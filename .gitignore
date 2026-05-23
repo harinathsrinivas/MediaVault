@@ -1,0 +1,31 @@
+# API keys / secrets — never commit
+a.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Claude Code local settings + secrets
+.claude/.env
+.claude/settings.local.json
+
+# Legacy / unrelated secrets file (lives under archive/unrelated/)
+archive/unrelated/a.json
+
+# Local plan / scratch files written by the agent
+PLAN.md
+
+# Git credentials (defensive — in case any local helper writes one)
+.git-credentials
+*.token

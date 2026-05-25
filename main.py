@@ -24,6 +24,8 @@ LIBRARY_ANIME = r'C:\Media\library_anime.json'
 LOCAL_ROOT = r"C:\Media"  # Your PC Root
 REMOTE_ROOT = "/sdcard/Media"  # Your Pixel Root
 MKVMERGE_PATH = r"C:\Program Files\MKVToolNix\mkvmerge.exe"
+FFMPEG_PATH = r"C:\Users\harin\AppData\Roaming\Emby-Server\system\ffmpeg.exe"
+DUMMY_MAX_BYTES = 200_000
 MAINFETCH_SCRIPT = "mainfetch.py"  # Name of the automation script
 
 # Folder Naming Conventions
@@ -280,6 +282,81 @@ def merge_video_files(chunk_paths, output_path):
     except FileNotFoundError:
         print(f"❌ Error: mkvmerge not found.");
         return False
+
+
+def resolve_ffmpeg():
+    if os.path.exists(FFMPEG_PATH):
+        return FFMPEG_PATH
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    return None
+
+
+def make_video_dummy(output_path, extension, source_path=None):
+    ffmpeg = resolve_ffmpeg()
+    if not ffmpeg:
+        print("❌ ffmpeg not found. Cannot generate video dummy. Install ffmpeg or check FFMPEG_PATH.")
+        return False
+
+    use_source = (
+        source_path is not None
+        and os.path.exists(source_path)
+        and os.path.getsize(source_path) >= DUMMY_MAX_BYTES
+    )
+
+    tmp_path = output_path + ".dummy_tmp" + extension
+    ext_lower = extension.lower()
+    audio_codec = "libmp3lame" if ext_lower == ".avi" else "aac"
+
+    print(f"   > 🎬 Generating dummy video: {os.path.basename(output_path)}")
+
+    def build_fallback_cmd():
+        cmd = [
+            ffmpeg, "-f", "lavfi", "-i", "color=c=black:s=128x72:d=1:r=2",
+            "-f", "lavfi", "-i", "anullsrc=cl=mono:r=8000",
+            "-shortest", "-c:v", "libx264", "-profile:v", "baseline",
+            "-pix_fmt", "yuv420p", "-c:a", audio_codec,
+            "-b:a", "16k", "-t", "1",
+        ]
+        if ext_lower in (".mp4", ".mov"):
+            cmd += ["-movflags", "+faststart"]
+        cmd += ["-loglevel", "error", "-nostdin", "-y", tmp_path]
+        return cmd
+
+    def build_derived_cmd():
+        cmd = [
+            ffmpeg, "-ss", "0", "-i", source_path,
+            "-f", "lavfi", "-i", "anullsrc=cl=mono:r=8000",
+            "-t", "1", "-map", "0:v:0", "-map", "1:a:0",
+            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
+            "-profile:v", "baseline", "-level:v", "3.0",
+            "-pix_fmt", "yuv420p", "-vf", "scale=128:72,fps=2",
+            "-c:a", audio_codec, "-b:a", "16k", "-shortest",
+        ]
+        if ext_lower in (".mp4", ".mov"):
+            cmd += ["-movflags", "+faststart"]
+        cmd += ["-loglevel", "error", "-nostdin", "-y", tmp_path]
+        return cmd
+
+    if use_source:
+        result = subprocess.run(build_derived_cmd(), capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"   ⚠️ Derived-mode failed (exit {result.returncode}). Falling back to synthetic source.")
+            result = subprocess.run(build_fallback_cmd(), capture_output=True, text=True)
+    else:
+        result = subprocess.run(build_fallback_cmd(), capture_output=True, text=True)
+
+    if result.returncode != 0 or not os.path.exists(tmp_path):
+        tail = result.stderr.strip().splitlines()[-5:]
+        print("❌ ffmpeg failed to generate dummy video:")
+        for line in tail:
+            print(f"   {line}")
+        return False
+
+    os.replace(tmp_path, output_path)
+    print(f"   ✅ Dummy video created: {os.path.basename(output_path)}")
+    return True
 
 
 # ==========================================

@@ -95,64 +95,74 @@ ignored when reasoning about current behavior.
 ```
 C:\Users\harin\PycharmProjects\MediaVault\
 |
-|-- main.py                          ACTIVE  — local pipeline + ADB push + restore (1621 lines)
-|-- mainfetch.py                     ACTIVE  — Selenium fetch from Google Photos (507 lines)
-|-- migrate_lib.py                   AUX     — one-shot migration tool: library.json -> library_{movies,series,anime}.json
-|-- index_file.py                    LEGACY  — old standalone hash indexer; writes media_library.json. Not wired to main pipeline.
-|-- media_library.json               LEGACY  — output of index_file.py; one entry, stale
-|-- requirements.txt                 ACTIVE  — pymediainfo / undetected-chromedriver / selenium
+|-- main.py                          ACTIVE — local pipeline + ADB push + restore (1621 lines)
+|-- mainfetch.py                     ACTIVE — Selenium fetch from Google Photos (507 lines)
+|-- requirements.txt                 ACTIVE — pymediainfo / undetected-chromedriver / selenium
 |-- ARCHITECTURE.md                  this document
-|-- a.json                           UNRELATED — config for an unrelated "openclaw" tool; NOT part of MediaVault
-|-- 2026-05-23-120010-use-the-architect-agent-...txt   transcript artifact, ignore
+|-- README.md                        user-facing overview
+|-- .gitignore                       see below; excludes a.json, PLAN.md, resources/
 |
-|-- (LEGACY SNAPSHOTS — present for history, NOT used at runtime)
-|-- main_clean.py                    byte-identical copy of main.py (backup)
-|-- main_newww.py                    earlier main.py with combined push/replace, single library.json
-|-- main_old.py                      very early prep-only prototype (113 lines)
-|-- main_perfect.py                  pre-balanced-split version
-|-- main_workingprep.py              minimal prep-only snapshot
-|-- mainneww.py                      early push integration, single library.json
-|-- mainfetch_clean.py               byte-identical copy of mainfetch.py
-|-- mainfetch_clean_new.py           intermediate fetch version
-|-- mainfetch_old.py                 earlier fetch
-|-- mainfetch_singleworking.py       single-file fetch prototype
-|-- mainfetchWorking.py              "first working" snapshot
-|-- mainfetchWorkingnew.py           newer working snapshot
-|-- mainfetchbatchworking.py         batch-mode prototype
-|-- mainfetch_workingbeforetv.py     pre-TV-series-support snapshot
-|-- mainfetch_workingserial.py       serial-processing snapshot
+|-- tools/
+|   `-- migrate_lib.py               AUX (one-shot) — splits legacy library.json into the 3 category files
+|
+|-- archive/                         git-tracked history; NOT used at runtime
+|   |-- main/
+|   |   |-- main_clean.py            byte-identical backup of main.py
+|   |   |-- main_newww.py            earlier main.py (combined push/replace, single library.json)
+|   |   |-- main_old.py              earliest prep-only prototype
+|   |   |-- main_perfect.py          pre-balanced-split version
+|   |   |-- main_workingprep.py      minimal prep-only snapshot
+|   |   `-- mainneww.py              early push integration
+|   |-- mainfetch/
+|   |   |-- mainfetch_clean.py       byte-identical backup of mainfetch.py
+|   |   `-- mainfetch_<variant>.py   8 historical snapshots (singleworking, batchworking, workingserial, etc.)
+|   |-- legacy/
+|   |   |-- index_file.py            old standalone SHA256 indexer; predates the manual-ID design
+|   |   `-- media_library.json       stale output of index_file.py (one entry); unused
+|   |-- unrelated/
+|   |   `-- a.json                   gitignored; openclaw-tool API keys (NOT part of MediaVault)
+|   `-- transcripts/                 captured session artifacts
+|
+|-- resources/                       gitignored — local snapshots of the three library JSONs +
+|                                    usage_commands.txt for offline analysis; NOT the source of truth
+|-- docs/                            placeholder (.gitkeep only)
+|-- assets/                          placeholder (.gitkeep only)
+|-- tests/                           placeholder (.gitkeep only); no test suite exists
 |
 |-- .venv\                           dev virtualenv (Python interpreter + site-packages)
-|-- .claude\                         Claude Code settings (settings.json, settings.local.json)
+|-- .claude\                         Claude Code settings (settings.json, settings.local.json, agents/)
 |-- .idea\                           PyCharm project files
 ```
+
+The runtime-relevant scripts are `main.py` and `mainfetch.py` at the
+project root. Everything under `archive/` is for git history only and
+must be ignored when reasoning about current behaviour.
 
 Library JSON files live **outside** the repo, under `C:\Media\`:
 
 ```
 C:\Media\
-|-- library_movies.json              ACTIVE  ~5,744 lines  (keys: mov-*)
-|-- library_series.json              ACTIVE  ~11,833 lines (keys: tv-* + season_map entries)
-|-- library_anime.json               ACTIVE  ~4,492 lines  (keys: ani-* + season_map entries)
-|-- library.json                     LEGACY  ~6,000 lines  (pre-migration combined file, kept as backup)
-|-- library - Copy.json              LEGACY  backup of legacy library.json
-|-- library - Copy (2).json          LEGACY  backup of legacy library.json
+|-- library_movies.json              ACTIVE  (keys: mov-*)
+|-- library_series.json              ACTIVE  (keys: tv-* + season_map entries)
+|-- library_anime.json               ACTIVE  (keys: ani-* + season_map entries)
+|-- library.json                     LEGACY  pre-migration combined file (read-only backup)
+|-- library - Copy.json              LEGACY  hand-made backup of legacy library.json
+|-- library - Copy (2).json          LEGACY  hand-made backup of legacy library.json
 |
 |-- Movies\                          media root for `scan_unprepped` Movies category
 |-- Series\                          media root for Series category
 |-- Anime\                           media root for Anime category
 |-- Utils\
     |-- ChromeProfile\               Selenium-attached Chrome user data dir for movies
-    |-- ChromeProfile_TV\            Selenium-attached Chrome user data dir for TV/anime
+    |-- ChromeProfile_TV\            Selenium-attached Chrome user data dir for TV + anime
 ```
 
-> **Important nuance**: the user prompt mentioned that the codebase uses
-> three JSON files; this is correct. The current `main.py` and `mainfetch.py`
-> read/write `library_movies.json`, `library_series.json`,
-> `library_anime.json` from `C:\Media\`. The older single
-> `C:\Media\library.json` is no longer the source of truth and is only
-> consumed by `migrate_lib.py`. `media_library.json` (in repo root, from
-> `index_file.py`) is unrelated and unused.
+> The current `main.py` and `mainfetch.py` read/write
+> `library_movies.json`, `library_series.json`, `library_anime.json`
+> from `C:\Media\`. The older single `C:\Media\library.json` is no
+> longer the source of truth and is only consumed by
+> `tools/migrate_lib.py`. `archive/legacy/media_library.json` is
+> unrelated to the live system and unused.
 
 ---
 
@@ -162,23 +172,18 @@ C:\Media\
 |---|---|---|
 | `main.py` | **ACTIVE** | Single CLI entry for prep/split/push/replace/restore/scan/sort/local_status and dispatching fetch |
 | `mainfetch.py` | **ACTIVE** | Selenium-driven Google Photos download + hash-matched routing into per-entry `restore/` folder |
-| `migrate_lib.py` | **AUX (one-shot)** | Migrates legacy `library.json` into the three category files; safe to re-run, idempotent for already-migrated data |
-| `requirements.txt` | **ACTIVE** | Lists `pymediainfo`, `undetected-chromedriver`, `selenium` |
-| `index_file.py` | **LEGACY** | Standalone hash + categorize utility that writes `media_library.json`. Not invoked by `main.py`; pre-dates the manual-ID library design |
-| `media_library.json` | **LEGACY** | Output of `index_file.py`; contains a single stale entry; do not edit |
-| `main_clean.py` | LEGACY (duplicate) | byte-identical copy of `main.py` (verified via `diff`) |
-| `mainfetch_clean.py` | LEGACY (duplicate) | byte-identical copy of `mainfetch.py` |
-| `main_newww.py` | LEGACY | older main.py before split into multi-library |
-| `main_old.py` | LEGACY | earliest prep-only prototype |
-| `main_perfect.py` | LEGACY | pre-balanced-split version |
-| `main_workingprep.py` | LEGACY | partial snapshot |
-| `mainneww.py` | LEGACY | early push integration |
-| `mainfetch_clean_new.py`, `mainfetch_old.py`, `mainfetch_singleworking.py`, `mainfetchWorking.py`, `mainfetchWorkingnew.py`, `mainfetchbatchworking.py`, `mainfetch_workingbeforetv.py`, `mainfetch_workingserial.py` | LEGACY | history of `mainfetch.py` evolution; all use the old single `library.json` and predate the dual Chrome-profile and parallel-trigger-+-harvester logic |
-| `a.json` | UNRELATED | Belongs to a separate "openclaw" tool (gateway/telegram bot config). Contains API keys; **not loaded by MediaVault** |
+| `tools/migrate_lib.py` | **AUX (one-shot)** | Migrates legacy `library.json` into the three category files; safe to re-run, idempotent |
+| `requirements.txt` | **ACTIVE** | Lists `pymediainfo`, `undetected-chromedriver`, `selenium` (the active codebase also imports `requests` and `webdriver-manager` which are missing from this file) |
+| `archive/main/*.py` | LEGACY | Six historical snapshots of `main.py` (e.g. `main_old.py`, `main_perfect.py`, `main_newww.py`). `main_clean.py` is byte-identical to the active `main.py`. |
+| `archive/mainfetch/*.py` | LEGACY | Nine historical snapshots of `mainfetch.py`. `mainfetch_clean.py` is byte-identical to the active `mainfetch.py`. All older variants use the pre-split single `library.json` and predate the dual Chrome-profile + parallel-trigger-and-harvester logic. |
+| `archive/legacy/index_file.py` | LEGACY | Standalone SHA256 indexer that writes `media_library.json`. Not invoked by `main.py`; predates the manual-ID library design. |
+| `archive/legacy/media_library.json` | LEGACY | Output of `index_file.py`; contains one stale entry; do not edit. |
+| `archive/unrelated/a.json` | UNRELATED | API keys / bot tokens for an unrelated "openclaw" tool. Gitignored. NOT loaded by MediaVault. |
 
 When the task says "two active files", it means **`main.py` and
-`mainfetch.py` are the only scripts a user ever invokes**. All others are
-either backups, migration aids, or unrelated artifacts.
+`mainfetch.py` are the only scripts a user ever invokes**. Everything
+under `archive/` is either a backup, a migration aid, or an unrelated
+artifact preserved for git history.
 
 ---
 
@@ -261,19 +266,73 @@ This split-by-prefix is hardcoded at `main.py:75-84`.
 
 ### 6.2 Manual ID format
 
-IDs are human-typed (or generated by `cmd_prep_season`) free-form strings.
-Conventions observed in the live data:
+IDs are human-typed (or generated by `cmd_prep_season`) free-form
+strings. `cmd_prep` does NOT validate them — anything goes — but the
+first three characters select which library JSON the entry lands in.
 
-- Movies: `mov-<lang2>-<year>-<slug>` e.g. `mov-en-2024-Inception`,
-  `mov-en-2025-f1`.
-- TV: `tv-<lang2>-<year>-<slug>-s<NN>e<MM>` e.g.
-  `tv-ta-2024-aindhamvedham-s01e01`, `tv-en-2016-strangerthings-s01e03`.
-  Parent ID is the same string minus the `eMM` suffix
-  (`tv-ta-2024-aindhamvedham-s01`).
-- Anime: `ani-<lang2>-<year>-<slug><EE>` (no `e` separator before episode
-  number) e.g. `ani-ja-2006-deathnote07`. Parent ID is the same minus the
-  trailing number (`ani-ja-2006-deathnote`).
-- Half-episodes are supported as floats: `...e16.5` or `...165` likewise.
+**Canonical shapes (the ones the README documents)**
+
+- Movies: `mov-<lang2>-<year>-<slug>` e.g. `mov-en-2025-f1`,
+  `mov-ta-2024-maharaja`, `mov-ma-2025-eko`.
+- TV series: `tv-<lang2>-<year>-<slug>-s<NN>e<MM>` e.g.
+  `tv-en-2016-strangerthings-s01e03`. Parent ID is the same string
+  minus the `eMM` suffix (`tv-en-2016-strangerthings-s01`).
+- Anime: `ani-<lang2>-<year>-<slug><EE>` (no `e` separator before the
+  episode number) e.g. `ani-ja-2006-deathnote07`. Parent ID strips the
+  trailing digits (`ani-ja-2006-deathnote`).
+- Half-episodes are floats appended to the episode segment: `...e16.5`
+  (series convention) or `...165.5`/`...16.5` (anime). Live data has
+  3 half-eps (all anime: `ani-ja-2012-kurokosbasketball-s0122.5`,
+  `-s0216.5`, `-s0325.5`).
+- Lang codes seen in production: `en`, `ta` (Tamil), `hi` (Hindi),
+  `ja` (Japanese, anime), `te` (Telugu), `ma` (Malayalam), `kor`
+  (Korean). The `cmd_sort` priority map only covers `en/ta/hi`;
+  everything else sorts at priority 99.
+
+**Non-canonical shapes that exist in production**
+
+These work today but step around the documented conventions:
+
+- **Mini-series with NO `-sNN-` segment** (the "Chernobyl" pattern):
+  `tv-en-2019-chernobyle01..e05`. The auto-parent regex strips `eNN$`
+  directly so the parent is `tv-en-2019-chernobyl`. Safe for
+  one-season shows; would collide if a second season were added.
+- **Anime WITH an explicit `-sNN` season segment** (the "Kuroko's
+  Basketball" pattern): `ani-ja-2012-kurokosbasketball-s0101..s0125`.
+  Anime library prefix (`ani-`) + season segment + 2-digit episode with
+  no `e`. Used for multi-season anime where pure absolute numbering
+  would collide. **This shape is only safe via `cmd_prep_season`**,
+  which passes `parent_id` explicitly. Calling `python main.py prep
+  ani-ja-2012-kurokosbasketball-s0125 ...` directly on such an ID would
+  trip the anime auto-parent regex (`^(ani-.*?)[\d\.]+$`) and produce a
+  junk parent `ani-ja-2012-kurokosbasketball-s` (just `-s`). See
+  Section 16 for details.
+
+**Typos that have slipped through**
+
+`cmd_prep` writes anything you give it. Live data contains
+`mov-en-20013-conjuring` (5-digit year — typo for 2013).
+`parse_metadata_from_id` only accepts 4-digit years, so
+`metadata.year = None` and the entry sorts at `year=0` (i.e. at the
+bottom). No code today flags this kind of malformed ID.
+
+**Live-data snapshot (2026-05-25) — counts per library**
+
+| Library | Leaves | Season maps | local_ready | archived |
+|---|---:|---:|---:|---:|
+| `library_movies.json` | 102 | 0 | 2 | 100 |
+| `library_series.json` | 290 | 28 | 86 | 204 |
+| `library_anime.json` | 140 | 5 | 32 | 108 |
+
+Two notable observations from the live data:
+
+- **0 anime entries have `split_info`** — every anime episode in
+  production has fit under the user's typical `SIZE_MB 9900` chunk
+  threshold. The chunk path in `mainfetch.fetch_single_entry` has
+  effectively never run against the TV Chrome profile.
+- **0 duplicate file hashes and 0 duplicate chunk hashes** across all
+  three libraries. The fetch-side hash-routing is provably collision-free
+  for this corpus.
 
 ### 6.3 Entry schemas
 
@@ -378,8 +437,12 @@ written by the code:
                                                         and library got out of sync)
 ```
 
-Observed states in live data: `local_ready`, `archived`. (`onboarded` and
-`restored_local` are transient and tend to be observed only mid-flight.)
+Observed in live data as of 2026-05-25: only `local_ready` (120 entries
+across the three libraries) and `archived` (412 entries) appear at rest.
+`onboarded` and `restored_local` are transient — `push → replace` and
+`fetch → restore` usually run back-to-back, so the intermediate state
+is rarely captured in a snapshot. See Section 6.2 for the per-library
+breakdown.
 
 Important quirks:
 
@@ -863,7 +926,7 @@ in a future cleanup.
 
 ## 9. Auxiliary Scripts
 
-### 9.1 `migrate_lib.py` (one-shot, 68 lines)
+### 9.1 `tools/migrate_lib.py` (one-shot, 68 lines)
 
 Reads `C:\Media\library.json` (the old combined file) and splits it
 into `library_movies.json` / `library_series.json` / `library_anime.json`
@@ -872,11 +935,11 @@ movies). Writes with `indent=4`. Idempotent in the sense that re-running
 it overwrites the three files with the same content (provided
 `library.json` itself hasn't changed). Not invoked by anything else.
 
-### 9.2 `index_file.py` (legacy, 123 lines)
+### 9.2 `archive/legacy/index_file.py` (legacy, 123 lines)
 
 Pre-dates the manual-ID system. Indexes a file by SHA256 and writes to
-`media_library.json` (in the project root) using the full file path as
-the dict key:
+`archive/legacy/media_library.json` using the full file path as the
+dict key:
 
 ```jsonc
 { "C:\\Media\\Movies\\English\\Oceans.Twelve...mkv": {
@@ -893,7 +956,8 @@ the dict key:
 
 This file is **not** read or written by `main.py` or `mainfetch.py`. It
 appears to be a debugging/exploration script that was never integrated.
-The `media_library.json` in the repo contains a single stale entry.
+The `archive/legacy/media_library.json` file contains a single stale
+entry.
 
 ---
 
@@ -1102,7 +1166,7 @@ CLI flags for paths. To re-target the system, you edit the source.
 | `CHROME_PATH` | `mainfetch.py:112` | `C:\Program Files\Google\Chrome\Application\chrome.exe` (falls back to `(x86)`) |
 | Debug port | `mainfetch.py:120` | `9222` |
 | Language priority (sort) | `main.py:1035` | `en=1, ta=2, hi=3, default=99` |
-| Hash block size | `main.py:101`, `mainfetch.py:85`, `index_file.py:22` | 65536 (64 KB) |
+| Hash block size | `main.py:101`, `mainfetch.py:85`, `archive/legacy/index_file.py:22` | 65536 (64 KB) |
 | Balanced-split buffer | `main.py:231, 245` | `+10 MB` |
 | Fetch base timeout | `mainfetch.py:306` | 300 s (self-extends while .crdownload active) |
 | Dummy-file threshold | `main.py:310, 531` | 1024 bytes |
@@ -1159,11 +1223,12 @@ CLI flags for paths. To re-target the system, you edit the source.
   `sys.exit(1)` on any read/parse failure instead of swallowing exceptions.
   `save_library` now uses `tempfile.mkstemp` + `os.replace()` for atomic
   writes — a mid-save OS kill can no longer produce a 0-byte corrupt file.
-- ~~**`a.json` checked into the repo**~~: **FIXED** — `.gitignore` created
-  at project root with `a.json` listed. The file contains API keys for
-  Gemini, OpenRouter, OpenAI, Notion, Telegram bot token, Perplexity — it
-  is unrelated to MediaVault. **Rotate those keys if the repo was ever
-  pushed to a remote.**
+- ~~**`a.json` checked into the repo**~~: **FIXED** — the file was
+  moved to `archive/unrelated/a.json` and both that path and bare
+  `a.json` are listed in `.gitignore`. The file contains API keys for
+  Gemini, OpenRouter, OpenAI, Notion, Telegram bot token, Perplexity —
+  it is unrelated to MediaVault. **Rotate those keys if the repo was
+  ever pushed to a remote before the gitignore landed.**
 - **`undetected-chromedriver` listed but unused**: clean up
   `requirements.txt` or actually start using it (its anti-bot evasion
   could matter if Google starts blocking the default Chromedriver on
@@ -1203,26 +1268,78 @@ CLI flags for paths. To re-target the system, you edit the source.
   off the local filename + UID and the remote rename uses the same
   formula. Fragile if the formula ever changes.
 
+### Issues found in the 2026-05-25 live-data audit
+
+- **No library integrity / orphan-parent check.** Discovered
+  2026-05-25: 8 children `tv-ta-2024-aindhamvedham-s01e01..e08` had
+  `parent_id = "tv-ta-2024-aindhamvedham-s01"` but the matching
+  `season_map` row was MISSING from `library_series.json`. These were
+  the first series the user ever prepped (one episode at a time, with
+  an older `main.py` that did not yet auto-create season_maps from a
+  detected parent). The season_map was inserted manually on
+  2026-05-25 (no other orphans exist in the live data). Today's
+  `cmd_prep` would not reproduce this state, but a `verify_library`
+  command to detect orphan parent_ids, missing children-listed-in-a-
+  season_map, or stale `total_episodes` is still missing.
+- **No ID-format validation in `cmd_prep`.** Live data contains
+  `mov-en-20013-conjuring` (5-digit year typo for 2013).
+  `parse_metadata_from_id` only accepts 4-digit years, so
+  `metadata.year` is `None` and `cmd_sort` sinks the entry to the
+  bottom with `year=0`. A `--force`-gated strict mode that warns on
+  unknown lang codes, non-4-digit years, etc., would have caught it.
+- **Direct `cmd_prep` on hybrid `ani-<show>-sNN<EE>` IDs would create
+  a junk season_map.** The anime auto-parent regex
+  (`^(ani-.*?)[\d\.]+$` at `main.py:336`) strips ALL trailing digits.
+  For `ani-ja-2012-kurokosbasketball-s0125` it yields parent
+  `ani-ja-2012-kurokosbasketball-s` (just `-s`) instead of the
+  intended `ani-...-s01`. Today this never fires in practice because
+  Kuroko-style IDs are only ever created via `cmd_prep_season`, which
+  passes `parent_id` explicitly and bypasses the regex.
+- **`cmd_push_group` is missing the `x`-separator regex** that its
+  siblings have. `main.py:731-732` checks only `[eE]\d+$` then a bare
+  trailing-digit fallback. By contrast `cmd_restore_group`
+  (`main.py:997-998`), `cmd_prep_push_rep_season` (`main.py:1303`),
+  and `mainfetch.resolve_targets` (`mainfetch.py:391-392`) also handle
+  `x\d+$`. Harmless today (no production ID uses the `x` convention),
+  but inconsistent.
+- **Anime chunk path is unproven in production.** 0 of 140 anime leaf
+  entries have `split_info` — every anime episode has fit under the
+  user's typical `SIZE_MB 9900` threshold. The first large anime
+  (4K BD anime film, long OAV, etc.) would be the first real
+  exercise of `split_video_file` → `mainfetch.fetch_single_entry`'s
+  chunk branch under the TV Chrome profile.
+- **`mainfetch.load_library` swallows errors silently** with bare
+  `except: pass` (`mainfetch.py:52-80`), asymmetric with
+  `main.load_library` which now `sys.exit(1)`s on corruption. A
+  corrupt library would cause mainfetch to "find" zero entries and
+  exit cleanly, masking the failure.
+- **`cmd_dispatch_fetch` invokes `"python"` literally**
+  (`main.py:1345`) instead of `sys.executable`. On a machine where
+  `PATH` resolves `python` to a different interpreter than the one
+  running `main.py`, the spawned `mainfetch.py` will fail to import
+  `selenium`.
+
 ### Code smells
 
-- ~9,280 lines of legacy snapshots in the repo root. They contradict
-  the active files and confuse new readers. Should be moved to
-  `archive/` or deleted now that `main.py` and `mainfetch.py` are
-  battle-tested.
 - Heavy code duplication between `main.py` and `mainfetch.py`
   (`load_library`, `calculate_file_hash`, library path constants). A
   shared `mvcommon.py` module would DRY this without changing
-  behaviour.
+  behaviour and would have prevented the asymmetric error-handling
+  between the two `load_library` copies.
 - Manual argv parsing across both entry points reimplements features
   `argparse` gives for free (help text, type validation, default
   values).
 - Inline emoji `print` statements make it hard to capture clean logs
   for debugging long-running batch operations.
+- `build_download_queue` in `mainfetch.py:413` is unreachable scaffolding.
+- `wait_for_download` and `automation_download_file` in
+  `mainfetch.py:219, 224` are no-op stubs kept "for compatibility".
 
 ### Security / privacy concerns
 
-- `a.json` in repo root contains live API keys and bot tokens (see
-  above). **High priority to remove.**
+- The `archive/unrelated/a.json` file contains API keys / bot tokens
+  for an unrelated tool. It is gitignored, but **rotate those keys if
+  the repo was ever pushed to a remote before the gitignore landed.**
 - Selenium attaches to a debug port without any auth on
   `127.0.0.1:9222` — anything local on the machine can issue commands
   to the browser session while it's running. Acceptable for a
@@ -1298,14 +1415,20 @@ work would slot in cleanly:
 | Which Chrome profile is chosen | `mainfetch.py:cmd_fetch_route` (459-464) |
 | How Photos search is performed | `mainfetch.py:trigger_download` (150-216) |
 | How downloaded files are routed | `mainfetch.py:fetch_single_entry` harvester loop (310-366) |
-| What ID prefix goes to which library file | `main.py:save_library` (75-84), `migrate_lib.py:38-45` |
+| What ID prefix goes to which library file | `main.py:save_library` (75-84), `tools/migrate_lib.py:38-45` |
 | Auto-parent / season-map creation | `main.py:cmd_prep` (333-364) |
 | Episode-number auto-detection from filenames | `main.py:cmd_prep_season` (489-507) |
+| Episode-range filter (group ops) | `main.py:cmd_push_group` (731-732), `cmd_restore_group` (997-998), `cmd_prep_push_rep_season` (1303); `mainfetch.py:resolve_targets` (391-392). Note: `cmd_push_group` lacks the `x\d+$` pattern — see §16. |
+| Chrome profile per category | `mainfetch.py:cmd_fetch_route` (457-462). Movies → `default`; series & anime → `tv`. |
 | Half-episode (`.5`) regex support | `main.py:336, 491, 738, 1004, 1310`; `mainfetch.py:393` |
 | Adding a new subcommand | Append to the `if/elif` chain in `main.py:1397-1622` |
 
 ---
 
-*Last updated to reflect `main.py` (1621 lines, balanced-split, anime
-auto-parent, half-episode support, dual Chrome profiles, parallel
-trigger-and-harvester restore).*
+*Last updated 2026-05-25 — reflects `main.py` (1621 lines, atomic
+save_library, balanced-split, anime auto-parent, half-episode support,
+dual Chrome profiles, parallel trigger-and-harvester restore) and the
+live-data audit of `library_movies/series/anime.json` (102 / 290+28 /
+140+5 entries). Repo layout now uses `archive/` (legacy snapshots),
+`tools/` (migrate_lib.py), and gitignored `resources/` (offline
+library copies).*

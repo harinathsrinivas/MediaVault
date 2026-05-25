@@ -841,15 +841,12 @@ def cmd_replace(manual_id):
     local_folder = entry['folder_path']
     filename = entry['filename']
     original = os.path.join(local_folder, filename)
-    dummy = os.path.join(local_folder, filename + ".temp_dummy")
 
-    # Create Dummy
-    try:
-        with open(dummy, 'w') as f:
-            f.write(f"Original Hash: {entry['hash']}\n")
-            if "split_info" in entry: f.write("Status: SPLIT (Check filenames for .chunk.)\n")
-    except Exception as e:
-        print(f"❌ Error creating dummy: {e}");
+    ext = os.path.splitext(filename)[1]
+    tmp_path = original + ".dummy_tmp" + ext
+    source = original if (os.path.exists(original) and os.path.getsize(original) >= DUMMY_MAX_BYTES) else None
+    if not make_video_dummy(tmp_path, ext, source_path=source):
+        print(f"❌ replace aborted — could not create video dummy for {filename}")
         return False
 
     # Swap Files
@@ -875,7 +872,7 @@ def cmd_replace(manual_id):
             print("   > Close any players/Plex scanning this file and try again.")
             return False
 
-    os.rename(dummy, original)
+    os.rename(tmp_path, original)
 
     library[manual_id]["status"] = "archived"
     save_library(library)

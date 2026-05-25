@@ -898,6 +898,60 @@ def cmd_replace_group(group_id):
         cmd_replace(mid)
 
 
+def cmd_repair_dummies(prefix_filter=None):
+    library = load_library()
+    scanned = 0
+    upgraded = 0
+    skipped = 0
+    missing = 0
+    failed = 0
+
+    for entry_id, entry in library.items():
+        if entry.get("type") == "season_map":
+            continue
+        if prefix_filter and not entry_id.startswith(prefix_filter):
+            continue
+        if entry.get("status") != "archived":
+            continue
+
+        scanned += 1
+        current_path = os.path.join(entry['folder_path'], entry['filename'])
+
+        if not os.path.exists(current_path):
+            print(f"⚠️ Missing: {current_path}")
+            missing += 1
+            continue
+
+        if os.path.getsize(current_path) >= DUMMY_MAX_BYTES:
+            skipped += 1
+            continue
+
+        try:
+            with open(current_path, 'rb') as f:
+                header = f.read(16)
+        except Exception:
+            skipped += 1
+            continue
+
+        if not header.startswith(b"Original Hash"):
+            skipped += 1
+            continue
+
+        ext = os.path.splitext(entry['filename'])[1]
+        tmp_path = current_path + ".repair_tmp" + ext
+
+        if not make_video_dummy(tmp_path, ext, source_path=None):
+            print(f"❌ Failed to repair {current_path}")
+            failed += 1
+            continue
+
+        os.remove(current_path)
+        os.rename(tmp_path, current_path)
+        upgraded += 1
+
+    print(f"✅ repair_dummies complete: scanned {scanned}, upgraded {upgraded}, skipped {skipped}, missing {missing}, failed {failed}")
+
+
 # ==========================================
 #             RESTORE COMMANDS
 # ==========================================
@@ -1480,6 +1534,7 @@ if __name__ == "__main__":
         print("  push_group [id] [SIZE_GB/SIZE_MB] [val] [episodes 1-3]")
         print("  replace [id]")
         print("  replace_group [id]")
+        print("  repair_dummies [optional: id_prefix]")
         print("  verify_restore [id]")
         print("  restore [id]")
         print("  restore_group [id]")
@@ -1590,6 +1645,10 @@ if __name__ == "__main__":
 
     elif cmd == "replace_group":
         cmd_replace_group(sys.argv[2])
+
+    elif cmd == "repair_dummies":
+        prefix = sys.argv[2] if len(sys.argv) > 2 else None
+        cmd_repair_dummies(prefix)
 
     elif cmd == "verify_restore":
         cmd_verify_restore(sys.argv[2])

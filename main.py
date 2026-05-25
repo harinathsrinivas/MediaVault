@@ -377,7 +377,7 @@ def cmd_prep(manual_id, filepath, parent_id=None):
             return True
 
     # Secondary Safety Net: Just in case the JSON is out of sync but the file is clearly a dummy
-    if os.path.getsize(filepath) < 1024:
+    if os.path.getsize(filepath) < DUMMY_MAX_BYTES:
         print(f"   ⏭️  Skipping Prep: {manual_id} (Dummy file detected).")
         return True
 
@@ -598,7 +598,7 @@ def cmd_check(manual_id):
     if not os.path.exists(file_path): print("❌ File missing!"); return
 
     # Dumb check for dummy file
-    if os.path.getsize(file_path) < 1024:
+    if os.path.getsize(file_path) < DUMMY_MAX_BYTES:
         print("⚠️ Dummy file detected (already archived). Skipping hash check.")
         return
 

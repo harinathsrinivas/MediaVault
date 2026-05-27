@@ -103,7 +103,7 @@ help text and no `--help` flag; this table is the reference.
 | `push_group` | `push_group [id] [SIZE_..] [episodes 1-3]` | Push a season group |
 | `replace` | `replace [id]` | Swap original with a tiny valid video file placeholder (requires ffmpeg) |
 | `replace_group` | `replace_group [id]` | Replace a season group |
-| `repair_dummies` | `repair_dummies [id_prefix]` | Upgrade old text-placeholder dummies to valid tiny video files |
+| `repair_dummies` | `repair_dummies [id_prefix]` | Regenerate any archived-entry dummy on disk to the current 10 KB video spec (idempotent — re-runs are safe) |
 | `fetch` | `fetch [id] [episodes <range>]` | Selenium-download from Google Photos |
 | `fetch_restore` | `fetch_restore [id] [episodes <range>]` | Fetch then restore in one command |
 | `restore` | `restore [id]` | Re-merge chunks, verify SHA256, place file back |

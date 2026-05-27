@@ -37,3 +37,7 @@ resources/
 .git-credentials
 *.token
 .candidates/
+
+dummy_size_test/
+dummy_size_test_mp4/
+

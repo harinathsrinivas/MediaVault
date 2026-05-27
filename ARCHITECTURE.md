@@ -637,86 +637,112 @@ ffmpeg. The placeholder is a real playable container so Plex, Kodi, and
 file-manager thumbnailers don't choke on a text blob masquerading as
 `.mkv`.
 
-#### `make_video_dummy(output_path, extension, source_path=None)` (`main.py:302`)
+#### Per-container recipe table (`DUMMY_RECIPE_BY_EXT`)
+
+Every container gets a single ffmpeg invocation with these shared video
+parameters: `color=c=black:s=128x72:r=24`, `libx264` baseline /
+`yuv420p` / `-b:v 50k` / `preset veryfast`. The audio side differs by
+extension:
+
+| Extension | Audio codec | Audio source | Duration | Typical size |
+|---|---|---|---|---|
+| `.mkv` | `pcm_s16le` | `anullsrc=cl=stereo:r=44100` (silence) | 0.05 s | 9,672 bytes |
+| `.avi` | `pcm_s16le` | `anullsrc=cl=stereo:r=44100` (silence) | 0.05 s | 18,978 bytes |
+| `.mp4` | `aac -b:a 64k` | `sine=frequency=440:sample_rate=44100` (440 Hz tone) | 0.5 s | 6,650 bytes |
+| `.mov` | `aac -b:a 64k` | `sine=frequency=440:sample_rate=44100` (440 Hz tone) | 0.5 s | 6,701 bytes |
+
+**Why the recipes differ:**
+
+- PCM `s16le` is incompatible with ISO-BMFF containers (`.mp4`, `.mov`),
+  so those containers use AAC.
+- AAC compresses silence near-perfectly (~2 KB regardless of bitrate
+  at short durations), so the `.mp4` / `.mov` recipe drives the encoder
+  with a 440 Hz sine tone to produce real entropy and land above a
+  plausible audio payload size.
+- `.mov` mirrors the `.mp4` recipe for cross-tool consistency (QuickTime,
+  Plex, and ffprobe all parse it cleanly).
+- `.avi` uses PCM to avoid the MP3 framing overhead that previously
+  bloated AVI dummies. At 0.05 s the raw PCM is still under 20 KB.
+
+All four recipes produce containers that ffprobe parses and Plex indexes
+(verified against live library).
+
+#### `make_video_dummy(output_path, extension)` (`main.py:334`)
 
 Single helper used by both `cmd_replace` and `cmd_repair_dummies`.
+There is one code path — no derived-mode or fallback-mode distinction.
 
-1. **Resolve ffmpeg** via `resolve_ffmpeg()` (`main.py:293`): first
+1. **Resolve ffmpeg** via `resolve_ffmpeg()` (`main.py:325`): first
    checks the hardcoded `FFMPEG_PATH` constant (the bundled Emby
    Server ffmpeg), then falls back to `shutil.which("ffmpeg")`. If
    neither is available the function prints an error and returns
-   `False` — **there is no fallback to the old text-blob dummy**.
-   Callers must handle the `False` return.
-2. **Choose mode**:
-   - **Derived mode** — used when `source_path` is provided, exists,
-     and is ≥ `DUMMY_MAX_BYTES` (200,000 bytes). ffmpeg clips 1 second
-     from the source: `-ss 0 -t 1`, scaled to `128x72` at 2 fps via
-     `-vf scale=128:72,fps=2`, re-encoded with `libx264` baseline /
-     level 3.0 / `ultrafast` / `zerolatency` / `yuv420p`, paired with
-     a silent `anullsrc` mono 8000 Hz track muxed in at 16 kbps.
-   - **Fallback mode** — used otherwise. ffmpeg synthesises 1 second
-     of `color=c=black:s=128x72:d=1:r=2` with the same silent audio.
-3. **Audio codec is container-driven**: `libmp3lame` for `.avi`, `aac`
-   for everything else. `-movflags +faststart` is added for `.mp4` /
-   `.mov`.
+   `False`. Callers must handle the `False` return.
+2. **Look up recipe**: `DUMMY_RECIPE_BY_EXT.get(ext_lower,
+   DUMMY_RECIPE_BY_EXT[".mp4"])` — unknown extensions fall back to the
+   `.mp4` recipe.
+3. **Build command**: two `-f lavfi` inputs (video color source + audio
+   source from the recipe), one output with the codec parameters from
+   the recipe. No `-movflags +faststart` (irrelevant at these file
+   sizes).
 4. **Atomic write**: ffmpeg writes to a sibling
    `<output_path>.dummy_tmp<ext>` temp file. On success the helper
    `os.replace()`s it into `output_path`. If ffmpeg fails (non-zero
    exit or missing tmp file), the last 5 lines of stderr are printed
    and the helper returns `False`.
-5. **Output sizes**: ~1.5 KB for MKV / MP4 / MOV, ~11 KB for AVI
-   (MP3 frame overhead). All well under the 200,000-byte sniff
-   threshold.
 
-#### `cmd_replace(manual_id)` flow (`main.py:838`)
+#### `cmd_replace(manual_id)` flow
 
 1. Refuse to act if `uploaded != True`.
-2. Compute `tmp_path = original + ".dummy_tmp" + ext`. If the original
-   still exists and is ≥ `DUMMY_MAX_BYTES`, pass it as `source_path`
-   so `make_video_dummy` runs in derived mode (the dummy is a 1-second
-   clip of the actual movie). Otherwise the helper runs in fallback
-   mode (black frame).
+2. Call `make_video_dummy(original_path, ext)` — produces the dummy
+   in a temp file via the recipe table above.
 3. If `make_video_dummy` returns `False`, abort with an error message
    — **no legacy text-blob fallback**.
 4. Delete the original with **3 retries** and a `chmod S_IWRITE` to
-   clear any read-only flag (`main.py:862-879`). Retries exist because
-   Plex, Windows Search, or a video player may be holding the file
-   open.
+   clear any read-only flag. Retries exist because Plex, Windows
+   Search, or a video player may be holding the file open.
 5. `os.rename(tmp_path, original)` — the dummy takes the exact name
    of the original.
-6. Set `status = "archived"`.
+6. Set `status = "archived"`. Library JSON mutation is identical to
+   what was planned; only the content of the temp file changed.
 
-#### `cmd_repair_dummies(prefix_filter=None)` (`main.py:907`)
+#### `cmd_repair_dummies(prefix_filter=None)`
 
-One-shot migrator for entries that were archived under the old
-text-blob scheme. Walks every leaf entry with `status == "archived"`,
-optionally filtered by a manual-ID prefix.
+Generic regenerator that brings every archived dummy on disk up to the
+current recipe spec. Walks every leaf entry with `status ==
+"archived"`, optionally filtered by a manual-ID prefix.
 
 For each candidate:
 
 1. Skip if file is missing (`missing` counter).
-2. Skip if file size ≥ `DUMMY_MAX_BYTES` (`skipped` — looks like a
+2. Skip if file extension is not in `VIDEO_EXTENSIONS` (`skipped`
+   counter — non-video filenames have no applicable recipe).
+3. Skip if file size ≥ `DUMMY_MAX_BYTES` (`skipped` — looks like a
    real video, not a dummy).
-3. Read the first 16 bytes and check for the magic header
-   `b"Original Hash"`. Non-matching files are skipped (this is the
-   sniff test that distinguishes legacy text dummies from
-   already-upgraded video dummies).
-4. Call `make_video_dummy(tmp_path, ext, source_path=None)` — always
-   fallback mode, since the real source is gone. On failure, increment
-   `failed` and continue (the legacy dummy is left in place).
-5. Replace the legacy dummy with the new video dummy.
+4. Call `make_video_dummy(file_path, ext)` using the per-container
+   recipe. Prints `Regenerating dummy: <path>` for each file.
+   On failure, increment `failed` and continue.
+5. Replace the existing dummy with the regenerated video dummy.
 
-Prints a final summary: `scanned / upgraded / skipped / missing /
+There is no magic-header sniff — any archived-entry video file under
+`DUMMY_MAX_BYTES` is treated as a dummy and regenerated. This makes the
+command **idempotent in spec**: running it twice leaves files at the
+correct recipe. It is not byte-identical across runs due to mild ffmpeg
+jitter (timestamps, encoder state), but functionally equivalent.
+
+Prints a final summary: `scanned / regenerated / skipped / missing /
 failed`.
+
+Live bulk run (2026-05-27): scanned 424, regenerated 423, skipped 1
+(non-video filename), missing 0, failed 0. Every regenerated `.mkv`
+landed at exactly 9,672 bytes.
 
 #### Dummy-sniff threshold
 
-The `DUMMY_MAX_BYTES` constant (200,000) is reused by `cmd_prep`
-(`main.py:386`) and `cmd_check` (`main.py:607`) as a sniff test: any
-file smaller than 200 KB is treated as a dummy and skipped. This
-threshold was raised from the previous 1024-byte limit to comfortably
-exceed the largest video dummy (~11 KB AVI) while still being far
-below the smallest real archived video.
+The `DUMMY_MAX_BYTES` constant (200,000) is reused by `cmd_prep` and
+`cmd_check` as a sniff test: any file smaller than 200 KB is treated as
+a dummy and skipped. This threshold comfortably exceeds the largest
+video dummy (~19 KB AVI) while remaining far below the smallest real
+archived video.
 
 ### 7.7 Restore flow
 
@@ -1236,7 +1262,9 @@ CLI flags for paths. To re-target the system, you edit the source.
 | Hash block size | `main.py:101`, `mainfetch.py:85`, `archive/legacy/index_file.py:22` | 65536 (64 KB) |
 | Balanced-split buffer | `main.py:231, 245` | `+10 MB` |
 | Fetch base timeout | `mainfetch.py:306` | 300 s (self-extends while .crdownload active) |
-| Dummy-file threshold | `main.py:310, 531` | 1024 bytes |
+| `DUMMY_MAX_BYTES` | `main.py:34` | `200_000` (200 KB) — sniff threshold in `cmd_prep`, `cmd_check`, and `cmd_repair_dummies` |
+| `FFMPEG_PATH` | `main.py:33` | `C:\Users\harin\AppData\Roaming\Emby-Server\system\ffmpeg.exe` (falls back to `shutil.which`) |
+| `DUMMY_RECIPE_BY_EXT` | `main.py:41` | Per-container ffmpeg recipe for the ~10 KB dummy (audio codec / source / duration); four entries: `.mkv`, `.avi`, `.mp4`, `.mov` |
 | Replace retry count | `main.py:789` | 3 |
 | ADB push flag | `main.py:675` | `-p` (built-in progress) |
 

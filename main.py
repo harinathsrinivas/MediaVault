@@ -32,6 +32,38 @@ REMOTE_ROOT = "/sdcard/Media"  # Your Pixel Root
 MKVMERGE_PATH = r"C:\Program Files\MKVToolNix\mkvmerge.exe"
 FFMPEG_PATH = r"C:\Users\harin\AppData\Roaming\Emby-Server\system\ffmpeg.exe"
 DUMMY_MAX_BYTES = 200_000
+# Per-container dummy-encode recipe. PCM containers (.mkv/.avi) use silent
+# anullsrc at 0.05 s — pcm_s16le produces ~10 KB regardless of audio content.
+# AAC containers (.mp4/.mov) use a 440 Hz sine tone at 0.5 s — AAC compresses
+# silence near-perfectly (~2 KB at any bitrate), so we drive it with a tone to
+# give the encoder real entropy. The .mp4 recipe (sine + aac 64k + 0.5 s) was
+# proven in Plex at 6,484 bytes.
+DUMMY_RECIPE_BY_EXT = {
+    ".mkv": {
+        "audio_codec": "pcm_s16le",
+        "audio_extra": [],
+        "audio_source": "anullsrc=cl=stereo:r=44100",
+        "duration": "0.05",
+    },
+    ".avi": {
+        "audio_codec": "pcm_s16le",
+        "audio_extra": [],
+        "audio_source": "anullsrc=cl=stereo:r=44100",
+        "duration": "0.05",
+    },
+    ".mp4": {
+        "audio_codec": "aac",
+        "audio_extra": ["-b:a", "64k"],
+        "audio_source": "sine=frequency=440:sample_rate=44100",
+        "duration": "0.5",
+    },
+    ".mov": {
+        "audio_codec": "aac",
+        "audio_extra": ["-b:a", "64k"],
+        "audio_source": "sine=frequency=440:sample_rate=44100",
+        "duration": "0.5",
+    },
+}
 MAINFETCH_SCRIPT = "mainfetch.py"  # Name of the automation script
 
 # Folder Naming Conventions
@@ -299,62 +331,34 @@ def resolve_ffmpeg():
     return None
 
 
-def make_video_dummy(output_path, extension, source_path=None):
+def make_video_dummy(output_path, extension):
     ffmpeg = resolve_ffmpeg()
     if not ffmpeg:
         print("❌ ffmpeg not found. Cannot generate video dummy. Install ffmpeg or check FFMPEG_PATH.")
         return False
 
-    use_source = (
-        source_path is not None
-        and os.path.exists(source_path)
-        and os.path.getsize(source_path) >= DUMMY_MAX_BYTES
-    )
-
-    tmp_path = output_path + ".dummy_tmp" + extension
     ext_lower = extension.lower()
-    audio_codec = "libmp3lame" if ext_lower == ".avi" else "aac"
+    recipe = DUMMY_RECIPE_BY_EXT.get(ext_lower, DUMMY_RECIPE_BY_EXT[".mp4"])
+    tmp_path = output_path + ".dummy_tmp" + extension
 
     print(f"   > 🎬 Generating dummy video: {os.path.basename(output_path)}")
 
-    def build_fallback_cmd():
-        cmd = [
-            ffmpeg, "-f", "lavfi", "-i", "color=c=black:s=128x72:d=1:r=2",
-            "-f", "lavfi", "-i", "anullsrc=cl=mono:r=8000",
-            "-shortest", "-c:v", "libx264", "-profile:v", "baseline",
-            "-pix_fmt", "yuv420p", "-c:a", audio_codec,
-            "-b:a", "16k", "-t", "1",
-        ]
-        if ext_lower in (".mp4", ".mov"):
-            cmd += ["-movflags", "+faststart"]
-        cmd += ["-loglevel", "error", "-nostdin", "-y", tmp_path]
-        return cmd
+    cmd = [
+        ffmpeg,
+        "-f", "lavfi", "-i", "color=c=black:s=128x72:r=24",
+        "-f", "lavfi", "-i", recipe["audio_source"],
+        "-c:v", "libx264", "-profile:v", "baseline", "-pix_fmt", "yuv420p",
+        "-preset", "veryfast", "-b:v", "50k",
+        "-c:a", recipe["audio_codec"], "-ac", "2", "-ar", "44100",
+        *recipe["audio_extra"],
+        "-t", recipe["duration"], "-shortest",
+        "-loglevel", "error", "-nostdin", "-y", tmp_path,
+    ]
 
-    def build_derived_cmd():
-        cmd = [
-            ffmpeg, "-ss", "0", "-i", source_path,
-            "-f", "lavfi", "-i", "anullsrc=cl=mono:r=8000",
-            "-t", "1", "-map", "0:v:0", "-map", "1:a:0",
-            "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-            "-profile:v", "baseline", "-level:v", "3.0",
-            "-pix_fmt", "yuv420p", "-vf", "scale=128:72,fps=2",
-            "-c:a", audio_codec, "-b:a", "16k", "-shortest",
-        ]
-        if ext_lower in (".mp4", ".mov"):
-            cmd += ["-movflags", "+faststart"]
-        cmd += ["-loglevel", "error", "-nostdin", "-y", tmp_path]
-        return cmd
-
-    if use_source:
-        result = subprocess.run(build_derived_cmd(), capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"   ⚠️ Derived-mode failed (exit {result.returncode}). Falling back to synthetic source.")
-            result = subprocess.run(build_fallback_cmd(), capture_output=True, text=True)
-    else:
-        result = subprocess.run(build_fallback_cmd(), capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True)
 
     if result.returncode != 0 or not os.path.exists(tmp_path):
-        tail = result.stderr.strip().splitlines()[-5:]
+        tail = (result.stderr or "").strip().splitlines()[-5:]
         print("❌ ffmpeg failed to generate dummy video:")
         for line in tail:
             print(f"   {line}")
@@ -850,8 +854,7 @@ def cmd_replace(manual_id):
 
     ext = os.path.splitext(filename)[1]
     tmp_path = original + ".dummy_tmp" + ext
-    source = original if (os.path.exists(original) and os.path.getsize(original) >= DUMMY_MAX_BYTES) else None
-    if not make_video_dummy(tmp_path, ext, source_path=source):
+    if not make_video_dummy(tmp_path, ext):
         print(f"❌ replace aborted — could not create video dummy for {filename}")
         return False
 
@@ -907,7 +910,7 @@ def cmd_replace_group(group_id):
 def cmd_repair_dummies(prefix_filter=None):
     library = load_library()
     scanned = 0
-    upgraded = 0
+    regenerated = 0
     skipped = 0
     missing = 0
     failed = 0
@@ -932,30 +935,24 @@ def cmd_repair_dummies(prefix_filter=None):
             skipped += 1
             continue
 
-        try:
-            with open(current_path, 'rb') as f:
-                header = f.read(16)
-        except Exception:
-            skipped += 1
-            continue
-
-        if not header.startswith(b"Original Hash"):
+        if os.path.splitext(entry['filename'])[1].lower() not in VIDEO_EXTENSIONS:
             skipped += 1
             continue
 
         ext = os.path.splitext(entry['filename'])[1]
         tmp_path = current_path + ".repair_tmp" + ext
 
-        if not make_video_dummy(tmp_path, ext, source_path=None):
-            print(f"❌ Failed to repair {current_path}")
+        print(f"🔧 Regenerating dummy: {current_path}")
+        if not make_video_dummy(tmp_path, ext):
+            print(f"❌ Failed to regenerate {current_path}")
             failed += 1
             continue
 
         os.remove(current_path)
         os.rename(tmp_path, current_path)
-        upgraded += 1
+        regenerated += 1
 
-    print(f"✅ repair_dummies complete: scanned {scanned}, upgraded {upgraded}, skipped {skipped}, missing {missing}, failed {failed}")
+    print(f"✅ repair_dummies complete: scanned {scanned}, regenerated {regenerated}, skipped {skipped}, missing {missing}, failed {failed}")
 
 
 # ==========================================

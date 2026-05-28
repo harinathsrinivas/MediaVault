@@ -39,6 +39,14 @@ completed items and prints exactly how to resume the rest.
 | `FAILURE_ANALYSIS.md` | The technical core: what each command creates/mutates, the precise point-of-no-return per command (with current `main.py` line refs), the reversible-vs-irreversible boundary, and concrete failure walk-throughs (Examples A/B/C). | …are touching `cmd_push`, `cmd_replace`, or `cmd_restore` for **any** reason. |
 | `RELATED_IMPROVEMENTS.md` | The prerequisite + complementary improvements (C9, C11, G1, C1, C2, A1, A7): how each relates to auto-rollback, what auto-rollback will expect from it, suggested order, and per-item "leave-the-seam" guidance. | …are implementing one of the prerequisite improvements. **Required reading for that.** |
 | `SESSION_LOG.md` | The full narrative of the planning session: original task, investigation findings, planner dispatch, the verbatim Q&A with the user, and the analysis corrections. | …want the complete history / "how did we get here." |
+| `_TRACKER.md` | Live dashboard of the prerequisite tasks (statuses, links, suggested order). | …want the current state of the prerequisite work. |
+| `_VAULT-GUIDE.md` | Obsidian-vs-Notion recommendation + free cross-device sync setup (iPad/iPhone/Mac/Windows). | …are setting this up in a notes app across devices. |
+| `<ID>-<slug>/` subfolders | One per prerequisite improvement — its ready-to-paste Claude prompt, definition-of-done checklist, completion report, and (once started) its `PLAN.md` + test notes. | …are implementing a specific prerequisite (C9/C11/G1/C1/C2/A1/A7). |
+
+Each prerequisite has its own subfolder so it becomes a self-contained record:
+`C9-atomic-replace/`, `C11-restore-quarantine/`, `G1-push-partial-atomic-rename/`,
+`C1-season-auto-resume/`, `C2-adb-selenium-retry/`, `A1-extract-mvcommon/`,
+`A7-pytest-harness/`. Start from `_TRACKER.md`.
 
 ---
 

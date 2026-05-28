@@ -101,8 +101,9 @@ help text and no `--help` flag; this table is the reference.
 | `prep_push_rep_season` | `prep_push_rep_season [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>]` | Sequential full pipeline for a whole season |
 | `push` | `push [id] [SIZE_MB/SIZE_GB/COUNT val] [chunks 1-4]` | Split and ADB-push to phone |
 | `push_group` | `push_group [id] [SIZE_..] [episodes 1-3]` | Push a season group |
-| `replace` | `replace [id]` | Swap original with tiny dummy placeholder |
+| `replace` | `replace [id]` | Swap original with a tiny valid video file placeholder (requires ffmpeg) |
 | `replace_group` | `replace_group [id]` | Replace a season group |
+| `repair_dummies` | `repair_dummies [id_prefix]` | Regenerate any archived-entry dummy on disk to the current 10 KB video spec (idempotent — re-runs are safe) |
 | `fetch` | `fetch [id] [episodes <range>]` | Selenium-download from Google Photos |
 | `fetch_restore` | `fetch_restore [id] [episodes <range>]` | Fetch then restore in one command |
 | `restore` | `restore [id]` | Re-merge chunks, verify SHA256, place file back |
@@ -177,6 +178,7 @@ committed. Media files themselves live under `C:\Media\Movies\`,
 | `chrome.exe` | `C:\Program Files\Google\Chrome\Application\chrome.exe` | Launched with `--remote-debugging-port=9222` for Selenium attach |
 | `chromedriver` | auto-managed by webdriver-manager (`~/.wdm/`) | Selenium WebDriver protocol client |
 | `MediaInfo.dll` | bundled with the `pymediainfo` wheel | Extract video/audio/subtitle metadata |
+| `ffmpeg` | `C:\Users\harin\AppData\Roaming\Emby-Server\system\ffmpeg.exe` or system PATH | Generate valid tiny video placeholder; required by `replace` and `repair_dummies` |
 
 All paths are hardcoded constants at the top of each source file. There is no
 config file, no environment variable lookup, and no command-line override for

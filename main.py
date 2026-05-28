@@ -13,6 +13,12 @@ import requests
 from datetime import datetime
 from pymediainfo import MediaInfo
 
+# Ensure emoji/Unicode output works on Windows consoles
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
 # ==========================================
 #               CONFIGURATION
 # ==========================================
@@ -24,6 +30,40 @@ LIBRARY_ANIME = r'C:\Media\library_anime.json'
 LOCAL_ROOT = r"C:\Media"  # Your PC Root
 REMOTE_ROOT = "/sdcard/Media"  # Your Pixel Root
 MKVMERGE_PATH = r"C:\Program Files\MKVToolNix\mkvmerge.exe"
+FFMPEG_PATH = r"C:\Users\harin\AppData\Roaming\Emby-Server\system\ffmpeg.exe"
+DUMMY_MAX_BYTES = 200_000
+# Per-container dummy-encode recipe. PCM containers (.mkv/.avi) use silent
+# anullsrc at 0.05 s — pcm_s16le produces ~10 KB regardless of audio content.
+# AAC containers (.mp4/.mov) use a 440 Hz sine tone at 0.5 s — AAC compresses
+# silence near-perfectly (~2 KB at any bitrate), so we drive it with a tone to
+# give the encoder real entropy. The .mp4 recipe (sine + aac 64k + 0.5 s) was
+# proven in Plex at 6,484 bytes.
+DUMMY_RECIPE_BY_EXT = {
+    ".mkv": {
+        "audio_codec": "pcm_s16le",
+        "audio_extra": [],
+        "audio_source": "anullsrc=cl=stereo:r=44100",
+        "duration": "0.05",
+    },
+    ".avi": {
+        "audio_codec": "pcm_s16le",
+        "audio_extra": [],
+        "audio_source": "anullsrc=cl=stereo:r=44100",
+        "duration": "0.05",
+    },
+    ".mp4": {
+        "audio_codec": "aac",
+        "audio_extra": ["-b:a", "64k"],
+        "audio_source": "sine=frequency=440:sample_rate=44100",
+        "duration": "0.5",
+    },
+    ".mov": {
+        "audio_codec": "aac",
+        "audio_extra": ["-b:a", "64k"],
+        "audio_source": "sine=frequency=440:sample_rate=44100",
+        "duration": "0.5",
+    },
+}
 MAINFETCH_SCRIPT = "mainfetch.py"  # Name of the automation script
 
 # Folder Naming Conventions
@@ -282,6 +322,53 @@ def merge_video_files(chunk_paths, output_path):
         return False
 
 
+def resolve_ffmpeg():
+    if os.path.exists(FFMPEG_PATH):
+        return FFMPEG_PATH
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    return None
+
+
+def make_video_dummy(output_path, extension):
+    ffmpeg = resolve_ffmpeg()
+    if not ffmpeg:
+        print("❌ ffmpeg not found. Cannot generate video dummy. Install ffmpeg or check FFMPEG_PATH.")
+        return False
+
+    ext_lower = extension.lower()
+    recipe = DUMMY_RECIPE_BY_EXT.get(ext_lower, DUMMY_RECIPE_BY_EXT[".mp4"])
+    tmp_path = output_path + ".dummy_tmp" + extension
+
+    print(f"   > 🎬 Generating dummy video: {os.path.basename(output_path)}")
+
+    cmd = [
+        ffmpeg,
+        "-f", "lavfi", "-i", "color=c=black:s=128x72:r=24",
+        "-f", "lavfi", "-i", recipe["audio_source"],
+        "-c:v", "libx264", "-profile:v", "baseline", "-pix_fmt", "yuv420p",
+        "-preset", "veryfast", "-b:v", "50k",
+        "-c:a", recipe["audio_codec"], "-ac", "2", "-ar", "44100",
+        *recipe["audio_extra"],
+        "-t", recipe["duration"], "-shortest",
+        "-loglevel", "error", "-nostdin", "-y", tmp_path,
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0 or not os.path.exists(tmp_path):
+        tail = (result.stderr or "").strip().splitlines()[-5:]
+        print("❌ ffmpeg failed to generate dummy video:")
+        for line in tail:
+            print(f"   {line}")
+        return False
+
+    os.replace(tmp_path, output_path)
+    print(f"   ✅ Dummy video created: {os.path.basename(output_path)}")
+    return True
+
+
 # ==========================================
 #             CORE COMMANDS
 # ==========================================
@@ -300,7 +387,7 @@ def cmd_prep(manual_id, filepath, parent_id=None):
             return True
 
     # Secondary Safety Net: Just in case the JSON is out of sync but the file is clearly a dummy
-    if os.path.getsize(filepath) < 1024:
+    if os.path.getsize(filepath) < DUMMY_MAX_BYTES:
         print(f"   ⏭️  Skipping Prep: {manual_id} (Dummy file detected).")
         return True
 
@@ -521,7 +608,7 @@ def cmd_check(manual_id):
     if not os.path.exists(file_path): print("❌ File missing!"); return
 
     # Dumb check for dummy file
-    if os.path.getsize(file_path) < 1024:
+    if os.path.getsize(file_path) < DUMMY_MAX_BYTES:
         print("⚠️ Dummy file detected (already archived). Skipping hash check.")
         return
 
@@ -764,15 +851,11 @@ def cmd_replace(manual_id):
     local_folder = entry['folder_path']
     filename = entry['filename']
     original = os.path.join(local_folder, filename)
-    dummy = os.path.join(local_folder, filename + ".temp_dummy")
 
-    # Create Dummy
-    try:
-        with open(dummy, 'w') as f:
-            f.write(f"Original Hash: {entry['hash']}\n")
-            if "split_info" in entry: f.write("Status: SPLIT (Check filenames for .chunk.)\n")
-    except Exception as e:
-        print(f"❌ Error creating dummy: {e}");
+    ext = os.path.splitext(filename)[1]
+    tmp_path = original + ".dummy_tmp" + ext
+    if not make_video_dummy(tmp_path, ext):
+        print(f"❌ replace aborted — could not create video dummy for {filename}")
         return False
 
     # Swap Files
@@ -798,7 +881,7 @@ def cmd_replace(manual_id):
             print("   > Close any players/Plex scanning this file and try again.")
             return False
 
-    os.rename(dummy, original)
+    os.rename(tmp_path, original)
 
     library[manual_id]["status"] = "archived"
     save_library(library)
@@ -822,6 +905,54 @@ def cmd_replace_group(group_id):
     print(f"   > Auto-replacing {len(target_ids)} items...")
     for mid in target_ids:
         cmd_replace(mid)
+
+
+def cmd_repair_dummies(prefix_filter=None):
+    library = load_library()
+    scanned = 0
+    regenerated = 0
+    skipped = 0
+    missing = 0
+    failed = 0
+
+    for entry_id, entry in library.items():
+        if entry.get("type") == "season_map":
+            continue
+        if prefix_filter and not entry_id.startswith(prefix_filter):
+            continue
+        if entry.get("status") != "archived":
+            continue
+
+        scanned += 1
+        current_path = os.path.join(entry['folder_path'], entry['filename'])
+
+        if not os.path.exists(current_path):
+            print(f"⚠️ Missing: {current_path}")
+            missing += 1
+            continue
+
+        if os.path.getsize(current_path) >= DUMMY_MAX_BYTES:
+            skipped += 1
+            continue
+
+        if os.path.splitext(entry['filename'])[1].lower() not in VIDEO_EXTENSIONS:
+            skipped += 1
+            continue
+
+        ext = os.path.splitext(entry['filename'])[1]
+        tmp_path = current_path + ".repair_tmp" + ext
+
+        print(f"🔧 Regenerating dummy: {current_path}")
+        if not make_video_dummy(tmp_path, ext):
+            print(f"❌ Failed to regenerate {current_path}")
+            failed += 1
+            continue
+
+        os.remove(current_path)
+        os.rename(tmp_path, current_path)
+        regenerated += 1
+
+    print(f"✅ repair_dummies complete: scanned {scanned}, regenerated {regenerated}, skipped {skipped}, missing {missing}, failed {failed}")
 
 
 # ==========================================
@@ -1406,6 +1537,7 @@ if __name__ == "__main__":
         print("  push_group [id] [SIZE_GB/SIZE_MB] [val] [episodes 1-3]")
         print("  replace [id]")
         print("  replace_group [id]")
+        print("  repair_dummies [optional: id_prefix]")
         print("  verify_restore [id]")
         print("  restore [id]")
         print("  restore_group [id]")
@@ -1516,6 +1648,10 @@ if __name__ == "__main__":
 
     elif cmd == "replace_group":
         cmd_replace_group(sys.argv[2])
+
+    elif cmd == "repair_dummies":
+        prefix = sys.argv[2] if len(sys.argv) > 2 else None
+        cmd_repair_dummies(prefix)
 
     elif cmd == "verify_restore":
         cmd_verify_restore(sys.argv[2])

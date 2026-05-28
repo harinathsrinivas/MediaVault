@@ -30,6 +30,15 @@
 - Updated the two usage-block strings to advertise `[device <id_or_name>]`.
 - Verified usage output shows the new suffix.
 
+## Step 6 — prep_push_rep_season + prep_push_rep parsers
+- `prep_push_rep_season` parser gained an `elif arg == "device":` branch identical in shape to the existing `episodes` branch.
+- `prep_push_rep` parser fully rewritten from the `rest[-2]` shape to a token scanner mirroring `prep_push_rep_season`. Walks `rest`, peels off SIZE/COUNT pairs and `device` pairs, accumulates the remainder into `filepath_parts`.
+- Both `cmd_*` final calls now pass `device_id=resolve_device(device_arg)`.
+- Updated usage-block strings to advertise `[device <id_or_name>]`.
+- Traced one example each: `prep_push_rep_season tv-en-2024-x "C:\Media\Series\Show S01" SIZE_MB 9900 episodes 1-5` yields the identical `(method="SIZE_MB", val="9900", ep_range="1-5")` tuple as today; same for `prep_push_rep mov-... <path> SIZE_MB 9900`.
+- Key decision: noted in plan §"Risks" — refactor is a behavioural change only for the vanishing edge case where a filepath's last two components literally are `SIZE_MB <number>`. Accepted risk; matches `prep_push_rep_season`'s existing behaviour.
+
+
 
 
 

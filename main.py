@@ -1537,8 +1537,8 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage:")
         print("  prep [id] [filepath]")
-        print("  prep_push_rep [id] [filepath] [optional: SIZE_GB/COUNT val]")
-        print("  prep_push_rep_season [id] [folder] [optional: SIZE..] [OPT: episodes]")
+        print("  prep_push_rep [id] [filepath] [optional: SIZE_GB/COUNT val] [device <id_or_name>]")
+        print("  prep_push_rep_season [id] [folder] [optional: SIZE..] [OPT: episodes] [device <id_or_name>]")
         print("  fetch_restore [id] [OPT: episodes 1-3]")  # [NEW]
         print("  set_search [id] [term]")
         print("  set_poster [id] [url]")
@@ -1570,7 +1570,7 @@ if __name__ == "__main__":
 
     elif cmd == "prep_push_rep":
         if len(sys.argv) < 4:
-            print("❌ Usage: prep_push_rep [id] [filepath] [optional: SIZE_MB/COUNT val]")
+            print("❌ Usage: prep_push_rep [id] [filepath] [optional: SIZE_MB/COUNT val] [device <id_or_name>]")
             sys.exit(1)
 
         mid = sys.argv[2]
@@ -1578,16 +1578,28 @@ if __name__ == "__main__":
 
         method = None
         val = None
-        filepath = ""
+        device_arg = None
+        filepath_parts = []
 
-        if len(rest) >= 3 and rest[-2] in ["SIZE_MB", "SIZE_GB", "COUNT"]:
-            method = rest[-2]
-            val = rest[-1]
-            filepath = " ".join(rest[:-2])
-        else:
-            filepath = " ".join(rest)
+        i = 0
+        while i < len(rest):
+            arg = rest[i]
+            if arg in ["SIZE_MB", "SIZE_GB", "COUNT"]:
+                if i + 1 < len(rest):
+                    method = arg
+                    val = rest[i + 1]
+                    i += 2
+                    continue
+            elif arg == "device":
+                if i + 1 < len(rest):
+                    device_arg = rest[i + 1]
+                    i += 2
+                    continue
+            filepath_parts.append(arg)
+            i += 1
 
-        cmd_prep_push_rep(mid, filepath, method, val)
+        filepath = " ".join(filepath_parts)
+        cmd_prep_push_rep(mid, filepath, method, val, device_id=resolve_device(device_arg))
 
     elif cmd == "prep_push_rep_season":
         if len(sys.argv) < 4:
@@ -1600,6 +1612,7 @@ if __name__ == "__main__":
         method = None
         val = None
         ep_range = None
+        device_arg = None
 
         i = 0
         while i < len(args):
@@ -1615,11 +1628,16 @@ if __name__ == "__main__":
                     ep_range = args[i + 1]
                     i += 2
                     continue
+            elif arg == "device":
+                if i + 1 < len(args):
+                    device_arg = args[i + 1]
+                    i += 2
+                    continue
             folder_parts.append(arg)
             i += 1
 
         folder_path = " ".join(folder_parts)
-        cmd_prep_push_rep_season(group_id, folder_path, method, val, ep_range)
+        cmd_prep_push_rep_season(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg))
 
     elif cmd == "set_search":
         if len(sys.argv) >= 4:

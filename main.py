@@ -806,7 +806,7 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
         return False
 
 
-def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=None):
+def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=None, device_id=None):
     print(f"=== BATCH PUSH GROUP: {group_id} ===")
     library = load_library()
     target_ids = []
@@ -851,7 +851,7 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
         if library[mid].get("uploaded") == True:
             print(f"⏭️  Skipping {mid} (Already uploaded)")
             continue
-        cmd_push(mid, split_method, split_val)
+        cmd_push(mid, split_method, split_val, device_id=device_id)
 
 
 def cmd_replace(manual_id):
@@ -1380,7 +1380,7 @@ def cmd_scan_unprepped():
         print("\n✅ All libraries are completely in sync.")
 
 
-def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None):
+def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, device_id=None):
     print(f"=== 🚀 AUTO-PILOT: PREP -> PUSH -> REPLACE for {manual_id} ===")
 
     # 1. PREP
@@ -1392,7 +1392,7 @@ def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None):
     # 2. PUSH
     print("\n>>> STEP 2: PUSH")
     # We pass None for chunk_range as this atomic command implies full push
-    if not cmd_push(manual_id, split_method, split_val):
+    if not cmd_push(manual_id, split_method, split_val, device_id=device_id):
         print("\n⚠️ Auto-Pilot Paused: Push failed.")
         print("   > Reverting temporary files to restore 'Prep' state...")
 
@@ -1422,7 +1422,7 @@ def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None):
     print("\n✅✅✅ AUTO-PILOT COMPLETE: Movie is safely archived.")
 
 
-def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=None, episode_range=None):
+def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=None, episode_range=None, device_id=None):
     # [NEW] TV SERIES SEQUENTIAL AUTO-PILOT
     print(f"=== 📺 SEASON AUTO-PILOT (SEQUENTIAL): PREP -> PUSH -> REPLACE for {base_id} ===")
 
@@ -1477,7 +1477,7 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
 
         # We skip calling 'cmd_prep' again because we already did prep_season
         # Just call Push then Replace
-        if cmd_push(mid, split_method, split_val):
+        if cmd_push(mid, split_method, split_val, device_id=device_id):
             cmd_replace(mid)
         else:
             print(f"❌ Failed to process {mid}. Stopping Auto-Pilot to prevent mess.")

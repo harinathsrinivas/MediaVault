@@ -18,4 +18,11 @@
 - Verified: only `["adb"` literal remaining in main.py is the `adb_base` assignment itself. `cmd_push` signature is `(manual_id, split_method=None, split_val=None, chunk_range=None, device_id=None)`.
 - Key decision: default call shape is preserved exactly — `adb_base` collapses to `["adb"]` when `device_id` is None, yielding identical subprocess argv to today.
 
+## Step 4 — Thread device_id through wrapper functions
+- Added `device_id=None` kwarg to `cmd_push_group`, `cmd_prep_push_rep`, `cmd_prep_push_rep_season`.
+- Each function passes it through to the nested `cmd_push` call as `device_id=device_id`.
+- `cmd_replace` left untouched (no ADB).
+- Verified all four signatures: each ends with `device_id=None`.
+
+
 

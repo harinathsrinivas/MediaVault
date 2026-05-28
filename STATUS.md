@@ -45,6 +45,15 @@
 - All four `cmd_*` signatures end with `device_id=None`.
 - Bonus verification §7: `subprocess.run(["adb"` returns no matches anywhere in main.py.
 
+## Step 8 — ARCHITECTURE.md + README.md updates
+- ARCHITECTURE.md §5: appended `[device <id_or_name>]` to the four push-flavoured signature cells.
+- ARCHITECTURE.md §7.5: added an opening paragraph describing the new `device_id` kwarg, its propagation, and its no-op behaviour when None; replaced the closing "ADB device detection is implicit" sentence with a note on the new opt-in selector while preserving the "no explicit `adb devices` check" caveat.
+- ARCHITECTURE.md §14: inserted a `DEVICE_ALIASES` row in the configuration constants table, immediately after `MAINFETCH_SCRIPT`, with the live dict value.
+- ARCHITECTURE.md §18: added a "How to pin a push to a specific phone" quick-reference row.
+- README.md: appended `[device <id_or_name>]` to the four push rows in the CLI table; added a new "Pinning a push to a specific phone (multi-device)" subsection with one example per command and a pointer to the hardcoded-config convention.
+- Diff stats: `ARCHITECTURE.md` +22/-7, `README.md` +25/-4. No structural / table-formatting damage.
+
+
 
 
 

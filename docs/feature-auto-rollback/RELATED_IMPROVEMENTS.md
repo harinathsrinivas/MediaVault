@@ -17,15 +17,15 @@ Suggested order: **C9 → C11 → G1**, with C1 / C2 / A1 / A7 as complementary.
 
 ## Summary table
 
-| Imp | Tier | One-liner | Relation to auto-rollback | Role |
-|---|---|---|---|---|
-| **C9** | C | Atomic `cmd_replace` via two-rename | Hardens the single true point-of-no-return (Example B) | **Prerequisite — do FIRST** |
-| **C11** | C | Hash-mismatch quarantine in `cmd_restore` | The restore-side "clean state on failure" behavior (in scope now) | **Prerequisite** |
-| **G1** | G | rclone patterns: `.partial` upload + atomic remote rename + `.mvmeta.json` | Removes the "partial upload looks complete" wrinkle in push rollback | **Prerequisite (optional, bigger)** |
-| **C1** | C | Season auto-resume from a progress file | We *print* the resume command; C1 *auto-resumes* | Complementary |
-| **C2** | C | Exponential-backoff retry for ADB + Selenium | Fewer transient failures → rollback/hard-fail triggers less often | Complementary |
-| **A1** | A | Extract `mvcommon.py` (shared lib I/O + hashing) | Plumbing our snapshot/rollback uses | Complementary (foundation) |
-| **A7** | A | Pytest harness with library fixtures | This feature creates the first tests; A7 formalizes the harness | Complementary |
+| Imp     | Tier | One-liner                                                                  | Relation to auto-rollback                                            | Role                                |
+| ------- | ---- | -------------------------------------------------------------------------- | -------------------------------------------------------------------- | ----------------------------------- |
+| **C9**  | C    | Atomic `cmd_replace` via two-rename                                        | Hardens the single true point-of-no-return (Example B)               | **Prerequisite — do FIRST**         |
+| **C11** | C    | Hash-mismatch quarantine in `cmd_restore`                                  | The restore-side "clean state on failure" behavior (in scope now)    | **Prerequisite**                    |
+| **G1**  | G    | rclone patterns: `.partial` upload + atomic remote rename + `.mvmeta.json` | Removes the "partial upload looks complete" wrinkle in push rollback | **Prerequisite (optional, bigger)** |
+| **C1**  | C    | Season auto-resume from a progress file                                    | We *print* the resume command; C1 *auto-resumes*                     | Complementary                       |
+| **C2**  | C    | Exponential-backoff retry for ADB + Selenium                               | Fewer transient failures → rollback/hard-fail triggers less often    | Complementary                       |
+| **A1**  | A    | Extract `mvcommon.py` (shared lib I/O + hashing)                           | Plumbing our snapshot/rollback uses                                  | Complementary (foundation)          |
+| **A7**  | A    | Pytest harness with library fixtures                                       | This feature creates the first tests; A7 formalizes the harness      | Complementary                       |
 
 ---
 

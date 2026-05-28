@@ -57,23 +57,33 @@ Restore is in scope for rollback (see [[DECISIONS]] D-1). Centralize the
 quarantine path/helper so rollback reuses it. Details: [[RELATED_IMPROVEMENTS]] → C11.
 
 ## Definition of Done
-- [ ] Planner run; `PLAN.md` in this subfolder; open decisions confirmed
-- [ ] Branched `feature/restore_quarantine` off `origin/main`
-- [ ] Quarantine-on-mismatch implemented; success path unchanged
-- [ ] Tests in `tests/` (copies only) for mismatch -> quarantine; passing
-- [ ] Seam left: single predictable quarantine path/helper
-- [ ] `IMP-C11` marked done in `improvements_tierC.md`
-- [ ] `ARCHITECTURE.md` / `README` updated if needed
-- [ ] PR to `main` opened
-- [ ] Completion report below filled in
+- [x] Planner run; `PLAN.md` in this subfolder; open decisions confirmed
+- [x] Branched `feature/restore_quarantine` off `origin/main`
+- [x] Quarantine-on-mismatch implemented; success path unchanged
+- [x] Tests in `tests/` (copies only) for mismatch -> quarantine; passing
+- [x] Seam left: single predictable quarantine path/helper
+- [x] `IMP-C11` marked done in `improvements_tierC.md`
+- [x] `ARCHITECTURE.md` / `README` updated if needed
+- [x] PR to `main` opened
+- [x] Completion report below filled in
 
 ## Completion report (fill in when done)
-- **Branch:**
-- **PR:**
-- **Merged commit:**
+- **Branch:** `feature/restore_quarantine` (branched off `origin/main` @ 4b7e7b6)
+- **PR:** https://github.com/harinathsrinivas/MediaVault/pull/6 (base `main`)
+- **Merged commit:** _pending merge_
 - **Files changed:**
-- **Tests added:**
+  - `main.py` — added `quarantine_restore_file(restore_folder, filename)` helper (the centralized seam) and wired it into both `cmd_restore` paths: standard single-file failure branch (quarantine + greppable diagnostic + defensive lock fallback) and split path (pre-merge per-chunk SHA256 verification → quarantine offending chunks, keep clean chunks, delete stale partial output, return False before merge).
+  - `tests/test_cmd_restore_quarantine.py` — new 9-test module (6 standard + 3 split), reusing the C9 `tests/conftest.py` sandbox fixtures (conftest unchanged).
+  - `ARCHITECTURE.md` — §7.7 (`cmd_restore` flow) and §12 (Error Handling) updated to describe quarantine + the helper seam.
+  - `improvements_tierC.md` — IMP-C11 status flipped to `done`.
+  - `docs/feature-auto-rollback/RELATED_IMPROVEMENTS.md` — noted the `quarantine_restore_file` helper name as the seam auto-rollback should reuse.
+  - `STATUS.md`, `docs/feature-auto-rollback/C11-restore-quarantine/PLAN.md`, this report.
+- **Tests added:** 9 (`tests/test_cmd_restore_quarantine.py`). Standard: `test_mismatch_moves_file_to_quarantine`, `test_mismatch_prints_greppable_diagnostic`, `test_mismatch_returns_false`, `test_success_path_unchanged`, `test_requarantine_no_collision`, `test_self_heal_contract`. Split: `test_split_mismatch_quarantines_offending_chunk_only`, `test_split_mismatch_deletes_partial_merge_output`, `test_split_success_path_unchanged`. Full suite (with the 6 C9 tests): 15 passed, 0 failures.
 - **Manual test commands:**
-- **Open decisions resolved:**
-- **Notes / surprises:**
-- **Follow-ups created:**
+  - `.venv\Scripts\python.exe -c "import main"`
+  - `.venv\Scripts\python.exe -m pytest tests/ -v`
+  - `.venv\Scripts\python.exe -m pytest tests/test_cmd_restore_quarantine.py -v`
+  - Grep contract: `python main.py restore <sandbox-test-id> 2>&1 | findstr /C:"Bad file quarantined at"` (sandbox only — never real `C:\Media`).
+- **Open decisions resolved:** All 5 from PLAN.md — (1) split path quarantines offending chunk(s) only, deletes the partial merged output; (2) split path is in scope (pre-merge per-chunk verification); (3) quarantine path `<folder>/restore/quarantine/<filename>.<YYYYmmddTHHMMSS>` (NTFS-safe, colon-free); (4) diagnostic to stdout, concise, no hash values; (5) root `/PLAN.md` left untouched (C11 plan lives only in this subfolder).
+- **Notes / surprises:** `datetime` is imported as `from datetime import datetime` in `main.py`, so the helper uses `datetime.now()`. `shutil` was already imported. The single-file success path and the split all-clean merge path are byte-for-byte unchanged (guarded by `test_success_path_unchanged` and `test_split_success_path_unchanged`). The split-success test stubs `merge_video_files` to stay hermetic and deterministic; the corrupt-chunk tests never reach the merge. `mainfetch.py` was intentionally NOT modified — its existing `os.path.exists` skip self-heals once the bad file is gone from `restore/`.
+- **Follow-ups created:** None. (A `cleanup_quarantine` retention/purge command remains explicitly out of scope — deferred IMP-D extension. Auto-rollback can now reuse the `quarantine_restore_file` seam.)

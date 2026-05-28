@@ -24,5 +24,12 @@
 - `cmd_replace` left untouched (no ADB).
 - Verified all four signatures: each ends with `device_id=None`.
 
+## Step 5 — CLI parser for push and push_group
+- Both parsers grow a new `elif args[i] == "device":` branch that scans a follow-up value into `dev`.
+- Final calls now pass `device_id=resolve_device(dev)`.
+- Updated the two usage-block strings to advertise `[device <id_or_name>]`.
+- Verified usage output shows the new suffix.
+
+
 
 

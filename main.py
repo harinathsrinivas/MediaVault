@@ -1548,8 +1548,8 @@ if __name__ == "__main__":
         print("  scan_unprepped")
         print("  check [id]")
         print("  local_status [opt: limit]")
-        print("  push [id] [SIZE_GB/SIZE_MB] [val] [chunks 1-4]")
-        print("  push_group [id] [SIZE_GB/SIZE_MB] [val] [episodes 1-3]")
+        print("  push [id] [SIZE_GB/SIZE_MB] [val] [chunks 1-4] [device <id_or_name>]")
+        print("  push_group [id] [SIZE_GB/SIZE_MB] [val] [episodes 1-3] [device <id_or_name>]")
         print("  replace [id]")
         print("  replace_group [id]")
         print("  repair_dummies [optional: id_prefix]")
@@ -1687,6 +1687,7 @@ if __name__ == "__main__":
         method = None
         val = None
         c_range = None
+        dev = None
 
         i = 1
         while i < len(args):
@@ -1705,10 +1706,17 @@ if __name__ == "__main__":
                 else:
                     print("❌ Error: Missing value for chunks range.")
                     sys.exit(1)
+            elif args[i] == "device":
+                if i + 1 < len(args):
+                    dev = args[i + 1]
+                    i += 2
+                else:
+                    print("❌ Error: Missing value for device.")
+                    sys.exit(1)
             else:
                 i += 1
 
-        cmd_push(mid, method, val, c_range)
+        cmd_push(mid, method, val, c_range, device_id=resolve_device(dev))
 
     elif cmd == "push_group":
         args = sys.argv[2:]
@@ -1720,6 +1728,7 @@ if __name__ == "__main__":
         method = None
         val = None
         ep_range = None
+        dev = None
 
         i = 1
         while i < len(args):
@@ -1732,10 +1741,14 @@ if __name__ == "__main__":
                 if i + 1 < len(args):
                     ep_range = args[i + 1]
                     i += 2
+            elif args[i] == "device":
+                if i + 1 < len(args):
+                    dev = args[i + 1]
+                    i += 2
             else:
                 i += 1
 
-        cmd_push_group(group_id, method, val, ep_range)
+        cmd_push_group(group_id, method, val, ep_range, device_id=resolve_device(dev))
 
     elif cmd == "sort":
         cmd_sort()

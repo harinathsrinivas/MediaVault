@@ -191,7 +191,7 @@
 - Rationale: The current sequence has a theoretical data-loss window. The window is small but real. The user has 70 GB files — losing one to a power blip is catastrophic.
 - Goal: Power-loss-safe replace. At any moment of an in-progress replace, the disk state has either the original or the dummy at the expected name.
 - Effort estimate: small
-- Status: pending
+- Status: done (fix/atomic_replace, PR to main 2026-05-29)
 
 ---
 

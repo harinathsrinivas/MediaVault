@@ -780,18 +780,34 @@ Prints pass/fail per file. Does not write or move anything.
 For split entries:
 1. Verify all chunk filenames exist in `<folder>/restore/`. If any
    missing, skip (so partial fetches don't half-restore).
-2. Call `merge_video_files(chunks, target_path)` which runs
+2. **Pre-merge per-chunk verification**: SHA256 each chunk and compare
+   to its stored hash in `entry["split_info"]["chunks"]` *before*
+   merging (mkvmerge is lenient and would otherwise silently fold a
+   corrupt chunk into a bad merged file). If any chunk fails, move only
+   the offending chunk(s) to `restore/quarantine/<chunk>.<timestamp>`
+   via the `quarantine_restore_file` helper, leave the clean chunks in
+   `restore/` (so a targeted re-fetch refills just the bad ones), delete
+   any stale partial merged output at `target_path`, print a greppable
+   diagnostic, and return False — the merge does not run.
+3. Call `merge_video_files(chunks, target_path)` which runs
    `mkvmerge -o <target> chunk1 +chunk2 +chunk3 ...`. The `+` syntax
    tells mkvmerge to append, not multiplex.
-3. Re-hash the merged file (its SHA256 differs from the original — the
+4. Re-hash the merged file (its SHA256 differs from the original — the
    container has been re-built) and overwrite `entry["hash"]`.
-4. Delete each chunk file. Remove the now-empty `restore/` folder.
-5. Set `status = "restored_local"`.
+5. Delete each chunk file. Remove the now-empty `restore/` folder.
+6. Set `status = "restored_local"`.
 
 For single-file entries:
-1. SHA256 the file in `restore/` and refuse to proceed if it doesn't
-   match `entry["hash"]`.
-2. `shutil.move` it back into `folder_path` (overwriting the dummy).
+1. SHA256 the file in `restore/`. On mismatch, instead of leaving the
+   bad file in place, move it to `restore/quarantine/<filename>.<timestamp>`
+   via the centralized `quarantine_restore_file` helper, print a
+   greppable diagnostic, and return False. Because the original filename
+   is now absent from `restore/`, mainfetch's `os.path.exists` skip no
+   longer traps the user and a fresh fetch self-heals (re-downloads).
+   The `quarantine_restore_file` helper is the single seam for "where a
+   bad restore file goes", reused by the auto-rollback feature.
+2. On a match, `shutil.move` it back into `folder_path` (overwriting the
+   dummy).
 3. Clean up empty `restore/`.
 4. Set `status = "restored_local"`.
 
@@ -1212,8 +1228,19 @@ Hash stays in JSON for the day the user wants to restore.
   `os.chmod(stat.S_IWRITE)` for files Plex/Windows Search have open.
   If all 3 retries fail, leaves both `original` and `original.temp_dummy`
   on disk; user is told to close players.
-- **Hash mismatch on restore**: blocks the move into place; the bad file
-  remains in `restore/` for inspection.
+- **Hash mismatch on restore**: the bad file (single-file path) or
+  offending chunk(s) (split path) are moved to
+  `restore/quarantine/<name>.<timestamp>` via the centralized
+  `quarantine_restore_file` helper instead of being left in `restore/`,
+  and a greppable diagnostic is printed
+  (`Hash mismatch. Bad file quarantined at <path>. A fresh fetch will
+  re-download.`). In the split path any stale partial merged output is
+  deleted and clean chunks are left in place. This leaves `restore/`
+  self-healing — because the original filename is gone, mainfetch's
+  existence skip no longer traps the user and a re-fetch re-downloads
+  automatically. The defensive fallback (move blocked by a file lock)
+  reverts to the prior leave-in-place behavior so restore is never made
+  worse than before.
 - **Auto-pilot rollback**: `cmd_prep_push_rep` deletes `_parts/` on push
   failure but does NOT delete the library entry. Re-running starts from
   `local_ready`.

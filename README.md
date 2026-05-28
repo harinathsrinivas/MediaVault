@@ -97,10 +97,10 @@ help text and no `--help` flag; this table is the reference.
 |---|---|---|
 | `prep` | `prep [id] [filepath]` | Index a new local file, compute SHA256, write sidecars |
 | `prep_season` | `prep_season [base_id] [folder]` | Batch-prep an entire season folder |
-| `prep_push_rep` | `prep_push_rep [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val]` | Full pipeline (prep -> push -> replace) for one file |
-| `prep_push_rep_season` | `prep_push_rep_season [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>]` | Sequential full pipeline for a whole season |
-| `push` | `push [id] [SIZE_MB/SIZE_GB/COUNT val] [chunks 1-4]` | Split and ADB-push to phone |
-| `push_group` | `push_group [id] [SIZE_..] [episodes 1-3]` | Push a season group |
+| `prep_push_rep` | `prep_push_rep [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>]` | Full pipeline (prep -> push -> replace) for one file |
+| `prep_push_rep_season` | `prep_push_rep_season [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>]` | Sequential full pipeline for a whole season |
+| `push` | `push [id] [SIZE_MB/SIZE_GB/COUNT val] [chunks 1-4] [device <id_or_name>]` | Split and ADB-push to phone |
+| `push_group` | `push_group [id] [SIZE_..] [episodes 1-3] [device <id_or_name>]` | Push a season group |
 | `replace` | `replace [id]` | Swap original with a tiny valid video file placeholder (requires ffmpeg) |
 | `replace_group` | `replace_group [id]` | Replace a season group |
 | `repair_dummies` | `repair_dummies [id_prefix]` | Regenerate any archived-entry dummy on disk to the current 10 KB video spec (idempotent — re-runs are safe) |
@@ -131,6 +131,27 @@ python mainfetch.py fetch <id> [episodes <range>]
 > range value.
 > Correct: `python main.py fetch tv-TheBoys episodes 1-3`
 > Wrong:   `python main.py fetch tv-TheBoys 1-3` (range silently ignored)
+
+### Pinning a push to a specific phone (multi-device)
+
+All four push-flavoured subcommands (`push`, `push_group`, `prep_push_rep`,
+`prep_push_rep_season`) accept an optional `device <id_or_name>` keyword that
+selects a specific ADB device. The value is either a raw ADB serial or a
+short alias defined in the hardcoded `DEVICE_ALIASES` dict near the top of
+`main.py` (currently `movies` -> `FA69H0300200`, `series` -> `FA75V0303405`).
+When omitted, ADB picks the connected device on its own (and errors if more
+than one is connected without `-s`).
+
+```
+python main.py push mov-en-2024-inception SIZE_MB 9900 device movies
+python main.py push_group tv-en-2016-strangerthings-s01 SIZE_MB 9900 episodes 1-3 device series
+python main.py prep_push_rep mov-en-2025-f1 "C:\Media\Movies\English\F1\F1.mkv" SIZE_MB 9900 device movies
+python main.py prep_push_rep_season tv-en-2024-show-s01 "C:\Media\Series\Show S01" SIZE_MB 9900 episodes 1-5 device series
+```
+
+Aliases are edited in source (matching the hardcoded-config convention noted
+in [`ARCHITECTURE.md` §14](ARCHITECTURE.md)). An unknown alias falls through
+to ADB as a raw serial, so any serial works without registration.
 
 ## Manual ID conventions
 

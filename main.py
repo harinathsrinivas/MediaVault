@@ -66,6 +66,10 @@ DUMMY_RECIPE_BY_EXT = {
 }
 MAINFETCH_SCRIPT = "mainfetch.py"  # Name of the automation script
 
+# Human-friendly aliases for the user's ADB devices. Maps alias -> serial.
+# Edit this dict when the physical phones change.
+DEVICE_ALIASES = {"movies": "FA69H0300200", "series": "FA75V0303405"}
+
 # Folder Naming Conventions
 SPLIT_DIR_NAME = "_parts"  # Temp folder for chunks during push
 CHECKSUM_DIR_NAME = "checksums"  # Permanent local folder for parity hashes
@@ -123,6 +127,14 @@ def save_library(data):
         except:
             os.unlink(tmp_path)
             raise
+
+
+def resolve_device(device_arg):
+    """Map a CLI device alias to an ADB serial. Returns None if arg is None.
+    Unknown aliases pass through as-is so any raw serial works."""
+    if device_arg is None:
+        return None
+    return DEVICE_ALIASES.get(device_arg, device_arg)
 
 
 def generate_short_id(long_id):
@@ -619,7 +631,7 @@ def cmd_check(manual_id):
         print("❌ FAIL: Hash mismatch!\n")
 
 
-def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None):
+def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, device_id=None):
     print(f"--- PUSHING: {manual_id} ---")
     library = load_library()
     if manual_id not in library: print(f"❌ ID not found."); return False
@@ -646,6 +658,9 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None):
     remote_target_dir = f"{REMOTE_ROOT}/{rel_path}".replace("\\", "/")
 
     print(f"   > Target: {remote_target_dir}")
+    if device_id:
+        print(f"   > Device: {device_id}")
+    adb_base = ["adb", "-s", device_id] if device_id else ["adb"]
 
     # [FIX] Escape single quotes for ADB Shell
     # ' -> '\'' turns 'Sorcerer's' into 'Sorcerer'\''s' which is shell-safe
@@ -653,7 +668,7 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None):
 
     try:
         # Use the safe, escaped path for mkdir
-        subprocess.run(["adb", "shell", "mkdir", "-p", f"'{safe_remote_dir}'"], check=True)
+        subprocess.run(adb_base + ["shell", "mkdir", "-p", f"'{safe_remote_dir}'"], check=True)
     except Exception as e:
         print(f"❌ Error: ADB Connection Failed. {e}");
         return False
@@ -752,7 +767,7 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None):
         try:
             # We construct the full remote path with the NEW name
             remote_full_path = f"{remote_target_dir}/{remote_fname}"
-            subprocess.run(["adb", "push", "-p", f, remote_full_path], check=True)
+            subprocess.run(adb_base + ["push", "-p", f, remote_full_path], check=True)
             print("✅")
 
             # DELETE LOCAL CHUNK after successful upload
@@ -791,7 +806,7 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None):
         return False
 
 
-def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=None):
+def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=None, device_id=None):
     print(f"=== BATCH PUSH GROUP: {group_id} ===")
     library = load_library()
     target_ids = []
@@ -836,7 +851,7 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
         if library[mid].get("uploaded") == True:
             print(f"⏭️  Skipping {mid} (Already uploaded)")
             continue
-        cmd_push(mid, split_method, split_val)
+        cmd_push(mid, split_method, split_val, device_id=device_id)
 
 
 def cmd_replace(manual_id):
@@ -1365,7 +1380,7 @@ def cmd_scan_unprepped():
         print("\n✅ All libraries are completely in sync.")
 
 
-def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None):
+def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, device_id=None):
     print(f"=== 🚀 AUTO-PILOT: PREP -> PUSH -> REPLACE for {manual_id} ===")
 
     # 1. PREP
@@ -1377,7 +1392,7 @@ def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None):
     # 2. PUSH
     print("\n>>> STEP 2: PUSH")
     # We pass None for chunk_range as this atomic command implies full push
-    if not cmd_push(manual_id, split_method, split_val):
+    if not cmd_push(manual_id, split_method, split_val, device_id=device_id):
         print("\n⚠️ Auto-Pilot Paused: Push failed.")
         print("   > Reverting temporary files to restore 'Prep' state...")
 
@@ -1407,7 +1422,7 @@ def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None):
     print("\n✅✅✅ AUTO-PILOT COMPLETE: Movie is safely archived.")
 
 
-def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=None, episode_range=None):
+def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=None, episode_range=None, device_id=None):
     # [NEW] TV SERIES SEQUENTIAL AUTO-PILOT
     print(f"=== 📺 SEASON AUTO-PILOT (SEQUENTIAL): PREP -> PUSH -> REPLACE for {base_id} ===")
 
@@ -1462,7 +1477,7 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
 
         # We skip calling 'cmd_prep' again because we already did prep_season
         # Just call Push then Replace
-        if cmd_push(mid, split_method, split_val):
+        if cmd_push(mid, split_method, split_val, device_id=device_id):
             cmd_replace(mid)
         else:
             print(f"❌ Failed to process {mid}. Stopping Auto-Pilot to prevent mess.")
@@ -1522,8 +1537,8 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage:")
         print("  prep [id] [filepath]")
-        print("  prep_push_rep [id] [filepath] [optional: SIZE_GB/COUNT val]")
-        print("  prep_push_rep_season [id] [folder] [optional: SIZE..] [OPT: episodes]")
+        print("  prep_push_rep [id] [filepath] [optional: SIZE_GB/COUNT val] [device <id_or_name>]")
+        print("  prep_push_rep_season [id] [folder] [optional: SIZE..] [OPT: episodes] [device <id_or_name>]")
         print("  fetch_restore [id] [OPT: episodes 1-3]")  # [NEW]
         print("  set_search [id] [term]")
         print("  set_poster [id] [url]")
@@ -1533,8 +1548,8 @@ if __name__ == "__main__":
         print("  scan_unprepped")
         print("  check [id]")
         print("  local_status [opt: limit]")
-        print("  push [id] [SIZE_GB/SIZE_MB] [val] [chunks 1-4]")
-        print("  push_group [id] [SIZE_GB/SIZE_MB] [val] [episodes 1-3]")
+        print("  push [id] [SIZE_GB/SIZE_MB] [val] [chunks 1-4] [device <id_or_name>]")
+        print("  push_group [id] [SIZE_GB/SIZE_MB] [val] [episodes 1-3] [device <id_or_name>]")
         print("  replace [id]")
         print("  replace_group [id]")
         print("  repair_dummies [optional: id_prefix]")
@@ -1555,7 +1570,7 @@ if __name__ == "__main__":
 
     elif cmd == "prep_push_rep":
         if len(sys.argv) < 4:
-            print("❌ Usage: prep_push_rep [id] [filepath] [optional: SIZE_MB/COUNT val]")
+            print("❌ Usage: prep_push_rep [id] [filepath] [optional: SIZE_MB/COUNT val] [device <id_or_name>]")
             sys.exit(1)
 
         mid = sys.argv[2]
@@ -1563,16 +1578,28 @@ if __name__ == "__main__":
 
         method = None
         val = None
-        filepath = ""
+        device_arg = None
+        filepath_parts = []
 
-        if len(rest) >= 3 and rest[-2] in ["SIZE_MB", "SIZE_GB", "COUNT"]:
-            method = rest[-2]
-            val = rest[-1]
-            filepath = " ".join(rest[:-2])
-        else:
-            filepath = " ".join(rest)
+        i = 0
+        while i < len(rest):
+            arg = rest[i]
+            if arg in ["SIZE_MB", "SIZE_GB", "COUNT"]:
+                if i + 1 < len(rest):
+                    method = arg
+                    val = rest[i + 1]
+                    i += 2
+                    continue
+            elif arg == "device":
+                if i + 1 < len(rest):
+                    device_arg = rest[i + 1]
+                    i += 2
+                    continue
+            filepath_parts.append(arg)
+            i += 1
 
-        cmd_prep_push_rep(mid, filepath, method, val)
+        filepath = " ".join(filepath_parts)
+        cmd_prep_push_rep(mid, filepath, method, val, device_id=resolve_device(device_arg))
 
     elif cmd == "prep_push_rep_season":
         if len(sys.argv) < 4:
@@ -1585,6 +1612,7 @@ if __name__ == "__main__":
         method = None
         val = None
         ep_range = None
+        device_arg = None
 
         i = 0
         while i < len(args):
@@ -1600,11 +1628,16 @@ if __name__ == "__main__":
                     ep_range = args[i + 1]
                     i += 2
                     continue
+            elif arg == "device":
+                if i + 1 < len(args):
+                    device_arg = args[i + 1]
+                    i += 2
+                    continue
             folder_parts.append(arg)
             i += 1
 
         folder_path = " ".join(folder_parts)
-        cmd_prep_push_rep_season(group_id, folder_path, method, val, ep_range)
+        cmd_prep_push_rep_season(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg))
 
     elif cmd == "set_search":
         if len(sys.argv) >= 4:
@@ -1672,6 +1705,7 @@ if __name__ == "__main__":
         method = None
         val = None
         c_range = None
+        dev = None
 
         i = 1
         while i < len(args):
@@ -1690,10 +1724,17 @@ if __name__ == "__main__":
                 else:
                     print("❌ Error: Missing value for chunks range.")
                     sys.exit(1)
+            elif args[i] == "device":
+                if i + 1 < len(args):
+                    dev = args[i + 1]
+                    i += 2
+                else:
+                    print("❌ Error: Missing value for device.")
+                    sys.exit(1)
             else:
                 i += 1
 
-        cmd_push(mid, method, val, c_range)
+        cmd_push(mid, method, val, c_range, device_id=resolve_device(dev))
 
     elif cmd == "push_group":
         args = sys.argv[2:]
@@ -1705,6 +1746,7 @@ if __name__ == "__main__":
         method = None
         val = None
         ep_range = None
+        dev = None
 
         i = 1
         while i < len(args):
@@ -1717,10 +1759,14 @@ if __name__ == "__main__":
                 if i + 1 < len(args):
                     ep_range = args[i + 1]
                     i += 2
+            elif args[i] == "device":
+                if i + 1 < len(args):
+                    dev = args[i + 1]
+                    i += 2
             else:
                 i += 1
 
-        cmd_push_group(group_id, method, val, ep_range)
+        cmd_push_group(group_id, method, val, ep_range, device_id=resolve_device(dev))
 
     elif cmd == "sort":
         cmd_sort()

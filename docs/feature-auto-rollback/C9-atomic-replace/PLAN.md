@@ -43,7 +43,7 @@ Why this is crash-safe on NTFS: `os.rename` over an existing target is `MoveFile
   - Details: Add `pytest` to a new `requirements-dev.txt` (do NOT add it to runtime `requirements.txt` — it is a test-only dep; keep runtime deps clean). Create an empty-but-importable `tests/conftest.py`. Do not delete `tests/.gitkeep`. Do NOT install anything yet (step 5 / Verification installs into `.venv`).
   - Acceptance: `requirements-dev.txt` exists with `pytest`; `tests/conftest.py` exists and is valid empty Python.
 
-- [ ] 2. [model: opus] Implement the two-rename swap inside `cmd_replace`.
+- [x] 2. [model: opus] Implement the two-rename swap inside `cmd_replace`.
   - Files: `main.py` (only the body of `cmd_replace`, ~lines 876-899; add the stale sweep just before the swap).
   - Details:
     - Keep lines 857-874 (load, uploaded guard, path building, `make_video_dummy`) BYTE-IDENTICAL.

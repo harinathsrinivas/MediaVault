@@ -38,6 +38,14 @@
 - Traced one example each: `prep_push_rep_season tv-en-2024-x "C:\Media\Series\Show S01" SIZE_MB 9900 episodes 1-5` yields the identical `(method="SIZE_MB", val="9900", ep_range="1-5")` tuple as today; same for `prep_push_rep mov-... <path> SIZE_MB 9900`.
 - Key decision: noted in plan §"Risks" — refactor is a behavioural change only for the vanishing edge case where a filepath's last two components literally are `SIZE_MB <number>`. Accepted risk; matches `prep_push_rep_season`'s existing behaviour.
 
+## Step 7 — Smoke tests
+- `python main.py` prints usage with `[device <id_or_name>]` on all four push lines.
+- `python main.py push` prints the existing usage error path.
+- `resolve_device('movies', 'series', 'FA00XYZ', None)` → `FA69H0300200 FA75V0303405 FA00XYZ None`.
+- All four `cmd_*` signatures end with `device_id=None`.
+- Bonus verification §7: `subprocess.run(["adb"` returns no matches anywhere in main.py.
+
+
 
 
 

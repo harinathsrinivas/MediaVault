@@ -710,12 +710,19 @@ There is one code path — no derived-mode or fallback-mode distinction.
    in a temp file via the recipe table above.
 3. If `make_video_dummy` returns `False`, abort with an error message
    — **no legacy text-blob fallback**.
-4. Delete the original with **3 retries** and a `chmod S_IWRITE` to
-   clear any read-only flag. Retries exist because Plex, Windows
-   Search, or a video player may be holding the file open.
-5. `os.rename(tmp_path, original)` — the dummy takes the exact name
-   of the original.
-6. Set `status = "archived"`. Library JSON mutation is identical to
+4. Stale sweep: if `<original>.tobedeleted` exists from a prior
+   interrupted run, restore the original from it (if the original path
+   is empty) or delete it (if redundant). Ensures idempotent re-entry.
+5. Rename `original → <original>.tobedeleted` (atomic on NTFS, same
+   volume) with **3 retries** and `chmod S_IWRITE`. This is the
+   point-of-no-return (`# ROLLBACK SEAM`): after this rename the
+   original bytes are always on disk, either at the original path or at
+   `.tobedeleted` — never absent.
+6. `os.rename(tmp_path, original)` — the dummy takes the exact name
+   of the original (atomic).
+7. Delete `<original>.tobedeleted` (best-effort; logs a WARNING on
+   failure, does not abort — the next run's stale sweep removes it).
+8. Set `status = "archived"`. Library JSON mutation is identical to
    what was planned; only the content of the temp file changed.
 
 #### `cmd_repair_dummies(prefix_filter=None)`
@@ -1119,9 +1126,12 @@ quality to the cloud. **MediaVault does not orchestrate this step.**
 1. `main.py:1521` -> `cmd_replace(mid)`.
 2. Refuse if `uploaded != True`.
 3. Write `<original>.temp_dummy` containing the hash and split info.
-4. Delete original (retry 3x with `chmod` -> tolerates Plex locks).
-5. Rename dummy to original's name.
-6. Set `status="archived"`.
+4. Stale sweep: recover from any prior interrupted replace.
+5. Rename `original → <original>.tobedeleted` (atomic commit,
+   ROLLBACK SEAM, 3-retry with `chmod`).
+6. Rename dummy → original's name (atomic, dummy goes live).
+7. Delete `.tobedeleted` (best-effort, non-fatal).
+8. Set `status="archived"`.
 
 The file path still exists on disk; Plex won't lose its library entry.
 Hash stays in JSON for the day the user wants to restore.

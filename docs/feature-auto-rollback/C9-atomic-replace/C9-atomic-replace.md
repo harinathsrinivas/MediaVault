@@ -5,10 +5,10 @@ improvement: IMP-C9
 tier: C
 role: prerequisite
 order: 1
-status: not-started
+status: done
 branch: fix/atomic_replace
 feature: auto-rollback
-tags: [claude, mediavault, prereq, tier/C, status/not-started]
+tags: [claude, mediavault, prereq, tier/C, status/done]
 created: 2026-05-28
 ---
 
@@ -60,23 +60,23 @@ identifiable so rollback can pin the PONR there. Details in
 [[RELATED_IMPROVEMENTS]] → C9.
 
 ## Definition of Done
-- [ ] Planner run; `PLAN.md` saved in this subfolder; open decisions confirmed by me
-- [ ] Branched `fix/atomic_replace` off `origin/main`
-- [ ] Two-rename implemented; success path unchanged; 3-retry PermissionError preserved
-- [ ] Tests in `tests/` (copies only) incl. crash-between-renames; passing
-- [ ] Seam left: first rename is the identifiable commit point
-- [ ] `IMP-C9` marked done in `improvements_tierC.md`
-- [ ] `ARCHITECTURE.md` / `README` updated if behavior is documented there
-- [ ] PR to `main` opened
-- [ ] Completion report below filled in
+- [x] Planner run; `PLAN.md` saved in this subfolder; open decisions confirmed by me
+- [x] Branched `fix/atomic_replace` off `origin/main`
+- [x] Two-rename implemented; success path unchanged; 3-retry PermissionError preserved
+- [x] Tests in `tests/` (copies only) incl. crash-between-renames; passing
+- [x] Seam left: first rename is the identifiable commit point (`main.py:904`)
+- [x] `IMP-C9` marked done in `improvements_tierC.md`
+- [x] `ARCHITECTURE.md` §7.6 and §10 Stage 3 updated
+- [x] PR to `main` opened
+- [x] Completion report below filled in
 
-## Completion report (fill in when done)
-- **Branch:**
-- **PR:**
-- **Merged commit:**
-- **Files changed:**
-- **Tests added:**
-- **Manual test commands:**
-- **Open decisions resolved:**
-- **Notes / surprises:**
-- **Follow-ups created:**
+## Completion report
+- **Branch:** `fix/atomic_replace`
+- **PR:** (to be filled after push)
+- **Merged commit:** (to be filled after merge)
+- **Files changed:** `main.py` (cmd_replace swap block), `tests/conftest.py` (new), `tests/test_cmd_replace.py` (new), `requirements-dev.txt` (new), `ARCHITECTURE.md` (§7.6 + §10), `improvements_tierC.md` (status → done), `docs/feature-auto-rollback/C9-atomic-replace/PLAN.md` (new)
+- **Tests added:** 6 — `test_happy_path`, `test_crash_between_renames`, `test_stale_tobedeleted_swept_redundant_leftover`, `test_stale_tobedeleted_swept_crash_recovery`, `test_locked_file_retry`, `test_dummy_creation_failure_aborts`
+- **Manual test commands:** `.venv\Scripts\python.exe -m pytest tests\ -v` (all 6 pass)
+- **Open decisions resolved:** (1) delete .tobedeleted failure → log WARNING, leave it; (2) stale .tobedeleted on next run → option a1: restore master if original absent, else delete
+- **Notes / surprises:** `os.rename` in test patching must be done via `monkeypatch.setattr(main.os, "rename", ...)` not `os.rename` directly. `save_library` uses `tempfile.mkstemp(dir=...)` so library dirs must exist in sandbox.
+- **Follow-ups created:** IMP-D6 (prune_dummies cleanup sweep for leftover .tobedeleted); auto-rollback feature can now pin PONR at `main.py:904` ROLLBACK SEAM

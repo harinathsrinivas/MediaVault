@@ -11,3 +11,11 @@
 - Verified: `python main.py` prints usage; `resolve_device('movies')` -> `FA69H0300200`, `resolve_device('FA00X')` -> `FA00X`, `resolve_device(None)` -> `None`.
 - Key decision: helper uses simple `dict.get(arg, arg)` passthrough so any raw serial works without registration.
 
+## Step 3 — Thread device_id through cmd_push
+- Added `device_id=None` kwarg to `cmd_push` signature.
+- After "Target:" print, added conditional `Device:` print and `adb_base = ["adb", "-s", device_id] if device_id else ["adb"]`.
+- Replaced both `subprocess.run(["adb", ...])` sites (mkdir + push) with `subprocess.run(adb_base + [...])`.
+- Verified: only `["adb"` literal remaining in main.py is the `adb_base` assignment itself. `cmd_push` signature is `(manual_id, split_method=None, split_val=None, chunk_range=None, device_id=None)`.
+- Key decision: default call shape is preserved exactly — `adb_base` collapses to `["adb"]` when `device_id` is None, yielding identical subprocess argv to today.
+
+

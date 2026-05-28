@@ -631,7 +631,7 @@ def cmd_check(manual_id):
         print("❌ FAIL: Hash mismatch!\n")
 
 
-def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None):
+def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, device_id=None):
     print(f"--- PUSHING: {manual_id} ---")
     library = load_library()
     if manual_id not in library: print(f"❌ ID not found."); return False
@@ -658,6 +658,9 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None):
     remote_target_dir = f"{REMOTE_ROOT}/{rel_path}".replace("\\", "/")
 
     print(f"   > Target: {remote_target_dir}")
+    if device_id:
+        print(f"   > Device: {device_id}")
+    adb_base = ["adb", "-s", device_id] if device_id else ["adb"]
 
     # [FIX] Escape single quotes for ADB Shell
     # ' -> '\'' turns 'Sorcerer's' into 'Sorcerer'\''s' which is shell-safe
@@ -665,7 +668,7 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None):
 
     try:
         # Use the safe, escaped path for mkdir
-        subprocess.run(["adb", "shell", "mkdir", "-p", f"'{safe_remote_dir}'"], check=True)
+        subprocess.run(adb_base + ["shell", "mkdir", "-p", f"'{safe_remote_dir}'"], check=True)
     except Exception as e:
         print(f"❌ Error: ADB Connection Failed. {e}");
         return False
@@ -764,7 +767,7 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None):
         try:
             # We construct the full remote path with the NEW name
             remote_full_path = f"{remote_target_dir}/{remote_fname}"
-            subprocess.run(["adb", "push", "-p", f, remote_full_path], check=True)
+            subprocess.run(adb_base + ["push", "-p", f, remote_full_path], check=True)
             print("✅")
 
             # DELETE LOCAL CHUNK after successful upload

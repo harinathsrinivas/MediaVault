@@ -26,8 +26,8 @@ Thumbs.db
 # Legacy / unrelated secrets file (lives under archive/unrelated/)
 archive/unrelated/a.json
 
-# Local plan / scratch files written by the agent
-PLAN.md
+# Local plan / scratch files written by the agent (root-level only)
+/PLAN.md
 
 # Local reference copies of personal library data and command logs
 # (the live files at C:\Media\*.json are the source of truth; these are snapshots)

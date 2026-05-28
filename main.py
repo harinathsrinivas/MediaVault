@@ -66,6 +66,10 @@ DUMMY_RECIPE_BY_EXT = {
 }
 MAINFETCH_SCRIPT = "mainfetch.py"  # Name of the automation script
 
+# Human-friendly aliases for the user's ADB devices. Maps alias -> serial.
+# Edit this dict when the physical phones change.
+DEVICE_ALIASES = {"movies": "FA69H0300200", "series": "FA75V0303405"}
+
 # Folder Naming Conventions
 SPLIT_DIR_NAME = "_parts"  # Temp folder for chunks during push
 CHECKSUM_DIR_NAME = "checksums"  # Permanent local folder for parity hashes
@@ -123,6 +127,14 @@ def save_library(data):
         except:
             os.unlink(tmp_path)
             raise
+
+
+def resolve_device(device_arg):
+    """Map a CLI device alias to an ADB serial. Returns None if arg is None.
+    Unknown aliases pass through as-is so any raw serial works."""
+    if device_arg is None:
+        return None
+    return DEVICE_ALIASES.get(device_arg, device_arg)
 
 
 def generate_short_id(long_id):

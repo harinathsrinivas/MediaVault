@@ -72,6 +72,24 @@ def test_atomic_save_failure_leaves_no_tmp_orphan(sandbox, monkeypatch):
     assert json.loads(sandbox["lib_movies"].read_text(encoding="utf-8")) == original
 
 
+def test_calculate_file_hash_progress_bar(tmp_path, capsys):
+    """calculate_file_hash emits a live progress bar with emoji and block chars."""
+    f = tmp_path / "sample.mkv"
+    f.write_bytes(b"x" * 300_000)   # 300 KB -> multiple block reads -> bar updates
+    h = mvcommon.calculate_file_hash(str(f))
+    out = capsys.readouterr().out
+    assert h is not None and len(h) == 64   # valid sha256 hex
+    assert "🔍" in out
+    assert "█" in out                        # at least one filled bar segment
+
+
+def test_calculate_file_hash_missing_file(tmp_path, capsys):
+    """calculate_file_hash returns None and prints an error for a missing file."""
+    result = mvcommon.calculate_file_hash(str(tmp_path / "nonexistent.mkv"))
+    assert result is None
+    assert "❌" in capsys.readouterr().out
+
+
 def test_corrupt_library_fails_loud(sandbox):
     """A corrupt library makes load_library exit loudly (SystemExit) — the
     unified loud contract that replaces mainfetch's old silent-zero-entries."""

@@ -5,10 +5,10 @@ improvement: IMP-A1
 tier: A
 role: foundation
 order: 6
-status: not-started
+status: done
 branch: refactor/extract_mvcommon
 feature: auto-rollback
-tags: [claude, mediavault, foundation, tier/A, status/not-started]
+tags: [claude, mediavault, foundation, tier/A, status/done]
 created: 2026-05-28
 ---
 
@@ -61,24 +61,70 @@ them here is the foundation. Keep the public surface clean. Details:
 [[RELATED_IMPROVEMENTS]] → A1.
 
 ## Definition of Done
-- [ ] Planner run; `PLAN.md` in this subfolder; open decisions confirmed
-- [ ] Branched `refactor/extract_mvcommon` off `origin/main`
-- [ ] `mvcommon.py` created; both scripts import from it; no import cycles
-- [ ] Behavior identical except the agreed `load_library` unification
-- [ ] Tests in `tests/` (copies only): round-trip + corrupt-library handling
-- [ ] Seam left: clean, stable public surface
-- [ ] `IMP-A1` marked done in `improvements_tierA.md`
-- [ ] `ARCHITECTURE.md` / `README` updated (module layout)
-- [ ] PR to `main` opened
-- [ ] Completion report below filled in
+- [x] Planner run; `PLAN.md` in this subfolder; open decisions confirmed
+- [x] Branched `refactor/extract_mvcommon` off `origin/main`
+- [x] `mvcommon.py` created; both scripts import from it; no import cycles
+- [x] Behavior identical except the agreed `load_library` unification
+- [x] Tests in `tests/` (copies only): round-trip + corrupt-library handling
+- [x] Seam left: clean, stable public surface
+- [x] `IMP-A1` marked done in `improvements_tierA.md`
+- [x] `ARCHITECTURE.md` / `README` updated (module layout)
+- [ ] PR to `main` opened (branch pushed; open the PR from the compare URL)
+- [x] Completion report below filled in
 
-## Completion report (fill in when done)
-- **Branch:**
-- **PR:**
-- **Merged commit:**
+## Completion report
+
+- **Branch:** `refactor/extract_mvcommon` (branched from `origin/main` @ `8c12680`).
+- **PR:** to `main` (open after push; see end-of-run summary for URL).
+- **Merged commit:** pending merge (PR target `main`).
 - **Files changed:**
-- **Tests added:**
-- **Manual test commands:**
+  - `mvcommon.py` (NEW) — 9 shared constants + 6 helpers; stdlib-only imports.
+  - `main.py` — removed the 9 moved constants and 6 moved helper defs; added
+    `from mvcommon import (...)`; dropped orphaned `import hashlib`.
+  - `mainfetch.py` — deleted its silent `load_library` + duplicate
+    `calculate_file_hash` + shared constants; added
+    `from mvcommon import RESTORE_DIR_NAME, load_library, calculate_file_hash`;
+    dropped orphaned `import hashlib` and `import json`. Now uses the loud
+    `load_library` contract.
+  - `tests/conftest.py` — sandbox fixture now monkeypatches BOTH
+    `mvcommon.LIBRARY_*` (authoritative) AND `main.LIBRARY_*`.
+  - `tests/test_mvcommon.py` (NEW) — 3 tests.
+  - `improvements_tierA.md`, `ARCHITECTURE.md`, `README.md` — docs.
+- **Tests added:** `tests/test_mvcommon.py` — (A) save/load round-trip with
+  prefix split, (B) atomic `save_library` failure (`os.replace` raises ->
+  re-raise, no `.tmp` orphan, target unchanged), (C) corrupt-library loud
+  failure (`SystemExit`). Full suite: 23 passed.
+- **Manual test commands (all run, all green):**
+  - `python -c "import mvcommon, main, mainfetch"` — all three import cleanly.
+  - `python main.py local_status` — same pending list as a pre-change run.
+  - `python mainfetch.py` — prints usage, no NameError (rc 0).
+  - `pytest -q` — 23 passed.
+  - `pytest tests/test_cmd_replace.py tests/test_cmd_restore_quarantine.py -q` —
+    15 passed (matches pre-change baseline).
 - **Open decisions resolved:**
+  1. Symbol set — moved exactly the 9 constants + 6 helpers; nothing else.
+     `PARTIAL_SUFFIX`/`MVMETA_SUFFIX` (G1 push-side) deliberately stayed in `main.py`.
+  2. `load_library` error handling — unified LOUD (`sys.exit(1)`) everywhere;
+     mainfetch's silent-zero-entries behavior intentionally removed.
+  3. Re-export shims — none; both files use `from mvcommon import ...`.
+  4. Hashing print cosmetic change — accepted; both entry points now use the
+     live progress bar from `mvcommon.calculate_file_hash`.
+  5. mainfetch import line — kept honest: imported only the referenced symbols
+     (`RESTORE_DIR_NAME`, `load_library`, `calculate_file_hash`). The other 8
+     constants were dead in mainfetch even before the refactor, so they were not
+     re-imported. `save_library` not imported (unused; available for future
+     fetch-side writes per the spec).
 - **Notes / surprises:**
-- **Follow-ups created:**
+  - The binding-location hazard was real and demonstrated: with the old conftest
+    (patching only `main.LIBRARY_*`), 12 C9/C11 tests failed ("ID not found")
+    because `mvcommon`'s own bindings still pointed at real `C:\Media`. Patching
+    `mvcommon.LIBRARY_*` fixed it; the `"C:\\Media" not in path` hard guard is retained.
+  - `origin/main` had already absorbed the G1 push-partial work (`PARTIAL_SUFFIX`,
+    `MVMETA_SUFFIX`, shifted line numbers); the plan's symbol set was still exact.
+  - Root `PLAN.md` was left as-is (it is the in-flight G1 working copy) — not
+    overwritten with this A1 plan, per step 7.
+  - An unrelated in-progress edit to `improvements_tierG.md` was parked in
+    `git stash` (`A1-orchestrator: park G1 improvements_tierG.md edit`) before
+    branching from `origin/main`, so it can be restored on the G1 branch later.
+- **Follow-ups created:** none. (Foundation seam ready for auto-rollback,
+  IMP-C2 retry helper, IMP-A6 type hints, IMP-A7 pytest harness.)

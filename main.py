@@ -873,16 +873,36 @@ def cmd_replace(manual_id):
         print(f"❌ replace aborted — could not create video dummy for {filename}")
         return False
 
-    # Swap Files
+    # Swap Files (atomic two-rename pattern — original is never absent without a leftover present)
+    tobedeleted = original + ".tobedeleted"
+
+    # STALE SWEEP: recover from a prior interrupted run before touching anything
+    if os.path.exists(tobedeleted):
+        try:
+            if os.path.exists(original):
+                # leftover is redundant — the real file is already in place
+                print(f"     ⚠️ Stale leftover from prior interrupted run — cleaning up {os.path.basename(tobedeleted)}")
+                os.remove(tobedeleted)
+            else:
+                # crash happened between rename-1 and rename-2: master is at .tobedeleted — restore and abort
+                print(f"     ⚠️ Recovered interrupted replace: restoring original from {os.path.basename(tobedeleted)}")
+                os.rename(tobedeleted, original)
+                print(f"❌ replace aborted — original restored. Please retry.")
+                return False
+        except Exception as e:
+            print(f"     ⚠️ Could not clean stale leftover: {e}")
+
+    # Step 1 (done above): make_video_dummy wrote tmp_path
+
+    # Step 2 (commit / point-of-no-return): rename original -> .tobedeleted
     if os.path.exists(original):
-        # [UPDATED] ROBUST DELETION (Retry + Force Write)
-        removed = False
+        moved = False
         for attempt in range(3):
             try:
                 # Force Write Permissions
                 os.chmod(original, stat.S_IWRITE)
-                os.remove(original)
-                removed = True
+                os.rename(original, tobedeleted)  # ROLLBACK SEAM: original removed from its path here (atomic commit / point-of-no-return)
+                moved = True
                 break
             except PermissionError:
                 print(f"     ⚠️ File busy or locked. Retrying... ({attempt + 1}/3)")
@@ -891,12 +911,20 @@ def cmd_replace(manual_id):
                 print(f"❌ Error removing file: {e}")
                 return False
 
-        if not removed:
+        if not moved:
             print(f"❌ PERMISSION DENIED: Could not delete {filename}")
             print("   > Close any players/Plex scanning this file and try again.")
             return False
 
+    # Step 3: rename dummy temp -> original (dummy is now live)
     os.rename(tmp_path, original)
+
+    # Step 4: delete the .tobedeleted leftover (non-fatal if it fails)
+    if os.path.exists(tobedeleted):
+        try:
+            os.remove(tobedeleted)
+        except Exception as e:
+            print(f"     ⚠️ WARNING: Could not remove leftover {os.path.basename(tobedeleted)}: {e}. It will be cleaned on the next replace.")
 
     library[manual_id]["status"] = "archived"
     save_library(library)
@@ -1031,6 +1059,25 @@ def cmd_verify_restore(manual_id):
             print(f"❌ FAILURE: Hash mismatch.")
 
 
+def quarantine_restore_file(restore_folder, filename):
+    """Move a bad restore file into restore/quarantine/<filename>.<ISO-ts>.
+    Returns the destination path. Single source of truth for 'where a bad
+    restore file goes' — reused by auto-rollback's restore handling."""
+    quarantine_dir = os.path.join(restore_folder, "quarantine")
+    os.makedirs(quarantine_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%dT%H%M%S")   # filesystem-safe ISO-ish
+    dest = os.path.join(quarantine_dir, f"{filename}.{ts}")
+    # collision guard: if same filename quarantined twice within one second,
+    # append a counter so we never overwrite a prior quarantined copy.
+    n = 1
+    final = dest
+    while os.path.exists(final):
+        final = f"{dest}.{n}"
+        n += 1
+    shutil.move(src=os.path.join(restore_folder, filename), dst=final)
+    return final
+
+
 def cmd_restore(manual_id):
     print(f"--- RESTORING: {manual_id} ---")
     library = load_library()
@@ -1055,6 +1102,33 @@ def cmd_restore(manual_id):
         # 1. Verification of Existence
         if not all(os.path.exists(p) for p in chunk_paths_in_restore):
             print(f"⏭️  Skipping {manual_id}: Incomplete chunks in restore folder.")
+            return False
+
+        # 1b. Pre-merge per-chunk hash verification. mkvmerge is lenient and
+        # would otherwise silently fold a corrupt chunk into a bad merged file,
+        # so verify each chunk against its stored hash BEFORE merging.
+        bad_chunks = []
+        for c in chunks_meta:
+            chunk_path = os.path.join(restore_folder, c['filename'])
+            if calculate_file_hash(chunk_path) != c['hash']:
+                bad_chunks.append(c['filename'])
+
+        if bad_chunks:
+            # Quarantine only the offending chunk(s); clean chunks stay in
+            # restore/ so a targeted re-fetch refills just the bad ones.
+            for chunk_filename in bad_chunks:
+                try:
+                    q = quarantine_restore_file(restore_folder, chunk_filename)
+                    print(f"❌ Hash mismatch. Bad file quarantined at {q}. A fresh fetch will re-download.")
+                except Exception:
+                    print(f"❌ Error: Restore chunk hash mismatch ({chunk_filename})! Corrupt?")
+            # Delete any stale partial merged output from a prior failed merge;
+            # it is reproducible from chunks, so re-fetch + re-merge regenerates it.
+            if os.path.exists(target_path):
+                try:
+                    os.remove(target_path)
+                except Exception:
+                    pass
             return False
 
         # 2. Merge
@@ -1094,7 +1168,13 @@ def cmd_restore(manual_id):
         # 1. Verify Hash
         print("   > Verifying Hash before restore...")
         if calculate_file_hash(source_path) != entry['hash']:
-            print("❌ Error: Restore file hash mismatch! Corrupt?");
+            try:
+                q = quarantine_restore_file(restore_folder, filename)
+                print(f"❌ Hash mismatch. Bad file quarantined at {q}. A fresh fetch will re-download.")
+            except Exception:
+                # Fallback: if the move is blocked (e.g. Windows file lock),
+                # never make restore worse than before — leave the file in place.
+                print("❌ Error: Restore file hash mismatch! Corrupt?")
             return False
 
         # 2. Move File

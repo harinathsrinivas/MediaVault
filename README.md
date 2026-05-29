@@ -27,7 +27,12 @@ puts the file back where it was.
   write sidecar files (`uid`, `<short_id>.sha256`) and record everything in
   the appropriate library JSON.
 - `push` — optionally split into balanced chunks via `mkvmerge`, then `adb push`
-  the result to `/sdcard/Media/...` on a Pixel phone.
+  the result to `/sdcard/Media/...` on a Pixel phone. Each chunk is uploaded to
+  a temporary `<name>.partial` and then atomically renamed with `adb shell mv`
+  only after the transfer succeeds, so a mid-push failure never leaves a
+  complete-named chunk for Google Photos to ingest. On full success a
+  `<base> [<short_id>].mvmeta.json` sidecar is written next to the chunks on the
+  phone (mirrors `split_info`) for disaster-recovery library rebuild.
 - (out of band) — the phone's Google Photos app auto-uploads the new files at
   original quality. MediaVault is not involved in this step.
 - `replace` — once `uploaded` is true, swap the original for a tiny dummy

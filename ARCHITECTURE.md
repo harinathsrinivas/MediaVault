@@ -472,6 +472,23 @@ These sidecars are belt-and-suspenders backup of what's in the JSON
 libraries — they are NEVER read by `main.py` itself. They exist for manual
 recovery if the JSON files are ever lost or corrupted.
 
+**Remote `.mvmeta.json` sidecar (lives on the phone, not on disk).** Unlike
+the `uid`/`.sha256` sidecars above, this one is pushed to the Pixel. On a
+fully successful `cmd_push` (all chunks uploaded, no `chunk_range` filter),
+`write_remote_mvmeta` writes `<base> [<short_id>].mvmeta.json` into the same
+remote dir as the chunks. It mirrors the entry's `split_info` plus key
+metadata (schema `version`, `manual_id`, `short_id`, `original_hash`,
+`is_split`/`method`/`val`/`total_chunks`, a `chunks` list of
+`{filename, hash}`, `folder_path`/`remote_target_dir`, `tech_spec`,
+`metadata`). Non-split single-file uploads also get one, with a 1-element
+`chunks` list referencing the renamed `<name> [<short_id>]<ext>` remote name.
+The write is **best-effort**: a failure logs a WARNING (`⚠️ mvmeta sidecar
+write failed (chunks are safe): ...`) and returns `False` but never raises and
+never flips a successful push to a failure — the chunks are the source of
+truth, the sidecar is disaster-recovery redundancy for rebuilding the library
+from the remote. It is written for new pushes only; the ~412 existing archived
+remotes are not back-filled.
+
 ---
 
 ## 7. main.py Deep Dive
@@ -617,23 +634,37 @@ High-level sequence inside one `cmd_push` call:
 5. **Optional chunk-range filter** (`chunks 1-4`): walks the file list
    and keeps only chunks whose 3-digit number is in range
    (`main.py:632-657`). Used for re-pushing specific failed parts.
-6. **Upload loop** (`main.py:659-693`):
+6. **Upload loop** (`.partial` + atomic remote rename):
    - For each file path, compute the remote filename. Chunks keep their
      names. Non-chunk (single-file) uploads are renamed to embed the
      short_id: `<name> [<short_id>]<ext>`.
-   - Run `adb push -p <local> <remote>` — the `-p` flag enables ADB's
-     built-in progress meter, which is left visible to the user (no
-     custom progress bar).
-   - **Critical safety check**: after a successful chunk upload, the
-     local chunk is deleted *only if* its path contains the
-     `_parts` segment (`main.py:680`). This protects against accidentally
-     deleting non-chunk source files if logic is ever rearranged.
-   - On any failure, break the loop and leave `_parts/` populated for
-     resume.
+   - Run `adb push -p <local> <remote>.partial` — the chunk is first
+     uploaded to a temporary name carrying the `PARTIAL_SUFFIX`
+     (`.partial`). The `-p` flag enables ADB's built-in progress meter,
+     which is left visible to the user (no custom progress bar).
+   - **Atomic remote rename**: on push success, run
+     `adb shell mv '<remote>.partial' '<remote>'` with `check=True`,
+     single-quote-escaping both paths exactly like the `mkdir` path. This
+     is the rclone-`chunker` pattern: Google Photos never indexes a
+     `.partial` as a complete chunk, so a mid-push death leaves at most a
+     `.partial` remnant and never a complete-named partial transfer. A
+     `mv` failure is treated identically to a push failure.
+   - **Critical safety check**: after a successful upload *and* rename,
+     the local chunk is deleted *only if* its path contains the `_parts`
+     segment. The chunk counts as "done" only once it sits at its final
+     name. This protects against accidentally deleting non-chunk source
+     files if logic is ever rearranged.
+   - On any push or `mv` failure, break the loop and leave `_parts/`
+     populated for resume. Resume re-pushes to `.partial`, which
+     overwrites any stale partial on the phone (no remote `ls` needed).
 7. **Post-loop bookkeeping**:
    - Remove `_parts/` if it's empty.
    - If all chunks succeeded AND no `chunk_range` filter was active,
-     set `uploaded=True`, `status="onboarded"`, save library.
+     write the remote `<base> [<short_id>].mvmeta.json` sidecar via
+     `write_remote_mvmeta` (best-effort — see §6.5), then set
+     `uploaded=True`, `status="onboarded"`, save library. A failure to
+     write the sidecar logs a WARNING but does NOT change the `True`
+     return — the chunks are the source of truth.
    - Partial uploads return success but leave state untouched.
 
 ADB device selection is now an opt-in CLI flag (`device <id_or_name>`)
@@ -1126,11 +1157,14 @@ references.
    build `entry["split_info"]`.
 6. `save_library(library)` — **persisted before any upload**, so an
    interrupted push has a verified manifest to resume against.
-7. Loop chunks: `adb push -p <local> /sdcard/Media/.../<chunk>`.
-   After each success, delete the local chunk (only if its path
-   contains `_parts`).
+7. Loop chunks: `adb push -p <local> /sdcard/Media/.../<chunk>.partial`,
+   then `adb shell mv '<chunk>.partial' '<chunk>'` to atomically rename
+   on success (so Google Photos never sees a partial as complete).
+   After a successful push+rename, delete the local chunk (only if its
+   path contains `_parts`).
 8. After all chunks done, `os.rmdir(_parts/)` (empty).
-9. Set `uploaded=True`, `status="onboarded"`. Save.
+9. Write the remote `<base> [<short_id>].mvmeta.json` sidecar
+   (best-effort), then set `uploaded=True`, `status="onboarded"`. Save.
 
 Meanwhile, on the phone, Google Photos auto-upload picks up the new
 files in `/sdcard/Media/...` (the user has configured the Pixel's
@@ -1303,6 +1337,8 @@ CLI flags for paths. To re-target the system, you edit the source.
 | `CHECKSUM_DIR_NAME` | both | `checksums` |
 | `RESTORE_DIR_NAME` | both | `restore` |
 | `VIDEO_EXTENSIONS` | both | `('.mkv', '.mp4', '.avi', '.mov')` |
+| `PARTIAL_SUFFIX` | `main.py` | `.partial` — chunks upload to `<final>.partial` then `adb shell mv` to final (atomic remote rename); auto-rollback seam |
+| `MVMETA_SUFFIX` | `main.py` | `.mvmeta.json` — remote disaster-recovery sidecar name (`<base> [<short_id>].mvmeta.json`) written on full push success |
 | `CHROME_PROFILES["default"]` | `mainfetch.py:38` | `C:\Media\Utils\ChromeProfile` |
 | `CHROME_PROFILES["tv"]` | `mainfetch.py:39` | `C:\Media\Utils\ChromeProfile_TV` |
 | `CHROME_PROFILE_NAME` | `mainfetch.py:41` | `Default` (sub-profile inside the user-data-dir) |

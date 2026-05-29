@@ -1,7 +1,5 @@
 import os
-import json
 import sys
-import hashlib
 import subprocess
 import shutil
 import time
@@ -23,13 +21,11 @@ except ImportError:
 # ==========================================
 #               CONFIGURATION
 # ==========================================
-# [UPDATED] Split Libraries
-LIBRARY_MOVIES = r'C:\Media\library_movies.json'
-LIBRARY_SERIES = r'C:\Media\library_series.json'
-LIBRARY_ANIME = r'C:\Media\library_anime.json'
-
-LOCAL_ROOT = r"C:\Media"
-MKVMERGE_PATH = r"C:\Program Files\MKVToolNix\mkvmerge.exe"
+# Shared library I/O + hashing now live in mvcommon.py (the single source of
+# truth imported by both entry points). load_library is now the loud/strict
+# version (sys.exit(1) on a corrupt library) — mainfetch's old silent-zero-
+# entries behavior is intentionally removed.
+from mvcommon import RESTORE_DIR_NAME, load_library, calculate_file_hash
 
 # --- AUTOMATION CONFIG ---
 CHROME_PROFILES = {
@@ -38,63 +34,6 @@ CHROME_PROFILES = {
 }
 CHROME_PROFILE_NAME = "Default"
 SYSTEM_DOWNLOADS_FOLDER = os.path.join(os.path.expanduser("~"), "Downloads")
-
-# Folder Naming Conventions
-SPLIT_DIR_NAME = "_parts"
-CHECKSUM_DIR_NAME = "checksums"
-RESTORE_DIR_NAME = "restore"
-VIDEO_EXTENSIONS = ('.mkv', '.mp4', '.avi', '.mov')
-
-
-# ==========================================
-#               UTILITIES
-# ==========================================
-def load_library():
-    """Loads all three libraries and merges them into one dictionary."""
-    data = {}
-
-    # Load Movies
-    if os.path.exists(LIBRARY_MOVIES):
-        try:
-            with open(LIBRARY_MOVIES, 'r') as f:
-                data.update(json.load(f))
-        except:
-            pass
-
-    # Load Series
-    if os.path.exists(LIBRARY_SERIES):
-        try:
-            with open(LIBRARY_SERIES, 'r') as f:
-                data.update(json.load(f))
-        except:
-            pass
-
-    # Load Anime
-    if os.path.exists(LIBRARY_ANIME):
-        try:
-            with open(LIBRARY_ANIME, 'r') as f:
-                data.update(json.load(f))
-        except:
-            pass
-
-    return data
-
-
-def calculate_file_hash(filepath, block_size=65536):
-    print(f"     🔍 Verifying: {os.path.basename(filepath)}...", end="", flush=True)
-    sha256 = hashlib.sha256()
-    try:
-        with open(filepath, 'rb') as f:
-            for block in iter(lambda: f.read(block_size), b''): sha256.update(block)
-        h = sha256.hexdigest()
-        print(" Done.")
-        return h
-    except FileNotFoundError:
-        print(" ❌ File not found.")
-        return None
-    except Exception as e:
-        print(f" ❌ Error: {e}")
-        return None
 
 
 # ==========================================

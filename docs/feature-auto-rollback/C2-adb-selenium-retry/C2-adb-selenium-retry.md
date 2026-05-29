@@ -30,21 +30,23 @@ Task: Plan the implementation of improvement IMP-C2 ("Exponential-backoff retry 
 Read these FIRST, in this order, before planning:
 1. improvements_tierC.md -> the IMP-C2 section. The spec for WHAT and WHY.
 2. docs/feature-auto-rollback/README.md, then docs/feature-auto-rollback/RELATED_IMPROVEMENTS.md ("C2" subsection). C2 is COMPLEMENTARY to the upcoming auto-rollback feature: fewer transient failures means rollback/hard-fail fires less often. The one hard requirement: do NOT change the failure contract callers rely on.
-3. ARCHITECTURE.md and the code: the adb push call in cmd_push in main.py (~770); trigger_download in mainfetch.py (~212); and the existing 3-retry PermissionError loop in cmd_replace (the only existing retry — do NOT disturb it).
+3. ARCHITECTURE.md and the code: the adb push call in cmd_push in main.py; trigger_download in mainfetch.py; and the existing 3-retry PermissionError loop in cmd_replace (the only existing retry — do NOT disturb it).
 
-What to build: a shared retry helper, retry(callable, attempts=3, backoff=(1,4,16), retry_on=(SubprocessError, TimeoutError)). Wrap adb push with it (exponential backoff on transient CalledProcessError). Wrap the inner body of trigger_download to retry once after ~5s if the search returns 0 thumbnails or the click fails, before returning False.
+Confirmed state — do not re-derive these, treat as facts:
+- IMP-A1 (mvcommon) is DONE and merged into origin/main. Put the retry() helper in mvcommon.py — not main.py. Branch C2 from origin/main AFTER confirming A1 is merged (check git log origin/main for the A1 merge commit).
+- IMP-G1 (push partial + atomic rename) is DONE and merged into origin/main (PR #7). A retried adb push MUST delete any `.partial` remnant left by the failed attempt before re-uploading — add a pre-retry `adb shell rm <remote>.partial` step within the retry wrapper for adb push specifically. This is not conditional.
+
+What to build: a shared retry() helper in mvcommon.py — retry(callable, attempts=3, backoff=(1,4,16), retry_on=(SubprocessError, TimeoutError)). Wrap adb push with it (exponential backoff on transient CalledProcessError, with pre-retry .partial cleanup). Wrap the inner body of trigger_download to retry once after ~5s if the search returns 0 thumbnails or the click fails, before returning False.
 
 Constraints (full list in docs/feature-auto-rollback/README.md):
-- Branch from origin/main. Suggested branch: feature/adb_selenium_retry.
+- Branch from origin/main (after A1 merge). Suggested branch: feature/adb_selenium_retry.
 - Happy path identical (first-attempt success behaves exactly as today). A retried-then-exhausted op must return the SAME failure signal callers rely on — do not change the failure contract auto-rollback depends on.
 - Tests in tests/, COPIES only — never touch real C:\Media files or real library_*.json; mock subprocess/Selenium to fail N times then succeed, and to fail permanently.
-- Surgical: the retry helper + its two call sites + tests; don't touch the cmd_replace PermissionError loop; don't touch archive/. Retry counts hardcoded for now (configurability is IMP-A5, out of scope).
-- If IMP-A1 (mvcommon) is already done, put the helper in mvcommon.py; otherwise keep it in main.py and note the future move.
-- G1 interaction: if IMP-G1 (push partial + atomic rename) is already done, a retried adb push must first delete any `.partial` remnant left by the failed attempt before re-uploading (otherwise the retry lands a second `.partial` alongside the orphaned first). Check whether G1 has been merged; if so, add a pre-retry `adb shell rm <remote>.partial` step within the retry wrapper for adb push specifically.
+- Surgical: the retry helper in mvcommon + its two call sites + tests; don't touch the cmd_replace PermissionError loop; don't touch archive/. Retry counts hardcoded for now (configurability is IMP-A5, out of scope).
 
 DOCUMENTATION: save your PLAN.md into docs/feature-auto-rollback/C2-adb-selenium-retry/PLAN.md; keep artifacts there; fill the "Completion report" in docs/feature-auto-rollback/C2-adb-selenium-retry/C2-adb-selenium-retry.md when done. (Keep /PLAN.md at root in sync if needed.)
 
-Pause and ask me about open decisions, at minimum: exact exception set to retry on; helper location (main.py vs mvcommon); whether to add jitter/logging per attempt.
+Pause and ask me about open decisions, at minimum: exact exception set to retry on for adb push vs trigger_download; whether to add per-attempt logging; whether to add jitter to the backoff.
 
 Deliverables: PLAN.md only (no code, no branches) with steps + tests + verification + "Open Decisions". Note IMP-C2 is marked done in improvements_tierC.md on implementation, the architect updates docs if needed, and I want branch name, PR to main, and manual test commands at the end.
 ```

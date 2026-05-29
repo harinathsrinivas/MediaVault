@@ -48,6 +48,13 @@ Then append a section for your step using Edit (read STATUS.md, then add to the 
 
 Do NOT overwrite existing entries in STATUS.md.
 
+WHEN TOUCHING TESTS (haiku is only assigned doc-level test changes — updating comments, marking test status, minor renames):
+
+- Read docs/testing-strategy.md before touching any file in tests/.
+- Do NOT write new fixture code or new test logic — that is sonnet/opus work. If the step requires it, report blocked.
+- Never touch real `C:\Media` or real `library_*.json`.
+- If you run `pytest -q` as an acceptance check, paste the exact output in STATUS.md.
+
 FAILURE HANDLING:
 If the step turns out harder than it looks, or requires decisions not in the plan:
 - Do NOT improvise.

@@ -67,6 +67,25 @@ Suggested branch: <type>/<short_name>
 ## Out of scope
 <things explicitly NOT being done in this task, to prevent scope creep>
 
+TESTING STEP RULES (read docs/testing-strategy.md for full detail):
+
+Before planning any step that writes or modifies tests:
+1. Read docs/testing-strategy.md to pick the right fixture.
+2. Assign conftest.py changes (new fixtures, binding-hazard patches) to [model: opus] — the binding hazard (patching both mvcommon.LIBRARY_* AND main.LIBRARY_*) is a correctness trap that opus handles more reliably.
+3. Assign test file writes (new test_*.py) to [model: sonnet].
+4. Assign doc-only test updates to [model: haiku].
+
+Fixture selection rules for plan steps:
+- Library I/O tests (load_library / save_library / any cmd_*): use `sandbox` fixture.
+- ADB protocol/sequencing tests (partial naming, mv ordering, failure-at-Nth): use `FakeAdb` recorder (defined in test_cmd_push_partial.py).
+- ADB data-integrity/round-trip tests (files actually land on device): use `mock_device` fixture.
+- Fetch/download tests (avoid Selenium): use `mock_fetch` fixture (implement in C2; see testing-strategy.md §4.6).
+- Tests that redirect LIBRARY_*: always patch BOTH `mvcommon.LIBRARY_*` AND `main.LIBRARY_*`. The `sandbox` fixture already does this — use it; do not DIY.
+
+Constraints that must appear in every test step's Details field:
+- "Never touch real C:\\Media files or real library_*.json."
+- "Run `pytest -q` and fix failures before marking the step done."
+
 MODEL ASSIGNMENT RULES:
 - haiku: mechanical edits, renames, formatting, simple docstring/comment additions, trivial test stubs, find-replace operations. NEVER use [candidates: N] with haiku.
 - sonnet: standard implementation, refactoring, normal test writing, bug fixes with clear cause, applying well-understood patterns.

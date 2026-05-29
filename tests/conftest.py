@@ -1,6 +1,7 @@
 import sys, os, json
 import pytest
-import main  # repo root must be on sys.path
+import main      # repo root must be on sys.path
+import mvcommon  # authoritative home of LIBRARY_* + load_library/save_library
 
 # Ensure repo root is importable (for pytest invoked from any CWD)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -33,13 +34,18 @@ def sandbox(tmp_path, monkeypatch):
     lib_series = lib_dir / "library_series.json"
     lib_anime  = lib_dir / "library_anime.json"
 
-    # Hard guard: fail immediately if any constant still points under C:\Media
+    # Hard guard: fail immediately if any constant still points under C:\Media.
+    # After the mvcommon extraction, load_library/save_library read mvcommon's
+    # OWN module-level LIBRARY_* bindings, so mvcommon is the authoritative patch
+    # target. main imported the names by value (a separate binding), so we patch
+    # both mvcommon and main to keep every reader pointed at the sandbox.
     for attr, path in [
         ("LIBRARY_MOVIES", str(lib_movies)),
         ("LIBRARY_SERIES", str(lib_series)),
         ("LIBRARY_ANIME",  str(lib_anime)),
     ]:
         assert "C:\\Media" not in path, f"Safety check failed: {attr} still points to real media!"
+        monkeypatch.setattr(mvcommon, attr, path)
         monkeypatch.setattr(main, attr, path)
 
     yield {

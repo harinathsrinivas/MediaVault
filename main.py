@@ -76,6 +76,13 @@ CHECKSUM_DIR_NAME = "checksums"  # Permanent local folder for parity hashes
 RESTORE_DIR_NAME = "restore"  # Folder where you dump downloaded files for restore
 VIDEO_EXTENSIONS = ('.mkv', '.mp4', '.avi', '.mov')
 
+# Remote push reliability conventions (rclone "chunker"-style).
+# AUTO-ROLLBACK SEAM: each chunk is uploaded to "<final>.partial" then atomically
+# renamed; remnant "<chunk>.partial" files are the only thing a push rollback must
+# `adb shell rm` (Google Photos never indexes a .partial as a complete chunk).
+PARTIAL_SUFFIX = ".partial"
+MVMETA_SUFFIX = ".mvmeta.json"  # Remote disaster-recovery sidecar mirroring split_info
+
 
 # ==========================================
 #               UTILITIES

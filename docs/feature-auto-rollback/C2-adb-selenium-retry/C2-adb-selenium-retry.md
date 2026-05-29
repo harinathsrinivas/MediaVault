@@ -40,6 +40,7 @@ Constraints (full list in docs/feature-auto-rollback/README.md):
 - Tests in tests/, COPIES only — never touch real C:\Media files or real library_*.json; mock subprocess/Selenium to fail N times then succeed, and to fail permanently.
 - Surgical: the retry helper + its two call sites + tests; don't touch the cmd_replace PermissionError loop; don't touch archive/. Retry counts hardcoded for now (configurability is IMP-A5, out of scope).
 - If IMP-A1 (mvcommon) is already done, put the helper in mvcommon.py; otherwise keep it in main.py and note the future move.
+- G1 interaction: if IMP-G1 (push partial + atomic rename) is already done, a retried adb push must first delete any `.partial` remnant left by the failed attempt before re-uploading (otherwise the retry lands a second `.partial` alongside the orphaned first). Check whether G1 has been merged; if so, add a pre-retry `adb shell rm <remote>.partial` step within the retry wrapper for adb push specifically.
 
 DOCUMENTATION: save your PLAN.md into docs/feature-auto-rollback/C2-adb-selenium-retry/PLAN.md; keep artifacts there; fill the "Completion report" in docs/feature-auto-rollback/C2-adb-selenium-retry/C2-adb-selenium-retry.md when done. (Keep /PLAN.md at root in sync if needed.)
 

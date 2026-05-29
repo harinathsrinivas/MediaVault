@@ -16,9 +16,11 @@ code boundaries, and [[_VAULT-GUIDE]] for sync setup.
 
 ## Suggested order
 
-**C9 → C11 → G1** (direct prerequisites), then **C1 / C2 / A1 / A7** as desired.
-Dependency hint: do **A1 before C2 and A7** if you want the retry helper and test
-imports to live in the shared `mvcommon` module.
+**C9 → C11 → G1** (direct prerequisites), then **C8 / C1 / C2 / A1 / A7** as desired.
+Dependency hints:
+- Do **G1 before C8** — C8 must verify at the correct remote path (final name after G1's `adb shell mv`).
+- Do **C2 before C8** (or together) — C8's mismatch is the natural trigger for C2's retry wrapper.
+- Do **A1 before C2 and A7** if you want the retry helper and test imports to live in the shared `mvcommon` module.
 
 ## Board
 
@@ -29,8 +31,9 @@ imports to live in the shared `mvcommon` module.
 | 3 | [[G1-push-partial-atomic-rename]] — `.partial` + atomic remote rename + mvmeta | G | Prereq (bigger) | `feature/push_partial_atomic_rename` | not-started |
 | 4 | [[C1-season-auto-resume]] — season auto-resume | C | Complementary | `feature/season_auto_resume` | not-started |
 | 5 | [[C2-adb-selenium-retry]] — ADB/Selenium retry | C | Complementary | `feature/adb_selenium_retry` | not-started |
-| 6 | [[A1-extract-mvcommon]] — extract `mvcommon.py` | A | Foundation | `refactor/extract_mvcommon` | not-started |
-| 7 | [[A7-pytest-harness]] — pytest harness | A | Complementary | `test/pytest_harness` | not-started |
+| 6 | [[C8-post-push-verify]] — post-push remote md5sum verify | C | Complementary (after G1) | `feature/post_push_verify` | not-started |
+| 7 | [[A1-extract-mvcommon]] — extract `mvcommon.py` | A | Foundation | `refactor/extract_mvcommon` | not-started |
+| 8 | [[A7-pytest-harness]] — pytest harness | A | Complementary | `test/pytest_harness` | not-started |
 
 ## Checklist
 
@@ -39,6 +42,7 @@ imports to live in the shared `mvcommon` module.
 - [ ] G1 — push `.partial` + atomic remote rename + mvmeta
 - [ ] C1 — season auto-resume
 - [ ] C2 — ADB/Selenium retry
+- [ ] C8 — post-push remote md5sum verify
 - [ ] A1 — extract `mvcommon.py`
 - [ ] A7 — pytest harness
 - [ ] **All prerequisites done → return to finalize [[PLAN|auto-rollback PLAN]]**

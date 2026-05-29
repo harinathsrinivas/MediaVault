@@ -70,7 +70,7 @@ The `.partial`-then-`mv` change is the only place the externally-observable remo
   - Details: In `ARCHITECTURE.md` §7.5 (ADB push flow, step 6 "Upload loop"), document the `.partial` → `adb shell mv` atomic rename and the post-success `.mvmeta.json` sidecar write; update §10 Stage 2 step 7 similarly; add `PARTIAL_SUFFIX`, `MVMETA_SUFFIX`, and the `.mvmeta.json` remote sidecar to §14 (Configuration) and §6.5 (Sidecar files — note this one lives on the phone, unlike the local `.sha256` sidecars). In `README.md`, add a brief note if/where it describes the push protocol. Keep edits surgical — describe the new behavior, do not rewrite surrounding prose.
   - Acceptance: The two files mention `.partial`, `adb shell mv`, and `.mvmeta.json`; `git diff` shows only additive/clarifying edits in the relevant sections.
 
-- [ ] 6. [model: haiku] Mark IMP-G1 done and fill the completion report.
+- [x] 6. [model: haiku] Mark IMP-G1 done and fill the completion report.
   - Files: `improvements_tierG.md`, `docs/feature-auto-rollback/G1-push-partial-atomic-rename/G1-push-partial-atomic-rename.md`
   - Details: In `improvements_tierG.md`, change the IMP-G1 `Status: pending` line to `Status: done`. In the G1 task doc, fill the "Completion report (fill in when done)" section (branch, PR, files changed, tests added, manual test commands, open decisions resolved, notes). Also update the front-matter `status: not-started` → `done` and check the Definition-of-Done boxes. Do this LAST, after implementation and tests are green.
   - Acceptance: IMP-G1 reads `Status: done`; completion report has no empty placeholder fields.

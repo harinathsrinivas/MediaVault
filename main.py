@@ -638,6 +638,86 @@ def cmd_check(manual_id):
         print("❌ FAIL: Hash mismatch!\n")
 
 
+MVMETA_SCHEMA_VERSION = 1
+
+
+def write_remote_mvmeta(adb_base, remote_target_dir, manual_id, entry):
+    """Write a disaster-recovery `.mvmeta.json` sidecar next to the chunks on the phone.
+
+    Mirrors the library entry (split_info + key metadata) so the local library can
+    be rebuilt from the remote if `library_*.json` is ever lost. The sidecar is
+    redundancy only -- the chunks are the source of truth -- so this is best-effort:
+    on any failure it prints a greppable WARNING and returns False WITHOUT raising.
+    The caller MUST ignore the return value for its own success contract.
+
+    Sidecar name is UID-tagged `<base> [<short_id>].mvmeta.json` (collision-proof,
+    matching the chunk naming convention). Written for non-split single-file uploads
+    too -- in that case `chunks` is a 1-element list referencing the renamed remote
+    `<name> [<short_id>]<ext>` name.
+    """
+    try:
+        short_id = entry.get("short_id", "")
+        filename = entry.get("filename", "")
+        base_filename, ext = os.path.splitext(filename)
+
+        split_info = entry.get("split_info")
+        if split_info and split_info.get("is_split"):
+            is_split = True
+            method = split_info.get("method")
+            val = split_info.get("val")
+            total_chunks = split_info.get("total_chunks")
+            chunks = [
+                {"filename": c.get("filename"), "hash": c.get("hash")}
+                for c in split_info.get("chunks", [])
+            ]
+        else:
+            # Non-split single-file upload: one synthetic chunk referencing the
+            # renamed remote name (`<name> [<short_id>]<ext>`), with the entry hash.
+            is_split = False
+            method = None
+            val = None
+            total_chunks = 1
+            remote_name = f"{base_filename} [{short_id}]{ext}"
+            chunks = [{"filename": remote_name, "hash": entry.get("hash")}]
+
+        mvmeta = {
+            "version": MVMETA_SCHEMA_VERSION,
+            "manual_id": manual_id,
+            "short_id": short_id,
+            "base_filename": base_filename,
+            "original_hash": entry.get("hash"),
+            "is_split": is_split,
+            "method": method,
+            "val": val,
+            "total_chunks": total_chunks,
+            "chunks": chunks,
+            "folder_path": entry.get("folder_path"),
+            "remote_target_dir": remote_target_dir,
+            "tech_spec": entry.get("tech_spec"),
+            "metadata": entry.get("metadata"),
+        }
+
+        sidecar_name = f"{base_filename} [{short_id}]{MVMETA_SUFFIX}"
+        remote_full_path = f"{remote_target_dir}/{sidecar_name}"
+
+        fd, tmp_path = tempfile.mkstemp(suffix=MVMETA_SUFFIX)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(mvmeta, f, indent=2)
+            subprocess.run(adb_base + ["push", "-p", tmp_path, remote_full_path], check=True)
+        finally:
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass  # best-effort temp cleanup; matches existing style
+
+        print(f"   > 📝 mvmeta sidecar written: {sidecar_name}")
+        return True
+    except Exception as e:
+        print(f"⚠️ mvmeta sidecar write failed (chunks are safe): {e}")
+        return False
+
+
 def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, device_id=None):
     print(f"--- PUSHING: {manual_id} ---")
     library = load_library()

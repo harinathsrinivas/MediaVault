@@ -27,7 +27,7 @@
 - Rationale: rclone has solved the partial-upload-looks-complete failure mode and the rebuild-from-remote disaster-recovery story. Adopting these patterns is cheap and gets MediaVault to industry-grade reliability.
 - Goal: Partial uploads are never observable as complete. Remote-side recovery is possible without the local library.
 - Effort estimate: medium
-- Status: pending
+- Status: done
 
 ---
 

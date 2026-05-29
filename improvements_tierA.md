@@ -25,7 +25,7 @@
 - Rationale: One drift case is already in production. Every shared change today has to be made twice and tested twice. The asymmetric error handling between the two `load_library`s means a corrupt library fails LOUDLY for `main.py` users but SILENTLY (zero entries found) for `mainfetch.py` users.
 - Goal: A single source of truth for library I/O and hashing. Eliminates the drift category permanently and is the foundation for IMP-A6 (type hints), IMP-A7 (pytest), and several Tier C robustness items.
 - Effort estimate: small
-- Status: pending
+- Status: done (refactor/extract_mvcommon, PR to main 2026-05-30)
 
 ---
 

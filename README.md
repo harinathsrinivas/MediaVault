@@ -178,6 +178,7 @@ trailing episode segment.
 MediaVault/
 ├── main.py              # Active — main CLI (prep/push/replace/restore/fetch/sort/...)
 ├── mainfetch.py         # Active — Selenium fetch from Google Photos
+├── mvcommon.py          # Active — shared library I/O + hashing constants/helpers (imported by both)
 ├── requirements.txt     # pymediainfo, selenium, undetected-chromedriver
 ├── ARCHITECTURE.md      # Full engineering reference
 ├── README.md            # This file

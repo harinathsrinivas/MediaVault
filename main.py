@@ -854,10 +854,25 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
         try:
             # We construct the full remote path with the NEW name
             remote_full_path = f"{remote_target_dir}/{remote_fname}"
-            subprocess.run(adb_base + ["push", "-p", f, remote_full_path], check=True)
+            # [PARTIAL+RENAME] Upload to "<final>.partial" first, then atomically
+            # rename to the final name only after the push succeeds. A mid-push
+            # death leaves a ".partial" remnant Google Photos never indexes as a
+            # complete chunk. Resume (Decision 1) re-pushes to ".partial", which
+            # overwrites any stale partial; no remote ls is needed.
+            remote_partial_path = remote_full_path + PARTIAL_SUFFIX
+            subprocess.run(adb_base + ["push", "-p", f, remote_partial_path], check=True)
+            # Atomic remote rename. Escape single quotes for both paths exactly
+            # like the mkdir path above ( ' -> '\'' ).
+            safe_partial = remote_partial_path.replace("'", "'\\''")
+            safe_final = remote_full_path.replace("'", "'\\''")
+            subprocess.run(
+                adb_base + ["shell", "mv", f"'{safe_partial}'", f"'{safe_final}'"],
+                check=True,
+            )
             print("✅")
 
-            # DELETE LOCAL CHUNK after successful upload
+            # DELETE LOCAL CHUNK after successful upload+rename.
+            # The chunk is "done" only once renamed to its final name.
             # Safety: Only delete if it's inside the SPLIT_DIR_NAME folder
             if SPLIT_DIR_NAME in f:
                 try:
@@ -880,6 +895,9 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
 
         # Only mark as 'onboarded' if we uploaded ALL chunks (no range filter)
         if not chunk_range:
+            # Best-effort remote disaster-recovery sidecar. A sidecar miss must
+            # NOT fail a fully-successful chunk upload, so its return is ignored.
+            write_remote_mvmeta(adb_base, remote_target_dir, manual_id, library[manual_id])
             library[manual_id]["uploaded"] = True
             library[manual_id]["status"] = "onboarded"
             save_library(library)

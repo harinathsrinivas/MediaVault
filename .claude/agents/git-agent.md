@@ -125,14 +125,36 @@ Steps:
 6. Report: PR number and URL (`gh pr view --json number,url`).
 
 ### OP: MERGE_PR
-Inputs: pr_number (optional, defaults to the PR for current branch), method (default `squash`)
-Squash-merges a PR into its base and deletes the branch.
+Inputs: pr_number (optional, defaults to the PR for current branch), method (default `squash`), user_approved (boolean)
+Squash-merges a PR into `main`. **Checkpoint 1 — human-gated.**
+PRECONDITION: the invoking prompt MUST state that the user explicitly approved merging this PR into main (user_approved = true). If that confirmation is absent, STOP and report "merge into main requires explicit user approval (Checkpoint 1)" — do NOT merge.
 Steps:
 1. Run `gh pr view --json number,mergeable,baseRefName` — confirm mergeable. If not, STOP and report.
 2. Confirm base is `main`/`master` (PRs only merge into the default branch here).
-3. Run `gh pr merge <pr_number> --squash --delete-branch`.
+3. Run `gh pr merge <pr_number> --squash`. (Do NOT pass `--delete-branch` — branch deletion is deferred to ARCHIVE_MERGED_BRANCH under Checkpoint 2.)
 4. Run `git checkout <base>` then `git pull --ff-only` to sync local base.
-5. Report: merge status, squash commit SHA on base, branch deletion, local sync result.
+5. Report: merge status, squash commit SHA on base, local sync result. Remind the orchestrator/user that archiving the branch (Checkpoint 2) is a separate, human-gated step.
+
+### OP: ARCHIVE_MERGED_BRANCH
+Inputs: branch_name, pr_number, main_sha (the squash commit on main), user_approved (boolean)
+Archives an already-merged feature branch as a tag (preserving the pre-squash commits), then deletes the branch. **Checkpoint 2 — human-gated.** This is the STANDARD way to retire a merged branch.
+PRECONDITION: the invoking prompt MUST state that the user explicitly approved archiving this branch (user_approved = true). If absent, STOP and report "archiving requires explicit user approval (Checkpoint 2)".
+Steps:
+1. Confirm branch_name is merged into main (the squash commit exists): if unsure, report and ask before proceeding. Never archive an unmerged branch.
+2. Build the annotated tag `archive/<branch_name>` with a message that includes BOTH the merge info AND the revive steps, exactly per `docs/git-pr-conventions.md`:
+   ```
+   Squash-merged to main via PR #<pr_number> (squash <main_sha>). Archived <YYYY-MM-DD>.
+   Detailed pre-squash commits preserved here for debugging.
+
+   Revive as a branch:  git switch -c <branch_name> archive/<branch_name>
+   Inspect commits:     git log --oneline main..archive/<branch_name>
+   Browse at tip:       git checkout archive/<branch_name>
+   ```
+   Run `git tag -a archive/<branch_name> <branch_name> -m "<message>"`.
+3. Push the tag: `git push origin archive/<branch_name>`.
+4. Verify the tag exists and points at the old branch tip (`git rev-parse archive/<branch_name>` == old branch tip).
+5. Delete the branch local + remote: `git branch -D <branch_name>` and `git push origin --delete <branch_name>`. (Safe — the tag holds the commits.)
+6. Report: tag name + SHA, push result, branch deletion (local + remote), and the revive command for the user.
 
 ### OP: STATUS
 Steps:
@@ -152,7 +174,7 @@ ERROR HANDLING:
 
 OUTPUT FORMAT:
 Always report:
-- Operation performed (CREATE_BRANCH / COMMIT_STEP / CREATE_CANDIDATE_WORKTREE / COMMIT_CANDIDATE / MERGE_CANDIDATE_WINNER / ARCHIVE_CANDIDATES / PUSH_BRANCH / CREATE_PR / MERGE_PR / STATUS)
+- Operation performed (CREATE_BRANCH / COMMIT_STEP / CREATE_CANDIDATE_WORKTREE / COMMIT_CANDIDATE / MERGE_CANDIDATE_WINNER / ARCHIVE_CANDIDATES / PUSH_BRANCH / CREATE_PR / MERGE_PR / ARCHIVE_MERGED_BRANCH / STATUS)
 - Exact commands run
 - Output of each command (or summary if long)
 - Success/failure status

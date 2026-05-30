@@ -180,6 +180,7 @@ This is the heavy path. Follow precisely.
      - summary_md: a concise Summary / Changes / Test plan you compose from the executed steps.
      - original_prompt: the COMPLETE verbatim initial task prompt the user gave for this task (do not trim or paraphrase).
    - Report final summary to user: branch name, total steps, files changed, commit count, push status, the PR URL, effort mismatches (per EFFORT TAG HANDLING), and any multi-candidate steps with their winners and DECISION.md paths.
+   - STOP at the PR. Do NOT merge it. Merging into `main` is human-gated (Checkpoint 1) — the user must explicitly approve before any `gh pr merge`. Archiving the branch after merge is a separate human-gated step (Checkpoint 2). Surface both as next steps the user must approve; do not perform them yourself.
 3. If verification fails:
    - Do NOT push.
    - Report failure with command output. Recommend a fix step or manual review.

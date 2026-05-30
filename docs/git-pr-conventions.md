@@ -50,10 +50,42 @@ Examples (history): `Refactor/extract mvcommon - IMP A1`, `Feature/push partial 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 ```
 
-## Merge
-- Squash-merge into `main` (matches the repo's `(#N)` history).
-- Delete the branch after merge.
-- After merge, sync local `main` (`git checkout main && git pull --ff-only`).
+## Merge into `main` — REQUIRES HUMAN APPROVAL (Checkpoint 1)
+
+Merging into `main` is **gated on the user**. Agents and Claude Code may create the PR and push the branch, but **must STOP and get the user's explicit confirmation before merging**. Never run `gh pr merge`, `git merge` into `main`, or push to `main` autonomously — not even for docs or "trivial" changes.
+
+- On the user's explicit approval, squash-merge (matches the repo's `(#N)` history): `gh pr merge <#> --squash`.
+- Do **not** delete the branch at merge time — that happens later, under Checkpoint 2.
+- After merge, sync local `main`: `git checkout main && git pull --ff-only`.
+
+## Archiving a merged feature branch — REQUIRES HUMAN APPROVAL (Checkpoint 2)
+
+Because we squash-merge, the detailed per-step commits and decisions live **only** on the feature-branch ref: the squash commit on `main` is not a descendant of them, `git branch --merged` won't even detect the branch, and the commits get garbage-collected if the ref is deleted. **Archive tags are therefore the standard way to keep the branch list clean without losing that history** — a tag is a permanent, GC-proof pointer. (Precedent: `git-agent` already archives multi-candidate branches via `candidates/step-N/<letter>-…` tags.)
+
+After a branch is merged into `main`, **check with the user first**. On the user's confirmation:
+1. Create an **annotated** `archive/<branch-name>` tag at the branch tip whose message includes the merge info **and the revive steps** (template below — the revive steps live *inside* the tag so they can never be lost).
+2. Push the tag: `git push origin archive/<branch-name>`.
+3. Delete the feature branch, local **and** remote, so the branch list stays clean. The tag preserves every commit permanently.
+
+Archive tag message template:
+```
+Squash-merged to main via PR #<N> (squash <main-sha>). Archived <YYYY-MM-DD>.
+Detailed pre-squash commits preserved here for debugging.
+
+Revive as a branch:  git switch -c <branch-name> archive/<branch-name>
+Inspect commits:     git log --oneline main..archive/<branch-name>
+Browse at tip:       git checkout archive/<branch-name>
+```
+
+Commands:
+```bash
+git tag -a archive/<branch> <branch> -m "<message above>"
+git push origin archive/<branch>
+git branch -D <branch>                 # safe: the tag holds the commits
+git push origin --delete <branch>
+```
+
+Reviving later is exactly the steps embedded in the tag message — read them with `git tag -n99 archive/<branch>`.
 
 ## Note for agents that load only on `.claude/` context
 The `git-agent` (OP: CREATE_PR) and the `orchestrator` (Phase 3) both reference this file. Keep them in sync if these rules change.

@@ -69,12 +69,12 @@ op must keep the same failure signal so rollback behaves unchanged. Details:
 - [x] `cmd_replace` PermissionError loop untouched
 - [x] `IMP-C2` marked done in `improvements_tierC.md`
 - [x] `ARCHITECTURE.md` / `README` updated if needed
-- [x] PR to `main` opened
+- [ ] PR to `main` opened — branch pushed; open manually (gh not authenticated)
 - [x] Completion report below filled in
 
 ## Completion report
 - **Branch:** `feature/adb_selenium_retry` (cut from `origin/main` @ `1aac738` — A1 merged; G1 = `8c12680`).
-- **PR:** PR_URL_PLACEHOLDER
+- **PR:** _Open manually_ — `gh` is not authenticated in this environment. Branch `feature/adb_selenium_retry` is pushed; create the PR at https://github.com/harinathsrinivas/MediaVault/pull/new/feature/adb_selenium_retry (base `main`, title `Feature/adb selenium retry (IMP-C2)`).
 - **Merged commit:** _(pending merge of the PR to `main`)_
 - **Files changed:**
   - `mvcommon.py` — added `retry(fn, attempts=3, backoff=(1,4,16), jitter=1.0, retry_on=(SubprocessError, TimeoutError), on_retry=None)` (stdlib-only).

@@ -27,7 +27,7 @@ from mvcommon import (
     LIBRARY_MOVIES, LIBRARY_SERIES, LIBRARY_ANIME, LOCAL_ROOT, MKVMERGE_PATH,
     SPLIT_DIR_NAME, CHECKSUM_DIR_NAME, RESTORE_DIR_NAME, VIDEO_EXTENSIONS,
     load_library, save_library, generate_short_id, calculate_file_hash,
-    human_readable_size, parse_size_str,
+    human_readable_size, parse_size_str, retry,
 )
 
 REMOTE_ROOT = "/sdcard/Media"  # Your Pixel Root
@@ -764,14 +764,38 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             # complete chunk. Resume (Decision 1) re-pushes to ".partial", which
             # overwrites any stale partial; no remote ls is needed.
             remote_partial_path = remote_full_path + PARTIAL_SUFFIX
-            subprocess.run(adb_base + ["push", "-p", f, remote_partial_path], check=True)
-            # Atomic remote rename. Escape single quotes for both paths exactly
-            # like the mkdir path above ( ' -> '\'' ).
+            # Escape single quotes for both paths exactly like the mkdir path
+            # above ( ' -> '\'' ).
             safe_partial = remote_partial_path.replace("'", "'\\''")
             safe_final = remote_full_path.replace("'", "'\\''")
-            subprocess.run(
-                adb_base + ["shell", "mv", f"'{safe_partial}'", f"'{safe_final}'"],
-                check=True,
+
+            # [IMP-C2] Wrap the push + atomic mv in mvcommon.retry() so a
+            # transient ADB CalledProcessError (USB reseat, screen lock) gets up
+            # to 3 attempts with 1/4/16s backoff + jitter. on_retry prints one
+            # user-visible line and unconditionally rm's the stale ".partial"
+            # remnant before each re-attempt so the re-push never collides.
+            # retry() re-raises the last CalledProcessError after exhaustion, so
+            # the surrounding except below fires identically to before C2.
+            def _push_and_rename():
+                subprocess.run(adb_base + ["push", "-p", f, remote_partial_path], check=True)
+                subprocess.run(
+                    adb_base + ["shell", "mv", f"'{safe_partial}'", f"'{safe_final}'"],
+                    check=True,
+                )
+
+            def _cleanup_and_log(attempt, exc):
+                print(f"⏳ Retry {attempt}/3 after {(1, 4, 16)[min(attempt - 1, 2)]}s (ADB push failed)…")
+                subprocess.run(
+                    adb_base + ["shell", "rm", f"'{safe_partial}'"],
+                    check=False,
+                )
+
+            retry(
+                _push_and_rename,
+                attempts=3,
+                backoff=(1, 4, 16),
+                retry_on=(subprocess.CalledProcessError,),
+                on_retry=_cleanup_and_log,
             )
             print("✅")
 

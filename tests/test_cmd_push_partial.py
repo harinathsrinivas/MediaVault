@@ -11,6 +11,15 @@ import subprocess
 import pytest
 
 import main
+import mvcommon
+
+
+@pytest.fixture(autouse=True)
+def _no_retry_sleep(monkeypatch):
+    """IMP-C2: cmd_push now wraps push+mv in mvcommon.retry(), which sleeps the
+    backoff between attempts. Stub the retry sleep so failure-path tests (which
+    exhaust all 3 attempts) stay instant. Real C:\\Media is never touched."""
+    monkeypatch.setattr(mvcommon.time, "sleep", lambda *_a, **_k: None)
 
 
 # ---------------------------------------------------------------------------
@@ -22,11 +31,22 @@ class FakeAdb:
 
     def __init__(self, fail_push_n=None, fail_mv_n=None, fail_mvmeta=False):
         self.calls = []          # list of argv lists, in order
-        self.fail_push_n = fail_push_n     # 1-based index of chunk push to fail
-        self.fail_mv_n = fail_mv_n         # 1-based index of mv to fail
+        # fail_push_n / fail_mv_n target a logical CHUNK POSITION (1-based), not
+        # a physical call index. After IMP-C2 the push+mv pair is wrapped in
+        # mvcommon.retry(), so a targeted chunk is attempted up to 3 times; to
+        # model a *permanent* (non-transient) failure these recorders fail that
+        # chunk position on EVERY attempt. Keying off the chunk position (via
+        # the .partial remote path) makes the failure stable across retries.
+        self.fail_push_n = fail_push_n     # 1-based chunk position whose push fails every attempt
+        self.fail_mv_n = fail_mv_n         # 1-based chunk position whose mv fails every attempt
         self.fail_mvmeta = fail_mvmeta     # fail the .mvmeta.json push
-        self._chunk_push_count = 0
-        self._mv_count = 0
+        self._push_positions = []   # ordered distinct chunk .partial paths seen
+        self._mv_positions = []     # ordered distinct mv destinations seen
+
+    def _position(self, ordered, key):
+        if key not in ordered:
+            ordered.append(key)
+        return ordered.index(key) + 1   # 1-based
 
     def run(self, argv, check=False, **kwargs):
         self.calls.append(list(argv))
@@ -37,16 +57,16 @@ class FakeAdb:
         is_mvmeta = is_push and dest.endswith(main.MVMETA_SUFFIX)
 
         if is_push and not is_mvmeta:
-            self._chunk_push_count += 1
-            if self.fail_push_n is not None and self._chunk_push_count == self.fail_push_n:
+            pos = self._position(self._push_positions, dest)
+            if self.fail_push_n is not None and pos == self.fail_push_n:
                 if check:
                     raise subprocess.CalledProcessError(1, argv)
         elif is_mvmeta:
             if self.fail_mvmeta and check:
                 raise subprocess.CalledProcessError(1, argv)
         elif is_mv:
-            self._mv_count += 1
-            if self.fail_mv_n is not None and self._mv_count == self.fail_mv_n:
+            pos = self._position(self._mv_positions, dest)
+            if self.fail_mv_n is not None and pos == self.fail_mv_n:
                 if check:
                     raise subprocess.CalledProcessError(1, argv)
 
@@ -184,7 +204,9 @@ def test_midpush_failure_returns_false_and_preserves_resume(split_entry, monkeyp
     result = main.cmd_push(split_entry["entry_id"])
     assert result is False
 
-    # Only 1 mv ran (for the first, successful chunk); the failed chunk got no mv.
+    # After IMP-C2 the permanently-failing 2nd chunk is push-retried 3x (all
+    # fail) before exhaustion breaks the loop. Only the first chunk ever
+    # reaches its mv, so exactly 1 mv ran; the failed chunk got no mv.
     assert len(fake.mvs()) == 1
     # No mvmeta push on failure.
     assert len(fake.mvmeta_pushes()) == 0
@@ -212,9 +234,12 @@ def test_mv_failure_returns_false_breaks_loop(split_entry, monkeypatch):
     result = main.cmd_push(split_entry["entry_id"])
     assert result is False
 
-    # chunk 1: push+mv ok. chunk 2: push ok, mv fails -> break. chunk 3 never pushed.
-    assert len(fake.chunk_pushes()) == 2
-    assert len(fake.mvs()) == 2  # 2nd mv was attempted and raised
+    # chunk 1: push+mv ok. chunk 2: push ok, mv fails. After IMP-C2 the push+mv
+    # pair is retried together 3x for the failing chunk (each attempt re-pushes
+    # then re-mv's), so chunk 2 contributes 3 pushes + 3 mvs before exhaustion
+    # breaks the loop; chunk 3 is never reached.
+    assert len(fake.chunk_pushes()) == 1 + 3   # chunk1 once + chunk2 x3 retries
+    assert len(fake.mvs()) == 1 + 3            # chunk1 once + chunk2 mv x3 (all raised)
     assert len(fake.mvmeta_pushes()) == 0
 
     entry = _load_entry(split_entry)

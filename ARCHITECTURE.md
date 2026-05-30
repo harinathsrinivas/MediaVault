@@ -668,6 +668,13 @@ High-level sequence inside one `cmd_push` call:
    - On any push or `mv` failure, break the loop and leave `_parts/`
      populated for resume. Resume re-pushes to `.partial`, which
      overwrites any stale partial on the phone (no remote `ls` needed).
+   - **Retry (IMP-C2)**: the push + atomic `mv` pair is wrapped in
+     `mvcommon.retry()` with 1/4/16 s backoff plus randomized jitter, so a
+     transient `CalledProcessError` is re-attempted up to 3 times. Before each
+     re-attempt the stale `<remote>.partial` is removed (`adb shell rm`,
+     best-effort) and a single `⏳ Retry N/3` line is printed. After exhaustion
+     `retry()` re-raises the last `CalledProcessError`, so the existing
+     break/return-`False` failure contract is unchanged.
 7. **Post-loop bookkeeping**:
    - Remove `_parts/` if it's empty.
    - If all chunks succeeded AND no `chunk_range` filter was active,
@@ -991,6 +998,11 @@ For each file to download, fire-and-forget triggers:
 The function returns `True` if the trigger was sent (it does NOT wait
 for the download to complete).
 
+**Retry (IMP-C2)**: the whole attempt body is retried once after a 5 s wait
+when the first pass returns `False` (0 thumbnails / index out of range) **or**
+raises a Selenium fault, printing one `⏳ Retry 2/2 after 5s` line. The second
+pass's result is final, so the `True`/`False` return contract is unchanged.
+
 ### 8.4 Parallel-trigger + harvester (`fetch_single_entry`, lines 233-372)
 
 The clever bit. For a single entry (possibly split into N chunks), the
@@ -1273,6 +1285,15 @@ Hash stays in JSON for the day the user wants to restore.
   `os.chmod(stat.S_IWRITE)` for files Plex/Windows Search have open.
   If all 3 retries fail, leaves both `original` and `original.temp_dummy`
   on disk; user is told to close players.
+- **Transient-failure retry (IMP-C2)**: a shared `mvcommon.retry()` helper
+  adds an exponential-backoff retry layer at two call sites. `cmd_push` wraps
+  the push + atomic `mv` pair (1/4/16 s backoff + jitter, up to 3 attempts,
+  with a pre-retry `.partial` rm and a `⏳ Retry N/3` print); `trigger_download`
+  retries its whole body once after 5 s on a 0-thumbnail miss or a caught
+  Selenium fault. Both preserve the existing failure contract: an exhausted
+  push re-raises the last `CalledProcessError` (so the loop still breaks and
+  returns `False`, leaving `_parts/` for resume) and an exhausted trigger still
+  returns `False`. First-attempt success is byte-for-byte unchanged.
 - **Hash mismatch on restore**: the bad file (single-file path) or
   offending chunk(s) (split path) are moved to
   `restore/quarantine/<name>.<timestamp>` via the centralized

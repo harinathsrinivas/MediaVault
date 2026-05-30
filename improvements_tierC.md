@@ -49,7 +49,7 @@
 - Rationale: USB and browser-automation are inherently flaky. Three quick retries catches the vast majority of transient blips ("phone screen locked during push") that today require human intervention.
 - Goal: 95% of transient failures self-heal without user touch.
 - Effort estimate: medium
-- Status: pending
+- Status: done (feature/adb_selenium_retry, PR to main 2026-05-30)
 
 ---
 

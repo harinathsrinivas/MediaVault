@@ -66,3 +66,10 @@ Note: Task subagent tool is unavailable in this run, so the orchestrator execute
 - Files changed: improvements_tierC.md, ARCHITECTURE.md
 - Outcome: improvements_tierC.md IMP-C2 Status flipped `pending` -> `done (feature/adb_selenium_retry, PR to main 2026-05-30)` (mirrors the IMP-C9 wording). ARCHITECTURE.md: §7.5 push flow gained a "Retry (IMP-C2)" bullet under the upload loop (push+mv wrapped in mvcommon.retry, 1/4/16s + jitter, pre-retry `.partial` rm, `⏳ Retry N/3` print, contract unchanged); §8.3 trigger_download gained a "Retry (IMP-C2)" note (one 5s retry on False or Selenium fault, contract unchanged); §12 Error Handling gained a "Transient-failure retry (IMP-C2)" bullet covering both call sites + the preserved failure contract.
 - Acceptance: IMP-C2 shows done with branch + PR note; ARCHITECTURE mentions the retry wrapper (with jitter + retry print) at both call sites and in §12; additive edits only, no unrelated content reworded. Doc-only step (no test impact).
+
+## Step 9 — [status: done]
+- Executor: orchestrator (direct)
+- Model: haiku
+- Files changed: docs/feature-auto-rollback/C2-adb-selenium-retry/C2-adb-selenium-retry.md; root PLAN.md (gitignored, local sync only)
+- Outcome: Filled the Completion report (branch, files changed, 15 tests added, manual commands, the 3 resolved decisions, the G1-test + dead-import notes, the no-follow-ups note). Front-matter status -> done; all DoD boxes ticked. PR URL left as PR_URL_PLACEHOLDER to be filled after the PR is opened in finalize. Synced root /PLAN.md from the folder copy (confirmed gitignored via `git check-ignore PLAN.md`, so it is NOT committed — matches the README's live-working-copy convention).
+- Acceptance: Completion report populated; root /PLAN.md matches the folder copy (re-synced after the final step-9 checkbox edit).

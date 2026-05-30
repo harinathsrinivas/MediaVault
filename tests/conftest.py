@@ -190,6 +190,42 @@ def mock_device(tmp_path, monkeypatch):
 
 
 @pytest.fixture()
+def mock_fetch(mock_device, tmp_path, monkeypatch):
+    """IMP-C2 — browser download stub (testing-strategy §4.6).
+
+    Monkeypatches mainfetch.trigger_download to copy a pre-seeded file from the
+    mock_device device_dir into a local restore directory and return True, so
+    fetch/restore logic can be exercised without Selenium or a real browser.
+
+    Composition / binding notes:
+      - Composes `mock_device` (which intercepts main.subprocess.run) so the
+        fake device filesystem is the search source; uses `tmp_path` for the
+        restore dir. Never references a real C:\\Media path.
+      - This fixture does NOT redirect LIBRARY_*; tests that need the library
+        boundary still pull in the `sandbox` fixture, which (post-A1) patches
+        BOTH mvcommon.LIBRARY_* and main.LIBRARY_*. mock_fetch only patches
+        mainfetch.trigger_download, so there is no LIBRARY_* binding hazard here.
+
+    Yields the restore_dir (pathlib.Path).
+    """
+    import shutil
+    import mainfetch
+
+    restore_dir = tmp_path / "restore"
+    restore_dir.mkdir(exist_ok=True)
+
+    def _fake_trigger(driver, query, index=0):
+        matches = list(mock_device.rglob(f"*{query}*"))
+        if not matches:
+            return False
+        shutil.copy2(matches[0], restore_dir / matches[0].name)
+        return True
+
+    monkeypatch.setattr(mainfetch, "trigger_download", _fake_trigger)
+    yield restore_dir
+
+
+@pytest.fixture()
 def fake_dummy(monkeypatch):
     """
     Replaces main.make_video_dummy with a stub that writes FAKE_DUMMY_BYTES

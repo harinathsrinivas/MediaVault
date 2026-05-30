@@ -19,14 +19,14 @@ Suggested order: **C9 → C11 → G1**, with C1 / C2 / A1 / A7 as complementary.
 
 | Imp     | Tier | One-liner                                                                  | Relation to auto-rollback                                            | Role                                |
 | ------- | ---- | -------------------------------------------------------------------------- | -------------------------------------------------------------------- | ----------------------------------- |
-| **C9**  | C    | Atomic `cmd_replace` via two-rename                                        | Hardens the single true point-of-no-return (Example B)               | **Prerequisite — do FIRST**         |
-| **C11** | C    | Hash-mismatch quarantine in `cmd_restore`                                  | The restore-side "clean state on failure" behavior (in scope now)    | **Prerequisite**                    |
-| **G1**  | G    | rclone patterns: `.partial` upload + atomic remote rename + `.mvmeta.json` | Removes the "partial upload looks complete" wrinkle in push rollback | **Prerequisite (optional, bigger)** |
-| **C1**  | C    | Season auto-resume from a progress file                                    | We *print* the resume command; C1 *auto-resumes*                     | Complementary                       |
-| **C2**  | C    | Exponential-backoff retry for ADB + Selenium                               | Fewer transient failures → rollback/hard-fail triggers less often    | Complementary                       |
-| **C8**  | C    | Post-push remote `md5sum` verification per chunk                           | Catches silent corruption before local chunk is deleted; feeds C2    | Complementary (do after G1)         |
-| **A1**  | A    | Extract `mvcommon.py` (shared lib I/O + hashing)                           | Plumbing our snapshot/rollback uses                                  | Complementary (foundation)          |
-| **A7**  | A    | Pytest harness with library fixtures                                       | This feature creates the first tests; A7 formalizes the harness      | Complementary                       |
+| **C9**  | C    | Atomic `cmd_replace` via two-rename                                        | Hardens the single true point-of-no-return (Example B)               | **Prerequisite — DONE** (fix/atomic_replace, 2026-05-29) |
+| **C11** | C    | Hash-mismatch quarantine in `cmd_restore`                                  | The restore-side "clean state on failure" behavior (in scope now)    | **Prerequisite — not started**      |
+| **G1**  | G    | rclone patterns: `.partial` upload + atomic remote rename + `.mvmeta.json` | Removes the "partial upload looks complete" wrinkle in push rollback | **Prerequisite — DONE** (PR #7, merged) |
+| **C1**  | C    | Season auto-resume from a progress file                                    | We *print* the resume command; C1 *auto-resumes*                     | Complementary — not started         |
+| **C2**  | C    | Exponential-backoff retry for ADB + Selenium                               | Fewer transient failures → rollback/hard-fail triggers less often    | Complementary — **DONE** (feature/adb_selenium_retry, 2026-05-30) |
+| **C8**  | C    | Post-push remote `md5sum` verification per chunk                           | Catches silent corruption before local chunk is deleted; feeds C2    | Complementary — not started (next)  |
+| **A1**  | A    | Extract `mvcommon.py` (shared lib I/O + hashing)                           | Plumbing our snapshot/rollback uses                                  | Complementary — **DONE** (refactor/extract_mvcommon, merged) |
+| **A7**  | A    | Pytest harness with library fixtures                                       | This feature creates the first tests; A7 formalizes the harness      | Complementary — not started         |
 
 ---
 
@@ -124,15 +124,17 @@ at the earliest possible moment — before the local chunk is deleted — so rol
 never inherits a corrupt remote state. It also creates the natural trigger point
 for C2's retry: a hash mismatch raises a retryable exception.
 
-**G1 interaction.** If G1 is done first, the remote file to verify exists at the
-final name (after `adb shell mv` from `.partial`). If G1 is not yet done, verify
-at the direct push path. C8's prompt handles both cases; implement after G1 if you
-want the verification path to be consistent.
+**G1 interaction.** G1 is done (PR #7, merged). The remote file to verify exists at
+the **final name** (after `adb shell mv` from `.partial`). Do not write a code path
+for the pre-G1 case — it no longer exists.
 
-**C2 interaction.** A hash mismatch is the canonical trigger for C2's retry wrapper.
-If C2 is done first, raise a retryable exception on mismatch so C2 handles the
-re-push. If C2 is not done, document the integration point and fail with the
-existing signal.
+**C2 interaction.** C2 is done (`feature/adb_selenium_retry`, 2026-05-30). On a
+hash mismatch, raise a `CalledProcessError` (or a subclass of `SubprocessError`) so
+C2's `retry()` wrapper in `mvcommon.py` handles the re-push automatically. The
+`retry()` signature is `retry(fn, attempts=3, backoff=(1,4,16), jitter=1.0,
+retry_on=(SubprocessError, TimeoutError), on_retry=None)`; the adb push call site
+uses `retry_on=(CalledProcessError,)`. Integrate directly — do not treat C2 as
+conditional or leave a "future integration" note.
 
 **Seam to leave.** Keep the mismatch signal catchable as a retryable exception
 (not a bare sys.exit). Keep `push.verify_remote` as a named flag (not a hardcoded

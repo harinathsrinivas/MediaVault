@@ -99,3 +99,120 @@ def test_corrupt_library_fails_loud(sandbox):
 
     with pytest.raises(SystemExit):
         mvcommon.load_library()
+
+
+# ---------------------------------------------------------------------------
+# retry() — IMP-C2 unit tests (no fixtures; mvcommon.time.sleep is patched so
+# the suite stays fast, and jitter is neutralised for deterministic timing).
+# ---------------------------------------------------------------------------
+import subprocess
+
+
+def _patch_sleep(monkeypatch):
+    """Record every delay passed to mvcommon.time.sleep; never actually wait."""
+    slept = []
+    monkeypatch.setattr(mvcommon.time, "sleep", lambda d: slept.append(d))
+    return slept
+
+
+def test_retry_success_first_call_no_sleep(monkeypatch):
+    slept = _patch_sleep(monkeypatch)
+    calls = []
+
+    def fn():
+        calls.append(1)
+        return "ok"
+
+    assert mvcommon.retry(fn) == "ok"
+    assert len(calls) == 1
+    assert slept == []
+
+
+def test_retry_fail_twice_then_succeed(monkeypatch):
+    slept = _patch_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise subprocess.SubprocessError("transient")
+        return "healed"
+
+    result = mvcommon.retry(fn, jitter=0)
+    assert result == "healed"
+    assert calls["n"] == 3
+    assert slept == [1, 4]
+
+
+def test_retry_exhausted_reraises_last(monkeypatch):
+    _patch_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        raise subprocess.SubprocessError(f"fail-{calls['n']}")
+
+    with pytest.raises(subprocess.SubprocessError) as exc:
+        mvcommon.retry(fn, attempts=3, jitter=0)
+    assert "fail-3" in str(exc.value)
+    assert calls["n"] == 3
+
+
+def test_retry_non_retryable_propagates_immediately(monkeypatch):
+    slept = _patch_sleep(monkeypatch)
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        raise ValueError("not retryable")
+
+    with pytest.raises(ValueError):
+        mvcommon.retry(fn, jitter=0)
+    assert calls["n"] == 1
+    assert slept == []
+
+
+def test_retry_backoff_shorter_than_attempts_clamps(monkeypatch):
+    slept = _patch_sleep(monkeypatch)
+
+    def fn():
+        raise subprocess.SubprocessError("always")
+
+    with pytest.raises(subprocess.SubprocessError):
+        mvcommon.retry(fn, attempts=4, backoff=(1, 4), jitter=0)
+    # 4 attempts -> 3 sleeps; last backoff value (4) reused for the clamp.
+    assert slept == [1, 4, 4]
+
+
+def test_retry_on_retry_callback_invoked_per_retry(monkeypatch):
+    _patch_sleep(monkeypatch)
+    seen = []
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise subprocess.SubprocessError(f"e{calls['n']}")
+        return "done"
+
+    def on_retry(attempt, exc):
+        seen.append((attempt, str(exc)))
+
+    assert mvcommon.retry(fn, jitter=0, on_retry=on_retry) == "done"
+    assert seen == [(1, "e1"), (2, "e2")]
+
+
+def test_retry_jitter_offset_added_to_base(monkeypatch):
+    slept = _patch_sleep(monkeypatch)
+    monkeypatch.setattr(mvcommon.random, "uniform", lambda a, b: 0.5)
+    calls = {"n": 0}
+
+    def fn():
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise subprocess.SubprocessError("transient")
+        return "ok"
+
+    assert mvcommon.retry(fn) == "ok"
+    # base values (1, 4) + fixed jitter offset (0.5).
+    assert slept == [1.5, 4.5]

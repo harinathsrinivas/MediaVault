@@ -5,10 +5,10 @@ improvement: IMP-C2
 tier: C
 role: complementary
 order: 5
-status: not-started
+status: done
 branch: feature/adb_selenium_retry
 feature: auto-rollback
-tags: [claude, mediavault, complementary, tier/C, status/not-started]
+tags: [claude, mediavault, complementary, tier/C, status/done]
 created: 2026-05-28
 ---
 
@@ -61,24 +61,36 @@ op must keep the same failure signal so rollback behaves unchanged. Details:
 [[RELATED_IMPROVEMENTS]] → C2.
 
 ## Definition of Done
-- [ ] Planner run; `PLAN.md` in this subfolder; open decisions confirmed
-- [ ] Branched `feature/adb_selenium_retry` off `origin/main`
-- [ ] `retry()` helper + wrapped `adb push` + wrapped `trigger_download`
-- [ ] First-attempt success unchanged; failure contract unchanged
-- [ ] Tests in `tests/` (mocked, copies only): fail-then-succeed + permanent-fail
-- [ ] `cmd_replace` PermissionError loop untouched
-- [ ] `IMP-C2` marked done in `improvements_tierC.md`
-- [ ] `ARCHITECTURE.md` / `README` updated if needed
-- [ ] PR to `main` opened
-- [ ] Completion report below filled in
+- [x] Planner run; `PLAN.md` in this subfolder; open decisions confirmed
+- [x] Branched `feature/adb_selenium_retry` off `origin/main`
+- [x] `retry()` helper + wrapped `adb push` + wrapped `trigger_download`
+- [x] First-attempt success unchanged; failure contract unchanged
+- [x] Tests in `tests/` (mocked, copies only): fail-then-succeed + permanent-fail
+- [x] `cmd_replace` PermissionError loop untouched
+- [x] `IMP-C2` marked done in `improvements_tierC.md`
+- [x] `ARCHITECTURE.md` / `README` updated if needed
+- [ ] PR to `main` opened — branch pushed; open manually (gh not authenticated)
+- [x] Completion report below filled in
 
-## Completion report (fill in when done)
-- **Branch:**
-- **PR:**
-- **Merged commit:**
+## Completion report
+- **Branch:** `feature/adb_selenium_retry` (cut from `origin/main` @ `1aac738` — A1 merged; G1 = `8c12680`).
+- **PR:** _Open manually_ — `gh` is not authenticated in this environment. Branch `feature/adb_selenium_retry` is pushed; create the PR at https://github.com/harinathsrinivas/MediaVault/pull/new/feature/adb_selenium_retry (base `main`, title `Feature/adb selenium retry (IMP-C2)`).
+- **Merged commit:** _(pending merge of the PR to `main`)_
 - **Files changed:**
-- **Tests added:**
-- **Manual test commands:**
-- **Open decisions resolved:**
+  - `mvcommon.py` — added `retry(fn, attempts=3, backoff=(1,4,16), jitter=1.0, retry_on=(SubprocessError, TimeoutError), on_retry=None)` (stdlib-only).
+  - `main.py` — wrapped `cmd_push`'s push + atomic `mv` pair in `retry()` (1/4/16s + jitter, pre-retry `.partial` rm, `⏳ Retry N/3` print); failure contract preserved.
+  - `mainfetch.py` — `trigger_download` body refactored to `_attempt()` with an explicit one-retry-after-5s on a `False` return OR a caught exception.
+  - `tests/conftest.py` — added the `mock_fetch` fixture (testing-strategy §4.6).
+  - `tests/test_mvcommon.py` — 7 `retry()` unit tests (incl. jitter offset).
+  - `tests/test_cmd_push_retry.py` (new) — adb push transient/permanent/happy-path tests.
+  - `tests/test_trigger_download_retry.py` (new) — trigger_download retry tests.
+  - `tests/test_cmd_push_partial.py` — G1 failure tests adapted to inject *permanent* (all-attempt) failures so they keep testing the failure contract under the new retry layer.
+  - `improvements_tierC.md`, `ARCHITECTURE.md` — docs.
+- **Tests added:** 7 (`test_mvcommon` retry) + 3 (`test_cmd_push_retry`) + 5 (`test_trigger_download_retry`) = 15 new; full suite 46 passed.
+- **Manual test commands:** see PLAN.md → Verification → Manual smoke (`python main.py push <id> SIZE_GB 10`; lock-screen mid-chunk to see a `⏳ Retry` line; `python main.py fetch <id>`).
+- **Open decisions resolved:** (1) `retry_on` per call site — adb push `(CalledProcessError,)`, trigger_download retries on BOTH `False` and exception. (2) Per-attempt logging is user-visible `print`. (3) Jitter enabled (`jitter=1.0` default; tests use `jitter=0` or patch `random.uniform`).
 - **Notes / surprises:**
-- **Follow-ups created:**
+  - The three G1 push tests in `test_cmd_push_partial.py` previously injected a *single* transient failure and asserted return `False`; the new retry layer self-heals that, so `FakeAdb` was reworked to fail a targeted chunk position on *every* attempt (permanent) — preserving their failure-contract intent. Self-heal is covered by the new `test_cmd_push_retry.py`.
+  - `retry` was deliberately NOT imported into `mainfetch.py`: the trigger_download retry is an explicit one-retry block (Resolved Decision 5), since `retry()` does not treat a `False` return as retryable; adding the import would be dead code.
+  - The Task subagent tool was unavailable this run, so the orchestrator executed all steps directly (same as the A1 run); STATUS.md is committed per-step as a scratchpad.
+- **Follow-ups created:** none. (IMP-C8 remote `md5sum` verification will later reuse this retry seam; IMP-A5 will make counts/backoff configurable — both already out of scope and tracked separately.)

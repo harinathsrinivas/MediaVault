@@ -14,13 +14,13 @@ created: 2026-05-29
 
 # C8 — Post-push remote verification
 
-> **At a glance:** After each successful `adb push`, run `adb shell md5sum` on the
-> remote file and compare to the local chunk hash already in `split_info`. A
-> mismatch triggers a retry under [[C2-adb-selenium-retry|C2]]. Gates on a
-> `push.verify_remote` flag (default false). Catches silent USB/driver corruption
-> before the local chunk is deleted. **Tip:** do [[G1-push-partial-atomic-rename|G1]]
-> first — G1 changes the remote naming convention and C8 must verify the file at the
-> right path (final name, after `adb shell mv`).
+> **At a glance:** After each successful `adb push` + `adb shell mv` (G1 is done),
+> run `adb shell md5sum` on the remote final-name file and compare to the local chunk
+> hash already in `split_info`. A mismatch raises a `CalledProcessError` which
+> C2's `retry()` wrapper (also done) catches and re-runs the push+mv pair. Gates on
+> a `push.verify_remote` flag (default false). Catches silent USB/driver corruption
+> before the local chunk is deleted. **Both G1 and C2 are done — branch from
+> `origin/main` and integrate directly.**
 > Related: [[RELATED_IMPROVEMENTS]] · [[_TRACKER]]
 
 ## Claude Code prompt (paste into a fresh session)
@@ -37,9 +37,9 @@ Read these FIRST, in this order, before planning:
 
 Confirmed state — do not re-derive these, treat as facts:
 - IMP-G1 (push partial + atomic rename) is DONE and merged into origin/main (PR #7). Verify the file at the FINAL remote path (after `adb shell mv` from `.partial` to final name). Do not write a code path for the pre-G1 case — it no longer exists.
-- IMP-C2 (retry helper) is DONE and merged into origin/main before this task starts (we are doing C2 first). Integrate directly: a hash mismatch must raise a retryable exception so C2's retry wrapper in mvcommon.py handles the re-push. Do not treat this as conditional or leave a "future integration" note.
+- IMP-C2 (retry helper) is DONE and merged into origin/main (feature/adb_selenium_retry, 2026-05-30). The retry() signature is: retry(fn, attempts=3, backoff=(1,4,16), jitter=1.0, retry_on=(SubprocessError, TimeoutError), on_retry=None). The adb push call site in cmd_push uses retry_on=(CalledProcessError,). On a hash mismatch, raise a CalledProcessError (or subclass of SubprocessError) so the existing retry wrapper catches it and re-runs the push+mv pair (including pre-retry .partial cleanup). Do not treat this as conditional or leave a "future integration" note.
 - IMP-A1 (mvcommon) is DONE. The retry() helper lives in mvcommon.py. C8's verification helper (if extracted) may also live there.
-- Branch C8 from origin/main AFTER confirming both A1 and C2 are merged.
+- Branch C8 from origin/main AFTER confirming A1 and C2 are merged (check git log origin/main — look for the A1 and C2 merge commits).
 
 What to build: after each successful `adb push` AND after G1's `adb shell mv` from `.partial` to final name, run `adb shell md5sum <remote_final_path>` (fall back to sha256sum if md5sum is unavailable). Parse the device-side hash and compare to `split_info.chunks[i].hash`. On mismatch, raise a retryable exception so C2's retry wrapper handles the re-push. Gate the entire verification step behind a config flag `push.verify_remote` (default: false) — a hardcoded module-level constant for now (configurability is IMP-A5, out of scope).
 
@@ -75,8 +75,8 @@ later without touching rollback logic. Details: [[RELATED_IMPROVEMENTS]] → C8.
 - [ ] `adb shell md5sum` (or sha256sum) verification after each push
 - [ ] Hash compared to `split_info.chunks[i].hash`; mismatch triggers retry / failure
 - [ ] Gated behind `push.verify_remote` flag (default false); happy path unchanged
-- [ ] G1 interaction handled (final-name vs `.partial`-name path, depending on G1 status)
-- [ ] C2 integration noted or implemented (mismatch as retryable exception)
+- [ ] G1 is done — verify at final name (after `adb shell mv` from `.partial`); no pre-G1 code path
+- [ ] C2 is done — mismatch raises `CalledProcessError` so retry() wrapper handles re-push automatically
 - [ ] Tests in `tests/` (mocked adb): match / mismatch / command-unavailable
 - [ ] `IMP-C8` marked done in `improvements_tierC.md`
 - [ ] `ARCHITECTURE.md` / `README` updated if needed

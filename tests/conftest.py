@@ -160,7 +160,11 @@ def mock_device(tmp_path, monkeypatch):
                 dst_p = device_dir / dst.lstrip("/")
                 dst_p.parent.mkdir(parents=True, exist_ok=True)
                 if src_p.exists():
-                    src_p.rename(dst_p)
+                    # Android `mv` overwrites an existing destination; Path.rename
+                    # does NOT on Windows. Use replace() so the C8 retry-after-
+                    # mismatch path (final file already present) behaves like the
+                    # real device instead of raising WinError 183.
+                    src_p.replace(dst_p)
                 elif check:
                     raise subprocess.CalledProcessError(1, argv)
             elif sub[0] == "rm":
@@ -176,6 +180,14 @@ def mock_device(tmp_path, monkeypatch):
                 p = device_dir / path.lstrip("/")
                 if p.exists():
                     h = hashlib.md5(p.read_bytes()).hexdigest()
+                    res.stdout = f"{h}  {path}\n"
+                elif check:
+                    raise subprocess.CalledProcessError(1, argv)
+            elif sub[0] == "sha256sum":
+                path = sub[-1].strip("'")
+                p = device_dir / path.lstrip("/")
+                if p.exists():
+                    h = hashlib.sha256(p.read_bytes()).hexdigest()
                     res.stdout = f"{h}  {path}\n"
                 elif check:
                     raise subprocess.CalledProcessError(1, argv)

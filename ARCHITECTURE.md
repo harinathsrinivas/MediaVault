@@ -1621,6 +1621,13 @@ work would slot in cleanly:
     headless on a server. Trade-off: Photos API doesn't return raw
     "original quality" video without a separate Picker workflow as of
     the latest documentation.
+11. **Opus 4.8 "dynamic workflows" for the agent pipeline**: a session
+    can plan a task then spin up hundreds of verified parallel subagents.
+    It could replace the sequential orchestrator + multi-candidate
+    worktrees, but it is a main-session capability and our `orchestrator`
+    is itself a subagent (subagents can't spawn subagents). Exploiting it
+    means running the orchestrator as the main session (`--agent`). Deferred;
+    see §19 and `improvements_tierH.md` (IMP-H2).
 
 ---
 
@@ -1647,10 +1654,104 @@ work would slot in cleanly:
 
 ---
 
-*Last updated 2026-05-25 — reflects `main.py` (1621 lines, atomic
-save_library, balanced-split, anime auto-parent, half-episode support,
-dual Chrome profiles, parallel trigger-and-harvester restore) and the
-live-data audit of `library_movies/series/anime.json` (102 / 290+28 /
-140+5 entries). Repo layout now uses `archive/` (legacy snapshots),
-`tools/` (migrate_lib.py), and gitignored `resources/` (offline
-library copies).*
+## 19. Agentic Development Workflow (Opus 4.8 effort tiers)
+
+Non-trivial changes to MediaVault are not hand-written; they are produced by a
+multi-agent Claude Code pipeline defined under `.claude/agents/`. This section
+documents that pipeline so a reader knows how the repo is actually changed and
+how to tune it. (The agent files are dev tooling — they do not ship in or affect
+the `main.py` / `mainfetch.py` runtime.)
+
+### 19.1 Agent roster
+
+| Agent | Role | Model | Effort |
+|---|---|---|---|
+| `architect` | One-time deep read → writes/refreshes `ARCHITECTURE.md` (read-only on code) | opus | high |
+| `planner` | Decomposes a task into `PLAN.md`; tags each step `[model:…][effort:…]` | opus | high |
+| `orchestrator` | Drives `PLAN.md` end-to-end; routes steps, handles multi-candidate, triggers git ops | opus | high |
+| `executor-haiku` | Executes mechanical steps (`[model: haiku]`) | haiku | low |
+| `executor-sonnet` | Executes standard implementation/refactor/test steps (`[model: sonnet]`) | sonnet | medium |
+| `executor-opus` | Executes the hardest reasoning steps (`[model: opus]`) | opus | max |
+| `git-agent` | The only agent that runs git — branch/commit/worktree/merge/push | haiku | low |
+| `judge` | Compares candidates of a multi-candidate step → `DECISION.md` | opus | high |
+
+`model: opus` is kept as an **alias** (resolves to the latest Opus — 4.8 today),
+so the agents auto-track future Opus releases rather than being pinned.
+
+### 19.2 Flow
+
+```
+   task
+    |
+    v
+ [architect]  (occasional / first pass)  --->  ARCHITECTURE.md
+    |
+    v
+ [planner]  --->  PLAN.md   (each step: [model: ...] [effort: ...])
+    |
+    v
+ [orchestrator]  <----- CREATE_BRANCH / COMMIT_STEP / PUSH ----->  [git-agent]
+    |
+    |  routes each step by its [model: ...] tag
+    +--------------------+--------------------+
+    v                    v                    v
+ [executor-haiku]   [executor-sonnet]   [executor-opus]
+   effort: low        effort: medium       effort: max
+    |                    |                    |
+    +--------- writes step outcome --> STATUS.md
+    |
+    |  (multi-candidate steps only)
+    v
+ candidates A/B/C built in isolated git worktrees
+    |
+    v
+ [judge]  --->  DECISION.md   --->  orchestrator squash-merges the winner
+```
+
+Artifacts the pipeline reads/writes: `PLAN.md` (the plan), `STATUS.md` (per-step
+execution log), `CRITIQUE.md` (per-candidate self-review), `DECISION.md` (judge
+verdict). All are plain Markdown at the repo root / under `.candidates/`.
+
+### 19.3 Effort tiers
+
+Effort controls how much a model deliberates. On Opus 4.8 the tiers are far
+"hotter" than the same-named 4.7 tiers (per the system card, Opus 4.8 `low` ≈ 4.7
+`max` capability), so even modest tiers are strong:
+
+| Tier | Use for |
+|---|---|
+| `low` | mechanical / high-volume / latency-sensitive work |
+| `medium` | standard coding following an existing pattern (Sonnet's default) |
+| `high` | tricky logic, ambiguous or security-sensitive steps |
+| `xhigh` | genuinely hard reasoning that `high` doesn't cover |
+| `max` | hardest, highest-stakes, hard-to-reverse steps (self-tests its own code) |
+
+### 19.4 How effort is applied — "hybrid advisory"
+
+The Task/Agent tool has **no per-invocation effort parameter** (open upstream:
+`anthropics/claude-code` issues #25669, #43083, #31536). Effort can only be set
+statically via an agent's `effort:` frontmatter or the session-level `/effort`.
+Consequence for this pipeline:
+
+- Each executor's effort is **fixed in frontmatter** (haiku→low, sonnet→medium, opus→max).
+- The planner's per-step `[effort: …]` tag is therefore **advisory**: it documents
+  intended effort and is the basis for the model choice. The orchestrator routes by
+  `[model: …]`, notes any mismatch, and flags under-powered steps in its final summary.
+- **Practical rule:** to actually deliver high/xhigh/max thinking today, assign
+  `[model: opus]` (which runs at `max`). The advisory tag future-proofs the plan for
+  when per-call effort lands upstream.
+
+See `.claude/AGENT_WORKFLOW_NOTES.md` for the full migration record and the
+pre-migration backup at `.claude/agents_pre_opus48/`, and `improvements_tierH.md`
+(IMP-H1/H2) for the tracked task and the deferred "dynamic workflows" follow-up.
+
+---
+
+*Last updated 2026-05-30 — agent pipeline migrated to Opus 4.8 effort tiers
+(new §19; see `.claude/AGENT_WORKFLOW_NOTES.md` and `improvements_tierH.md`).
+Prior content reflects `main.py` (1621 lines, atomic save_library,
+balanced-split, anime auto-parent, half-episode support, dual Chrome profiles,
+parallel trigger-and-harvester restore) and the live-data audit of
+`library_movies/series/anime.json` (102 / 290+28 / 140+5 entries). Repo layout
+uses `archive/` (legacy snapshots), `tools/` (migrate_lib.py), and gitignored
+`resources/` (offline library copies).*

@@ -2,7 +2,6 @@
 name: planner
 description: Analyzes a task, produces a detailed plan in PLAN.md, and assigns each step to the appropriate executor model (haiku, sonnet, or opus). Optionally marks specific steps for multi-candidate evaluation when the problem genuinely has multiple legitimate approaches. Use before any non-trivial code change.
 model: opus
-effort: high
 tools: Read, Write, Glob, Grep, Bash
 ---
 
@@ -43,13 +42,13 @@ Suggested branch: <type>/<short_name>
 ## Steps
 
 ### Standard step format (most steps look like this):
-- [ ] N. [model: haiku|sonnet|opus] [effort: low|medium|high|xhigh|max] <step description>
+- [ ] N. [model: haiku|sonnet|opus] <step description>
   - Files: <paths>
   - Details: <what specifically to do — precise enough that the executor doesn't need to guess>
   - Acceptance: <how to verify this step is done>
 
 ### Multi-candidate step format (ONLY when guardrails below are satisfied):
-- [ ] N. [model: sonnet|opus] [effort: low|medium|high|xhigh|max] [candidates: 2|3|4|5] <step description>
+- [ ] N. [model: sonnet|opus] [candidates: 2|3|4|5] <step description>
   - Files: <paths>
   - Details: <high-level intent — leave space for candidates to differ>
   - Acceptance: <objective criteria all candidates must meet>
@@ -87,38 +86,10 @@ Constraints that must appear in every test step's Details field:
 - "Never touch real C:\\Media files or real library_*.json."
 - "Run `pytest -q` and fix failures before marking the step done."
 
-MODEL + EFFORT ASSIGNMENT RULES:
-
-Every step gets TWO tags: a [model: ...] tag (which executor runs it) and an [effort: ...] tag (how hard that model should think). You assign both based on the step's complexity.
-
-MODEL (picks the executor — this also picks the real runtime effort; see "How effort is actually applied" below):
+MODEL ASSIGNMENT RULES:
 - haiku: mechanical edits, renames, formatting, simple docstring/comment additions, trivial test stubs, find-replace operations. NEVER use [candidates: N] with haiku.
 - sonnet: standard implementation, refactoring, normal test writing, bug fixes with clear cause, applying well-understood patterns.
 - opus: cross-cutting changes, tricky algorithms, ambiguous requirements, security-sensitive code, anything where the planner is uncertain how the executor should proceed.
-
-EFFORT (how much the model deliberates — this is currently ADVISORY; see the note below):
-We run on Opus 4.8 / Sonnet 4.6 effort tiers. Effort is a major lever on speed and token cost, so estimate it per step. Reference (from the Opus 4.8 system card — note Opus tiers are far hotter than the same-named 4.7 tiers; Opus 4.8 "low" ≈ 4.7 "max" capability, and Opus "medium" out-spends 4.7 "high"):
-- low: skips or limits deep thinking. Mechanical/high-volume/latency-sensitive steps. On Opus this is still very capable; on haiku it's the right default for trivial work.
-- medium: balanced speed/cost — the everyday default for standard coding and tool-heavy steps. Sonnet's recommended default.
-- high: extensive planning and edge-case consideration before committing. Use when quality matters more than speed — tricky logic, ambiguous steps, security-sensitive code.
-- xhigh: between high and max. Use for genuinely hard reasoning that high doesn't quite cover, when max would be overkill.
-- max: largest token budget — the model tests its own code, explores multi-file impact, maximizes capability. Reserve for the hardest, highest-stakes steps (core algorithms, intricate migrations, the riskiest multi-candidate steps).
-
-Per-step effort assignment heuristic:
-- Trivial / mechanical (rename, format, doc tweak) → low
-- Standard implementation following an existing pattern → medium
-- Tricky logic, ambiguous requirements, security-sensitive, cross-cutting → high
-- Genuinely hard reasoning beyond "high" → xhigh
-- Hardest / highest-stakes / hard-to-reverse → max
-
-Keep model and effort coherent: a step that needs max effort almost always also needs [model: opus]; a [model: haiku] step should be low (occasionally medium). If you find yourself wanting max effort on a haiku step, you've mis-assigned the model — bump it to sonnet or opus.
-
-How effort is actually applied (IMPORTANT — read so your tags are realistic):
-The Task/Agent tool cannot set effort per invocation. Each executor has a FIXED effort baked into its frontmatter:
-- executor-haiku → low
-- executor-sonnet → medium
-- executor-opus → max
-So today your [effort: ...] tag is ADVISORY: it documents the effort the step *should* get and is the basis for choosing the model. The orchestrator routes by [model: ...] and the executor runs at its frontmatter effort, noting any mismatch with your tag. Practical consequence: if a step truly needs high/xhigh/max thinking, the reliable way to deliver it is to assign [model: opus] (which runs at max). Use the [effort: ...] tag honestly anyway — it records intent and future-proofs the plan for when per-call effort lands upstream.
 
 MULTI-CANDIDATE GUARDRAILS (CRITICAL — read carefully):
 

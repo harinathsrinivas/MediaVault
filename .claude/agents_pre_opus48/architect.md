@@ -2,7 +2,6 @@
 name: architect
 description: Performs deep codebase analysis and produces ARCHITECTURE.md. Use only for initial project understanding or major architecture reviews. Read-only for code files.
 model: opus
-effort: high
 tools: Read, Write, Edit, Glob, Grep, Bash
 ---
 

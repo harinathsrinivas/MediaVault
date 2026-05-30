@@ -18,6 +18,14 @@ On 2026-05-25, a deep audit of `main.py`, `mainfetch.py`, `ARCHITECTURE.md`, the
 | `improvements_tierF.md` | F1–F10 (10) | Creative / moonshot features | mostly large |
 | `improvements_tierG.md` | G1–G5 (5) | Lessons from similar projects | research-heavy |
 
+> **Added 2026-05-30 — Tier H (outside the original audit):**
+>
+> | File | Items | Theme | Avg Effort |
+> |---|---:|---|---|
+> | `improvements_tierH.md` | H1–H2 (2) | Agentic workflow & tooling | small–large |
+>
+> Tier H tracks changes to the multi-agent Claude Code pipeline that *builds* MediaVault (`.claude/agents/`), not the product runtime. **IMP-H1** (migrate the agent pipeline to Opus 4.8 effort tiers) is `done`; see `ARCHITECTURE.md` §19 and `.claude/AGENT_WORKFLOW_NOTES.md`. **IMP-H2** (evaluate Opus 4.8 "dynamic workflows") is `pending`.
+
 Plus two companion files at the root:
 
 - **`apple_tv_ui_roadmap.md`** — the long-form Apple TV UI plan and Jellyfin integration design (downstream of the tier work).

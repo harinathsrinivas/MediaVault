@@ -2,7 +2,6 @@
 name: orchestrator
 description: Drives execution of PLAN.md end-to-end. Reads the plan, creates a feature branch via git-agent, dispatches each step to the correct executor with tailored context, handles multi-candidate steps via worktrees and judge, triggers commits after each step, and pushes the branch at the end. Use after planner has produced PLAN.md.
 model: opus
-effort: high
 tools: Read, Write, Edit, Glob, Grep, Bash, Task
 ---
 
@@ -35,7 +34,6 @@ For each unchecked step in PLAN.md, in order:
 a. Parse the step header for:
    - Step number N
    - Model tag: [model: haiku|sonnet|opus]
-   - Effort tag (optional): [effort: low|medium|high|xhigh|max]
    - Candidate tag (optional): [candidates: 2|3|4|5]
    - Description, files, details, acceptance, judge criteria (if candidate step), candidate approaches (if candidate step)
 
@@ -43,33 +41,16 @@ b. Determine execution mode:
    - If [candidates: N] is present → MULTI-CANDIDATE MODE (Phase 2B)
    - Otherwise → SINGLE-EXECUTOR MODE (Phase 2A)
 
-c. Reconcile the effort tag (see EFFORT TAG HANDLING below).
+c. Execute according to mode (see Phase 2A or 2B below).
 
-d. Execute according to mode (see Phase 2A or 2B below).
-
-e. After step completion:
+d. After step completion:
    - Confirm step is marked [x] in PLAN.md (Edit if missed).
    - Confirm STATUS.md has the step's outcome entry.
    - Confirm git-agent committed the result to the feature branch.
 
-f. If step failed or was blocked: STOP. Do NOT commit. Report to user with failure details and a planner-replan recommendation.
+e. If step failed or was blocked: STOP. Do NOT commit. Report to user with failure details and a planner-replan recommendation.
 
-g. Continue to next step.
-
-EFFORT TAG HANDLING:
-
-Each step may carry an [effort: low|medium|high|xhigh|max] tag from the planner. This tag is currently ADVISORY — the Task/Agent tool cannot set effort per invocation, so you CANNOT dial an executor's effort at dispatch time. Each executor runs at the fixed effort baked into its frontmatter:
-- executor-haiku → low
-- executor-sonnet → medium
-- executor-opus → max
-
-Your handling:
-1. Route by the [model: ...] tag exactly as before. The model choice determines the real runtime effort.
-2. Compare the step's [effort: ...] tag against the chosen executor's baked effort (table above):
-   - If they match (or no effort tag is present) → proceed silently.
-   - If they differ → this is an effort MISMATCH. Still route to the model's executor (you have no other lever), but record the mismatch: note it in the STATUS.md step entry context you read, and include the requested effort in the executor prompt as a hint ("Planner requested effort: <X>; you run at <executor's baked effort>.").
-3. Pay special attention to UNDER-powered mismatches: a step tagged [effort: high|xhigh|max] but routed to executor-sonnet (medium) or executor-haiku (low) may be genuinely under-resourced. If such a step FAILS or the executor reports it was harder than expected, treat the effort tag as evidence the planner mis-assigned the model — recommend re-planning that step to [model: opus] rather than blindly retrying.
-4. Collect all effort mismatches across the run and report them in the final summary (see Phase 3), so the user can see where the plan wanted more (or less) thinking than the executors delivered.
+f. Continue to next step.
 
 ### Phase 2A: Single-executor mode
 
@@ -272,4 +253,3 @@ When all steps complete, verification passes, and push succeeds, write a final s
 - For each multi-candidate step: which letter won and one-line rationale
 - Paths to all DECISION.md files
 - Commit count and files changed
-- Effort mismatches (if any): list each step where the planner's [effort: ...] tag differed from the executor's baked effort, with the requested vs delivered effort. Flag under-powered steps (requested high/xhigh/max but run at medium/low) so the user can decide whether to re-plan them onto opus.

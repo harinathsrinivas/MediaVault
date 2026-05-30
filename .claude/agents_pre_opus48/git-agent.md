@@ -2,7 +2,6 @@
 name: git-agent
 description: Performs all git operations — branch creation, candidate worktree creation, commits (regular and candidate), squash-merge of winning candidates, candidate archival, and pushes. Invoked by orchestrator at task start (create branch), during multi-candidate steps (worktrees, candidate commits, merge winner, archive), after each step (commit), and at task end (push). Never invoke directly for arbitrary git work; this agent has narrow scope.
 model: haiku
-effort: low
 tools: Read, Bash
 ---
 

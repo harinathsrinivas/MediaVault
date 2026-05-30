@@ -1,10 +1,12 @@
 # Feature: Auto-Rollback for Multi-Step Commands
 
-> **STATUS: PLANNING — PAUSED (2026-05-28).**
-> A draft implementation plan exists. **No code has been written and nothing in
-> any `improvements_tier*.md` file has been marked done.** The user deliberately
-> paused this feature to implement a few prerequisite improvements first (see
-> `RELATED_IMPROVEMENTS.md`), then will return to finalize and orchestrate it.
+> **STATUS: PLANNING — PAUSED (prerequisites in progress).**
+> A draft implementation plan exists. The user is working through prerequisite and
+> complementary improvements before implementing auto-rollback itself.
+> **Done so far:** A1 (`mvcommon.py`, merged), G1 (`.partial` + atomic rename, PR #7
+> merged), C9 (atomic `cmd_replace`, merged 2026-05-29), C2 (ADB/Selenium retry,
+> `feature/adb_selenium_retry` pushed 2026-05-30 — PR pending).
+> **Next up:** C8 (post-push remote verification) — see `_TRACKER.md`.
 
 This folder is the single source of truth for the auto-rollback feature. It was
 produced during a planning session (the planner agent + a Q&A round with the

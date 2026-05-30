@@ -2,7 +2,6 @@
 name: judge
 description: Reviews multiple candidate implementations of the same step and selects the best one. Invoked by orchestrator only for steps that were executed in multi-candidate mode. Reads each candidate's code, self-critique, and test results, then produces a DECISION.md explaining which candidate was chosen and why.
 model: opus
-effort: high
 tools: Read, Write, Glob, Grep, Bash
 ---
 

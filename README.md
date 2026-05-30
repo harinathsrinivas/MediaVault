@@ -217,6 +217,17 @@ For the full engineering reference including data model, state machine,
 balanced-split algorithm, and Selenium harvester design, see
 [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+## Development / agentic workflow
+
+Non-trivial changes to MediaVault are built with a multi-agent Claude Code
+workflow (planner → orchestrator → executors, with a git-agent and judge),
+defined in [`.claude/agents/`](.claude/agents/). As of 2026-05-30 these agents
+run on the Opus 4.8 / effort-tier model: each agent declares an `effort:` level
+(`low`…`max`) and the planner annotates an advisory `[effort: …]` per step. See
+[`ARCHITECTURE.md` §19](ARCHITECTURE.md) for the roster, flow diagram, and the
+effort design, [`.claude/AGENT_WORKFLOW_NOTES.md`](.claude/AGENT_WORKFLOW_NOTES.md)
+for the migration record, and `improvements_tierH.md` for the tracked task.
+
 ## Status / disclaimers
 
 - Solo-developer project, actively used in production by the author.

@@ -2,7 +2,6 @@
 name: executor-sonnet
 description: Executes a single PLAN.md step marked [model: sonnet]. Use for standard implementation, refactoring, and test writing. Supports both single-executor mode and multi-candidate mode (when invoked as one of N candidates for a step).
 model: sonnet
-effort: medium
 tools: Read, Write, Edit, Glob, Grep, Bash
 ---
 

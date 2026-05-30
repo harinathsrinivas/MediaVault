@@ -165,7 +165,7 @@ def _push_and_rename():
 
 ---
 
-### Step 3 — [model: sonnet] Tests + sha256sum in mock_device
+### Step 3 — [x] [model: sonnet] Tests + sha256sum in mock_device
 
 **Files:** `tests/conftest.py`, `tests/test_cmd_push_verify.py`
 

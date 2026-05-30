@@ -93,7 +93,10 @@ def trigger_download(driver, query, index=0):
 
     print(f"   > ⚡ Triggering: '{query}' (Index: {index})")
 
-    try:
+    def _attempt():
+        """One navigate→search→click→Shift+D→Esc pass. Returns True if the
+        trigger was sent, False on a 0-thumbnail miss / index out of range.
+        May raise on a Selenium fault (caught/retried by the caller below)."""
         driver.get("https://photos.google.com")
         wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         time.sleep(1.5)
@@ -148,6 +151,24 @@ def trigger_download(driver, query, index=0):
         print("     🚀 Triggered.")
         return True
 
+    # [IMP-C2] Retry the whole attempt ONCE after ~5s when the first pass either
+    # returns False (0 thumbnails / index out of range) OR raises a Selenium
+    # fault. The second pass's result is final; a second-attempt failure/error
+    # yields False, preserving today's failure signal exactly (the function
+    # still returns True/False with the same meaning). This explicit one-retry
+    # block is intentionally NOT routed through mvcommon.retry(), which only
+    # treats exceptions (not a False return) as retryable (Resolved Decision 5).
+    try:
+        first = _attempt()
+        if first:
+            return True
+    except Exception as e:
+        print(f"     ⚠️ Error: {e}")
+
+    print("⏳ Retry 2/2 after 5s (no results / error)…")
+    time.sleep(5)
+    try:
+        return _attempt()
     except Exception as e:
         print(f"     ⚠️ Error: {e}")
         return False

@@ -77,6 +77,9 @@ DEVICE_ALIASES = {"movies": "FA69H0300200", "series": "FA75V0303405"}
 # `adb shell rm` (Google Photos never indexes a .partial as a complete chunk).
 PARTIAL_SUFFIX = ".partial"
 MVMETA_SUFFIX = ".mvmeta.json"  # Remote disaster-recovery sidecar mirroring split_info
+# IMP-C8: post-push remote hash verification. Gated off here; config-file
+# support (toggle without editing source) arrives with IMP-A5.
+PUSH_VERIFY_REMOTE = False
 
 
 # ==========================================

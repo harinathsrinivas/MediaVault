@@ -31,7 +31,7 @@ Dependency hints:
 | 3 | [[G1-push-partial-atomic-rename]] — `.partial` + atomic remote rename + mvmeta | G | Prereq (bigger) | `feature/push_partial_atomic_rename` | done |
 | 4 | [[C1-season-auto-resume]] — season auto-resume | C | Complementary | `feature/season_auto_resume` | not-started |
 | 5 | [[C2-adb-selenium-retry]] — ADB/Selenium retry | C | Complementary | `feature/adb_selenium_retry` | done |
-| 6 | [[C8-post-push-verify]] — post-push remote md5sum verify | C | Complementary (after G1) | `feature/post_push_verify` | not-started |
+| 6 | [[C8-post-push-verify]] — post-push remote verify | C | Complementary (after G1) | `feature/post_push_verify` | done |
 | 7 | [[A1-extract-mvcommon]] — extract `mvcommon.py` | A | Foundation | `refactor/extract_mvcommon` | done |
 | 8 | [[A7-pytest-harness]] — pytest harness | A | Complementary | `test/pytest_harness` | not-started |
 
@@ -42,7 +42,7 @@ Dependency hints:
 - [x] G1 — push `.partial` + atomic remote rename + mvmeta *(done — PR #7, merged)*
 - [ ] C1 — season auto-resume
 - [x] C2 — ADB/Selenium retry *(done — feature/adb_selenium_retry, 2026-05-30)*
-- [ ] C8 — post-push remote md5sum verify
+- [x] C8 — post-push remote verify *(done — feature/post_push_verify, PR to main 2026-05-30)*
 - [x] A1 — extract `mvcommon.py` *(done — refactor/extract_mvcommon, merged)*
 - [ ] A7 — pytest harness
 - [ ] **All prerequisites done → return to finalize [[PLAN|auto-rollback PLAN]]**

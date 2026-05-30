@@ -5,10 +5,10 @@ improvement: IMP-C8
 tier: C
 role: complementary
 order: 6
-status: not-started
+status: done
 branch: feature/post_push_verify
 feature: auto-rollback
-tags: [claude, mediavault, complementary, tier/C, status/not-started]
+tags: [claude, mediavault, complementary, tier/C, status/done]
 created: 2026-05-29
 ---
 
@@ -70,26 +70,36 @@ unchanged. Gate behind `push.verify_remote` so it can be promoted to default-tru
 later without touching rollback logic. Details: [[RELATED_IMPROVEMENTS]] → C8.
 
 ## Definition of Done
-- [ ] Planner run; `PLAN.md` in this subfolder; open decisions confirmed
-- [ ] Branched `feature/post_push_verify` off `origin/main`
-- [ ] `adb shell md5sum` (or sha256sum) verification after each push
-- [ ] Hash compared to `split_info.chunks[i].hash`; mismatch triggers retry / failure
-- [ ] Gated behind `push.verify_remote` flag (default false); happy path unchanged
-- [ ] G1 is done — verify at final name (after `adb shell mv` from `.partial`); no pre-G1 code path
-- [ ] C2 is done — mismatch raises `CalledProcessError` so retry() wrapper handles re-push automatically
-- [ ] Tests in `tests/` (mocked adb): match / mismatch / command-unavailable
-- [ ] `IMP-C8` marked done in `improvements_tierC.md`
-- [ ] `ARCHITECTURE.md` / `README` updated if needed
-- [ ] PR to `main` opened
-- [ ] Completion report below filled in
+- [x] Planner run; `PLAN.md` in this subfolder; open decisions confirmed
+- [x] Branched `feature/post_push_verify` off `origin/main`
+- [x] `adb shell sha256sum` verification after each push (OD-1: sha256sum, not md5sum)
+- [x] Hash compared to `split_info.chunks[i].hash`; mismatch triggers retry / failure
+- [x] Gated behind `PUSH_VERIFY_REMOTE` flag (default false); happy path unchanged
+- [x] G1 is done — verify at final name (after `adb shell mv` from `.partial`); no pre-G1 code path
+- [x] C2 is done — mismatch raises `CalledProcessError` so retry() wrapper handles re-push automatically
+- [x] Tests in `tests/` (mocked adb): match / mismatch / command-unavailable (+ verify-off + retry-then-match)
+- [x] `IMP-C8` marked done in `improvements_tierC.md`
+- [x] `ARCHITECTURE.md` updated (§7.5); `README` unchanged (not needed)
+- [x] PR to `main` opened
+- [x] Completion report below filled in
 
-## Completion report (fill in when done)
-- **Branch:**
-- **PR:**
-- **Merged commit:**
+## Completion report
+- **Branch:** `feature/post_push_verify` (cut from `origin/main` @ `59932be`; A1 `1aac738` / C2 `cf79684` / G1 `8c12680` confirmed ancestors).
+- **PR:** https://github.com/harinathsrinivas/MediaVault/pull/12 (title `Feature: post-push remote hash verification — IMP-C8`).
+- **Merged commit:** not yet merged — Checkpoint 1 (merge into `main`) is human-gated; PR awaits user approval.
 - **Files changed:**
-- **Tests added:**
+  - `main.py` — `PUSH_VERIFY_REMOTE = False` constant; new `_verify_chunk_hash()` helper; `_chunk_hashes` builder before the upload loop; verify call inside `_push_and_rename()`; retry print "ADB push failed" -> "ADB push/verify failed".
+  - `tests/test_cmd_push_verify.py` — new (5 scenarios; inline `FakeAdbVerify` recorder — Step 3 winner, candidate A).
+  - `improvements_tierC.md` — IMP-C8 Status -> done.
+  - `ARCHITECTURE.md` — §7.5 post-push verification sub-bullet.
+  - Docs: `_TRACKER.md` (C8 done), this report, `STEP3_DECISION.md` (multi-candidate verdict), `STATUS.md` (execution log).
+- **Tests added:** 5 in `tests/test_cmd_push_verify.py` — (a) verify-off zero sha256sum calls; (b) hash match -> onboarded, one call/chunk; (c) mismatch-then-match -> C2 retry self-heals (2 calls, one `rm '.partial'`); (d) all-3-mismatch -> False, entry unchanged, `_parts/` populated, 3 calls; (e) sha256sum unavailable -> warn-and-skip, True, one call, no retry. Full suite: 51 passed (46 baseline + 5).
 - **Manual test commands:**
-- **Open decisions resolved:**
+  - `pytest -q` ; `pytest tests/test_cmd_push_verify.py -q` ; `pytest tests/test_cmd_push_retry.py -q`
+  - `python main.py push <small-mov-id>` (verify off — no behaviour change). Then temporarily set `PUSH_VERIFY_REMOTE = True` and re-push a small split entry; on a clean cable it completes with no extra output. To simulate a mismatch, corrupt the remote file via `adb shell` after push and re-run push on the `_parts/` chunks — expect `⏳ Retry` lines then self-heal or `❌ FAILED`.
+- **Open decisions resolved:** OD-1 sha256sum (direct compare to stored SHA-256, no re-hash, no schema change); OD-2 warn-and-skip when the hash command is unavailable (one warning line, push continues); OD-3 helper inline in `main.py` as module-level `_verify_chunk_hash()` (keeps `mvcommon` stdlib-only).
 - **Notes / surprises:**
-- **Follow-ups created:**
+  - Step 3 was multi-candidate (2). Candidate A (inline recorder, no conftest change) beat candidate B (extend `mock_device` for a real-bytes round trip) on the ranked criteria. Key finding: B required an UNPLANNED behavioural change to the shared `mock_device` `mv` handler (`Path.rename` -> `Path.replace`) — the mock `mv` does not overwrite on Windows, so the retry-after-mismatch path raised `WinError 183` and masked the verify retry as an mv error. That widened blast radius (the `mv` handler is shared by the G1/C2 suites) decided #4 in A's favour. See `STEP3_DECISION.md`.
+  - The Task subagent / git-agent / judge tools were unavailable in this run, so the orchestrator executed every step, the candidate worktrees, and the judging directly (same situation noted in the A1/C2 STATUS logs).
+  - Pre-existing dirty working tree carried a stray `README.md` regression (reverted already-merged G1/A1/H1 docs) and CRLF-only artifacts on `C8-post-push-verify.md`/`improvements_tierC.md`; the README regression was discarded before cutting the branch and is NOT part of C8.
+- **Follow-ups created:** none new. IMP-A5 (config-file toggle for `PUSH_VERIFY_REMOTE`) remains the documented future work to flip the flag without editing source.

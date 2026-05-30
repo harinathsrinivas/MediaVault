@@ -77,6 +77,9 @@ DEVICE_ALIASES = {"movies": "FA69H0300200", "series": "FA75V0303405"}
 # `adb shell rm` (Google Photos never indexes a .partial as a complete chunk).
 PARTIAL_SUFFIX = ".partial"
 MVMETA_SUFFIX = ".mvmeta.json"  # Remote disaster-recovery sidecar mirroring split_info
+# IMP-C8: post-push remote hash verification. Gated off here; config-file
+# support (toggle without editing source) arrives with IMP-A5.
+PUSH_VERIFY_REMOTE = False
 
 
 # ==========================================
@@ -622,6 +625,32 @@ def write_remote_mvmeta(adb_base, remote_target_dir, manual_id, entry):
         return False
 
 
+def _verify_chunk_hash(adb_base, remote_path, safe_path, expected_sha256):
+    """Run `adb shell sha256sum` on the remote file; raise CalledProcessError on mismatch.
+
+    On command-not-found / file-not-found (non-zero exit from the sha256sum call
+    itself), print a warning and return WITHOUT raising — the push is kept alive
+    (OD-2a, warn-and-skip). A genuine hash mismatch raises subprocess.CalledProcessError
+    so the surrounding IMP-C2 retry(retry_on=(CalledProcessError,)) wrapper re-runs the
+    whole push->mv->verify closure, and after exhaustion cmd_push returns False with the
+    existing failure contract.
+    """
+    try:
+        result = subprocess.run(
+            adb_base + ["shell", "sha256sum", f"'{safe_path}'"],
+            check=True, capture_output=True, text=True,
+        )
+    except subprocess.CalledProcessError:
+        print(f"  ⚠️  sha256sum unavailable on device — remote verification skipped for {os.path.basename(remote_path)}")
+        return
+    # Format: "<hash>  <path>\n"
+    remote_hash = result.stdout.strip().split()[0]
+    if remote_hash != expected_sha256:
+        raise subprocess.CalledProcessError(
+            1, f"hash mismatch for {os.path.basename(remote_path)}"
+        )
+
+
 def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, device_id=None):
     print(f"--- PUSHING: {manual_id} ---")
     library = load_library()
@@ -742,6 +771,22 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             print("❌ Invalid chunk range format. Use '1-4'.")
             return False
 
+    # [IMP-C8] Build expected per-chunk hashes (local_filename -> stored SHA-256)
+    # for optional post-push remote verification. Covers three cases:
+    #   - new split: chunk_metadata was just populated above
+    #   - resume (pre-existing _parts/): hashes already in library split_info
+    #   - single-file push: dict stays empty -> verification skipped (no stored hash)
+    _chunk_hashes: dict = {}
+    if chunk_metadata:
+        _chunk_hashes = {c["filename"]: c["hash"] for c in chunk_metadata
+                         if c.get("hash")}
+    elif "split_info" in library.get(manual_id, {}):
+        _chunk_hashes = {
+            c["filename"]: c["hash"]
+            for c in library[manual_id]["split_info"].get("chunks", [])
+            if c.get("hash")
+        }
+
     # 3. UPLOAD LOOP
     all_success = True
     for f in files_to_upload_paths:
@@ -782,9 +827,17 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
                     adb_base + ["shell", "mv", f"'{safe_partial}'", f"'{safe_final}'"],
                     check=True,
                 )
+                # [IMP-C8] post-push remote hash verification (gated on PUSH_VERIFY_REMOTE).
+                # When False (default) this is byte-for-byte identical to pre-C8 behaviour.
+                # A mismatch raises CalledProcessError, which the surrounding retry()
+                # wrapper treats as a transient failure and re-runs push->mv->verify.
+                if PUSH_VERIFY_REMOTE:
+                    expected = _chunk_hashes.get(local_fname)
+                    if expected:
+                        _verify_chunk_hash(adb_base, remote_full_path, safe_final, expected)
 
             def _cleanup_and_log(attempt, exc):
-                print(f"⏳ Retry {attempt}/3 after {(1, 4, 16)[min(attempt - 1, 2)]}s (ADB push failed)…")
+                print(f"⏳ Retry {attempt}/3 after {(1, 4, 16)[min(attempt - 1, 2)]}s (ADB push/verify failed)…")
                 subprocess.run(
                     adb_base + ["shell", "rm", f"'{safe_partial}'"],
                     check=False,

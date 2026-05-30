@@ -4,6 +4,9 @@ import sys
 import hashlib
 import re
 import tempfile
+import time
+import random
+from subprocess import SubprocessError
 
 # ==========================================
 #         SHARED CONFIGURATION
@@ -28,6 +31,39 @@ VIDEO_EXTENSIONS = ('.mkv', '.mp4', '.avi', '.mov')
 # ==========================================
 #               UTILITIES
 # ==========================================
+def retry(fn, attempts=3, backoff=(1, 4, 16), jitter=1.0,
+          retry_on=(SubprocessError, TimeoutError), on_retry=None):
+    """Call fn() with exponential-backoff retries on transient failures.
+
+    Contract:
+      - Returns fn()'s value on the first successful call.
+      - On a retryable exception (type in `retry_on`), sleeps
+        `backoff[i] + random.uniform(0, jitter)` before the next attempt; the
+        backoff base is clamped to the last tuple entry when attempts exceed
+        the tuple length. `jitter=0` yields the deterministic base.
+      - After the final attempt the last `retry_on` exception is re-raised
+        (the failure signal is unchanged for callers).
+      - Exceptions NOT in `retry_on` propagate immediately, unchanged.
+      - `attempts=1` means a single call with no retry.
+      - `on_retry(attempt_number, exception)` runs before each sleep (the seam
+        used to clean up / log). A callback failure never masks the retry.
+    """
+    for attempt in range(attempts):
+        try:
+            return fn()
+        except retry_on as e:
+            if attempt == attempts - 1:
+                raise
+            base = backoff[min(attempt, len(backoff) - 1)]
+            delay = base + random.uniform(0, jitter)
+            if on_retry is not None:
+                try:
+                    on_retry(attempt + 1, e)
+                except Exception:
+                    pass
+            time.sleep(delay)
+
+
 def load_library():
     """Loads all three libraries and merges them into one dictionary."""
     data = {}

@@ -59,7 +59,7 @@ resolves; no other files changed.
 
 ---
 
-### Step 2 — [model: sonnet] Implement post-push verification in `cmd_push`
+### Step 2 — [x] [model: sonnet] Implement post-push verification in `cmd_push`
 
 **Files:** `main.py`
 

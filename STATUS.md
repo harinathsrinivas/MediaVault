@@ -11,3 +11,15 @@ Note: Task subagent tool is unavailable in this run, so the orchestrator execute
 - Files changed: main.py
 - Outcome: Added module-level `PUSH_VERIFY_REMOTE = False` immediately after `MVMETA_SUFFIX` (near the other push constants PARTIAL_SUFFIX/MVMETA_SUFFIX/REMOTE_ROOT), with a two-line comment noting it is gated off here until IMP-A5 adds config-file support. Purely additive; no logic changes.
 - Acceptance: `python -c "import main; assert main.PUSH_VERIFY_REMOTE is False"` -> "OK PUSH_VERIFY_REMOTE is False". No other files changed. PASS.
+
+## Step 2 — [status: done]
+- Executor: orchestrator (direct)
+- Model: sonnet (effort tag: none/medium — matches executor-sonnet baked medium; no mismatch)
+- Files changed: main.py
+- Outcome:
+  - 2b: Added module-level `_verify_chunk_hash(adb_base, remote_path, safe_path, expected_sha256)` just above `cmd_push`. Runs `adb shell sha256sum '<safe_path>'` with `check=True, capture_output=True, text=True`; catches the call's own `CalledProcessError` (cmd-not-found / file-not-found) and warns+returns (OD-2a); on success parses `stdout.strip().split()[0]` and raises `subprocess.CalledProcessError(1, ...)` on mismatch so C2's retry wrapper re-runs the closure.
+  - 2a: Before `# 3. UPLOAD LOOP` added `_chunk_hashes: dict` mapping local_filename->expected_sha256 from `chunk_metadata` (new split) OR `library[manual_id]["split_info"]["chunks"]` (resume); empty for single-file push. Lives in the closure scope.
+  - 2c: Extended the existing `_push_and_rename()` closure with `if PUSH_VERIFY_REMOTE: expected = _chunk_hashes.get(local_fname); if expected: _verify_chunk_hash(adb_base, remote_full_path, safe_final, expected)`. No signature changes — all names already in closure scope.
+  - Accuracy tweak (per plan risk note): retry print "(ADB push failed)" -> "(ADB push/verify failed)" since a mismatch now also feeds the retry. Behaviour unchanged.
+- Key decision: `PUSH_VERIFY_REMOTE=False` keeps the `if` body dead, so the happy path is byte-for-byte identical to pre-C8 (regression proven by existing push tests). `expected is None` (single-file or hash not found) skips verification silently — a missing stored hash is not a corruption signal.
+- Acceptance: import OK + `_verify_chunk_hash` callable; `pytest tests/test_cmd_push_retry.py tests/test_cmd_push_partial.py -q` -> 8 passed (regression: zero extra subprocess calls when False); full `pytest -q` -> 46 passed (unchanged from baseline). The =True match/mismatch/unavailable paths are asserted by Step 3 tests.

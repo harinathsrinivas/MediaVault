@@ -1,6 +1,10 @@
+import shutil
+import hashlib
+import subprocess
 import sys, os, json
 import pytest
-import main  # repo root must be on sys.path
+import main      # repo root must be on sys.path
+import mvcommon  # authoritative home of LIBRARY_* + load_library/save_library
 
 # Ensure repo root is importable (for pytest invoked from any CWD)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -33,13 +37,18 @@ def sandbox(tmp_path, monkeypatch):
     lib_series = lib_dir / "library_series.json"
     lib_anime  = lib_dir / "library_anime.json"
 
-    # Hard guard: fail immediately if any constant still points under C:\Media
+    # Hard guard: fail immediately if any constant still points under C:\Media.
+    # After the mvcommon extraction, load_library/save_library read mvcommon's
+    # OWN module-level LIBRARY_* bindings, so mvcommon is the authoritative patch
+    # target. main imported the names by value (a separate binding), so we patch
+    # both mvcommon and main to keep every reader pointed at the sandbox.
     for attr, path in [
         ("LIBRARY_MOVIES", str(lib_movies)),
         ("LIBRARY_SERIES", str(lib_series)),
         ("LIBRARY_ANIME",  str(lib_anime)),
     ]:
         assert "C:\\Media" not in path, f"Safety check failed: {attr} still points to real media!"
+        monkeypatch.setattr(mvcommon, attr, path)
         monkeypatch.setattr(main, attr, path)
 
     yield {
@@ -86,6 +95,98 @@ def sandbox_entry(sandbox, tmp_path):
         "filename":  filename,
         "orig_path": orig_path,
     }
+
+
+@pytest.fixture()
+def mock_device(tmp_path, monkeypatch):
+    """
+    Stateful fake Android device backed by tmp_path/device/.
+    Intercepts main.subprocess.run for all adb calls and executes them against
+    the local filesystem instead of a real device. See docs/testing-strategy.md.
+
+    adb push [-p] <local> <remote>   -> shutil.copy2 into device_dir
+    adb shell mv '<src>' '<dst>'     -> os.rename within device_dir
+    adb shell rm '<path>'            -> os.unlink from device_dir
+    adb shell mkdir -p '<path>'      -> os.makedirs inside device_dir
+    adb shell md5sum '<path>'        -> md5 of file in device_dir on stdout
+    adb devices                      -> fake device list
+
+    Yields device_dir (pathlib.Path). Tests inspect it with rglob("*.mkv") etc.
+    Does NOT conflict with FakeAdb in test_cmd_push_partial.py — both patch
+    subprocess.run but they are used in separate test functions.
+    """
+    device_dir = tmp_path / "device"
+    device_dir.mkdir()
+
+    def _parse_adb(argv):
+        """Strip 'adb' and optional '-s <id>' prefix; return the subcommand list."""
+        argv = list(argv)
+        i = 0
+        while i < len(argv):
+            if argv[i] == "adb":
+                i += 1
+            elif argv[i] == "-s":
+                i += 2
+            else:
+                break
+        return argv[i:]
+
+    class _R:
+        returncode = 0
+        stdout = ""
+
+    def fake_run(argv, check=False, capture_output=False, **kwargs):
+        cmd = _parse_adb(argv)
+        res = _R()
+        if not cmd:
+            return res
+
+        if cmd[0] == "push":
+            # adb push [-p] <local> <remote> — skip flags
+            positional = [a for a in cmd[1:] if not a.startswith("-")]
+            local, remote = positional[0], positional[1]
+            dest = device_dir / remote.lstrip("/")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(local, dest)
+
+        elif cmd[0] == "shell":
+            sub = cmd[1:]
+            if not sub:
+                return res
+            if sub[0] == "mv":
+                src = sub[1].strip("'")
+                dst = sub[2].strip("'")
+                src_p = device_dir / src.lstrip("/")
+                dst_p = device_dir / dst.lstrip("/")
+                dst_p.parent.mkdir(parents=True, exist_ok=True)
+                if src_p.exists():
+                    src_p.rename(dst_p)
+                elif check:
+                    raise subprocess.CalledProcessError(1, argv)
+            elif sub[0] == "rm":
+                path = sub[-1].strip("'")
+                p = device_dir / path.lstrip("/")
+                if p.exists():
+                    p.unlink()
+            elif sub[0] == "mkdir":
+                path = sub[-1].strip("'")
+                (device_dir / path.lstrip("/")).mkdir(parents=True, exist_ok=True)
+            elif sub[0] == "md5sum":
+                path = sub[-1].strip("'")
+                p = device_dir / path.lstrip("/")
+                if p.exists():
+                    h = hashlib.md5(p.read_bytes()).hexdigest()
+                    res.stdout = f"{h}  {path}\n"
+                elif check:
+                    raise subprocess.CalledProcessError(1, argv)
+
+        elif cmd[0] == "devices":
+            res.stdout = "List of devices attached\nfake123\tdevice\n"
+
+        return res
+
+    monkeypatch.setattr(main.subprocess, "run", fake_run)
+    yield device_dir
 
 
 @pytest.fixture()

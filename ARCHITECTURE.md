@@ -97,6 +97,7 @@ C:\Users\harin\PycharmProjects\MediaVault\
 |
 |-- main.py                          ACTIVE — local pipeline + ADB push + restore (1621 lines)
 |-- mainfetch.py                     ACTIVE — Selenium fetch from Google Photos (507 lines)
+|-- mvcommon.py                      ACTIVE — shared library I/O + hashing constants/helpers imported by both entry points
 |-- requirements.txt                 ACTIVE — pymediainfo / undetected-chromedriver / selenium
 |-- ARCHITECTURE.md                  this document
 |-- README.md                        user-facing overview
@@ -502,6 +503,16 @@ folder names (`_parts`, `checksums`, `restore`), and the recognised
 extension tuple `('.mkv', '.mp4', '.avi', '.mov')`.
 
 ### 7.2 Utility functions
+
+> **As of IMP-A1**, the shared constants and the six helpers
+> `load_library`, `save_library`, `generate_short_id`, `calculate_file_hash`,
+> `human_readable_size`, and `parse_size_str` now live in `mvcommon.py` and are
+> imported by both `main.py` and `mainfetch.py` via `from mvcommon import ...`
+> (no local copies remain in either entry point). Both entry points' `load_library`
+> is now the loud/strict version (`sys.exit(1)` on a corrupt library) — the prior
+> drift where `mainfetch.load_library` silently treated a corrupt file as zero
+> entries is eliminated. `calculate_file_hash` additionally gained a live progress
+> bar. The line numbers in the table below are historical (pre-extraction).
 
 | Function | Lines | Behaviour |
 |---|---|---|
@@ -1320,6 +1331,13 @@ Implicit safety checks that act as runtime tests:
 All configuration is **hardcoded Python constants at the top of each
 file**. There are no env vars, `.env`, `config.json`, `settings.py`, or
 CLI flags for paths. To re-target the system, you edit the source.
+
+> **As of IMP-A1**, the shared library/path constants (`LIBRARY_MOVIES`,
+> `LIBRARY_SERIES`, `LIBRARY_ANIME`, `LOCAL_ROOT`, `MKVMERGE_PATH`,
+> `SPLIT_DIR_NAME`, `CHECKSUM_DIR_NAME`, `RESTORE_DIR_NAME`,
+> `VIDEO_EXTENSIONS`) are now defined once in `mvcommon.py` and imported by both
+> entry points. The "Defined in" column below reflects the historical
+> per-file locations; edit `mvcommon.py` to re-target any shared constant.
 
 ### Active configuration constants
 

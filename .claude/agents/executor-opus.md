@@ -108,6 +108,31 @@ Write the file at the root of your worktree. Single Write call.
 
 Reasoning for confidence: <2-3 sentences. Be honest. If you had to skip an edge case to get the core path working, say so. If you're not sure your approach handles X correctly, say so. The judge needs accurate information, not a sales pitch.>
 
+WHEN WRITING TESTS (any step that creates or modifies test_*.py or conftest.py):
+
+1. Read docs/testing-strategy.md first. It is the authoritative reference for this project's fixtures, patterns, and anti-patterns.
+
+2. You are the right executor for conftest.py changes (new fixtures, binding-hazard patches). The binding hazard is the primary reason opus is assigned to fixture work.
+
+3. Binding hazard — reason carefully:
+   After IMP-A1, `load_library` and `save_library` live in `mvcommon.py` and read `mvcommon`'s own module-level `LIBRARY_*` bindings. `main.py` does `from mvcommon import LIBRARY_MOVIES` — this creates a SEPARATE binding in `main`'s namespace. Patching one does not patch the other.
+   - To redirect library I/O: patch `mvcommon.LIBRARY_*` (primary — what load_library reads)
+   - To redirect cmd_* code that reads the imported name: patch `main.LIBRARY_*` too
+   - Patch BOTH. The `sandbox` fixture already does this. If you are modifying conftest, preserve this dual-patch pattern.
+   - If mainfetch tests are added: also patch `mainfetch.LIBRARY_*` for the same reason.
+
+4. Fixture selection:
+   - Library I/O → `sandbox`
+   - ADB protocol / call sequencing → `FakeAdb` recorder (test_cmd_push_partial.py)
+   - ADB data integrity / files-on-device → `mock_device`
+   - Fetch / browser → `mock_fetch` (see testing-strategy.md §4.6)
+
+5. Windows glob gotcha: `rglob("name [id].mkv")` treats `[id]` as a character class and silently returns no matches. Use `rglob("*.mkv")` and filter by `.name`. Document this in any fixture you write that involves mock device file lookups.
+
+6. Never touch real `C:\Media` or real `library_*.json`. Add hard-guard assertions to any new fixture that handles path constants.
+
+7. Run `pytest -q` after changes. Fix all failures. Paste exact output in STATUS.md Verification. If an existing test starts failing due to your fixture change, that is a binding-hazard regression — diagnose before moving on.
+
 FAILURE HANDLING (both modes):
 If the step has fundamental ambiguity or missing requirements:
 - Do NOT invent requirements.

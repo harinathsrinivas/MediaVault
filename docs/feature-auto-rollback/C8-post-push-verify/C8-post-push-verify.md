@@ -33,21 +33,25 @@ Task: Plan the implementation of improvement IMP-C8 ("Post-push remote verificat
 Read these FIRST, in this order, before planning:
 1. improvements_tierC.md -> the IMP-C8 section. The spec for WHAT and WHY.
 2. docs/feature-auto-rollback/README.md, then docs/feature-auto-rollback/RELATED_IMPROVEMENTS.md ("C8" subsection). C8 is COMPLEMENTARY to the upcoming auto-rollback feature: it catches silent corruption at push time so rollback never has to deal with a chunk that looks uploaded but is corrupt. The one hard requirement: the failure contract callers rely on must not change.
-3. ARCHITECTURE.md and the code: the adb push call in cmd_push in main.py (~line 668-690 — adb push, per-chunk local delete, loop continue); split_info structure (chunks[i].hash is already computed before push); and IMP-C2's retry helper if it has already been implemented.
+3. ARCHITECTURE.md and the code: the adb push call in cmd_push in main.py (the adb push + per-chunk local delete loop); split_info structure (chunks[i].hash is already computed before push); and IMP-C2's retry helper in mvcommon.py.
 
-What to build: after each successful `adb push` (and after G1's `adb shell mv` from `.partial` to final name, if G1 is already done), run `adb shell md5sum <remote_final_path>` (fall back to sha256sum if md5sum is unavailable on the device). Parse the device-side hash and compare to `split_info.chunks[i].hash`. On mismatch, treat the push as failed: if IMP-C2 is already done, let C2's retry handle the re-push; otherwise raise/return the same failure signal callers rely on. Gate the entire verification step behind a config flag `push.verify_remote` (default: false).
+Confirmed state — do not re-derive these, treat as facts:
+- IMP-G1 (push partial + atomic rename) is DONE and merged into origin/main (PR #7). Verify the file at the FINAL remote path (after `adb shell mv` from `.partial` to final name). Do not write a code path for the pre-G1 case — it no longer exists.
+- IMP-C2 (retry helper) is DONE and merged into origin/main before this task starts (we are doing C2 first). Integrate directly: a hash mismatch must raise a retryable exception so C2's retry wrapper in mvcommon.py handles the re-push. Do not treat this as conditional or leave a "future integration" note.
+- IMP-A1 (mvcommon) is DONE. The retry() helper lives in mvcommon.py. C8's verification helper (if extracted) may also live there.
+- Branch C8 from origin/main AFTER confirming both A1 and C2 are merged.
+
+What to build: after each successful `adb push` AND after G1's `adb shell mv` from `.partial` to final name, run `adb shell md5sum <remote_final_path>` (fall back to sha256sum if md5sum is unavailable). Parse the device-side hash and compare to `split_info.chunks[i].hash`. On mismatch, raise a retryable exception so C2's retry wrapper handles the re-push. Gate the entire verification step behind a config flag `push.verify_remote` (default: false) — a hardcoded module-level constant for now (configurability is IMP-A5, out of scope).
 
 Constraints (full list in docs/feature-auto-rollback/README.md):
-- Branch from origin/main. Suggested branch: feature/post_push_verify.
+- Branch from origin/main (after A1 + C2 merge). Suggested branch: feature/post_push_verify.
 - Happy path with verify_remote=false IDENTICAL to today. With verify_remote=true, first-push-success-and-hash-match is also identical. A failed hash check must return the SAME failure signal callers rely on — do not change the failure contract.
-- G1 interaction: if IMP-G1 is already done, verify the file at the FINAL remote path (after `adb shell mv`), not at the `.partial` path. If G1 is not done, verify at the direct push path. Check the cmd_push upload loop to determine which case applies.
-- C2 interaction: if IMP-C2 is already done, a hash mismatch should be raised as a retryable exception so C2's retry wrapper handles re-push. If C2 is not done, note the future integration point and raise the failure signal directly.
-- Tests in tests/, COPIES only — never touch real C:\Media files or real library_*.json; mock adb (subprocess.run) so no real device is needed; test: hash matches (passes), hash mismatches (fails/retries), adb shell command unavailable (graceful fallback or skip).
-- Surgical: the post-push verification step + config flag read + tests; don't touch archive/ or the pre-push split logic.
+- Tests in tests/, COPIES only — never touch real C:\Media files or real library_*.json; mock adb (subprocess.run) so no real device is needed; test: hash matches (passes), hash mismatches (C2 retry fires), adb shell hash command unavailable (graceful fallback or skip with warning).
+- Surgical: the post-push verification step + config flag constant + tests; don't touch archive/ or the pre-push split logic.
 
 DOCUMENTATION: save your PLAN.md into docs/feature-auto-rollback/C8-post-push-verify/PLAN.md; keep all task artifacts there; fill the "Completion report" in docs/feature-auto-rollback/C8-post-push-verify/C8-post-push-verify.md when done. (Keep /PLAN.md at root in sync if needed.)
 
-Pause and ask me about open decisions, at minimum: md5sum vs sha256sum preference (md5sum is faster; sha256sum is already used for local hashes — do we re-hash or re-use stored split_info hash?); what to do if the adb shell hash command is unavailable on the device (skip silently / warn / fail); how verify_remote=false is read from config (hardcoded constant for now vs config file); whether C2 is already done and whether to integrate now or leave a note.
+Pause and ask me about open decisions, at minimum: md5sum vs sha256sum (md5sum is faster; sha256sum already used locally — do we re-hash on device or accept the algorithm difference?); what to do if adb shell hash command is unavailable (skip silently with warning / hard-fail); where to put the verification helper (inline in cmd_push vs extracted to mvcommon).
 
 Deliverables: PLAN.md only (no code, no branches) with steps + tests + verification + "Open Decisions". Note IMP-C8 is marked done in improvements_tierC.md on implementation, the architect updates ARCHITECTURE.md/README if needed, and I want branch name, PR to main, and manual test commands at the end.
 ```

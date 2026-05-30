@@ -1,51 +1,59 @@
 # Execution Log
 
-Task: IMP-C11 — Hash-mismatch quarantine in cmd_restore
+Task: IMP-A1 — Extract shared library I/O + hashing into mvcommon.py
+Branch: refactor/extract_mvcommon (from origin/main @ 8c12680)
+Baseline (pre-change): pytest tests/test_cmd_replace.py tests/test_cmd_restore_quarantine.py -q -> 15 passed.
+Note: this STATUS.md is an orchestration scratchpad and is intentionally NOT committed (not in the A1 plan file list).
 
 ## Step 1 — [status: done]
 - Executor: orchestrator (direct; subagent Task tool unavailable in this run)
-- Model: opus
-- Files changed: `main.py` (added one top-level helper)
-- Outcome: Added `quarantine_restore_file(restore_folder, filename)` at main.py:1062, immediately before `cmd_restore`. It creates `<restore_folder>/quarantine/` (exist_ok=True), builds a colon-free timestamped destination `<filename>.<YYYYmmddTHHMMSS>`, applies a same-second collision counter (`.1`, `.2`, ...), `shutil.move`s the bad file there, and returns the final dest path. No call site yet — purely additive.
-- Key decisions: main.py imports datetime as `from datetime import datetime` (line 13), so the helper uses `datetime.now()`. `shutil` is already imported (line 6). No new imports added. Steps 2/3 must match this `datetime.now()` form.
-- Verification: `.venv\Scripts\python.exe -c "import main"` imports cleanly (attr present). Functional smoke test: moved a temp restore/ file into restore/quarantine/<name>.<ts> and returned that path (SMOKE PASS). Collision test: quarantining the same filename twice produced two distinct files, neither overwritten (COLLISION PASS).
+- Model: sonnet
+- Files changed: mvcommon.py (new)
+- Outcome: Created mvcommon.py at repo root with the 9 shared constants (LIBRARY_MOVIES/SERIES/ANIME, LOCAL_ROOT, MKVMERGE_PATH, SPLIT_DIR_NAME, CHECKSUM_DIR_NAME, RESTORE_DIR_NAME, VIDEO_EXTENSIONS) and 6 helpers. Stdlib-only imports (os, json, sys, hashlib, re, tempfile). load_library (loud sys.exit(1)), save_library (atomic), generate_short_id, human_readable_size, parse_size_str copied verbatim from main.py. calculate_file_hash rewritten with the live █/░ progress bar per the exact spec.
+- Key decision: PARTIAL_SUFFIX/MVMETA_SUFFIX (added on main by G1 work) are push-side and left in main.py — not in the move set.
+- Acceptance: python -c "import mvcommon; print(...)" printed all seven symbols. PASS.
 
 ## Step 2 — [status: done]
 - Executor: orchestrator (direct)
-- Model: opus
-- Files changed: `main.py` (standard-path failure branch of `cmd_restore` only)
-- Outcome: In the single-file (non-split) path of `cmd_restore`, the hash-mismatch failure branch (main.py:~1124) now calls `q = quarantine_restore_file(restore_folder, filename)`, prints `❌ Hash mismatch. Bad file quarantined at {q}. A fresh fetch will re-download.`, and returns False — instead of leaving the bad file in restore/. Wrapped in try/except: if the move is blocked, it falls back to the original `❌ Error: Restore file hash mismatch! Corrupt?` message (leave-in-place) and still returns False, so behavior is never worse than before. The success branch (`shutil.move(source_path, target_path)`, empty-restore/ cleanup, `status="restored_local"`) is untouched.
-- Key decisions: Passed the in-scope locals `restore_folder` (=`os.path.join(local_folder, RESTORE_DIR_NAME)`) and `filename` (=`entry['filename']`) directly to the helper — `source_path` is `os.path.join(restore_folder, filename)`, so the helper receives exactly the bad file. Greppable substring tests assert on is `Hash mismatch. Bad file quarantined at` (emoji prefix kept separate so it can't break the grep).
-- Verification: import clean; `grep -c "Bad file quarantined at"` = 1; success-path lines `shutil.move(source_path, target_path)` and `restored_local` still present. Behavioral (sandbox, LIBRARY_* monkeypatched): mismatch -> RETURN_FALSE, ORIG_GONE from restore/, exactly 1 file under restore/quarantine/ named `film.mkv.<ts>`, diagnostic in stdout, target dummy untouched. Success (matching hash) -> RETURN_TRUE, good bytes moved into folder_path, NO quarantine dir, status restored_local, restore/ cleaned.
+- Model: sonnet
+- Files changed: main.py
+- Outcome: Removed the 9 shared constant defs and the 6 moved helper defs; added a single `from mvcommon import (...)` near the config block. Kept REMOTE_ROOT, FFMPEG_PATH, DUMMY_*, MAINFETCH_SCRIPT, DEVICE_ALIASES, PARTIAL_SUFFIX, MVMETA_SUFFIX, resolve_device, get_tech_specs, all cmd_*. Removed orphaned `import hashlib` (only the deleted helpers used it). Kept `import tempfile` (still used at line 608 by G1 mvmeta sidecar) and `import re`/`json` (still used).
+- Acceptance: `import main` clean; `main.load_library.__module__ == mvcommon`; grep shows zero moved defs in main.py; `python main.py local_status` printed the same pending list as before (read-only, exercises load_library + human_readable_size). PASS.
 
 ## Step 3 — [status: done]
 - Executor: orchestrator (direct)
-- Model: opus
-- Files changed: `main.py` (split path of `cmd_restore`, inserted block only)
-- Outcome: Added a pre-merge per-chunk SHA256 verification loop (main.py:1100-1125) AFTER the existence check and BEFORE the `merge_video_files` call. It iterates `chunks_meta`, hashing `os.path.join(restore_folder, c['filename'])` and comparing to `c['hash']`, collecting offending filenames into `bad_chunks`. If any are bad: it quarantines ONLY the offending chunk(s) via `quarantine_restore_file` (clean chunks stay in restore/ for a targeted re-fetch), prints the greppable diagnostic per bad chunk, deletes any stale partial merged output at `target_path` via `os.remove` (guarded by exists + try/except), and returns False — so `merge_video_files` never runs on corrupt input. If all chunks pass, control falls through to the unchanged merge -> re-hash -> cleanup -> `status="restored_local"` -> return True success path.
-- Key decisions: Reused the existing in-scope locals: `chunks_meta` (= `entry["split_info"]["chunks"]`), `restore_folder`, and `target_path` (= `os.path.join(local_folder, filename)`, the merge destination). Quarantine call per offending chunk wrapped in try/except mirroring the standard path's fallback. Stale partial-output deletion uses `os.remove` (NOT quarantine) since it is reproducible from chunks. Diagnostic wording identical to the standard path.
-- Verification: import clean; `grep -c "Bad file quarantined at"` = 2 (standard + split); the merge call `if merge_video_files(chunk_paths_in_restore, target_path):` and `restored_local` both still present (success path untouched). Behavioral (sandbox, LIBRARY_* monkeypatched, 2 chunks where chunk.002 is corrupt, plus a stale partial merge at target): RETURN_FALSE; BAD_CHUNK_GONE from restore/; CLEAN_CHUNK_STAYS in restore/; exactly 1 file quarantined named `film.chunk.002.mkv.<ts>`; PARTIAL_MERGE_DELETED (target removed); diagnostic in stdout. merge_video_files never reached (so no mkvmerge dependency in this path).
+- Model: sonnet
+- Files changed: mainfetch.py
+- Outcome: Deleted mainfetch's silent load_library and its calculate_file_hash + the 9 shared constants; added `from mvcommon import RESTORE_DIR_NAME, load_library, calculate_file_hash`. mainfetch now uses the loud load_library contract (intentional behavior change). Removed orphaned `import hashlib` AND `import json` (both were used only by the deleted helpers; verified zero other uses). Kept CHROME_PROFILES, CHROME_PROFILE_NAME, SYSTEM_DOWNLOADS_FOLDER, Selenium block, all fetch logic.
+- Key decision: imported only the symbols mainfetch actually references (RESTORE_DIR_NAME at lines ~172/~349 + the 2 functions). The other 8 constants were dead in mainfetch even before this refactor, so re-importing them would just re-create dead bindings — kept the import line honest per plan's "import only the referenced ones" guidance and Open Decision 3. save_library/generate_short_id/human_readable_size/parse_size_str NOT imported (unused).
+- Acceptance: `import mainfetch` clean; load_library/calculate_file_hash resolve to mvcommon; grep shows zero defs; `python mainfetch.py` prints usage with no NameError (rc 0). PASS.
 
 ## Step 4 — [status: done]
 - Executor: orchestrator (direct)
 - Model: opus
-- Files changed: `tests/test_cmd_restore_quarantine.py` (new); `tests/conftest.py` NOT modified (C9 fixtures reused)
-- Outcome: Added a 9-test module (6 standard-path + 3 split-path). All tests build sandboxes on top of the existing C9 `sandbox` fixture (which monkeypatches LIBRARY_MOVIES/SERIES/ANIME to tmp JSON files and hard-guards against real C:\\Media) and use a local `mov_test_c11_001` entry. Standard-path tests: mismatch-moves-to-quarantine, greppable-diagnostic (capsys), returns-False, success-path-unchanged (file moved into folder_path, no quarantine dir, restore/ cleaned, status restored_local), re-quarantine-no-collision (two distinct quarantine files), self-heal-contract (the exact restore/<filename> path mainfetch checks is absent). Split-path tests: offending-chunk-only quarantine (clean chunk stays), partial-merge-output deleted, all-clean success.
-- Key decisions: conftest.py was NOT extended — the C9 `sandbox` fixture already provides the LIBRARY_* monkeypatch + media_dir + lib paths, so the new module's local helpers (`_make_single_file_scenario`, `_make_split_scenario`) build directly on it. The corrupt-chunk split tests deliberately make a chunk's disk bytes mismatch its stored hash so pre-merge verification returns False and `merge_video_files` is NEVER reached (per the plan, merge is not mocked there). For the single all-clean split-success test ONLY, `merge_video_files` is monkeypatched to a stub that writes a merged file and returns True — this deterministically proves pre-merge verification passes and control reaches the merge (asserting merge_calls==1, return True, target exists, no quarantine dir, chunks cleaned, status restored_local) without depending on a real mkvmerge run, keeping the suite hermetic and green. (mkvmerge IS present in this env, but stubbing keeps the test deterministic and fast.)
-- Verification: `pytest tests/test_cmd_restore_quarantine.py -v` -> 9 passed. Full suite `pytest tests/` -> 15 passed (9 new + 6 C9), 0 failures. collect-only confirms 9 + 6 = 15 tests. No test reads/writes real C:\\Media or real library_*.json (all via the sandbox monkeypatch + tmp_path).
+- Files changed: tests/conftest.py
+- Outcome: Added `import mvcommon`; the sandbox fixture now monkeypatches BOTH `mvcommon.LIBRARY_*` (authoritative — load_library/save_library read mvcommon's own bindings) AND `main.LIBRARY_*` (the by-value copy). Kept the `"C:\\Media" not in path` hard guard.
+- Key decision: DEMONSTRATED the binding hazard first — running C9/C11 with the old conftest (patching only main.LIBRARY_*) produced 12 failures ("ID not found") because mvcommon's bindings still pointed at real C:\Media and cmd_* couldn't see the sandbox entry. Patching mvcommon fixed it. mainfetch.LIBRARY_* not patched (no test touches fetch I/O).
+- Acceptance: `pytest tests/test_cmd_replace.py tests/test_cmd_restore_quarantine.py -q` -> 15 passed, identical to the pre-change baseline. No real C:\Media path touched (hard guard active).
 
 ## Step 5 — [status: done]
 - Executor: orchestrator (direct)
-- Model: haiku
-- Files changed: `ARCHITECTURE.md` (two surgical edits only)
-- Outcome: Edit 1 (§7.7 `cmd_restore` DESTRUCTIVE): in the split-entries list, inserted a new step 2 describing pre-merge per-chunk SHA256 verification + offending-chunk quarantine + clean-chunks-stay + stale-partial-output delete + return False, and renumbered the subsequent merge/re-hash/cleanup/status steps to 3-6. In the single-file list, rewrote step 1 so a mismatch moves the bad file to `restore/quarantine/<filename>.<timestamp>` via `quarantine_restore_file`, prints a greppable diagnostic, returns False, and self-heals on re-fetch; named the helper as the centralized seam. Edit 2 (§12 Error Handling): replaced the "Hash mismatch on restore: ... remains in restore/ for inspection" bullet with a bullet describing quarantine of bad file / offending chunks via `quarantine_restore_file`, the exact greppable diagnostic, split-path stale-output deletion + clean-chunk retention, the self-healing restore/, and the lock fallback.
-- Key decisions: Kept edits confined to exactly the two sections (diff shows two hunks: §7.7 ~line 780, §12 ~line 1213). Matched the existing numbered-list / bullet markdown style. The helper name appears in both edited locations so future readers and auto-rollback can find the seam.
-- Verification: `grep -c "quarantine_restore_file" ARCHITECTURE.md` = 2; `grep -c "for inspection" ARCHITECTURE.md` = 0 (old §12 wording removed); `git diff --stat` shows only ARCHITECTURE.md changed, 2 hunks, no unrelated edits.
+- Model: sonnet
+- Files changed: tests/test_mvcommon.py (new)
+- Outcome: 3 tests on the `sandbox` fixture (now patching mvcommon). Test A round-trip: save_library splits one mov-/tv-/ani- entry into the three sandbox JSONs by prefix, load_library merges back to an equal dict. Test B atomic save: monkeypatch mvcommon.os.replace to raise -> save_library re-raises OSError, leaves no .tmp orphan in lib dir, pre-existing target unchanged. Test C corrupt library: invalid JSON in lib_movies -> load_library raises SystemExit (codifies the unified loud contract).
+- Acceptance: `pytest tests/test_mvcommon.py -q` -> 3 passed. Full `pytest -q` -> 23 passed, 0 failures.
 
 ## Step 6 — [status: done]
 - Executor: orchestrator (direct)
 - Model: haiku
-- Files changed: `improvements_tierC.md`, `docs/feature-auto-rollback/C11-restore-quarantine/C11-restore-quarantine.md`, `docs/feature-auto-rollback/RELATED_IMPROVEMENTS.md`, `docs/feature-auto-rollback/C11-restore-quarantine/PLAN.md` (checkboxes 1-6 ticked)
-- Outcome: Flipped IMP-C11 in improvements_tierC.md from `pending` to `done (feature/restore_quarantine, PR to main 2026-05-29)` (matching the C9 format). Filled the C11 completion report: checked all 9 Definition-of-Done boxes and filled Branch / PR (#6) / Files changed / Tests added (9) / Manual test commands / Open decisions resolved (all 5) / Notes / Follow-ups (none). Added a "Seam (implemented)" note to RELATED_IMPROVEMENTS.md naming `quarantine_restore_file` as the helper auto-rollback should reuse. Ticked all six step checkboxes in PLAN.md.
-- Key decisions: Did NOT commit `docs/feature-auto-rollback/C9-atomic-replace/C9-atomic-replace.md` — its working-tree change is a 0-line (CRLF-only phantom) diff unrelated to C11. The RELATED_IMPROVEMENTS.md working tree also carried a pre-existing cosmetic table-realignment from a prior session; that is included alongside the new seam note since it lives in the same file. `.obsidian/` and the session transcript `.txt` were left untracked (not committed). The root `/PLAN.md` was never touched.
-- Verification: IMP-C11 Status line reads `done`; C11 report PR field shows the real URL; `quarantine_restore_file` present in RELATED_IMPROVEMENTS.md; `import main` still clean. Final full suite re-run: 15 passed.
+- Files changed: improvements_tierA.md, ARCHITECTURE.md, README.md
+- Outcome: improvements_tierA.md IMP-A1 Status flipped pending -> done (refactor/extract_mvcommon, PR to main 2026-05-30). ARCHITECTURE.md: added mvcommon.py to the §3 layout block, a note after §7.2 (six helpers + constants now in mvcommon, both load_library loud, progress bar added), and a note in §14 (shared constants now defined once in mvcommon). README.md: added mvcommon.py to the file-tree.
+- Key decision: surgical additive edits only — historical line numbers in the §7.2/§14 tables left intact with a note that they predate the extraction (avoids churning the whole tables).
+- Acceptance: grep IMP-A1 -> Status: done; ARCHITECTURE mvcommon mentions = 7; README = 1; git diff is small/additive.
+
+## Step 7 — [status: done]
+- Executor: orchestrator (direct)
+- Model: haiku
+- Files changed: docs/feature-auto-rollback/A1-extract-mvcommon/A1-extract-mvcommon.md; docs/.../A1-extract-mvcommon/PLAN.md (committed as artifact)
+- Outcome: Filled the completion report (files changed, tests, manual commands all green, 5 resolved decisions, the conftest binding-location finding, the parked G1 stash note). Front-matter status -> done; DoD boxes ticked except "PR opened" (left for after push). Root PLAN.md confirmed gitignored + untouched (in-flight G1 copy).
+- Acceptance: report filled with concrete commands/results; root PLAN.md untouched (git check-ignore = PLAN.md, no diff).

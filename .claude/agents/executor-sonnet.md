@@ -103,6 +103,33 @@ Write the file at the root of your worktree (the working directory provided by t
 
 Reasoning for confidence: <2-3 sentences. Be honest. If you had to skip an edge case to get the core path working, say so. If you're not sure your approach handles X correctly, say so. The judge needs accurate information, not a sales pitch.>
 
+WHEN WRITING TESTS (any step that creates or modifies test_*.py or conftest.py):
+
+1. Read docs/testing-strategy.md first. It is the authoritative reference for this project's fixtures, patterns, and anti-patterns.
+
+2. Check tests/conftest.py for existing fixtures before writing anything new. The available fixtures are: `sandbox`, `sandbox_entry`, `fake_dummy`, `mock_device`. Never re-invent them.
+
+3. Fixture selection:
+   - Library I/O (load_library / save_library / any cmd_*) → `sandbox`
+   - ADB protocol / call sequencing → `FakeAdb` recorder (defined in test_cmd_push_partial.py)
+   - ADB data integrity / files-on-device → `mock_device`
+   - Fetch / browser / trigger_download → `mock_fetch` (see testing-strategy.md §4.6; implement if not yet in conftest)
+
+4. Binding hazard (CRITICAL — get this wrong and tests silently hit C:\Media):
+   After IMP-A1, `load_library` and `save_library` read `mvcommon`'s own module-level bindings. Patching only `main.LIBRARY_*` does NOT redirect them.
+   Always patch BOTH: `monkeypatch.setattr(mvcommon, "LIBRARY_MOVIES", ...)` AND `monkeypatch.setattr(main, "LIBRARY_MOVIES", ...)`.
+   The `sandbox` fixture already does this correctly — use it instead of patching manually.
+
+5. Windows glob gotcha: `rglob("name [id].chunk.001.mkv")` treats `[id]` as a glob character class and silently returns no matches. MediaVault filenames contain `[short_id]`. Always use `rglob("*.mkv")` and filter by `.name`:
+   ```python
+   files = {f.name: f for f in device_dir.rglob("*.mkv")}
+   assert "movie [abc123].chunk.001.mkv" in files
+   ```
+
+6. Never touch real `C:\Media` or real `library_*.json`. Never assert on absolute device paths — search by name with `rglob("*.ext")`.
+
+7. Run `pytest -q` after writing tests. Fix all failures before marking the step done. Paste the exact output in STATUS.md Verification.
+
 FAILURE HANDLING (both modes):
 If the step needs design decisions not covered in the plan, or you encounter something that requires user judgment:
 - Do NOT invent requirements.

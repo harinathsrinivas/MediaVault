@@ -675,6 +675,18 @@ High-level sequence inside one `cmd_push` call:
      best-effort) and a single `⏳ Retry N/3` line is printed. After exhaustion
      `retry()` re-raises the last `CalledProcessError`, so the existing
      break/return-`False` failure contract is unchanged.
+   - **Post-push verification (IMP-C8)**: gated on the module-level
+     `PUSH_VERIFY_REMOTE` flag (default `False`). When `True`, after the
+     push + atomic `mv` succeed, `_verify_chunk_hash` runs
+     `adb shell sha256sum '<remote>'` on the device and compares the result
+     to the stored chunk hash (`split_info.chunks[i].hash`). A mismatch raises
+     `CalledProcessError` *inside* the retried closure, so the same C2 retry
+     wrapper re-runs push→mv→verify; on exhaustion the push fails normally. If
+     `sha256sum` itself is unavailable (non-zero exit), the verifier prints one
+     warning and skips (warn-and-skip), so a device without `sha256sum` never
+     blocks a push. With `PUSH_VERIFY_REMOTE=False` the verify body never runs
+     and the happy path is byte-for-byte unchanged. Toggling the flag without
+     editing source is deferred to IMP-A5 (config file).
 7. **Post-loop bookkeeping**:
    - Remove `_parts/` if it's empty.
    - If all chunks succeeded AND no `chunk_range` filter was active,

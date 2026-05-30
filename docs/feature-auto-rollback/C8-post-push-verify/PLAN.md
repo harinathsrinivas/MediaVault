@@ -311,7 +311,7 @@ single-executor (see Multi-candidate summary).
 
 ---
 
-### Step 4 — [model: haiku] Mark IMP-C8 done; update ARCHITECTURE.md
+### Step 4 — [x] [model: haiku] Mark IMP-C8 done; update ARCHITECTURE.md
 
 **Files:** `improvements_tierC.md`, `ARCHITECTURE.md`
 

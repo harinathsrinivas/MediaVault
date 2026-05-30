@@ -34,3 +34,11 @@ Note: Task subagent tool is unavailable in this run, so the orchestrator execute
 - Judge rationale (ranked criteria): #1 correctness TIE (both 5/5, full contract). #2 fault-injection clarity -> A (single constructor flag vs indirect byte corruption). #3 regression strength -> A (slight; literal empty-list assert, no wrapper). #4 blast radius -> A decisively (one new file, zero shared-fixture change vs B's behavioural change to a fixture the G1/C2 suites depend on — the exact risk the plan flagged). #5 fidelity -> B (real round trip; lowest-ranked). Ranking favors A.
 - Scenarios proven (a) verify-off zero sha256sum calls; (b) match -> onboarded, 1 call/chunk; (c) mismatch-then-match -> C2 retry self-heals, 2 calls, 1 `rm '.partial'`; (d) all-3-mismatch -> False, entry unchanged, _parts/ populated, 3 calls; (e) unavailable -> warn+skip, True, 1 call, no retry.
 - Acceptance: `pytest tests/test_cmd_push_verify.py -q` -> 5 passed; full `pytest -q` -> 51 passed (no regressions). PASS.
+
+## Step 4 — [status: done]
+- Executor: orchestrator (direct)
+- Model: haiku (effort tag: low — matches executor-haiku baked low; no mismatch)
+- Files changed: improvements_tierC.md, ARCHITECTURE.md
+- Outcome: improvements_tierC.md IMP-C8 Status flipped `pending` -> `done (feature/post_push_verify, PR to main 2026-05-30)` (mirrors IMP-C2/C9 wording). ARCHITECTURE.md §7.5 gained a "Post-push verification (IMP-C8)" sub-bullet under the upload loop: gated on `PUSH_VERIFY_REMOTE` (default False), runs `adb shell sha256sum '<remote>'` after push+mv, compares to the stored chunk hash, raises CalledProcessError on mismatch inside the retried closure (so C2's retry re-runs push->mv->verify), warn-and-skips when sha256sum is unavailable, byte-identical happy path when False, config-toggle deferred to IMP-A5.
+- Note: improvements_tierC.md had a pre-existing CRLF-only working-tree artifact (no content diff); this edit defines its committed content cleanly.
+- Acceptance: IMP-C8 shows done with branch + PR note; ARCHITECTURE mentions the verification step and the PUSH_VERIFY_REMOTE flag. Additive doc edits only. PASS.

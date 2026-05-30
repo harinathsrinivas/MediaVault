@@ -171,7 +171,7 @@
 - Rationale: Defensive measure for the rare but real case of silent corruption in transit. The cost is one extra hash computation on the phone per chunk — significant for big chunks but on a modern Pixel still much faster than the push itself.
 - Goal: Catches the silent-corruption class of failure that would otherwise only surface during restore weeks later.
 - Effort estimate: small
-- Status: pending
+- Status: done (feature/post_push_verify, PR to main 2026-05-30)
 
 ---
 

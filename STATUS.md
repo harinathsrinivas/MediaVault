@@ -42,3 +42,13 @@ Note: Task subagent tool is unavailable in this run, so the orchestrator execute
 - Outcome: improvements_tierC.md IMP-C8 Status flipped `pending` -> `done (feature/post_push_verify, PR to main 2026-05-30)` (mirrors IMP-C2/C9 wording). ARCHITECTURE.md §7.5 gained a "Post-push verification (IMP-C8)" sub-bullet under the upload loop: gated on `PUSH_VERIFY_REMOTE` (default False), runs `adb shell sha256sum '<remote>'` after push+mv, compares to the stored chunk hash, raises CalledProcessError on mismatch inside the retried closure (so C2's retry re-runs push->mv->verify), warn-and-skips when sha256sum is unavailable, byte-identical happy path when False, config-toggle deferred to IMP-A5.
 - Note: improvements_tierC.md had a pre-existing CRLF-only working-tree artifact (no content diff); this edit defines its committed content cleanly.
 - Acceptance: IMP-C8 shows done with branch + PR note; ARCHITECTURE mentions the verification step and the PUSH_VERIFY_REMOTE flag. Additive doc edits only. PASS.
+
+## Step 5 — [status: done]
+- Executor: orchestrator (direct)
+- Model: haiku (effort tag: low — matches executor-haiku baked low; no mismatch)
+- Files changed: docs/feature-auto-rollback/C8-post-push-verify/C8-post-push-verify.md, docs/feature-auto-rollback/_TRACKER.md, /PLAN.md (root, gitignored — local sync only)
+- Outcome:
+  1. Filled the Completion report in C8-post-push-verify.md (branch, PR placeholder, files changed, 5 tests, manual commands, OD-1/2/3 resolved, the multi-candidate B mv-overwrite surprise note + Task-tool-unavailable note + stray-README note, no new follow-ups). Front-matter status -> done; all DoD boxes ticked. PR URL left as PR_URL_PLACEHOLDER, filled after the PR is opened in finalize.
+  2. _TRACKER.md: row 6 `not-started` -> `done`; checklist `- [ ] C8 — post-push remote md5sum verify` -> `- [x] C8 — post-push remote verify *(done — feature/post_push_verify, PR to main 2026-05-30)*`.
+  3. Restored root /PLAN.md from docs/feature-auto-rollback/PLAN.md (auto-rollback plan) — `git diff --no-index` confirms IDENTICAL. Confirmed gitignored (`git check-ignore PLAN.md`), so NOT committed; this hands the root live working copy back to the auto-rollback feature now that C8 is done.
+- Acceptance: completion report populated; _TRACKER shows C8 done with branch/PR note; root /PLAN.md matches the auto-rollback plan (NOT the C8 plan). PASS.

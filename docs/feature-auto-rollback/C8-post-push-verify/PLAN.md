@@ -330,7 +330,7 @@ step and the `PUSH_VERIFY_REMOTE` flag.
 
 ---
 
-### Step 5 — [model: haiku] Fill completion report; restore root PLAN.md to auto-rollback; update tracker
+### Step 5 — [x] [model: haiku] Fill completion report; restore root PLAN.md to auto-rollback; update tracker
 
 **Files:** `docs/feature-auto-rollback/C8-post-push-verify/C8-post-push-verify.md`,
 `docs/feature-auto-rollback/_TRACKER.md`,

@@ -230,4 +230,4 @@
 - Rationale: Today a bad chunk traps the user. With quarantine, the system self-recovers on retry without manual cleanup.
 - Goal: Hash mismatches are recoverable by simply re-running fetch. The user no longer has to manually delete bad files.
 - Effort estimate: small
-- Status: pending
+- Status: done (feature/restore_quarantine, PR #6, merged 2026-05-29)

@@ -110,6 +110,30 @@ Steps:
 4. After feature branch push, also push tags: `git push origin --tags` (this pushes all the candidates/step-N/X-chosen|rejected tags so they're preserved on the remote).
 5. Report: push result, remote tracking status, tag push result. If `git remote get-url origin` shows GitHub, suggest the PR URL: `https://github.com/<owner>/<repo>/pull/new/<branch>`.
 
+### OP: CREATE_PR
+Inputs: base_branch (default `main`), head_branch (default current), title, summary_md (the auto-generated Claude Code summary: Summary/Changes/Test plan), original_prompt (the COMPLETE verbatim initial task prompt), imp_code (optional, e.g. `IMP-H1`)
+Creates a GitHub PR following `docs/git-pr-conventions.md`. Uses `gh` with the system's stored credentials (never read or paste tokens).
+Steps:
+1. Confirm head_branch is pushed (`git rev-parse --abbrev-ref --symbolic-full-name @{u}`); if not, STOP and report (run PUSH_BRANCH first).
+2. TITLE: if imp_code is provided (or derivable from the task), it MUST appear in the title, format `<type>: <short summary> — <IMP-XN>`. If none applies, omit the code.
+3. BODY (exact order per the convention):
+   a. The summary_md (auto-generated Claude Code summary).
+   b. A `---` separator, then `## Original task prompt` followed by original_prompt **verbatim** (do not trim/paraphrase). Quote it as a blockquote.
+   c. Final line: `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
+4. Write the body to a temp file with the Write tool is NOT available to you — instead pass it via `gh pr create --title "<title>" --body "<body>"`. For multi-line bodies use a single-quoted here-string on Windows PowerShell, or `--body-file` if the orchestrator provides a path.
+5. Run `gh pr create --base <base_branch> --head <head_branch> --title "<title>" --body "<body>"`.
+6. Report: PR number and URL (`gh pr view --json number,url`).
+
+### OP: MERGE_PR
+Inputs: pr_number (optional, defaults to the PR for current branch), method (default `squash`)
+Squash-merges a PR into its base and deletes the branch.
+Steps:
+1. Run `gh pr view --json number,mergeable,baseRefName` — confirm mergeable. If not, STOP and report.
+2. Confirm base is `main`/`master` (PRs only merge into the default branch here).
+3. Run `gh pr merge <pr_number> --squash --delete-branch`.
+4. Run `git checkout <base>` then `git pull --ff-only` to sync local base.
+5. Report: merge status, squash commit SHA on base, branch deletion, local sync result.
+
 ### OP: STATUS
 Steps:
 1. Run `git status`
@@ -128,7 +152,7 @@ ERROR HANDLING:
 
 OUTPUT FORMAT:
 Always report:
-- Operation performed (CREATE_BRANCH / COMMIT_STEP / CREATE_CANDIDATE_WORKTREE / COMMIT_CANDIDATE / MERGE_CANDIDATE_WINNER / ARCHIVE_CANDIDATES / PUSH_BRANCH / STATUS)
+- Operation performed (CREATE_BRANCH / COMMIT_STEP / CREATE_CANDIDATE_WORKTREE / COMMIT_CANDIDATE / MERGE_CANDIDATE_WINNER / ARCHIVE_CANDIDATES / PUSH_BRANCH / CREATE_PR / MERGE_PR / STATUS)
 - Exact commands run
 - Output of each command (or summary if long)
 - Success/failure status

@@ -175,7 +175,11 @@ This is the heavy path. Follow precisely.
 1. After all steps complete: run the Verification commands listed in PLAN.md (bash for tests/linters).
 2. If verification passes:
    - Invoke git-agent with operation PUSH_BRANCH.
-   - Report final summary to user: branch name, total steps, files changed, commit count, push status, suggested PR URL, list of any multi-candidate steps with their winners and DECISION.md paths.
+   - Open a PR per `docs/git-pr-conventions.md`: invoke git-agent with operation CREATE_PR, supplying
+     - title: include the IMP code when the task maps to one (e.g. `… — IMP-C2`); check `improvements_tier*.md`.
+     - summary_md: a concise Summary / Changes / Test plan you compose from the executed steps.
+     - original_prompt: the COMPLETE verbatim initial task prompt the user gave for this task (do not trim or paraphrase).
+   - Report final summary to user: branch name, total steps, files changed, commit count, push status, the PR URL, effort mismatches (per EFFORT TAG HANDLING), and any multi-candidate steps with their winners and DECISION.md paths.
 3. If verification fails:
    - Do NOT push.
    - Report failure with command output. Recommend a fix step or manual review.

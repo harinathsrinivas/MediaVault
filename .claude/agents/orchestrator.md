@@ -8,6 +8,11 @@ tools: Read, Write, Edit, Glob, Grep, Bash, Task
 
 You are the execution orchestrator. You drive PLAN.md from start to finish by coordinating executors, the git-agent, and (for multi-candidate steps) the judge.
 
+PLAN.md LOCATION CONVENTION (IMPORTANT):
+- Root `/PLAN.md` is the **live working copy** you and the executors consume during the run. It is **gitignored — never committed or pushed.**
+- The **canonical, tracked** plan + `DECISIONS.md` + completion reports live under `docs/<feature>/` and ship with the feature branch.
+- As steps complete, ticks happen in the root `/PLAN.md`. At end-of-run, ensure `docs/<feature>/PLAN.md` (and the feature's `DECISIONS.md` / completion report) reflect the final state, and have git-agent commit those `docs/<feature>/` artifacts with the branch. Never ask git-agent to commit root `/PLAN.md`.
+
 CRITICAL TOOL CONSTRAINTS (Windows):
 - Use Task to invoke subagents (executors, git-agent, judge). This is your primary tool.
 - Use Read for inspecting PLAN.md, ARCHITECTURE.md, STATUS.md, candidate CRITIQUE.md files, DECISION.md.
@@ -174,6 +179,7 @@ This is the heavy path. Follow precisely.
 ### Phase 3: Finalize
 1. After all steps complete: run the Verification commands listed in PLAN.md (bash for tests/linters).
 2. If verification passes:
+   - Ensure the canonical `docs/<feature>/PLAN.md` (and `DECISIONS.md` / completion report) match the final state of the run, then have git-agent COMMIT_STEP those `docs/<feature>/` artifacts (root `/PLAN.md` is gitignored and is NOT committed).
    - Invoke git-agent with operation PUSH_BRANCH.
    - Open a PR per `docs/git-pr-conventions.md`: invoke git-agent with operation CREATE_PR, supplying
      - title: include the IMP code when the task maps to one (e.g. `… — IMP-C2`); check `improvements_tier*.md`.

@@ -296,6 +296,88 @@ def make_video_dummy(output_path, extension):
 
 
 # ==========================================
+#   AUTO-ROLLBACK SPEC  (point-of-no-return + artifact map)
+# ==========================================
+# Authoritative implementation spec for the auto-rollback feature
+# (feature/auto_rollback). This block is DESIGN-ONLY documentation — it adds NO
+# behavior. Each Step-3 candidate implements its own rollback primitive against
+# this contract; placement of that primitive is candidate-chosen (main.py is the
+# default per DECISIONS.md N-4) so this spec is intentionally location-agnostic.
+# Line refs below are verified against the current main.py (2026-05-31). See
+# docs/feature-auto-rollback/PLAN.md + DECISIONS.md (D-1..D-9, O-1..O-3, N-1..N-6).
+#
+# --- INVARIANT (O-2) ---------------------------------------------------------
+# The master/original video is the source of truth. As long as it exists on disk
+# the operation is REVERSIBLE. The master is destroyed in exactly two places:
+#   1. cmd_replace commit rename (os.rename(original -> .tobedeleted), line ~990)
+#   2. cmd_restore split-path chunk delete (os.remove of merged chunks, ~1232-1234)
+# These two — and only these two — are true points-of-no-return (PONR). Push is
+# reversible/resumable (O-1): the master always survives a push failure.
+#
+# --- SNAPSHOT DATA SHAPE (D-6), captured per-id at command entry --------------
+# A rollback snapshot records, for the target id (and its parent if any):
+#   entry_existed        : bool   — was library[id] present at entry?
+#   prior_status         : str|None — entry["status"] at entry (to revert)
+#   prior_uploaded       : bool|None — entry["uploaded"] at entry (to revert)
+#   parent_id            : str|None — resolved parent id (season_map), if any
+#   parent_existed       : bool   — was library[parent] present at entry?
+#   child_already_linked : bool   — was id already in parent["children"]?
+#   split_info_existed   : bool   — did entry already carry "split_info"?
+#   preexisting_paths    : set    — which of {uid, <short_id>.sha256, _parts/,
+#                                   checksums/, restore/, target_path} existed at
+#                                   entry. Rollback deletes only the set-DIFFERENCE
+#                                   (created-this-run); pre-existing paths are NEVER
+#                                   touched (resume-safe — see _parts/ resume @700).
+# Rollback reverts the in-memory library dict to the snapshot, then save_library().
+#
+# --- INVERSE ACTION PER REVERSIBLE ARTIFACT (created-this-run only) -----------
+#   library entry            -> del library[id]                 (only if not entry_existed)
+#   entry["split_info"]      -> entry.pop("split_info", None)   (only if not split_info_existed)
+#   entry["status"]/["uploaded"] -> restore prior_* values      (if entry_existed)
+#   uid sidecar              -> os.remove(<folder>/uid)         (only if created-this-run)
+#   <short_id>.sha256 sidecar-> os.remove                       (only if created-this-run)
+#   _parts/ dir + contents   -> shutil.rmtree(parts_dir)        (only if created-this-run;
+#                                NEVER if it pre-existed — that is the resume path @700-703)
+#   checksums/ dir + contents-> shutil.rmtree(checksum_dir)     (only if created-this-run)
+#   restore/ merged target   -> os.remove(target_path)          (reproducible from chunks;
+#                                code already does this @1213-1217 on hash-mismatch)
+#   parent child-link        -> parent["children"].remove(id);
+#                               parent["total_episodes"] = len(children)  (if child added this run)
+#   parent season_map (D-7)  -> del library[parent] ONLY IF (this run created the parent)
+#                               AND (removing this child leaves 0 children); otherwise just
+#                               unlink the child + recompute total_episodes.
+# Windows file locks (Plex / Windows Search) can make os.remove/rmtree fail mid-
+# rollback; the primitive must report PARTIAL rollback honestly, not claim success.
+#
+# --- PONR TOGGLE ------------------------------------------------------------
+# The primitive exposes a "mark PONR crossed" toggle. Before it is set, a failure
+# rolls back (above). After it is set, a failure is a STRUCTURED HARD-FAIL carrying
+# (current state, why rollback is impossible, the EXISTING command that resumes/
+# repairs it). No new command is invented — irreversible hard-fails name the
+# existing `fetch_restore <id>` pipeline (N-2; the bytes live in the cloud).
+#
+# --- D-9 ---------------------------------------------------------------------
+# The empty remote dir created by `adb shell mkdir` (push, @691) is left in place
+# on rollback. NEVER `adb shell rmdir` it (harmless; a re-run reuses it; avoids a
+# round-trip + a new failure surface mid-rollback).
+#
+# --- PER-COMMAND PONR SUMMARY (details in-line at each cmd_* below) -----------
+#   cmd_prep    (@302) : fully reversible — NO PONR. Early-skips @311-318 create
+#                        ZERO artifacts and MUST NOT roll back (return True).
+#   cmd_push    (@654) : NO rollback PONR (O-1). Failure -> resume-message; leave the
+#                        partial upload, entry stays local_ready/uploaded=False, print
+#                        `push <id>`. Roll back this-run _parts/checksums/split_info
+#                        ONLY if created-this-run AND failure is pre-any-upload.
+#   cmd_replace (@943) : PONR = os.rename(original -> .tobedeleted) @990. Pre-PONR
+#                        rollback = delete the dummy temp @957. At/after PONR =
+#                        hard-fail naming `fetch_restore <id>`. C9 stale-sweep
+#                        (@966-979) self-heals a torn crash on the next replace.
+#   cmd_restore (@1167): split-path PONR = merged-chunk delete @1232-1234. Pre-PONR
+#                        reuses C11 quarantine_restore_file (@1207) + the reproducible-
+#                        output cleanup (@1213-1217). At/after PONR = hard-fail naming
+#                        `fetch_restore <id>`. Standard path (@1248) is a single
+#                        shutil.move — no torn window.
+# ==========================================
 #             CORE COMMANDS
 # ==========================================
 
@@ -306,14 +388,22 @@ def cmd_prep(manual_id, filepath, parent_id=None):
     # [NEW] Load library EARLY to check if we should skip
     library = load_library()
 
+    # [ROLLBACK SPEC] cmd_prep is FULLY REVERSIBLE — no PONR. A rollback removes
+    # only this-run artifacts: the library entry (if not entry_existed), the uid +
+    # <short_id>.sha256 sidecars (if created-this-run), and the parent child-link /
+    # this-run-created parent season_map per D-7. See the module spec block above.
     if manual_id in library:
         entry = library[manual_id]
         if entry.get("uploaded") == True or entry.get("status") == "archived":
+            # [ROLLBACK SPEC] Early-skip: returns True having created ZERO artifacts.
+            # The wrapper MUST treat this as success and NEVER roll back.
             print(f"   ⏭️  Skipping Prep: {manual_id} (Already marked as uploaded/archived).")
             return True
 
     # Secondary Safety Net: Just in case the JSON is out of sync but the file is clearly a dummy
     if os.path.getsize(filepath) < DUMMY_MAX_BYTES:
+        # [ROLLBACK SPEC] Early-skip: returns True having created ZERO artifacts.
+        # The wrapper MUST treat this as success and NEVER roll back.
         print(f"   ⏭️  Skipping Prep: {manual_id} (Dummy file detected).")
         return True
 
@@ -696,6 +786,14 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
     files_to_upload_paths = []
     chunk_metadata = []
 
+    # [ROLLBACK SPEC] cmd_push has NO rollback PONR (O-1). A push failure is
+    # RESUMABLE: the master survives, so chunks can always be re-split/re-pushed.
+    # On failure the wrapper emits the resume-message (leave the partial upload,
+    # entry stays local_ready/uploaded=False, print `push <id>`) — NOT a rollback.
+    # The chunk delete @858-862 below is resumable, NOT a PONR. The only artifacts
+    # a push rollback may remove are this-run _parts/checksums/split_info, and ONLY
+    # if created-this-run AND the failure is pre-any-upload. A pre-existing _parts/
+    # (the resume branch just below) MUST NEVER be deleted.
     # 1. CHECK FOR RESUME (Existing _parts folder)
     if os.path.exists(parts_dir) and os.listdir(parts_dir):
         files_to_upload_paths = sorted(
@@ -733,6 +831,10 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
                 with open(os.path.join(checksum_dir, f"{c_name}.sha256"), 'w') as f: f.write(f"{c_hash} *{c_name}")
 
             # Save split info to library IMMEDIATELY
+            # [ROLLBACK SPEC] split_info is written HERE this run. A pre-any-upload
+            # rollback pops it ONLY if split_info_existed was False at entry (a prior
+            # interrupted push may have left it). _parts/ + checksums/ created just
+            # above (@719-720) are likewise removed only if created-this-run.
             library[manual_id]["split_info"] = {
                 "is_split": True, "method": split_method, "val": split_val,
                 "total_chunks": len(files_to_upload_paths), "chunks": chunk_metadata
@@ -855,6 +957,9 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             # DELETE LOCAL CHUNK after successful upload+rename.
             # The chunk is "done" only once renamed to its final name.
             # Safety: Only delete if it's inside the SPLIT_DIR_NAME folder
+            # [ROLLBACK SPEC] This delete is NOT a PONR (O-1) — the deleted chunk is
+            # reproducible from the surviving master via re-split. A push failure
+            # after some chunks were uploaded+deleted is the resume-message case.
             if SPLIT_DIR_NAME in f:
                 try:
                     os.remove(f);
@@ -954,6 +1059,8 @@ def cmd_replace(manual_id):
     original = os.path.join(local_folder, filename)
 
     ext = os.path.splitext(filename)[1]
+    # [ROLLBACK SPEC] tmp_path (<original>.dummy_tmp<ext>) is the ONLY pre-PONR
+    # artifact in cmd_replace. A pre-PONR failure rolls back by deleting tmp_path.
     tmp_path = original + ".dummy_tmp" + ext
     if not make_video_dummy(tmp_path, ext):
         print(f"❌ replace aborted — could not create video dummy for {filename}")
@@ -987,6 +1094,12 @@ def cmd_replace(manual_id):
             try:
                 # Force Write Permissions
                 os.chmod(original, stat.S_IWRITE)
+                # [ROLLBACK SPEC] PONR (O-2): the master leaves its path here. BEFORE
+                # this line a failure rolls back (delete tmp_path). AT/AFTER this line
+                # a failure is a structured HARD-FAIL naming `fetch_restore <id>` (the
+                # bytes are in the cloud). C9's stale-sweep above (@966-979) already
+                # self-heals a torn crash on the NEXT replace; the wrapper must not
+                # double-handle that — pre-PONR rollback only removes tmp_path.
                 os.rename(original, tobedeleted)  # ROLLBACK SEAM: original removed from its path here (atomic commit / point-of-no-return)
                 moved = True
                 break
@@ -1200,6 +1313,10 @@ def cmd_restore(manual_id):
                 bad_chunks.append(c['filename'])
 
         if bad_chunks:
+            # [ROLLBACK SPEC] Pre-PONR reversible path. The wrapper REUSES this C11
+            # quarantine + reproducible-output cleanup (@1213-1217) as the clean-state
+            # behavior — it must NOT duplicate it. No merged target exists yet that
+            # this run cannot reproduce from chunks.
             # Quarantine only the offending chunk(s); clean chunks stay in
             # restore/ so a targeted re-fetch refills just the bad ones.
             for chunk_filename in bad_chunks:
@@ -1228,6 +1345,12 @@ def cmd_restore(manual_id):
             save_library(library)
 
             # --- CLEANUP ---
+            # [ROLLBACK SPEC] PONR (O-2, split path): the merged chunks are deleted
+            # from restore/ here. BEFORE this loop a restore failure is reversible
+            # (the merged target_path is reproducible from chunks — safe to remove).
+            # AT/AFTER this delete a failure is a structured HARD-FAIL naming
+            # `fetch_restore <id>` (a re-merge now needs a re-fetch). The standard
+            # path (@1248) is a single shutil.move with no torn window — no PONR.
             print("   > 🧹 Cleaning up chunks...")
             for p in chunk_paths_in_restore:
                 try:

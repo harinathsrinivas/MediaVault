@@ -51,3 +51,17 @@ Model/effort policy (DECISIONS.md N-5): every logic-bearing step is opus/max; no
 - DESIGN.md: docs/feature-auto-rollback/rollback-architecture/CANDIDATE_B.md.
 - git diff --stat (vs 80f7711): main.py + tests/test_rollback.py (new, portable behavior-only matrix) + tests/test_cmd_replace.py (same 1 except broadened) + CANDIDATE_B.md. ~704 ins net. mainfetch.py untouched. No live ad-hoc strings.
 - Same post-PONR-raises contract change as A (broadened the one except). Distinctive vs A: inverses are local/adjacent (no central snapshot), LIFO makes D-7 fall out naturally; more small closures.
+
+### Candidate C — [status: done & committed]
+- Architecture: durable on-disk operation journal (`RollbackJournal` writes `<folder>/.mediavault_txn.json` with fsync+os.replace, records each intent before acting; `recover_journal()` finishes an interrupted rollback after a hard kill) + `RollbackHardFail`. Placement main.py only.
+- Worktree: .candidates/step-03/C · Branch: feature/auto_rollback__cand_c · Commit: 613fe24.
+- pytest tests/ -q -> 67 passed, 1 skipped (66 shared matrix + a C-only durable-journal crash-recovery test; ffmpeg-gated split skips). Baseline oracle unchanged & green.
+- DESIGN.md: docs/feature-auto-rollback/rollback-architecture/CANDIDATE_C.md.
+- git diff --stat (vs 80f7711): main.py + tests/test_rollback.py (new, matrix + crash-recovery test) + tests/test_cmd_replace.py (same 1 except broadened) + CANDIDATE_C.md. ~932 ins net. mainfetch.py + mvcommon.py untouched. No live ad-hoc strings.
+- Distinctive: only candidate whose REVERT survives a hard process kill (durable journal + recover_journal). Cost: largest main.py diff + an fsync/os.replace per mutation + a transient dot-file per media folder (happy path still byte-identical per the oracle).
+
+## Step 3 — [status: PAUSED at the user-decides gate]
+- All three genuinely-distinct candidates complete, green, committed in their worktrees. mainfetch.py + mvcommon.py untouched across all three; diffs confined to main.py + tests/ + each CANDIDATE_*.md.
+- Comparative review (NO WINNER, D-2): docs/feature-auto-rollback/rollback-architecture/DECISION.md. The three CANDIDATE_{A,B,C}.md were also copied onto feature/auto_rollback alongside DECISION.md for one-place review.
+- Equivalent on correctness/happy-path/in-process failure (all pass the same matrix + unchanged oracle). Differentiators: B smallest/most-local diff; A single cohesive snapshot object; C uniquely survives a hard kill mid-rollback (durable journal) at a larger-diff + per-mutation-fsync cost.
+- PAUSED per the resume brief: NOT auto-selected, NO candidate merged into feature/auto_rollback, Step 4 NOT run, nothing pushed, no PR, no main merge, no archiving. Awaiting the user's winner pick → record as DECISIONS.md N-6 before merge.

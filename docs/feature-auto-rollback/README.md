@@ -36,9 +36,10 @@ completed items and prints exactly how to resume the rest.
 
 | File | What it contains | Read it if you… |
 |---|---|---|
-| `README.md` | This outline + status + onboarding for prerequisite-improvement agents. | …are starting cold. **Start here.** |
-| `PLAN.md` | The full draft implementation plan (planner output): steps, model assignments, the multi-candidate architecture step, risks, verification, out-of-scope. Archived snapshot as of the pause. | …will implement or re-plan auto-rollback itself. |
-| `DECISIONS.md` | Every decision: confirmed, accepted-default, and still-open — each with rationale and status. The authoritative decision record. | …need to know *why* something was chosen, or what is still undecided. |
+| `REPLAN_BRIEF.md` | **Consolidated re-plan brief** — original plan + all confirmed decisions (incl. O-1) + corrected failure analysis + post-merge code map + the ready-to-paste planner prompt. | …are resuming auto-rollback. **Start here.** |
+| `README.md` | This outline + status + onboarding for prerequisite-improvement agents. | …want the folder map. |
+| `PLAN.md` | The full draft implementation plan (planner output): steps, model assignments, the multi-candidate architecture step, risks, verification, out-of-scope. **Archived draft as of the pause — re-derive against `REPLAN_BRIEF.md` + current code.** | …will implement or re-plan auto-rollback itself. |
+| `DECISIONS.md` | Every decision: confirmed, accepted-default, and (formerly) open — each with rationale and status. O-1/O-2/O-3 now resolved. The authoritative decision record. | …need to know *why* something was chosen. |
 | `FAILURE_ANALYSIS.md` | The technical core: what each command creates/mutates, the precise point-of-no-return per command (with current `main.py` line refs), the reversible-vs-irreversible boundary, and concrete failure walk-throughs (Examples A/B/C). | …are touching `cmd_push`, `cmd_replace`, or `cmd_restore` for **any** reason. |
 | `RELATED_IMPROVEMENTS.md` | The prerequisite + complementary improvements (C9, C11, G1, C1, C2, A1, A7): how each relates to auto-rollback, what auto-rollback will expect from it, suggested order, and per-item "leave-the-seam" guidance. | …are implementing one of the prerequisite improvements. **Required reading for that.** |
 | `SESSION_LOG.md` | The full narrative of the planning session: original task, investigation findings, planner dispatch, the verbatim Q&A with the user, and the analysis corrections. | …want the complete history / "how did we get here." |

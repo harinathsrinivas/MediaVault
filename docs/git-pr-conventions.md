@@ -87,5 +87,10 @@ git push origin --delete <branch>
 
 Reviving later is exactly the steps embedded in the tag message — read them with `git tag -n99 archive/<branch>`.
 
+## Plan & docs artifacts (PLAN.md location convention)
+- **Root `/PLAN.md` is the live working copy** the planner/orchestrator/executors read and update during a run. It is **gitignored — never stage, commit, or push it.**
+- **The canonical, tracked plan lives under `docs/<feature>/`** — `docs/<feature>/PLAN.md` plus that feature's `DECISIONS.md`, completion reports, and task artifacts.
+- **Every feature branch ships its `docs/<feature>/` artifacts.** Commit and push the feature's plan/decisions/reports alongside the code so the tracked plan always matches what landed. The planner keeps the root and `docs/<feature>/` copies in sync; the git-agent commits only the `docs/<feature>/` copy.
+
 ## Note for agents that load only on `.claude/` context
 The `git-agent` (OP: CREATE_PR) and the `orchestrator` (Phase 3) both reference this file. Keep them in sync if these rules change.

@@ -20,11 +20,11 @@ Suggested order: **C9 → C11 → G1**, with C1 / C2 / A1 / A7 as complementary.
 | Imp     | Tier | One-liner                                                                  | Relation to auto-rollback                                            | Role                                |
 | ------- | ---- | -------------------------------------------------------------------------- | -------------------------------------------------------------------- | ----------------------------------- |
 | **C9**  | C    | Atomic `cmd_replace` via two-rename                                        | Hardens the single true point-of-no-return (Example B)               | **Prerequisite — DONE** (fix/atomic_replace, 2026-05-29) |
-| **C11** | C    | Hash-mismatch quarantine in `cmd_restore`                                  | The restore-side "clean state on failure" behavior (in scope now)    | **Prerequisite — not started**      |
+| **C11** | C    | Hash-mismatch quarantine in `cmd_restore`                                  | The restore-side "clean state on failure" behavior (in scope now)    | **Prerequisite — DONE** (feature/restore_quarantine, PR #6, merged 2026-05-29) |
 | **G1**  | G    | rclone patterns: `.partial` upload + atomic remote rename + `.mvmeta.json` | Removes the "partial upload looks complete" wrinkle in push rollback | **Prerequisite — DONE** (PR #7, merged) |
 | **C1**  | C    | Season auto-resume from a progress file                                    | We *print* the resume command; C1 *auto-resumes*                     | Complementary — not started         |
 | **C2**  | C    | Exponential-backoff retry for ADB + Selenium                               | Fewer transient failures → rollback/hard-fail triggers less often    | Complementary — **DONE** (feature/adb_selenium_retry, 2026-05-30) |
-| **C8**  | C    | Post-push remote `md5sum` verification per chunk                           | Catches silent corruption before local chunk is deleted; feeds C2    | Complementary — not started (next)  |
+| **C8**  | C    | Post-push remote `sha256sum` verification per chunk                        | Catches silent corruption before local chunk is deleted; feeds C2    | Complementary — **DONE** (feature/post_push_verify, PR #12, merged 2026-05-30) |
 | **A1**  | A    | Extract `mvcommon.py` (shared lib I/O + hashing)                           | Plumbing our snapshot/rollback uses                                  | Complementary — **DONE** (refactor/extract_mvcommon, merged) |
 | **A7**  | A    | Pytest harness with library fixtures                                       | This feature creates the first tests; A7 formalizes the harness      | Complementary — not started         |
 

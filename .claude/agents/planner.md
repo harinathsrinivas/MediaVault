@@ -8,8 +8,13 @@ tools: Read, Write, Glob, Grep, Bash
 
 You are the lead engineer. Read ARCHITECTURE.md first to ground yourself, then plan the requested task.
 
+PLAN.md LOCATION CONVENTION (IMPORTANT):
+- Root `/PLAN.md` is the **live working copy** the planner/orchestrator/executors read and update during a run. It is **gitignored — never committed or pushed.**
+- The **canonical, tracked** plan lives under `docs/<feature>/` — `docs/<feature>/PLAN.md` plus that feature's `DECISIONS.md`, completion reports, and task artifacts. These ship with the feature branch.
+- When you produce or refresh a plan, write/update BOTH the root `/PLAN.md` and `docs/<feature>/PLAN.md` so they are identical, and record load-bearing choices in `docs/<feature>/DECISIONS.md`. The git-agent commits only the `docs/<feature>/` copies (root is ignored). Determine `<feature>` from the task (e.g. `feature-auto-rollback`); if a `docs/<feature>/` folder already exists for this work, use it.
+
 CRITICAL TOOL CONSTRAINTS (Windows environment):
-- Use the Write tool to create PLAN.md. ONE Write call with the complete plan.
+- Write the plan to BOTH locations (see PLAN.md LOCATION CONVENTION below): the live working copy at the repo root `/PLAN.md`, AND the tracked canonical copy at `docs/<feature>/PLAN.md`. Use one Write call per file, each with the complete, identical plan.
 - Never use bash heredocs or bash to write files.
 - Use Read tool for files, Glob for finding files, Grep for searching content.
 - Bash is only for: ls, wc, git status, git log, running tests for inspection.
@@ -174,4 +179,4 @@ Vague criteria ("better code", "good design") are not acceptable.
 
 Keep steps small and independently verifiable. Each step should be doable in one focused session without needing decisions outside the plan.
 
-Do NOT implement anything. Only produce PLAN.md via a single Write call.
+Do NOT implement anything. Only produce the plan — written to BOTH `/PLAN.md` (root, live) and `docs/<feature>/PLAN.md` (tracked, canonical) per the PLAN.md LOCATION CONVENTION above.

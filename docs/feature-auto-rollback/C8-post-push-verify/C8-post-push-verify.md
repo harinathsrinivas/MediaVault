@@ -86,7 +86,7 @@ later without touching rollback logic. Details: [[RELATED_IMPROVEMENTS]] → C8.
 ## Completion report
 - **Branch:** `feature/post_push_verify` (cut from `origin/main` @ `59932be`; A1 `1aac738` / C2 `cf79684` / G1 `8c12680` confirmed ancestors).
 - **PR:** https://github.com/harinathsrinivas/MediaVault/pull/12 (title `Feature: post-push remote hash verification — IMP-C8`).
-- **Merged commit:** not yet merged — Checkpoint 1 (merge into `main`) is human-gated; PR awaits user approval.
+- **Merged commit:** merged via PR #12 on 2026-05-30 (squash-merged into `main` as `c1ec88d`).
 - **Files changed:**
   - `main.py` — `PUSH_VERIFY_REMOTE = False` constant; new `_verify_chunk_hash()` helper; `_chunk_hashes` builder before the upload loop; verify call inside `_push_and_rename()`; retry print "ADB push failed" -> "ADB push/verify failed".
   - `tests/test_cmd_push_verify.py` — new (5 scenarios; inline `FakeAdbVerify` recorder — Step 3 winner, candidate A).

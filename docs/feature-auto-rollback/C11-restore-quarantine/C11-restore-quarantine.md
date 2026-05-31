@@ -5,10 +5,10 @@ improvement: IMP-C11
 tier: C
 role: prerequisite
 order: 2
-status: not-started
+status: done
 branch: feature/restore_quarantine
 feature: auto-rollback
-tags: [claude, mediavault, prereq, tier/C, status/not-started]
+tags: [claude, mediavault, prereq, tier/C, status/done]
 created: 2026-05-28
 ---
 
@@ -70,7 +70,7 @@ quarantine path/helper so rollback reuses it. Details: [[RELATED_IMPROVEMENTS]] 
 ## Completion report (fill in when done)
 - **Branch:** `feature/restore_quarantine` (branched off `origin/main` @ 4b7e7b6)
 - **PR:** https://github.com/harinathsrinivas/MediaVault/pull/6 (base `main`)
-- **Merged commit:** _pending merge_
+- **Merged commit:** merged via PR #6 on 2026-05-29 (squash-merged into `main`).
 - **Files changed:**
   - `main.py` — added `quarantine_restore_file(restore_folder, filename)` helper (the centralized seam) and wired it into both `cmd_restore` paths: standard single-file failure branch (quarantine + greppable diagnostic + defensive lock fallback) and split path (pre-merge per-chunk SHA256 verification → quarantine offending chunks, keep clean chunks, delete stale partial output, return False before merge).
   - `tests/test_cmd_restore_quarantine.py` — new 9-test module (6 standard + 3 split), reusing the C9 `tests/conftest.py` sandbox fixtures (conftest unchanged).

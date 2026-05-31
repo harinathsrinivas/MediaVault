@@ -378,6 +378,173 @@ def make_video_dummy(output_path, extension):
 #                        `fetch_restore <id>`. Standard path (@1248) is a single
 #                        shutil.move — no torn window.
 # ==========================================
+#   ROLLBACK PRIMITIVE — Candidate A (snapshot / transaction context-manager)
+# ==========================================
+# Architecture A: a RollbackContext captures the per-id snapshot (D-6 shape) at
+# __enter__, the wrapped command body REGISTERS each artifact it creates, and on a
+# pre-PONR failure rollback() removes ONLY created-this-run artifacts + reverts the
+# in-memory library to the snapshot + save_library(). After mark_point_of_no_return()
+# a failure is a structured HARD-FAIL (RollbackHardFail) naming an existing command.
+# Placement: main.py (N-4 default). No mvcommon change. See the AUTO-ROLLBACK SPEC
+# block above for the authoritative contract this implements.
+
+
+class RollbackHardFail(Exception):
+    """Raised when a command fails AT/AFTER its point-of-no-return. Carries the
+    current state, why rollback is impossible, and the EXISTING command that
+    resumes/repairs it (N-2 — never a new command). The orchestrators turn this
+    into the user-facing actionable message."""
+
+    def __init__(self, state, reason, resume_cmd):
+        self.state = state
+        self.reason = reason
+        self.resume_cmd = resume_cmd
+        super().__init__(f"{state}: {reason} — resume with: {resume_cmd}")
+
+
+class RollbackContext:
+    """Snapshot/transaction wrapper for ONE command operating on ONE id.
+
+    Usage (wrapping, not rewriting — the happy-path body is untouched):
+
+        ctx = RollbackContext(manual_id, library)   # snapshot taken here
+        ... existing body, calling ctx.created_*() as artifacts appear ...
+        ctx.mark_point_of_no_return()                # after the irreversible commit
+        ... rest of body ...
+
+        # on a reversible failure:
+        ctx.rollback()                               # restores exact pre-command state
+        # on an irreversible failure:
+        raise RollbackHardFail(state, reason, resume_cmd)
+
+    The snapshot records (D-6): whether the entry / parent existed, prior
+    status/uploaded, whether the child was already linked, whether split_info
+    pre-existed, and which on-disk paths pre-existed. rollback() removes only the
+    set-difference (created-this-run) and reverts the in-memory dict, then saves.
+    """
+
+    def __init__(self, manual_id, library, folder_path=None, short_id=None,
+                 parent_id=None):
+        self.manual_id = manual_id
+        self.library = library
+        self.crossed_ponr = False
+        # Created-this-run registry (filled by the wrapped body):
+        self._created_paths = []      # files to os.remove on rollback
+        self._created_dirs = []       # dirs to shutil.rmtree on rollback (created-this-run only)
+        self._created_entry = False   # did this run create library[manual_id]?
+        self._created_split_info = False
+        self._created_parent = False  # did this run create the parent season_map?
+        self._linked_child = False    # did this run add manual_id to parent["children"]?
+        self.parent_id = parent_id
+        # --- D-6 snapshot of the pre-command state ---
+        entry = library.get(manual_id, {})
+        self.entry_existed = manual_id in library
+        self.prior_entry = json.loads(json.dumps(entry)) if self.entry_existed else None
+        self.split_info_existed = "split_info" in entry
+        self.prior_parent = None
+        if parent_id and parent_id in library:
+            self.prior_parent = json.loads(json.dumps(library[parent_id]))
+
+    # ---- registration helpers the wrapped body calls as artifacts appear ----
+    def created_path(self, path):
+        """Register a file created this run (rolled back via os.remove)."""
+        self._created_paths.append(path)
+
+    def created_dir(self, path):
+        """Register a directory created this run (rolled back via shutil.rmtree)."""
+        self._created_dirs.append(path)
+
+    def created_entry(self):
+        self._created_entry = True
+
+    def created_split_info(self):
+        self._created_split_info = True
+
+    def created_parent(self):
+        self._created_parent = True
+
+    def linked_child(self):
+        self._linked_child = True
+
+    def mark_point_of_no_return(self):
+        """After this the operation is irreversible; rollback() refuses to run and
+        a failure must be raised as RollbackHardFail."""
+        self.crossed_ponr = True
+
+    # ---- rollback ----
+    def rollback(self):
+        """Restore the exact pre-command state. Removes ONLY created-this-run
+        artifacts, reverts the in-memory library dict to the snapshot, saves.
+        Reports partial rollback honestly if a Windows file lock blocks a delete.
+        MUST NOT be called after mark_point_of_no_return()."""
+        if self.crossed_ponr:
+            # Defensive: a post-PONR caller should raise RollbackHardFail instead.
+            raise RuntimeError("rollback() called after point-of-no-return")
+
+        partial = []
+        # 1. On-disk artifacts created this run (files first, then dirs).
+        for p in self._created_paths:
+            try:
+                if os.path.exists(p):
+                    os.chmod(p, stat.S_IWRITE)
+                    os.remove(p)
+            except Exception as e:
+                partial.append(f"{os.path.basename(p)} ({e})")
+        for d in self._created_dirs:
+            try:
+                if os.path.isdir(d):
+                    shutil.rmtree(d)
+            except Exception as e:
+                partial.append(f"{os.path.basename(d)}/ ({e})")
+
+        # 2. Revert the in-memory library to the snapshot.
+        # 2a. Parent season_map (D-7).
+        if self.parent_id and self.parent_id in self.library:
+            if self._created_parent:
+                # This run created the parent. Delete it ONLY if removing this
+                # child leaves 0 children; else just unlink + recompute.
+                parent = self.library[self.parent_id]
+                kids = parent.get("children", [])
+                if self.manual_id in kids:
+                    kids.remove(self.manual_id)
+                if not kids:
+                    del self.library[self.parent_id]
+                else:
+                    parent["children"] = sorted(kids)
+                    parent["total_episodes"] = len(kids)
+            elif self._linked_child and self.prior_parent is not None:
+                # Parent pre-existed; just undo this run's child link + recompute.
+                parent = self.library[self.parent_id]
+                kids = parent.get("children", [])
+                if self.manual_id in kids:
+                    kids.remove(self.manual_id)
+                parent["children"] = sorted(kids)
+                parent["total_episodes"] = len(kids)
+
+        # 2b. The entry itself.
+        if self._created_entry and not self.entry_existed:
+            self.library.pop(self.manual_id, None)
+        elif self.entry_existed and self.prior_entry is not None:
+            # Revert in place to the exact prior snapshot (status/uploaded/split_info).
+            self.library[self.manual_id] = json.loads(json.dumps(self.prior_entry))
+        elif self._created_split_info and not self.split_info_existed:
+            # Entry survived but this run added split_info — pop just that.
+            self.library.get(self.manual_id, {}).pop("split_info", None)
+
+        save_library(self.library)
+
+        if partial:
+            print("⚠️ PARTIAL ROLLBACK — these artifacts could not be removed "
+                  "(likely a file lock); remove them manually:")
+            for item in partial:
+                print(f"     - {item}")
+            print("   The library state was reverted to the pre-command snapshot.")
+            return False
+        print("✅ Rollback complete — back to exact pre-command state.")
+        return True
+
+
+# ==========================================
 #             CORE COMMANDS
 # ==========================================
 
@@ -412,76 +579,111 @@ def cmd_prep(manual_id, filepath, parent_id=None):
 
     print(f"--- PREPPING: {manual_id} ---")
     short_id = generate_short_id(manual_id)
-    file_hash = calculate_file_hash(filepath)
-    if not file_hash: return False  # Stop if hashing failed
 
-    tech_specs = get_tech_specs(filepath)
-
-    # Create Sidecar Files
-    try:
-        with open(os.path.join(folder_path, "uid"), 'w') as f:
-            f.write(short_id)
-        with open(os.path.join(folder_path, f"{short_id}.sha256"), 'w') as f:
-            f.write(f"{file_hash} *{filename}")
-    except Exception as e:
-        print(f"⚠️ Warning: Could not write sidecar files: {e}")
-
-    # --- INTELLIGENT PARENT DETECTION & LINKING ---
-    if not parent_id:
-        # Standard TV S01E01 (now supporting .5 episodes)
+    # [ROLLBACK A] Resolve the parent id up-front so the snapshot knows it, then
+    # open the transaction. cmd_prep has NO PONR — any failure rolls fully back.
+    resolved_parent = parent_id
+    if not resolved_parent:
         match = re.match(r"^(.*)[eE|xX](\d+(?:\.\d+)?)$", manual_id)
         if match:
-            parent_id = match.group(1)
-            print(f"   > 🔗 Auto-Link: Detected Parent '{parent_id}'")
-        # [NEW] Anime Auto-Link (ani-name-01 -> ani-name) (now supporting .5 episodes)
+            resolved_parent = match.group(1)
         elif manual_id.startswith("ani-"):
-            # Try to strip last numbers
             match_ani = re.match(r"^(ani-.*?)[\d\.]+$", manual_id)
             if match_ani:
-                parent_id = match_ani.group(1)
-                print(f"   > 🔗 Auto-Link (Anime): Detected Parent '{parent_id}'")
+                resolved_parent = match_ani.group(1)
+    ctx = RollbackContext(manual_id, library, folder_path=folder_path,
+                          short_id=short_id, parent_id=resolved_parent)
 
-    if parent_id:
-        # Create Parent Season Map if it doesn't exist
-        if parent_id not in library:
-            print(f"   > 🗺️  Creating new Season Map for '{parent_id}'...")
-            library[parent_id] = {
-                "type": "season_map",
-                "folder_path": folder_path,
-                "total_episodes": 0,
-                "children": []
-            }
+    try:
+        file_hash = calculate_file_hash(filepath)
+        if not file_hash:
+            ctx.rollback()  # nothing created yet — no-op, prints clean message
+            return False  # Stop if hashing failed
 
-        # Add Child to Parent's list
-        if manual_id not in library[parent_id]["children"]:
-            library[parent_id]["children"].append(manual_id)
-            library[parent_id]["children"].sort()
-            library[parent_id]["total_episodes"] = len(library[parent_id]["children"])
+        tech_specs = get_tech_specs(filepath)
 
-    # [NEW] Generate Auto Search Term
-    name_no_ext, ext = os.path.splitext(filename)
-    default_search_term = f"{name_no_ext} [{short_id}]{ext}"
+        # Create Sidecar Files
+        uid_path = os.path.join(folder_path, "uid")
+        sha_path = os.path.join(folder_path, f"{short_id}.sha256")
+        uid_preexisted = os.path.exists(uid_path)
+        sha_preexisted = os.path.exists(sha_path)
+        try:
+            with open(uid_path, 'w') as f:
+                f.write(short_id)
+            if not uid_preexisted:
+                ctx.created_path(uid_path)
+            with open(sha_path, 'w') as f:
+                f.write(f"{file_hash} *{filename}")
+            if not sha_preexisted:
+                ctx.created_path(sha_path)
+        except Exception as e:
+            print(f"⚠️ Warning: Could not write sidecar files: {e}")
 
-    # Create Entry
-    entry_data = {
-        "short_id": short_id,
-        "filename": filename,
-        "folder_path": folder_path,
-        "status": "local_ready",
-        "uploaded": False,
-        "search_term": default_search_term,  # Store search term
-        "hash": file_hash,
-        "metadata": parse_metadata_from_id(manual_id),
-        "tech_spec": tech_specs
-    }
+        # --- INTELLIGENT PARENT DETECTION & LINKING ---
+        if not parent_id:
+            # Standard TV S01E01 (now supporting .5 episodes)
+            match = re.match(r"^(.*)[eE|xX](\d+(?:\.\d+)?)$", manual_id)
+            if match:
+                parent_id = match.group(1)
+                print(f"   > 🔗 Auto-Link: Detected Parent '{parent_id}'")
+            # [NEW] Anime Auto-Link (ani-name-01 -> ani-name) (now supporting .5 episodes)
+            elif manual_id.startswith("ani-"):
+                # Try to strip last numbers
+                match_ani = re.match(r"^(ani-.*?)[\d\.]+$", manual_id)
+                if match_ani:
+                    parent_id = match_ani.group(1)
+                    print(f"   > 🔗 Auto-Link (Anime): Detected Parent '{parent_id}'")
 
-    if parent_id:
-        entry_data["parent_id"] = parent_id
+        if parent_id:
+            # Create Parent Season Map if it doesn't exist
+            if parent_id not in library:
+                print(f"   > 🗺️  Creating new Season Map for '{parent_id}'...")
+                library[parent_id] = {
+                    "type": "season_map",
+                    "folder_path": folder_path,
+                    "total_episodes": 0,
+                    "children": []
+                }
+                ctx.created_parent()
 
-    library[manual_id] = entry_data
-    save_library(library)
-    print(f"✅ Library Entry Created & Linked (Search Key: {default_search_term}).\n")
-    return True
+            # Add Child to Parent's list
+            if manual_id not in library[parent_id]["children"]:
+                library[parent_id]["children"].append(manual_id)
+                library[parent_id]["children"].sort()
+                library[parent_id]["total_episodes"] = len(library[parent_id]["children"])
+                ctx.linked_child()
+
+        # [NEW] Generate Auto Search Term
+        name_no_ext, ext = os.path.splitext(filename)
+        default_search_term = f"{name_no_ext} [{short_id}]{ext}"
+
+        # Create Entry
+        entry_data = {
+            "short_id": short_id,
+            "filename": filename,
+            "folder_path": folder_path,
+            "status": "local_ready",
+            "uploaded": False,
+            "search_term": default_search_term,  # Store search term
+            "hash": file_hash,
+            "metadata": parse_metadata_from_id(manual_id),
+            "tech_spec": tech_specs
+        }
+
+        if parent_id:
+            entry_data["parent_id"] = parent_id
+
+        if not ctx.entry_existed:
+            ctx.created_entry()
+        library[manual_id] = entry_data
+        save_library(library)
+        print(f"✅ Library Entry Created & Linked (Search Key: {default_search_term}).\n")
+        return True
+    except Exception as e:
+        # [ROLLBACK A] No PONR in prep — any unexpected failure rolls fully back.
+        print(f"❌ Prep failed: {e}")
+        ctx.rollback()
+        return False
 
 
 def cmd_set_search(manual_id, search_term):
@@ -794,6 +996,12 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
     # a push rollback may remove are this-run _parts/checksums/split_info, and ONLY
     # if created-this-run AND the failure is pre-any-upload. A pre-existing _parts/
     # (the resume branch just below) MUST NEVER be deleted.
+    # [ROLLBACK A] Open the transaction. Record which split artifacts pre-existed
+    # so a pre-upload failure rolls back only this-run ones (never a resume _parts/).
+    ctx = RollbackContext(manual_id, library, folder_path=local_folder, short_id=short_id)
+    parts_preexisted = os.path.exists(parts_dir)
+    checksum_preexisted = os.path.exists(checksum_dir)
+    any_upload_done = False  # flips True the moment a chunk is uploaded+renamed
     # 1. CHECK FOR RESUME (Existing _parts folder)
     if os.path.exists(parts_dir) and os.listdir(parts_dir):
         files_to_upload_paths = sorted(
@@ -816,11 +1024,21 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             print(f"   > ✂️ Splitting...")
             os.makedirs(parts_dir, exist_ok=True)
             os.makedirs(checksum_dir, exist_ok=True)
+            # [ROLLBACK A] Register dirs as created-this-run ONLY if they did not
+            # pre-exist (never delete a resume _parts/ or a pre-existing checksums/).
+            if not parts_preexisted:
+                ctx.created_dir(parts_dir)
+            if not checksum_preexisted:
+                ctx.created_dir(checksum_dir)
 
             # [UPDATED] Pass short_id to attach UID to chunk names
             files_to_upload_paths = split_video_file(local_file_path, parts_dir, split_method, split_val,
                                                      file_id=short_id)
-            if not files_to_upload_paths: return False  # Stop if split failed
+            if not files_to_upload_paths:
+                # [ROLLBACK A] Split failed pre-any-upload (reversible) — roll back
+                # this-run _parts/checksums/split_info, leave master intact.
+                ctx.rollback()
+                return False  # Stop if split failed
 
             # Hash Chunks
             for chunk_path in files_to_upload_paths:
@@ -835,6 +1053,8 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             # rollback pops it ONLY if split_info_existed was False at entry (a prior
             # interrupted push may have left it). _parts/ + checksums/ created just
             # above (@719-720) are likewise removed only if created-this-run.
+            if not ctx.split_info_existed:
+                ctx.created_split_info()
             library[manual_id]["split_info"] = {
                 "is_split": True, "method": split_method, "val": split_val,
                 "total_chunks": len(files_to_upload_paths), "chunks": chunk_metadata
@@ -953,6 +1173,9 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
                 on_retry=_cleanup_and_log,
             )
             print("✅")
+            # [ROLLBACK A] A chunk is now on the device — past the pre-upload window.
+            # Any later failure is the O-1 resume-message case, not a rollback.
+            any_upload_done = True
 
             # DELETE LOCAL CHUNK after successful upload+rename.
             # The chunk is "done" only once renamed to its final name.
@@ -993,8 +1216,20 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             print(f"✅ Partial Upload Complete (Chunks {chunk_range}).\n")
             return True
     else:
-        print("❌ FAILED. Fix connection and re-run to resume.\n")
-        return False
+        # [ROLLBACK A] Push failed (O-1: NO PONR — the master survives).
+        if any_upload_done:
+            # Chunks already on the device. Resume-message: leave the partial
+            # upload, keep the entry local_ready/uploaded=False, print `push <id>`.
+            print("❌ FAILED. Partial upload left in place (resumable).")
+            print(f"   > Entry stays local_ready / uploaded=False. Resume with: push {manual_id}\n")
+            return False
+        else:
+            # Pre-any-upload failure: roll back this-run _parts/checksums/split_info
+            # (created-this-run only; a resume _parts/ is never touched).
+            print("❌ FAILED before any chunk uploaded — rolling back this-run artifacts.")
+            ctx.rollback()
+            print(f"   > Resume with: push {manual_id}\n")
+            return False
 
 
 def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=None, device_id=None):
@@ -1066,69 +1301,106 @@ def cmd_replace(manual_id):
         print(f"❌ replace aborted — could not create video dummy for {filename}")
         return False
 
-    # Swap Files (atomic two-rename pattern — original is never absent without a leftover present)
-    tobedeleted = original + ".tobedeleted"
+    # [ROLLBACK A] Open the transaction; register the dummy temp as the sole
+    # pre-PONR artifact. status flips to archived only on full success, so the
+    # entry snapshot covers the in-memory revert if we roll back pre-PONR.
+    ctx = RollbackContext(manual_id, library, folder_path=local_folder)
+    if os.path.exists(tmp_path):
+        ctx.created_path(tmp_path)
 
-    # STALE SWEEP: recover from a prior interrupted run before touching anything
-    if os.path.exists(tobedeleted):
-        try:
-            if os.path.exists(original):
-                # leftover is redundant — the real file is already in place
-                print(f"     ⚠️ Stale leftover from prior interrupted run — cleaning up {os.path.basename(tobedeleted)}")
-                os.remove(tobedeleted)
-            else:
-                # crash happened between rename-1 and rename-2: master is at .tobedeleted — restore and abort
-                print(f"     ⚠️ Recovered interrupted replace: restoring original from {os.path.basename(tobedeleted)}")
-                os.rename(tobedeleted, original)
-                print(f"❌ replace aborted — original restored. Please retry.")
-                return False
-        except Exception as e:
-            print(f"     ⚠️ Could not clean stale leftover: {e}")
+    try:
+        # Swap Files (atomic two-rename pattern — original is never absent without a leftover present)
+        tobedeleted = original + ".tobedeleted"
 
-    # Step 1 (done above): make_video_dummy wrote tmp_path
-
-    # Step 2 (commit / point-of-no-return): rename original -> .tobedeleted
-    if os.path.exists(original):
-        moved = False
-        for attempt in range(3):
+        # STALE SWEEP: recover from a prior interrupted run before touching anything
+        if os.path.exists(tobedeleted):
             try:
-                # Force Write Permissions
-                os.chmod(original, stat.S_IWRITE)
-                # [ROLLBACK SPEC] PONR (O-2): the master leaves its path here. BEFORE
-                # this line a failure rolls back (delete tmp_path). AT/AFTER this line
-                # a failure is a structured HARD-FAIL naming `fetch_restore <id>` (the
-                # bytes are in the cloud). C9's stale-sweep above (@966-979) already
-                # self-heals a torn crash on the NEXT replace; the wrapper must not
-                # double-handle that — pre-PONR rollback only removes tmp_path.
-                os.rename(original, tobedeleted)  # ROLLBACK SEAM: original removed from its path here (atomic commit / point-of-no-return)
-                moved = True
-                break
-            except PermissionError:
-                print(f"     ⚠️ File busy or locked. Retrying... ({attempt + 1}/3)")
-                time.sleep(1)
+                if os.path.exists(original):
+                    # leftover is redundant — the real file is already in place
+                    print(f"     ⚠️ Stale leftover from prior interrupted run — cleaning up {os.path.basename(tobedeleted)}")
+                    os.remove(tobedeleted)
+                else:
+                    # crash happened between rename-1 and rename-2: master is at .tobedeleted — restore and abort
+                    print(f"     ⚠️ Recovered interrupted replace: restoring original from {os.path.basename(tobedeleted)}")
+                    os.rename(tobedeleted, original)
+                    print(f"❌ replace aborted — original restored. Please retry.")
+                    ctx.rollback()  # pre-PONR — remove the dummy temp we just made
+                    return False
             except Exception as e:
-                print(f"❌ Error removing file: {e}")
+                print(f"     ⚠️ Could not clean stale leftover: {e}")
+
+        # Step 1 (done above): make_video_dummy wrote tmp_path
+
+        # Step 2 (commit / point-of-no-return): rename original -> .tobedeleted
+        if os.path.exists(original):
+            moved = False
+            for attempt in range(3):
+                try:
+                    # Force Write Permissions
+                    os.chmod(original, stat.S_IWRITE)
+                    # [ROLLBACK SPEC] PONR (O-2): the master leaves its path here. BEFORE
+                    # this line a failure rolls back (delete tmp_path). AT/AFTER this line
+                    # a failure is a structured HARD-FAIL naming `fetch_restore <id>` (the
+                    # bytes are in the cloud). C9's stale-sweep above (@966-979) already
+                    # self-heals a torn crash on the NEXT replace; the wrapper must not
+                    # double-handle that — pre-PONR rollback only removes tmp_path.
+                    os.rename(original, tobedeleted)  # ROLLBACK SEAM: original removed from its path here (atomic commit / point-of-no-return)
+                    # [ROLLBACK A] PONR crossed: the master is gone from its path.
+                    ctx.mark_point_of_no_return()
+                    moved = True
+                    break
+                except PermissionError:
+                    print(f"     ⚠️ File busy or locked. Retrying... ({attempt + 1}/3)")
+                    time.sleep(1)
+                except Exception as e:
+                    print(f"❌ Error removing file: {e}")
+                    # [ROLLBACK A] Still pre-PONR (rename never succeeded) — reversible.
+                    ctx.rollback()
+                    return False
+
+            if not moved:
+                print(f"❌ PERMISSION DENIED: Could not delete {filename}")
+                print("   > Close any players/Plex scanning this file and try again.")
+                # [ROLLBACK A] Pre-PONR (the master never moved) — roll back the dummy temp.
+                ctx.rollback()
                 return False
 
-        if not moved:
-            print(f"❌ PERMISSION DENIED: Could not delete {filename}")
-            print("   > Close any players/Plex scanning this file and try again.")
-            return False
+        # Step 3: rename dummy temp -> original (dummy is now live)
+        os.rename(tmp_path, original)
 
-    # Step 3: rename dummy temp -> original (dummy is now live)
-    os.rename(tmp_path, original)
+        # Step 4: delete the .tobedeleted leftover (non-fatal if it fails)
+        if os.path.exists(tobedeleted):
+            try:
+                os.remove(tobedeleted)
+            except Exception as e:
+                print(f"     ⚠️ WARNING: Could not remove leftover {os.path.basename(tobedeleted)}: {e}. It will be cleaned on the next replace.")
 
-    # Step 4: delete the .tobedeleted leftover (non-fatal if it fails)
-    if os.path.exists(tobedeleted):
-        try:
-            os.remove(tobedeleted)
-        except Exception as e:
-            print(f"     ⚠️ WARNING: Could not remove leftover {os.path.basename(tobedeleted)}: {e}. It will be cleaned on the next replace.")
-
-    library[manual_id]["status"] = "archived"
-    save_library(library)
-    print(f"✅ Replaced/Archived: {manual_id}")
-    return True
+        library[manual_id]["status"] = "archived"
+        save_library(library)
+        print(f"✅ Replaced/Archived: {manual_id}")
+        return True
+    except RollbackHardFail as hf:
+        # [ROLLBACK A] Re-raised below to the orchestrator after a user-facing line.
+        print(f"❌ {hf}")
+        raise
+    except Exception as e:
+        if ctx.crossed_ponr:
+            # [ROLLBACK A] At/after PONR — the master is no longer at its path.
+            # Hard-fail naming the EXISTING fetch_restore pipeline (N-2); C9's
+            # stale-sweep will recover the local file on the next replace, but the
+            # archive is committed (bytes in the cloud).
+            print(f"❌ IRREVERSIBLE: replace failed after the commit point for {manual_id}.")
+            print(f"   > The original is no longer in place (C9 stale-sweep recovers it next run).")
+            print(f"   > To recover the file from the cloud: fetch_restore {manual_id}")
+            raise RollbackHardFail(
+                state=f"{manual_id} archived (original committed)",
+                reason=f"replace failed past the point-of-no-return: {e}",
+                resume_cmd=f"fetch_restore {manual_id}",
+            )
+        # Pre-PONR unexpected failure — reversible.
+        print(f"❌ replace failed (pre-commit): {e}")
+        ctx.rollback()
+        return False
 
 
 def cmd_replace_group(group_id):
@@ -1292,6 +1564,11 @@ def cmd_restore(manual_id):
         print(f"⏭️  Skipping {manual_id}: 'restore' folder missing.")
         return False
 
+    # [ROLLBACK A] Open the transaction for the restore. status/hash flip only on
+    # full success, so the snapshot covers the in-memory revert if a pre-PONR
+    # merge failure occurs after we (hypothetically) touched the entry.
+    ctx = RollbackContext(manual_id, library, folder_path=local_folder)
+
     # A. SPLIT RESTORE
     if entry.get("split_info") and entry["split_info"].get("is_split"):
         chunks_meta = entry["split_info"]["chunks"]
@@ -1335,7 +1612,26 @@ def cmd_restore(manual_id):
             return False
 
         # 2. Merge
-        if merge_video_files(chunk_paths_in_restore, target_path):
+        # [ROLLBACK A] The merge is PRE-PONR. A merge failure (returns False or
+        # raises) is reversible: the reproducible target output is removed and the
+        # chunks stay in restore/ for a re-merge. Wrap it to handle a raise too.
+        try:
+            merged_ok = merge_video_files(chunk_paths_in_restore, target_path)
+        except Exception as e:
+            print(f"❌ Merge crashed: {e}")
+            merged_ok = False
+        if not merged_ok:
+            # Pre-PONR reversible: drop any partial/reproducible merged output;
+            # leave the chunks in restore/ so a re-merge can retry without a fetch.
+            print(f"❌ Merge failed for {manual_id}. Chunks left in restore/ for re-merge.")
+            if os.path.exists(target_path):
+                try:
+                    os.remove(target_path)
+                except Exception:
+                    pass
+            return False
+
+        if merged_ok:
             print(f"   > 💾 Re-indexing Merged File (New Container)...")
             new_hash = calculate_file_hash(target_path)
 
@@ -1351,6 +1647,13 @@ def cmd_restore(manual_id):
             # AT/AFTER this delete a failure is a structured HARD-FAIL naming
             # `fetch_restore <id>` (a re-merge now needs a re-fetch). The standard
             # path (@1248) is a single shutil.move with no torn window — no PONR.
+            # [ROLLBACK A] The merge succeeded + the library was saved. From here
+            # the restore is effectively complete; the chunk delete only frees
+            # space. We mark the PONR so any failure during/after deletion is a
+            # hard-fail (the merged file is reproducible only via a re-fetch once
+            # chunks are gone). Deletion itself is best-effort and never fails the
+            # restore (matches the pre-existing try/except behavior).
+            ctx.mark_point_of_no_return()
             print("   > 🧹 Cleaning up chunks...")
             for p in chunk_paths_in_restore:
                 try:
@@ -1680,32 +1983,29 @@ def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, de
 
     # 2. PUSH
     print("\n>>> STEP 2: PUSH")
+    # [ROLLBACK A] The ad-hoc cleanup block here (manual _parts rmtree + the old
+    # revert-temp-files / push-manually messages) is REMOVED.
+    # The wrapped cmd_push now owns failure handling: a pre-upload failure rolls
+    # back this-run artifacts itself; a post-upload failure leaves the partial
+    # upload and prints its own O-1 resume-message (`push <id>`). No second
+    # rollback mechanism remains here.
     # We pass None for chunk_range as this atomic command implies full push
     if not cmd_push(manual_id, split_method, split_val, device_id=device_id):
-        print("\n⚠️ Auto-Pilot Paused: Push failed.")
-        print("   > Reverting temporary files to restore 'Prep' state...")
-
-        # Cleanup logic: Remove _parts folder if it exists
-        library = load_library()
-        if manual_id in library:
-            entry = library[manual_id]
-            parts_dir = os.path.join(entry['folder_path'], SPLIT_DIR_NAME)
-            if os.path.exists(parts_dir):
-                try:
-                    shutil.rmtree(parts_dir)
-                    print("     ✅ Temp chunks cleaned up.")
-                except Exception as e:
-                    print(f"     ❌ Could not clean temp chunks: {e}")
-
-        print("   > System is in 'local_ready' state. Fix the issue (e.g. ADB) and run 'push' manually.")
+        print("\n⚠️ Auto-Pilot Paused: Push did not complete (see the resume hint above).")
         return
 
     # 3. REPLACE
     print("\n>>> STEP 3: REPLACE")
-    if not cmd_replace(manual_id):
-        print("\n⚠️ Auto-Pilot Finished with Warning: Replace failed.")
-        print("   > File is uploaded but still takes space locally.")
-        print("   > Run 'replace' manually to archive.")
+    try:
+        if not cmd_replace(manual_id):
+            print("\n⚠️ Auto-Pilot Finished with Warning: Replace failed.")
+            print("   > File is uploaded but still takes space locally.")
+            print("   > Run 'replace' manually to archive.")
+            return
+    except RollbackHardFail as hf:
+        # [ROLLBACK A] Irreversible replace failure (past the commit point).
+        print(f"\n❌ Auto-Pilot Stopped: {hf.state} — {hf.reason}")
+        print(f"   > To recover: {hf.resume_cmd}")
         return
 
     print("\n✅✅✅ AUTO-PILOT COMPLETE: Movie is safely archived.")
@@ -1749,12 +2049,39 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
     # 3. LOOP PROCESS: PUSH -> REPLACE (One by One)
     print(f"\n>>> STEP 2 & 3: SEQUENTIAL PROCESSING ({len(target_ids)} items)")
 
-    for mid in target_ids:
+    def _season_resume_cmd(failing_idx):
+        """[ROLLBACK A] Reconstruct the exact resume command from the failing
+        episode to the end of the (range-filtered) target_ids. Faithfully
+        reproduces split_method/split_val/device_id/episode_range, handling .5
+        episodes. C1 is NOT merged → messaging only, no progress file."""
+        remaining = target_ids[failing_idx:]
+        ep_nums = []
+        for rid in remaining:
+            ep_str = rid.replace(base_id, "")
+            m = re.search(r'^[eExX]?(\d+(?:\.\d+)?)$', ep_str)
+            if m:
+                ep_nums.append(m.group(1))
+        parts = [f"prep_push_rep_season {base_id} \"{folder_path}\""]
+        if split_method and split_val:
+            parts.append(f"{split_method} {split_val}")
+        if ep_nums:
+            parts.append(f"episodes {ep_nums[0]}-{ep_nums[-1]}")
+        if device_id:
+            parts.append(f"device {device_id}")
+        return " ".join(parts)
+
+    for idx, mid in enumerate(target_ids):
         entry = library[mid]
         if entry.get("uploaded") == True:
             # If already uploaded, just ensure replace runs
             print(f"\n[SKIP PUSH] {mid} is already uploaded. Checking Replace...")
-            cmd_replace(mid)
+            try:
+                cmd_replace(mid)
+            except RollbackHardFail as hf:
+                print(f"❌ {mid}: {hf.state} — {hf.reason}")
+                print(f"   > To recover this item: {hf.resume_cmd}")
+                print(f"   > Resume the rest of the season: {_season_resume_cmd(idx)}")
+                return
             continue
 
         print(f"\n---------------------------------------------------")
@@ -1764,13 +2091,28 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
         # Use existing single-item logic (Re-using logic from prep_push_rep)
         path = os.path.join(entry['folder_path'], entry['filename'])
 
+        # [ROLLBACK A] The old bare-break stop-the-season behavior is REPLACED. Completed
+        # episodes stay intact. The in-flight item has already rolled itself back
+        # (reversible) or hard-failed (irreversible) inside the wrapped commands.
+        # On any stop we print the exact resume range from this episode onward.
         # We skip calling 'cmd_prep' again because we already did prep_season
         # Just call Push then Replace
         if cmd_push(mid, split_method, split_val, device_id=device_id):
-            cmd_replace(mid)
+            try:
+                cmd_replace(mid)
+            except RollbackHardFail as hf:
+                print(f"\n❌ {mid}: {hf.state} — {hf.reason}")
+                print(f"   > To recover this item: {hf.resume_cmd}")
+                print(f"   > Resume the rest of the season: {_season_resume_cmd(idx)}")
+                return
         else:
-            print(f"❌ Failed to process {mid}. Stopping Auto-Pilot to prevent mess.")
-            break
+            # Push did not complete (the wrapped cmd_push already rolled back any
+            # this-run artifacts OR left a resumable partial upload + printed its
+            # own `push <id>` hint). Completed episodes stay; stop the season here.
+            print(f"\n⚠️ Stopping season auto-pilot at {mid} (push incomplete).")
+            print(f"   > Completed episodes are intact.")
+            print(f"   > Resume the rest of the season: {_season_resume_cmd(idx)}")
+            return
 
     print("\n✅✅✅ SEASON AUTO-PILOT COMPLETE.")
 

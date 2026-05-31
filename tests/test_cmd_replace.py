@@ -56,10 +56,13 @@ def test_crash_between_renames(sandbox_entry, fake_dummy, monkeypatch):
 
     monkeypatch.setattr(main.os, "rename", patched_rename)
 
-    # cmd_replace will raise (or return False) — we don't care which
+    # cmd_replace will raise (or return False) — we don't care which.
+    # Auto-rollback (this candidate) converts a post-PONR failure into a
+    # structured hard-fail exception; the data-safety assertion below is what
+    # this test actually guards, so accept any exception type here.
     try:
         main.cmd_replace(entry_id)
-    except OSError:
+    except Exception:
         pass
 
     tobedeleted = str(orig_path) + ".tobedeleted"

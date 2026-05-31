@@ -1,0 +1,39 @@
+# Line-ending policy for MediaVault.
+#
+# WHY: core.autocrlf=true on Windows + text files stored as LF (with no
+# .gitattributes) makes git perpetually report unchanged files as "modified"
+# and warn "LF will be replaced by CRLF". Pinning EOL here overrides autocrlf
+# and ends the phantom-diff churn for every clone and every contributor.
+#
+# POLICY: normalize all text to LF in the repo AND check it out as LF, so the
+# index and working tree always agree. Binary assets are never converted.
+
+# Default: treat as text, auto-detect, force LF on checkout.
+* text=auto eol=lf
+
+# Explicit text types (defensive; covers what the repo actually contains).
+*.py     text eol=lf
+*.md     text eol=lf
+*.json   text eol=lf
+*.txt    text eol=lf
+*.ps1    text eol=lf
+*.sh     text eol=lf
+*.toml   text eol=lf
+*.cfg    text eol=lf
+*.ini    text eol=lf
+*.yml    text eol=lf
+*.yaml   text eol=lf
+.gitignore   text eol=lf
+.gitattributes text eol=lf
+
+# Binary assets — never apply EOL conversion or diff as text.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.mkv   binary
+*.mp4   binary
+*.mov   binary
+*.zip   binary

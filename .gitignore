@@ -3,6 +3,8 @@ a.json
 .gitignore
 
 .git*
+# ...but DO track the line-ending policy (overrides core.autocrlf; stops CRLF phantom diffs)
+!.gitattributes
 
 # Python
 __pycache__/

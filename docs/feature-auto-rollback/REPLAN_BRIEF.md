@@ -150,7 +150,7 @@ Use the planner agent to RESUME and RE-PLAN the auto-rollback feature.
 Read these FIRST, in order, before planning:
 1. docs/feature-auto-rollback/REPLAN_BRIEF.md  (this consolidated brief — start here)
 2. docs/feature-auto-rollback/DECISIONS.md      (authoritative decisions; O-1/O-2/O-3 now resolved)
-3. docs/feature-auto-rollback/FAILURE_ANALYSIS.md (the point-of-no-return analysis — line numbers are STALE, re-derive)
+3. docs/feature-auto-rollback/FAILUR/exE_ANALYSIS.md (the point-of-no-return analysis — line numbers are STALE, re-derive)
 4. docs/feature-auto-rollback/PLAN.md            (the ARCHIVED pre-pause draft — structure to build on, but its prereq "defer" notes and line numbers are outdated)
 5. docs/feature-auto-rollback/RELATED_IMPROVEMENTS.md, README.md, SESSION_LOG.md (context)
 6. ARCHITECTURE.md and current main.py / mvcommon.py / tests/ — RE-DERIVE all line numbers and the point-of-no-return against CURRENT code.
@@ -172,8 +172,10 @@ What to produce: a refreshed PLAN.md with
 PLAN.md LOCATION CONVENTION (per repo policy): write the plan to BOTH /PLAN.md (root, live, gitignored) AND docs/feature-auto-rollback/PLAN.md (tracked, canonical), identical. Record any new load-bearing choices in docs/feature-auto-rollback/DECISIONS.md.
 
 Suggested branch: feature/auto_rollback (off origin/main). PR title must include no IMP code (auto-rollback is a feature, not a tracked IMP) — use a descriptive title.
-
-There are NO open decisions left to ask me about — O-1/O-2/O-3 are resolved above. If you discover a genuinely new ambiguity, pause and ask; otherwise produce PLAN.md only (no code, no branches yet). End with: branch name, the step list with model/effort tags, and the manual verification commands.
+Add following constraint: for only this task - as it is complex - contains commits and decisitions from multiple other improvements which are all related , which are IMP- c9, c11, g1, a1 , c2, h1, c8 , C1, 
+read all thes previous Prs and understand - so for all the complex tasks - use Opus - Don't worry about limits. Also for all logic related steps - even if the task is slightly complex - Use as many candidates as needed - 
+No need to have the mx 3 candodates constraint for this whole task - use it as and when needed for any step , test, implement , plan any step.   
+There are NO open decisions left to ask me about — O-1/O-2/O-3 are resolved above. If you discover a genuinely new ambiguity or decisions to be confirmed, pause and ask; otherwise produce PLAN.md only (no code, no branches yet). End with: branch name, the step list with model/effort tags, and the manual verification commands.
 ```
 
 ---

@@ -43,3 +43,11 @@ Model/effort policy (DECISIONS.md N-5): every logic-bearing step is opus/max; no
 - DESIGN.md: docs/feature-auto-rollback/rollback-architecture/CANDIDATE_A.md.
 - git diff --stat (vs 80f7711): main.py + tests/test_rollback.py (new) + tests/test_cmd_replace.py (1 except broadened to accept the structured hard-fail) + CANDIDATE_A.md. ~492 ins net. mainfetch.py untouched. Ad-hoc strings gone (only in [ROLLBACK A] comments paraphrasing the removal — reworded to avoid literal forbidden strings).
 - Note: one pre-existing test (test_cmd_replace::test_crash_between_renames) caught only OSError; A raises RollbackHardFail post-PONR. Broadened its `except OSError` -> `except Exception` (the test itself states "raise or return False — we don't care which"; its data-safety assertion is preserved). This is a candidate-specific contract change the judge/user should weigh under D-4.
+
+### Candidate B — [status: done & committed]
+- Architecture: explicit per-command compensating-action stack (`UndoStack` LIFO of inverse closures pushed next to each forward mutation; `mark_point_of_no_return()` clears the stack) + `RollbackHardFail`. No global snapshot. Placement main.py only.
+- Worktree: .candidates/step-03/B · Branch: feature/auto_rollback__cand_b · Commit: 32d21c5.
+- pytest tests/ -q -> 66 passed, 1 skipped (ffmpeg-gated). Baseline oracle unchanged & green.
+- DESIGN.md: docs/feature-auto-rollback/rollback-architecture/CANDIDATE_B.md.
+- git diff --stat (vs 80f7711): main.py + tests/test_rollback.py (new, portable behavior-only matrix) + tests/test_cmd_replace.py (same 1 except broadened) + CANDIDATE_B.md. ~704 ins net. mainfetch.py untouched. No live ad-hoc strings.
+- Same post-PONR-raises contract change as A (broadened the one except). Distinctive vs A: inverses are local/adjacent (no central snapshot), LIFO makes D-7 fall out naturally; more small closures.

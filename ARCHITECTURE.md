@@ -1351,6 +1351,12 @@ MediaVault's multi-step commands (`prep` → `push` → `replace`, the
 failure never leaves an undocumented half-finished state. There is exactly one
 rollback mechanism in the codebase — the two former ad-hoc paths are gone.
 
+> **Deep-dive** (lifecycle + recovery diagrams, the full failure-scenario matrix,
+> storage analysis, and the change-gate) lives in
+> [`docs/feature-auto-rollback/ROLLBACK_MECHANISM.md`](docs/feature-auto-rollback/ROLLBACK_MECHANISM.md).
+> ⚠️ This mechanism is **change-gated** — see "Change-gate" at the end of this
+> section before editing anything that touches it.
+
 ### The mechanism — `RollbackJournal` (on-disk operation journal)
 
 The chosen architecture (Step 3 bake-off winner, see `DECISIONS.md` N-6 —
@@ -1444,13 +1450,28 @@ Production changes are confined to `main.py` + `tests/` (`mainfetch.py` and
 `mvcommon.py` are untouched). The full scenario matrix lives in
 `tests/test_rollback.py`, including a durable-journal crash-recovery test.
 
+### Change-gate (load-bearing)
+
+This mechanism is depended on by every multi-step command. **Any task that would
+change its behavior MUST pause before implementing, state exactly what differs from
+the behavior documented here, and ask the user as an explicit decision** — see
+`CLAUDE.md` ("Auto-rollback is load-bearing — change-gate") and
+`docs/feature-auto-rollback/ROLLBACK_MECHANISM.md` §10. "Affecting rollback"
+includes the journal format/durability, the PONR locations, the created-this-run
+scoping (D-6/D-7), the `cmd_*` wrapping, `recover_journal` semantics, the season
+resume-range messaging, and the `RollbackHardFail` contract. Forward-looking
+rollback/storage work is tracked in `improvements_tierR.md`.
+
 ---
 
 ## 13. Testing Approach
 
-**No automated tests exist.** No `tests/`, `pytest`, `unittest`,
-`tox.ini`, or CI config of any kind. The project is "tested by use" —
-each pipeline run is a manual integration test. The legacy snapshots
+**Automated tests now exist only for the auto-rollback feature.** PR #14
+bootstrapped the first `pytest` suite under `tests/` (`test_rollback.py`,
+`test_baseline_happy_path.py`, plus shared conftest fixtures); `pytest -q` → 67
+passed, 1 ffmpeg-gated skip. The **rest** of the codebase still has no automated
+coverage and there is no `tox.ini` or CI config of any kind — it is "tested by
+use", each pipeline run a manual integration test. The legacy snapshots
 (`main_workingprep.py`, `mainfetchWorking.py`, etc.) are the de-facto
 regression baselines: when something breaks, the user can `diff` the
 active file against the most recent "working" snapshot to triage.

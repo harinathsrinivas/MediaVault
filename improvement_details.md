@@ -26,6 +26,14 @@ On 2026-05-25, a deep audit of `main.py`, `mainfetch.py`, `ARCHITECTURE.md`, the
 >
 > Tier H tracks changes to the multi-agent Claude Code pipeline that *builds* MediaVault (`.claude/agents/`), not the product runtime. **IMP-H1** (migrate the agent pipeline to Opus 4.8 effort tiers) is `done`; see `ARCHITECTURE.md` §19 and `.claude/AGENT_WORKFLOW_NOTES.md`. **IMP-H2** (evaluate Opus 4.8 "dynamic workflows") is `pending`.
 
+> **Added 2026-06-01 — Tier R (auto-rollback follow-ups & storage efficiency):**
+>
+> | File | Items | Theme | Avg Effort |
+> |---|---:|---|---|
+> | `improvements_tierR.md` | R1–R5 (5) | Auto-rollback hardening & storage efficiency | medium–large |
+>
+> Tier R holds forward-looking work that builds on the merged auto-rollback feature (see `docs/feature-auto-rollback/ROLLBACK_MECHANISM.md`) — e.g. **IMP-R1** (cut the ~40 GB split/upload disk peak via streaming split-upload-delete) and exposing a `recover` CLI command for `recover_journal()`. All `pending`; enrich as ideas arise. **Any change that alters rollback behavior is change-gated — see `CLAUDE.md`.**
+
 Plus two companion files at the root:
 
 - **`apple_tv_ui_roadmap.md`** — the long-form Apple TV UI plan and Jellyfin integration design (downstream of the tier work).

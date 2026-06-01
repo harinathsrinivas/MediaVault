@@ -1319,11 +1319,14 @@ Hash stays in JSON for the day the user wants to restore.
   automatically. The defensive fallback (move blocked by a file lock)
   reverts to the prior leave-in-place behavior so restore is never made
   worse than before.
-- **Auto-pilot rollback**: `cmd_prep_push_rep` deletes `_parts/` on push
-  failure but does NOT delete the library entry. Re-running starts from
-  `local_ready`.
-- **Season auto-pilot stops on failure**: `cmd_prep_push_rep_season`
-  breaks the loop on first push failure "to prevent mess".
+- **Auto-rollback (unified failure handling)**: every multi-step command is
+  wrapped by the auto-rollback mechanism (§12a). A reversible failure restores
+  the exact pre-command state; an irreversible (post-PONR) failure hard-fails
+  with an actionable message naming an existing command. The two former ad-hoc
+  paths — `cmd_prep_push_rep` deleting `_parts/` on push failure, and
+  `cmd_prep_push_rep_season` breaking the loop "to prevent mess" — have been
+  replaced by this single mechanism (push failure is now an O-1 resume-message;
+  the season loop keeps completed episodes and prints a resume-range command).
 - **Hash collision on restore harvester**: the harvester routes by
   SHA256, so if two queued chunks somehow have the same hash, the
   second one to arrive will be deleted as a "duplicate". This is a
@@ -1336,6 +1339,110 @@ Hash stays in JSON for the day the user wants to restore.
 - **Lost session state**: if Selenium's debug-port attach fails (e.g.,
   9222 already in use by another Chrome), `init_driver` returns None
   and the fetch route exits cleanly.
+
+---
+
+## 12a. Auto-Rollback for Multi-Step Commands
+
+MediaVault's multi-step commands (`prep` → `push` → `replace`, the
+`prep_push_rep` / `prep_push_rep_season` orchestrators, and the
+`fetch` → `restore` side) can fail half-way. Auto-rollback (feature branch
+`feature/auto_rollback`) unifies failure handling into **one** mechanism so a
+failure never leaves an undocumented half-finished state. There is exactly one
+rollback mechanism in the codebase — the two former ad-hoc paths are gone.
+
+### The mechanism — `RollbackJournal` (on-disk operation journal)
+
+The chosen architecture (Step 3 bake-off winner, see `DECISIONS.md` N-6 —
+**Candidate C, selected wholesale for all operations**) is a durable on-disk
+operation journal in `main.py`:
+
+- `class RollbackJournal` (`main.py:410`) — one journal per command, per id. It
+  writes `<folder>/.mediavault_txn.json` (constant `TXN_JOURNAL_NAME`,
+  `main.py:395`) and **records each intended mutation BEFORE performing it**, so a
+  crash mid-action still leaves a replayable inverse on disk. The record vocabulary
+  is small and fixed (`record_create_file`, `record_create_dir`, `record_set_field`,
+  `record_create_entry`, `record_link_child`, …). The write is fsync-flushed +
+  `os.replace`'d so it is durable.
+- On a reversible failure, `journal.rollback(library)` replays the recorded
+  inverses LIFO, reverts the in-memory library dict, calls `save_library()`, and
+  deletes the journal. On clean success `journal.commit()` deletes the journal.
+  Inverse failures (e.g. a Windows file lock) are reported as a **partial rollback
+  honestly** and the journal is kept for retry.
+- `mark_point_of_no_return()` (`main.py:481`) writes a `crossed_ponr` marker into
+  the journal; thereafter a failure raises `RollbackHardFail` (`main.py:398`)
+  rather than attempting a (now-impossible) rollback.
+- `class RollbackHardFail(Exception)` (`main.py:398`) carries `(state, reason,
+  resume_cmd)` — the structured hard-fail that the orchestrators turn into the
+  user-facing actionable message. The `resume_cmd` always names an **existing**
+  command (never a new "fetch-to-fix" command — decision N-2).
+- `recover_journal(folder_path)` (`main.py:561`) is the crash-recovery entry point:
+  if a journal survives a hard process kill **and** never crossed its PONR, it
+  replays the inverses to finish the interrupted rollback. A journal that crossed
+  the PONR is left in place for inspection. This is **not** called on the happy
+  path, so unrelated commands stay byte-for-byte identical (decision D-4). This
+  durable crash-recovery of the rollback itself is the property that distinguished
+  Candidate C from the in-memory alternatives (A: transaction context-manager;
+  B: compensating-action stack — see `docs/feature-auto-rollback/`).
+
+### Point-of-no-return (PONR) table — verified against current `main.py`
+
+The master/original video is the source of truth: as long as it exists on disk the
+operation is reversible. It is destroyed in **exactly two** places (the only true
+PONRs). Push is reversible/resumable (O-1) — the master always survives a push
+failure.
+
+| Command (def line) | PONR | On failure |
+|---|---|---|
+| `cmd_prep` (`main.py:599`) | none — fully reversible | auto-rollback this-run entry / sidecars / parent child-link (early-skips create no artifacts and never roll back) |
+| `cmd_push` (`main.py:992`) | **none (O-1)** — resumable | resume-message: leave the partial upload, entry stays `local_ready`/`uploaded=False`, print `push <id>`. Roll back this-run `_parts`/`checksums`/`split_info` only if created this run AND failure is pre-any-upload; a pre-existing `_parts/` (resume) is never deleted |
+| `cmd_replace` (`main.py:1335`) | **commit rename `os.rename(original, tobedeleted)` (`main.py:1398`)**, marked at `main.py:1400` | pre-PONR: roll back the dummy temp. At/after PONR: `RollbackHardFail` naming `fetch_restore <id>` (`main.py:1442`). C9 stale-sweep self-heals a torn crash on the next `replace` |
+| `cmd_restore` (`main.py:1598`) | **split-path merged-chunk delete**, marked at `main.py:1690` | pre-PONR: reuse C11 `quarantine_restore_file` + reproducible-output cleanup. At/after PONR: `RollbackHardFail` naming `fetch_restore <id>`. Standard path is a single `shutil.move` — no torn window |
+
+### O-1 resume-message vs O-2 hard-fail split
+
+- **O-1 (push = resume-message).** A failed multi-chunk push is reversible/resumable
+  because the master survives; `cmd_push` already auto-resumes from a surviving
+  `_parts/`. So a push failure is NOT a PONR — it leaves the partial upload and
+  prints the exact `push <id>` resume command.
+- **O-2 (the two true PONRs).** `cmd_replace` after the commit rename, and
+  `cmd_restore` (split) after the merged-chunk delete. Both hard-fail with a
+  message naming the existing `fetch_restore <id>` pipeline (the bytes are in the
+  cloud / need a re-fetch). No new command is invented.
+
+### Orchestrator unification + season resume-range messaging
+
+- `cmd_prep_push_rep` (`main.py:2010`) — the ad-hoc cleanup block ("Reverting
+  temporary files", `_parts` rmtree, "run 'push' manually") is gone; it relies on
+  the wrapped `cmd_push`'s O-1 resume-message and the wrapped `cmd_replace`'s
+  rollback-or-hard-fail. It catches `RollbackHardFail` (`main.py:2040`).
+- `cmd_prep_push_rep_season` (`main.py:2048`) — the bare `break` "to prevent mess"
+  is gone. Completed episodes stay; the in-flight item has already rolled itself
+  back (reversible) or hard-failed (irreversible) via the wrapped commands; the
+  orchestrator computes and prints a **resume-range** command (failing episode →
+  end of the range-filtered ids), reconstructing the exact `SIZE_*` / `device` /
+  `episodes` args and handling a `.5` episode in the range filter. It catches
+  `RollbackHardFail` at `main.py:2114` / `main.py:2137`. Messaging only — there is
+  no progress-file dependency (C1 is not merged).
+
+### Constraints honored
+
+- **D-4** happy path byte-for-byte identical — commands are *wrapped*, not
+  rewritten; the journal is removed on clean success and `recover_journal()` is not
+  on the happy path.
+- **D-6** snapshot-before — rollback removes only the set-difference created this
+  run; pre-existing artifacts (resume `_parts/`, pre-existing `split_info`) are
+  never touched.
+- **D-7** season parent `season_map` — deleted only if this run created it AND
+  rolling back its child leaves 0 children; otherwise only the child-link is removed
+  and `total_episodes` recomputed.
+- **D-9** the empty remote `adb mkdir` dir is left in place on rollback.
+- **C9 / C11 seams reused** — replace stale-sweep and restore quarantine are not
+  duplicated.
+
+Production changes are confined to `main.py` + `tests/` (`mainfetch.py` and
+`mvcommon.py` are untouched). The full scenario matrix lives in
+`tests/test_rollback.py`, including a durable-journal crash-recovery test.
 
 ---
 

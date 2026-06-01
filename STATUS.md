@@ -73,3 +73,10 @@ Model/effort policy (DECISIONS.md N-5): every logic-bearing step is opus/max; no
 - VERIFY: full `python -m pytest -q` on the merged feature branch → **67 passed, 1 skipped** (the ffmpeg-gated genuine-split test skips cleanly; ffmpeg absent on this machine) — exactly the Candidate-C totals.
 - Step 3 ticked [x] in BOTH PLAN.md (root) and docs/feature-auto-rollback/PLAN.md (byte-identical, MD5 EB15F985...).
 - Losing candidate branches feature/auto_rollback__cand_a (e6fde22) + __cand_b (32d21c5) left in place for a later human-gated archive/delete decision.
+
+## Step 4 — [status: done] Architect docs (docs-only) (2026-06-01)
+- Executor: orchestrator (direct; Task subagent unavailable). Model: opus, effort high (matches the step tag — no mismatch).
+- Files changed (DOCS ONLY — `git diff --name-only` confirmed zero `.py` files): ARCHITECTURE.md, docs/feature-auto-rollback/README.md.
+- ARCHITECTURE.md: added §12a "Auto-Rollback for Multi-Step Commands" (the single RollbackJournal mechanism + RollbackHardFail + recover_journal crash recovery; the verified PONR table with current main.py line refs — cmd_prep@599 / cmd_push@992 / cmd_replace@1335 PONR@1398 / cmd_restore@1598; the O-1 resume-message vs O-2 hard-fail split; orchestrator unification + season resume-range messaging; D-4/D-6/D-7/D-9 + C9/C11 seam reuse). Updated the stale §12 bullets that described the two old ad-hoc paths to point at §12a.
+- docs/feature-auto-rollback/README.md: status PLANNING → IMPLEMENTED; cross-links DECISIONS.md N-6 + rollback-architecture/DECISION.md (Candidate C won, wholesale) and ARCHITECTURE.md §12a; notes pytest 67 passed / 1 skipped.
+- Descriptive only — NO code change. Step 4 ticked [x] in BOTH PLAN.md copies (byte-identical, MD5 AA8906AB...).

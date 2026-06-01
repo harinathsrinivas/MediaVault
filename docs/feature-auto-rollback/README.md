@@ -1,13 +1,17 @@
 # Feature: Auto-Rollback for Multi-Step Commands
 
-> **STATUS: PLANNING — all prerequisites merged; ready for the auto-rollback re-plan.**
-> An archived draft implementation plan exists; it now needs to be re-planned
-> against current `main` (all prerequisites have landed).
-> **Done & merged:** A1 (`mvcommon.py`), G1 (`.partial` + atomic rename, PR #7),
-> C9 (atomic `cmd_replace`, PR #5), C11 (restore quarantine, PR #6), C2
-> (ADB/Selenium retry, PR #9), C8 (post-push remote verification, PR #12).
-> **Next up:** the auto-rollback re-plan itself — resolve the open `DECISIONS.md`
-> items (O-1 push-failure boundary) and refresh `PLAN.md`. See `_TRACKER.md`.
+> **STATUS: IMPLEMENTED (on `feature/auto_rollback`).**
+> The feature is built, tested, and merged onto the feature branch. The Step 3
+> bake-off winner is **Candidate C — the on-disk operation journal
+> (`RollbackJournal` + `recover_journal`)**, selected by the user **wholesale for
+> all operations** (see `DECISIONS.md` N-6 and `rollback-architecture/DECISION.md`).
+> The mechanism, the verified point-of-no-return table, the O-1/O-2 split, and the
+> season resume-range messaging are documented in `ARCHITECTURE.md` §12a.
+> **Prerequisites (all merged):** A1 (`mvcommon.py`), G1 (`.partial` + atomic
+> rename, PR #7), C9 (atomic `cmd_replace`, PR #5), C11 (restore quarantine, PR #6),
+> C2 (ADB/Selenium retry, PR #9), C8 (post-push remote verification, PR #12).
+> `tests/test_rollback.py` carries the full scenario matrix; `pytest -q` is green
+> (67 passed, 1 ffmpeg-gated skip).
 
 This folder is the single source of truth for the auto-rollback feature. It was
 produced during a planning session (the planner agent + a Q&A round with the

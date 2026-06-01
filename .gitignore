@@ -43,3 +43,9 @@ resources/
 dummy_size_test/
 dummy_size_test_mp4/
 
+# Obsidian vault config (notes app used only to read the .md files — not a project file)
+.obsidian/
+
+# Local command-caveat transcript dumps written at the repo root by interactive runs
+*local-command-caveat*.txt
+

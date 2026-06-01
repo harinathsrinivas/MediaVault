@@ -65,3 +65,11 @@ Model/effort policy (DECISIONS.md N-5): every logic-bearing step is opus/max; no
 - Comparative review (NO WINNER, D-2): docs/feature-auto-rollback/rollback-architecture/DECISION.md. The three CANDIDATE_{A,B,C}.md were also copied onto feature/auto_rollback alongside DECISION.md for one-place review.
 - Equivalent on correctness/happy-path/in-process failure (all pass the same matrix + unchanged oracle). Differentiators: B smallest/most-local diff; A single cohesive snapshot object; C uniquely survives a hard kill mid-rollback (durable journal) at a larger-diff + per-mutation-fsync cost.
 - PAUSED per the resume brief: NOT auto-selected, NO candidate merged into feature/auto_rollback, Step 4 NOT run, nothing pushed, no PR, no main merge, no archiving. Awaiting the user's winner pick → record as DECISIONS.md N-6 before merge.
+
+## Step 3 — [status: done] WINNER SELECTED + MERGED (2026-06-01)
+- User selected **Candidate C** (on-disk operation journal `RollbackJournal` + `recover_journal`), used WHOLESALE for all operations. Recorded as DECISIONS.md N-6 (commit b2041bd). The hybrid (A-for-small / C-for-big) was explicitly considered and rejected (O-1 makes the headline 100GB push a resume-message not a rollback; rollback duration doesn't scale with file size; a hybrid carries both mechanisms + a size-threshold dispatch for marginal gain).
+- Merge: `git merge --squash feature/auto_rollback__cand_c` (613fe24) → squash commit `c27b05e` (`feat: auto-rollback via on-disk journal (RollbackJournal) — Candidate C`). Merge applied cleanly with NO conflict (the candidate's CANDIDATE_C.md / review docs matched the canonical copies already on the feature branch).
+- git diff --stat of the squash: main.py (+) + tests/test_rollback.py (new) + tests/test_cmd_replace.py (1-line except broadened). mainfetch.py + mvcommon.py UNTOUCHED (verified by name-only grep).
+- VERIFY: full `python -m pytest -q` on the merged feature branch → **67 passed, 1 skipped** (the ffmpeg-gated genuine-split test skips cleanly; ffmpeg absent on this machine) — exactly the Candidate-C totals.
+- Step 3 ticked [x] in BOTH PLAN.md (root) and docs/feature-auto-rollback/PLAN.md (byte-identical, MD5 EB15F985...).
+- Losing candidate branches feature/auto_rollback__cand_a (e6fde22) + __cand_b (32d21c5) left in place for a later human-gated archive/delete decision.

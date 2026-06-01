@@ -43,6 +43,20 @@ puts the file back where it was.
 - `restore` — re-merge the chunks with `mkvmerge`, SHA256-verify against the
   library, and move the resulting file back into the original folder.
 
+### Failure handling (auto-rollback)
+
+Every multi-step command is wrapped by a single **auto-rollback** mechanism. A
+failure *before* a command's point-of-no-return rolls back to the exact
+pre-command state (removing only what that run created); a failure *at/after* it
+hard-fails with a message naming the existing command that resumes/repairs it
+(`fetch_restore <id>`); a `push` failure is treated as resumable (it leaves the
+partial upload and prints `push <id>`); and a season batch keeps completed
+episodes and prints how to resume the rest. It is backed by a durable on-disk
+journal (`.mediavault_txn.json`) that survives a hard process kill, so an
+interrupted rollback can be finished afterward via `recover_journal`. See
+[`ARCHITECTURE.md` §12a](ARCHITECTURE.md) and
+[`docs/feature-auto-rollback/ROLLBACK_MECHANISM.md`](docs/feature-auto-rollback/ROLLBACK_MECHANISM.md).
+
 ## Tech stack
 
 - **Python 3.7+** — `main.py` relies on guaranteed dict insertion order
@@ -233,9 +247,11 @@ for the migration record, and `improvements_tierH.md` for the tracked task.
 - Solo-developer project, actively used in production by the author.
 - Windows 10/11 only — paths, ADB, and Chrome integration are hardcoded for
   Windows. There is no plan to port to macOS or Linux.
-- No automated tests. The project is "tested by use"; the legacy snapshots
-  under `archive/` serve as informal regression baselines that can be diffed
-  against the active files when something breaks.
+- Automated tests cover only the auto-rollback feature so far (the first
+  `pytest` suite, under `tests/`, added by PR #14). The rest of the project is
+  "tested by use"; the legacy snapshots under `archive/` serve as informal
+  regression baselines that can be diffed against the active files when something
+  breaks.
 - The `undetected-chromedriver` package is listed in `requirements.txt` but
   not imported anywhere; `requests` is imported by `main.py` but not listed
   in `requirements.txt`. Both are known issues documented in

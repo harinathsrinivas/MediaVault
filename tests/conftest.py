@@ -237,3 +237,163 @@ def fake_dummy(monkeypatch):
         return True
 
     monkeypatch.setattr(main, "make_video_dummy", _fake_make_video_dummy)
+
+
+# ===========================================================================
+# Auto-rollback test infrastructure (added for the auto-rollback feature).
+#
+# These helpers are the shared failure-injection + fixture surface the Step 1
+# baseline oracle AND the Step 3 candidate scenario matrices build on. They
+# mock ONLY at the I/O boundary (subprocess.run, merge_video_files,
+# get_tech_specs) per docs/testing-strategy.md §1 — application logic always
+# runs real. Nothing here references a real C:\Media path or real library_*.json
+# (the `sandbox` fixture's hard-guard still governs every library write).
+# ===========================================================================
+
+
+@pytest.fixture()
+def stub_tech_specs(monkeypatch):
+    """Replace main.get_tech_specs with a deterministic stub so cmd_prep does
+    not depend on pymediainfo / a real MediaInfo parse of the fake fixture file.
+
+    cmd_prep calls get_tech_specs(filepath) once and stores the result verbatim
+    under entry["tech_spec"]; the value is opaque to rollback logic, so a fixed
+    dict keeps the prep happy-path deterministic across machines. Yields the
+    dict that will be stored so a test can assert the entry mirrors it."""
+    specs = {"resolution": "1080p", "video_codec": "HEVC", "size_bytes": 0}
+
+    def _fake_get_tech_specs(filepath):
+        out = dict(specs)
+        out["size_bytes"] = os.path.getsize(filepath)
+        return out
+
+    monkeypatch.setattr(main, "get_tech_specs", _fake_get_tech_specs)
+    yield specs
+
+
+class FailNthSubprocess:
+    """subprocess.run replacement that succeeds for the first (N-1) *matching*
+    calls then raises CalledProcessError on the Nth, modelling a permanent ADB
+    failure at a chosen point. Composes ON TOP of an underlying run impl
+    (default: a no-op success) so the surrounding command logic — path math,
+    library writes, .partial naming — still executes for real.
+
+    Args:
+      fail_on_nth: 1-based index of the matching call that should raise.
+      match: predicate(argv) -> bool selecting which calls are counted/failed.
+             Default counts every call. Use e.g. lambda a: "push" in a to fail
+             the Nth push specifically.
+      inner: optional underlying run(argv, **kw) used for the calls that are
+             allowed through (e.g. a mock_device fake_run to actually move
+             bytes). When None, allowed calls return a returncode==0 stub.
+
+    Records every argv in `.calls` for post-hoc assertions.
+    """
+
+    def __init__(self, fail_on_nth, match=None, inner=None):
+        self.fail_on_nth = fail_on_nth
+        self.match = match or (lambda argv: True)
+        self.inner = inner
+        self.calls = []
+        self._matched = 0
+
+    def run(self, argv, check=False, **kwargs):
+        argv = list(argv)
+        self.calls.append(argv)
+        if self.match(argv):
+            self._matched += 1
+            if self._matched == self.fail_on_nth:
+                if check:
+                    raise subprocess.CalledProcessError(1, argv)
+
+                class _R:
+                    returncode = 1
+                    stdout = ""
+
+                return _R()
+        if self.inner is not None:
+            return self.inner(argv, check=check, **kwargs)
+
+        class _R:
+            returncode = 0
+            stdout = ""
+
+        return _R()
+
+
+@pytest.fixture()
+def fail_nth_subprocess(monkeypatch):
+    """Factory fixture: returns a callable
+        install(fail_on_nth, match=None, inner=None) -> FailNthSubprocess
+    that patches main.subprocess.run with a FailNthSubprocess and hands the
+    recorder back so a test can inspect `.calls`. Use this to fail the Nth adb
+    push / mv / mkdir during cmd_push without duplicating the FakeAdb recorder.
+    Also stubs mvcommon.time.sleep so retry() backoff is instant."""
+    monkeypatch.setattr(mvcommon.time, "sleep", lambda *_a, **_k: None)
+
+    def install(fail_on_nth, match=None, inner=None):
+        rec = FailNthSubprocess(fail_on_nth, match=match, inner=inner)
+        monkeypatch.setattr(main.subprocess, "run", rec.run)
+        return rec
+
+    return install
+
+
+@pytest.fixture()
+def fail_merge(monkeypatch):
+    """Factory fixture for failing merge_video_files / mkvmerge in cmd_restore.
+
+    Returns install(mode="return_false"|"raise") which patches
+    main.merge_video_files to either return False (the in-band failure signal
+    the code already handles) or raise RuntimeError (an unexpected mkvmerge
+    crash). Records the number of merge attempts in the returned dict's "n".
+    Use the split-restore PONR comes AFTER a successful merge, so a merge
+    failure is a *pre-PONR* (reversible) event the rollback mechanism must
+    handle without faking a restore."""
+    state = {"n": 0}
+
+    def install(mode="return_false"):
+        def _merge(chunk_paths, output_path):
+            state["n"] += 1
+            if mode == "raise":
+                raise RuntimeError("simulated mkvmerge crash")
+            return False
+
+        monkeypatch.setattr(main, "merge_video_files", _merge)
+        return state
+
+    return install
+
+
+def _ffmpeg_available():
+    """True if an ffmpeg binary is callable. Used to gate the real-split
+    fixture so machines without ffmpeg skip those tests cleanly."""
+    import shutil as _sh
+    return _sh.which("ffmpeg") is not None
+
+
+@pytest.fixture()
+def ffmpeg_multichunk_mkv(tmp_path):
+    """ffmpeg-generated multi-MB MKV for tests that need a GENUINE split (i.e.
+    they exercise the real split_video_file path rather than a pre-seeded
+    _parts/ folder). Skips cleanly when ffmpeg is absent so the suite stays
+    green on machines without it (docs/testing-strategy.md §4 / §11).
+
+    Generates a ~6 MB testsrc MKV at tmp_path. Yields its Path. The caller pairs
+    it with a small split target (e.g. SIZE_MB 2) to force multiple chunks.
+    Never writes under real C:\\Media."""
+    if not _ffmpeg_available():
+        pytest.skip("ffmpeg not available — skipping real-split fixture")
+
+    out = tmp_path / "bigsample.mkv"
+    # testsrc at a modest resolution/duration produces a few MB of real MKV.
+    cmd = [
+        "ffmpeg", "-y", "-f", "lavfi",
+        "-i", "testsrc=duration=8:size=640x480:rate=25",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        str(out),
+    ]
+    proc = subprocess.run(cmd, capture_output=True)
+    if proc.returncode != 0 or not out.exists():
+        pytest.skip("ffmpeg invocation failed — skipping real-split fixture")
+    yield out

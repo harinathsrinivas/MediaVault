@@ -1,54 +1,82 @@
 # Execution Log
 
-Task: IMP-C8 — Post-push remote verification
-Branch: feature/post_push_verify (from origin/main @ 59932be; A1 1aac738 / C2 cf79684 / G1 8c12680 all confirmed ancestors)
-Baseline (pre-change): pytest -q -> 46 passed.
-Note: Task subagent tool is unavailable in this run, so the orchestrator executes steps directly (same situation as the A1 and C2 runs). STATUS.md is committed per-step as a scratchpad artifact. Pre-existing dirty working tree had a stray README.md regression (reverted already-merged G1/A1/H1 docs) and a CRLF-only change on C8-post-push-verify.md — both discarded before cutting the branch from origin/main; they are NOT part of C8.
+Task: Auto-rollback for multi-step commands (feature/auto_rollback)
+Branch: feature/auto_rollback (from origin/main @ a70d118; carried the three uncommitted plan docs over). Initial plan commit: 8b8896a.
+Scope for THIS run: Steps 1 -> 2 -> 3 (flagship uncapped bake-off), then PAUSE at the user-decides gate. Steps 4 + merge + push are OUT OF SCOPE this run (D-2 user-selects the Step 3 winner first).
+Note: the Task subagent tool is UNAVAILABLE in this run (same as the A1/C2/C8 runs), so the orchestrator executes every step directly with Read/Write/Edit/Bash and performs git operations inline (the git-agent's exact step sequences are followed by hand). STATUS.md is a per-step scratchpad artifact committed with the branch.
+Baseline (pre-change, unmodified main.py): `pytest -q` -> 58 passed.
+Model/effort policy (DECISIONS.md N-5): every logic-bearing step is opus/max; no downgrade; 3-candidate cap lifted for Step 3 (uncapped). No effort mismatches — the orchestrator runs at opus effort directly.
 
-## Step 1 — [status: done]
-- Executor: orchestrator (direct; Task subagent tool unavailable)
-- Model: haiku (effort tag: low — matches executor-haiku baked low; no mismatch)
-- Files changed: main.py
-- Outcome: Added module-level `PUSH_VERIFY_REMOTE = False` immediately after `MVMETA_SUFFIX` (near the other push constants PARTIAL_SUFFIX/MVMETA_SUFFIX/REMOTE_ROOT), with a two-line comment noting it is gated off here until IMP-A5 adds config-file support. Purely additive; no logic changes.
-- Acceptance: `python -c "import main; assert main.PUSH_VERIFY_REMOTE is False"` -> "OK PUSH_VERIFY_REMOTE is False". No other files changed. PASS.
-
-## Step 2 — [status: done]
-- Executor: orchestrator (direct)
-- Model: sonnet (effort tag: none/medium — matches executor-sonnet baked medium; no mismatch)
-- Files changed: main.py
+## Step 1 — [status: done] Behavior-baseline characterization + happy-path smoke harness
+- Executor: orchestrator (direct; Task subagent tool unavailable). Model: opus, effort max (matches the step tag — no mismatch).
+- Files changed: tests/conftest.py (extended, additive only), tests/test_baseline_happy_path.py (new).
 - Outcome:
-  - 2b: Added module-level `_verify_chunk_hash(adb_base, remote_path, safe_path, expected_sha256)` just above `cmd_push`. Runs `adb shell sha256sum '<safe_path>'` with `check=True, capture_output=True, text=True`; catches the call's own `CalledProcessError` (cmd-not-found / file-not-found) and warns+returns (OD-2a); on success parses `stdout.strip().split()[0]` and raises `subprocess.CalledProcessError(1, ...)` on mismatch so C2's retry wrapper re-runs the closure.
-  - 2a: Before `# 3. UPLOAD LOOP` added `_chunk_hashes: dict` mapping local_filename->expected_sha256 from `chunk_metadata` (new split) OR `library[manual_id]["split_info"]["chunks"]` (resume); empty for single-file push. Lives in the closure scope.
-  - 2c: Extended the existing `_push_and_rename()` closure with `if PUSH_VERIFY_REMOTE: expected = _chunk_hashes.get(local_fname); if expected: _verify_chunk_hash(adb_base, remote_full_path, safe_final, expected)`. No signature changes — all names already in closure scope.
-  - Accuracy tweak (per plan risk note): retry print "(ADB push failed)" -> "(ADB push/verify failed)" since a mismatch now also feeds the retry. Behaviour unchanged.
-- Key decision: `PUSH_VERIFY_REMOTE=False` keeps the `if` body dead, so the happy path is byte-for-byte identical to pre-C8 (regression proven by existing push tests). `expected is None` (single-file or hash not found) skips verification silently — a missing stored hash is not a corruption signal.
-- Acceptance: import OK + `_verify_chunk_hash` callable; `pytest tests/test_cmd_push_retry.py tests/test_cmd_push_partial.py -q` -> 8 passed (regression: zero extra subprocess calls when False); full `pytest -q` -> 46 passed (unchanged from baseline). The =True match/mismatch/unavailable paths are asserted by Step 3 tests.
+  - conftest.py additions (all additive; existing fixtures untouched):
+    - `stub_tech_specs` — deterministic get_tech_specs stub so cmd_prep does not need pymediainfo on the fake fixture file.
+    - `FailNthSubprocess` class + `fail_nth_subprocess` factory fixture — fail the Nth *matching* subprocess.run (e.g. Nth `push`) with CalledProcessError, composing over an optional inner run (e.g. mock_device) so path math / library writes still execute; records `.calls`. Also stubs mvcommon.time.sleep so retry() backoff is instant. (Extends the FakeAdb(fail_push_n=...) pattern rather than duplicating it.)
+    - `fail_merge` factory fixture — patch merge_video_files to return False or raise, for the cmd_restore pre-PONR (reversible) merge-failure scenarios; records attempt count.
+    - `ffmpeg_multichunk_mkv` fixture — ffmpeg-generated ~6 MB testsrc MKV for GENUINE-split tests; `pytest.skip`s cleanly when ffmpeg is absent or the invocation fails (testing-strategy §4/§11).
+  - test_baseline_happy_path.py (the regression ORACLE for D-4): 7 tests snapshotting the happy-path post-state of all five target paths — cmd_prep (no-split movie: entry + uid + <short_id>.sha256, no parent), cmd_prep (season episode: parent season_map created + child linked + total_episodes), cmd_prep early-skip (uploaded -> True, ZERO artifacts), cmd_push (split via mock_device: chunk bytes land at final names, _parts cleaned, entry onboarded/uploaded), cmd_replace (fake_dummy: dummy live, status archived, no .dummy_tmp/.tobedeleted), cmd_restore split (stubbed merge: chunks merge to target + status restored_local + chunks deleted), cmd_restore standard (verified move + status restored_local + restore/ cleaned).
+- Key decisions:
+  - cmd_prep fixture files must exceed DUMMY_MAX_BYTES (200_000) or the @316-318 dummy-detection safety net early-skips them (hit during first run; fixed by writing DUMMY_MAX_BYTES+1 bytes). This is itself a captured fact for the Step 3 candidates: the early-skips create no artifacts and must never roll back.
+  - cmd_push happy path uses `mock_device` (data round-trip) not FakeAdb — O-1 means push FAILURE is resume-message, so only the SUCCESS path is the oracle here; failure scenarios live in Step 3 candidate matrices.
+  - cmd_restore split uses a stubbed merge_video_files (no real mkvmerge) — mirrors test_cmd_restore_quarantine's split-success test.
+- Acceptance: `pytest tests/test_baseline_happy_path.py -q` -> 7 passed against UNMODIFIED main.py. Full `pytest -q` -> 58 passed (was 58 before; conftest additions caused zero regressions). New helpers patch via the existing `sandbox` fixture (both mvcommon.LIBRARY_* and main.LIBRARY_*) — no DIY redirect; no fixture references real C:\Media or real library_*.json. PASS.
 
-## Step 3 — [status: done] [MULTI-CANDIDATE, 2 candidates]
-- Executor: orchestrator (direct; ran both candidates sequentially in git worktrees under .candidates/step-03/{A,B}, then judged)
-- Model: sonnet (effort tag: none/medium — matches executor-sonnet baked medium; no mismatch)
-- Mode: multi-candidate (candidates: 2). Winner: **A**. DECISION.md: docs/feature-auto-rollback/C8-post-push-verify/STEP3_DECISION.md
-- Files changed (winner A merged onto feature branch): tests/test_cmd_push_verify.py (new), plus the DECISION record. Candidate A made NO conftest change (its design).
-- Candidate A (inline FakeAdbVerify recorder): self-contained recorder in the new test file, sha256sum answered from a `sha256_mode` flag (correct/wrong/wrong_then_correct/unavailable); no real bytes; no conftest change; sandbox-only isolation. 5/5 scenarios pass, full suite 51 passed.
-- Candidate B (extend mock_device): added the `sha256sum` branch to conftest + REQUIRED an unplanned `mv` handler change (Path.rename -> Path.replace) because the mock mv doesn't overwrite on Windows, so the retry-after-mismatch path raised WinError 183 and masked the verify retry as an mv error. Real-bytes round trip; 5/5 scenarios pass, full suite 51 passed.
-- Judge rationale (ranked criteria): #1 correctness TIE (both 5/5, full contract). #2 fault-injection clarity -> A (single constructor flag vs indirect byte corruption). #3 regression strength -> A (slight; literal empty-list assert, no wrapper). #4 blast radius -> A decisively (one new file, zero shared-fixture change vs B's behavioural change to a fixture the G1/C2 suites depend on — the exact risk the plan flagged). #5 fidelity -> B (real round trip; lowest-ranked). Ranking favors A.
-- Scenarios proven (a) verify-off zero sha256sum calls; (b) match -> onboarded, 1 call/chunk; (c) mismatch-then-match -> C2 retry self-heals, 2 calls, 1 `rm '.partial'`; (d) all-3-mismatch -> False, entry unchanged, _parts/ populated, 3 calls; (e) unavailable -> warn+skip, True, 1 call, no retry.
-- Acceptance: `pytest tests/test_cmd_push_verify.py -q` -> 5 passed; full `pytest -q` -> 51 passed (no regressions). PASS.
+## Step 2 — [status: done] In-code PONR + artifact-map spec (design-only comments)
+- Executor: orchestrator (direct; Task subagent tool unavailable). Model: opus, effort max (matches the step tag — no mismatch).
+- Commit: `01b18de` (`docs(main): in-code PONR + artifact-map spec for rollback — Step 2`).
+- Files changed: main.py ONLY (+123 lines, all comments — NO behavior change; `python -m py_compile main.py` clean; `git diff --stat` = main.py only).
+- Outcome — transcribed the re-derived PONR table + snapshot/restore contract into main.py as the authoritative implementation spec every Step 3 candidate builds against:
+  - Module-level `AUTO-ROLLBACK SPEC` block inserted before CORE COMMANDS header (location-agnostic per N-4 — does NOT presume the primitive's final home): O-2 invariant (master = source of truth; exactly two PONRs); D-6 snapshot shape (entry_existed, prior_status/uploaded, parent_id/parent_existed, child_already_linked, split_info_existed, preexisting_paths set); inverse action per reversible artifact (entry / split_info / status+uploaded / uid / <short_id>.sha256 / _parts / checksums / restore merged target / parent child-link / parent season_map per D-7); the partial-rollback-on-Windows-lock honesty rule; the PONR toggle -> structured hard-fail naming `fetch_restore <id>` (N-2); D-9 leave-remote-dir; and a per-command PONR summary.
+  - Per-site `[ROLLBACK SPEC]` markers with CURRENT verified line refs: cmd_prep fully reversible + both early-skips @311-318 flagged as zero-artifact / never-roll-back; cmd_push NO rollback PONR (O-1) at the resume `_parts` branch @700 + the split_info save @736 + the chunk delete @858 (all noted resumable, never delete pre-existing _parts); cmd_replace dummy-temp @957 as the only pre-PONR artifact + the PONR seam @990 (augmented the existing C9 seam comment with pre/at-PONR behavior + the don't-double-handle-C9-stale-sweep note); cmd_restore pre-PONR C11 quarantine reuse @1202 + the chunk-delete PONR @1232 + standard-path-no-torn-window note.
+- Acceptance: map names every in-scope artifact (entry, parent season_map + child link, uid, <short_id>.sha256, _parts, checksums, split_info, status, uploaded, restore merge output) with current line refs; matches D-1/D-4/D-6/D-7/D-9 + O-1/O-2. Step 1 baseline remains green: full `pytest -q` -> 58 passed (no runtime change). PASS.
 
-## Step 4 — [status: done]
-- Executor: orchestrator (direct)
-- Model: haiku (effort tag: low — matches executor-haiku baked low; no mismatch)
-- Files changed: improvements_tierC.md, ARCHITECTURE.md
-- Outcome: improvements_tierC.md IMP-C8 Status flipped `pending` -> `done (feature/post_push_verify, PR to main 2026-05-30)` (mirrors IMP-C2/C9 wording). ARCHITECTURE.md §7.5 gained a "Post-push verification (IMP-C8)" sub-bullet under the upload loop: gated on `PUSH_VERIFY_REMOTE` (default False), runs `adb shell sha256sum '<remote>'` after push+mv, compares to the stored chunk hash, raises CalledProcessError on mismatch inside the retried closure (so C2's retry re-runs push->mv->verify), warn-and-skips when sha256sum is unavailable, byte-identical happy path when False, config-toggle deferred to IMP-A5.
-- Note: improvements_tierC.md had a pre-existing CRLF-only working-tree artifact (no content diff); this edit defines its committed content cleanly.
-- Acceptance: IMP-C8 shows done with branch + PR note; ARCHITECTURE mentions the verification step and the PUSH_VERIFY_REMOTE flag. Additive doc edits only. PASS.
+## Step 3 — [status: in_progress] FLAGSHIP UNCAPPED BAKE-OFF (JUDGE-REVIEWS-ONLY / USER-DECIDES)
+- Mode: multi-candidate, executed inline (Task subagent unavailable). Worktrees under .candidates/step-03/{A,B,C} (gitignored), each branched off feature/auto_rollback HEAD 80f7711 (Steps 1+2). Three genuinely-distinct schools per plan: A snapshot/transaction context-manager, B compensating-action stack, C on-disk journal. No D/E (no further genuinely-distinct strategy that isn't a cosmetic variant of these three).
+- Per-candidate deliverable: primitive (3a) + wrapping integration of cmd_prep/push/replace/restore (3b) + orchestrator unification of both ad-hoc paths with season resume-range (3c) + full scenario matrix tests/test_rollback.py (3d) + DESIGN.md. Each committed in its own worktree as it goes green (checkpointing).
 
-## Step 5 — [status: done]
-- Executor: orchestrator (direct)
-- Model: haiku (effort tag: low — matches executor-haiku baked low; no mismatch)
-- Files changed: docs/feature-auto-rollback/C8-post-push-verify/C8-post-push-verify.md, docs/feature-auto-rollback/_TRACKER.md, /PLAN.md (root, gitignored — local sync only)
-- Outcome:
-  1. Filled the Completion report in C8-post-push-verify.md (branch, PR placeholder, files changed, 5 tests, manual commands, OD-1/2/3 resolved, the multi-candidate B mv-overwrite surprise note + Task-tool-unavailable note + stray-README note, no new follow-ups). Front-matter status -> done; all DoD boxes ticked. PR URL left as PR_URL_PLACEHOLDER, filled after the PR is opened in finalize.
-  2. _TRACKER.md: row 6 `not-started` -> `done`; checklist `- [ ] C8 — post-push remote md5sum verify` -> `- [x] C8 — post-push remote verify *(done — feature/post_push_verify, PR to main 2026-05-30)*`.
-  3. Restored root /PLAN.md from docs/feature-auto-rollback/PLAN.md (auto-rollback plan) — `git diff --no-index` confirms IDENTICAL. Confirmed gitignored (`git check-ignore PLAN.md`), so NOT committed; this hands the root live working copy back to the auto-rollback feature now that C8 is done.
-- Acceptance: completion report populated; _TRACKER shows C8 done with branch/PR note; root /PLAN.md matches the auto-rollback plan (NOT the C8 plan). PASS.
+### Candidate A — [status: done & committed]
+- Architecture: snapshot/transaction context-manager (`RollbackContext` class + `RollbackHardFail` carrier), placement main.py only.
+- Worktree: .candidates/step-03/A · Branch: feature/auto_rollback__cand_a · Commit: e6fde22.
+- pytest tests/ -q -> 66 passed, 1 skipped (ffmpeg-gated genuine-split test skips cleanly; ffmpeg absent on this machine). Baseline oracle (test_baseline_happy_path.py) unchanged & green.
+- DESIGN.md: docs/feature-auto-rollback/rollback-architecture/CANDIDATE_A.md.
+- git diff --stat (vs 80f7711): main.py + tests/test_rollback.py (new) + tests/test_cmd_replace.py (1 except broadened to accept the structured hard-fail) + CANDIDATE_A.md. ~492 ins net. mainfetch.py untouched. Ad-hoc strings gone (only in [ROLLBACK A] comments paraphrasing the removal — reworded to avoid literal forbidden strings).
+- Note: one pre-existing test (test_cmd_replace::test_crash_between_renames) caught only OSError; A raises RollbackHardFail post-PONR. Broadened its `except OSError` -> `except Exception` (the test itself states "raise or return False — we don't care which"; its data-safety assertion is preserved). This is a candidate-specific contract change the judge/user should weigh under D-4.
+
+### Candidate B — [status: done & committed]
+- Architecture: explicit per-command compensating-action stack (`UndoStack` LIFO of inverse closures pushed next to each forward mutation; `mark_point_of_no_return()` clears the stack) + `RollbackHardFail`. No global snapshot. Placement main.py only.
+- Worktree: .candidates/step-03/B · Branch: feature/auto_rollback__cand_b · Commit: 32d21c5.
+- pytest tests/ -q -> 66 passed, 1 skipped (ffmpeg-gated). Baseline oracle unchanged & green.
+- DESIGN.md: docs/feature-auto-rollback/rollback-architecture/CANDIDATE_B.md.
+- git diff --stat (vs 80f7711): main.py + tests/test_rollback.py (new, portable behavior-only matrix) + tests/test_cmd_replace.py (same 1 except broadened) + CANDIDATE_B.md. ~704 ins net. mainfetch.py untouched. No live ad-hoc strings.
+- Same post-PONR-raises contract change as A (broadened the one except). Distinctive vs A: inverses are local/adjacent (no central snapshot), LIFO makes D-7 fall out naturally; more small closures.
+
+### Candidate C — [status: done & committed]
+- Architecture: durable on-disk operation journal (`RollbackJournal` writes `<folder>/.mediavault_txn.json` with fsync+os.replace, records each intent before acting; `recover_journal()` finishes an interrupted rollback after a hard kill) + `RollbackHardFail`. Placement main.py only.
+- Worktree: .candidates/step-03/C · Branch: feature/auto_rollback__cand_c · Commit: 613fe24.
+- pytest tests/ -q -> 67 passed, 1 skipped (66 shared matrix + a C-only durable-journal crash-recovery test; ffmpeg-gated split skips). Baseline oracle unchanged & green.
+- DESIGN.md: docs/feature-auto-rollback/rollback-architecture/CANDIDATE_C.md.
+- git diff --stat (vs 80f7711): main.py + tests/test_rollback.py (new, matrix + crash-recovery test) + tests/test_cmd_replace.py (same 1 except broadened) + CANDIDATE_C.md. ~932 ins net. mainfetch.py + mvcommon.py untouched. No live ad-hoc strings.
+- Distinctive: only candidate whose REVERT survives a hard process kill (durable journal + recover_journal). Cost: largest main.py diff + an fsync/os.replace per mutation + a transient dot-file per media folder (happy path still byte-identical per the oracle).
+
+## Step 3 — [status: PAUSED at the user-decides gate]
+- All three genuinely-distinct candidates complete, green, committed in their worktrees. mainfetch.py + mvcommon.py untouched across all three; diffs confined to main.py + tests/ + each CANDIDATE_*.md.
+- Comparative review (NO WINNER, D-2): docs/feature-auto-rollback/rollback-architecture/DECISION.md. The three CANDIDATE_{A,B,C}.md were also copied onto feature/auto_rollback alongside DECISION.md for one-place review.
+- Equivalent on correctness/happy-path/in-process failure (all pass the same matrix + unchanged oracle). Differentiators: B smallest/most-local diff; A single cohesive snapshot object; C uniquely survives a hard kill mid-rollback (durable journal) at a larger-diff + per-mutation-fsync cost.
+- PAUSED per the resume brief: NOT auto-selected, NO candidate merged into feature/auto_rollback, Step 4 NOT run, nothing pushed, no PR, no main merge, no archiving. Awaiting the user's winner pick → record as DECISIONS.md N-6 before merge.
+
+## Step 3 — [status: done] WINNER SELECTED + MERGED (2026-06-01)
+- User selected **Candidate C** (on-disk operation journal `RollbackJournal` + `recover_journal`), used WHOLESALE for all operations. Recorded as DECISIONS.md N-6 (commit b2041bd). The hybrid (A-for-small / C-for-big) was explicitly considered and rejected (O-1 makes the headline 100GB push a resume-message not a rollback; rollback duration doesn't scale with file size; a hybrid carries both mechanisms + a size-threshold dispatch for marginal gain).
+- Merge: `git merge --squash feature/auto_rollback__cand_c` (613fe24) → squash commit `c27b05e` (`feat: auto-rollback via on-disk journal (RollbackJournal) — Candidate C`). Merge applied cleanly with NO conflict (the candidate's CANDIDATE_C.md / review docs matched the canonical copies already on the feature branch).
+- git diff --stat of the squash: main.py (+) + tests/test_rollback.py (new) + tests/test_cmd_replace.py (1-line except broadened). mainfetch.py + mvcommon.py UNTOUCHED (verified by name-only grep).
+- VERIFY: full `python -m pytest -q` on the merged feature branch → **67 passed, 1 skipped** (the ffmpeg-gated genuine-split test skips cleanly; ffmpeg absent on this machine) — exactly the Candidate-C totals.
+- Step 3 ticked [x] in BOTH PLAN.md (root) and docs/feature-auto-rollback/PLAN.md (byte-identical, MD5 EB15F985...).
+- Losing candidate branches feature/auto_rollback__cand_a (e6fde22) + __cand_b (32d21c5) left in place for a later human-gated archive/delete decision.
+
+## Step 4 — [status: done] Architect docs (docs-only) (2026-06-01)
+- Executor: orchestrator (direct; Task subagent unavailable). Model: opus, effort high (matches the step tag — no mismatch).
+- Files changed (DOCS ONLY — `git diff --name-only` confirmed zero `.py` files): ARCHITECTURE.md, docs/feature-auto-rollback/README.md.
+- ARCHITECTURE.md: added §12a "Auto-Rollback for Multi-Step Commands" (the single RollbackJournal mechanism + RollbackHardFail + recover_journal crash recovery; the verified PONR table with current main.py line refs — cmd_prep@599 / cmd_push@992 / cmd_replace@1335 PONR@1398 / cmd_restore@1598; the O-1 resume-message vs O-2 hard-fail split; orchestrator unification + season resume-range messaging; D-4/D-6/D-7/D-9 + C9/C11 seam reuse). Updated the stale §12 bullets that described the two old ad-hoc paths to point at §12a.
+- docs/feature-auto-rollback/README.md: status PLANNING → IMPLEMENTED; cross-links DECISIONS.md N-6 + rollback-architecture/DECISION.md (Candidate C won, wholesale) and ARCHITECTURE.md §12a; notes pytest 67 passed / 1 skipped.
+- Descriptive only — NO code change. Step 4 ticked [x] in BOTH PLAN.md copies (byte-identical, MD5 AA8906AB...).

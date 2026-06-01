@@ -1,13 +1,17 @@
 # Feature: Auto-Rollback for Multi-Step Commands
 
-> **STATUS: PLANNING — all prerequisites merged; ready for the auto-rollback re-plan.**
-> An archived draft implementation plan exists; it now needs to be re-planned
-> against current `main` (all prerequisites have landed).
-> **Done & merged:** A1 (`mvcommon.py`), G1 (`.partial` + atomic rename, PR #7),
-> C9 (atomic `cmd_replace`, PR #5), C11 (restore quarantine, PR #6), C2
-> (ADB/Selenium retry, PR #9), C8 (post-push remote verification, PR #12).
-> **Next up:** the auto-rollback re-plan itself — resolve the open `DECISIONS.md`
-> items (O-1 push-failure boundary) and refresh `PLAN.md`. See `_TRACKER.md`.
+> **STATUS: IMPLEMENTED (on `feature/auto_rollback`).**
+> The feature is built, tested, and merged onto the feature branch. The Step 3
+> bake-off winner is **Candidate C — the on-disk operation journal
+> (`RollbackJournal` + `recover_journal`)**, selected by the user **wholesale for
+> all operations** (see `DECISIONS.md` N-6 and `rollback-architecture/DECISION.md`).
+> The mechanism, the verified point-of-no-return table, the O-1/O-2 split, and the
+> season resume-range messaging are documented in `ARCHITECTURE.md` §12a.
+> **Prerequisites (all merged):** A1 (`mvcommon.py`), G1 (`.partial` + atomic
+> rename, PR #7), C9 (atomic `cmd_replace`, PR #5), C11 (restore quarantine, PR #6),
+> C2 (ADB/Selenium retry, PR #9), C8 (post-push remote verification, PR #12).
+> `tests/test_rollback.py` carries the full scenario matrix; `pytest -q` is green
+> (67 passed, 1 ffmpeg-gated skip).
 
 This folder is the single source of truth for the auto-rollback feature. It was
 produced during a planning session (the planner agent + a Q&A round with the
@@ -38,6 +42,7 @@ completed items and prints exactly how to resume the rest.
 |---|---|---|
 | `REPLAN_BRIEF.md` | **Consolidated re-plan brief** — original plan + all confirmed decisions (incl. O-1) + corrected failure analysis + post-merge code map + the ready-to-paste planner prompt. | …are resuming auto-rollback. **Start here.** |
 | `README.md` | This outline + status + onboarding for prerequisite-improvement agents. | …want the folder map. |
+| `ROLLBACK_MECHANISM.md` | **How the implemented mechanism works** — lifecycle + recovery diagrams, the journal format, the full failure-scenario matrix, the storage analysis, and the change-gate. | …touch failure handling anywhere. **The how-it-works doc.** |
 | `PLAN.md` | The full draft implementation plan (planner output): steps, model assignments, the multi-candidate architecture step, risks, verification, out-of-scope. **Archived draft as of the pause — re-derive against `REPLAN_BRIEF.md` + current code.** | …will implement or re-plan auto-rollback itself. |
 | `DECISIONS.md` | Every decision: confirmed, accepted-default, and (formerly) open — each with rationale and status. O-1/O-2/O-3 now resolved. The authoritative decision record. | …need to know *why* something was chosen. |
 | `FAILURE_ANALYSIS.md` | The technical core: what each command creates/mutates, the precise point-of-no-return per command (with current `main.py` line refs), the reversible-vs-irreversible boundary, and concrete failure walk-throughs (Examples A/B/C). | …are touching `cmd_push`, `cmd_replace`, or `cmd_restore` for **any** reason. |
@@ -90,20 +95,21 @@ But auto-rollback depends on the code you are about to touch, so:
 
 ---
 
-## How this feature resumes
+## Status — implemented (PR #14)
 
-When the user returns, the planner agent will be re-run **against the updated
-code** (after any prerequisite improvements have landed) and will refresh
-`PLAN.md`, incorporating:
+This feature is **done and merged onto `feature/auto_rollback` (PR #14)**. The
+re-plan (2026-05-31) ran against the merged prerequisites; the Step 3 uncapped
+bake-off produced three candidates (A transaction context-manager, B
+compensating-action stack, C on-disk journal); the judge wrote a no-winner
+comparative review (`rollback-architecture/DECISION.md`) and the **user selected
+Candidate C wholesale** (recorded as `DECISIONS.md` N-6). Restore / `fetch_restore`
+were in scope; the push-failure boundary resolved to a resume-message (O-1).
 
-- **Restore / `fetch_restore` is IN scope** (confirmed).
-- The architecture step is an **uncapped candidate bake-off**: the planner
-  proposes as many genuinely-distinct rollback-mechanism approaches as exist,
-  each runs to completion, the judge writes a review, and **the user makes the
-  final selection** (the judge does NOT auto-pick).
-- The user's **push-failure boundary** choice (see `DECISIONS.md`, open item).
-- Whatever prerequisite improvements were completed (which change the
-  point-of-no-return analysis).
+- **How it works:** [`ROLLBACK_MECHANISM.md`](ROLLBACK_MECHANISM.md) (diagrams,
+  scenario matrix, storage, change-gate) and `ARCHITECTURE.md` §12a.
+- **Change-gate:** the mechanism is load-bearing — any future change that alters
+  rollback behavior must pause and ask the user (see `CLAUDE.md`).
+- **Follow-ups:** tracked in `improvements_tierR.md` (e.g. IMP-R1 split/upload disk-peak reduction).
 
 **PLAN.md location convention.** The live working copy the orchestrator/planner
 consume is `/PLAN.md` at the repo root — it is **gitignored and never committed.**

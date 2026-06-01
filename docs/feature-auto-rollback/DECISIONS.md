@@ -133,6 +133,107 @@ prerequisites; nothing further is folded in.
 
 ---
 
+## ☑️ New load-bearing choices from the 2026-05-31 re-plan (planner-recommended)
+
+These were decided while re-planning against current `main`. They do not reopen
+any resolved decision; they record load-bearing implementation choices and the
+re-derived facts the new `PLAN.md` depends on.
+
+### N-1. Re-derived points-of-no-return against CURRENT `main.py` (line refs verified 2026-05-31)
+The stale doc line numbers were re-derived against current code (post all merges):
+- `cmd_replace` PONR is now the **C9 commit rename `os.rename(original, tobedeleted)`
+  at `main.py:990`** (NOT the old `os.remove(original)`); C9 already labels this
+  line as the rollback seam. The dummy temp (`<original>.dummy_tmp<ext>`) is the
+  only pre-PONR artifact to roll back; C9's stale-sweep (`main.py:966-979`)
+  self-heals a torn crash on the next `replace`.
+- `cmd_restore` split-path PONR is the **merged-chunk delete at `main.py:1232-1234`**.
+  Pre-PONR failures reuse C11's `quarantine_restore_file()` (`main.py:1148`,
+  called at 1207/1258) and the existing reproducible-output cleanup (1213-1217).
+- `cmd_push` has **no rollback PONR** (O-1): the chunk delete at `main.py:858-862`
+  is resumable, not a PONR. Push failures emit the resume-message.
+- Other current refs: `cmd_prep`@302 (early-skips 311-318), `cmd_push`@654,
+  `cmd_replace`@943, `cmd_restore`@1167, `cmd_prep_push_rep`@1549 (ad-hoc block
+  1562-1578), `cmd_prep_push_rep_season`@1591 (bare break 1649-1650, already-
+  uploaded skip 1631-1635), `cmd_fetch_restore`@1672.
+
+### N-2. The irreversible hard-fail message names `fetch_restore <id>` (not a new command)
+For both true PONRs (`cmd_replace` post-commit, `cmd_restore` post-chunk-delete)
+the hard-fail message points the user at the EXISTING `fetch_restore <id>`
+pipeline (the bytes live in the cloud / need a re-fetch). No new "fetch-to-fix"
+or repair command is invented — honoring the original task constraint.
+
+### N-3. Flagship bake-off is FULL competing implementations, judge reviews, USER picks (updated 2026-05-31)
+~~Original framing: a design-only bake-off (written design notes per candidate) in
+Step 3, then a separate single-executor implementation step (Step 4).~~ **Superseded
+by the user's 2026-05-31 decision.** Per the user's explicit instruction ("full
+implementations … don't worry about limits"), the flagship Step 3 bake-off now has
+each candidate ship a COMPLETE, integrated, tested implementation in its own
+worktree (primitive + wrapping of `cmd_prep`/`cmd_push`/`cmd_replace`/`cmd_restore`
++ orchestrator unification + full scenario test matrix, plus a per-candidate
+DESIGN.md self-critique). The former separate "implement primitive / integrate /
+unify orchestrators / scenario tests" steps are COLLAPSED into each candidate, so
+the user compares RUNNING code + per-candidate `pytest` results rather than design
+intent. D-2 still holds: the judge writes a comparative review with NO winner; the
+orchestrator PAUSES and the USER selects; the winning candidate's branch IS what
+gets merged (losing worktrees archived per repo policy). The uncapped/no-3-cap and
+Opus-on-all-logic policies (N-5) apply throughout. The user's selection is to be
+appended here as N-6 BEFORE the winner is merged.
+
+### N-4. Mechanism placement defaults to `main.py`
+The rollback primitive lives in `main.py` (where all `cmd_*` live and are
+wrapped). `mvcommon.py` is touched ONLY if the user-chosen candidate explicitly
+justifies a shared-module placement. `mainfetch.py` is not modified — the fetch
+boundary is exercised via the `mock_fetch` fixture / the `cmd_dispatch_fetch`
+subprocess seam.
+
+### N-5. Model/effort policy for THIS feature: Opus + max on all logic-bearing steps
+Per the user's task-scoped override (this feature stitches together C9/C11/G1/A1/
+C2/C8/H1 and is unusually complex), every logic-bearing step — design,
+implementation, AND tests — is tagged `[model: opus]` and runs at the executor's
+`max` effort. No haiku/sonnet steps appear in this plan; the doc-only architect
+step is opus at advisory `high`. The uncapped multi-candidate cap is lifted only
+for Step 3 (the architecture bake-off).
+
+---
+
+## ✅ User selection of the Step 3 bake-off winner (2026-06-01)
+
+### N-6. Winner = **Candidate C (on-disk operation journal, `RollbackJournal`), used WHOLESALE for all operations**
+After reviewing all three complete, tested implementations and the comparative
+review (`rollback-architecture/DECISION.md`), the user selected **Candidate C**:
+the durable on-disk operation journal (`RollbackJournal` writes
+`<folder>/.mediavault_txn.json` with fsync + `os.replace`, recording each intended
+mutation before performing it; `recover_journal()` finishes an interrupted rollback
+after a hard process kill) plus the `RollbackHardFail` carrier. Candidate C's branch
+`feature/auto_rollback__cand_c` (`613fe24`) is the implementation that gets merged.
+The mechanism is applied to **ALL operations**, not a size-based subset.
+
+**Rationale (why C wholesale, and why the hybrid was rejected):**
+- The user wanted a **self-recovering, recorded rollback** that survives a hard kill
+  *mid-rollback* (`recover_journal()` finishes the interrupted revert from the durable
+  journal) and that leaves a **forensic record** of exactly what each run did.
+- This is applied to **every** operation, not just large ones. A size-based hybrid
+  (Candidate A's in-memory snapshot for small files, Candidate C's journal for big
+  files) was explicitly considered and **rejected** because:
+  1. **O-1 makes a large multi-chunk push a resume-message, NOT a rollback** — so on
+     the headline 100 GB-push case, C's durability isn't even exercised (push failure
+     leaves the partial upload and prints `push <id>`; nothing rolls back). The
+     durability benefit a size-threshold would gate on is therefore not where the big
+     files actually are.
+  2. **Rollback duration does not scale with file size** — rollback work is deletes
+     and dict reverts, which are fast regardless of how large the master file is. A
+     large file does not make the rollback window longer or riskier.
+  3. **A hybrid carries BOTH mechanisms PLUS a size-threshold dispatch** — the highest
+     maintenance burden (two code paths to keep correct + a branch deciding which) for
+     a marginal, largely-unexercised gain. One uniform mechanism is simpler to audit
+     and reason about for a solo maintainer.
+
+**Decision date:** 2026-06-01. The winner is merged into `feature/auto_rollback` as a
+single squash commit; the losing candidate branches (`__cand_a`, `__cand_b`) are left
+in place for the user to archive/delete later (a separate human-gated decision).
+
+---
+
 ## (historical) ❓ OPEN — superseded by the confirmations above
 The three items above were open at the pause; all are now resolved (2026-05-31).
 No open decisions remain blocking the auto-rollback re-plan.

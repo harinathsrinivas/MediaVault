@@ -196,6 +196,44 @@ for Step 3 (the architecture bake-off).
 
 ---
 
+## ✅ User selection of the Step 3 bake-off winner (2026-06-01)
+
+### N-6. Winner = **Candidate C (on-disk operation journal, `RollbackJournal`), used WHOLESALE for all operations**
+After reviewing all three complete, tested implementations and the comparative
+review (`rollback-architecture/DECISION.md`), the user selected **Candidate C**:
+the durable on-disk operation journal (`RollbackJournal` writes
+`<folder>/.mediavault_txn.json` with fsync + `os.replace`, recording each intended
+mutation before performing it; `recover_journal()` finishes an interrupted rollback
+after a hard process kill) plus the `RollbackHardFail` carrier. Candidate C's branch
+`feature/auto_rollback__cand_c` (`613fe24`) is the implementation that gets merged.
+The mechanism is applied to **ALL operations**, not a size-based subset.
+
+**Rationale (why C wholesale, and why the hybrid was rejected):**
+- The user wanted a **self-recovering, recorded rollback** that survives a hard kill
+  *mid-rollback* (`recover_journal()` finishes the interrupted revert from the durable
+  journal) and that leaves a **forensic record** of exactly what each run did.
+- This is applied to **every** operation, not just large ones. A size-based hybrid
+  (Candidate A's in-memory snapshot for small files, Candidate C's journal for big
+  files) was explicitly considered and **rejected** because:
+  1. **O-1 makes a large multi-chunk push a resume-message, NOT a rollback** — so on
+     the headline 100 GB-push case, C's durability isn't even exercised (push failure
+     leaves the partial upload and prints `push <id>`; nothing rolls back). The
+     durability benefit a size-threshold would gate on is therefore not where the big
+     files actually are.
+  2. **Rollback duration does not scale with file size** — rollback work is deletes
+     and dict reverts, which are fast regardless of how large the master file is. A
+     large file does not make the rollback window longer or riskier.
+  3. **A hybrid carries BOTH mechanisms PLUS a size-threshold dispatch** — the highest
+     maintenance burden (two code paths to keep correct + a branch deciding which) for
+     a marginal, largely-unexercised gain. One uniform mechanism is simpler to audit
+     and reason about for a solo maintainer.
+
+**Decision date:** 2026-06-01. The winner is merged into `feature/auto_rollback` as a
+single squash commit; the losing candidate branches (`__cand_a`, `__cand_b`) are left
+in place for the user to archive/delete later (a separate human-gated decision).
+
+---
+
 ## (historical) ❓ OPEN — superseded by the confirmations above
 The three items above were open at the pause; all are now resolved (2026-05-31).
 No open decisions remain blocking the auto-rollback re-plan.

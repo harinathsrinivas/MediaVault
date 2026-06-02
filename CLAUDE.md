@@ -13,6 +13,11 @@ Follow [`docs/git-pr-conventions.md`](docs/git-pr-conventions.md) for all branch
 ## Agentic workflow
 Non-trivial changes go through the multi-agent pipeline in `.claude/agents/` (planner → orchestrator → executors, with git-agent and judge). It runs on Opus 4.8 effort tiers — see `ARCHITECTURE.md` §19 and `.claude/AGENT_WORKFLOW_NOTES.md`.
 
+**Execution model — top-level orchestration.** A Claude Code sub-agent cannot spawn sub-agents (nesting depth = 1), and `orchestrator` is otherwise a sub-agent. So the pipeline runs in the **main (top-level) session**: it reads `PLAN.md`, follows `.claude/agents/orchestrator.md` as a *playbook*, and spawns the executor / candidate / judge / git sub-agents **itself** (depth-1 from the main session works), committing between steps and pausing at the human gates. **Do NOT launch the `orchestrator` agent via `Task` to execute a plan** — it would hit the depth limit and (as happened on the A1/C2/C8/auto-rollback runs) silently fall back to running everything inline. See the 2026-06-03 decision in `.claude/AGENT_WORKFLOW_NOTES.md`.
+
+## Surface fundamental contradictions — no silent handling
+If any agent — or the main session — hits a **fundamental capability gap or contradiction** with the task/plan (a required tool is unavailable, e.g. nested `Task`; a planned approach is impossible; an instruction conflicts with a hard runtime limit), **STOP and surface it to the user as an explicit decision** — state what was expected, what actually differs, and the options — rather than silently working around it and continuing. This applies to every agent (this file loads into every session and sub-agent).
+
 ## Improvement tasks
 Work is tracked as `IMP-<XN>` tasks across `improvements_tier*.md`; start from `improvement_details.md`. Mark status (`pending`/`in_progress`/`done`) as work progresses.
 

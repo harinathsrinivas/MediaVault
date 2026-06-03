@@ -84,6 +84,11 @@ Status: complete
 Key decisions: Dispatch joins sys.argv[2:] so space-containing folder paths work; --scan takes priority over positional target; no-args case prints usage error without calling cmd_recover.
 Acceptance: `python main.py` (no args) usage block lists `recover [id|folder]  (or: recover --scan)`; `python main.py recover` (no args) prints `❌ Usage: recover [id|folder]   (or: recover --scan)`. Both passed.
 
+## Step 3 — Add tests/test_recover_cli.py
+Status: complete
+Key decisions: Hand-wrote journals as JSON (no RollbackJournal constructor needed); _seed_library helper writes lib_movies entry + empty series/anime; scan test monkeypatches main.LOCAL_ROOT to tmp_path/Media with C:\Media guard; crossed-PONR test asserts journal survives and result is falsy.
+Acceptance: pytest tests/test_recover_cli.py -v: 5 passed in 0.26s; pytest -q: 72 passed, 1 skipped (no regressions).
+
 ## Step 4 — [status: done] Architect docs (docs-only) (2026-06-01)
 - Executor: orchestrator (direct; Task subagent unavailable). Model: opus, effort high (matches the step tag — no mismatch).
 - Files changed (DOCS ONLY — `git diff --name-only` confirmed zero `.py` files): ARCHITECTURE.md, docs/feature-auto-rollback/README.md.

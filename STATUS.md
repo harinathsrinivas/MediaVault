@@ -95,3 +95,8 @@ Acceptance: pytest tests/test_recover_cli.py -v: 5 passed in 0.26s; pytest -q: 7
 - ARCHITECTURE.md: added §12a "Auto-Rollback for Multi-Step Commands" (the single RollbackJournal mechanism + RollbackHardFail + recover_journal crash recovery; the verified PONR table with current main.py line refs — cmd_prep@599 / cmd_push@992 / cmd_replace@1335 PONR@1398 / cmd_restore@1598; the O-1 resume-message vs O-2 hard-fail split; orchestrator unification + season resume-range messaging; D-4/D-6/D-7/D-9 + C9/C11 seam reuse). Updated the stale §12 bullets that described the two old ad-hoc paths to point at §12a.
 - docs/feature-auto-rollback/README.md: status PLANNING → IMPLEMENTED; cross-links DECISIONS.md N-6 + rollback-architecture/DECISION.md (Candidate C won, wholesale) and ARCHITECTURE.md §12a; notes pytest 67 passed / 1 skipped.
 - Descriptive only — NO code change. Step 4 ticked [x] in BOTH PLAN.md copies (byte-identical, MD5 AA8906AB...).
+
+## Step 4 — Document recover in README + ARCHITECTURE
+Status: complete
+Key decisions: additive doc rows only; recover_journal semantics unchanged
+Acceptance: README row added at line 139 after `sort` (describes `recover [id|folder]` and `recover --scan`); ARCHITECTURE §5 row added at line 226 after `fetch` (describes `cmd_recover` dispatch); ARCHITECTURE §12a notes CLI entry point at line 1394 (new sentence after the alternatives paragraph, before PONR table section).

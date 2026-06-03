@@ -136,6 +136,7 @@ help text and no `--help` flag; this table is the reference.
 | `set_fanart` | `set_fanart [id] [url]` | Download and save fanart.jpg into the media folder |
 | `set_uploaded` | `set_uploaded [id]` | Force-mark as uploaded (emergency rescue) |
 | `sort` | `sort` | Re-sort all library JSONs by language -> year -> size |
+| `recover` | `recover [id\|folder]` (or `recover --scan`) | Finish an interrupted auto-rollback for a media folder (resolves by id or path); `--scan` reports leftover `.mediavault_txn.json` journals (read-only) |
 
 The Selenium fetcher can also be invoked directly:
 

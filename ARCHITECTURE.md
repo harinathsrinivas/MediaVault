@@ -223,6 +223,7 @@ Brackets denote optional args; `[id]` is the manual library ID like
 | `restore_group` | `restore_group [id]` | `cmd_restore_group` |
 | `sort` | `sort` | `cmd_sort` — re-order JSONs by lang -> year -> size |
 | `fetch` | `fetch [id] [OPT: episodes <range>]` | `cmd_dispatch_fetch` — spawns `python mainfetch.py fetch ...` |
+| `recover` | `recover [id\|folder]` / `recover --scan` | `cmd_recover` — finish an interrupted rollback (calls `recover_journal`); `--scan` lists leftover journals read-only |
 
 > **`episodes` keyword is a required literal trigger.** For `fetch`,
 > `fetch_restore`, and `prep_push_rep_season`, the word `episodes` must
@@ -1390,6 +1391,7 @@ operation journal in `main.py`:
   durable crash-recovery of the rollback itself is the property that distinguished
   Candidate C from the in-memory alternatives (A: transaction context-manager;
   B: compensating-action stack — see `docs/feature-auto-rollback/`).
+  `recover_journal` is now reachable from the CLI via `python main.py recover <id|folder>` (and `recover --scan` for a read-only sweep of all media roots); the function's semantics and journal format are unchanged.
 
 ### Point-of-no-return (PONR) table — verified against current `main.py`
 

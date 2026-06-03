@@ -100,3 +100,8 @@ Acceptance: pytest tests/test_recover_cli.py -v: 5 passed in 0.26s; pytest -q: 7
 Status: complete
 Key decisions: additive doc rows only; recover_journal semantics unchanged
 Acceptance: README row added at line 139 after `sort` (describes `recover [id|folder]` and `recover --scan`); ARCHITECTURE §5 row added at line 226 after `fetch` (describes `cmd_recover` dispatch); ARCHITECTURE §12a notes CLI entry point at line 1394 (new sentence after the alternatives paragraph, before PONR table section).
+
+## Step 5 — DECISIONS.md + IMP-R2 status flip
+Status: complete
+Key decisions: wrapper-only/change-gate; id-first resolution; scan read-only; argv join
+Acceptance: DECISIONS.md created with 4 entries; improvements_tierR.md IMP-R2 Status: done

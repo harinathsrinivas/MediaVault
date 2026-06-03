@@ -79,6 +79,11 @@ Status: complete
 Key decisions: Inserted `cmd_recover(target=None, scan=False)` between `recover_journal` (line 592) and the `# CORE COMMANDS` banner; scan branch walks LOCAL_ROOT/{Movies,Series,Anime} read-only reporting journals; resolve branch strips quotes, checks library for id→folder_path, falls back to direct path, then calls `recover_journal`.
 Acceptance: `python -c "import main; print(main.cmd_recover.__name__)"` → `cmd_recover`; `recover_journal` lines 561-592 byte-for-byte unchanged (verified by read-back).
 
+## Step 2 — Wire recover dispatch + usage
+Status: complete
+Key decisions: Dispatch joins sys.argv[2:] so space-containing folder paths work; --scan takes priority over positional target; no-args case prints usage error without calling cmd_recover.
+Acceptance: `python main.py` (no args) usage block lists `recover [id|folder]  (or: recover --scan)`; `python main.py recover` (no args) prints `❌ Usage: recover [id|folder]   (or: recover --scan)`. Both passed.
+
 ## Step 4 — [status: done] Architect docs (docs-only) (2026-06-01)
 - Executor: orchestrator (direct; Task subagent unavailable). Model: opus, effort high (matches the step tag — no mismatch).
 - Files changed (DOCS ONLY — `git diff --name-only` confirmed zero `.py` files): ARCHITECTURE.md, docs/feature-auto-rollback/README.md.

@@ -2276,6 +2276,7 @@ if __name__ == "__main__":
         print("  restore_group [id]")
         print("  sort")
         print("  fetch [id]")
+        print("  recover [id|folder]  (or: recover --scan)")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -2488,6 +2489,15 @@ if __name__ == "__main__":
 
     elif cmd == "sort":
         cmd_sort()
+
+    elif cmd == "recover":
+        args = sys.argv[2:]
+        if args and args[0] == "--scan":
+            cmd_recover(scan=True)
+        elif args:
+            cmd_recover(" ".join(args))
+        else:
+            print("❌ Usage: recover [id|folder]   (or: recover --scan)")
 
     elif cmd == "fetch":
         if len(sys.argv) < 3:

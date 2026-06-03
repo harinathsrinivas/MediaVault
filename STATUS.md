@@ -74,6 +74,11 @@ Model/effort policy (DECISIONS.md N-5): every logic-bearing step is opus/max; no
 - Step 3 ticked [x] in BOTH PLAN.md (root) and docs/feature-auto-rollback/PLAN.md (byte-identical, MD5 EB15F985...).
 - Losing candidate branches feature/auto_rollback__cand_a (e6fde22) + __cand_b (32d21c5) left in place for a later human-gated archive/delete decision.
 
+## Step 1 — Add cmd_recover to main.py
+Status: complete
+Key decisions: Inserted `cmd_recover(target=None, scan=False)` between `recover_journal` (line 592) and the `# CORE COMMANDS` banner; scan branch walks LOCAL_ROOT/{Movies,Series,Anime} read-only reporting journals; resolve branch strips quotes, checks library for id→folder_path, falls back to direct path, then calls `recover_journal`.
+Acceptance: `python -c "import main; print(main.cmd_recover.__name__)"` → `cmd_recover`; `recover_journal` lines 561-592 byte-for-byte unchanged (verified by read-back).
+
 ## Step 4 — [status: done] Architect docs (docs-only) (2026-06-01)
 - Executor: orchestrator (direct; Task subagent unavailable). Model: opus, effort high (matches the step tag — no mismatch).
 - Files changed (DOCS ONLY — `git diff --name-only` confirmed zero `.py` files): ARCHITECTURE.md, docs/feature-auto-rollback/README.md.

@@ -592,6 +592,62 @@ def recover_journal(folder_path):
     return True
 
 
+def cmd_recover(target=None, scan=False):
+    # Wrapper around recover_journal: scan for stale journals or resolve one folder/id
+    if scan:
+        roots = [os.path.join(LOCAL_ROOT, c) for c in ("Movies", "Series", "Anime")]
+        found = 0
+        for root in roots:
+            if not os.path.exists(root):
+                continue
+            for dirpath, dirs, files in os.walk(root):
+                dirs[:] = [d for d in dirs if d not in [
+                    SPLIT_DIR_NAME, CHECKSUM_DIR_NAME, RESTORE_DIR_NAME,
+                    ".git", ".idea", "__pycache__", "Utils"
+                ]]
+                for fname in files:
+                    if fname != TXN_JOURNAL_NAME:
+                        continue
+                    jpath = os.path.join(dirpath, fname)
+                    try:
+                        with open(jpath, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                    except Exception:
+                        print(f"   ⚠️ Could not parse journal at {dirpath}")
+                        continue
+                    crossed = data.get("crossed_ponr", False)
+                    count = len(data.get("records", []))
+                    action = (
+                        f'inspect manually (crossed point-of-no-return)'
+                        if crossed else
+                        f'recover "{dirpath}"'
+                    )
+                    print(f"   {dirpath}  crossed_ponr={crossed}  records={count}  → {action}")
+                    found += 1
+        print(f"   {found} journal(s) found.")
+        return found
+    else:
+        if not target:
+            print("❌ Usage: recover [id|folder]   (or: recover --scan)")
+            return
+        target = target.strip('"').strip("'")
+        library = load_library()
+        if target in library and library[target].get("folder_path"):
+            folder = library[target]["folder_path"]
+            print(f"> Resolved id '{target}' -> {folder}")
+        else:
+            folder = target
+        if not os.path.isdir(folder):
+            print(f"❌ No such media folder / unknown id: {target}")
+            return
+        result = recover_journal(folder)
+        if result:
+            print(f"✅ recover finished for {folder}")
+        else:
+            print(f"ℹ️ Nothing to recover at {folder} (no pre-PONR journal).")
+        return result
+
+
 # ==========================================
 #             CORE COMMANDS
 # ==========================================
@@ -2220,6 +2276,7 @@ if __name__ == "__main__":
         print("  restore_group [id]")
         print("  sort")
         print("  fetch [id]")
+        print("  recover [id|folder]  (or: recover --scan)")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -2432,6 +2489,15 @@ if __name__ == "__main__":
 
     elif cmd == "sort":
         cmd_sort()
+
+    elif cmd == "recover":
+        args = sys.argv[2:]
+        if args and args[0] == "--scan":
+            cmd_recover(scan=True)
+        elif args:
+            cmd_recover(" ".join(args))
+        else:
+            print("❌ Usage: recover [id|folder]   (or: recover --scan)")
 
     elif cmd == "fetch":
         if len(sys.argv) < 3:

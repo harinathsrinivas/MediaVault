@@ -74,9 +74,34 @@ Model/effort policy (DECISIONS.md N-5): every logic-bearing step is opus/max; no
 - Step 3 ticked [x] in BOTH PLAN.md (root) and docs/feature-auto-rollback/PLAN.md (byte-identical, MD5 EB15F985...).
 - Losing candidate branches feature/auto_rollback__cand_a (e6fde22) + __cand_b (32d21c5) left in place for a later human-gated archive/delete decision.
 
+## Step 1 — Add cmd_recover to main.py
+Status: complete
+Key decisions: Inserted `cmd_recover(target=None, scan=False)` between `recover_journal` (line 592) and the `# CORE COMMANDS` banner; scan branch walks LOCAL_ROOT/{Movies,Series,Anime} read-only reporting journals; resolve branch strips quotes, checks library for id→folder_path, falls back to direct path, then calls `recover_journal`.
+Acceptance: `python -c "import main; print(main.cmd_recover.__name__)"` → `cmd_recover`; `recover_journal` lines 561-592 byte-for-byte unchanged (verified by read-back).
+
+## Step 2 — Wire recover dispatch + usage
+Status: complete
+Key decisions: Dispatch joins sys.argv[2:] so space-containing folder paths work; --scan takes priority over positional target; no-args case prints usage error without calling cmd_recover.
+Acceptance: `python main.py` (no args) usage block lists `recover [id|folder]  (or: recover --scan)`; `python main.py recover` (no args) prints `❌ Usage: recover [id|folder]   (or: recover --scan)`. Both passed.
+
+## Step 3 — Add tests/test_recover_cli.py
+Status: complete
+Key decisions: Hand-wrote journals as JSON (no RollbackJournal constructor needed); _seed_library helper writes lib_movies entry + empty series/anime; scan test monkeypatches main.LOCAL_ROOT to tmp_path/Media with C:\Media guard; crossed-PONR test asserts journal survives and result is falsy.
+Acceptance: pytest tests/test_recover_cli.py -v: 5 passed in 0.26s; pytest -q: 72 passed, 1 skipped (no regressions).
+
 ## Step 4 — [status: done] Architect docs (docs-only) (2026-06-01)
 - Executor: orchestrator (direct; Task subagent unavailable). Model: opus, effort high (matches the step tag — no mismatch).
 - Files changed (DOCS ONLY — `git diff --name-only` confirmed zero `.py` files): ARCHITECTURE.md, docs/feature-auto-rollback/README.md.
 - ARCHITECTURE.md: added §12a "Auto-Rollback for Multi-Step Commands" (the single RollbackJournal mechanism + RollbackHardFail + recover_journal crash recovery; the verified PONR table with current main.py line refs — cmd_prep@599 / cmd_push@992 / cmd_replace@1335 PONR@1398 / cmd_restore@1598; the O-1 resume-message vs O-2 hard-fail split; orchestrator unification + season resume-range messaging; D-4/D-6/D-7/D-9 + C9/C11 seam reuse). Updated the stale §12 bullets that described the two old ad-hoc paths to point at §12a.
 - docs/feature-auto-rollback/README.md: status PLANNING → IMPLEMENTED; cross-links DECISIONS.md N-6 + rollback-architecture/DECISION.md (Candidate C won, wholesale) and ARCHITECTURE.md §12a; notes pytest 67 passed / 1 skipped.
 - Descriptive only — NO code change. Step 4 ticked [x] in BOTH PLAN.md copies (byte-identical, MD5 AA8906AB...).
+
+## Step 4 — Document recover in README + ARCHITECTURE
+Status: complete
+Key decisions: additive doc rows only; recover_journal semantics unchanged
+Acceptance: README row added at line 139 after `sort` (describes `recover [id|folder]` and `recover --scan`); ARCHITECTURE §5 row added at line 226 after `fetch` (describes `cmd_recover` dispatch); ARCHITECTURE §12a notes CLI entry point at line 1394 (new sentence after the alternatives paragraph, before PONR table section).
+
+## Step 5 — DECISIONS.md + IMP-R2 status flip
+Status: complete
+Key decisions: wrapper-only/change-gate; id-first resolution; scan read-only; argv join
+Acceptance: DECISIONS.md created with 4 entries; improvements_tierR.md IMP-R2 Status: done

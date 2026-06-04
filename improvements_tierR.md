@@ -73,7 +73,7 @@ explicit, change-gated decision.
 - Goal: after a simulated hard kill mid-command, `python main.py recover <id>`
   restores the exact pre-command state and removes the journal.
 - Effort estimate: small
-- Status: pending
+- Status: done
 
 ## IMP-R3: Stale-journal detection in a `doctor`/health check
 

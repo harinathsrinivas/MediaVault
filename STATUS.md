@@ -123,3 +123,9 @@ Acceptance: DECISIONS.md created with 4 entries; improvements_tierR.md IMP-R2 St
 - Files changed: tests/test_prep_season_episode_parse.py (extended, +2 pure-function tests D and E).
 - Outcome: Test D (e20 included by 20-20), Test E (e20.6 excluded by 20-20). pytest 77 passed, 1 skipped.
 - Key decisions: Approach (i) — inline filter logic, pure function, no I/O. Documents the invariant that a clean `e20` ID yields ep_num==20.0 and passes the 20-20 filter.
+
+## Step 4 — [status: done] Record decisions and update tracked plan
+- Executor: executor-haiku. Model: haiku, effort: low (plan) / low (baked) — no mismatch.
+- Files changed: docs/feature-fix-episode-title-parse/DECISIONS.md (new), docs/feature-fix-episode-title-parse/PLAN.md (steps marked done).
+- Outcome: DECISIONS.md records the 4 decision points. Tracked PLAN.md steps all marked [x].
+- Key decisions: doc-only step; no code changed.

@@ -887,7 +887,7 @@ def cmd_prep_season(base_id, folder_path):
         ep_num = None
 
         # Strategy 1: Standard S01E01 (Works for TV and some Anime, handles .5)
-        match = re.search(r"[sS]\d+[eE](\d+(?:\.\d+)?)", filename)
+        match = re.search(r"[sS]\d+[eE](\d+)", filename)
         if not match: match = re.search(r"\d+[xX](\d+(?:\.\d+)?)", filename)
 
         if match:

@@ -105,3 +105,9 @@ Acceptance: README row added at line 139 after `sort` (describes `recover [id|fo
 Status: complete
 Key decisions: wrapper-only/change-gate; id-first resolution; scan read-only; argv join
 Acceptance: DECISIONS.md created with 4 entries; improvements_tierR.md IMP-R2 Status: done
+
+## Step 1 — [status: done] Fix SxxExx episode-extraction regex
+- Executor: executor-opus. Model: opus, effort: high (plan) / max (baked) — over-powered, acceptable.
+- Files changed: main.py line 890 only.
+- Outcome: Dropped the optional decimal group `(?:\.\d+)?` from the `SxxExx` branch on line 890, changing `re.search(r"[sS]\d+[eE](\d+(?:\.\d+)?)", filename)` to `re.search(r"[sS]\d+[eE](\d+)", filename)`. The `NxYY` branch on line 891 (`\d+[xX](\d+(?:\.\d+)?)`) is untouched. REPL checks all printed expected values: `Fringe.S03E20.6.02.AM.EST.2011.1080p.BluRay.mkv` → `20`; `Fringe.S03E19.1080p.BluRay.mkv` → `19`; `[Grp] Show 16x05.5 [hash].mkv` (NxYY) → `05.5`. `git diff` confirmed only line 890 changed. `python -m pytest -q` → 72 passed, 1 skipped (no regressions).
+- Key decisions: SxxExx decimal capture dropped (Option A); NxYY line 891 untouched; rollback code untouched.

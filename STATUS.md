@@ -117,3 +117,9 @@ Acceptance: DECISIONS.md created with 4 entries; improvements_tierR.md IMP-R2 St
 - Files changed: tests/test_prep_season_episode_parse.py (new, 3 test cases).
 - Outcome: Tests A (dotted-title e20 fix), B (canonical e19), C (anime NxYY .5). pytest 75 passed, 1 skipped.
 - Key decisions: Used sandbox + stub_tech_specs fixtures; created separate tmp subfolders per test group. Fake .mkv files must write 210_000 bytes (exceeding DUMMY_MAX_BYTES=200_000) or cmd_prep early-skips them as dummy files.
+
+## Step 3 — [status: done] Add filter-arithmetic regression tests
+- Executor: executor-sonnet. Model: sonnet, effort: medium (plan) / medium (baked) — no mismatch.
+- Files changed: tests/test_prep_season_episode_parse.py (extended, +2 pure-function tests D and E).
+- Outcome: Test D (e20 included by 20-20), Test E (e20.6 excluded by 20-20). pytest 77 passed, 1 skipped.
+- Key decisions: Approach (i) — inline filter logic, pure function, no I/O. Documents the invariant that a clean `e20` ID yields ep_num==20.0 and passes the 20-20 filter.

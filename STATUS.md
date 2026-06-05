@@ -105,3 +105,27 @@ Acceptance: README row added at line 139 after `sort` (describes `recover [id|fo
 Status: complete
 Key decisions: wrapper-only/change-gate; id-first resolution; scan read-only; argv join
 Acceptance: DECISIONS.md created with 4 entries; improvements_tierR.md IMP-R2 Status: done
+
+## Step 1 — [status: done] Fix SxxExx episode-extraction regex
+- Executor: executor-opus. Model: opus, effort: high (plan) / max (baked) — over-powered, acceptable.
+- Files changed: main.py line 890 only.
+- Outcome: Dropped the optional decimal group `(?:\.\d+)?` from the `SxxExx` branch on line 890, changing `re.search(r"[sS]\d+[eE](\d+(?:\.\d+)?)", filename)` to `re.search(r"[sS]\d+[eE](\d+)", filename)`. The `NxYY` branch on line 891 (`\d+[xX](\d+(?:\.\d+)?)`) is untouched. REPL checks all printed expected values: `Fringe.S03E20.6.02.AM.EST.2011.1080p.BluRay.mkv` → `20`; `Fringe.S03E19.1080p.BluRay.mkv` → `19`; `[Grp] Show 16x05.5 [hash].mkv` (NxYY) → `05.5`. `git diff` confirmed only line 890 changed. `python -m pytest -q` → 72 passed, 1 skipped (no regressions).
+- Key decisions: SxxExx decimal capture dropped (Option A); NxYY line 891 untouched; rollback code untouched.
+
+## Step 2 — [status: done] Add unit tests for episode-ID extraction
+- Executor: executor-sonnet. Model: sonnet, effort: medium (plan) / medium (baked) — no mismatch.
+- Files changed: tests/test_prep_season_episode_parse.py (new, 3 test cases).
+- Outcome: Tests A (dotted-title e20 fix), B (canonical e19), C (anime NxYY .5). pytest 75 passed, 1 skipped.
+- Key decisions: Used sandbox + stub_tech_specs fixtures; created separate tmp subfolders per test group. Fake .mkv files must write 210_000 bytes (exceeding DUMMY_MAX_BYTES=200_000) or cmd_prep early-skips them as dummy files.
+
+## Step 3 — [status: done] Add filter-arithmetic regression tests
+- Executor: executor-sonnet. Model: sonnet, effort: medium (plan) / medium (baked) — no mismatch.
+- Files changed: tests/test_prep_season_episode_parse.py (extended, +2 pure-function tests D and E).
+- Outcome: Test D (e20 included by 20-20), Test E (e20.6 excluded by 20-20). pytest 77 passed, 1 skipped.
+- Key decisions: Approach (i) — inline filter logic, pure function, no I/O. Documents the invariant that a clean `e20` ID yields ep_num==20.0 and passes the 20-20 filter.
+
+## Step 4 — [status: done] Record decisions and update tracked plan
+- Executor: executor-haiku. Model: haiku, effort: low (plan) / low (baked) — no mismatch.
+- Files changed: docs/feature-fix-episode-title-parse/DECISIONS.md (new), docs/feature-fix-episode-title-parse/PLAN.md (steps marked done).
+- Outcome: DECISIONS.md records the 4 decision points. Tracked PLAN.md steps all marked [x].
+- Key decisions: doc-only step; no code changed.

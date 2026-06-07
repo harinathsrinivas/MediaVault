@@ -329,7 +329,7 @@ AFTER first deferred restore blesses (DEFERRED), or after eager promote-at-repla
     - B: store the canonical at push AND a top-level `pending_promote: true` flag so `cmd_replace` keys
       off a single explicit boolean (tradeoff: one more top-level field vs. clearer promote trigger).
 
-- [ ] 4. [model: opus] [effort: high] Hard disk pre-flight (push single-item + season + restore-side already in Step 2)
+- [x] 4. [model: opus] [effort: high] Hard disk pre-flight (push single-item + season + restore-side already in Step 2)
   - Files: `cmd_push` `main.py:1048` (just before the split decision ~`main.py:1115-1135`);
     `cmd_prep_push_rep_season` `main.py:2104` (after `target_ids` built, before the loop ~`main.py:2140`);
     `cmd_push_group` `main.py:1343`

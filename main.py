@@ -308,6 +308,23 @@ def bless_or_verify_merged_hash(entry, new_hash):
     return "bless"
 
 
+def _will_split(file_size, split_method, split_val):
+    """Mirror cmd_push's `should_split` decision WITHOUT side effects, for the
+    Step-4 disk pre-flight. SIZE_MB/SIZE_GB → True iff the file is at/over the
+    target (a file smaller than the target is pushed whole, never split); COUNT
+    → always True (cmd_push splits on COUNT regardless of size); no/empty
+    split_method → False (a standard whole-file push). Pure; never raises."""
+    if not split_method:
+        return False
+    if split_method == "SIZE_MB":
+        return file_size >= float(split_val) * (1024 ** 2)
+    if split_method == "SIZE_GB":
+        return file_size >= float(split_val) * (1024 ** 3)
+    if split_method == "COUNT":
+        return True
+    return False
+
+
 def _required_extra_bytes(file_size, will_split, eager):
     """Extra on-disk bytes a push/restore would CREATE beyond the original:
     0 if the file won't be split, 2X (chunks + eager merge temp) for an eager
@@ -1248,6 +1265,27 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
                 should_split = False
 
         if should_split:
+            # [SPLIT-HASH] HARD DISK PRE-FLIGHT (Step 4). STOP before splitting if
+            # local_folder can't hold what the split would create — never start and
+            # fail mid-split. Deferred needs 1X (chunks), eager 2X (chunks + the
+            # merge temp), plus a max(1%, 2GB) buffer. This is a READ-ONLY check
+            # (shutil.disk_usage) that runs BEFORE makedirs/journal records below, so
+            # nothing has been created and there is NOTHING to roll back — a clean
+            # early return like the chunk_range "no chunks" guard. (temp_dir
+            # redirection is Step 5; this check targets local_folder.) The resume
+            # branch above never reaches here, so an existing _parts/ skips the check.
+            file_size = os.path.getsize(local_file_path)
+            if not _free_space_ok(local_folder, file_size, True, eager_rehash):
+                free, required, _short = _disk_shortfall(
+                    local_folder, file_size, True, eager_rehash)
+                print(f"❌ Not enough free space to split {manual_id}.")
+                print(f"   Need ~{human_readable_size(required)} free in {local_folder} "
+                      f"({'chunks + merge temp' if eager_rehash else 'chunks'} + buffer); "
+                      f"only {human_readable_size(free)} available.")
+                print("   Free up space, or pass a temp dir on another volume.")
+                if eager_rehash:
+                    print("   (Or drop the `rehash` token to halve the need — deferred re-hash uses 1X, not 2X.)")
+                return False
             print(f"   > ✂️ Splitting...")
             # [ROLLBACK C] Journal the dir creations (this run only) BEFORE makedirs.
             if not parts_preexisted:
@@ -1551,6 +1589,47 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
 
     if not target_ids: print("❌ No items found to push."); return
     print(f"   > Processing {len(target_ids)} items...\n")
+
+    # [SPLIT-HASH] HARD DISK PRE-FLIGHT (Step 4). Items are pushed SEQUENTIALLY
+    # with per-item _parts cleanup, so the PEAK disk use is the LARGEST single
+    # item that will split, NOT the sum. Find that worst item once and check it
+    # against its folder volume BEFORE processing ANY item — read-only, pre-
+    # any-creation, nothing to roll back. (Each cmd_push still does its own guard
+    # as defense-in-depth.)
+    max_req = 0
+    worst_mid = None
+    worst_size = 0
+    worst_dir = None
+    for mid in target_ids:
+        if library[mid].get("uploaded") == True:
+            continue  # already uploaded → won't push/split
+        f = os.path.join(library[mid]["folder_path"], library[mid]["filename"])
+        if not os.path.exists(f):
+            continue
+        fsize = os.path.getsize(f)
+        ws = _will_split(fsize, split_method, split_val)
+        req = _required_extra_bytes(fsize, ws, eager_rehash)
+        if req > max_req:
+            max_req = req
+            worst_mid = mid
+            worst_size = fsize
+            worst_dir = library[mid]["folder_path"]
+    if max_req > 0:
+        buffer = _disk_buffer(max_req)
+        try:
+            free = shutil.disk_usage(worst_dir).free
+        except Exception:
+            free = -1
+        if free < max_req + buffer:
+            print(f"❌ Not enough free space to push group {group_id}.")
+            print(f"   Largest splitting item: {worst_mid} ({human_readable_size(worst_size)}).")
+            print(f"   Need ~{human_readable_size(max_req + buffer)} free in {worst_dir} "
+                  f"({'chunks + merge temp' if eager_rehash else 'chunks'} + buffer); "
+                  f"only {human_readable_size(free)} available.")
+            print("   Free up space, or pass a temp dir on another volume.")
+            if eager_rehash:
+                print("   (Or drop the `rehash` token to halve the need — deferred re-hash uses 1X, not 2X.)")
+            return
 
     for mid in target_ids:
         if library[mid].get("uploaded") == True:
@@ -2409,6 +2488,46 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
         if device_id:
             parts.append(f"device {device_id}")
         return " ".join(parts)
+
+    # [SPLIT-HASH] HARD DISK PRE-FLIGHT (Step 4). Episodes run SEQUENTIALLY with
+    # per-item _parts cleanup, so the PEAK disk use is the LARGEST single episode
+    # that will split, NOT the sum. Find that worst episode and check it ONCE
+    # against the season folder volume BEFORE processing ANY episode — read-only,
+    # pre-any-creation, nothing to roll back. Already-uploaded episodes won't
+    # push/split, so they're skipped. (Each cmd_push still guards itself as
+    # defense-in-depth; this is the "don't even start" early failure.)
+    max_req = 0
+    worst_mid = None
+    worst_size = 0
+    for mid in target_ids:
+        if library[mid].get("uploaded") == True:
+            continue
+        f = os.path.join(library[mid]["folder_path"], library[mid]["filename"])
+        if not os.path.exists(f):
+            continue
+        fsize = os.path.getsize(f)
+        ws = _will_split(fsize, split_method, split_val)
+        req = _required_extra_bytes(fsize, ws, eager_rehash)
+        if req > max_req:
+            max_req = req
+            worst_mid = mid
+            worst_size = fsize
+    if max_req > 0:
+        buffer = _disk_buffer(max_req)
+        try:
+            free = shutil.disk_usage(folder_path).free
+        except Exception:
+            free = -1
+        if free < max_req + buffer:
+            print(f"\n❌ Not enough free space to process this season.")
+            print(f"   Largest splitting episode: {worst_mid} ({human_readable_size(worst_size)}).")
+            print(f"   Need ~{human_readable_size(max_req + buffer)} free in {folder_path} "
+                  f"({'chunks + merge temp' if eager_rehash else 'chunks'} + buffer); "
+                  f"only {human_readable_size(free)} available.")
+            print("   Free up space, or pass a temp dir on another volume.")
+            if eager_rehash:
+                print("   (Or drop the `rehash` token to halve the need — deferred re-hash uses 1X, not 2X.)")
+            return
 
     for idx, mid in enumerate(target_ids):
         entry = library[mid]

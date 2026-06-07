@@ -111,3 +111,36 @@ Change-gate — VERIFIED in merged code: `cmd_push` stays PONR-less (O-1); repla
 Mechanism notes (playbook naming gaps worked around): step-3 candidate BRANCHES are step-qualified (`__step3_a/b`) to avoid colliding with step-2's `__cand_a/b`; candidate TAGS are feature-scoped because the generic `candidates/step-03/*` were already taken by C8.
 
 Verification: orchestrator re-ran `.venv/Scripts/python.exe -m pytest -q` on the merged branch → **77 passed, 1 skipped**.
+
+---
+
+## Step 4 — Hard disk pre-flight (cmd_push single-item + season + group) — status: done
+
+Executor: executor-opus (single-executor mode). Model: opus 4.8, effort high. `main.py` only, additive (+119 / -0). NO rollback/PONR/journal/split/merge code touched.
+
+What changed (all in `main.py`):
+- **`_will_split(file_size, split_method, split_val)`** at `main.py:311` (immediately before `_required_extra_bytes`, with the Step-1 disk helpers). Pure, never raises. Mirrors cmd_push's `should_split`: `SIZE_MB` → `file_size >= val*1024**2`; `SIZE_GB` → `file_size >= val*1024**3` (file AT/OVER the target splits, under it does not); `COUNT` → `True`; no/empty `split_method` → `False`.
+- **cmd_push single-item check** inserted inside `if should_split:` at `main.py:1267` — BEFORE the journal `record_create_dir` calls + `os.makedirs` (which now start at ~`1290`). Computes `file_size = os.path.getsize(local_file_path)`; if `not _free_space_ok(local_folder, file_size, True, eager_rehash)` → prints a hard-stop built from `_disk_shortfall(...)` (`human_readable_size(required)` vs `(free)`) PLUS remedies (free up space / pass a temp dir on another volume / if eager, drop `rehash` to halve 2X→1X) and `return False`. Clean early return — nothing created yet (mirrors the existing `chunk_range` "no chunks" return). Targets `local_folder` (temp_dir redirection is Step 5; no temp_dir param added). The RESUME branch (`if os.path.exists(parts_dir) and os.listdir(parts_dir)`) never reaches this block, so an existing `_parts/` correctly SKIPS the check.
+- **Group pre-flight** in `cmd_push_group` at `main.py:1593` — AFTER `target_ids` finalized (range filter + empty check) and BEFORE the `for mid in target_ids:` loop. MAX logic: skip already-`uploaded`; for each remaining item resolve `folder_path/filename`, if it exists `fsize=getsize`, `ws=_will_split(...)`, `req=_required_extra_bytes(fsize, ws, eager_rehash)`, track MAX req + its mid/size/folder. If `max_req > 0`: `buffer=_disk_buffer(max_req)`, `free=shutil.disk_usage(worst_dir).free` (worst item's own folder volume; `-1` on stat failure), and if `free < max_req + buffer` → hard-stop naming the largest splitting item + size + free-vs-needed + same remedies, `return`. NOT added to `cmd_replace_group`/`cmd_restore_group` (they don't split).
+- **Season pre-flight** in `cmd_prep_push_rep_season` at `main.py:2492` — AFTER `target_ids` finalized (range filter) + the `_season_resume_cmd` helper def, BEFORE the `for idx, mid in enumerate(target_ids):` loop. Identical MAX logic; target volume = the season `folder_path` parameter (`shutil.disk_usage(folder_path).free`). Hard-stop names the largest splitting episode + size + free-vs-needed + remedies, `return` before processing ANY episode. Already-uploaded episodes skipped (won't push/split); if NO episode will split → `max_req=0` → proceeds (0 extra).
+
+Season/group MAX shape (both identical):
+```python
+max_req = 0; worst_mid = None; worst_size = 0   # (+worst_dir in the group)
+for mid in target_ids:
+    if library[mid].get("uploaded") == True: continue
+    f = os.path.join(library[mid]["folder_path"], library[mid]["filename"])
+    if not os.path.exists(f): continue
+    fsize = os.path.getsize(f)
+    ws = _will_split(fsize, split_method, split_val)
+    req = _required_extra_bytes(fsize, ws, eager_rehash)
+    if req > max_req: max_req = req; worst_mid = mid; worst_size = fsize
+if max_req > 0:
+    buffer = _disk_buffer(max_req)
+    free = shutil.disk_usage(<target_dir>).free  # season: folder_path; group: worst_dir
+    if free < max_req + buffer: <named hard-stop + remedies>; return
+```
+
+CHANGE-GATE — confirmed NOTHING rollback-related was touched. This is a purely READ-ONLY pre-check (`shutil.disk_usage` / `_free_space_ok` / `_disk_shortfall`) that runs BEFORE any artifact creation (before `os.makedirs`, before the journal `record_create_dir` records). A hard-stop creates nothing and has nothing to roll back → ZERO rollback interaction. The `RollbackJournal`, PONR markers, `mark_point_of_no_return`, `record_*`/`rollback` calls, the journal format/durability, created-this-run scoping, and the split/merge logic are all UNTOUCHED (verified: the diff adds no line referencing any of those — the single grep hit is an explanatory comment). cmd_push stays PONR-less (O-1).
+
+Verification: throwaway smoke test (`tests/test_step4_smoke.py`, since DELETED — no stray files) asserted (i) `cmd_push` returns False + creates NO `_parts/`/`checksums/` when `_free_space_ok` is forced False; (ii) the season pre-flight picks the LARGEST splitting episode (200 MB vs 5 MB) and hard-stops before any `cmd_push` (the loop's `cmd_push` was rigged to throw if reached) → **2 passed**. Then full suite `.venv/Scripts/python.exe -m pytest -q` → **77 passed, 1 skipped** (baseline held; genuine-split tests pass the new gate on this ~45 GB-free machine, no assertions weakened).

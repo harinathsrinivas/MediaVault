@@ -89,3 +89,25 @@ Change-gate — VERIFIED in the merged code (not just the CRITIQUE):
 - End-to-end: inherited unchanged by `cmd_fetch_restore` (`main.py:2224`) → `cmd_restore` / `cmd_restore_group` (`main.py:1993`).
 
 Verification: orchestrator re-ran `.venv/Scripts/python.exe -m pytest -q` on the merged feature branch → **77 passed, 1 skipped**.
+
+---
+
+## Step 3 — EAGER bless-at-push + promote-at-replace + re_hashed-reset on re-split — status: done
+
+Mode: MULTI-CANDIDATE (2 candidates, both general-purpose @ opus, parallel isolated worktrees). Winner: **A** (transient `split_info["canonical_hash"]`, no extra schema field). Decision: `.candidates/step-03/DECISION.md`. Merge commit `1dc1fbe` (squash of `__step3_a`). Candidate tags FEATURE-SCOPED to avoid a cross-feature collision (the generic `candidates/step-03/*` already belong to the C8 feature): `candidates/split_hash/step-03/A-chosen` (`91b0532`), `candidates/split_hash/step-03/B-rejected` (`b4c97b9`); worktrees removed.
+
+Files changed (merged): `main.py` only (+73/-7).
+
+What changed:
+- `eager_rehash=False` kwarg threaded through `cmd_push` (`main.py:1171`) + `cmd_push_group` (`1514`→pass `1559`), `cmd_prep_push_rep` (`2316`→`2334`), `cmd_prep_push_rep_season` (`2354`→`2440`). Dormant/False until the Step-6 CLI `rehash` token.
+- RE-SPLIT RESET (`main.py:1298`): in the NEW-SPLIT branch ONLY, set `re_hashed=False`; the fresh `split_info` dict naturally drops stale `merge_seed/merge_tool/rehashed_at/canonical_hash`. Resume branch untouched → never resets. Closes the re-push false-alarm hole the user flagged.
+- EAGER bless-at-push (`main.py:1311-1333`, gated on `eager_rehash` + a fresh split): seed = `short_id or manual_id`; merges the UNFILTERED chunk list (`files_to_upload_paths`, before the chunk_range filter at ~`1342`) into `<local_folder>/<base>.rehash_tmp.mkv`; hashes → `canonical`; stores `split_info.{merge_seed,merge_tool,canonical_hash}` (NOT `entry["hash"]`, NOT `re_hashed`); `finally` ALWAYS deletes the temp; any merge/hash failure warns + continues as DEFERRED (never aborts the push — Step 4's proactive disk pre-flight doesn't exist yet, so this graceful fallback is the interim safety).
+- PROMOTE-AT-REPLACE (`main.py:1655-1670`): after the replace PONR, before `status="archived"` + save — if `split_info.canonical_hash` present AND `re_hashed` not already True → `entry["hash"]=canonical`, `re_hashed=True`, stamp `rehashed_at`, drop `canonical_hash`. No-op for non-eager/non-split.
+
+Key decision: Judge chose A over B — both correct + change-gate-clean; A's transient `canonical_hash` is a single self-clearing promote signal, avoiding B's extra top-level `pending_promote` field (which had to stay coupled with the canonical across 3 sites). Schema stays minimal.
+
+Change-gate — VERIFIED in merged code: `cmd_push` stays PONR-less (O-1); replace PONR (`os.rename`) unmoved (promote runs strictly after it); NO new `RollbackJournal` record kinds; `record_set_field` scope unchanged; the reset writes the SAFE unblessed state (no journalling needed — a push rollback leaving `re_hashed=False` is correct). Eager writes confined to `split_info`. `entry["hash"]` is never set to the canonical at push time (only at replace) → `cmd_check` stays correct across the push→replace window.
+
+Mechanism notes (playbook naming gaps worked around): step-3 candidate BRANCHES are step-qualified (`__step3_a/b`) to avoid colliding with step-2's `__cand_a/b`; candidate TAGS are feature-scoped because the generic `candidates/step-03/*` were already taken by C8.
+
+Verification: orchestrator re-ran `.venv/Scripts/python.exe -m pytest -q` on the merged branch → **77 passed, 1 skipped**.

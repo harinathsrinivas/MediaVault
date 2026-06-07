@@ -273,7 +273,7 @@ AFTER first deferred restore blesses (DEFERRED), or after eager promote-at-repla
       that returns a decision the `cmd_restore` body acts on (mutations + journal stay in `cmd_restore`),
       isolating the decision logic for unit-testability without touching the rollback seam.
 
-- [ ] 3. [model: opus] [effort: max] [candidates: 2] EAGER bless-at-push + promote-at-replace + re_hashed-reset on re-split
+- [x] 3. [model: opus] [effort: max] [candidates: 2] EAGER bless-at-push + promote-at-replace + re_hashed-reset on re-split
   - Files: `main.py:1144-1164` (post-split chunk-hash block in `cmd_push`), `cmd_push` signature
     `main.py:1048`, `cmd_replace` `main.py:1483-1487`, Step-1 helper at `main.py:231`
   - Details: EAGER mode (only when the new `eager_rehash` kwarg is True AND a split actually happened

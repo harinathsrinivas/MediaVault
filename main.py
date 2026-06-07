@@ -1168,7 +1168,7 @@ def _verify_chunk_hash(adb_base, remote_path, safe_path, expected_sha256):
         )
 
 
-def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, device_id=None):
+def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, device_id=None, eager_rehash=False):
     print(f"--- PUSHING: {manual_id} ---")
     library = load_library()
     if manual_id not in library: print(f"❌ ID not found."); return False
@@ -1284,6 +1284,54 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
                 "is_split": True, "method": split_method, "val": split_val,
                 "total_chunks": len(files_to_upload_paths), "chunks": chunk_metadata
             }
+            # [SPLIT-HASH] RE-SPLIT REHASH RESET (new-split branch ONLY; the resume
+            # branch above must NOT reset). Fresh chunks were just produced and the
+            # OLD split_info (which may have carried merge_seed/merge_tool/
+            # rehashed_at/canonical_hash for a prior, now-stale chunk set) was
+            # REPLACED by the dict above — so those canonical fields are naturally
+            # dropped. Clearing re_hashed too means a re-push of an already-blessed
+            # entry ends unblessed → the next split restore re-blesses for the NEW
+            # chunks instead of false-alarming a hash mismatch. A brand-new entry
+            # (re_hashed absent) just becomes explicitly False — a no-op.
+            # ROLLBACK: this writes the SAFE (unblessed) state, so it needs no
+            # journalling — a push rollback leaving re_hashed=False is correct.
+            library[manual_id]["re_hashed"] = False
+
+            # [SPLIT-HASH] EAGER bless-at-push. Only when requested AND a NEW split
+            # happened this run. Produces the deterministic canonical hash NOW (so a
+            # later split restore just verifies) by merging the just-created chunks
+            # into a throwaway temp and storing the hash as a TRANSIENT
+            # split_info["canonical_hash"] pending promotion at cmd_replace. This is
+            # best-effort: ANY failure cleans up, warns, writes NO canonical, and
+            # CONTINUES as deferred (re_hashed stays False) — never aborts an
+            # otherwise-successful push. The eager temp lives in split_info only,
+            # which is already journalled this-run for NEW entries (record_set_field
+            # above); no new rollback-relevant state is introduced and the push
+            # remains PONR-less (O-1).
+            if eager_rehash:
+                seed = entry.get("short_id") or manual_id
+                base = os.path.splitext(filename)[0]
+                rehash_tmp = os.path.join(local_folder, f"{base}.rehash_tmp.mkv")
+                try:
+                    print(f"   > 🧬 Eager canonical re-hash: merging {len(files_to_upload_paths)} chunks (seed={seed})...")
+                    merged_ok = merge_video_files(files_to_upload_paths, rehash_tmp, seed=seed)
+                    canonical = calculate_file_hash(rehash_tmp) if merged_ok else None
+                    if merged_ok and canonical:
+                        library[manual_id]["split_info"]["merge_seed"] = seed
+                        library[manual_id]["split_info"]["merge_tool"] = _current_merge_tool()
+                        library[manual_id]["split_info"]["canonical_hash"] = canonical
+                        print(f"   > 🧬 Eager canonical hash staged (promotes at replace): {canonical}")
+                    else:
+                        print("   ⚠️ Eager re-hash did not produce a hash — continuing as deferred (will bless at first restore).")
+                except Exception as e:
+                    print(f"   ⚠️ Eager re-hash failed ({e}) — continuing as deferred (will bless at first restore).")
+                finally:
+                    if os.path.exists(rehash_tmp):
+                        try:
+                            os.remove(rehash_tmp)
+                        except Exception:
+                            pass
+
             save_library(library)
         else:
             files_to_upload_paths = [local_file_path]
@@ -1463,7 +1511,7 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             return False
 
 
-def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=None, device_id=None):
+def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False):
     print(f"=== BATCH PUSH GROUP: {group_id} ===")
     library = load_library()
     target_ids = []
@@ -1508,7 +1556,7 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
         if library[mid].get("uploaded") == True:
             print(f"⏭️  Skipping {mid} (Already uploaded)")
             continue
-        cmd_push(mid, split_method, split_val, device_id=device_id)
+        cmd_push(mid, split_method, split_val, device_id=device_id, eager_rehash=eager_rehash)
 
 
 def cmd_replace(manual_id):
@@ -1602,6 +1650,24 @@ def cmd_replace(manual_id):
                 os.remove(tobedeleted)
             except Exception as e:
                 print(f"     ⚠️ WARNING: Could not remove leftover {os.path.basename(tobedeleted)}: {e}. It will be cleaned on the next replace.")
+
+        # [SPLIT-HASH] PROMOTE-AT-REPLACE. If an eager push staged a transient
+        # canonical hash (split_info["canonical_hash"]) and the entry is not yet
+        # blessed, promote it to the entry's truth NOW: canonical -> hash,
+        # re_hashed=True, stamp rehashed_at, and drop the transient field. No-op
+        # for non-eager / non-split entries (no canonical_hash present) and for an
+        # already-blessed entry (re_hashed already True). This runs AFTER the
+        # replace PONR (os.rename(original -> .tobedeleted)); it only mutates
+        # in-memory library fields the existing save_library below persists, so it
+        # introduces no new rollback-relevant journalled state.
+        _split_info = library[manual_id].get("split_info", {})
+        _staged = _split_info.get("canonical_hash")
+        if _staged and library[manual_id].get("re_hashed") is not True:
+            library[manual_id]["hash"] = _staged
+            library[manual_id]["re_hashed"] = True
+            library[manual_id]["split_info"]["rehashed_at"] = _rehashed_at()
+            del library[manual_id]["split_info"]["canonical_hash"]
+            print(f"   > 🧬 Promoted eager canonical hash to entry truth (re_hashed=True).")
 
         library[manual_id]["status"] = "archived"
         save_library(library)
@@ -2247,7 +2313,7 @@ def cmd_scan_unprepped():
         print("\n✅ All libraries are completely in sync.")
 
 
-def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, device_id=None):
+def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, device_id=None, eager_rehash=False):
     print(f"=== 🚀 AUTO-PILOT: PREP -> PUSH -> REPLACE for {manual_id} ===")
 
     # 1. PREP
@@ -2265,7 +2331,7 @@ def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, de
     # prints its own O-1 resume-message (`push <id>`). No second rollback mechanism
     # remains here.
     # We pass None for chunk_range as this atomic command implies full push
-    if not cmd_push(manual_id, split_method, split_val, device_id=device_id):
+    if not cmd_push(manual_id, split_method, split_val, device_id=device_id, eager_rehash=eager_rehash):
         print("\n⚠️ Auto-Pilot Paused: Push did not complete (see the resume hint above).")
         return
 
@@ -2285,7 +2351,7 @@ def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, de
     print("\n✅✅✅ AUTO-PILOT COMPLETE: Movie is safely archived.")
 
 
-def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=None, episode_range=None, device_id=None):
+def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False):
     # [NEW] TV SERIES SEQUENTIAL AUTO-PILOT
     print(f"=== 📺 SEASON AUTO-PILOT (SEQUENTIAL): PREP -> PUSH -> REPLACE for {base_id} ===")
 
@@ -2371,7 +2437,7 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
         # commands. On any stop we print the exact resume range from this episode.
         # We skip calling 'cmd_prep' again because we already did prep_season
         # Just call Push then Replace
-        if cmd_push(mid, split_method, split_val, device_id=device_id):
+        if cmd_push(mid, split_method, split_val, device_id=device_id, eager_rehash=eager_rehash):
             try:
                 cmd_replace(mid)
             except RollbackHardFail as hf:

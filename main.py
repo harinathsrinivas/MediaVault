@@ -1185,7 +1185,7 @@ def _verify_chunk_hash(adb_base, remote_path, safe_path, expected_sha256):
         )
 
 
-def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, device_id=None, eager_rehash=False):
+def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, device_id=None, eager_rehash=False, temp_dir=None):
     print(f"--- PUSHING: {manual_id} ---")
     library = load_library()
     if manual_id not in library: print(f"❌ ID not found."); return False
@@ -1199,7 +1199,21 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
     filename = entry['filename']
     short_id = entry['short_id']  # Needed for tagging
     local_file_path = os.path.join(local_folder, filename)
-    parts_dir = os.path.join(local_folder, SPLIT_DIR_NAME)
+    # [SPLIT-HASH] TEMP-DIR REDIRECT (Step 5). base_dir is the SINGLE volume that
+    # holds the heavy transients — the `_parts/` chunk dir AND the eager merge temp.
+    # With temp_dir=None it IS local_folder, so every path below is byte-identical
+    # to before this step. With a temp_dir it becomes temp_dir/<safe-id>/, moving
+    # only those bulky artifacts off the media volume. A bad temp_dir hard-stops
+    # HERE, before any journal/dir/upload work — nothing created → nothing to roll
+    # back. checksum_dir + the RollbackJournal stay rooted at local_folder (small
+    # sidecars + the durable journal live with the media), so the journal FORMAT
+    # and created-this-run scoping are unchanged — only the recorded parts_dir PATH
+    # may now point under temp_dir.
+    base_dir, _tmperr = _parts_base(local_folder, temp_dir, manual_id)
+    if _tmperr is not None:
+        print(f"❌ {_tmperr}")
+        return False
+    parts_dir = os.path.join(base_dir, SPLIT_DIR_NAME)
     checksum_dir = os.path.join(local_folder, CHECKSUM_DIR_NAME)
 
     if not os.path.exists(local_file_path): print(f"❌ Source file missing."); return False
@@ -1271,15 +1285,26 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             # merge temp), plus a max(1%, 2GB) buffer. This is a READ-ONLY check
             # (shutil.disk_usage) that runs BEFORE makedirs/journal records below, so
             # nothing has been created and there is NOTHING to roll back — a clean
-            # early return like the chunk_range "no chunks" guard. (temp_dir
-            # redirection is Step 5; this check targets local_folder.) The resume
-            # branch above never reaches here, so an existing _parts/ skips the check.
+            # early return like the chunk_range "no chunks" guard. (Step 5: the
+            # chunks now land under base_dir — local_folder when no temp_dir, else
+            # the temp volume — so the check targets base_dir, the volume that must
+            # actually hold them.) The resume branch above never reaches here, so an
+            # existing _parts/ skips the check.
             file_size = os.path.getsize(local_file_path)
-            if not _free_space_ok(local_folder, file_size, True, eager_rehash):
+            # [SPLIT-HASH] Step 5 disk-check target: base_dir/<safe-id> is NOT
+            # created until os.makedirs(parts_dir) below, so stat'ing it would
+            # raise (→ free=-1 → false stop) on a first-time temp_dir split. Check
+            # the volume via a dir that already exists: temp_dir (validated by
+            # _parts_base above, SAME volume as base_dir → identical free bytes),
+            # else local_folder (== base_dir when no temp_dir, byte-identical to
+            # before). Mirrors cmd_push_group's check_dir pattern. base_dir itself
+            # is unchanged — still correct for parts_dir/eager-temp/cleanup.
+            check_dir = temp_dir if temp_dir else local_folder
+            if not _free_space_ok(check_dir, file_size, True, eager_rehash):
                 free, required, _short = _disk_shortfall(
-                    local_folder, file_size, True, eager_rehash)
+                    check_dir, file_size, True, eager_rehash)
                 print(f"❌ Not enough free space to split {manual_id}.")
-                print(f"   Need ~{human_readable_size(required)} free in {local_folder} "
+                print(f"   Need ~{human_readable_size(required)} free in {check_dir} "
                       f"({'chunks + merge temp' if eager_rehash else 'chunks'} + buffer); "
                       f"only {human_readable_size(free)} available.")
                 print("   Free up space, or pass a temp dir on another volume.")
@@ -1349,7 +1374,12 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             if eager_rehash:
                 seed = entry.get("short_id") or manual_id
                 base = os.path.splitext(filename)[0]
-                rehash_tmp = os.path.join(local_folder, f"{base}.rehash_tmp.mkv")
+                # [SPLIT-HASH] Step 5: the eager merge temp is the 2nd heavy
+                # transient, so it follows the chunks onto base_dir (== local_folder
+                # when no temp_dir). It lives only in split_info (already journalled
+                # this-run for NEW entries) and is os.remove'd in the finally below,
+                # so relocating it introduces no new rollback-relevant state.
+                rehash_tmp = os.path.join(base_dir, f"{base}.rehash_tmp.mkv")
                 try:
                     print(f"   > 🧬 Eager canonical re-hash: merging {len(files_to_upload_paths)} chunks (seed={seed})...")
                     merged_ok = merge_video_files(files_to_upload_paths, rehash_tmp, seed=seed)
@@ -1512,6 +1542,19 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
     if all_success:
         # Cleanup temp dir if empty
         if os.path.exists(parts_dir) and not os.listdir(parts_dir): os.rmdir(parts_dir)
+        # [SPLIT-HASH] Step 5: with a temp_dir we ALSO created the per-entry parent
+        # (temp_dir/<safe-id>/) as a side effect of makedirs(parts_dir) — tidy it
+        # when now-empty so the temp volume doesn't accumulate empty <safe-id>/
+        # shells. Guarded the SAME way _parts/ is journalled (only when NOT
+        # parts_preexisted, i.e. created THIS run): a pre-existing temp <safe-id>/
+        # is never removed. Never touches local_folder (only runs when temp_dir set,
+        # so base_dir != local_folder). rmdir is no-op-safe when non-empty/missing.
+        if temp_dir and not parts_preexisted and base_dir != local_folder:
+            try:
+                if os.path.isdir(base_dir) and not os.listdir(base_dir):
+                    os.rmdir(base_dir)
+            except OSError:
+                pass
 
         # Only mark as 'onboarded' if we uploaded ALL chunks (no range filter)
         if not chunk_range:
@@ -1549,7 +1592,7 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             return False
 
 
-def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False):
+def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False, temp_dir=None):
     print(f"=== BATCH PUSH GROUP: {group_id} ===")
     library = load_library()
     target_ids = []
@@ -1616,14 +1659,27 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
             worst_dir = library[mid]["folder_path"]
     if max_req > 0:
         buffer = _disk_buffer(max_req)
+        # [SPLIT-HASH] Step 5: when a temp_dir is given, EVERY item's chunks land on
+        # the temp volume, so the peak is checked against THAT volume (validate it
+        # once up front via _parts_base — a bad temp_dir hard-stops before any item
+        # runs). With no temp_dir this is worst_dir (the worst item's media folder),
+        # unchanged. Each cmd_push re-checks against its own base_dir as
+        # defense-in-depth.
+        check_dir = worst_dir
+        if temp_dir:
+            probe_base, probe_err = _parts_base(worst_dir, temp_dir, "_probe")
+            if probe_err is not None:
+                print(f"❌ {probe_err}")
+                return
+            check_dir = temp_dir
         try:
-            free = shutil.disk_usage(worst_dir).free
+            free = shutil.disk_usage(check_dir).free
         except Exception:
             free = -1
         if free < max_req + buffer:
             print(f"❌ Not enough free space to push group {group_id}.")
             print(f"   Largest splitting item: {worst_mid} ({human_readable_size(worst_size)}).")
-            print(f"   Need ~{human_readable_size(max_req + buffer)} free in {worst_dir} "
+            print(f"   Need ~{human_readable_size(max_req + buffer)} free in {check_dir} "
                   f"({'chunks + merge temp' if eager_rehash else 'chunks'} + buffer); "
                   f"only {human_readable_size(free)} available.")
             print("   Free up space, or pass a temp dir on another volume.")
@@ -1635,7 +1691,7 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
         if library[mid].get("uploaded") == True:
             print(f"⏭️  Skipping {mid} (Already uploaded)")
             continue
-        cmd_push(mid, split_method, split_val, device_id=device_id, eager_rehash=eager_rehash)
+        cmd_push(mid, split_method, split_val, device_id=device_id, eager_rehash=eager_rehash, temp_dir=temp_dir)
 
 
 def cmd_replace(manual_id):
@@ -2392,7 +2448,7 @@ def cmd_scan_unprepped():
         print("\n✅ All libraries are completely in sync.")
 
 
-def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, device_id=None, eager_rehash=False):
+def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, device_id=None, eager_rehash=False, temp_dir=None):
     print(f"=== 🚀 AUTO-PILOT: PREP -> PUSH -> REPLACE for {manual_id} ===")
 
     # 1. PREP
@@ -2410,7 +2466,7 @@ def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, de
     # prints its own O-1 resume-message (`push <id>`). No second rollback mechanism
     # remains here.
     # We pass None for chunk_range as this atomic command implies full push
-    if not cmd_push(manual_id, split_method, split_val, device_id=device_id, eager_rehash=eager_rehash):
+    if not cmd_push(manual_id, split_method, split_val, device_id=device_id, eager_rehash=eager_rehash, temp_dir=temp_dir):
         print("\n⚠️ Auto-Pilot Paused: Push did not complete (see the resume hint above).")
         return
 
@@ -2430,7 +2486,7 @@ def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, de
     print("\n✅✅✅ AUTO-PILOT COMPLETE: Movie is safely archived.")
 
 
-def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False):
+def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False, temp_dir=None):
     # [NEW] TV SERIES SEQUENTIAL AUTO-PILOT
     print(f"=== 📺 SEASON AUTO-PILOT (SEQUENTIAL): PREP -> PUSH -> REPLACE for {base_id} ===")
 
@@ -2514,14 +2570,26 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
             worst_size = fsize
     if max_req > 0:
         buffer = _disk_buffer(max_req)
+        # [SPLIT-HASH] Step 5: when a temp_dir is given, EVERY episode's chunks land on
+        # the temp volume, so the peak is checked against THAT volume (validate it
+        # once up front via _parts_base — a bad temp_dir hard-stops before any episode
+        # runs). With no temp_dir this is folder_path (the season folder), unchanged.
+        # Each cmd_push re-checks against its own base_dir as defense-in-depth.
+        check_dir = folder_path
+        if temp_dir:
+            probe_base, probe_err = _parts_base(folder_path, temp_dir, "_probe")
+            if probe_err is not None:
+                print(f"❌ {probe_err}")
+                return
+            check_dir = temp_dir
         try:
-            free = shutil.disk_usage(folder_path).free
+            free = shutil.disk_usage(check_dir).free
         except Exception:
             free = -1
         if free < max_req + buffer:
             print(f"\n❌ Not enough free space to process this season.")
             print(f"   Largest splitting episode: {worst_mid} ({human_readable_size(worst_size)}).")
-            print(f"   Need ~{human_readable_size(max_req + buffer)} free in {folder_path} "
+            print(f"   Need ~{human_readable_size(max_req + buffer)} free in {check_dir} "
                   f"({'chunks + merge temp' if eager_rehash else 'chunks'} + buffer); "
                   f"only {human_readable_size(free)} available.")
             print("   Free up space, or pass a temp dir on another volume.")
@@ -2556,7 +2624,7 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
         # commands. On any stop we print the exact resume range from this episode.
         # We skip calling 'cmd_prep' again because we already did prep_season
         # Just call Push then Replace
-        if cmd_push(mid, split_method, split_val, device_id=device_id, eager_rehash=eager_rehash):
+        if cmd_push(mid, split_method, split_val, device_id=device_id, eager_rehash=eager_rehash, temp_dir=temp_dir):
             try:
                 cmd_replace(mid)
             except RollbackHardFail as hf:

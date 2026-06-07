@@ -353,7 +353,7 @@ def fail_merge(monkeypatch):
     state = {"n": 0}
 
     def install(mode="return_false"):
-        def _merge(chunk_paths, output_path):
+        def _merge(chunk_paths, output_path, seed=None):
             state["n"] += 1
             if mode == "raise":
                 raise RuntimeError("simulated mkvmerge crash")

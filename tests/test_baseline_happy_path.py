@@ -282,7 +282,7 @@ def test_restore_split_happy_path_oracle(sandbox, monkeypatch):
 
     target_path = os.path.join(media_dir, filename)
 
-    def _fake_merge(chunk_paths, output_path):
+    def _fake_merge(chunk_paths, output_path, seed=None):
         with open(output_path, "wb") as f:
             f.write(b1 + b2)
         return True

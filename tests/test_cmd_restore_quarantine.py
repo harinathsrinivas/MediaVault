@@ -266,7 +266,7 @@ def test_split_success_path_unchanged(sandbox, monkeypatch):
 
     merge_calls = {"n": 0}
 
-    def _fake_merge(chunk_paths, output_path):
+    def _fake_merge(chunk_paths, output_path, seed=None):
         merge_calls["n"] += 1
         # Produce a merged file so the real success path can finish.
         with open(output_path, "wb") as f:

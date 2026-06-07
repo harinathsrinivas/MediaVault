@@ -1806,6 +1806,38 @@ def cmd_restore(manual_id):
                     pass
             return False
 
+        # 1c. RESTORE-SIDE DISK PRE-CHECK (pre-PONR, pre-merge — nothing created
+        # yet, nothing to roll back). The deterministic re-merge writes a merged
+        # output (~original size) into local_folder while the chunks still sit in
+        # restore/, so local_folder must have room for ~1X + buffer. Estimate the
+        # merged size from the chunk file sizes on disk (they sum to ~original),
+        # falling back to the recorded tech_spec size if a chunk can't be stat'd.
+        try:
+            est_merged_size = sum(os.path.getsize(p) for p in chunk_paths_in_restore)
+        except OSError:
+            est_merged_size = entry.get("tech_spec", {}).get("size_bytes", 0)
+        if not est_merged_size:
+            est_merged_size = entry.get("tech_spec", {}).get("size_bytes", 0)
+        if not _free_space_ok(local_folder, est_merged_size, will_split=True, eager=False):
+            free, required, _short = _disk_shortfall(
+                local_folder, est_merged_size, will_split=True, eager=False)
+            print(f"❌ Not enough disk space to merge {manual_id} in {local_folder}.")
+            print(f"   Free: {human_readable_size(free)}  |  Required: "
+                  f"{human_readable_size(required)}  (merged output + buffer).")
+            print("   Chunks left in restore/ — free space and retry restore.")
+            return False
+
+        # 1d. SEED for the canonical deterministic merge. Reuse a previously
+        # blessed seed if present so the canonical-producing merge is byte-stable
+        # across runs; otherwise the entry's short_id is the seed. short_id is
+        # itself generate_short_id(manual_id), so deriving it the same way is an
+        # identical, deterministic fallback for any entry missing the field.
+        # Chosen BEFORE the merge so the merge that produces the canonical hash
+        # uses exactly the seed we will persist.
+        seed = (entry["split_info"].get("merge_seed")
+                or entry.get("short_id")
+                or generate_short_id(manual_id))
+
         # 2. Merge
         # [ROLLBACK C] The merge is PRE-PONR. Open a journal and log the
         # reproducible merged output before merging; a merge failure replays the
@@ -1813,7 +1845,7 @@ def cmd_restore(manual_id):
         journal = RollbackJournal(local_folder, manual_id)
         journal.record_create_reproducible(target_path)
         try:
-            merged_ok = merge_video_files(chunk_paths_in_restore, target_path)
+            merged_ok = merge_video_files(chunk_paths_in_restore, target_path, seed=seed)
         except Exception as e:
             print(f"❌ Merge crashed: {e}")
             merged_ok = False
@@ -1826,10 +1858,45 @@ def cmd_restore(manual_id):
             print(f"   > 💾 Re-indexing Merged File (New Container)...")
             new_hash = calculate_file_hash(target_path)
 
-            # Update Library
-            library[manual_id]["hash"] = new_hash
-            library[manual_id]["status"] = "restored_local"
-            save_library(library)
+            # VERIFY-OR-BLESS (pre-PONR, inside the already-journalled
+            # reproducible-output window). Because the merge above ran with the
+            # stored/derived seed via mkvmerge --deterministic, the merged
+            # container is reproducible and its hash is canonical.
+            if entry.get("re_hashed") is True:
+                # Already blessed once → VERIFY this run reproduces the canonical
+                # hash. Do NOT overwrite hash on success.
+                if new_hash != entry["hash"]:
+                    # LOUD, greppable corruption alarm. The merge is deterministic,
+                    # so a mismatch means the inputs (chunks) or the merge tool
+                    # drifted — not normal container churn. Return BEFORE the PONR
+                    # and reuse the merge-fail rollback (the reproducible target is
+                    # removed); chunks stay in restore/ for a clean re-fetch/re-merge.
+                    print("❌❌❌ RESTORE HASH MISMATCH — POSSIBLE CORRUPTION ❌❌❌")
+                    print(f"   id            : {manual_id}")
+                    print(f"   expected hash : {entry['hash']}")
+                    print(f"   actual   hash : {new_hash}")
+                    print(f"   merge_tool    : "
+                          f"{entry['split_info'].get('merge_tool', 'unknown')}")
+                    print("   The deterministic re-merge did NOT reproduce the "
+                          "canonical hash. Chunks left in restore/; merged output "
+                          "rolled back. Re-fetch the chunks and retry restore.")
+                    journal.rollback(library)
+                    return False
+                # Match → canonical hash confirmed; keep hash unchanged.
+                print("   > ✅ Canonical hash verified (deterministic re-merge).")
+                library[manual_id]["status"] = "restored_local"
+                save_library(library)
+            else:
+                # FIRST BLESS → adopt the deterministic merged hash as canonical and
+                # persist the seed/tool/timestamp used to produce it.
+                library[manual_id]["hash"] = new_hash
+                library[manual_id]["re_hashed"] = True
+                library[manual_id]["split_info"]["merge_seed"] = seed
+                library[manual_id]["split_info"]["merge_tool"] = _current_merge_tool()
+                library[manual_id]["split_info"]["rehashed_at"] = _rehashed_at()
+                library[manual_id]["status"] = "restored_local"
+                print("   > 🔖 Canonical whole-file hash blessed (deterministic merge).")
+                save_library(library)
 
             # --- CLEANUP ---
             # [ROLLBACK SPEC] PONR (O-2, split path): the merged chunks are deleted

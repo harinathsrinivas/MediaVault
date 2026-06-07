@@ -283,6 +283,31 @@ def _current_merge_tool():
     return "mkvmerge (unknown)"
 
 
+def bless_or_verify_merged_hash(entry, new_hash):
+    """Decide what a split restore should do with the freshly-merged file's hash.
+
+    PURE: reads ONLY `entry["re_hashed"]` / `entry["hash"]` and the supplied
+    `new_hash`; performs NO mutation, NO journal call, NO I/O. The caller acts on
+    the returned string:
+
+      "bless"    — entry has never been canonically re-hashed
+                   (`re_hashed` is not True). The merged hash becomes the new
+                   canonical truth: the caller writes hash + the split_info
+                   canonical fields, then proceeds across the PONR.
+      "ok"       — entry was already blessed (`re_hashed is True`) AND the new
+                   merge reproduced the stored canonical hash. The caller leaves
+                   hash untouched and proceeds across the PONR.
+      "mismatch" — entry was already blessed but the deterministic merge did NOT
+                   reproduce the stored hash → corruption / tool drift. The caller
+                   raises the alarm and rolls back PRE-PONR (chunks kept).
+
+    Keeping the decision here — and every side effect in cmd_restore — makes the
+    three-way policy trivially unit-testable in isolation (Step 9)."""
+    if entry.get("re_hashed") is True:
+        return "ok" if new_hash == entry.get("hash") else "mismatch"
+    return "bless"
+
+
 def _required_extra_bytes(file_size, will_split, eager):
     """Extra on-disk bytes a push/restore would CREATE beyond the original:
     0 if the file won't be split, 2X (chunks + eager merge temp) for an eager
@@ -1806,14 +1831,44 @@ def cmd_restore(manual_id):
                     pass
             return False
 
+        # 1c. RESTORE-SIDE DISK PRE-CHECK (pre-merge, pre-PONR). The merge writes
+        # the reassembled file (~original size) into local_folder while the chunks
+        # still sit in restore/, so this is a transient extra-bytes requirement.
+        # Estimate the merged size from the actual on-disk chunk sizes (their sum
+        # ~= the original whole-file size); fall back to the entry's recorded
+        # size_bytes if a chunk can't be stat'd. Treat it as a deferred split
+        # (will_split=True, eager=False) so the disk helper requires merged_size
+        # + buffer. Insufficient room → hard-stop BEFORE the merge: nothing is
+        # created, the chunks are untouched in restore/, nothing to roll back.
+        try:
+            merged_size = sum(os.path.getsize(p) for p in chunk_paths_in_restore)
+        except Exception:
+            merged_size = entry.get("tech_spec", {}).get("size_bytes", 0)
+        if not _free_space_ok(local_folder, merged_size, will_split=True, eager=False):
+            free, required, _short = _disk_shortfall(
+                local_folder, merged_size, will_split=True, eager=False)
+            print(f"❌ Not enough free space to re-merge {manual_id}.")
+            print(f"   Need ~{human_readable_size(required)} free in {local_folder} "
+                  f"(merged file + buffer); only {human_readable_size(free)} available.")
+            print("   Chunks left untouched in restore/ — free space and retry.")
+            return False
+
         # 2. Merge
+        # SEED: the deterministic merge must use the SAME seed that produced (or
+        # will produce) the canonical hash. Reuse a previously-stored seed if the
+        # entry was already blessed; otherwise the entry's short_id is the seed
+        # (manual_id is the stable fallback if an older entry lacks short_id — it
+        # is the unique library key short_id is derived from, never None/empty).
+        # Chosen/persisted BEFORE the merge so the canonical-producing merge below
+        # uses exactly the stored value.
+        seed = entry["split_info"].get("merge_seed") or entry.get("short_id") or manual_id
         # [ROLLBACK C] The merge is PRE-PONR. Open a journal and log the
         # reproducible merged output before merging; a merge failure replays the
         # inverse (remove the reproducible target) and keeps chunks for a re-merge.
         journal = RollbackJournal(local_folder, manual_id)
         journal.record_create_reproducible(target_path)
         try:
-            merged_ok = merge_video_files(chunk_paths_in_restore, target_path)
+            merged_ok = merge_video_files(chunk_paths_in_restore, target_path, seed=seed)
         except Exception as e:
             print(f"❌ Merge crashed: {e}")
             merged_ok = False
@@ -1826,8 +1881,39 @@ def cmd_restore(manual_id):
             print(f"   > 💾 Re-indexing Merged File (New Container)...")
             new_hash = calculate_file_hash(target_path)
 
-            # Update Library
-            library[manual_id]["hash"] = new_hash
+            # VERIFY-OR-BLESS. The pure helper returns the policy; ALL mutations,
+            # save_library, journal calls, and I/O stay HERE so the seam stays
+            # trivially unit-testable.
+            decision = bless_or_verify_merged_hash(entry, new_hash)
+
+            if decision == "mismatch":
+                # Already-blessed entry whose deterministic re-merge did NOT
+                # reproduce the stored canonical hash → corruption or tool drift.
+                # LOUD, greppable alarm naming id + expected/actual + the stored
+                # merge_tool for drift triage. Return PRE-PONR: reuse the SAME
+                # reproducible-output rollback as the merge-fail branch above (the
+                # merged target_path is reproducible, so removing it is correct),
+                # and DO NOT cross the PONR or delete chunks — they stay in
+                # restore/ for a re-fetch / re-merge.
+                stored_tool = entry.get("split_info", {}).get("merge_tool", "(unknown)")
+                print(f"🛑 RESTORE HASH MISMATCH — canonical re-hash verification FAILED for {manual_id}")
+                print(f"   expected (stored canonical): {entry.get('hash')}")
+                print(f"   actual   (this re-merge)   : {new_hash}")
+                print(f"   stored split_info.merge_tool: {stored_tool}; this run: {_current_merge_tool()}")
+                print("   Possible corruption or mkvmerge version drift. Chunks kept in restore/ for re-fetch.")
+                journal.rollback(library)
+                return False
+
+            if decision == "bless":
+                # First canonical bless: this merged hash BECOMES the truth.
+                library[manual_id]["hash"] = new_hash
+                library[manual_id]["re_hashed"] = True
+                library[manual_id]["split_info"]["merge_seed"] = seed
+                library[manual_id]["split_info"]["merge_tool"] = _current_merge_tool()
+                library[manual_id]["split_info"]["rehashed_at"] = _rehashed_at()
+            # decision == "ok": already-blessed and the re-merge reproduced the
+            # canonical hash — leave hash/split_info untouched.
+
             library[manual_id]["status"] = "restored_local"
             save_library(library)
 

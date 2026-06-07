@@ -46,6 +46,12 @@ dummy_size_test_mp4/
 # Obsidian vault config (notes app used only to read the .md files — not a project file)
 .obsidian/
 
+# Obsidian loose artifacts written at the repo root (canvases, bases, date-named daily notes).
+# Scoped patterns only — never a broad *.md (root docs like ARCHITECTURE.md are tracked).
+*.canvas
+*.base
+/20[0-9][0-9]-[0-9][0-9]-[0-9][0-9].md
+
 # Local command-caveat transcript dumps written at the repo root by interactive runs
 *local-command-caveat*.txt
 

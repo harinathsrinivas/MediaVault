@@ -9,7 +9,7 @@ import time
 import stat
 import tempfile
 import requests
-from datetime import datetime
+from datetime import datetime, timezone
 from pymediainfo import MediaInfo
 
 # Ensure emoji/Unicode output works on Windows consoles
@@ -228,10 +228,17 @@ def split_video_file(input_path, output_dir, method, value_str, file_id=""):
         return []
 
 
-def merge_video_files(chunk_paths, output_path):
+def merge_video_files(chunk_paths, output_path, seed=None):
     print(f"   > 🛠️  Merging {len(chunk_paths)} chunks...")
     # Syntax: mkvmerge -o output.mkv chunk1 +chunk2 +chunk3 ...
-    cmd = [MKVMERGE_PATH, "-o", output_path]
+    # When a seed is supplied, prepend the GLOBAL `--deterministic <seed>` option
+    # (it must precede -o) so the merged container is byte-identical across runs
+    # (mkvmerge v97.0, confirmed in the planning spike). seed=None keeps the argv
+    # byte-for-byte identical to the original, non-deterministic merge.
+    cmd = [MKVMERGE_PATH]
+    if seed is not None:
+        cmd += ["--deterministic", seed]
+    cmd += ["-o", output_path]
     cmd.append(chunk_paths[0])
     for chunk in chunk_paths[1:]:
         cmd.append(f"+{chunk}")
@@ -246,6 +253,97 @@ def merge_video_files(chunk_paths, output_path):
     except FileNotFoundError:
         print(f"❌ Error: mkvmerge not found.");
         return False
+
+
+# --- Deterministic-rehash helpers (canonical whole-file hash for split files) ---
+# These are pure/standalone helpers wired into cmd_restore / cmd_push / cmd_replace
+# by later steps. The merge SEED is the entry's short_id (callers pass it); there
+# is intentionally no seed-generator here.
+def _rehashed_at():
+    """Compact ISO-8601 UTC timestamp with a trailing 'Z' (e.g.
+    '2026-06-07T14:03:22Z'). Stamped when the canonical hash is blessed."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _current_merge_tool():
+    """Return the running mkvmerge version as 'mkvmerge vNN.N' (e.g.
+    'mkvmerge v97.0'), parsed from `mkvmerge --version`. On ANY failure
+    (binary missing, parse miss, non-zero exit) return 'mkvmerge (unknown)'.
+    NEVER raises — it is only metadata for version-drift triage."""
+    try:
+        out = subprocess.run(
+            [MKVMERGE_PATH, "--version"],
+            capture_output=True, text=True,
+        ).stdout or ""
+        m = re.search(r"v\d+(?:\.\d+)+", out)
+        if m:
+            return f"mkvmerge {m.group(0)}"
+    except Exception:
+        pass
+    return "mkvmerge (unknown)"
+
+
+def _required_extra_bytes(file_size, will_split, eager):
+    """Extra on-disk bytes a push/restore would CREATE beyond the original:
+    0 if the file won't be split, 2X (chunks + eager merge temp) for an eager
+    split, else 1X (chunks only) for a deferred split."""
+    if not will_split:
+        return 0
+    return 2 * file_size if eager else file_size
+
+
+def _disk_buffer(need):
+    """Safety head-room on top of `need` bytes: the larger of 1% of the need or
+    a 2 GB floor. Zero when nothing extra is required."""
+    if need == 0:
+        return 0
+    return max(int(0.01 * need), 2 * 1024 ** 3)
+
+
+def _disk_shortfall(target_dir, file_size, will_split, eager):
+    """Return (free, required, shortfall) bytes for messaging, where `required`
+    already includes the buffer. `shortfall` is max(0, required - free).
+    NEVER raises: if `target_dir` can't be stat'd (missing/invalid) free is
+    reported as -1 (an impossible value) and the whole requirement is treated
+    as short, so callers can both message AND fail the check."""
+    need = _required_extra_bytes(file_size, will_split, eager)
+    required = need + _disk_buffer(need)
+    try:
+        free = shutil.disk_usage(target_dir).free
+    except Exception:
+        return (-1, required, required)
+    return (free, required, max(0, required - free))
+
+
+def _free_space_ok(target_dir, file_size, will_split, eager):
+    """True if `target_dir` has room for the bytes this op would create plus the
+    buffer. A non-splitting op needs nothing extra → always True (the target dir
+    is not even stat'd). NEVER raises (an unstattable dir → not ok)."""
+    if _required_extra_bytes(file_size, will_split, eager) == 0:
+        return True
+    free, required, _short = _disk_shortfall(target_dir, file_size, will_split, eager)
+    return free >= required
+
+
+def _parts_base(local_folder, temp_dir, manual_id):
+    """Directory that should hold the `_parts` chunk dir (and the eager merge
+    temp). With no temp_dir → `local_folder`. With a temp_dir → a per-entry
+    subdir `temp_dir/<filesystem-safe manual_id>` (NOT created here — the caller
+    journals + mkdirs it). The `checksums/` sidecars and the RollbackJournal
+    ALWAYS live in `local_folder` and are unaffected by this helper.
+
+    Returns (base_dir, error): on success (path, None); on a bad temp_dir
+    (missing / not a directory / not writable) (None, reason). It NEVER raises,
+    so it composes with the never-raise disk helpers and lets callers hard-stop
+    on `error` the same way other commands return a sentinel + message."""
+    if not temp_dir:
+        return (local_folder, None)
+    if not os.path.isdir(temp_dir):
+        return (None, f"temp dir does not exist or is not a directory: {temp_dir}")
+    if not os.access(temp_dir, os.W_OK):
+        return (None, f"temp dir is not writable: {temp_dir}")
+    safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", manual_id)
+    return (os.path.join(temp_dir, safe_id), None)
 
 
 def resolve_ffmpeg():

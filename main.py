@@ -9,6 +9,7 @@ import time
 import stat
 import tempfile
 import requests
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pymediainfo import MediaInfo
 
@@ -386,6 +387,62 @@ def _parts_base(local_folder, temp_dir, manual_id):
         return (None, f"temp dir is not writable: {temp_dir}")
     safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", manual_id)
     return (os.path.join(temp_dir, safe_id), None)
+
+
+@dataclass(frozen=True)
+class TempLayout:
+    """The fully-resolved on-disk layout for one cmd_push run — the SINGLE place
+    that knows where the large/transient artifacts live and where the small
+    durable ones stay. Computed once at the top of cmd_push via _push_layout();
+    every path decision (parts_dir, checksum_dir, eager temp, disk-check target,
+    resume scan, cleanup) reads from this object so the temp-dir vs media-volume
+    split is decided in exactly one location.
+
+    Fields:
+      parts_dir     : where the `_parts/` chunk dir lives. Under the temp volume
+                      when a temp_dir is supplied, else under local_folder.
+      checksum_dir  : the `checksums/` sidecar dir. ALWAYS under local_folder
+                      (small; rides with the journal so recovery is self-contained).
+      eager_tmp     : the throwaway eager-merge target. Sits next to the chunks
+                      (under `base_volume`) so the 2X eager footprint is entirely
+                      on the redirected volume.
+      base_volume   : the directory whose free space the disk pre-flight checks
+                      (the volume that will actually hold the chunks/merge temp).
+
+    When `_push_layout` is called with temp_dir=None, base_volume == local_folder
+    and every path equals today's value byte-for-byte; the journal record for
+    `parts_dir` is therefore identical. Only the recorded PATH value (never the
+    journal format/durability, PONR placement, or created-this-run scoping)
+    changes when a temp_dir is supplied — see ROLLBACK_MECHANISM.md §10."""
+    parts_dir: str
+    checksum_dir: str
+    eager_tmp: str
+    base_volume: str
+
+
+def _push_layout(local_folder, temp_dir, manual_id, filename):
+    """Resolve the cmd_push artifact layout. Returns (layout, error):
+      - bad temp_dir (missing / not a dir / not writable) → (None, reason); the
+        caller hard-stops BEFORE any work, exactly like the disk pre-flight guard.
+      - otherwise → (TempLayout(...), None).
+
+    `checksum_dir` is rooted at `local_folder` unconditionally. `parts_dir`,
+    `eager_tmp`, and `base_volume` route through `_parts_base`, so with no
+    temp_dir they collapse to local_folder and reproduce today's paths exactly.
+    Never raises (it only composes the never-raise `_parts_base`)."""
+    base_volume, err = _parts_base(local_folder, temp_dir, manual_id)
+    if err:
+        return (None, err)
+    base = os.path.splitext(filename)[0]
+    return (
+        TempLayout(
+            parts_dir=os.path.join(base_volume, SPLIT_DIR_NAME),
+            checksum_dir=os.path.join(local_folder, CHECKSUM_DIR_NAME),
+            eager_tmp=os.path.join(base_volume, f"{base}.rehash_tmp.mkv"),
+            base_volume=base_volume,
+        ),
+        None,
+    )
 
 
 def resolve_ffmpeg():
@@ -1185,7 +1242,7 @@ def _verify_chunk_hash(adb_base, remote_path, safe_path, expected_sha256):
         )
 
 
-def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, device_id=None, eager_rehash=False):
+def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, device_id=None, eager_rehash=False, temp_dir=None):
     print(f"--- PUSHING: {manual_id} ---")
     library = load_library()
     if manual_id not in library: print(f"❌ ID not found."); return False

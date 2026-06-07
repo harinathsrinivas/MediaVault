@@ -222,7 +222,7 @@ AFTER first deferred restore blesses (DEFERRED), or after eager promote-at-repla
     {no-split, deferred, eager}; `_parts_base` returns `local_folder` with no temp_dir and the temp
     location with one. `pytest -q` still green.
 
-- [ ] 2. [model: opus] [effort: max] [candidates: 2] `cmd_restore` split-path verify-or-bless (DEFERRED core) + restore-side disk check + end-to-end cycle
+- [x] 2. [model: opus] [effort: max] [candidates: 2] `cmd_restore` split-path verify-or-bless (DEFERRED core) + restore-side disk check + end-to-end cycle
   - Files: `main.py:1727-1734` (merge + hash + overwrite block in `cmd_restore`); the pre-merge area
     `main.py:1711-1718`
   - Details:

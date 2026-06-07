@@ -66,3 +66,26 @@ pre-existing real-mkvmerge/ffmpeg-gated test, unrelated). The `fail_merge`
 fixture + the baseline/quarantine merge stubs stay valid: they fully replace
 `main.merge_video_files`, and the live `cmd_restore` still calls it with no seed
 (unchanged this step).
+
+---
+
+## Step 2 — cmd_restore split-path verify-or-bless + restore-side disk check (deferred rehash core) — status: done
+
+Mode: MULTI-CANDIDATE (2 candidates, both general-purpose @ opus in isolated worktrees, run in parallel). Winner: **B** (extracted pure helper). Decision: `.candidates/step-02/DECISION.md`. Merge commit `2b84a37` (squash of `__cand_b`). Candidates tagged `candidates/step-02/A-rejected` (`dd49616`) and `candidates/step-02/B-chosen` (`82b2be7`); worktrees removed.
+
+Files changed (merged):
+- `main.py` — new PURE helper `bless_or_verify_merged_hash(entry, new_hash) -> "bless"|"ok"|"mismatch"` (`main.py:286`, no mutation/journal/IO); `cmd_restore` SPLIT path: restore-side disk pre-check (`~1834-1854`), seed selection (`1864`), deterministic seeded merge (`1871`), verify-or-bless block (`1887-1918`).
+- `tests/conftest.py`, `tests/test_baseline_happy_path.py`, `tests/test_cmd_restore_quarantine.py` — synced the 3 existing `merge_video_files` stubs to `(chunk_paths, output_path, seed=None)`. FORCED by Step 1's signature once Step 2 became the first seed-passing caller (else `TypeError`); NO assertion changes (both candidates' test diffs were byte-identical).
+
+Key decisions:
+- Judge chose B over A (both correct + change-gate-faithful): B isolates the bless/verify/alarm policy in a pure, trivially unit-testable helper (the seam Step 9 table-tests), funnels status+save once, and prints stored-vs-current `merge_tool` in the alarm. A's edges (slightly smaller diff + `generate_short_id(manual_id)` seed fallback) did not outweigh.
+- Seed = `split_info.merge_seed or short_id or manual_id`. The `manual_id` fallback only triggers for fixtures lacking `short_id`; real entries always carry `short_id`, so it never affects production. FOLLOW-UP (judge): could switch the fallback to `generate_short_id(manual_id)` for exactness — cosmetic, NOT acted on.
+- Restore-side disk pre-check estimates merged size from `sum(getsize(chunk))` (fallback `tech_spec.size_bytes`), treats it as a deferred split (1X + buffer), hard-stops BEFORE the merge with a free-vs-required message, chunks untouched.
+
+Change-gate — VERIFIED in the merged code (not just the CRITIQUE):
+- PONR unchanged: `journal.mark_point_of_no_return()` at `main.py:1930`, still AFTER merge + `save_library`, BEFORE the chunk-delete loop (`1932+`).
+- Mismatch path returns at `main.py:1905` — BEFORE the PONR — reusing the existing pre-PONR reproducible-output `journal.rollback(library)`; chunks are NOT deleted (cleanup loop never reached).
+- Journal format/durability + `RollbackJournal` calls unchanged; standard (non-split) restore path byte-identical.
+- End-to-end: inherited unchanged by `cmd_fetch_restore` (`main.py:2224`) → `cmd_restore` / `cmd_restore_group` (`main.py:1993`).
+
+Verification: orchestrator re-ran `.venv/Scripts/python.exe -m pytest -q` on the merged feature branch → **77 passed, 1 skipped**.

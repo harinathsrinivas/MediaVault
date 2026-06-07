@@ -273,7 +273,7 @@ AFTER first deferred restore blesses (DEFERRED), or after eager promote-at-repla
       that returns a decision the `cmd_restore` body acts on (mutations + journal stay in `cmd_restore`),
       isolating the decision logic for unit-testability without touching the rollback seam.
 
-- [ ] 3. [model: opus] [effort: max] [candidates: 2] EAGER bless-at-push + promote-at-replace
+- [ ] 3. [model: opus] [effort: max] [candidates: 2] EAGER bless-at-push + promote-at-replace + re_hashed-reset on re-split
   - Files: `main.py:1144-1164` (post-split chunk-hash block in `cmd_push`), `cmd_push` signature
     `main.py:1048`, `cmd_replace` `main.py:1483-1487`, Step-1 helper at `main.py:231`
   - Details: EAGER mode (only when the new `eager_rehash` kwarg is True AND a split actually happened
@@ -296,12 +296,28 @@ AFTER first deferred restore blesses (DEFERRED), or after eager promote-at-repla
     transient `canonical_hash`. This happens AFTER the replace PONR has already been crossed and mutates
     only in-memory library fields saved by the existing `save_library`/`journal.commit()` — adds NO new
     PONR, does NOT move the replace PONR (`main.py:1454`), no-op for non-eager / non-split entries.
+    RE-SPLIT REHASH RESET (applies to BOTH deferred and eager — closes the re-push false-alarm hole the
+    user flagged): whenever `cmd_push` writes a NEW `split_info` from a freshly-performed split (the
+    new-split branch ~`main.py:1158-1164`, NOT the resume branch that reuses an existing `_parts/`), set
+    `library[manual_id]["re_hashed"] = False` and DROP any stale `split_info` canonical fields
+    (`merge_seed`/`merge_tool`/`rehashed_at`/`canonical_hash`) when writing the new chunk list — the old
+    canonical pertains to the OLD chunks and must not survive new chunks. Effect: a re-push that
+    re-splits an already-blessed entry yields NEW chunks with a CLEARED canonical, so the next restore
+    re-blesses (deferred) — or the eager block above re-computes the canonical for the new chunks —
+    instead of the next restore false-alarming a mismatch against a stale canonical. A brand-new entry is
+    a no-op (re_hashed was absent). A RESUME (existing `_parts/`, same chunks) must NOT reset (same chunks
+    → canonical still valid) — gate the reset on the new-split branch ONLY. This reset is a plain library
+    field write under the already-journalled `split_info`/entry save; it adds NO PONR and no new
+    rollback-relevant state.
     Thread `eager_rehash` (default False) through `cmd_push` and the callers `cmd_push_group`
     (`main.py:1388`), `cmd_prep_push_rep` (`main.py:2084`), `cmd_prep_push_rep_season` (`main.py:2190`).
   - Acceptance: `push … rehash` on a split entry writes `merge_seed`/`merge_tool`/`canonical_hash` into
     `split_info` while `entry["hash"]` still equals the original and `re_hashed` is absent/False; a
     subsequent `cmd_replace` promotes `canonical_hash` into `entry["hash"]`, sets `re_hashed=true`, and
     stamps `rehashed_at`. The replace PONR and `tests/test_rollback.py` are unchanged. `pytest -q` green.
+    RE-SPLIT RESET: a deferred `push` that re-splits an already-`re_hashed=true` entry leaves it
+    `re_hashed=false` with the stale `split_info` canonical fields cleared; a RESUME of an existing
+    `_parts/` does NOT reset; a brand-new push is a no-op (re_hashed stays absent/False).
   - Judge criteria: (1) `entry["hash"]` consistent with on-disk file across the whole window so
     `cmd_check` is correct; eager writes confined to `split_info`; promotion only at replace (most
     important); (2) Change-gate fidelity: no new PONR, no un-journalled rollback-relevant state,

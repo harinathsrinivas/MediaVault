@@ -493,7 +493,7 @@ AFTER first deferred restore blesses (DEFERRED), or after eager promote-at-repla
   - Acceptance: both files exist under `docs/feature-split-hash-deterministic/`; docs PLAN.md == root
     PLAN.md; DECISIONS.md captures the above.
 
-- [ ] 11. [model: opus] [effort: high] (ARCHITECT, final) Update docs to reverse the stale rationale + document the new mechanism
+- [x] 11. [model: opus] [effort: high] (ARCHITECT, final) Update docs to reverse the stale rationale + document the new mechanism
   - Files: `ARCHITECTURE.md` (§6.4 note `ARCHITECTURE.md:457`; §7.7 split flow `ARCHITECTURE.md:858`;
     §10 Stage 5 `ARCHITECTURE.md:1252-1253`; the command table for the new tokens), `improvements_tierA.md:8`,
     `README.md`

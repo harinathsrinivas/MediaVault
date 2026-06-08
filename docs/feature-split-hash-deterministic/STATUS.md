@@ -372,3 +372,43 @@ Sections captured in DECISIONS.md:
 9. Resolved open decisions table (8 items with chosen defaults and rationale)
 10. As-built bake-off winners table (Steps 2, 3, 5; Step-5 redo noted)
 11. Related improvements table (IMP-R1/F2/F1/D4/D5/D8/C9/C10/B3/B6; none marked done)
+
+---
+
+## Step 11 — Update docs to reverse the stale rationale + document the new mechanism — status: done
+
+Architect (read-only on code; verified as-built line numbers against `main.py` by
+function name, since the feature shifted line numbers). DOC-ONLY — no code, tests,
+rollback docs, or memory files touched.
+
+Files edited:
+- **`ARCHITECTURE.md`** — (a) §6.4 quirk note: reversed "rewrites hash because
+  mkvmerge produces a different SHA256" → deterministic-merge verify-or-bless
+  (cites `bless_or_verify_merged_hash` @286, `cmd_restore` @~2042-2101). (b) NEW
+  §6.4a: schema fields (`re_hashed`/`merge_seed`/`merge_tool`/`rehashed_at`/transient
+  `canonical_hash`), DEFERRED vs EAGER, re-split reset, hard disk pre-flight (1X/2X
+  + max(1%,2GB), season=largest item), `tempdir` redirect, and the rollback-contract-
+  unchanged note. (c) §7.7 `cmd_restore` step 3/4 + (d) §10 Stage 5 step 3/4: merge
+  now `--deterministic <seed>` + verify-or-bless. (e) Entry-schema example: added
+  `re_hashed` + the four `split_info` fields with comments. (f) Command table:
+  `[rehash] [tempdir <path>]` on push/push_group/prep_push_rep/prep_push_rep_season.
+  (g) §12a Change-gate: explicit note that the verify-or-bless change + `tempdir`
+  `_parts/` relocation do NOT alter PONR/journal-format/durability/created-this-run
+  scoping (cross-ref ROLLBACK_MECHANISM §10).
+- **`improvements_tierA.md:8`** — reversed the "overwrite is INTENTIONAL … Do not
+  'fix' this" note into a pointer that it was fixed via deterministic re-merge
+  (DOC update only; NO IMP marked done — the close-list is empty).
+- **`README.md`** — `push` bullet: disk pre-flight + `tempdir`; `restore` bullet:
+  deterministic canonical re-hash (bless/verify) + `rehash` eager note; command
+  table: `[rehash] [tempdir <path>]` on the four push commands.
+- **`docs/feature-split-hash-deterministic/DECISIONS.md`** — appended the Step-11
+  memory-retirement flag (`feedback_mkvmerge_hash_divergence` is stale; human to
+  retire after merge) + the out-of-scope `apple_tv_ui_roadmap.md` §5 observation.
+
+As-built line-number corrections vs the old PLAN refs: the `cmd_restore` split PONR
+is at `main.py:2116` (not 1746); verify-or-bless block ~2073-2101; pure helper @286;
+`cmd_push` @1188 (eager block ~1365-1380, re-split reset ~1352); `cmd_replace` promote
+~1784-1790; `_parts_base` @370. Docs cite the helper/function names (stable) rather
+than brittle line numbers.
+
+Memory NOT edited (human-managed). No code/test/rollback-doc files touched.

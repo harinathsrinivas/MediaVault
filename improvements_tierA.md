@@ -5,7 +5,7 @@
 > **Cross-cutting context** that applies to many items below:
 > - The two active files are `main.py` (1621 lines) and `mainfetch.py` (507 lines) at the project root. Everything under `archive/` is git history; do not touch.
 > - The library JSON files (`C:\Media\library_movies.json`, `library_series.json`, `library_anime.json`) are the source of truth. Live snapshots are mirrored read-only under `resources/` (gitignored).
-> - `cmd_restore` overwriting `entry["hash"]` after merge is INTENTIONAL — `mkvmerge` never re-produces a byte-identical container even from identical content. Do not "fix" this.
+> - `cmd_restore`'s old blind `entry["hash"]` overwrite after merge has been REPLACED by a verifiable canonical re-hash. `mkvmerge`'s *default* merge is non-deterministic, but `mkvmerge --deterministic <seed>` produces a byte-identical container, so split entries now get a verifiable canonical whole-file hash (blessed at first restore or eager-push→promote-at-replace). See `docs/feature-split-hash-deterministic/`.
 > - The Aindham Vedham orphan parent_id was the only known data-integrity case and was manually patched on 2026-05-25. Today's `cmd_prep` would not reproduce that state.
 
 ---

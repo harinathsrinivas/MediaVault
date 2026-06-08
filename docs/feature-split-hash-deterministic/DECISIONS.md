@@ -293,3 +293,19 @@ No improvement is marked done by this task. The closest item (the inverse of
 
 **Rule:** mark a related IMP done ONLY if implementation actually closes it. That list is
 currently EMPTY for this task.
+
+---
+
+## ◉ Step 11 (architect) — stale-memory flag for human retirement
+
+The saved memory `feedback_mkvmerge_hash_divergence` ("the `cmd_restore` post-merge hash
+overwrite is intentional; mkvmerge re-muxes and never produces a byte-identical container —
+don't fix") is now **STALE** as of this feature. The spike proved `mkvmerge --deterministic
+<seed>` IS byte-identical, and the blind overwrite was replaced by verify-or-bless against a
+deterministic canonical hash. **The human should retire/update that memory AFTER this branch
+merges** — Claude (the architect) does NOT edit memory files. `ARCHITECTURE.md`
+(§6.4/§6.4a/§7.7/§10/§12a), `README.md`, and `improvements_tierA.md:8` were reversed in Step 11.
+
+Out-of-scope observation (NOT fixed, flagged only): `apple_tv_ui_roadmap.md` §5 references an
+"Original Hash:" dummy marker that is already stale (the dummy is a real video, not a text
+marker). Left untouched per scope.

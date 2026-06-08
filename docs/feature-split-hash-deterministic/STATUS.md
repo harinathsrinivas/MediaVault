@@ -351,3 +351,24 @@ Orchestrator fixes (3 TEST bugs):
 3. `test_cmd_check_passes_in_eager_prereplace_window` wrote a 2,000-byte file (< DUMMY_MAX_BYTES 200,000) → cmd_check's dummy-detection skipped it → enlarged to 220,000 bytes.
 
 Verification: `pytest tests/test_rehash.py -q` → 16 passed, 1 skipped. Full suite `.venv/Scripts/python.exe -m pytest -q` → **93 passed, 2 skipped** (was 77/1; +16 new passing tests, +1 new gated skip = the determinism test). `tests/test_rollback.py` + `tests/test_baseline_happy_path.py` unaffected. (The pre-existing `test_rollback.py` real-split bug flagged in Step 8 is unrelated and skips here since ffmpeg isn't on PATH, so the suite is green.)
+
+---
+
+## Step 10 — Record decisions in DECISIONS.md — status: done
+
+Executor: executor-sonnet (single-executor mode, general-purpose stand-in). Model: sonnet 4.6, effort low. DOC-ONLY — no code, tests, or rollback documentation touched.
+
+New file: `docs/feature-split-hash-deterministic/DECISIONS.md`. PLAN.md step 10 ticked `[x]`.
+
+Sections captured in DECISIONS.md:
+1. D-1 — Core approach: Way A + `--deterministic` (spike hashes; Way B rejected; stale-assumption reversal noted)
+2. D-2 — Default DEFERRED / opt-in EAGER (verify-or-bless; 3X-vs-2X disk reasoning; eager graceful fallback)
+3. D-3 — Keep master until `cmd_replace`; eager promote-at-replace not at push; `cmd_check` correctness
+4. D-4 — Schema (no `original_hash`; `entry["hash"]` repurposed; `re_hashed`/`merge_seed`/`merge_tool`/`rehashed_at`; re-split reset; sidecar note)
+5. D-5 — End-to-end fetch→restore verification cycle (inherited by `fetch_restore`/`restore_group`)
+6. D-6 — Hard disk pre-flight (1X/2X + buffer, season=max-episode, hard-stop with remedies) + `tempdir` redirect (resume re-pass; checksums/journal stay on `local_folder`)
+7. D-7 — Change-gate stance (PONR/journal/scoping unchanged; two pre-authorized changes stated; eager/promote-at-replace safety justified)
+8. D-8 — Migration approach (lazy bless; no bulk re-hash; `migrate_rehash_flag.py`)
+9. Resolved open decisions table (8 items with chosen defaults and rationale)
+10. As-built bake-off winners table (Steps 2, 3, 5; Step-5 redo noted)
+11. Related improvements table (IMP-R1/F2/F1/D4/D5/D8/C9/C10/B3/B6; none marked done)

@@ -481,7 +481,7 @@ AFTER first deferred restore blesses (DEFERRED), or after eager promote-at-repla
   - Acceptance: `pytest tests/test_rehash.py -q` passes (determinism skips cleanly without mkvmerge);
     full `pytest -q` stays green incl. `tests/test_rollback.py` + `tests/test_baseline_happy_path.py`.
 
-- [ ] 10. [model: sonnet] [effort: low] Record decisions in the tracked DECISIONS.md and mirror the plan
+- [x] 10. [model: sonnet] [effort: low] Record decisions in the tracked DECISIONS.md and mirror the plan
   - Files: `docs/feature-split-hash-deterministic/DECISIONS.md` (new), `…/PLAN.md` (identical to root)
   - Details: Record the locked decisions: Way A + `--deterministic` (spike hashes); DEFERRED default /
     EAGER opt-in; keep-master-until-replace; schema (drop `original_hash`, repurpose `entry["hash"]`,

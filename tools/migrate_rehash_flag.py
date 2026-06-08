@@ -11,6 +11,17 @@ runs this against the ``sandbox`` libraries; the real run is a manual command th
 invokes.
 """
 
+import os
+import sys
+
+# Allow running this script DIRECTLY (`python tools/migrate_rehash_flag.py`):
+# mvcommon.py lives in the repo root (the parent of tools/), which is NOT on
+# sys.path when this file is executed as a script (sys.path[0] is tools/, not the
+# repo root). Add the repo root so the import below resolves. (When imported as a
+# module — e.g. by the Step-9 test — the repo root is already on sys.path, so this
+# insert is a harmless no-op.)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from mvcommon import load_library, save_library
 
 

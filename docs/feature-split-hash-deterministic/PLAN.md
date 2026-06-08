@@ -360,7 +360,7 @@ AFTER first deferred restore blesses (DEFERRED), or after eager promote-at-repla
     season of all-non-split files proceeds with no extra-space requirement; a resume (existing `_parts/`)
     skips the check. `pytest -q` green.
 
-- [ ] 5. [model: opus] [effort: max] [candidates: 2] Optional `tempdir <path>` — redirect chunks + eager merge temp off the media volume
+- [x] 5. [model: opus] [effort: max] [candidates: 2] Optional `tempdir <path>` — redirect chunks + eager merge temp off the media volume
   - Files: `cmd_push` `main.py:1048-1342` (parts_dir/checksum_dir derivation `main.py:1062-1063`, the
     resume branch `main.py:1110-1113`, the split/mkdirs `main.py:1130-1135`, the eager temp from Step 3,
     the cleanup `main.py:1304-1305`); the `RollbackJournal` dir records `main.py:1130-1135`

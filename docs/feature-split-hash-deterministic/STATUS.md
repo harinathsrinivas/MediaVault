@@ -144,3 +144,27 @@ if max_req > 0:
 CHANGE-GATE — confirmed NOTHING rollback-related was touched. This is a purely READ-ONLY pre-check (`shutil.disk_usage` / `_free_space_ok` / `_disk_shortfall`) that runs BEFORE any artifact creation (before `os.makedirs`, before the journal `record_create_dir` records). A hard-stop creates nothing and has nothing to roll back → ZERO rollback interaction. The `RollbackJournal`, PONR markers, `mark_point_of_no_return`, `record_*`/`rollback` calls, the journal format/durability, created-this-run scoping, and the split/merge logic are all UNTOUCHED (verified: the diff adds no line referencing any of those — the single grep hit is an explanatory comment). cmd_push stays PONR-less (O-1).
 
 Verification: throwaway smoke test (`tests/test_step4_smoke.py`, since DELETED — no stray files) asserted (i) `cmd_push` returns False + creates NO `_parts/`/`checksums/` when `_free_space_ok` is forced False; (ii) the season pre-flight picks the LARGEST splitting episode (200 MB vs 5 MB) and hard-stops before any `cmd_push` (the loop's `cmd_push` was rigged to throw if reached) → **2 passed**. Then full suite `.venv/Scripts/python.exe -m pytest -q` → **77 passed, 1 skipped** (baseline held; genuine-split tests pass the new gate on this ~45 GB-free machine, no assertions weakened).
+
+---
+
+## Step 5 — Optional `tempdir <path>` redirect for chunks + eager merge temp — status: done (CLEAN REDO)
+
+**This step was REDONE.** Attempt 1 was disrupted by a session limit: candidate B was left a non-functional STUB and candidate A was completed+patched — never a fair comparison. So the attempt-1 Step-5 merge was **reset off the feature branch** (`git reset --hard 82b5c28`, safe — branch unpushed, attempt-1 work preserved at tag `candidates/split_hash/step-05/A-chosen`) and BOTH candidates were re-implemented FULLY from the Step-4 base, then judged FRESH on two complete implementations.
+
+Winner: **A** (single `base_dir` variable). Decision: `.candidates/step-05-redo/DECISION.md`. Merge commit `32eb442` (squash of `__step5r_a` @ `814b29f`, +70/-19). Redo tags: `candidates/split_hash/step-05-redo/A-chosen` (`814b29f`), `B-rejected` (`788c48a`). (Attempt-1 candidates also preserved: `candidates/split_hash/step-05/A-chosen` `4775023`, `B-rejected` `f3a84a9`.)
+
+Files changed (merged): `main.py` only (+70/-19).
+
+What changed:
+- `temp_dir=None` threaded through ALL FOUR functions (`cmd_push` `main.py:1188`, `cmd_push_group` `1583`, `cmd_prep_push_rep` `2436`, `cmd_prep_push_rep_season` `2474`) AND every per-item `cmd_push` call (group loop, season loop, prep_push_rep).
+- `cmd_push` derives `base_dir, _tmperr = _parts_base(local_folder, temp_dir, manual_id)` (`1207`; hard-stop on `_tmperr`); `parts_dir` + eager `rehash_tmp` (`1370`) under `base_dir`; `checksum_dir` + `RollbackJournal` STAY on `local_folder`.
+- Disk-check target correct from the start: `check_dir = temp_dir if temp_dir else local_folder` (`1293`) — stats an EXISTING dir (the per-entry `base_dir = temp_dir/<safe-id>` doesn't exist at check time → would `FileNotFoundError` → false hard-stop). Group (`1659`) + season (`2567`) pre-flights target `temp_dir` when set, validated via a `_parts_base` probe (which ALSO enforces W_OK, hard-stopping a read-only temp_dir at the batch gate — the judge noted this as A's edge over B).
+- Cleanup (`1540`): removes the temp `_parts/` + the empty `temp_dir/<safe-id>/` parent on success ONLY when created-this-run (`temp_dir and not parts_preexisted and base_dir != local_folder`).
+
+Net behavior: a `temp_dir` (kwarg only; the CLI `tempdir` token is Step 6) sends `_parts/` chunks + the eager merge temp to `temp_dir/<safe-id>/`; `checksums/` + the journal stay on the media volume; a bad temp_dir hard-stops before any work; resume re-passes `tempdir`; `temp_dir=None` is byte-identical.
+
+Change-gate — VERIFIED (both candidates + judge): journal FORMAT/durability UNCHANGED (only the recorded `parts_dir` PATH string may live under temp_dir); created-this-run scoping preserved; `cmd_push` PONR-less; `checksums/` + journal on `local_folder`; no rollback-API calls changed.
+
+Judge (FAIR comparison of two COMPLETE impls; explicitly NOT anchored on the void attempt 1): **Winner A** — both correct + complete + change-gate-clean; A more surgical (+70/-19 vs B's +130/-28 `TempLayout` "abstraction ahead of need for a single consumer") and a strictly stronger batch W_OK pre-flight. Legitimately confirms the same pick as the disrupted run.
+
+Verification: each candidate's 3-scenario temp_dir smoke passed (first-time split routes to temp + checksums/journal stay + cleanup; bad temp_dir hard-stop; resume). Full suite → **77 passed, 1 skipped** (re-run by orchestrator on the merged branch `32eb442`).

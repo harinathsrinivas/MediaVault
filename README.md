@@ -32,7 +32,12 @@ puts the file back where it was.
   only after the transfer succeeds, so a mid-push failure never leaves a
   complete-named chunk for Google Photos to ingest. On full success a
   `<base> [<short_id>].mvmeta.json` sidecar is written next to the chunks on the
-  phone (mirrors `split_info`) for disaster-recovery library rebuild.
+  phone (mirrors `split_info`) for disaster-recovery library rebuild. A push that
+  would exceed the target volume's free space hard-stops before splitting (a
+  **disk pre-flight**: deferred needs 1X, eager 2X, plus a `max(1%, 2 GB)`
+  buffer; a season sizes to its largest splitting episode). The optional
+  `tempdir <path>` token redirects the `_parts/` chunks (and the eager merge
+  temp) to another volume; `checksums/` and the rollback journal stay put.
 - (out of band) — the phone's Google Photos app auto-uploads the new files at
   original quality. MediaVault is not involved in this step.
 - `replace` — once `uploaded` is true, swap the original for a tiny dummy
@@ -40,8 +45,13 @@ puts the file back where it was.
 - `fetch` — Selenium attaches to a logged-in Chrome session, searches Google
   Photos for the embedded short-id, and triggers the "download original"
   shortcut for every chunk into `~/Downloads`.
-- `restore` — re-merge the chunks with `mkvmerge`, SHA256-verify against the
-  library, and move the resulting file back into the original folder.
+- `restore` — re-merge the chunks with `mkvmerge --deterministic` (a byte-identical
+  merge), SHA256-verify against the library, and move the resulting file back into
+  the original folder. For split entries the first restore **blesses** that
+  deterministic merged hash as the canonical whole-file hash (`re_hashed`); later
+  restores **verify** against it and alarm on mismatch (without crossing the
+  restore point-of-no-return). Use the `rehash` token at `push` to bless eagerly
+  instead (canonical promoted into the entry at `replace`).
 
 ### Failure handling (auto-rollback)
 
@@ -116,10 +126,10 @@ help text and no `--help` flag; this table is the reference.
 |---|---|---|
 | `prep` | `prep [id] [filepath]` | Index a new local file, compute SHA256, write sidecars |
 | `prep_season` | `prep_season [base_id] [folder]` | Batch-prep an entire season folder |
-| `prep_push_rep` | `prep_push_rep [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>]` | Full pipeline (prep -> push -> replace) for one file |
-| `prep_push_rep_season` | `prep_push_rep_season [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>]` | Sequential full pipeline for a whole season |
-| `push` | `push [id] [SIZE_MB/SIZE_GB/COUNT val] [chunks 1-4] [device <id_or_name>]` | Split and ADB-push to phone |
-| `push_group` | `push_group [id] [SIZE_..] [episodes 1-3] [device <id_or_name>]` | Push a season group |
+| `prep_push_rep` | `prep_push_rep [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>]` | Full pipeline (prep -> push -> replace) for one file |
+| `prep_push_rep_season` | `prep_push_rep_season [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>]` | Sequential full pipeline for a whole season |
+| `push` | `push [id] [SIZE_MB/SIZE_GB/COUNT val] [chunks 1-4] [device <id_or_name>] [rehash] [tempdir <path>]` | Split and ADB-push to phone (`rehash` = eager canonical re-hash; `tempdir` = off-volume chunks) |
+| `push_group` | `push_group [id] [SIZE_..] [episodes 1-3] [device <id_or_name>] [rehash] [tempdir <path>]` | Push a season group |
 | `replace` | `replace [id]` | Swap original with a tiny valid video file placeholder (requires ffmpeg) |
 | `replace_group` | `replace_group [id]` | Replace a season group |
 | `repair_dummies` | `repair_dummies [id_prefix]` | Regenerate any archived-entry dummy on disk to the current 10 KB video spec (idempotent — re-runs are safe) |

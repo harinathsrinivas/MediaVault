@@ -399,7 +399,7 @@ AFTER first deferred restore blesses (DEFERRED), or after eager promote-at-repla
     - B: a thin `TempLayout` helper object encapsulating {parts_dir, checksum_dir, eager_tmp, journal_dir}
       so every path decision routes through one place (clearer separation, slightly larger diff).
 
-- [ ] 6. [model: opus] [effort: high] CLI: thread the `rehash` + `tempdir <path>` tokens through the dispatch + usage
+- [x] 6. [model: opus] [effort: high] CLI: thread the `rehash` + `tempdir <path>` tokens through the dispatch + usage
   - Files: `main.py:2256-2280` (usage), `main.py:2417-2456` (`push`), `main.py:2458-2488` (`push_group`),
     `main.py:2290-2321` (`prep_push_rep`), `main.py:2323-2359` (`prep_push_rep_season`)
   - Details: Add a bareword `rehash` flag (no value → `eager_rehash=True`) and a `tempdir <path>` token

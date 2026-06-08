@@ -168,3 +168,77 @@ Change-gate — VERIFIED (both candidates + judge): journal FORMAT/durability UN
 Judge (FAIR comparison of two COMPLETE impls; explicitly NOT anchored on the void attempt 1): **Winner A** — both correct + complete + change-gate-clean; A more surgical (+70/-19 vs B's +130/-28 `TempLayout` "abstraction ahead of need for a single consumer") and a strictly stronger batch W_OK pre-flight. Legitimately confirms the same pick as the disrupted run.
 
 Verification: each candidate's 3-scenario temp_dir smoke passed (first-time split routes to temp + checksums/journal stay + cleanup; bad temp_dir hard-stop; resume). Full suite → **77 passed, 1 skipped** (re-run by orchestrator on the merged branch `32eb442`).
+
+---
+
+## Step 6 — CLI: thread the `rehash` + `tempdir <path>` tokens through the dispatch + usage — status: done
+
+Executor: executor-opus (single-executor mode). Model: opus 4.8, effort high. `main.py` only — the four argv command handlers in the `if __name__ == "__main__"` dispatch + the four usage lines. NO `cmd_*` bodies, NO rollback code, nothing else touched. (The four `cmd_*` signatures already accepted `eager_rehash=False`/`temp_dir=None` from Steps 3 & 5 — this step only wires the CLI tokens that were dormant.)
+
+Two tokens added to each of the four handlers:
+- **`rehash`** — bareword flag (no value) → `eager=True` → passed as `eager_rehash=eager`.
+- **`tempdir <path>`** — consumes the NEXT argv element as the path → `tdir=<next>` → passed as `temp_dir=tdir`. A quoted path-with-spaces is a single argv element, so it is captured whole.
+
+EXACT branches added per handler (each inits `eager = False`, `tdir = None` alongside the existing locals):
+
+1. **`push`** (has `else: i += 1`; existing branches use `if i+1<len … else: sys.exit(1)`). Added BEFORE `else: i += 1`:
+   ```python
+   elif args[i] == "rehash":
+       eager = True
+       i += 1
+   elif args[i] == "tempdir":
+       if i + 1 < len(args):
+           tdir = args[i + 1]
+           i += 2
+       else:
+           print("❌ Error: Missing value for tempdir.")
+           sys.exit(1)
+   ```
+2. **`push_group`** (same `else: i += 1` structure). Added the IDENTICAL two branches (bareword `rehash`; `tempdir` with the missing-value `sys.exit(1)` per the task instruction — note `push_group`'s own pre-existing SIZE_*/episodes/device branches lack an `else` and silently fall through, but the task explicitly specified the error+exit form for `tempdir`, which I followed).
+3. **`prep_push_rep`** (TRAP: unmatched tokens `filepath_parts.append(arg)`; matched branches use `continue`). Added BEFORE the append fallback, mirroring the `device` branch's `continue` style (no `else` — a `tempdir` with no following value falls through to the append, consistent with how `device`/`SIZE_*` behave locally):
+   ```python
+   elif arg == "rehash":
+       eager = True
+       i += 1
+       continue
+   elif arg == "tempdir":
+       if i + 1 < len(rest):
+           tdir = rest[i + 1]
+           i += 2
+           continue
+   ```
+4. **`prep_push_rep_season`** (same TRAP: `folder_parts.append(arg)`). Added the IDENTICAL two `continue`-style branches before the append fallback (reading `args` instead of `rest`).
+
+Four call-site changes (appended `eager_rehash=eager, temp_dir=tdir` as the last kwargs):
+- `cmd_push(mid, method, val, c_range, device_id=resolve_device(dev), eager_rehash=eager, temp_dir=tdir)`
+- `cmd_push_group(group_id, method, val, ep_range, device_id=resolve_device(dev), eager_rehash=eager, temp_dir=tdir)`
+- `cmd_prep_push_rep(mid, filepath, method, val, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir)`
+- `cmd_prep_push_rep_season(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir)`
+
+Four usage-line changes (appended ` [rehash] [tempdir <path>]`):
+- `push [id] [SIZE_GB/SIZE_MB] [val] [chunks 1-4] [device <id_or_name>] [rehash] [tempdir <path>]`
+- `push_group [id] [SIZE_GB/SIZE_MB] [val] [episodes 1-3] [device <id_or_name>] [rehash] [tempdir <path>]`
+- `prep_push_rep [id] [filepath] [optional: SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>]`
+- `prep_push_rep_season [id] [folder] [optional: SIZE..] [OPT: episodes] [device <id_or_name>] [rehash] [tempdir <path>]`
+
+CHANGE-GATE: nothing rollback-related touched. This is argv parsing in `__main__` only; the `cmd_*` bodies (incl. all journal/PONR/`_parts`/merge logic from Steps 1–5) are byte-for-byte unchanged. The tokens just flip the already-existing `eager_rehash`/`temp_dir` kwargs from their dormant defaults.
+
+Verification:
+- `.venv/Scripts/python.exe -m pytest -q` → **77 passed, 1 skipped** (CLI parsing isn't covered by existing tests; confirms no syntax break).
+- `python main.py` (no args) → usage block shows `[rehash] [tempdir <path>]` on all four lines (push / push_group / prep_push_rep / prep_push_rep_season). (Exits 1 — the pre-existing usage `sys.exit(1)`, expected.)
+- PARSE-SMOKE (subprocess; ids don't exist so commands bail after parsing):
+  - `python main.py push __nonexistent_id__ SIZE_MB 2000 rehash tempdir C:\Temp device movies`:
+    ```
+    --- PUSHING: __nonexistent_id__ ---
+    ❌ ID not found.
+    ```
+    → SIZE_MB/device still parse, rehash/tempdir neither crashed nor got mis-consumed; no traceback, no "Missing value".
+  - `python main.py prep_push_rep __nonexistent_id__ "C:\some\path\file.mkv" SIZE_MB 2000 rehash tempdir C:\Temp device movies`:
+    ```
+    === 🚀 AUTO-PILOT: PREP -> PUSH -> REPLACE for __nonexistent_id__ ===
+
+    >>> STEP 1: PREP
+    ❌ File not found: C:\some\path\file.mkv
+    ❌ Auto-Pilot Aborted: Prep failed.
+    ```
+    → **TRAP AVOIDED**: the reported filepath is exactly `C:\some\path\file.mkv`, NOT polluted with `rehash`/`tempdir`/`C:\Temp`. (Then aborts at prep on file-not-found, as expected.)

@@ -2675,8 +2675,8 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("Usage:")
         print("  prep [id] [filepath]")
-        print("  prep_push_rep [id] [filepath] [optional: SIZE_GB/COUNT val] [device <id_or_name>]")
-        print("  prep_push_rep_season [id] [folder] [optional: SIZE..] [OPT: episodes] [device <id_or_name>]")
+        print("  prep_push_rep [id] [filepath] [optional: SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>]")
+        print("  prep_push_rep_season [id] [folder] [optional: SIZE..] [OPT: episodes] [device <id_or_name>] [rehash] [tempdir <path>]")
         print("  fetch_restore [id] [OPT: episodes 1-3]")  # [NEW]
         print("  set_search [id] [term]")
         print("  set_poster [id] [url]")
@@ -2686,8 +2686,8 @@ if __name__ == "__main__":
         print("  scan_unprepped")
         print("  check [id]")
         print("  local_status [opt: limit]")
-        print("  push [id] [SIZE_GB/SIZE_MB] [val] [chunks 1-4] [device <id_or_name>]")
-        print("  push_group [id] [SIZE_GB/SIZE_MB] [val] [episodes 1-3] [device <id_or_name>]")
+        print("  push [id] [SIZE_GB/SIZE_MB] [val] [chunks 1-4] [device <id_or_name>] [rehash] [tempdir <path>]")
+        print("  push_group [id] [SIZE_GB/SIZE_MB] [val] [episodes 1-3] [device <id_or_name>] [rehash] [tempdir <path>]")
         print("  replace [id]")
         print("  replace_group [id]")
         print("  repair_dummies [optional: id_prefix]")
@@ -2718,6 +2718,8 @@ if __name__ == "__main__":
         method = None
         val = None
         device_arg = None
+        eager = False
+        tdir = None
         filepath_parts = []
 
         i = 0
@@ -2734,11 +2736,20 @@ if __name__ == "__main__":
                     device_arg = rest[i + 1]
                     i += 2
                     continue
+            elif arg == "rehash":
+                eager = True
+                i += 1
+                continue
+            elif arg == "tempdir":
+                if i + 1 < len(rest):
+                    tdir = rest[i + 1]
+                    i += 2
+                    continue
             filepath_parts.append(arg)
             i += 1
 
         filepath = " ".join(filepath_parts)
-        cmd_prep_push_rep(mid, filepath, method, val, device_id=resolve_device(device_arg))
+        cmd_prep_push_rep(mid, filepath, method, val, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir)
 
     elif cmd == "prep_push_rep_season":
         if len(sys.argv) < 4:
@@ -2752,6 +2763,8 @@ if __name__ == "__main__":
         val = None
         ep_range = None
         device_arg = None
+        eager = False
+        tdir = None
 
         i = 0
         while i < len(args):
@@ -2772,11 +2785,20 @@ if __name__ == "__main__":
                     device_arg = args[i + 1]
                     i += 2
                     continue
+            elif arg == "rehash":
+                eager = True
+                i += 1
+                continue
+            elif arg == "tempdir":
+                if i + 1 < len(args):
+                    tdir = args[i + 1]
+                    i += 2
+                    continue
             folder_parts.append(arg)
             i += 1
 
         folder_path = " ".join(folder_parts)
-        cmd_prep_push_rep_season(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg))
+        cmd_prep_push_rep_season(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir)
 
     elif cmd == "set_search":
         if len(sys.argv) >= 4:
@@ -2845,6 +2867,8 @@ if __name__ == "__main__":
         val = None
         c_range = None
         dev = None
+        eager = False
+        tdir = None
 
         i = 1
         while i < len(args):
@@ -2870,10 +2894,20 @@ if __name__ == "__main__":
                 else:
                     print("❌ Error: Missing value for device.")
                     sys.exit(1)
+            elif args[i] == "rehash":
+                eager = True
+                i += 1
+            elif args[i] == "tempdir":
+                if i + 1 < len(args):
+                    tdir = args[i + 1]
+                    i += 2
+                else:
+                    print("❌ Error: Missing value for tempdir.")
+                    sys.exit(1)
             else:
                 i += 1
 
-        cmd_push(mid, method, val, c_range, device_id=resolve_device(dev))
+        cmd_push(mid, method, val, c_range, device_id=resolve_device(dev), eager_rehash=eager, temp_dir=tdir)
 
     elif cmd == "push_group":
         args = sys.argv[2:]
@@ -2886,6 +2920,8 @@ if __name__ == "__main__":
         val = None
         ep_range = None
         dev = None
+        eager = False
+        tdir = None
 
         i = 1
         while i < len(args):
@@ -2902,10 +2938,20 @@ if __name__ == "__main__":
                 if i + 1 < len(args):
                     dev = args[i + 1]
                     i += 2
+            elif args[i] == "rehash":
+                eager = True
+                i += 1
+            elif args[i] == "tempdir":
+                if i + 1 < len(args):
+                    tdir = args[i + 1]
+                    i += 2
+                else:
+                    print("❌ Error: Missing value for tempdir.")
+                    sys.exit(1)
             else:
                 i += 1
 
-        cmd_push_group(group_id, method, val, ep_range, device_id=resolve_device(dev))
+        cmd_push_group(group_id, method, val, ep_range, device_id=resolve_device(dev), eager_rehash=eager, temp_dir=tdir)
 
     elif cmd == "sort":
         cmd_sort()

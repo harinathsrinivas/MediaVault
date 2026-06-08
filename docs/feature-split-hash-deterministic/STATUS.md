@@ -242,3 +242,43 @@ Verification:
     ❌ Auto-Pilot Aborted: Prep failed.
     ```
     → **TRAP AVOIDED**: the reported filepath is exactly `C:\some\path\file.mkv`, NOT polluted with `rehash`/`tempdir`/`C:\Temp`. (Then aborts at prep on file-not-found, as expected.)
+
+---
+
+## Step 7 — One-time metadata migration: stamp `re_hashed:false` on existing split entries — status: done
+
+Executor: executor-sonnet (single-executor mode, general-purpose stand-in). Model: sonnet 4.6, effort medium.
+
+New file: `tools/migrate_rehash_flag.py` (+67 lines). No other files changed.
+
+### What the file does
+
+- **`migrate(verbose=True) -> dict`** — the sole public function. Calls `load_library()` (merged dict of all three libraries), iterates every entry, and stamps `entry["re_hashed"] = False` on entries where `split_info.is_split is True` AND `"re_hashed" not in entry`. Entries without `split_info`, with `is_split` not True, or already carrying `re_hashed` are counted separately and left untouched. `season_map` parents (`entry.get("type") == "season_map"`) are skipped before the scanned counter is incremented (they are containers, not leaf entries). Calls `save_library(data)` ONLY if `stamped > 0` (idempotent — a second run that changes nothing never writes). Returns `{"scanned", "stamped", "already_had_flag", "skipped_non_split"}` and prints a summary line when `verbose`.
+- **`if __name__ == "__main__":`** block — calls `migrate()` and prints summary.
+- **Module docstring** — states verbatim: "One-time, metadata-only, idempotent" and "Never touch real C:\\Media files or real library_*.json when TESTING — the unit test runs this against the ``sandbox`` libraries; the real run is a manual command the user invokes."
+- Imports only `load_library`, `save_library` from `mvcommon`.
+
+### Smoke-test results (throwaway — created, run, DELETED)
+
+Four entries set up in sandbox `tmp_path` libraries (dual-patched: both `mvcommon.LIBRARY_*` and `main.LIBRARY_*`, mirroring the `conftest.py` `sandbox` fixture pattern):
+- `mov-split-no-flag` — split entry (`is_split=True`), no `re_hashed` key → **stamped `re_hashed=False`**
+- `mov-non-split` — no `split_info` → **untouched**, counted in `skipped_non_split`
+- `tv-split-already-flagged` — split entry, `re_hashed=False` already present → **untouched**, counted in `already_had_flag`
+- `ani-season-parent` — `type=season_map` → **not counted in `scanned`**, completely untouched
+
+First run: `scanned=3, stamped=1, already_had_flag=1, skipped_non_split=1`
+
+Verified assertions:
+- `re_hashed=False` on the split-without-flag entry; `hash` still `"aabbcc"` (unchanged)
+- No `merge_seed`/`merge_tool`/`rehashed_at` written under `split_info` of any entry
+- Non-split entry: no `re_hashed` key, no `split_info` key
+- Already-flagged entry: `re_hashed=False` unchanged, no new fields
+- `season_map` parent: completely untouched
+
+Second run (idempotent): `scanned=3, stamped=0, already_had_flag=2, skipped_non_split=1`. Library content byte-identical to after the first run (`data2 == data`). No write occurred.
+
+Smoke result: **1 passed** — split-only stamping, idempotency, no-hash guarantees all confirmed.
+
+### pytest
+
+`.venv/Scripts/python.exe -m pytest -q` → **77 passed, 1 skipped** (baseline unchanged; the smoke file was deleted before this run — `git status --short` shows only `?? tools/migrate_rehash_flag.py`).

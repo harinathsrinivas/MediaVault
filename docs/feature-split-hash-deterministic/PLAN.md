@@ -417,7 +417,7 @@ AFTER first deferred restore blesses (DEFERRED), or after eager promote-at-repla
     device all correctly; omitting both keeps `eager_rehash=False`, `temp_dir=None` (byte-identical to
     today). Usage shows the tokens. `pytest -q` green.
 
-- [ ] 7. [model: sonnet] [effort: medium] One-time metadata migration: stamp `re_hashed:false` on existing split entries
+- [x] 7. [model: sonnet] [effort: medium] One-time metadata migration: stamp `re_hashed:false` on existing split entries
   - Files: new `tools/migrate_rehash_flag.py` (one-shot, mirrors `tools/migrate_lib.py` style)
   - Details: Idempotent one-shot — load all three libraries (`mvcommon.load_library`/`save_library`),
     and for every leaf entry with `entry.get("split_info", {}).get("is_split") is True` that lacks a

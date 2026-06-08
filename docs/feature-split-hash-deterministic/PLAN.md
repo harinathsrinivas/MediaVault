@@ -429,7 +429,7 @@ AFTER first deferred restore blesses (DEFERRED), or after eager promote-at-repla
   - Acceptance: against a sandbox library with one split + one non-split entry, stamps `re_hashed:false`
     on the split entry only, no-op on re-run, never writes a hash.
 
-- [ ] 8. [model: opus] [effort: high] Add the deterministic real-mkvmerge test fixture + binding-safe scaffolding to conftest
+- [x] 8. [model: opus] [effort: high] Add the deterministic real-mkvmerge test fixture + binding-safe scaffolding to conftest
   - Files: `tests/conftest.py`
   - Details: Read `docs/testing-strategy.md` first. Add a fixture yielding real mkvmerge chunks for the
     determinism test, GATED on real mkvmerge (skip cleanly when `MKVMERGE_PATH` is missing AND

@@ -397,3 +397,87 @@ def ffmpeg_multichunk_mkv(tmp_path):
     if proc.returncode != 0 or not out.exists():
         pytest.skip("ffmpeg invocation failed — skipping real-split fixture")
     yield out
+
+
+def _mkvmerge_available():
+    """True if a real mkvmerge binary is reachable — EITHER the configured
+    main.MKVMERGE_PATH exists on disk OR `mkvmerge` is on PATH. Mirrors the
+    real-binary gating of `_ffmpeg_available`; used to skip the deterministic
+    real-merge fixture cleanly on machines without MKVToolNix."""
+    return os.path.exists(main.MKVMERGE_PATH) or shutil.which("mkvmerge") is not None
+
+
+@pytest.fixture()
+def mkvmerge_split_chunks(ffmpeg_multichunk_mkv, tmp_path):
+    """Real-mkvmerge chunk set for the determinism test (Step 9): merging the
+    SAME chunks 2–3 times with the same seed must yield an identical SHA256.
+
+    Yields a dict (keys are stable; documented here):
+        {"chunks": [Path, ...],  # sorted real .mkv chunk paths, len >= 2, under tmp_path
+         "out_dir": Path}        # empty temp dir under tmp_path for merged outputs
+
+    Gating (mirrors the project's real-binary skip pattern, testing-strategy
+    §4 / §11): DEPENDS on `ffmpeg_multichunk_mkv` purely to INHERIT its ffmpeg
+    skip — that fixture `pytest.skip`s when ffmpeg is unavailable, so this one
+    never runs without ffmpeg. On top of that it SKIPS when mkvmerge is absent
+    (BOTH main.MKVMERGE_PATH missing AND `mkvmerge` not on PATH). So it runs ONLY
+    when both real binaries are present.
+
+    NOTE on the source: it does NOT reuse `ffmpeg_multichunk_mkv`'s *output* MKV.
+    That fixture's `testsrc` pattern compresses to ~50 KB (despite its ~6 MB
+    docstring claim), and `split_video_file` adds a +10 MB per-chunk buffer, so a
+    tiny source can NEVER split into ≥2 chunks. We therefore generate our OWN
+    high-entropy (geq random-noise, -qp 0) ~60 MB source here so a real split
+    genuinely yields ≥2 chunks. We still depend on `ffmpeg_multichunk_mkv` so the
+    ffmpeg skip + "ffmpeg works on this box" guarantee are inherited (it has
+    already proven ffmpeg runs by the time this fixture body executes). The
+    shared fixture is intentionally left unchanged (other tests rely on its size
+    and `bigsample.mkv` name).
+
+    Splits with the REAL main.split_video_file (SIZE_MB "10" on the ~60 MB source
+    → 3 chunks, with comfortable keyframe-drift margin) into a fresh `_parts` dir
+    under tmp_path. No library I/O — does NOT redirect LIBRARY_*.
+    """
+    if not _mkvmerge_available():
+        pytest.skip("mkvmerge not available — skipping deterministic real-merge fixture")
+
+    # Build a high-entropy (incompressible) multi-MB source so a real split with
+    # split_video_file's +10 MB buffer still produces ≥2 chunks. testsrc would
+    # compress to a few KB and collapse to a single chunk.
+    src = tmp_path / "det_source.mkv"
+    cmd = [
+        "ffmpeg", "-y", "-f", "lavfi",
+        "-i", "color=c=black:s=640x480:d=6:r=25",
+        "-vf", "geq=random(1)*255:128:128",
+        "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv420p",
+        str(src),
+    ]
+    proc = subprocess.run(cmd, capture_output=True)
+    if proc.returncode != 0 or not src.exists():
+        pytest.skip("ffmpeg invocation failed — skipping deterministic real-merge fixture")
+
+    parts_dir = tmp_path / "_parts"
+    parts_dir.mkdir()
+    out_dir = tmp_path / "merge_out"
+    out_dir.mkdir()
+
+    chunk_strs = main.split_video_file(
+        str(src), str(parts_dir), "SIZE_MB", "10", file_id="det01"
+    )
+    # List by extension + filter on .name — never a bracketed glob ("[id]" is a
+    # glob char class on Windows; testing-strategy §8.1 / §9).
+    chunks = sorted(p for p in parts_dir.glob("*.mkv") if p.name.endswith(".mkv"))
+
+    assert len(chunks) >= 2, (
+        f"determinism fixture needs >=2 real chunks, got {len(chunks)} "
+        f"(split returned {len(chunk_strs)})"
+    )
+
+    # Hard guard: every yielded path must live under tmp_path — NEVER real C:\Media.
+    tmp_resolved = tmp_path.resolve()
+    for p in (*chunks, out_dir):
+        rp = p.resolve()
+        assert tmp_resolved in rp.parents or rp == tmp_resolved, f"path escaped tmp_path: {p}"
+        assert "C:\\Media" not in str(rp), f"path must never touch real C:\\Media: {p}"
+
+    yield {"chunks": chunks, "out_dir": out_dir}

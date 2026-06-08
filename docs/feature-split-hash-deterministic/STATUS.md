@@ -282,3 +282,40 @@ Smoke result: **1 passed** — split-only stamping, idempotency, no-hash guarant
 ### pytest
 
 `.venv/Scripts/python.exe -m pytest -q` → **77 passed, 1 skipped** (baseline unchanged; the smoke file was deleted before this run — `git status --short` shows only `?? tools/migrate_rehash_flag.py`).
+
+---
+
+## Step 8 — Deterministic real-mkvmerge fixture in conftest — status: done
+
+Executor: executor-opus (single-executor mode). Model: opus 4.8, effort high. `tests/conftest.py` only — ADDITIVE; the existing `sandbox`/`mock_device`/`ffmpeg_multichunk_mkv` fixtures and the binding-hazard dual-patch are byte-for-byte untouched. No `LIBRARY_*` redirect in the new fixture (pure file/split — no library I/O).
+
+### What was added (`tests/conftest.py`, +2 defs)
+
+- **`_mkvmerge_available()`** (mirrors `_ffmpeg_available()`): returns True when EITHER `os.path.exists(main.MKVMERGE_PATH)` OR `shutil.which("mkvmerge") is not None` — exactly the OR gate Step 8 specified.
+- **`mkvmerge_split_chunks(ffmpeg_multichunk_mkv, tmp_path)`** fixture.
+  - **Yielded shape** (documented in a comment above the fixture): a dict
+    `{"chunks": [Path, ...]  # sorted real .mkv chunk paths, len >= 2, all under tmp_path,
+      "out_dir": Path}        # empty temp output dir under tmp_path for Step 9's merged files`.
+  - **Skip condition:** depends on `ffmpeg_multichunk_mkv` (so it INHERITS that fixture's `pytest.skip` when ffmpeg is absent), then additionally `pytest.skip`s when `not _mkvmerge_available()` (mkvmerge absent: `MKVMERGE_PATH` missing AND not on PATH). Runs only when BOTH real binaries are present. Also skips if the ffmpeg encode returns non-zero.
+  - **How it reuses `ffmpeg_multichunk_mkv`:** depends on it as a fixture ARG to inherit the ffmpeg skip gate (and the "ffmpeg actually runs on this box" guarantee). It deliberately does NOT reuse that fixture's OUTPUT MKV — see the binding/sizing finding below — and leaves the shared fixture unchanged (other tests rely on its `bigsample.mkv` name + size).
+  - Builds its OWN high-entropy source (`geq=random(1)*255` noise, `-qp 0`, 640x480 d6 → ~63 MB incompressible MKV) under `tmp_path`, splits it with the REAL `main.split_video_file(..., "SIZE_MB", "10", file_id="det01")` into a fresh `tmp_path/_parts`, lists chunks via `parts_dir.glob("*.mkv")` + `.name` filter (NOT a bracketed `[id]` glob — testing-strategy §8.1/§9), asserts `len(chunks) >= 2`, and hard-guards that every yielded path resolves UNDER `tmp_path` and contains no `C:\Media`.
+
+### FINDING surfaced (sizing/skip reality on this machine — affects the assigned recipe)
+
+The literal Step-8 recipe ("reuse `ffmpeg_multichunk_mkv`'s ~6 MB source + `SIZE_MB` small → ≥2 chunks") is **not achievable as written**, for two empirically-confirmed reasons:
+1. **ffmpeg is NOT invokable as `ffmpeg`** on this box — it is not on PATH; only app-bundled copies exist (DICloak/Stremio/UHF). So `shutil.which("ffmpeg")` is `None` and `ffmpeg_multichunk_mkv` **already SKIPS here** — it IS the pre-existing "1 skipped". (The task's "ffmpeg present" premise assumed it was on PATH.)
+2. **`ffmpeg_multichunk_mkv`'s `testsrc` output compresses to ~50 KB**, not the ~6 MB its docstring claims. Combined with `split_video_file`'s **+10 MB per-chunk buffer** (`split_size_mb = ceil(total/n) + 10`), any source under ~20 MB collapses to **1 chunk** — so `SIZE_MB 2` on that source can NEVER yield ≥2 chunks (verified: COUNT 2 / SIZE_MB 8/10 on even a 23.7 MB source → 1 chunk).
+
+Resolution (kept within the fixture's own remit; nothing shared changed): still DEPEND on `ffmpeg_multichunk_mkv` to inherit the ffmpeg skip, but generate an own incompressible ~60 MB source so a real split genuinely produces ≥2 chunks. This is the minimal change that makes the fixture's "≥2 chunks" contract actually true. Documented inline in the fixture docstring.
+
+Related pre-existing bug (NOT in Step-8 scope, flagged for the planner): `tests/test_rollback.py::test_push_split_fail_before_upload_rolls_back` is **already broken on any machine where ffmpeg runs** — it copies the ~50 KB source, `cmd_push` prints "File size (0MB) is smaller than split limit (2MB). Skipping split.", no split happens, the lone push (the failure-injection targets a CHUNK push that never occurs) succeeds, and the test's `assert result is False` fails. It only "passes" universally because ffmpeg is never on PATH → it always skips. My change does not touch it; I left it as-is.
+
+### Verification
+
+- **Throwaway test** (created under `tests/`, run, then DELETED — `git status --short` confirms only `tests/conftest.py` modified, no stray file): consumed `mkvmerge_split_chunks` and asserted ≥2 `.mkv` chunks that exist + are non-empty + resolve under `tmp_path` (not `C:\Media`) + an `out_dir` under `tmp_path`.
+  - With ffmpeg+mkvmerge on PATH (bundled ffmpeg + `MKVMERGE_PATH`): **1 passed** — `FIXTURE OK: 3 chunks, all under tmp_path; out_dir=...\merge_out`.
+  - Without PATH (sandboxed shell): **1 skipped** — clean inherited ffmpeg skip ("ffmpeg not available — skipping real-split fixture").
+- **Determinism premise sanity-check** (throwaway, deleted): merged the yielded chunks twice via `main.merge_video_files(chunks, out, seed="f6b674")` → SHA256 `19b5b3d787e3e516…` == `19b5b3d787e3e516…` (**byte-identical**), confirming the chunks are fit for Step 9.
+- **Full suite, sandboxed (no PATH):** `.venv/Scripts/python.exe -m pytest -q` → **77 passed, 1 skipped** — unchanged from baseline (no test consumes the new fixture yet; conftest still imports cleanly, proving no collection error).
+- **Full suite, binaries on PATH:** 77 passed + the pre-existing `test_rollback.py` real-split test FAILS for the unrelated reason above (the new fixture itself is fine and is exercised green by the throwaway). This failure is pre-existing and out of Step-8 scope.
+- `git status --short` → only `tests/conftest.py` (+ the two docs files for this status/plan update); no stray test file.

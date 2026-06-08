@@ -441,7 +441,7 @@ AFTER first deferred restore blesses (DEFERRED), or after eager promote-at-repla
   - Acceptance: the fixture skips cleanly without mkvmerge/ffmpeg and, when present, yields ≥2 real chunk
     paths + an output dir under `tmp_path`. `pytest -q` green with and without mkvmerge.
 
-- [ ] 9. [model: sonnet] [effort: medium] Write the rehash test suite
+- [x] 9. [model: sonnet] [effort: medium] Write the rehash test suite
   - Files: new `tests/test_rehash.py`
   - Details: Read `docs/testing-strategy.md` first. Module docstring MUST state "Never touch real
     C:\\Media files or real library_*.json." and "Run `pytest -q` and fix failures before marking the

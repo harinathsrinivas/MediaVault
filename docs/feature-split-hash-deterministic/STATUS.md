@@ -319,3 +319,35 @@ Related pre-existing bug (NOT in Step-8 scope, flagged for the planner): `tests/
 - **Full suite, sandboxed (no PATH):** `.venv/Scripts/python.exe -m pytest -q` → **77 passed, 1 skipped** — unchanged from baseline (no test consumes the new fixture yet; conftest still imports cleanly, proving no collection error).
 - **Full suite, binaries on PATH:** 77 passed + the pre-existing `test_rollback.py` real-split test FAILS for the unrelated reason above (the new fixture itself is fine and is exercised green by the throwaway). This failure is pre-existing and out of Step-8 scope.
 - `git status --short` → only `tests/conftest.py` (+ the two docs files for this status/plan update); no stray test file.
+
+---
+
+## Step 9 — rehash test suite (tests/test_rehash.py) — status: done
+
+Executor: executor-sonnet (single-executor) wrote all 17 tests; the session limit interrupted it BEFORE its run-and-fix phase, so the orchestrator finished it — diagnosed the failures, fixed 3 TEST bugs (NO product bugs; the product behaved correctly in every case), and verified green.
+
+New file `tests/test_rehash.py` — 17 tests (16 pass + 1 determinism test SKIPS without mkvmerge/ffmpeg on PATH). Module docstring carries the safety lines. Library-I/O uses `sandbox`; ADB uses `mock_device`; merges are monkeypatched to fixed-bytes where real mkvmerge isn't needed.
+
+Tests + the invariant each locks:
+- `test_deterministic_merge_same_seed_yields_identical_hash` — same chunks merged 3× with the same seed → identical SHA256 (the linchpin; uses the Step-8 `mkvmerge_split_chunks` fixture; SKIPS without mkvmerge/ffmpeg).
+- `test_deferred_restore_first_call_blesses` — first restore sets hash=merged, re_hashed=True, stores merge_seed(=short_id)/merge_tool/rehashed_at.
+- `test_deferred_restore_second_call_verifies_hash_unchanged` — re_hashed=True + matching merge → hash unchanged (verify path).
+- `test_deferred_restore_mismatch_alarms_no_ponr_chunks_kept` — re_hashed=True + non-matching merge → alarm + return False + **chunks survive (PONR not crossed)** + hash unchanged. (The load-bearing integrity invariant.)
+- `test_e2e_not_yet_rehashed_blesses` / `_already_rehashed_verifies` / `_corrupt_chunk_caught_before_bless` — the fetch→restore cycle (bless / verify / corrupt-chunk caught pre-merge so bless never runs).
+- `test_eager_push_stages_canonical_in_split_info` — eager push (NEW split) stages merge_seed/merge_tool/canonical_hash in split_info while entry hash stays original + re_hashed False.
+- `test_cmd_replace_promotes_eager_canonical` — replace promotes canonical→entry hash, re_hashed=True, rehashed_at stamped, canonical_hash dropped.
+- `test_resplit_reset_clears_canonical_fields` — re-split of a blessed entry resets re_hashed=False + drops stale canonical fields.
+- `test_disk_preflight_stops_before_parts_dir_created` — `_free_space_ok`=False → push hard-stops before `_parts/` is created.
+- `test_season_preflight_picks_largest_splitting_item` — season pre-flight hard-stops before pushing any episode when the gate fails.
+- `test_eager_merge_failure_falls_back_to_deferred` — eager merge fails (NEW split) → push still succeeds as deferred, no canonical written.
+- `test_tempdir_chunks_land_under_scratch` — temp_dir routes chunks off-volume; checksums stay under the media folder.
+- `test_tempdir_bad_path_returns_false` — bad temp_dir → False, no `_parts/`.
+- `test_cmd_check_passes_in_eager_prereplace_window` — cmd_check PASSES against the on-disk original during the eager pre-replace window.
+- `test_migration_stamps_split_only_and_is_idempotent` — migrate() stamps split-only, skips non-split + season_map, idempotent, no hashes written.
+
+Orchestrator fixes (3 TEST bugs):
+1. `test_eager_push_stages_canonical_in_split_info` used the RESUME path (pre-existing `_parts/`), which correctly BYPASSES the eager block (eager bless runs only on a NEW split) → restructured to the new-split path (monkeypatch `split_video_file`). Added shared `_seed_new_split_entry`/`_fake_split_two_chunks` helpers.
+2. `test_eager_merge_failure_falls_back_to_deferred` had the SAME resume-path issue and was FALSE-PASSING (asserting "no canonical_hash" — trivially true when the eager block never runs) → restructured to the new-split path so the eager failure path is genuinely exercised.
+3. `test_cmd_check_passes_in_eager_prereplace_window` wrote a 2,000-byte file (< DUMMY_MAX_BYTES 200,000) → cmd_check's dummy-detection skipped it → enlarged to 220,000 bytes.
+
+Verification: `pytest tests/test_rehash.py -q` → 16 passed, 1 skipped. Full suite `.venv/Scripts/python.exe -m pytest -q` → **93 passed, 2 skipped** (was 77/1; +16 new passing tests, +1 new gated skip = the determinism test). `tests/test_rollback.py` + `tests/test_baseline_happy_path.py` unaffected. (The pre-existing `test_rollback.py` real-split bug flagged in Step 8 is unrelated and skips here since ffmpeg isn't on PATH, so the suite is green.)

@@ -2555,6 +2555,16 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
             print("❌ Invalid range.")
             return
 
+    # De-alias: collapse multi_ep_alias ids to their primaries; dedup order-preserving.
+    seen = set()
+    dealiased = []
+    for mid in target_ids:
+        real_id, _ = _resolve_alias(library, mid)
+        if real_id not in seen:
+            seen.add(real_id)
+            dealiased.append(real_id)
+    target_ids = dealiased
+
     # 3. LOOP PROCESS: PUSH -> REPLACE (One by One)
     print(f"\n>>> STEP 2 & 3: SEQUENTIAL PROCESSING ({len(target_ids)} items)")
 

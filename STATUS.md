@@ -141,3 +141,9 @@ Acceptance: DECISIONS.md created with 4 entries; improvements_tierR.md IMP-R2 St
 - Files changed: main.py
 - Key decision: Single-hop only; returns (real_id, entry); fallback to (mid, alias_entry) if alias target missing.
 - Acceptance: _resolve_alias(lib, "...e20") returns ("...e19", <e19 entry>); _resolve_alias(lib, "...e19") returns ("...e19", <e19 entry>).
+
+## Step 3 — Make cmd_prep_push_rep_season alias-aware
+- Status: done
+- Files changed: main.py
+- Key decision: De-alias pass runs after range filter, before disk pre-flight; target_ids contains only primary ids from that point on; alias-only range (episodes 20-20) resolves to the primary (e19).
+- Acceptance: With seeded library containing e19(real)+e20(alias), episodes 18-20 and episodes 20-20 both resolve target_ids to [e19] only.

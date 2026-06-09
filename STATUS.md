@@ -153,3 +153,15 @@ Acceptance: DECISIONS.md created with 4 entries; improvements_tierR.md IMP-R2 St
 - Files changed: main.py
 - Key decision: ep_str derived from real_id (resolved) not rid (raw); library is in-scope closure variable. Step 3 already de-aliases target_ids so this is belt-and-suspenders only.
 - Acceptance: _season_resume_cmd emits the primary episode number; the RollbackHardFail resume_cmd contract (must name an existing command) is preserved.
+
+## Step 6 — Resolve aliases in mainfetch.resolve_targets
+- Status: done
+- Files changed: mainfetch.py
+- Key decision: Local _resolve_alias helper added (mirrors main._resolve_alias, no import); season_map branch de-aliases children before building target_entries; single-id branch resolves alias to primary. fetch episodes 20-20 and fetch episodes 19-19 both queue the same physical file.
+- Acceptance: fetch by alias id (e20) returns primary's filename/hash/split_info; season range 19-20 queues one entry, not two.
+
+## Step 5 — cmd_push_group / cmd_replace_group alias-aware
+- Status: done
+- Files changed: main.py
+- Key decision: De-alias pass inserted after range filter, before downstream loop, in each group command that accesses entry fields directly. cmd_restore_group was also included (not just push/replace) because cmd_restore accesses entry['folder_path']/entry['filename'] directly and would KeyError on an alias entry.
+- Acceptance: Group push/replace over a library with a multi_ep_alias resolves to a single primary id; existing non-alias group behaviour unchanged (transform is a no-op for non-alias ids).

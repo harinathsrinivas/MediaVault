@@ -1667,6 +1667,16 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
             print("❌ Invalid episode range format. Use '1-3'.")
             return
 
+    # De-alias: collapse multi_ep_alias ids to their primaries; dedup order-preserving.
+    seen = set()
+    dealiased = []
+    for mid in target_ids:
+        real_id, _ = _resolve_alias(library, mid)
+        if real_id not in seen:
+            seen.add(real_id)
+            dealiased.append(real_id)
+    target_ids = dealiased
+
     if not target_ids: print("❌ No items found to push."); return
     print(f"   > Processing {len(target_ids)} items...\n")
 
@@ -1874,6 +1884,16 @@ def cmd_replace_group(group_id):
         target_ids = sorted([k for k in library.keys() if k.startswith(group_id) and k != group_id])
 
     if not target_ids: print("❌ No items found."); return
+
+    # De-alias: collapse multi_ep_alias ids to their primaries; dedup order-preserving.
+    seen = set()
+    dealiased = []
+    for mid in target_ids:
+        real_id, _ = _resolve_alias(library, mid)
+        if real_id not in seen:
+            seen.add(real_id)
+            dealiased.append(real_id)
+    target_ids = dealiased
 
     # [FIX] Removed User Confirmation Prompt to match Movie behavior
     print(f"   > Auto-replacing {len(target_ids)} items...")
@@ -2253,6 +2273,16 @@ def cmd_restore_group(group_id, episode_range=None):
             print(f"   > Filtered to {len(target_ids)} items (Episodes {episode_range}).")
         except:
             print("   ⚠️ Invalid range. Processing all.")
+
+    # De-alias: collapse multi_ep_alias ids to their primaries; dedup order-preserving.
+    seen = set()
+    dealiased = []
+    for mid in target_ids:
+        real_id, _ = _resolve_alias(library, mid)
+        if real_id not in seen:
+            seen.add(real_id)
+            dealiased.append(real_id)
+    target_ids = dealiased
 
     count = 0
     for mid in target_ids:

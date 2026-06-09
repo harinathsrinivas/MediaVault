@@ -257,3 +257,20 @@
 - Goal: A clean web UI for browsing and managing the archive. Foundation for the Apple TV UI roadmap.
 - Effort estimate: large
 - Status: pending
+
+---
+
+## IMP-E13: Multi-episode combined-file support (SxxExxExx)
+
+- Category: parsing / library
+- Priority: high
+- Files: `main.py` (`cmd_prep_season`, `_resolve_alias`, group command range filters, `_season_resume_cmd`); `mainfetch.py` (`_resolve_alias` mirror, `resolve_targets`); `ARCHITECTURE.md` §6.3 + §7.8
+- Current behavior: `cmd_prep_season` only parsed the FIRST episode number from `S04E19E20`, silently skipping `e20`. Fetching ep20 failed; range filter `episodes 18-20` missed the combined file.
+- Change delivered (PR #21, 2026-06-10):
+  - `cmd_prep_season` detects `[sS]\d+(?:[eE]\d+){2,}` (TV SxxExx branch only, never anime), registers the lowest episode as the full primary leaf, and creates a thin `multi_ep_alias` entry for each additional episode: `{"type":"multi_ep_alias","alias_of":"...e19","parent_id":"...s04"}`. Both primary and aliases appear in `season_map.children`.
+  - New `_resolve_alias(lib, mid)` helper (main.py + local mirror in mainfetch.py) collapses an alias to its primary in one hop.
+  - All group push/replace/restore loops and `mainfetch.resolve_targets` de-alias `target_ids` before processing — the physical file is pushed/fetched exactly once.
+  - `fetch episodes 20-20` and `fetch episodes 19-19` both correctly queue the same file.
+  - Generalises to 3+ episodes per file (`E17E18E19`) with no extra code.
+  - 6 new tests (F–K); 11 total pass.
+- Status: done

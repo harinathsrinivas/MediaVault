@@ -1025,13 +1025,22 @@ def cmd_prep_season(base_id, folder_path):
 
     for filename in files:
         ep_num = None
+        is_sxxexx_combined = False  # Track SxxExxExx combined-episode TV files
 
         # Strategy 1: Standard S01E01 (Works for TV and some Anime, handles .5)
         match = re.search(r"[sS]\d+[eE](\d+)", filename)
+        matched_sxxexx = bool(match)  # Strategy-1 matched via the SxxExx sub-regex
         if not match: match = re.search(r"\d+[xX](\d+(?:\.\d+)?)", filename)
 
         if match:
             ep_num = match.group(1)
+            # Combined-episode detector: ONLY for the SxxExx (TV) branch, never the
+            # \d+xYY anime fallback. Fires on 2+ consecutive E-numbers (S04E19E20).
+            if matched_sxxexx:
+                combined = re.search(r"[sS]\d+(?:[eE]\d+){2,}", filename)
+                if combined:
+                    is_sxxexx_combined = True
+                    combined_eps = re.findall(r"[eE](\d+)", combined.group(0))
 
         # Strategy 2: Anime Absolute Numbering (001, 01, 135, handles .5)
         # Look for numbers at start or surrounded by delimiters
@@ -1050,8 +1059,28 @@ def cmd_prep_season(base_id, folder_path):
             full_id = f"{base_id}e{ep_num}" if not is_anime else f"{base_id}{ep_num}"
             full_path = os.path.join(folder_path, filename)
 
-            cmd_prep(full_id, full_path, parent_id=base_id)
+            prepped = cmd_prep(full_id, full_path, parent_id=base_id)
             count += 1
+
+            # Combined-episode aliases (SxxExxExx TV only): the FIRST E-number is the
+            # primary (already prepped as full_id); the rest become thin alias entries
+            # pointing at the same file. Guard on prep success AND the primary actually
+            # existing in the library (a dummy/skip returns True but creates no entry).
+            if is_sxxexx_combined and prepped:
+                library = load_library()
+                if full_id in library:
+                    for s in combined_eps[1:]:
+                        alias_id = f"{base_id}e{s}"
+                        if alias_id not in library:
+                            library[alias_id] = {
+                                "type": "multi_ep_alias",
+                                "alias_of": full_id,
+                                "parent_id": base_id,
+                            }
+                            library[base_id]["children"].append(alias_id)
+                            library[base_id]["children"].sort()
+                            library[base_id]["total_episodes"] = len(library[base_id]["children"])
+                    save_library(library)
         else:
             print(f"⚠️ Skipping {filename} (No episode number detected)")
 

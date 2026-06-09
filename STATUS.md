@@ -129,3 +129,9 @@ Acceptance: DECISIONS.md created with 4 entries; improvements_tierR.md IMP-R2 St
 - Files changed: docs/feature-fix-episode-title-parse/DECISIONS.md (new), docs/feature-fix-episode-title-parse/PLAN.md (steps marked done).
 - Outcome: DECISIONS.md records the 4 decision points. Tracked PLAN.md steps all marked [x].
 - Key decisions: doc-only step; no code changed.
+
+## Step 1 — Extend cmd_prep_season for combined-episode aliases
+- Status: done
+- Files changed: main.py
+- Key decision: Combined-episode detector scoped to SxxExx TV branch only; alias loop runs after primary cmd_prep returns truthy; save_library called once per file after all secondaries.
+- Acceptance: Verified by inspection that S04E19E20 creates e19 primary + e20 alias; S04E19 single creates only e19; anime NxYY unaffected.

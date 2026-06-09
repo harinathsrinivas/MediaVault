@@ -330,6 +330,20 @@ def fetch_single_entry(driver, entry):
         print("\n   ❌ ENTRY INCOMPLETE.")
 
 
+def _resolve_alias(lib, mid):
+    """Mirror of main._resolve_alias — single-hop multi_ep_alias resolution."""
+    entry = lib.get(mid)
+    if entry is None:
+        raise KeyError(mid)
+    if entry.get("type") == "multi_ep_alias":
+        primary_id = entry["alias_of"]
+        primary_entry = lib.get(primary_id)
+        if primary_entry is None:
+            return (mid, entry)
+        return (primary_id, primary_entry)
+    return (mid, entry)
+
+
 def resolve_targets(manual_id, ep_range=None):
     """Resolves a group ID into a list of individual entries."""
     lib = load_library()
@@ -358,13 +372,24 @@ def resolve_targets(manual_id, ep_range=None):
             except:
                 print("   > ⚠️ Invalid range format. Processing all.")
 
+        # De-alias: resolve multi_ep_alias children to their primaries, dedup order-preserving.
+        seen = set()
+        resolved_ids = []
+        for cid in children_ids:
+            real_id, _ = _resolve_alias(lib, cid)
+            if real_id not in seen:
+                seen.add(real_id)
+                resolved_ids.append(real_id)
+        children_ids = resolved_ids
+
         target_entries = []
         for cid in children_ids:
             if cid in lib: target_entries.append(lib[cid])
         return target_entries
 
     else:
-        # Single Movie or Episode
+        # Single Movie or Episode — resolve alias if needed
+        real_id, entry = _resolve_alias(lib, manual_id)
         return [entry]
 
 

@@ -129,3 +129,51 @@ Acceptance: DECISIONS.md created with 4 entries; improvements_tierR.md IMP-R2 St
 - Files changed: docs/feature-fix-episode-title-parse/DECISIONS.md (new), docs/feature-fix-episode-title-parse/PLAN.md (steps marked done).
 - Outcome: DECISIONS.md records the 4 decision points. Tracked PLAN.md steps all marked [x].
 - Key decisions: doc-only step; no code changed.
+
+## Step 1 — Extend cmd_prep_season for combined-episode aliases
+- Status: done
+- Files changed: main.py
+- Key decision: Combined-episode detector scoped to SxxExx TV branch only; alias loop runs after primary cmd_prep returns truthy; save_library called once per file after all secondaries.
+- Acceptance: Verified by inspection that S04E19E20 creates e19 primary + e20 alias; S04E19 single creates only e19; anime NxYY unaffected.
+
+## Step 2 — Add _resolve_alias helper
+- Status: done
+- Files changed: main.py
+- Key decision: Single-hop only; returns (real_id, entry); fallback to (mid, alias_entry) if alias target missing.
+- Acceptance: _resolve_alias(lib, "...e20") returns ("...e19", <e19 entry>); _resolve_alias(lib, "...e19") returns ("...e19", <e19 entry>).
+
+## Step 3 — Make cmd_prep_push_rep_season alias-aware
+- Status: done
+- Files changed: main.py
+- Key decision: De-alias pass runs after range filter, before disk pre-flight; target_ids contains only primary ids from that point on; alias-only range (episodes 20-20) resolves to the primary (e19).
+- Acceptance: With seeded library containing e19(real)+e20(alias), episodes 18-20 and episodes 20-20 both resolve target_ids to [e19] only.
+
+## Step 4 — Defensive resolve in _season_resume_cmd
+- Status: done
+- Files changed: main.py
+- Key decision: ep_str derived from real_id (resolved) not rid (raw); library is in-scope closure variable. Step 3 already de-aliases target_ids so this is belt-and-suspenders only.
+- Acceptance: _season_resume_cmd emits the primary episode number; the RollbackHardFail resume_cmd contract (must name an existing command) is preserved.
+
+## Step 6 — Resolve aliases in mainfetch.resolve_targets
+- Status: done
+- Files changed: mainfetch.py
+- Key decision: Local _resolve_alias helper added (mirrors main._resolve_alias, no import); season_map branch de-aliases children before building target_entries; single-id branch resolves alias to primary. fetch episodes 20-20 and fetch episodes 19-19 both queue the same physical file.
+- Acceptance: fetch by alias id (e20) returns primary's filename/hash/split_info; season range 19-20 queues one entry, not two.
+
+## Step 5 — cmd_push_group / cmd_replace_group alias-aware
+- Status: done
+- Files changed: main.py
+- Key decision: De-alias pass inserted after range filter, before downstream loop, in each group command that accesses entry fields directly. cmd_restore_group was also included (not just push/replace) because cmd_restore accesses entry['folder_path']/entry['filename'] directly and would KeyError on an alias entry.
+- Acceptance: Group push/replace over a library with a multi_ep_alias resolves to a single primary id; existing non-alias group behaviour unchanged (transform is a no-op for non-alias ids).
+
+## Step 7 — Tests F–K
+- Status: done
+- Files changed: tests/test_prep_season_episode_parse.py
+- Key decision: Tests H and I are pure unit tests of the de-alias transform (no cmd_prep_season call); others use the standard sandbox+tmp_path fixture pattern.
+- Acceptance: pytest tests/test_prep_season_episode_parse.py -v green (A–K all pass).
+
+## Step 8 — ARCHITECTURE.md update
+- Status: done
+- Files changed: ARCHITECTURE.md
+- Key decision: Added multi_ep_alias as a third entry type in §6.3; added one sentence to the cmd_prep_season bullet in §7.8.
+- Acceptance: §6.3 lists three entry types; §7.8 cmd_prep_season mentions combined-episode aliasing.

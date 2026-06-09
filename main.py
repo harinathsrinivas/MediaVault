@@ -1025,13 +1025,22 @@ def cmd_prep_season(base_id, folder_path):
 
     for filename in files:
         ep_num = None
+        is_sxxexx_combined = False  # Track SxxExxExx combined-episode TV files
 
         # Strategy 1: Standard S01E01 (Works for TV and some Anime, handles .5)
         match = re.search(r"[sS]\d+[eE](\d+)", filename)
+        matched_sxxexx = bool(match)  # Strategy-1 matched via the SxxExx sub-regex
         if not match: match = re.search(r"\d+[xX](\d+(?:\.\d+)?)", filename)
 
         if match:
             ep_num = match.group(1)
+            # Combined-episode detector: ONLY for the SxxExx (TV) branch, never the
+            # \d+xYY anime fallback. Fires on 2+ consecutive E-numbers (S04E19E20).
+            if matched_sxxexx:
+                combined = re.search(r"[sS]\d+(?:[eE]\d+){2,}", filename)
+                if combined:
+                    is_sxxexx_combined = True
+                    combined_eps = re.findall(r"[eE](\d+)", combined.group(0))
 
         # Strategy 2: Anime Absolute Numbering (001, 01, 135, handles .5)
         # Look for numbers at start or surrounded by delimiters
@@ -1050,8 +1059,28 @@ def cmd_prep_season(base_id, folder_path):
             full_id = f"{base_id}e{ep_num}" if not is_anime else f"{base_id}{ep_num}"
             full_path = os.path.join(folder_path, filename)
 
-            cmd_prep(full_id, full_path, parent_id=base_id)
+            prepped = cmd_prep(full_id, full_path, parent_id=base_id)
             count += 1
+
+            # Combined-episode aliases (SxxExxExx TV only): the FIRST E-number is the
+            # primary (already prepped as full_id); the rest become thin alias entries
+            # pointing at the same file. Guard on prep success AND the primary actually
+            # existing in the library (a dummy/skip returns True but creates no entry).
+            if is_sxxexx_combined and prepped:
+                library = load_library()
+                if full_id in library:
+                    for s in combined_eps[1:]:
+                        alias_id = f"{base_id}e{s}"
+                        if alias_id not in library:
+                            library[alias_id] = {
+                                "type": "multi_ep_alias",
+                                "alias_of": full_id,
+                                "parent_id": base_id,
+                            }
+                            library[base_id]["children"].append(alias_id)
+                            library[base_id]["children"].sort()
+                            library[base_id]["total_episodes"] = len(library[base_id]["children"])
+                    save_library(library)
         else:
             print(f"⚠️ Skipping {filename} (No episode number detected)")
 
@@ -1580,6 +1609,26 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             return False
 
 
+def _resolve_alias(lib, mid):
+    """Return (real_id, entry) resolving a multi_ep_alias one hop to its primary.
+
+    - If mid is a multi_ep_alias, follow alias_of once and return the primary id + primary entry.
+    - If the alias target is missing from lib, return (mid, alias_entry) so callers can detect/skip.
+    - Otherwise return (mid, lib[mid]) unchanged.
+    Single-hop only; aliases never point at other aliases by construction.
+    """
+    entry = lib.get(mid)
+    if entry is None:
+        raise KeyError(mid)
+    if entry.get("type") == "multi_ep_alias":
+        primary_id = entry["alias_of"]
+        primary_entry = lib.get(primary_id)
+        if primary_entry is None:
+            return (mid, entry)
+        return (primary_id, primary_entry)
+    return (mid, entry)
+
+
 def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False, temp_dir=None):
     print(f"=== BATCH PUSH GROUP: {group_id} ===")
     library = load_library()
@@ -1617,6 +1666,16 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
         except ValueError:
             print("❌ Invalid episode range format. Use '1-3'.")
             return
+
+    # De-alias: collapse multi_ep_alias ids to their primaries; dedup order-preserving.
+    seen = set()
+    dealiased = []
+    for mid in target_ids:
+        real_id, _ = _resolve_alias(library, mid)
+        if real_id not in seen:
+            seen.add(real_id)
+            dealiased.append(real_id)
+    target_ids = dealiased
 
     if not target_ids: print("❌ No items found to push."); return
     print(f"   > Processing {len(target_ids)} items...\n")
@@ -1825,6 +1884,16 @@ def cmd_replace_group(group_id):
         target_ids = sorted([k for k in library.keys() if k.startswith(group_id) and k != group_id])
 
     if not target_ids: print("❌ No items found."); return
+
+    # De-alias: collapse multi_ep_alias ids to their primaries; dedup order-preserving.
+    seen = set()
+    dealiased = []
+    for mid in target_ids:
+        real_id, _ = _resolve_alias(library, mid)
+        if real_id not in seen:
+            seen.add(real_id)
+            dealiased.append(real_id)
+    target_ids = dealiased
 
     # [FIX] Removed User Confirmation Prompt to match Movie behavior
     print(f"   > Auto-replacing {len(target_ids)} items...")
@@ -2205,6 +2274,16 @@ def cmd_restore_group(group_id, episode_range=None):
         except:
             print("   ⚠️ Invalid range. Processing all.")
 
+    # De-alias: collapse multi_ep_alias ids to their primaries; dedup order-preserving.
+    seen = set()
+    dealiased = []
+    for mid in target_ids:
+        real_id, _ = _resolve_alias(library, mid)
+        if real_id not in seen:
+            seen.add(real_id)
+            dealiased.append(real_id)
+    target_ids = dealiased
+
     count = 0
     for mid in target_ids:
         # Loop blindly - the restore command handles checks
@@ -2506,6 +2585,16 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
             print("❌ Invalid range.")
             return
 
+    # De-alias: collapse multi_ep_alias ids to their primaries; dedup order-preserving.
+    seen = set()
+    dealiased = []
+    for mid in target_ids:
+        real_id, _ = _resolve_alias(library, mid)
+        if real_id not in seen:
+            seen.add(real_id)
+            dealiased.append(real_id)
+    target_ids = dealiased
+
     # 3. LOOP PROCESS: PUSH -> REPLACE (One by One)
     print(f"\n>>> STEP 2 & 3: SEQUENTIAL PROCESSING ({len(target_ids)} items)")
 
@@ -2517,7 +2606,8 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
         remaining = target_ids[failing_idx:]
         ep_nums = []
         for rid in remaining:
-            ep_str = rid.replace(base_id, "")
+            real_id, _ = _resolve_alias(library, rid)
+            ep_str = real_id.replace(base_id, "")
             m = re.search(r'^[eExX]?(\d+(?:\.\d+)?)$', ep_str)
             if m:
                 ep_nums.append(m.group(1))

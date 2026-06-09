@@ -171,3 +171,9 @@ Acceptance: DECISIONS.md created with 4 entries; improvements_tierR.md IMP-R2 St
 - Files changed: tests/test_prep_season_episode_parse.py
 - Key decision: Tests H and I are pure unit tests of the de-alias transform (no cmd_prep_season call); others use the standard sandbox+tmp_path fixture pattern.
 - Acceptance: pytest tests/test_prep_season_episode_parse.py -v green (A–K all pass).
+
+## Step 8 — ARCHITECTURE.md update
+- Status: done
+- Files changed: ARCHITECTURE.md
+- Key decision: Added multi_ep_alias as a third entry type in §6.3; added one sentence to the cmd_prep_season bullet in §7.8.
+- Acceptance: §6.3 lists three entry types; §7.8 cmd_prep_season mentions combined-episode aliasing.

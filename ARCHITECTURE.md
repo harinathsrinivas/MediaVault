@@ -339,8 +339,8 @@ Two notable observations from the live data:
 
 ### 6.3 Entry schemas
 
-There are **two entry types** per library: leaf entries and season-map
-parents.
+There are **three entry types** per library: leaf entries, season-map
+parents, and multi-episode aliases.
 
 #### Leaf entry (one per file)
 
@@ -405,6 +405,29 @@ parents.
   ]
 }
 ```
+
+#### Multi-episode alias (one per secondary episode of a combined file)
+
+```jsonc
+"tv-en-2009-bsg-s04e20": {
+  "type":      "multi_ep_alias",
+  "alias_of":  "tv-en-2009-bsg-s04e19",
+  "parent_id": "tv-en-2009-bsg-s04"
+}
+```
+
+A single physical file covering multiple episodes (e.g. `S04E19E20.mkv`) is
+registered once as a normal leaf entry under the **first** (lowest) episode
+number. Each additional episode number gets a thin alias entry carrying only
+`type`, `alias_of`, and `parent_id` — no `hash`, `filename`, `tech_spec`, or
+`split_info`. Both the primary and all aliases are listed in the season_map's
+`children`.
+
+`_resolve_alias(lib, mid)` in `main.py` (and a local mirror in `mainfetch.py`)
+resolves an alias to its primary in one hop. All group push/replace/restore loops
+and `mainfetch.resolve_targets` call this helper to collapse aliases to their
+primaries before processing, so the underlying file is pushed/replaced/fetched
+exactly once regardless of how many episode numbers share it.
 
 Season maps have no `hash`, no `filename`, no `tech_spec`. They are
 recognised throughout the code by `entry.get("type") == "season_map"` and
@@ -977,6 +1000,7 @@ results in some children skipping cleanly.
     regex looking for any 1-4-digit number surrounded by `[ ._\-[]]`
     delimiters, with a guard against parsing release years
     (`19xx`/`20xx`) as episode numbers.
+  For TV files where the SxxExx cluster contains two or more episode numbers (e.g. S04E19E20), the detector emits the first as the primary and creates a thin `multi_ep_alias` entry for each additional number — see §6.3.
 - `cmd_push_group(group_id, ...)` (714-759) — same logic as
   `cmd_restore_group` but for pushing: season-map mode OR prefix-match
   mode, with optional `episodes A-B` filter, skipping items already

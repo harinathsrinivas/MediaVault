@@ -2576,7 +2576,8 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
         remaining = target_ids[failing_idx:]
         ep_nums = []
         for rid in remaining:
-            ep_str = rid.replace(base_id, "")
+            real_id, _ = _resolve_alias(library, rid)
+            ep_str = real_id.replace(base_id, "")
             m = re.search(r'^[eExX]?(\d+(?:\.\d+)?)$', ep_str)
             if m:
                 ep_nums.append(m.group(1))

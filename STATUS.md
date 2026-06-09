@@ -147,3 +147,9 @@ Acceptance: DECISIONS.md created with 4 entries; improvements_tierR.md IMP-R2 St
 - Files changed: main.py
 - Key decision: De-alias pass runs after range filter, before disk pre-flight; target_ids contains only primary ids from that point on; alias-only range (episodes 20-20) resolves to the primary (e19).
 - Acceptance: With seeded library containing e19(real)+e20(alias), episodes 18-20 and episodes 20-20 both resolve target_ids to [e19] only.
+
+## Step 4 — Defensive resolve in _season_resume_cmd
+- Status: done
+- Files changed: main.py
+- Key decision: ep_str derived from real_id (resolved) not rid (raw); library is in-scope closure variable. Step 3 already de-aliases target_ids so this is belt-and-suspenders only.
+- Acceptance: _season_resume_cmd emits the primary episode number; the RollbackHardFail resume_cmd contract (must name an existing command) is preserved.

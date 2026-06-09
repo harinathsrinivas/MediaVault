@@ -1609,6 +1609,26 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             return False
 
 
+def _resolve_alias(lib, mid):
+    """Return (real_id, entry) resolving a multi_ep_alias one hop to its primary.
+
+    - If mid is a multi_ep_alias, follow alias_of once and return the primary id + primary entry.
+    - If the alias target is missing from lib, return (mid, alias_entry) so callers can detect/skip.
+    - Otherwise return (mid, lib[mid]) unchanged.
+    Single-hop only; aliases never point at other aliases by construction.
+    """
+    entry = lib.get(mid)
+    if entry is None:
+        raise KeyError(mid)
+    if entry.get("type") == "multi_ep_alias":
+        primary_id = entry["alias_of"]
+        primary_entry = lib.get(primary_id)
+        if primary_entry is None:
+            return (mid, entry)
+        return (primary_id, primary_entry)
+    return (mid, entry)
+
+
 def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False, temp_dir=None):
     print(f"=== BATCH PUSH GROUP: {group_id} ===")
     library = load_library()

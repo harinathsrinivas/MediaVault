@@ -135,3 +135,9 @@ Acceptance: DECISIONS.md created with 4 entries; improvements_tierR.md IMP-R2 St
 - Files changed: main.py
 - Key decision: Combined-episode detector scoped to SxxExx TV branch only; alias loop runs after primary cmd_prep returns truthy; save_library called once per file after all secondaries.
 - Acceptance: Verified by inspection that S04E19E20 creates e19 primary + e20 alias; S04E19 single creates only e19; anime NxYY unaffected.
+
+## Step 2 — Add _resolve_alias helper
+- Status: done
+- Files changed: main.py
+- Key decision: Single-hop only; returns (real_id, entry); fallback to (mid, alias_entry) if alias target missing.
+- Acceptance: _resolve_alias(lib, "...e20") returns ("...e19", <e19 entry>); _resolve_alias(lib, "...e19") returns ("...e19", <e19 entry>).

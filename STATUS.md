@@ -165,3 +165,9 @@ Acceptance: DECISIONS.md created with 4 entries; improvements_tierR.md IMP-R2 St
 - Files changed: main.py
 - Key decision: De-alias pass inserted after range filter, before downstream loop, in each group command that accesses entry fields directly. cmd_restore_group was also included (not just push/replace) because cmd_restore accesses entry['folder_path']/entry['filename'] directly and would KeyError on an alias entry.
 - Acceptance: Group push/replace over a library with a multi_ep_alias resolves to a single primary id; existing non-alias group behaviour unchanged (transform is a no-op for non-alias ids).
+
+## Step 7 — Tests F–K
+- Status: done
+- Files changed: tests/test_prep_season_episode_parse.py
+- Key decision: Tests H and I are pure unit tests of the de-alias transform (no cmd_prep_season call); others use the standard sandbox+tmp_path fixture pattern.
+- Acceptance: pytest tests/test_prep_season_episode_parse.py -v green (A–K all pass).

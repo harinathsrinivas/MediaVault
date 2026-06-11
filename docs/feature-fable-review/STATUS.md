@@ -17,25 +17,32 @@
 - [x] Housekeeping commit `5000533` (README re-format + PR #21 docs)
 - [x] `SESSION_BRIEF.md` (verbatim prompt + the 4 user decisions)
 - [x] This tracker
-- [ ] Memory-dir entry for cross-session recall
+- [x] Memory-dir entry (`project_fable_review.md` + MEMORY.md index; split-hash memory marked MERGED)
 
-### P1 — Repo deep read (notes → `REVIEW_NOTES.md`)
-- [ ] `ARCHITECTURE.md` (1731 lines) — full read; note stale/missing sections
-- [ ] `main.py` (2682 lines) — full read; bugs/smells/improvement candidates
-- [ ] `mainfetch.py` (~470 lines) — full read
-- [ ] `mvcommon.py` — full read
-- [ ] `README.md` — full read; verify against code
-- [ ] `improvement_details.md` + all 9 tier files (A–H, R) — formats, statuses, pending inventory
-- [ ] `apple_tv_ui_roadmap.md` (existing roadmap — reconcile, don't duplicate)
-- [ ] Root `PLAN.md` / `STATUS.md` (gitignored live copies — identify which feature they're from; read-only)
-- [ ] `docs/` key files: `ROLLBACK_MECHANISM.md`, auto-rollback `DECISIONS.md`/`README.md`, split-hash PLAN/DECISIONS/STATUS, multi-episode PLAN/DECISIONS, `testing-strategy.md`, `next-tasks-planner-prompts.md`
-- [ ] `tests/` inventory (what's covered), `tools/`, `step2_validate.ps1`, `requirements*.txt`, `.claude/agents/` (skim)
+### P1 — Repo deep read ✅ (findings in `REVIEW_NOTES.md`)
+- [x] `ARCHITECTURE.md` (2013 lines) — full read; 10 stale items logged (§B of notes)
+- [x] `main.py` (3081 lines) — full read; 11 bugs/smells logged (§A), incl. 2 alias crashers
+- [x] `mainfetch.py` (491 lines) — full read
+- [x] `mvcommon.py` (168 lines) — full read
+- [x] `README.md` — full read (claims verified; tests claim stale, requirements gap confirmed)
+- [x] `improvement_details.md` + IMP status inventory via grep (9 done: A1,C2,C8,C9,C11,E13,G1,H1,R2;
+      status errors found: C4 actually shipped PR #2, A7 effectively done by the test suite)
+- [x] `apple_tv_ui_roadmap.md` — read; §5 dummy-detection design INVALIDATED by video-dummy feature
+- [x] Root `PLAN.md` (multi-ep leftover, gitignored) / `STATUS.md` (auto-rollback-era, **tracked & stale**
+      → should be gitignored like PLAN.md); `2026-06-07.md` = empty stray file
+- [x] `docs/`: testing-strategy.md read (2 small stale items: short_id "8-char sha256" wrong — 6-char md5;
+      md5sum vs sha256sum); rollback docs covered via §12a + spec blocks + PR #14 artifacts;
+      next-tasks-planner-prompts.md skimmed (prompts for R2✅/C1/R1)
+- [x] `tests/` (13 files), `tools/` (migrate_lib + migrate_rehash_flag — latter undocumented in ARCH §9),
+      `requirements*.txt` (missing requests + webdriver-manager confirmed), `.claude/agents/` (8 agents),
+      `step2_validate.ps1` (stray root helper script — cleanup candidate)
+- NOTE: full tier-file texts will be read tier-by-tier during P5 (only statuses inventoried so far)
 
-### P2 — Recent PR review (→ `PR_REVIEW.md`)
-- [ ] `gh pr list` full inventory of merged PRs
-- [ ] Deep: #14 auto-rollback, #20 deterministic split-hash (the two "big changes")
-- [ ] Medium: #18 recover CLI, #19 episode parsing, #21 multi-episode
-- [ ] Light: earlier PRs for context (#7–#17)
+### P2 — Recent PR review ✅ (→ `PR_REVIEW.md`)
+- [x] All 21 merged PRs inventoried with dates/branches
+- [x] Deep: #14 auto-rollback (+2814/−380, 20 files), #20 split-hash (+3547/−50, 16 files)
+- [x] Medium: #18 recover CLI, #19 dotted-title parse, #21 multi-episode (+ its missed iterators)
+- [x] Light: #1–#13, #15–#17; process observations logged (tracked STATUS.md, worktree leftovers)
 
 ### P3 — Architecture & README updates
 - [ ] Fix/refresh stale ARCHITECTURE.md sections found in P1/P2 (verify against code, don't trust docs)

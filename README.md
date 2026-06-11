@@ -122,31 +122,31 @@ pip install requests   # missing from requirements.txt — required by main.py
 All operations are invoked as `python main.py <subcommand> ...`. There is no
 help text and no `--help` flag; this table is the reference.
 
-| Subcommand | Signature | Description |
-|---|---|---|
-| `prep` | `prep [id] [filepath]` | Index a new local file, compute SHA256, write sidecars |
-| `prep_season` | `prep_season [base_id] [folder]` | Batch-prep an entire season folder |
-| `prep_push_rep` | `prep_push_rep [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>]` | Full pipeline (prep -> push -> replace) for one file |
-| `prep_push_rep_season` | `prep_push_rep_season [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>]` | Sequential full pipeline for a whole season |
-| `push` | `push [id] [SIZE_MB/SIZE_GB/COUNT val] [chunks 1-4] [device <id_or_name>] [rehash] [tempdir <path>]` | Split and ADB-push to phone (`rehash` = eager canonical re-hash; `tempdir` = off-volume chunks) |
-| `push_group` | `push_group [id] [SIZE_..] [episodes 1-3] [device <id_or_name>] [rehash] [tempdir <path>]` | Push a season group |
-| `replace` | `replace [id]` | Swap original with a tiny valid video file placeholder (requires ffmpeg) |
-| `replace_group` | `replace_group [id]` | Replace a season group |
-| `repair_dummies` | `repair_dummies [id_prefix]` | Regenerate any archived-entry dummy on disk to the current 10 KB video spec (idempotent — re-runs are safe) |
-| `fetch` | `fetch [id] [episodes <range>]` | Selenium-download from Google Photos |
-| `fetch_restore` | `fetch_restore [id] [episodes <range>]` | Fetch then restore in one command |
-| `restore` | `restore [id]` | Re-merge chunks, verify SHA256, place file back |
-| `restore_group` | `restore_group [id]` | Restore a season group |
-| `verify_restore` | `verify_restore [id]` | Dry-run hash check of restore/ folder contents |
-| `check` | `check [id]` | Re-hash file in place and compare to library |
-| `scan_unprepped` | `scan_unprepped` | Find video files on disk not yet in any library |
-| `local_status` | `local_status [limit_size]` | Show pending uploads with optional bin-packing |
-| `set_search` | `set_search [id] [term]` | Override the Google Photos search term |
-| `set_poster` | `set_poster [id] [url]` | Download and save poster.jpg into the media folder |
-| `set_fanart` | `set_fanart [id] [url]` | Download and save fanart.jpg into the media folder |
-| `set_uploaded` | `set_uploaded [id]` | Force-mark as uploaded (emergency rescue) |
-| `sort` | `sort` | Re-sort all library JSONs by language -> year -> size |
-| `recover` | `recover [id\|folder]` (or `recover --scan`) | Finish an interrupted auto-rollback for a media folder (resolves by id or path); `--scan` reports leftover `.mediavault_txn.json` journals (read-only) |
+| Subcommand             | Signature                                                                                                                           | Description                                                                                                                                            |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `prep`                 | `prep [id] [filepath]`                                                                                                              | Index a new local file, compute SHA256, write sidecars                                                                                                 |
+| `prep_season`          | `prep_season [base_id] [folder]`                                                                                                    | Batch-prep an entire season folder                                                                                                                     |
+| `prep_push_rep`        | `prep_push_rep [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>]`                         | Full pipeline (prep -> push -> replace) for one file                                                                                                   |
+| `prep_push_rep_season` | `prep_push_rep_season [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>]` | Sequential full pipeline for a whole season                                                                                                            |
+| `push`                 | `push [id] [SIZE_MB/SIZE_GB/COUNT val] [chunks 1-4] [device <id_or_name>] [rehash] [tempdir <path>]`                                | Split and ADB-push to phone (`rehash` = eager canonical re-hash; `tempdir` = off-volume chunks)                                                        |
+| `push_group`           | `push_group [id] [SIZE_..] [episodes 1-3] [device <id_or_name>] [rehash] [tempdir <path>]`                                          | Push a season group                                                                                                                                    |
+| `replace`              | `replace [id]`                                                                                                                      | Swap original with a tiny valid video file placeholder (requires ffmpeg)                                                                               |
+| `replace_group`        | `replace_group [id]`                                                                                                                | Replace a season group                                                                                                                                 |
+| `repair_dummies`       | `repair_dummies [id_prefix]`                                                                                                        | Regenerate any archived-entry dummy on disk to the current 10 KB video spec (idempotent — re-runs are safe)                                            |
+| `fetch`                | `fetch [id] [episodes <range>]`                                                                                                     | Selenium-download from Google Photos                                                                                                                   |
+| `fetch_restore`        | `fetch_restore [id] [episodes <range>]`                                                                                             | Fetch then restore in one command                                                                                                                      |
+| `restore`              | `restore [id]`                                                                                                                      | Re-merge chunks, verify SHA256, place file back                                                                                                        |
+| `restore_group`        | `restore_group [id]`                                                                                                                | Restore a season group                                                                                                                                 |
+| `verify_restore`       | `verify_restore [id]`                                                                                                               | Dry-run hash check of restore/ folder contents                                                                                                         |
+| `check`                | `check [id]`                                                                                                                        | Re-hash file in place and compare to library                                                                                                           |
+| `scan_unprepped`       | `scan_unprepped`                                                                                                                    | Find video files on disk not yet in any library                                                                                                        |
+| `local_status`         | `local_status [limit_size]`                                                                                                         | Show pending uploads with optional bin-packing                                                                                                         |
+| `set_search`           | `set_search [id] [term]`                                                                                                            | Override the Google Photos search term                                                                                                                 |
+| `set_poster`           | `set_poster [id] [url]`                                                                                                             | Download and save poster.jpg into the media folder                                                                                                     |
+| `set_fanart`           | `set_fanart [id] [url]`                                                                                                             | Download and save fanart.jpg into the media folder                                                                                                     |
+| `set_uploaded`         | `set_uploaded [id]`                                                                                                                 | Force-mark as uploaded (emergency rescue)                                                                                                              |
+| `sort`                 | `sort`                                                                                                                              | Re-sort all library JSONs by language -> year -> size                                                                                                  |
+| `recover`              | `recover [id\|folder]` (or `recover --scan`)                                                                                        | Finish an interrupted auto-rollback for a media folder (resolves by id or path); `--scan` reports leftover `.mediavault_txn.json` journals (read-only) |
 
 The Selenium fetcher can also be invoked directly:
 

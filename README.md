@@ -114,7 +114,10 @@ cd MediaVault
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-pip install requests   # missing from requirements.txt — required by main.py
+pip install requests webdriver-manager   # both missing from requirements.txt —
+                                         # requests is required by main.py,
+                                         # webdriver-manager by mainfetch.py
+pip install -r requirements-dev.txt      # pytest (only needed to run the test suite)
 ```
 
 ## Usage / CLI reference
@@ -201,19 +204,28 @@ trailing episode segment.
 
 ```
 MediaVault/
-├── main.py              # Active — main CLI (prep/push/replace/restore/fetch/sort/...)
-├── mainfetch.py         # Active — Selenium fetch from Google Photos
-├── mvcommon.py          # Active — shared library I/O + hashing constants/helpers (imported by both)
-├── requirements.txt     # pymediainfo, selenium, undetected-chromedriver
-├── ARCHITECTURE.md      # Full engineering reference
-├── README.md            # This file
+├── main.py                  # Active — main CLI (prep/push/replace/restore/fetch/sort/recover/...)
+├── mainfetch.py             # Active — Selenium fetch from Google Photos
+├── mvcommon.py              # Active — shared library I/O + hashing constants/helpers (imported by both)
+├── requirements.txt         # pymediainfo, selenium, undetected-chromedriver (see install note above)
+├── requirements-dev.txt     # pytest
+├── ARCHITECTURE.md          # Full engineering reference
+├── ARCHITECTURE_GRAPH.md    # Graph views (Mermaid) of the architecture
+├── README.md                # This file
+├── improvement_details.md   # Index + manual for the improvements_tier*.md task set
+├── improvements_tier*.md    # Tracked improvement tasks (tiers A–H, R, S, U)
+├── apple_tv_ui_roadmap.md   # 2026-05 Jellyfin UI design (see docs/feature-fable-review/ for the current roadmap)
+├── docs/                    # Per-feature plans/decisions, conventions, testing strategy
+│   └── README.md            # Master index of all documentation
+├── tests/                   # pytest suite (rollback, push, replace, restore, rehash, parsing, recover, ...)
 ├── tools/
-│   └── migrate_lib.py   # One-shot helper: library.json → three category files
-└── archive/             # Historical snapshots — NOT used at runtime
-    ├── main/            # Older versions of main.py
-    ├── mainfetch/       # Older versions of mainfetch.py
-    ├── legacy/          # index_file.py and media_library.json (pre-dates current design)
-    └── transcripts/     # Session transcript artifacts
+│   ├── migrate_lib.py       # One-shot: library.json → three category files
+│   └── migrate_rehash_flag.py  # One-shot (PR #20): stamp re_hashed=false on split entries
+└── archive/                 # Historical snapshots — NOT used at runtime
+    ├── main/                # Older versions of main.py
+    ├── mainfetch/           # Older versions of mainfetch.py
+    ├── legacy/              # index_file.py and media_library.json (pre-dates current design)
+    └── transcripts/         # Session transcript artifacts
 ```
 
 The three live library JSON files (`library_movies.json`, `library_series.json`,
@@ -258,11 +270,13 @@ for the migration record, and `improvements_tierH.md` for the tracked task.
 - Solo-developer project, actively used in production by the author.
 - Windows 10/11 only — paths, ADB, and Chrome integration are hardcoded for
   Windows. There is no plan to port to macOS or Linux.
-- Automated tests cover only the auto-rollback feature so far (the first
-  `pytest` suite, under `tests/`, added by PR #14). The rest of the project is
-  "tested by use"; the legacy snapshots under `archive/` serve as informal
-  regression baselines that can be diffed against the active files when something
-  breaks.
+- Automated tests (13 files under `tests/`, run with `pytest -q`) cover the
+  auto-rollback matrix, push (`.partial`+mv protocol, retry, remote verify,
+  mock-device round-trip), replace, restore quarantine, the deterministic
+  re-hash feature, episode parsing (incl. combined episodes), the `recover`
+  CLI, and the shared helpers. See `docs/testing-strategy.md`. Everything
+  else — notably the live Selenium fetch — is "tested by use"; the legacy
+  snapshots under `archive/` serve as informal regression baselines.
 - The `undetected-chromedriver` package is listed in `requirements.txt` but
   not imported anywhere; `requests` is imported by `main.py` but not listed
   in `requirements.txt`. Both are known issues documented in

@@ -44,14 +44,15 @@
 - [x] Medium: #18 recover CLI, #19 dotted-title parse, #21 multi-episode (+ its missed iterators)
 - [x] Light: #1–#13, #15–#17; process observations logged (tracked STATUS.md, worktree leftovers)
 
-### P3 — Architecture & README updates
-- [ ] Fix/refresh stale ARCHITECTURE.md sections found in P1/P2 (verify against code, don't trust docs)
-- [ ] README.md corrections (e.g., missing commands, requirements gaps)
-- [ ] Reconcile §17 Future Work / §19 agent workflow with current reality
+### P3 — Architecture & README updates ✅ (commit bee7432)
+- [x] ARCHITECTURE.md: line counts, layout, §7.8 PR#19 regex, §9.1a migrate_rehash_flag, §12a anchors
+      re-verified, §13 rewritten (13-file suite), §16 strikethroughs + new alias findings, §17 done-markers, footer
+- [x] README.md: install note (webdriver-manager + dev deps), layout block, test-coverage claim
+- [x] requirements.txt itself deliberately NOT changed (docs-only scope) — tracked as quick-win IMP instead
 
-### P4 — Architecture graphs (graphify-style)
-- [ ] `ARCHITECTURE_GRAPH.md` — Mermaid: system overview, command pipeline, data model, status state machine, rollback flow, fetch flow
-- [ ] `docs/architecture-graph/graph.html` — interactive vis.js graph (nodes = commands/functions/data/externals; edges = calls/reads/writes; search + filter), self-contained
+### P4 — Architecture graphs (graphify-style) ✅ (commit bee7432)
+- [x] `ARCHITECTURE_GRAPH.md` — 7 Mermaid views (system, lifecycle, state machine, ER data model, rollback flow, fetch sequence, seam map)
+- [x] `docs/architecture-graph/graph.html` — interactive vis.js graph, hand-curated 40+ nodes/70+ edges, search/filter/details/physics (vis-network via CDN, offline fallback note)
 
 ### P5 — Improvement tier overhaul
 - [ ] Add `Risk` + `If skipped` (impact_if_skipped) attributes to every **pending** task in tiers A–H, R (done tasks: skip)
@@ -60,14 +61,38 @@
 - [ ] New tiers for the end goal (planned: **S** = serving/streaming & Jellyfin integration, **U** = UX/clients, **W** = web/ops UI if warranted) — same format as existing tiers
 - [ ] Update `improvement_details.md` master list accordingly
 
-### P6 — Web research dossier (→ `RESEARCH_*.md`)
-- [ ] Jellyfin deep dive: plugin API, webhooks, .strm/virtual libraries, session-message API (in-client notify!), Collections, watched-state events, Swiftfin/Android TV/Infuse clients
-- [ ] `JELLYFIN_SETUP_GUIDE.md`: scratch install → fully configured for MediaVault (user explicitly wants super-detailed steps)
-- [ ] Emby + Plex delta analysis: what buying/using each adds; user owns Emby lifetime, may buy Plex before price increase (next month, i.e., July 2026)
-- [ ] Google Photos constraints 2026: API lockdown, fetch options, ranged access, ToS risk — feasibility backbone for streaming-on-the-fly
-- [ ] OSS landscape: riven/zurg/debrid-style on-demand ecosystems, Sonarr/Radarr patterns, Stremio, gphotos tooling, comparable "cloud vault" projects
-- [ ] Netflix/streaming feature steal list (trickplay, continue-watching, intro skip, autoplay, smart-fetch-next-episode, "still watching?" → archive prompt analog)
-- [ ] Hardware notes: Ugoos AM6B (CoreELEC/DV-FEL path), Apple TV (Infuse vs Swiftfin), Alienware as 24/7 server (NVENC transcode)
+### P6 — Web research dossier ✅ (done BEFORE P5 so new tiers cite findings)
+- [x] `RESEARCH_MEDIA_SERVERS.md`: Jellyfin 10.10/10.11 state, integration surfaces (Webhook plugin,
+      Sessions DisplayMessage, refresh API, C# plugin, .strm caveats), JellyBridge placeholder-as-button
+      precedent, in-client interaction design (dummy-play = fetch request; grace auto-archive + action
+      stubs + Keep-collection), Netflix-ification plugin shelf, NVENC notes, Emby delta (webhooks are
+      Premiere-gated; viable fallback), Plex delta (lifetime now $749, no plugin surface → DON'T BUY),
+      client matrix (Infuse+Swiftfin / Ugoos CoreELEC DV-FEL path)
+- [x] `RESEARCH_STORAGE_STREAMING.md`: GP API lockdown verified (2025-03-31, self-uploaded-only;
+      Picker useless for automation) → Selenium/browser-session is the ONLY automated path; gphotosdl
+      (rclone org, local streaming proxy!) + gphotos-cdp as hardening/upgrade targets; **streaming
+      verdict: T0 today / T1 couch-triggered fetch = roadmap centerpiece / T2 watch-chunk-1-while-
+      fetching = experiment / T3 proxy-streaming = moonshot / T4 direct = blocked**; OSS steal table
+      (zurg/arr/JellyBridge/Seerr/JellyHookDebouncer); Netflix feature map (smart-prefetch+auto-archive
+      = highest leverage); topology question for user (4 Pixels vs 2 serials/2 accounts)
+- [x] `JELLYFIN_SETUP_GUIDE.md`: scratch→configured (install/wizard/3 libraries with exact toggles/
+      users/plugins now-vs-skip/trickplay-before-archive policy/NVENC/clients incl. CoreELEC add-on
+      mode/network policy/backups) + Phase-0 validation checklist incl. DisplayMessage client test
+
+### P5/P7 pre-decisions (LOCKED — keep consistent post-compaction)
+- New-bug IMP codes: **IMP-C12** alias crashes scan_unprepped/local_status (high) · **IMP-C13**
+  single-id alias handling (med) · **IMP-C14** CLI parser papercuts: push_group hang + mainfetch argv
+  guard + silent replace (low-med) · **IMP-C15** micro-robustness: repair_dummies os.replace +
+  _verify_chunk_hash IndexError (low)
+- Rollback-adjacent (ALL change-gated, decision-first): **IMP-R6** restore-merge-failure leaves no
+  dummy on disk · **IMP-R7** journal clobber on re-run · **IMP-R8** eager rehash_tmp not journalled ·
+  **IMP-R9** prep_season alias creation outside journal
+- Perf: **IMP-B9** hash progress-print throttle · **IMP-B10** harvester processed_files persistence
+- Status fixes: IMP-C4 → done (PR #2); IMP-A7 → done (suite exists, conftest+13 files)
+- New tiers: **S = Streaming & media-server integration** (daemon, webhook flow, Jellyfin wiring,
+  smart prefetch, archive policy, fetch hardening via gphotosdl/CDP patterns) and
+  **U = Couch UX & clients** (trickplay-before-archive, collections/rows, metadata→NFO, client
+  validation, DV-FEL path docs). NO new W tier (E12 covers web UI).
 
 ### P7 — End-goal roadmap
 - [ ] `ROADMAP_END_GOAL.md`: phased path from today's CLI → couch-only Netflix-like flow (browse → fetch/play → in-client notify → watch → in-client archive prompt)

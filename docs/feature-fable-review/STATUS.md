@@ -125,25 +125,28 @@
 2. **R6/R7 gate decisions** when convenient (options laid out in improvements_tierR.md).
 3. Start **Phase 0** (JELLYFIN_SETUP_GUIDE.md) whenever ready — zero code required.
 
-## Deliverable file map (planned)
+## Deliverable file map (FINAL locations)
+
+> Durable strategic docs were promoted out of this session folder into `improvements/` during the
+> 2026-06-12 consolidation (see Decisions log). This map reflects where things actually landed.
 
 | File | Content |
 |---|---|
-| `docs/feature-fable-review/SESSION_BRIEF.md` | Verbatim prompt + decisions ✅ |
-| `docs/feature-fable-review/STATUS.md` | This tracker ✅ |
-| `docs/feature-fable-review/REVIEW_NOTES.md` | Running findings from the code/docs deep read |
-| `docs/feature-fable-review/PR_REVIEW.md` | What each recent PR changed (focus #14, #20) |
-| `docs/feature-fable-review/RESEARCH_MEDIA_SERVERS.md` | Jellyfin deep dive + Emby/Plex delta |
-| `docs/feature-fable-review/JELLYFIN_SETUP_GUIDE.md` | Scratch-install → fully-configured guide |
-| `docs/feature-fable-review/RESEARCH_STORAGE_STREAMING.md` | Google Photos constraints + streaming feasibility |
-| `docs/feature-fable-review/RESEARCH_OSS_LANDSCAPE.md` | Comparable projects + Netflix feature steals |
-| `docs/feature-fable-review/ROADMAP_END_GOAL.md` | The phased master roadmap |
-| `docs/feature-fable-review/BLOCKERS_AND_MOONSHOTS.md` | Hard blockers + 1% ideas |
-| `ARCHITECTURE_GRAPH.md` (root) | Mermaid graph views of the architecture |
-| `docs/architecture-graph/graph.html` | Interactive vis.js architecture graph |
-| `docs/README.md` | Master index of all documentation |
-| `ARCHITECTURE.md`, `README.md` | Updated in place |
-| `improvements_tier*.md`, `improvement_details.md` | Attributes + new tasks + new tiers |
+| `docs/feature-fable-review/SESSION_BRIEF.md` | Verbatim prompt(s) + decisions ✅ (session record) |
+| `docs/feature-fable-review/STATUS.md` | This tracker ✅ (session record) |
+| `docs/feature-fable-review/REVIEW_NOTES.md` | Findings from the code/docs deep read ✅ (session record) |
+| `docs/feature-fable-review/PR_REVIEW.md` | What each recent PR changed (focus #14, #20) ✅ (session record) |
+| `improvements/RESEARCH_MEDIA_SERVERS.md` | Jellyfin deep dive + Emby/Plex delta ✅ |
+| `improvements/JELLYFIN_SETUP_GUIDE.md` | Scratch-install → fully-configured guide ✅ |
+| `improvements/RESEARCH_STORAGE_STREAMING.md` | Google Photos constraints + streaming feasibility ✅ (also absorbed the planned OSS-landscape content) |
+| `improvements/ROADMAP_END_GOAL.md` | The phased master roadmap ✅ |
+| `improvements/BLOCKERS_AND_MOONSHOTS.md` | Hard blockers + 1% ideas ✅ |
+| `ARCHITECTURE_GRAPH.md` (root) | Mermaid graph views of the architecture ✅ |
+| `docs/architecture-graph/graph.html` | Interactive vis.js architecture graph ✅ |
+| `docs/priority-graph/priority-graph.html` | Interactive priority task graph ✅ |
+| `docs/README.md`, `improvements/README.md` | Master doc index + improvements-folder index ✅ |
+| `ARCHITECTURE.md`, `README.md`, `CLAUDE.md` | Updated in place ✅ |
+| `improvements/improvements_tier*.md`, `improvements/improvement_details.md`, `improvements/PRIORITY.md` | Attributes + new tasks + new tiers (S/U/X) + priority list ✅ |
 
 ## Decisions log
 
@@ -151,6 +154,7 @@
 - 2026-06-12: Commit trailer uses `Claude Fable 5` (truthful model attribution; `git-pr-conventions.md` hardcodes Opus 4.8 — flagged for a conventions-doc touch-up in P8).
 - 2026-06-12: Git operations run inline in the main session (not via git-agent) — this is an interactive docs/research session, not a pipeline plan execution; human gates still honored.
 - 2026-06-12: In-client-only interaction design per user decision #4 — research must prioritize Jellyfin session-message API / plugin surfaces; fallbacks only where in-client is provably impossible, explicitly marked.
+- 2026-06-12: **Doc consolidation (P11, user-approved).** Created the `improvements/` folder and moved the task system (`improvements_tier*.md`, `improvement_details.md`, `PRIORITY.md`) + the durable strategic docs (`ROADMAP_END_GOAL.md`, both `RESEARCH_*`, `JELLYFIN_SETUP_GUIDE.md`, `BLOCKERS_AND_MOONSHOTS.md`) into it, with a new `improvements/README.md` index. The session *record* (SESSION_BRIEF/STATUS/REVIEW_NOTES/PR_REVIEW) stays here under `docs/feature-fable-review/`. All cross-references repointed (CLAUDE.md, ARCHITECTURE.md, README.md, docs/README.md, the priority graph, apple_tv_ui_roadmap.md); `git mv` preserved history.
 
 ## Work log
 
@@ -166,6 +170,11 @@
   **IMP-C16** (anime-account fetch routing), `PRIORITY.md` + the interactive `docs/priority-graph/priority-graph.html`,
   resolved the 3-account topology question across all docs, wired the keep-priority-current rule into
   CLAUDE.md/improvement_details.md/docs README. Pushed; PR updated. **Still awaiting Checkpoint-1 merge approval.**
+
+## P11 — Doc consolidation into improvements/ (user-approved 2026-06-12)
+- [x] `git mv` task system + durable strategic docs into `improvements/`; session record stays in `docs/feature-fable-review/`
+- [x] New `improvements/README.md` folder index; repointed all cross-refs (CLAUDE/ARCHITECTURE/README/docs-README/graph/apple_tv)
+- [x] Verified no broken intra-repo links; committed + pushed; PR updated
 
 ## Follow-up round deliverables (P10)
 - [x] Tier X (X1–X5) with §0 sharing-vs-replication research table + the deletion-cascade answer

@@ -3,7 +3,7 @@
 > **This file is the single source of truth for task ordering.** It is **updated every time a
 > task, bug, or improvement is added, completed, or re-prioritized** (see the maintenance protocol
 > at the bottom — this rule is also recorded in `CLAUDE.md` and `improvement_details.md`).
-> Visual version: [`docs/priority-graph/priority-graph.html`](docs/priority-graph/priority-graph.html)
+> Visual version: [`../docs/priority-graph/priority-graph.html`](../docs/priority-graph/priority-graph.html)
 > — an interactive task graph; click any node to see its details and jump to the tier file.
 >
 > Full task text lives in `improvements_tier*.md`; this file only orders them. Legend:
@@ -94,7 +94,7 @@ Moonshots: `F1`–`F9`. Research-only: `G3`,`G5`,`H2`,`A6`.
 Whenever you **add, complete, or re-prioritize** a task:
 1. Update its row/band here AND bump the **Last updated** date + the **👉 SUGGESTED NEXT TASK** line.
 2. Update the matching task in its `improvements_tier*.md` (status / attributes).
-3. Update the graph data in `docs/priority-graph/priority-graph.html` (the `TASKS`/`EDGES` arrays
+3. Update the graph data in `../docs/priority-graph/priority-graph.html` (the `TASKS`/`EDGES` arrays
    near the top of the `<script>` block — add the node, set its `p` priority + `s` status, wire any
    dependency edges). The graph and this file must always agree.
 4. If it's a new bug that breaks something, it goes into **Band 0** and becomes a candidate for the

@@ -1,6 +1,6 @@
 # Improvements — Tier D · New CLI Commands
 
-> Commands you'd type. Most are 30-80 lines of Python and lean heavily on Tier A foundations (argparse, mvcommon, --json). Several are precursors to the couch/Apple-TV experience ([[project_future_apple_tv_ui]], Tier S/U, `docs/feature-fable-review/ROADMAP_END_GOAL.md`).
+> Commands you'd type. Most are 30-80 lines of Python and lean heavily on Tier A foundations (argparse, mvcommon, --json). Several are precursors to the couch/Apple-TV experience ([[project_future_apple_tv_ui]], Tier S/U, `ROADMAP_END_GOAL.md`).
 
 > **Cross-cutting context:**
 > - Library scale today: 102 movies, 290 series episodes + 28 season_maps, 140 anime episodes + 5 season_maps. State distribution: 412 archived, 120 local_ready.

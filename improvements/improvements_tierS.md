@@ -5,7 +5,7 @@
 > Apple TV / the Ugoos projector via Jellyfin, select → fetch in the background → get told
 > in-client when it's ready → watch → get the archive handled automatically. Phasing,
 > rationale, and the research behind every choice live in
-> [`docs/feature-fable-review/ROADMAP_END_GOAL.md`](docs/feature-fable-review/ROADMAP_END_GOAL.md)
+> [`ROADMAP_END_GOAL.md`](ROADMAP_END_GOAL.md)
 > (the master roadmap), `RESEARCH_MEDIA_SERVERS.md`, and `RESEARCH_STORAGE_STREAMING.md`.
 >
 > **Locked decisions shaping this tier (SESSION_BRIEF.md):** Jellyfin-first (Emby lifetime
@@ -27,7 +27,7 @@
 
 - Category: integration (infrastructure, no MediaVault code)
 - Priority: high
-- Files: none in this repo (Alienware Jellyfin install); results recorded into `docs/feature-fable-review/JELLYFIN_SETUP_GUIDE.md` §10 + a new `CLIENT_MATRIX.md`
+- Files: none in this repo (Alienware Jellyfin install); results recorded into `JELLYFIN_SETUP_GUIDE.md` §10 + a new `CLIENT_MATRIX.md`
 - Current behavior: No media server is wired to the vault. Plex exists on the machine historically (Emby's ffmpeg is even MediaVault's `FFMPEG_PATH`), but nothing serves the `C:\Media` tree with vault-awareness.
 - Proposed change: Execute `JELLYFIN_SETUP_GUIDE.md` end-to-end (install as service → 3 libraries with exact toggles → NVENC → plugins: Webhook, Intro Skipper, AniDB/AniList, Home Screen Sections → clients: Swiftfin + Infuse on Apple TV, Jellyfin-for-Kodi in add-on mode on the Ugoos/CoreELEC). Run the §10 validation checklist and **record the client capability matrix**: which clients render `DisplayMessage` popups (web/AndroidTV/iOS confirmed by research; Swiftfin/Infuse/Kodi UNKNOWN — this measurement decides S3's notify design), direct-play behavior per client, dummy-play behavior (what exactly happens when each client "plays" a 10 KB dummy).
 - Rationale: Every subsequent S-task builds on a measured, working Jellyfin baseline — especially the DisplayMessage matrix, which is the difference between "popup notify" and "action-stub fallback" designs.
@@ -111,7 +111,7 @@
 
 - Category: experiment / spike
 - Priority: medium
-- Files: spike branch; possibly small `mainfetch` ordering tweak (chunk-priority) + daemon serving logic; verdict doc in `docs/feature-fable-review/`
+- Files: spike branch; possibly small `mainfetch` ordering tweak (chunk-priority) + daemon serving logic; verdict doc in `../docs/feature-fable-review/`
 - Current behavior: A split title is playable only after ALL chunks arrive + merge completes (restore is all-or-nothing).
 - Proposed change: Validate and productize the T2 tier from `RESEARCH_STORAGE_STREAMING.md` §2: mkvmerge-split chunks are independently playable Matroska files — so fetch chunks strictly in order, expose chunk 1 as soon as it lands+verifies (as `<Title> — Part 1` via a temp library item, or a Kodi playlist), let the user start watching while 2..N download; the normal verified merge runs afterward and the parts presentation disappears. Spike questions: client behavior at part boundaries (manual next vs playlist autoplay), whether a growing pre-merge file is viable on any client, interaction with trickplay/progress tracking, and UX acceptability on the projector vs Apple TV. WRITTEN VERDICT required (proceed / park) before any productization.
 - Rationale: Cuts time-to-first-frame for big movies from ~full-fetch to ~one-chunk-fetch (≈10-15 min for 9.6 GB chunks on a fast line) — the biggest remaining latency win after S5, without touching Google-side mechanics.

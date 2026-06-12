@@ -8,7 +8,7 @@
 > - The Aindham Vedham orphan ([[project_followup_library_integrity]]) is the only known library integrity gap. Today's code would not produce it, but no command exists to AUDIT for similar drift (IMP-D4).
 > - `cmd_set_uploaded` is a pure metadata override with no ADB-side sanity check.
 > - mainfetch's `init_driver` returns None on failure and `cmd_fetch_route` exits cleanly, but trigger_download swallows per-chunk exceptions without escalating to "the session is dead, stop" (IMP-C6).
-> - **2026-06-12 review additions:** IMP-C12–C15 are concrete bugs found by the fable-review full code read (`docs/feature-fable-review/REVIEW_NOTES.md` §A).
+> - **2026-06-12 review additions:** IMP-C12–C15 are concrete bugs found by the fable-review full code read (`../docs/feature-fable-review/REVIEW_NOTES.md` §A).
 > - **Attribute key (added 2026-06-12):** `Risk` = blast radius of MAKING the change. `If skipped` = the failure that keeps happening, with a scenario.
 
 ---

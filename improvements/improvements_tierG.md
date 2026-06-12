@@ -1,11 +1,11 @@
 # Improvements — Tier G · Lessons From Similar Projects
 
-> Cross-cutting design lessons drawn from production-grade adjacent projects. These are not standalone tasks to implement directly — they are inputs that should shape decisions in Tiers A–F/S/U. Each lesson lists which task it most strongly informs. The 2026-06-12 research dossier (`docs/feature-fable-review/RESEARCH_STORAGE_STREAMING.md` §3) extends this tier with the debrid-stack / *arr / JellyBridge / Seerr pattern catalog.
+> Cross-cutting design lessons drawn from production-grade adjacent projects. These are not standalone tasks to implement directly — they are inputs that should shape decisions in Tiers A–F/S/U. Each lesson lists which task it most strongly informs. The 2026-06-12 research dossier (`RESEARCH_STORAGE_STREAMING.md` §3) extends this tier with the debrid-stack / *arr / JellyBridge / Seerr pattern catalog.
 
 > **Cross-cutting context:**
 > - MediaVault sits in a small but real ecosystem of "split-large-files-and-upload-to-free-cloud-storage" tools. rclone (chunker + gphotosdl) and tdl (Telegram) are the most mature.
 > - Google Photos API policy as of **March 31, 2025**: third-party apps can only download photos that they themselves uploaded. Since the user's Pixel phone Google Photos app uploads them (not a MediaVault API client), the official API is permanently unavailable for restore. **Browser-session automation is the only path forward** (verified again 2026-06-12).
-> - Jellyfin is the chosen couch platform (2026-06-12 session decision) — see Tier S/U and `docs/feature-fable-review/ROADMAP_END_GOAL.md`.
+> - Jellyfin is the chosen couch platform (2026-06-12 session decision) — see Tier S/U and `ROADMAP_END_GOAL.md`.
 > - **Attribute key (added 2026-06-12):** `Risk` = blast radius of acting on the lesson. `If skipped` = what we keep re-learning the hard way.
 
 ---

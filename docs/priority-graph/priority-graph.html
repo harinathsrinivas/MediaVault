@@ -81,7 +81,7 @@
 
 <header>
   <div class="brand">Media<span>Vault</span> · Priority Graph</div>
-  <div class="next">⚡ Next: <b>IMP-C12</b>&nbsp;<span style="color:#9fb0d6">alias crash, broken in prod</span>&nbsp;·&nbsp;<a href="../../PRIORITY.md">full list →</a></div>
+  <div class="next">⚡ Next: <b>IMP-C12</b>&nbsp;<span style="color:#9fb0d6">alias crash, broken in prod</span>&nbsp;·&nbsp;<a href="../../improvements/PRIORITY.md">full list →</a></div>
   <div class="grow"></div>
   <input id="search" placeholder="search tasks…  (Enter to focus)">
 </header>
@@ -315,7 +315,7 @@ function showMeta(m){
   document.getElementById("p-deps").innerHTML=
     (inDeps.length?`<b>After:</b> ${inDeps.map(d=>"IMP-"+d).join(", ")}<br>`:"")+
     (outDeps.length?`<b>Unblocks:</b> ${outDeps.map(d=>"IMP-"+d).join(", ")}`:"");
-  document.getElementById("p-open").href="../../"+TIER_FILE[m.tier];
+  document.getElementById("p-open").href="../../improvements/"+TIER_FILE[m.tier];
   panel.classList.add("show");
 }
 function hidePanel(){panel.classList.remove("show");net.unselectAll();}

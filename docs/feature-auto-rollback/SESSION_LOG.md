@@ -127,6 +127,6 @@ delete in `push`; push failures are resumable. Plus the per-improvement breakdow
   ARCHITECTURE.md + README; finally provide branch name, PR to `main`, and manual
   test commands.
 
-See also: `../../improvements_tierC.md`, `../../improvements_tierG.md`,
-`../../improvements_tierA.md`, and the auto-memory note
+See also: `../../improvements/improvements_tierC.md`, `../../improvements/improvements_tierG.md`,
+`../../improvements/improvements_tierA.md`, and the auto-memory note
 `project_auto_rollback_task.md`.

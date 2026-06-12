@@ -212,11 +212,15 @@ MediaVault/
 ├── ARCHITECTURE.md          # Full engineering reference
 ├── ARCHITECTURE_GRAPH.md    # Graph views (Mermaid) of the architecture
 ├── README.md                # This file
-├── PRIORITY.md              # Always-current task ordering ("what to do next"; critical bugs first)
-├── improvement_details.md   # Index + manual for the improvements_tier*.md task set
-├── improvements_tier*.md    # Tracked improvement tasks (tiers A–H, R, S, U, X)
-├── apple_tv_ui_roadmap.md   # 2026-05 Jellyfin UI design (see docs/feature-fable-review/ for the current roadmap)
-├── docs/                    # Per-feature plans/decisions, conventions, testing strategy
+├── apple_tv_ui_roadmap.md   # 2026-05 Jellyfin UI design (superseded — see improvements/ROADMAP_END_GOAL.md)
+├── improvements/            # The backlog + direction "brain" — start at improvements/README.md
+│   ├── README.md            #   index of this folder
+│   ├── PRIORITY.md          #   always-current task ordering ("what to do next"; critical bugs first)
+│   ├── improvement_details.md  #   IMP-XN operating manual
+│   ├── improvements_tier*.md   #   tracked improvement tasks (tiers A–H, R, S, U, X)
+│   ├── ROADMAP_END_GOAL.md  #   the phased couch-vault roadmap
+│   └── RESEARCH_*.md, JELLYFIN_SETUP_GUIDE.md, BLOCKERS_AND_MOONSHOTS.md  # durable research/direction
+├── docs/                    # Per-feature plans/decisions, conventions, testing strategy, graphs
 │   └── README.md            # Master index of all documentation
 ├── tests/                   # pytest suite (rollback, push, replace, restore, rehash, parsing, recover, ...)
 ├── tools/
@@ -256,9 +260,11 @@ balanced-split algorithm, and Selenium harvester design, see
 [`ARCHITECTURE.md`](ARCHITECTURE.md) — graph views in
 [`ARCHITECTURE_GRAPH.md`](ARCHITECTURE_GRAPH.md) and an interactive version at
 `docs/architecture-graph/graph.html`. **The master index of ALL documentation
-is [`docs/README.md`](docs/README.md).** The forward roadmap (couch-vault /
-Jellyfin end goal) is
-[`docs/feature-fable-review/ROADMAP_END_GOAL.md`](docs/feature-fable-review/ROADMAP_END_GOAL.md).
+is [`docs/README.md`](docs/README.md).** The backlog, priority list, and the
+forward roadmap (couch-vault / Jellyfin end goal) live in
+[`improvements/`](improvements/) — start at
+[`improvements/README.md`](improvements/README.md), roadmap at
+[`improvements/ROADMAP_END_GOAL.md`](improvements/ROADMAP_END_GOAL.md).
 
 ## Development / agentic workflow
 

@@ -1,8 +1,8 @@
 # Apple TV-style UI — Long-form Roadmap
 
 > ⚠️ **PARTIALLY SUPERSEDED (2026-06-12, fable-review session).** The current master plan is
-> [`docs/feature-fable-review/ROADMAP_END_GOAL.md`](docs/feature-fable-review/ROADMAP_END_GOAL.md)
-> with task tracking in `improvements_tierS.md` / `improvements_tierU.md`. What changed since this
+> [`improvements/ROADMAP_END_GOAL.md`](improvements/ROADMAP_END_GOAL.md)
+> with task tracking in `improvements/improvements_tierS.md` / `improvements/improvements_tierU.md`. What changed since this
 > file was written (2026-05):
 > - **§5 dummy detection is STALE**: dummies are no longer `<1 KB` text blobs starting with
 >   `"Original Hash:"` — the video-dummy feature (PRs #1/#3) made them ~10 KB *valid playable videos*.

@@ -21,7 +21,7 @@ largest + most invasive).
   touch the rollback orchestration/journaling, so their prompts require an explicit
   *pause-and-ask* step before any rollback-behavior change. R2 only *exposes*
   `recover_journal`, so it's additive — but still must not change rollback semantics.
-- The tasks are tracked in `improvements_tierR.md` (R1, R2) and `improvements_tierC.md`
+- The tasks are tracked in `improvements/improvements_tierR.md` (R1, R2) and `improvements/improvements_tierC.md`
   (C1). The full rollback spec is `docs/feature-auto-rollback/ROLLBACK_MECHANISM.md`.
 
 ---

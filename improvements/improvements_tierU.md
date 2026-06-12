@@ -3,7 +3,7 @@
 > **Added 2026-06-12 (fable-review session).** Client-side and presentation-layer work on
 > top of Tier S's plumbing: the polish that makes browsing/watching the vault from the
 > Apple TV or the Ugoos projector feel like a first-party streaming service. Research
-> grounding: `docs/feature-fable-review/RESEARCH_MEDIA_SERVERS.md` (plugin shelf, client
+> grounding: `RESEARCH_MEDIA_SERVERS.md` (plugin shelf, client
 > matrix, hardware paths) and the Netflix feature mapping in
 > `RESEARCH_STORAGE_STREAMING.md` §4. Phasing: `ROADMAP_END_GOAL.md`.
 >

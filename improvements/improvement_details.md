@@ -41,7 +41,7 @@ On 2026-05-25, a deep audit of `main.py`, `mainfetch.py`, `ARCHITECTURE.md`, the
 > | `improvements_tierS.md` | S1–S8 (8) | Streaming & media-server integration (Jellyfin daemon, in-client fetch/notify/archive flows, fetch hardening, watch-while-fetching) | medium–large |
 > | `improvements_tierU.md` | U1–U5 (5) | Couch UX & clients (enrichment-before-archive, status rows, NFO/artwork, DV-FEL paths, eventual C# plugin) | small–large |
 >
-> These two tiers implement the end goal: browse the vault from Apple TV / the Ugoos projector via **Jellyfin**, select → background fetch → in-client "ready" notify → watch → in-client-governed auto-archive. The **master phasing lives in [`docs/feature-fable-review/ROADMAP_END_GOAL.md`](docs/feature-fable-review/ROADMAP_END_GOAL.md)**; research grounding in `docs/feature-fable-review/RESEARCH_*.md`. Locked session decisions: Jellyfin-first (Emby lifetime = fallback, Plex = do-not-buy at $749), in-client-only interaction, 4× Pixel unlimited-upload path untouchable.
+> These two tiers implement the end goal: browse the vault from Apple TV / the Ugoos projector via **Jellyfin**, select → background fetch → in-client "ready" notify → watch → in-client-governed auto-archive. The **master phasing lives in [`ROADMAP_END_GOAL.md`](ROADMAP_END_GOAL.md)**; research grounding in `../docs/feature-fable-review/RESEARCH_*.md`. Locked session decisions: Jellyfin-first (Emby lifetime = fallback, Plex = do-not-buy at $749), in-client-only interaction, 4× Pixel unlimited-upload path untouchable.
 
 > **Added 2026-06-12 — Tier X (cloud resilience & privacy), fable-review follow-up:**
 >
@@ -55,7 +55,7 @@ On 2026-05-25, a deep audit of `main.py`, `mainfetch.py`, `ARCHITECTURE.md`, the
 
 [`/PRIORITY.md`](PRIORITY.md) is the **single source of truth for task ordering** — critical bugs
 first, a always-updated **👉 SUGGESTED NEXT TASK** pointer, and five priority bands. Its visual twin is
-[`docs/priority-graph/priority-graph.html`](docs/priority-graph/priority-graph.html) — an interactive
+[`../docs/priority-graph/priority-graph.html`](../docs/priority-graph/priority-graph.html) — an interactive
 concentric task graph (critical in the center), click any node for details + a jump to its tier file.
 **Both must be updated whenever a task is added, completed, or re-prioritized** — protocol in
 `PRIORITY.md` and `CLAUDE.md`.
@@ -263,7 +263,7 @@ After Phase 6: MediaVault is connected to the ecosystem.
 
 ### Phase 8 — Couch UI proper
 - **SUPERSEDED 2026-06-12**: the end-goal phasing now lives in
-  [`docs/feature-fable-review/ROADMAP_END_GOAL.md`](docs/feature-fable-review/ROADMAP_END_GOAL.md)
+  [`ROADMAP_END_GOAL.md`](ROADMAP_END_GOAL.md)
   (Tiers S/U), which absorbs `apple_tv_ui_roadmap.md` Phases 0-4 with corrections
   (video-dummy detection, daemon-first instead of plugin-first, in-client-only interaction).
 - The plugin polish phase is **IMP-U5** (ex-G4 direction).

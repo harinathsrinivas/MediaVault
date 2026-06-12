@@ -71,7 +71,7 @@ User reviewed the PR ("looks good"), then asked for three additions BEFORE mergi
    list. Maybe store that list also as a graph with nodes being these tasks and clicking the node
    should directly take it to that task details. Make it super futuristic visually... This list also
    should be updated each time when we add a task or bug or improvement."*
-   → Delivered: `PRIORITY.md` (root, single source of truth — critical Band 0 first, a
+   → Delivered: `improvements/PRIORITY.md` (single source of truth — critical Band 0 first, a
    `👉 SUGGESTED NEXT TASK` pointer, 5 bands, maintenance protocol) + `docs/priority-graph/priority-graph.html`
    (concentric-by-urgency vis.js graph, glassmorphism/neon, click-node→details + jump-to-tier-file,
    search/filters). The "keep both current on every task change" rule is wired into CLAUDE.md,

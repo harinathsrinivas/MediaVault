@@ -9,61 +9,74 @@
 
 1. [`/CLAUDE.md`](../CLAUDE.md) — project rules: PR conventions pointer, **human merge gates**, the
    **auto-rollback change-gate**, the **keep-PRIORITY.md-current rule**, agent-pipeline execution model.
-2. [`/PRIORITY.md`](../PRIORITY.md) — **what to do next** (critical bugs first, suggested-next pointer).
+2. [`improvements/PRIORITY.md`](../improvements/PRIORITY.md) — **what to do next** (critical bugs first, suggested-next pointer).
    Visual twin: [`docs/priority-graph/priority-graph.html`](priority-graph/priority-graph.html).
 3. [`/ARCHITECTURE.md`](../ARCHITECTURE.md) — THE engineering reference (data model, every command,
    rollback mechanism §12a, testing §13, config §14, known issues §16, agent workflow §19).
-4. [`/improvement_details.md`](../improvement_details.md) — how the IMP-task system works + tier map.
-5. [`docs/feature-fable-review/ROADMAP_END_GOAL.md`](feature-fable-review/ROADMAP_END_GOAL.md) — where
+4. [`improvements/README.md`](../improvements/README.md) — the backlog + direction "brain"; its
+   `improvement_details.md` explains how the IMP-task system works + the tier map.
+5. [`improvements/ROADMAP_END_GOAL.md`](../improvements/ROADMAP_END_GOAL.md) — where
    the project is GOING (the couch-vault phases).
 6. The relevant tier file / feature folder for whatever you're touching.
 
-## 1. Root-level documents
+## 1. Top-level documents (repo root)
 
 | File | What it is |
 |---|---|
 | [`README.md`](../README.md) | User-facing overview: what MediaVault does, install, full CLI reference table, ID conventions, layout |
 | [`ARCHITECTURE.md`](../ARCHITECTURE.md) | Definitive engineering reference (~2000 lines, 19 sections). Read before changing `main.py`/`mainfetch.py` |
 | [`ARCHITECTURE_GRAPH.md`](../ARCHITECTURE_GRAPH.md) | The architecture as 7 Mermaid graph views (system, lifecycle, state machine, ER model, rollback flow, fetch sequence, seam map) |
-| [`CLAUDE.md`](../CLAUDE.md) | Session rules for AI-assisted work: gates, change-gate, pipeline notes |
-| [`PRIORITY.md`](../PRIORITY.md) | **The always-current "what to do next"** — critical bugs first, a `👉 SUGGESTED NEXT TASK` pointer, five priority bands, and the maintenance protocol. Visual twin: `docs/priority-graph/priority-graph.html` |
-| [`improvement_details.md`](../improvement_details.md) | Index + operating manual for the IMP-XN task system (format spec incl. the 2026-06-12 `Risk`/`If skipped` attributes, dependency chains, phased rollout) |
-| `improvements_tierA..H,R,S,U,X.md` | The ~109 tracked improvement tasks — see §2 below |
-| [`apple_tv_ui_roadmap.md`](../apple_tv_ui_roadmap.md) | 2026-05 Jellyfin-plugin UI design. **Partially superseded** — carries a correction banner; current plan is ROADMAP_END_GOAL.md |
+| [`CLAUDE.md`](../CLAUDE.md) | Session rules for AI-assisted work: gates, change-gate, keep-PRIORITY-current rule, pipeline notes |
+| [`apple_tv_ui_roadmap.md`](../apple_tv_ui_roadmap.md) | 2026-05 Jellyfin-plugin UI design. **Partially superseded** — carries a correction banner; current plan is `improvements/ROADMAP_END_GOAL.md` |
 | `PLAN.md`, `STATUS.md` (root) | **Gitignored/stale live working copies** used by the agent pipeline during runs (root STATUS.md is currently still tracked — cleanup tracked as IMP-A11). Canonical copies live under `docs/<feature>/` |
+
+## 1b. The `improvements/` folder — backlog + direction ("the brain")
+
+> Everything about *what we're building and why*. Start at
+> [`improvements/README.md`](../improvements/README.md). The keep-current rule (CLAUDE.md) applies to
+> `PRIORITY.md` + the priority graph on every task change.
+
+| File | What it is |
+|---|---|
+| [`improvements/README.md`](../improvements/README.md) | Index of this folder — read first |
+| [`improvements/PRIORITY.md`](../improvements/PRIORITY.md) | **The always-current "what to do next"** — critical bugs first, a `👉 SUGGESTED NEXT TASK` pointer, five priority bands, maintenance protocol. Visual twin: `docs/priority-graph/priority-graph.html` |
+| [`improvements/improvement_details.md`](../improvements/improvement_details.md) | Operating manual for the IMP-XN task system (format spec incl. the `Risk`/`If skipped` attributes, dependency chains, phased rollout) |
+| `improvements/improvements_tierA..H,R,S,U,X.md` | The ~110 tracked improvement tasks — see §2 |
+| [`improvements/ROADMAP_END_GOAL.md`](../improvements/ROADMAP_END_GOAL.md) | **The master phased plan** to the couch-vault experience (supersedes apple_tv_ui_roadmap phasing) |
+| [`improvements/RESEARCH_MEDIA_SERVERS.md`](../improvements/RESEARCH_MEDIA_SERVERS.md) | Jellyfin integration surfaces + in-client interaction design; Emby/Plex deltas; client matrix incl. Ugoos DV-FEL path |
+| [`improvements/RESEARCH_STORAGE_STREAMING.md`](../improvements/RESEARCH_STORAGE_STREAMING.md) | Google Photos 2026 constraints; the tiered T0-T4 streaming-on-the-fly verdict; OSS steal table; Netflix feature mapping |
+| [`improvements/JELLYFIN_SETUP_GUIDE.md`](../improvements/JELLYFIN_SETUP_GUIDE.md) | Scratch-install → fully-configured Jellyfin on the Alienware + Phase-0 validation checklist |
+| [`improvements/BLOCKERS_AND_MOONSHOTS.md`](../improvements/BLOCKERS_AND_MOONSHOTS.md) | Hard blockers (5), soft blockers (5), tracked moonshots (10) + yearly re-check ritual |
 
 ## 2. Improvement tiers (the work backlog)
 
 | Tier | Theme | Notable |
 |---|---|---|
-| [A](../improvements_tierA.md) | Code architecture & refactoring | A2 argparse, A4 --json, A5 config; A10-A12 added 2026-06-12 |
-| [B](../improvements_tierB.md) | Performance | B1 library-handle cache (gate-adjacent), B9/B10 added 2026-06-12 |
-| [C](../improvements_tierC.md) | Robustness & reliability | C12 **alias crashers (broken today)**, C3 doctor, C5/C6 fetch fixes |
-| [D](../improvements_tierD.md) | New CLI commands | D4 verify_library, D10 prep_auto wizard |
-| [E](../improvements_tierE.md) | Ecosystem integration | E3 metadata enrichment, E5 phone cleanup, E12 web UI |
-| [F](../improvements_tierF.md) | Moonshots | Header documents the **container constraint**; F9 multi-cloud hedge |
-| [G](../improvements_tierG.md) | Lessons from similar projects | G2 gphotosdl spike (raised), G4 Jellyfin direction (graduated) |
-| [H](../improvements_tierH.md) | Agentic dev workflow | H1 done (effort tiers), H2 dynamic-workflows spike |
-| [R](../improvements_tierR.md) | Auto-rollback hardening | ⚠️ change-gated tier; R6-R9 = 2026-06-12 gate-flagged findings |
-| [S](../improvements_tierS.md) | **Streaming & media-server integration** | The end-goal backbone: daemon, in-client flows, fetch hardening |
-| [U](../improvements_tierU.md) | **Couch UX & clients** | Enrichment-before-archive, home rows, NFO pipeline, DV-FEL paths |
-| [X](../improvements_tierX.md) | **Cloud resilience & privacy** | X1 multi-account replication (the real backup), X2 topology/runbook + sharing decision, X3 encrypted/anti-scanning upload, X4/X5 self-heal + ban canary |
+| [A](../improvements/improvements_tierA.md) | Code architecture & refactoring | A2 argparse, A4 --json, A5 config; A10-A12 added 2026-06-12 |
+| [B](../improvements/improvements_tierB.md) | Performance | B1 library-handle cache (gate-adjacent), B9/B10 added 2026-06-12 |
+| [C](../improvements/improvements_tierC.md) | Robustness & reliability | C12 **alias crashers (broken today)**, C3 doctor, C5/C6 fetch fixes |
+| [D](../improvements/improvements_tierD.md) | New CLI commands | D4 verify_library, D10 prep_auto wizard |
+| [E](../improvements/improvements_tierE.md) | Ecosystem integration | E3 metadata enrichment, E5 phone cleanup, E12 web UI |
+| [F](../improvements/improvements_tierF.md) | Moonshots | Header documents the **container constraint**; F9 multi-cloud hedge |
+| [G](../improvements/improvements_tierG.md) | Lessons from similar projects | G2 gphotosdl spike (raised), G4 Jellyfin direction (graduated) |
+| [H](../improvements/improvements_tierH.md) | Agentic dev workflow | H1 done (effort tiers), H2 dynamic-workflows spike |
+| [R](../improvements/improvements_tierR.md) | Auto-rollback hardening | ⚠️ change-gated tier; R6-R9 = 2026-06-12 gate-flagged findings |
+| [S](../improvements/improvements_tierS.md) | **Streaming & media-server integration** | The end-goal backbone: daemon, in-client flows, fetch hardening |
+| [U](../improvements/improvements_tierU.md) | **Couch UX & clients** | Enrichment-before-archive, home rows, NFO pipeline, DV-FEL paths |
+| [X](../improvements/improvements_tierX.md) | **Cloud resilience & privacy** | X1 multi-account replication (the real backup), X2 topology/runbook + sharing decision, X3 encrypted/anti-scanning upload, X4/X5 self-heal + ban canary |
 
 ## 3. The fable-review dossier (`docs/feature-fable-review/`, 2026-06-12)
 
-The full-repo review + end-goal research session. **Resume protocol lives in its STATUS.md.**
+The **session record** of the full-repo review + end-goal research session (provenance — how the
+backlog was produced). The durable outputs it created (roadmap, research, Jellyfin guide, blockers)
+were promoted into [`improvements/`](../improvements/) — see §1b. **Resume protocol lives in STATUS.md.**
 
 | File | Contents |
 |---|---|
-| [`SESSION_BRIEF.md`](feature-fable-review/SESSION_BRIEF.md) | The verbatim originating prompt + the 4 locked user decisions (Jellyfin-first, docs-only, leftovers committed, in-client-only) |
-| [`STATUS.md`](feature-fable-review/STATUS.md) | Phase checklist P0-P9, deliverable map, decisions log, resume protocol |
-| [`REVIEW_NOTES.md`](feature-fable-review/REVIEW_NOTES.md) | P1 code-read findings: 11 bugs/smells (incl. the alias crashers), 10 stale-doc items, verified-true cross-checks, the open 4-Pixel topology question |
+| [`SESSION_BRIEF.md`](feature-fable-review/SESSION_BRIEF.md) | The verbatim originating prompt(s) + the locked user decisions (Jellyfin-first, in-client-only, 3-account topology, the follow-up round) |
+| [`STATUS.md`](feature-fable-review/STATUS.md) | Phase checklist P0-P10, deliverable map, decisions log, resume protocol |
+| [`REVIEW_NOTES.md`](feature-fable-review/REVIEW_NOTES.md) | P1 code-read findings: 11 bugs/smells (incl. the alias crashers), 10 stale-doc items, verified-true cross-checks, the (now-resolved) topology question |
 | [`PR_REVIEW.md`](feature-fable-review/PR_REVIEW.md) | All 21 merged PRs reviewed; deep dives on #14 (auto-rollback) and #20 (deterministic split-hash) |
-| [`RESEARCH_MEDIA_SERVERS.md`](feature-fable-review/RESEARCH_MEDIA_SERVERS.md) | Jellyfin platform/integration surfaces + in-client interaction design; Emby/Plex deltas; client matrix incl. Ugoos DV-FEL path; sources |
-| [`RESEARCH_STORAGE_STREAMING.md`](feature-fable-review/RESEARCH_STORAGE_STREAMING.md) | Google Photos 2026 constraints (API lockdown verified); the tiered T0-T4 streaming-on-the-fly verdict; OSS steal table; Netflix feature mapping |
-| [`JELLYFIN_SETUP_GUIDE.md`](feature-fable-review/JELLYFIN_SETUP_GUIDE.md) | Scratch-install → fully-configured Jellyfin on the Alienware, with exact per-library/plugin/transcode/client settings + Phase-0 validation checklist |
-| [`ROADMAP_END_GOAL.md`](feature-fable-review/ROADMAP_END_GOAL.md) | **The master phased plan** to the couch-vault experience (supersedes apple_tv_ui_roadmap phasing) |
-| [`BLOCKERS_AND_MOONSHOTS.md`](feature-fable-review/BLOCKERS_AND_MOONSHOTS.md) | Hard blockers (5), soft blockers (5), tracked moonshots (10) + yearly re-check ritual |
 
 ## 4. Cross-cutting engineering docs
 

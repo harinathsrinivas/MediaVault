@@ -102,10 +102,13 @@ C:\Users\harin\PycharmProjects\MediaVault\
 |-- requirements-dev.txt             ACTIVE — pytest
 |-- ARCHITECTURE.md                  this document
 |-- README.md                        user-facing overview
-|-- improvement_details.md           improvements index + operating manual (start here for IMP-XN work)
-|-- improvements_tier{A..H,R,S,U,X}.md  tracked improvement tasks (see improvement_details.md)
-|-- PRIORITY.md                      always-current task ordering ("what to do next"); visual twin docs/priority-graph/priority-graph.html
-|-- apple_tv_ui_roadmap.md           2026-05 Jellyfin-plugin UI design (partially superseded — see docs/feature-fable-review/)
+|-- improvements/                    the backlog + direction "brain" (start at improvements/README.md):
+|   |-- improvement_details.md         IMP-XN operating manual
+|   |-- improvements_tier{A..H,R,S,U,X}.md  tracked improvement tasks
+|   |-- PRIORITY.md                    always-current task ordering ("what to do next"); visual twin docs/priority-graph/priority-graph.html
+|   |-- ROADMAP_END_GOAL.md            the phased couch-vault roadmap
+|   |-- RESEARCH_*.md, JELLYFIN_SETUP_GUIDE.md, BLOCKERS_AND_MOONSHOTS.md  durable research/direction
+|-- apple_tv_ui_roadmap.md           2026-05 Jellyfin-plugin UI design (partially superseded — see improvements/ROADMAP_END_GOAL.md)
 |-- .gitignore                       excludes a.json, PLAN.md, resources/, Obsidian vault, transcript dumps
 |
 |-- tools/
@@ -1595,7 +1598,7 @@ the behavior documented here, and ask the user as an explicit decision** — see
 includes the journal format/durability, the PONR locations, the created-this-run
 scoping (D-6/D-7), the `cmd_*` wrapping, `recover_journal` semantics, the season
 resume-range messaging, and the `RollbackHardFail` contract. Forward-looking
-rollback/storage work is tracked in `improvements_tierR.md`.
+rollback/storage work is tracked in `improvements/improvements_tierR.md`.
 
 > **Split-hash-deterministic feature (§6.4a):** the `cmd_restore` verify-or-bless
 > change and the `tempdir` `_parts/` relocation do NOT alter the rollback PONR
@@ -1926,7 +1929,7 @@ work would slot in cleanly:
     worktrees, but it is a main-session capability and our `orchestrator`
     is itself a subagent (subagents can't spawn subagents). Exploiting it
     means running the orchestrator as the main session (`--agent`). Deferred;
-    see §19 and `improvements_tierH.md` (IMP-H2).
+    see §19 and `improvements/improvements_tierH.md` (IMP-H2).
 
 ---
 
@@ -2041,7 +2044,7 @@ Consequence for this pipeline:
   when per-call effort lands upstream.
 
 See `.claude/AGENT_WORKFLOW_NOTES.md` for the full migration record and the
-pre-migration backup at `.claude/agents_pre_opus48/`, and `improvements_tierH.md`
+pre-migration backup at `.claude/agents_pre_opus48/`, and `improvements/improvements_tierH.md`
 (IMP-H1/H2) for the tracked task and the deferred "dynamic workflows" follow-up.
 
 ---

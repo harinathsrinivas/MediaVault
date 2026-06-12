@@ -1,11 +1,12 @@
 # Improvements — Tier G · Lessons From Similar Projects
 
-> Cross-cutting design lessons drawn from production-grade adjacent projects. These are not standalone tasks to implement directly — they are inputs that should shape decisions in Tiers A–F. Each lesson lists which Tier A–F task it most strongly informs.
+> Cross-cutting design lessons drawn from production-grade adjacent projects. These are not standalone tasks to implement directly — they are inputs that should shape decisions in Tiers A–F/S/U. Each lesson lists which task it most strongly informs. The 2026-06-12 research dossier (`docs/feature-fable-review/RESEARCH_STORAGE_STREAMING.md` §3) extends this tier with the debrid-stack / *arr / JellyBridge / Seerr pattern catalog.
 
 > **Cross-cutting context:**
 > - MediaVault sits in a small but real ecosystem of "split-large-files-and-upload-to-free-cloud-storage" tools. rclone (chunker + gphotosdl) and tdl (Telegram) are the most mature.
-> - Google Photos API policy as of **March 31, 2025**: third-party apps can only download photos that they themselves uploaded. Since the user's Pixel phone Google Photos app uploads them (not a MediaVault API client), the official API is permanently unavailable for restore. **Selenium-style browser automation is the only path forward.**
-> - Jellyfin is the de facto open-source media browser. Its plugin model is the cheapest path to the future Apple TV UI ([[project_future_apple_tv_ui]]).
+> - Google Photos API policy as of **March 31, 2025**: third-party apps can only download photos that they themselves uploaded. Since the user's Pixel phone Google Photos app uploads them (not a MediaVault API client), the official API is permanently unavailable for restore. **Browser-session automation is the only path forward** (verified again 2026-06-12).
+> - Jellyfin is the chosen couch platform (2026-06-12 session decision) — see Tier S/U and `docs/feature-fable-review/ROADMAP_END_GOAL.md`.
+> - **Attribute key (added 2026-06-12):** `Risk` = blast radius of acting on the lesson. `If skipped` = what we keep re-learning the hard way.
 
 ---
 
@@ -13,21 +14,14 @@
 
 - Category: refactor
 - Priority: medium
-- Files: `cmd_push` (535-704), entry `split_info` schema, remote upload paths on phone
+- Files: `cmd_push`, entry `split_info` schema, remote upload paths on phone
 - Informs: IMP-A1 (mvcommon), IMP-C8 (post-push verify), IMP-C2 (retry)
-- Current behavior: MediaVault's split + push is bespoke. rclone's `chunker` backend (https://rclone.org/chunker/) solves the same problem in production with several patterns worth adopting:
-  - Chunks upload to a **temporary suffix** (`.partial` / `.rclone_chunk_pending`). Only on full successful upload does an **atomic rename** swap them to the final name. A partial upload is never observable as a "complete" chunk.
-  - **Composite-file JSON metadata** stored alongside chunks on the remote — records chunk count, sizes, hashes. Allows server-side verification independent of the source-of-truth library.
-  - Hash modes: `md5all`, `sha1all`, `md5quick`, `sha1quick` — configurable trade-offs between full-file integrity and per-chunk speed.
-  - Filename overhead awareness: rclone reserves 17 chars per chunk name to stay safe on backends with 255-char limits.
-- Proposed change:
-  - **Upload to `<final>.partial` then `adb shell mv`** — apply the atomic-rename pattern. Partial uploads on the phone are no longer mistakenly indexed by Google Photos as complete chunks.
-  - **Write a `<base>.mvmeta.json` sidecar to /sdcard/Media** alongside chunks. Mirrors the `split_info` JSON. If `library_series.json` is ever destroyed, the remote sidecars contain enough info to rebuild the library.
-  - **Audit MediaVault chunk filename overhead**: ` [<short_id>].chunk.NNN.mkv` is ~25 chars. For long titles approaching 230 chars, the path can exceed Windows' 260-char path limit.
-- Rationale: rclone has solved the partial-upload-looks-complete failure mode and the rebuild-from-remote disaster-recovery story. Adopting these patterns is cheap and gets MediaVault to industry-grade reliability.
-- Goal: Partial uploads are never observable as complete. Remote-side recovery is possible without the local library.
+- Current behavior (pre-fix): bespoke split+push with no partial-upload protection and no remote-side recovery metadata.
+- Proposed change: `.partial` upload + atomic `adb shell mv` rename; remote `<base> [<uid>].mvmeta.json` sidecar mirroring split_info; chunk-filename overhead audit.
+- Rationale: rclone solved partial-upload-looks-complete and rebuild-from-remote in production.
+- Goal: Partial uploads never observable as complete; remote-side recovery possible without the local library.
 - Effort estimate: medium
-- Status: done
+- Status: done (PR #7 shipped `.partial`+mv; the mvmeta remote sidecar shipped with the rollback-era work — both verified in current code 2026-06-12. Remaining unshipped sub-item: the **260-char Windows path / 255-char filename overhead audit** for long titles + ` [uid].chunk.NNN.mkv` suffixes — small, folded into IMP-D4's verify_library checks as a path-length lint.)
 
 ---
 
@@ -35,26 +29,22 @@
 
 - Category: refactor
 - Priority: high
-- Files: potentially replace `mainfetch.py` (507 lines) with a thin wrapper around external `gphotosdl` binary
-- Informs: IMP-C5 (fallback search), IMP-C6 (session expiry), IMP-A1 (mvcommon)
-- Current behavior: `mainfetch.py` is a hand-rolled Selenium driver. It works for the user's setup. But it is the most fragile piece of MediaVault — every Google Photos UI change can break it. rclone's project ships **gphotosdl** (https://github.com/rclone/gphotosdl), a Go binary that does exactly this — runs a headless Chrome via Selenium and exposes an HTTP API for downloads. It's actively maintained because **the official Google Photos API was restricted on 2025-03-31 to only allow downloading photos uploaded by your own app**, meaning gphotosdl is the de facto standard for downloading at original quality from photos uploaded by the Photos mobile app.
+- Files: potentially replace `mainfetch.py` (491 lines) with a thin wrapper around external `gphotosdl` binary
+- Informs: IMP-C5 (fallback search), IMP-C6 (session expiry), Tier S fetch hardening (IMP-S7), T3 proxy-streaming moonshot (RESEARCH_STORAGE_STREAMING §2)
+- Current behavior: `mainfetch.py` is a hand-rolled Selenium driver. It works for the user's setup. But it is the most fragile piece of MediaVault — every Google Photos UI change can break it. rclone's project ships **gphotosdl** (https://github.com/rclone/gphotosdl), a Go binary that runs a headless Chrome and exposes a **local HTTP proxy** for original-quality downloads (`http://localhost:8282/id/<photoID>`), actively maintained because the post-2025-03-31 API only allows self-uploaded content — gphotosdl is the de facto standard for downloading originals that the Photos mobile app uploaded.
 - Proposed change:
-  - **Spike** (4-8 hours): try gphotosdl against the user's ChromeProfile_TV. Confirm:
-    - Can it find and download a known chunk?
-    - Does it handle the two-Google-accounts case via separate profile dirs?
-    - Does parallel download work better than mainfetch's harvester loop?
-  - **If yes**: refactor `mainfetch.py` to be a thin Python shim:
-    1. Start gphotosdl as a subprocess pointed at the right ChromeProfile.
-    2. HTTP-POST search queries; receive download URLs.
-    3. Reuse MediaVault's hash-routing (`fetch_single_entry`'s harvester logic) on top of gphotosdl's downloads.
-  - **If no** (e.g., gphotosdl assumes a single account): cherry-pick patterns:
-    - Their session-expiry detection.
-    - Their throttling / rate-limit handling against Google.
-    - Their parallel-download orchestration.
-    - Their cookie persistence and re-auth flow.
-- Rationale: gphotosdl is maintained by the rclone team with broad community testing. Outsourcing the most fragile piece of MediaVault to a project that exists explicitly for it is a strategic win.
-- Goal: Replace or harden the Selenium fetch path using lessons from a battle-tested alternative.
+  - **Spike** (4-8 hours): run gphotosdl against a COPY of ChromeProfile_TV. Confirm:
+    - Can it find and download a known chunk (search-by-filename or id discovery path)?
+    - Does it handle the two-Google-accounts case via separate profile dirs / two instances on two ports?
+    - Does its download-streaming proxy behave under our chunk sizes (9.6 GB)? (This doubles as the T3 streaming feasibility probe — it streams bytes through as they download.)
+    - Parallelism vs mainfetch's trigger+harvester?
+  - **If yes**: refactor `mainfetch.py` into a thin shim — start gphotosdl per profile, resolve photo ids, GET from the proxy, keep MediaVault's hash-routing as the integrity layer.
+  - **If no**: cherry-pick its session-expiry detection, throttling/rate-limit handling, parallel-download orchestration, cookie persistence/re-auth flow into mainfetch (feeds IMP-C5/C6 and IMP-S7's CDP migration).
+- Rationale: Outsourcing the most fragile piece of MediaVault to a project that exists explicitly for this problem — maintained by the rclone team with broad community testing — is a strategic win; and its proxy architecture is the seed of watch-while-fetching.
+- Goal: Replace or harden the Selenium fetch path using a battle-tested alternative; produce a written go/no-go decision.
 - Effort estimate: medium (spike) → large (full replacement if chosen)
+- Risk: medium — the spike itself is read-only/sandboxed (use a copied Chrome profile so the live session cookies aren't risked); a full replacement swaps the fetch engine and must preserve the hash-routing contract and the two-profile routing exactly.
+- If skipped: mainfetch remains one Google UI redesign away from total fetch outage, with selectors only one person maintains; every Photos frontend experiment Google runs is a potential 90-minute debugging night.
 - Status: pending
 
 ---
@@ -63,7 +53,7 @@
 
 - Category: refactor
 - Priority: low
-- Files: future considerations for IMP-E10 Telegram dispatch, IMP-F10 status broadcaster
+- Files: future considerations for IMP-E10 Telegram dispatch, IMP-F9 multi-cloud, IMP-F10 status broadcaster
 - Informs: IMP-A2 (CLI design), IMP-E10 (Telegram bot), IMP-F9 (multi-cloud)
 - Current behavior: `tdl` (https://github.com/iyear/tdl) is a Go tool using Telegram as cold storage — same trick as MediaVault, different cloud. The Telegram-as-storage ecosystem is more mature than the Google Photos one and has converged on:
   - Single-binary deployment with zero Python runtime hassles (Go).
@@ -72,35 +62,35 @@
   - Subcommand structure (`tdl chat`, `tdl forward`, `tdl up`, `tdl down`) — analogous to MediaVault's `cmd_*` shape.
 - Proposed change:
   - **CLI shape inspiration**: tdl's subcommand structure validates argparse-with-subparsers (IMP-A2) as the right shape for MediaVault.
-  - **Parallel uploads**: tdl saturates bandwidth across chunks. MediaVault's `cmd_push` is single-stream. With IMP-E7 (multi-device push) we get cross-device parallelism; tdl shows intra-device parallelism is also feasible.
-  - **Future considerations**: if Google's policy ever forces a multi-cloud move (IMP-F9), tdl is a reference implementation for "Telegram as backend".
+  - **Parallel uploads**: tdl saturates bandwidth across chunks. MediaVault's `cmd_push` is single-stream. With IMP-E7 (multi-device push) we get cross-device parallelism; tdl shows intra-device parallelism is also feasible (less relevant for ADB-over-USB, which is link-bound).
+  - **Future considerations**: if Google's policy ever forces a multi-cloud move (IMP-F9), Telegram-as-backend (via tdl patterns or tdl itself) is a candidate with REAL arbitrary-file support — no container constraint (Tier F header) because Telegram stores files, not "photos".
 - Rationale: A second mature reference for the same architectural problem broadens the design space and validates approaches.
 - Goal: Architectural ideas to borrow when designing IMP-A2, IMP-E10, IMP-F9.
 - Effort estimate: small (research only)
+- Risk: low — research input only.
+- If skipped: design decisions in A2/E10/F9 are made with one fewer production reference.
 - Status: pending
 
 ---
 
-## IMP-G4: Build the Apple TV UI as a Jellyfin plugin instead of from scratch
+## IMP-G4: Build the couch UI on Jellyfin instead of from scratch
 
 - Category: refactor
-- Priority: medium (long-term; depends on prerequisites)
-- Files: future Jellyfin plugin project, separate from MediaVault repo
-- Informs: [[project_future_apple_tv_ui]], IMP-E9, IMP-E12
-- Current behavior: The future UI goal ([[project_future_apple_tv_ui]]) is "Apple TV-style smooth UI for browsing the archive". Building one from scratch (Electron/Tauri + React) is a multi-month project.
-- Proposed change:
-  - **Don't build a Jellyfin from scratch**. Build a small **Jellyfin plugin** (https://jellyfin.org) that:
-    - Treats a `<1 KB` `.mkv` (MediaVault's dummy marker) as a special "archived" state in Jellyfin's UI.
-    - Replaces the `[Play]` button on archived items with `[Restore]`.
-    - Hits MediaVault's CLI (or its FastAPI wrapper from IMP-E12) to trigger `fetch_restore` when clicked.
-    - Listens to the WebSocket status (IMP-F10) for live progress.
-    - Calls Jellyfin's library-refresh API once the file is restored, then plays normally.
-  - Reference plugins to study: `jellyfin-plugin-home-sections`, `Gelato`, `KefinTweaks` (https://github.com/awesome-jellyfin/awesome-jellyfin).
-  - Jellyfin's default web UI is already polished and tile-driven. With a custom theme it looks Apple TV-ish. Clients like ARVIO (Android TV) and Infuse (Apple TV) consume Jellyfin servers directly — so a Jellyfin-plugin-based MediaVault would inherit Apple TV support for free if the user owns an Apple TV.
-- Rationale: 95% of the UI work is already done by Jellyfin's team. MediaVault contributes the "archived/restore" semantic on top.
-- Goal: Apple TV-style archive browser without building one from scratch.
-- Effort estimate: medium (plugin development)
-- Status: pending
+- Priority: medium → **high (now the confirmed direction — 2026-06-12 session decision: Jellyfin-first)**
+- Files: future Jellyfin plugin project (separate from the MediaVault repo) + the Tier S daemon (this repo)
+- Informs: [[project_future_apple_tv_ui]], IMP-E9, IMP-E12, all of Tier S/U
+- Current behavior: The couch-UI goal is "Apple TV-style smooth UI for browsing the archive". Building one from scratch (Electron/Tauri + React, or a native tvOS app) is a multi-month project.
+- Proposed change (UPDATED 2026-06-12 — this lesson GRADUATED into the roadmap):
+  - **Don't build a UI from scratch — ride Jellyfin.** The original analysis stands and the session decision confirmed it. Two refinements from the research (`RESEARCH_MEDIA_SERVERS.md`):
+    1. **The daemon-first path gets ~90% of the experience with ZERO client/plugin code** (IMP-S1..S5): dummies are already real playable items, so "play a dummy" = the fetch request (webhook-observed), DisplayMessage = the notify, collections = the status rows, grace-period policy = the archive prompt. The C# plugin is the *polish* phase, not the entry fee.
+    2. **The plugin's old detection design is stale**: dummies are no longer `<1 KB` text blobs with an `Original Hash:` marker — they are ~10 KB valid videos (PR #1/#3). Detection = size < `DUMMY_MAX_BYTES` (200 KB) + `uid` sidecar / daemon API lookup. `apple_tv_ui_roadmap.md` §5 must be read with this correction (banner added 2026-06-12).
+  - Reference plugins to study when the plugin phase arrives: `jellyfin-plugin-home-sections`, JellyBridge (placeholder-items-as-actions precedent), Intro Skipper (Media Segments usage), the plugin-template repo.
+- Rationale: 95% of the UI work is already done by Jellyfin's team and clients (Swiftfin/Infuse/Kodi). MediaVault contributes the "archived/restore" semantic on top.
+- Goal: Apple TV-style archive browsing without building a UI — via the staged plan in `ROADMAP_END_GOAL.md` (daemon → conventions → plugin polish).
+- Effort estimate: medium (plugin phase; the daemon phases are tracked in Tier S)
+- Risk: low as a direction (everything is additive around the untouched CLI core); plugin-phase risk is Jellyfin plugin-ABI churn across server versions — pin to an LTS line when that phase starts.
+- If skipped: the couch goal requires either building a client from scratch (months) or accepting Plex's closed surface (impossible — no plugin API); skipping Jellyfin means effectively skipping the end goal.
+- Status: pending (direction locked; execution tracked as Tier S/U + ROADMAP_END_GOAL phases)
 
 ---
 
@@ -119,7 +109,10 @@
     - Content-addressed store schema.
   - Borg uses a similar approach with a different hash function (BuzHash).
   - Both have published security analyses of their content-defined boundaries — important if combined with encryption (IMP-F1, since CDC boundaries can leak about file content via chunk-size analysis).
+  - Remember the Tier F container constraint: restic/borg chunks are raw blobs — fine on real object stores (F9), blocked on Google Photos without a wrapping layer.
 - Rationale: CDC is non-trivial to implement correctly. Two mature open-source reference implementations exist.
 - Goal: Don't reinvent rolling-hash CDC when restic / borg already did it well.
 - Effort estimate: small (research only)
+- Risk: low — research input only.
+- If skipped: only matters if F2 proceeds; then skipping = reinventing a subtle wheel.
 - Status: pending

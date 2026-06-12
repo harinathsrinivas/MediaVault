@@ -38,4 +38,6 @@
 - Rationale: could dramatically speed up large multi-step plans and improve verification, but it is a structural change with unclear payoff at MediaVault's scale.
 - Goal: a decision (with rationale) on whether to restructure the pipeline around dynamic workflows, or keep the current orchestrator.
 - Effort estimate: medium (spike) → large (restructure if chosen)
+- Risk: low for the spike (no production code, no agent files changed); large restructures of `.claude/agents/` would change how every future task is built — gate behind a written decision doc, keep `agents_pre_*` backups like the H1 migration did.
+- If skipped: the pipeline stays sequential — perfectly adequate at MediaVault's current task sizes; revisit only when a plan regularly exceeds ~10 steps or wall-clock pain appears. (2026-06-12 note: the main-session-as-orchestrator pattern mandated by CLAUDE.md after the nested-Task failures is a partial, manual version of this idea.)
 - Status: pending

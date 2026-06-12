@@ -19,7 +19,7 @@ Non-trivial changes go through the multi-agent pipeline in `.claude/agents/` (pl
 If any agent — or the main session — hits a **fundamental capability gap or contradiction** with the task/plan (a required tool is unavailable, e.g. nested `Task`; a planned approach is impossible; an instruction conflicts with a hard runtime limit), **STOP and surface it to the user as an explicit decision** — state what was expected, what actually differs, and the options — rather than silently working around it and continuing. This applies to every agent (this file loads into every session and sub-agent).
 
 ## Improvement tasks
-Work is tracked as `IMP-<XN>` tasks across `improvements_tier*.md`; start from `improvement_details.md`. Mark status (`pending`/`in_progress`/`done`) as work progresses.
+Work is tracked as `IMP-<XN>` tasks across `improvements_tier*.md` (tiers A–H, R, S, U); start from `improvement_details.md`. Mark status (`pending`/`in_progress`/`done`) as work progresses. The master index of all documentation is `docs/README.md`; the forward roadmap is `docs/feature-fable-review/ROADMAP_END_GOAL.md`.
 
 ## Auto-rollback is load-bearing — change-gate
 The unified auto-rollback mechanism (`RollbackJournal` / `recover_journal` / `RollbackHardFail` in `main.py`, the per-`cmd_*` point-of-no-return markers, the `.mediavault_txn.json` journal format, the O-1 resume-message vs O-2 hard-fail split, and the `cmd_prep_push_rep_season` resume-range messaging) was chosen via a user-decided bake-off (`docs/feature-auto-rollback/DECISIONS.md` N-6, PR #14). Many commands depend on it for safe failure handling.

@@ -252,7 +252,12 @@ any of them. To re-target the system, edit the constants directly.
 
 For the full engineering reference including data model, state machine,
 balanced-split algorithm, and Selenium harvester design, see
-[`ARCHITECTURE.md`](ARCHITECTURE.md).
+[`ARCHITECTURE.md`](ARCHITECTURE.md) — graph views in
+[`ARCHITECTURE_GRAPH.md`](ARCHITECTURE_GRAPH.md) and an interactive version at
+`docs/architecture-graph/graph.html`. **The master index of ALL documentation
+is [`docs/README.md`](docs/README.md).** The forward roadmap (couch-vault /
+Jellyfin end goal) is
+[`docs/feature-fable-review/ROADMAP_END_GOAL.md`](docs/feature-fable-review/ROADMAP_END_GOAL.md).
 
 ## Development / agentic workflow
 

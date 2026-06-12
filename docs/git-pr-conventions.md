@@ -9,10 +9,12 @@ Canonical rules for branches, commits, and pull requests in this repo. **All age
 
 ## Commits
 - Imperative subject. Reference the IMP task in the body: `Refs: improvements_tier<X>.md IMP-<XN>` when applicable.
-- End every commit message with:
+- End every commit message with a co-author trailer naming the **model that actually did the work**
+  (truthful attribution; updated 2026-06-12 — was hardcoded to Opus 4.8):
   ```
-  Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+  Co-Authored-By: Claude <model name> <noreply@anthropic.com>
   ```
+  e.g. `Claude Opus 4.8`, `Claude Fable 5`, `Claude Sonnet 4.6` (whichever executed the change).
 
 ## Pull requests
 

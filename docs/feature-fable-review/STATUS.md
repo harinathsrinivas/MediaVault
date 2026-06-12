@@ -54,12 +54,18 @@
 - [x] `ARCHITECTURE_GRAPH.md` — 7 Mermaid views (system, lifecycle, state machine, ER data model, rollback flow, fetch sequence, seam map)
 - [x] `docs/architecture-graph/graph.html` — interactive vis.js graph, hand-curated 40+ nodes/70+ edges, search/filter/details/physics (vis-network via CDN, offline fallback note)
 
-### P5 — Improvement tier overhaul
-- [ ] Add `Risk` + `If skipped` (impact_if_skipped) attributes to every **pending** task in tiers A–H, R (done tasks: skip)
-- [ ] Re-review every pending task: still valid? superseded? priority right?
-- [ ] Add newly found improvements from P1 code review
-- [ ] New tiers for the end goal (planned: **S** = serving/streaming & Jellyfin integration, **U** = UX/clients, **W** = web/ops UI if warranted) — same format as existing tiers
-- [ ] Update `improvement_details.md` master list accordingly
+### P5 — Improvement tier overhaul ✅ (commits 6631926, 940005b, 4e6397f, 42f9d3f)
+- [x] `Risk` + `If skipped` attributes on every pending task across A–H, R (~70 tasks)
+- [x] Re-review pass: statuses fixed (A7→done, C4→done), reorientations (E4/E9/E10/E12/F4/F6/F10/G2/G4),
+      stale text refreshed (C1 resume-msg reality, R3 scan-shipped, G1 leftover sub-item)
+- [x] New tasks from the review: A10-A12, B9-B10, C12-C15, R6-R9 (R6-R9 gate-flagged as decision requests)
+- [x] New tiers: **S** (8 tasks — daemon, in-client flows, fetch hardening, T2/T3 spikes) and
+      **U** (5 tasks — enrichment-before-archive, home rows, NFO pipeline, DV-FEL paths, C# plugin);
+      W dropped (E12 covers the ops web UI)
+- [x] `improvement_details.md`: tier registration, format spec gains Risk/If-skipped, change log,
+      priority table marked historical, Phase 7/8 superseded pointer
+- [x] Bonus findings during the pass: Tier F **container constraint**; `cmd_replace_group` doesn't
+      catch RollbackHardFail (folded into R4)
 
 ### P6 — Web research dossier ✅ (done BEFORE P5 so new tiers cite findings)
 - [x] `RESEARCH_MEDIA_SERVERS.md`: Jellyfin 10.10/10.11 state, integration surfaces (Webhook plugin,
@@ -94,21 +100,30 @@
   **U = Couch UX & clients** (trickplay-before-archive, collections/rows, metadata→NFO, client
   validation, DV-FEL path docs). NO new W tier (E12 covers web UI).
 
-### P7 — End-goal roadmap
-- [ ] `ROADMAP_END_GOAL.md`: phased path from today's CLI → couch-only Netflix-like flow (browse → fetch/play → in-client notify → watch → in-client archive prompt)
-- [ ] Reconcile/supersede `apple_tv_ui_roadmap.md` (mark its status explicitly)
-- [ ] `BLOCKERS_AND_MOONSHOTS.md`: hard blockers, 1%-possible ideas (user explicitly wants these tracked)
-- [ ] Streaming-playback-on-the-fly: explicit feasibility verdict with evidence
+### P7 — End-goal roadmap ✅ (commit 072f186)
+- [x] `ROADMAP_END_GOAL.md`: phases 0-6, requirement→mechanism map, dependency weave, Emby/Plex
+      adoption verdicts, risk register, topology question
+- [x] `apple_tv_ui_roadmap.md` superseded with a corrections banner (stale §5 detection, daemon-first
+      resequencing, in-client-only; Jellyfin choice re-confirmed)
+- [x] `BLOCKERS_AND_MOONSHOTS.md`: 5 hard blockers, 5 soft blockers, 10 tracked moonshots, yearly ritual
+- [x] Streaming verdict: tiered T0-T4 answer in roadmap §4 backed by RESEARCH_STORAGE_STREAMING §2
 
-### P8 — Master docs index + consistency pass
-- [ ] `docs/README.md`: master index — every doc file, what it means/contains (user: "master .md file")
-- [ ] Root README pointer to the index
-- [ ] Cross-link pass; stale-reference sweep (e.g., git-pr-conventions Co-Authored-By model name)
+### P8 — Master docs index + consistency pass ✅
+- [x] `docs/README.md`: master index (orientation order, root docs, tiers, fable-review dossier,
+      cross-cutting docs, per-feature archives, agent docs, maintenance rules)
+- [x] Root README pointer + CLAUDE.md pointer (tiers A–H,R,S,U + docs index + roadmap)
+- [x] `git-pr-conventions.md` Co-Authored-By made model-truthful (was hardcoded Opus 4.8)
 
-### P9 — Wrap-up
-- [ ] Final STATUS update; memory-dir update
-- [ ] Push branch; create PR (IMP code: check tier files — likely none yet exists for "review" itself; new-tier tasks will be created BY this PR, reference them)
+### P9 — Wrap-up (in progress)
+- [x] Final STATUS update; memory-dir update
+- [ ] Push branch; create PR (no pre-existing IMP code applies — this PR *creates* the new tasks;
+      title carries no IMP code by design, body references the created tiers)
 - [ ] **STOP — ask user before merge (Checkpoint 1)**
+
+## Post-merge follow-ups for the user (the answer queue)
+1. **4-Pixel topology** (REVIEW_NOTES §E1 / roadmap §6) — answer unblocks E7/S5 lane counts.
+2. **R6/R7 gate decisions** when convenient (options laid out in improvements_tierR.md).
+3. Start **Phase 0** (JELLYFIN_SETUP_GUIDE.md) whenever ready — zero code required.
 
 ## Deliverable file map (planned)
 
@@ -140,3 +155,9 @@
 ## Work log
 
 - 2026-06-12: Session start. Orientation scan, 4 setup questions answered, branch created, housekeeping commit `5000533`, tracking files written.
+- 2026-06-12: P1+P2 complete (full code/docs read, 21-PR review) — commits `d945742`, `4f2c50f`.
+- 2026-06-12: P3+P4 complete (ARCHITECTURE/README truth-up, Mermaid + vis.js graphs) — commit `bee7432`.
+- 2026-06-12: P6 research dossier (3 docs) — commit `b4e1fc6`. (Usage-limit pause hit during P5 tier D read; resumed cleanly from this tracker.)
+- 2026-06-12: P5 tier overhaul A–U complete — commits `6631926`, `940005b`, `4e6397f`, `42f9d3f`.
+- 2026-06-12: P7 roadmap + blockers/moonshots + supersession banner — commit `072f186`.
+- 2026-06-12: P8 master index + consistency pass; P9 wrap-up: branch pushed, PR opened, **awaiting Checkpoint-1 merge approval**.

@@ -1,0 +1,101 @@
+# MediaVault Documentation — Master Index
+
+> **The map of every document in this repository**: what each file means, what it contains, and when
+> to read it. Created 2026-06-12 by the fable-review session; update it whenever a doc is added,
+> superseded, or moved. (Requested as: *"a proper master .md file to indicate what each of these
+> files mean and contain... documented in such a way that this session is never needed again."*)
+
+## 0. Start here (new session / new agent orientation order)
+
+1. [`/CLAUDE.md`](../CLAUDE.md) — project rules: PR conventions pointer, **human merge gates**, the
+   **auto-rollback change-gate**, agent-pipeline execution model, no-silent-handling rule.
+2. [`/ARCHITECTURE.md`](../ARCHITECTURE.md) — THE engineering reference (data model, every command,
+   rollback mechanism §12a, testing §13, config §14, known issues §16, agent workflow §19).
+3. [`/improvement_details.md`](../improvement_details.md) — how the IMP-task system works + tier map.
+4. [`docs/feature-fable-review/ROADMAP_END_GOAL.md`](feature-fable-review/ROADMAP_END_GOAL.md) — where
+   the project is GOING (the couch-vault phases).
+5. The relevant tier file / feature folder for whatever you're touching.
+
+## 1. Root-level documents
+
+| File | What it is |
+|---|---|
+| [`README.md`](../README.md) | User-facing overview: what MediaVault does, install, full CLI reference table, ID conventions, layout |
+| [`ARCHITECTURE.md`](../ARCHITECTURE.md) | Definitive engineering reference (~2000 lines, 19 sections). Read before changing `main.py`/`mainfetch.py` |
+| [`ARCHITECTURE_GRAPH.md`](../ARCHITECTURE_GRAPH.md) | The architecture as 7 Mermaid graph views (system, lifecycle, state machine, ER model, rollback flow, fetch sequence, seam map) |
+| [`CLAUDE.md`](../CLAUDE.md) | Session rules for AI-assisted work: gates, change-gate, pipeline notes |
+| [`improvement_details.md`](../improvement_details.md) | Index + operating manual for the IMP-XN task system (format spec incl. the 2026-06-12 `Risk`/`If skipped` attributes, dependency chains, phased rollout) |
+| `improvements_tierA..H,R,S,U.md` | The ~104 tracked improvement tasks — see §2 below |
+| [`apple_tv_ui_roadmap.md`](../apple_tv_ui_roadmap.md) | 2026-05 Jellyfin-plugin UI design. **Partially superseded** — carries a correction banner; current plan is ROADMAP_END_GOAL.md |
+| `PLAN.md`, `STATUS.md` (root) | **Gitignored/stale live working copies** used by the agent pipeline during runs (root STATUS.md is currently still tracked — cleanup tracked as IMP-A11). Canonical copies live under `docs/<feature>/` |
+
+## 2. Improvement tiers (the work backlog)
+
+| Tier | Theme | Notable |
+|---|---|---|
+| [A](../improvements_tierA.md) | Code architecture & refactoring | A2 argparse, A4 --json, A5 config; A10-A12 added 2026-06-12 |
+| [B](../improvements_tierB.md) | Performance | B1 library-handle cache (gate-adjacent), B9/B10 added 2026-06-12 |
+| [C](../improvements_tierC.md) | Robustness & reliability | C12 **alias crashers (broken today)**, C3 doctor, C5/C6 fetch fixes |
+| [D](../improvements_tierD.md) | New CLI commands | D4 verify_library, D10 prep_auto wizard |
+| [E](../improvements_tierE.md) | Ecosystem integration | E3 metadata enrichment, E5 phone cleanup, E12 web UI |
+| [F](../improvements_tierF.md) | Moonshots | Header documents the **container constraint**; F9 multi-cloud hedge |
+| [G](../improvements_tierG.md) | Lessons from similar projects | G2 gphotosdl spike (raised), G4 Jellyfin direction (graduated) |
+| [H](../improvements_tierH.md) | Agentic dev workflow | H1 done (effort tiers), H2 dynamic-workflows spike |
+| [R](../improvements_tierR.md) | Auto-rollback hardening | ⚠️ change-gated tier; R6-R9 = 2026-06-12 gate-flagged findings |
+| [S](../improvements_tierS.md) | **Streaming & media-server integration** | The end-goal backbone: daemon, in-client flows, fetch hardening |
+| [U](../improvements_tierU.md) | **Couch UX & clients** | Enrichment-before-archive, home rows, NFO pipeline, DV-FEL paths |
+
+## 3. The fable-review dossier (`docs/feature-fable-review/`, 2026-06-12)
+
+The full-repo review + end-goal research session. **Resume protocol lives in its STATUS.md.**
+
+| File | Contents |
+|---|---|
+| [`SESSION_BRIEF.md`](feature-fable-review/SESSION_BRIEF.md) | The verbatim originating prompt + the 4 locked user decisions (Jellyfin-first, docs-only, leftovers committed, in-client-only) |
+| [`STATUS.md`](feature-fable-review/STATUS.md) | Phase checklist P0-P9, deliverable map, decisions log, resume protocol |
+| [`REVIEW_NOTES.md`](feature-fable-review/REVIEW_NOTES.md) | P1 code-read findings: 11 bugs/smells (incl. the alias crashers), 10 stale-doc items, verified-true cross-checks, the open 4-Pixel topology question |
+| [`PR_REVIEW.md`](feature-fable-review/PR_REVIEW.md) | All 21 merged PRs reviewed; deep dives on #14 (auto-rollback) and #20 (deterministic split-hash) |
+| [`RESEARCH_MEDIA_SERVERS.md`](feature-fable-review/RESEARCH_MEDIA_SERVERS.md) | Jellyfin platform/integration surfaces + in-client interaction design; Emby/Plex deltas; client matrix incl. Ugoos DV-FEL path; sources |
+| [`RESEARCH_STORAGE_STREAMING.md`](feature-fable-review/RESEARCH_STORAGE_STREAMING.md) | Google Photos 2026 constraints (API lockdown verified); the tiered T0-T4 streaming-on-the-fly verdict; OSS steal table; Netflix feature mapping |
+| [`JELLYFIN_SETUP_GUIDE.md`](feature-fable-review/JELLYFIN_SETUP_GUIDE.md) | Scratch-install → fully-configured Jellyfin on the Alienware, with exact per-library/plugin/transcode/client settings + Phase-0 validation checklist |
+| [`ROADMAP_END_GOAL.md`](feature-fable-review/ROADMAP_END_GOAL.md) | **The master phased plan** to the couch-vault experience (supersedes apple_tv_ui_roadmap phasing) |
+| [`BLOCKERS_AND_MOONSHOTS.md`](feature-fable-review/BLOCKERS_AND_MOONSHOTS.md) | Hard blockers (5), soft blockers (5), tracked moonshots (10) + yearly re-check ritual |
+
+## 4. Cross-cutting engineering docs
+
+| File | Contents |
+|---|---|
+| [`git-pr-conventions.md`](git-pr-conventions.md) | Branch naming, commit trailer, PR title (IMP code!) + body order (verbatim prompt!), **Checkpoint 1/2 human gates**, archive-tag procedure, PLAN.md location convention |
+| [`testing-strategy.md`](testing-strategy.md) | Mock-at-the-boundary philosophy, fixture catalogue (sandbox/mock_device/FakeAdb), dual-binding hazard, Windows gotchas, per-layer examples |
+| [`next-tasks-planner-prompts.md`](next-tasks-planner-prompts.md) | Ready-to-paste planner prompts for IMP-R2 (done) / IMP-C1 / IMP-R1 |
+| [`architecture-graph/graph.html`](architecture-graph/graph.html) | Interactive vis.js architecture graph (graphify-style: search, kind filters, click-for-details). Open in a browser |
+
+## 5. Per-feature design archives (`docs/feature-*/`, `docs/imp-*/`)
+
+Each merged feature ships its planning/decision artifacts here (the squash-merge keeps detailed
+history only on archived branch tags — these folders are the readable record).
+
+| Folder | Feature (merged) | Key files |
+|---|---|---|
+| `feature-auto-rollback/` | PR #14 (2026-06-01) — the RollbackJournal mechanism | **`ROLLBACK_MECHANISM.md`** (THE spec + §10 change-gate), `DECISIONS.md` (D-1..D-9/O/N incl. the N-6 bake-off), `rollback-architecture/CANDIDATE_{A,B,C}.md` + `DECISION.md`, scenario analyses, per-task subfolders (A1/C2/C8/C9/C11/G1...) |
+| `feature-split-hash-deterministic/` | PR #20 (2026-06-08) — verifiable canonical hash | `PLAN.md`, `DECISIONS.md`, `STATUS.md` |
+| `feature-multi-episode/` | PR #21 (2026-06-10) — multi_ep_alias | `PLAN.md`, `DECISIONS.md` |
+| `feature-fix-episode-title-parse/` | PR #19 (2026-06-05) — dotted-title parsing | `PLAN.md`, `DECISIONS.md` |
+| `imp-r2-recover-cli/` | PR #18 (2026-06-03) — recover CLI | `PLAN.md`, `DECISIONS.md` |
+| `feature-video-dummy/` | PRs #1/#3 (2026-05-28) — real video dummies | `PLAN.md`/`planv2.md`, `DECISION.md`, dummy-size test scripts |
+| `feature-adb-device-select/` | PR #2 (2026-05-28) — device pinning | `PLAN.md`, `STATUS.md` |
+| `feature-fable-review/` | THIS review session | see §3 |
+
+## 6. Agent-pipeline docs (`.claude/`)
+
+`agents/*.md` (8 agent definitions: planner, orchestrator, executors ×3, git-agent, judge,
+architect) · `AGENT_WORKFLOW_NOTES.md` (Opus 4.8 effort-tier migration record, top-level
+orchestration decision) · see also `ARCHITECTURE.md` §19 and the public portable version at
+`harinathsrinivas/claude-agent-pipeline`.
+
+## 7. Maintenance rules for this index
+
+- New doc → add a row here in the same commit.
+- Superseding a doc → banner the old one (see `apple_tv_ui_roadmap.md` for the pattern) AND update
+  its row here.
+- Feature merged → its `docs/<feature>/` folder gets a row in §5 with PR number + date.

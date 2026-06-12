@@ -114,7 +114,10 @@ cd MediaVault
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-pip install requests   # missing from requirements.txt — required by main.py
+pip install requests webdriver-manager   # both missing from requirements.txt —
+                                         # requests is required by main.py,
+                                         # webdriver-manager by mainfetch.py
+pip install -r requirements-dev.txt      # pytest (only needed to run the test suite)
 ```
 
 ## Usage / CLI reference
@@ -122,31 +125,31 @@ pip install requests   # missing from requirements.txt — required by main.py
 All operations are invoked as `python main.py <subcommand> ...`. There is no
 help text and no `--help` flag; this table is the reference.
 
-| Subcommand | Signature | Description |
-|---|---|---|
-| `prep` | `prep [id] [filepath]` | Index a new local file, compute SHA256, write sidecars |
-| `prep_season` | `prep_season [base_id] [folder]` | Batch-prep an entire season folder |
-| `prep_push_rep` | `prep_push_rep [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>]` | Full pipeline (prep -> push -> replace) for one file |
-| `prep_push_rep_season` | `prep_push_rep_season [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>]` | Sequential full pipeline for a whole season |
-| `push` | `push [id] [SIZE_MB/SIZE_GB/COUNT val] [chunks 1-4] [device <id_or_name>] [rehash] [tempdir <path>]` | Split and ADB-push to phone (`rehash` = eager canonical re-hash; `tempdir` = off-volume chunks) |
-| `push_group` | `push_group [id] [SIZE_..] [episodes 1-3] [device <id_or_name>] [rehash] [tempdir <path>]` | Push a season group |
-| `replace` | `replace [id]` | Swap original with a tiny valid video file placeholder (requires ffmpeg) |
-| `replace_group` | `replace_group [id]` | Replace a season group |
-| `repair_dummies` | `repair_dummies [id_prefix]` | Regenerate any archived-entry dummy on disk to the current 10 KB video spec (idempotent — re-runs are safe) |
-| `fetch` | `fetch [id] [episodes <range>]` | Selenium-download from Google Photos |
-| `fetch_restore` | `fetch_restore [id] [episodes <range>]` | Fetch then restore in one command |
-| `restore` | `restore [id]` | Re-merge chunks, verify SHA256, place file back |
-| `restore_group` | `restore_group [id]` | Restore a season group |
-| `verify_restore` | `verify_restore [id]` | Dry-run hash check of restore/ folder contents |
-| `check` | `check [id]` | Re-hash file in place and compare to library |
-| `scan_unprepped` | `scan_unprepped` | Find video files on disk not yet in any library |
-| `local_status` | `local_status [limit_size]` | Show pending uploads with optional bin-packing |
-| `set_search` | `set_search [id] [term]` | Override the Google Photos search term |
-| `set_poster` | `set_poster [id] [url]` | Download and save poster.jpg into the media folder |
-| `set_fanart` | `set_fanart [id] [url]` | Download and save fanart.jpg into the media folder |
-| `set_uploaded` | `set_uploaded [id]` | Force-mark as uploaded (emergency rescue) |
-| `sort` | `sort` | Re-sort all library JSONs by language -> year -> size |
-| `recover` | `recover [id\|folder]` (or `recover --scan`) | Finish an interrupted auto-rollback for a media folder (resolves by id or path); `--scan` reports leftover `.mediavault_txn.json` journals (read-only) |
+| Subcommand             | Signature                                                                                                                           | Description                                                                                                                                            |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `prep`                 | `prep [id] [filepath]`                                                                                                              | Index a new local file, compute SHA256, write sidecars                                                                                                 |
+| `prep_season`          | `prep_season [base_id] [folder]`                                                                                                    | Batch-prep an entire season folder                                                                                                                     |
+| `prep_push_rep`        | `prep_push_rep [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>]`                         | Full pipeline (prep -> push -> replace) for one file                                                                                                   |
+| `prep_push_rep_season` | `prep_push_rep_season [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>]` | Sequential full pipeline for a whole season                                                                                                            |
+| `push`                 | `push [id] [SIZE_MB/SIZE_GB/COUNT val] [chunks 1-4] [device <id_or_name>] [rehash] [tempdir <path>]`                                | Split and ADB-push to phone (`rehash` = eager canonical re-hash; `tempdir` = off-volume chunks)                                                        |
+| `push_group`           | `push_group [id] [SIZE_..] [episodes 1-3] [device <id_or_name>] [rehash] [tempdir <path>]`                                          | Push a season group                                                                                                                                    |
+| `replace`              | `replace [id]`                                                                                                                      | Swap original with a tiny valid video file placeholder (requires ffmpeg)                                                                               |
+| `replace_group`        | `replace_group [id]`                                                                                                                | Replace a season group                                                                                                                                 |
+| `repair_dummies`       | `repair_dummies [id_prefix]`                                                                                                        | Regenerate any archived-entry dummy on disk to the current 10 KB video spec (idempotent — re-runs are safe)                                            |
+| `fetch`                | `fetch [id] [episodes <range>]`                                                                                                     | Selenium-download from Google Photos                                                                                                                   |
+| `fetch_restore`        | `fetch_restore [id] [episodes <range>]`                                                                                             | Fetch then restore in one command                                                                                                                      |
+| `restore`              | `restore [id]`                                                                                                                      | Re-merge chunks, verify SHA256, place file back                                                                                                        |
+| `restore_group`        | `restore_group [id]`                                                                                                                | Restore a season group                                                                                                                                 |
+| `verify_restore`       | `verify_restore [id]`                                                                                                               | Dry-run hash check of restore/ folder contents                                                                                                         |
+| `check`                | `check [id]`                                                                                                                        | Re-hash file in place and compare to library                                                                                                           |
+| `scan_unprepped`       | `scan_unprepped`                                                                                                                    | Find video files on disk not yet in any library                                                                                                        |
+| `local_status`         | `local_status [limit_size]`                                                                                                         | Show pending uploads with optional bin-packing                                                                                                         |
+| `set_search`           | `set_search [id] [term]`                                                                                                            | Override the Google Photos search term                                                                                                                 |
+| `set_poster`           | `set_poster [id] [url]`                                                                                                             | Download and save poster.jpg into the media folder                                                                                                     |
+| `set_fanart`           | `set_fanart [id] [url]`                                                                                                             | Download and save fanart.jpg into the media folder                                                                                                     |
+| `set_uploaded`         | `set_uploaded [id]`                                                                                                                 | Force-mark as uploaded (emergency rescue)                                                                                                              |
+| `sort`                 | `sort`                                                                                                                              | Re-sort all library JSONs by language -> year -> size                                                                                                  |
+| `recover`              | `recover [id\|folder]` (or `recover --scan`)                                                                                        | Finish an interrupted auto-rollback for a media folder (resolves by id or path); `--scan` reports leftover `.mediavault_txn.json` journals (read-only) |
 
 The Selenium fetcher can also be invoked directly:
 
@@ -201,19 +204,33 @@ trailing episode segment.
 
 ```
 MediaVault/
-├── main.py              # Active — main CLI (prep/push/replace/restore/fetch/sort/...)
-├── mainfetch.py         # Active — Selenium fetch from Google Photos
-├── mvcommon.py          # Active — shared library I/O + hashing constants/helpers (imported by both)
-├── requirements.txt     # pymediainfo, selenium, undetected-chromedriver
-├── ARCHITECTURE.md      # Full engineering reference
-├── README.md            # This file
+├── main.py                  # Active — main CLI (prep/push/replace/restore/fetch/sort/recover/...)
+├── mainfetch.py             # Active — Selenium fetch from Google Photos
+├── mvcommon.py              # Active — shared library I/O + hashing constants/helpers (imported by both)
+├── requirements.txt         # pymediainfo, selenium, undetected-chromedriver (see install note above)
+├── requirements-dev.txt     # pytest
+├── ARCHITECTURE.md          # Full engineering reference
+├── ARCHITECTURE_GRAPH.md    # Graph views (Mermaid) of the architecture
+├── README.md                # This file
+├── apple_tv_ui_roadmap.md   # 2026-05 Jellyfin UI design (superseded — see improvements/ROADMAP_END_GOAL.md)
+├── improvements/            # The backlog + direction "brain" — start at improvements/README.md
+│   ├── README.md            #   index of this folder
+│   ├── PRIORITY.md          #   always-current task ordering ("what to do next"; critical bugs first)
+│   ├── improvement_details.md  #   IMP-XN operating manual
+│   ├── improvements_tier*.md   #   tracked improvement tasks (tiers A–H, R, S, U, X)
+│   ├── ROADMAP_END_GOAL.md  #   the phased couch-vault roadmap
+│   └── RESEARCH_*.md, JELLYFIN_SETUP_GUIDE.md, BLOCKERS_AND_MOONSHOTS.md  # durable research/direction
+├── docs/                    # Per-feature plans/decisions, conventions, testing strategy, graphs
+│   └── README.md            # Master index of all documentation
+├── tests/                   # pytest suite (rollback, push, replace, restore, rehash, parsing, recover, ...)
 ├── tools/
-│   └── migrate_lib.py   # One-shot helper: library.json → three category files
-└── archive/             # Historical snapshots — NOT used at runtime
-    ├── main/            # Older versions of main.py
-    ├── mainfetch/       # Older versions of mainfetch.py
-    ├── legacy/          # index_file.py and media_library.json (pre-dates current design)
-    └── transcripts/     # Session transcript artifacts
+│   ├── migrate_lib.py       # One-shot: library.json → three category files
+│   └── migrate_rehash_flag.py  # One-shot (PR #20): stamp re_hashed=false on split entries
+└── archive/                 # Historical snapshots — NOT used at runtime
+    ├── main/                # Older versions of main.py
+    ├── mainfetch/           # Older versions of mainfetch.py
+    ├── legacy/              # index_file.py and media_library.json (pre-dates current design)
+    └── transcripts/         # Session transcript artifacts
 ```
 
 The three live library JSON files (`library_movies.json`, `library_series.json`,
@@ -240,7 +257,14 @@ any of them. To re-target the system, edit the constants directly.
 
 For the full engineering reference including data model, state machine,
 balanced-split algorithm, and Selenium harvester design, see
-[`ARCHITECTURE.md`](ARCHITECTURE.md).
+[`ARCHITECTURE.md`](ARCHITECTURE.md) — graph views in
+[`ARCHITECTURE_GRAPH.md`](ARCHITECTURE_GRAPH.md) and an interactive version at
+`docs/architecture-graph/graph.html`. **The master index of ALL documentation
+is [`docs/README.md`](docs/README.md).** The backlog, priority list, and the
+forward roadmap (couch-vault / Jellyfin end goal) live in
+[`improvements/`](improvements/) — start at
+[`improvements/README.md`](improvements/README.md), roadmap at
+[`improvements/ROADMAP_END_GOAL.md`](improvements/ROADMAP_END_GOAL.md).
 
 ## Development / agentic workflow
 
@@ -258,11 +282,13 @@ for the migration record, and `improvements_tierH.md` for the tracked task.
 - Solo-developer project, actively used in production by the author.
 - Windows 10/11 only — paths, ADB, and Chrome integration are hardcoded for
   Windows. There is no plan to port to macOS or Linux.
-- Automated tests cover only the auto-rollback feature so far (the first
-  `pytest` suite, under `tests/`, added by PR #14). The rest of the project is
-  "tested by use"; the legacy snapshots under `archive/` serve as informal
-  regression baselines that can be diffed against the active files when something
-  breaks.
+- Automated tests (13 files under `tests/`, run with `pytest -q`) cover the
+  auto-rollback matrix, push (`.partial`+mv protocol, retry, remote verify,
+  mock-device round-trip), replace, restore quarantine, the deterministic
+  re-hash feature, episode parsing (incl. combined episodes), the `recover`
+  CLI, and the shared helpers. See `docs/testing-strategy.md`. Everything
+  else — notably the live Selenium fetch — is "tested by use"; the legacy
+  snapshots under `archive/` serve as informal regression baselines.
 - The `undetected-chromedriver` package is listed in `requirements.txt` but
   not imported anywhere; `requests` is imported by `main.py` but not listed
   in `requirements.txt`. Both are known issues documented in

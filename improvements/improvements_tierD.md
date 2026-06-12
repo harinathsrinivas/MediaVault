@@ -1,12 +1,14 @@
 # Improvements — Tier D · New CLI Commands
 
-> Commands you'd type. Most are 30-80 lines of Python and lean heavily on Tier A foundations (argparse, mvcommon, --json). Several are precursors to the future Apple TV UI ([[project_future_apple_tv_ui]]).
+> Commands you'd type. Most are 30-80 lines of Python and lean heavily on Tier A foundations (argparse, mvcommon, --json). Several are precursors to the couch/Apple-TV experience ([[project_future_apple_tv_ui]], Tier S/U, `ROADMAP_END_GOAL.md`).
 
 > **Cross-cutting context:**
 > - Library scale today: 102 movies, 290 series episodes + 28 season_maps, 140 anime episodes + 5 season_maps. State distribution: 412 archived, 120 local_ready.
 > - User's manual ID composition is error-prone — `usage_commands.txt` shows typos like `tv-en-strangerthings-s01` (missing year segment), `tv-en-2016-mrrobot-s02` pointing to S04 folder, `mov-en-20013-conjuring` (5-digit year).
 > - The legacy `media_library.json` under `archive/legacy/` is unused; do not confuse with the live three.
-> - Most of these commands consume but do not mutate library state. The few that mutate (`repair_library`, `relocate`, `rebuild_search_terms`) must follow the atomic-save pattern from `save_library`.
+> - Most of these commands consume but do not mutate library state. The few that mutate (`repair_library`, `relocate`, `rebuild_search_terms`) must follow the atomic-save pattern from `save_library` and SHOULD reuse the `RollbackJournal` for their mutations.
+> - **Any new whole-library iterator must skip/resolve `multi_ep_alias` entries** (the IMP-C12 lesson — scan_unprepped and local_status both crashed on this).
+> - **Attribute key (added 2026-06-12):** `Risk` = blast radius of MAKING the change. `If skipped` = the failure/limitation that persists, with a scenario.
 
 ---
 
@@ -15,7 +17,7 @@
 - Category: other
 - Priority: high
 - Files: new `cmd_library_stats` in `main.py`; new subcommand under argparse (IMP-A2)
-- Current behavior: There is no single-command view of the library's state. The closest is `local_status` (1071-1152), which only shows pending uploads. The user has to mentally compose answers like "how many GB are in the cloud?" from multiple commands.
+- Current behavior: There is no single-command view of the library's state. The closest is `local_status`, which only shows pending uploads. The user has to mentally compose answers like "how many GB are in the cloud?" from multiple commands.
 - Proposed change:
   - New `python main.py library_stats` prints a single-screen dashboard:
     - Per-library totals (count, total cloud bytes, total local bytes, count by status).
@@ -24,11 +26,14 @@
     - Top 5 oldest local_ready items (by `metadata.added_date`) — these are stale backlog candidates.
     - Total chunks pushed across all entries with `split_info`.
     - Last activity timestamp from the log (after IMP-A3).
+  - Skip `season_map` AND `multi_ep_alias` entries in all aggregations (C12 lesson).
   - `--json` mode returns the same data as a structured object for UI consumption.
   - Optional `--per-year`, `--per-language` breakdowns.
-- Rationale: Operational visibility. Today the user has no concise way to know "is my archive 1 TB or 5 TB". This is also the first command a UI (IMP-E12, future Apple TV) will need.
+- Rationale: Operational visibility. Today the user has no concise way to know "is my archive 1 TB or 5 TB". This is also the first command a UI (IMP-E12, Tier S daemon status page, future Apple TV) will need.
 - Goal: At-a-glance view of the entire archive state in <2 seconds.
 - Effort estimate: small
+- Risk: low — new read-only command; no existing path changes.
+- If skipped: no breakage — but capacity questions ("how much would a second cloud account need to hold?", "what's my local-disk exposure?") keep requiring ad-hoc JSON spelunking, and the daemon's status surface has nothing to serve.
 - Status: pending
 
 ---
@@ -46,12 +51,15 @@
     - `entry.metadata.title`
     - Optional: the folder name component of `folder_path`
   - Returns top 10 matches, each line: `<status_emoji> <id>  <filename> (<size>, <year>)`.
+  - Resolve `multi_ep_alias` hits to their primary (show both ids: `…s04e20 → …s04e19`).
   - Optional `--library movies|series|anime` to scope.
   - Optional `--regex` for power users.
   - `--json` output.
 - Rationale: Speeds up every interactive session. Eliminates "what was that movie called again" friction.
 - Goal: Find any ID in <3 keystrokes of recall. Reduces typo-driven re-prep.
 - Effort estimate: small
+- Risk: low — read-only.
+- If skipped: ID recall friction persists; every mistyped id costs a "❌ ID not found" round-trip (or worse, a near-miss id that silently targets the wrong entry).
 - Status: pending
 
 ---
@@ -64,18 +72,21 @@
 - Current behavior: To diagnose an entry the user must mentally combine: read the JSON for the entry, check disk for original/dummy, check `_parts/` for chunks, check `checksums/` for sidecars, check `restore/` for fetched chunks, check ADB for the remote files. There is no command that does this in one call.
 - Proposed change:
   - New `python main.py where_is <id>` prints:
-    - Library entry summary (status, uploaded, parent_id, chunks count)
+    - Library entry summary (status, uploaded, parent_id, chunks count, re_hashed/canonical state)
     - Local: existence and size of `folder_path/filename` (and whether it's a dummy or real file)
     - Local: existence of `folder_path/_parts/`, list of files within (with hashes vs split_info)
     - Local: existence of `folder_path/checksums/`, list of sidecars
-    - Local: existence of `folder_path/restore/`, list of files within (and hash-routing match)
+    - Local: existence of `folder_path/restore/` (+ `quarantine/`), list of files within (and hash-routing match)
+    - Local: leftover `.mediavault_txn.json` journal (pre/post PONR state)
     - Sidecars: `uid` and `<short_id>.sha256` presence
-    - Remote: `adb shell ls /sdcard/Media/<rel_path>/` listing
+    - Remote: `adb shell ls /sdcard/Media/<rel_path>/` listing (incl. `.mvmeta.json` sidecar)
     - Cloud: optional — search Google Photos for the short_id (slow; gated behind `--check-cloud`)
   - `--json` output.
-- Rationale: Diagnostic clarity. When something goes wrong, this command tells you EVERYTHING about an entry's current state in one shot.
+- Rationale: Diagnostic clarity. When something goes wrong, this command tells you EVERYTHING about an entry's current state in one shot. The daemon's "why is this tile stuck?" debugging tool.
 - Goal: Replace "five separate commands and a mental model" with one truth-revealing call.
 - Effort estimate: medium
+- Risk: low — read-only (ADB `ls` only).
+- If skipped: every stuck-state investigation stays a multi-command archaeology session; with a daemon adding background mutations, ad-hoc diagnosis gets harder, not easier.
 - Status: pending
 
 ---
@@ -90,19 +101,23 @@
   - New `python main.py verify_library` performs read-only checks across all three libraries:
     1. **Orphan children**: any leaf with `parent_id` not present in the library.
     2. **Stale season_maps**: any `season_map` whose `total_episodes` ≠ `len(children)`, or whose `children[]` references missing leaf IDs.
-    3. **ID-format violations**: regex-mismatches against the canonical conventions (mov-/tv-/ani- prefix, 2-3 char lang code, 4-digit year, sNNeMM where applicable). Whitelist known non-canonical shapes (Chernobyl, Kuroko).
-    4. **Metadata.year = None**: detect 5-digit-year typos like `mov-en-20013-conjuring`.
-    5. **tech_spec=error**: entries where MediaInfo parsing failed.
-    6. **Hash duplicates**: any SHA256 appearing on two leaves (would confuse fetch routing).
-    7. **Chunk hash duplicates within a single entry's split_info**.
-    8. **Folder paths that no longer exist** on disk.
-    9. **Status drift**: entries with `status=archived` but no dummy file on disk; entries with a dummy file but `status≠archived`.
-    10. **Dangling _parts**: `_parts/` folders sitting on disk for entries that show `uploaded=True`.
+    3. **Alias integrity (new, post-PR #21)**: every `multi_ep_alias.alias_of` resolves to an existing LEAF (not another alias); every alias appears in its parent's `children`; no leaf was overwritten onto a former alias id.
+    4. **ID-format violations**: regex-mismatches against the canonical conventions (mov-/tv-/ani- prefix, 2-3 char lang code, 4-digit year, sNNeMM where applicable). Whitelist known non-canonical shapes (Chernobyl, Kuroko).
+    5. **Metadata.year = None**: detect 5-digit-year typos like `mov-en-20013-conjuring`.
+    6. **tech_spec=error**: entries where MediaInfo parsing failed.
+    7. **Hash duplicates**: any SHA256 appearing on two leaves (would confuse fetch routing).
+    8. **Chunk hash duplicates within a single entry's split_info**.
+    9. **Folder paths that no longer exist** on disk.
+    10. **Status drift**: entries with `status=archived` but no dummy file on disk; entries with a dummy file but `status≠archived`.
+    11. **Dangling _parts**: `_parts/` folders sitting on disk for entries that show `uploaded=True`.
+    12. **Split-hash state sanity**: `re_hashed=true` entries missing `merge_seed`, or a transient `canonical_hash` surviving past replace.
   - Each check prints a count and an example. Exit code 0 if all clean, non-zero otherwise.
   - `--json` mode emits a structured report.
-- Rationale: Aindham Vedham proved that integrity drift can hide for months. A periodic audit catches new cases within one run.
-- Goal: Recurring confidence that the library is internally consistent. CI-able if the user ever adopts CI.
+- Rationale: Aindham Vedham proved that integrity drift can hide for months. A periodic audit catches new cases within one run — and the daemon should run it nightly.
+- Goal: Recurring confidence that the library is internally consistent. CI-able (IMP-A12) and daemon-schedulable.
 - Effort estimate: medium
+- Risk: low — strictly read-only.
+- If skipped: integrity drift keeps being discovered by accident (the orphan sat invisible for months); the daemon would happily automate fetch/archive cycles on top of silently inconsistent state, amplifying any drift.
 - Status: pending
 
 ---
@@ -119,13 +134,17 @@
   - Repairable categories:
     - **Orphan parents**: rebuild the `season_map` from the children's `parent_id` and shared `folder_path`.
     - **Stale season_maps**: recompute `total_episodes` and re-sort `children`.
+    - **Broken aliases**: re-point `alias_of` when the primary was renamed, or remove an alias whose primary is gone (with confirmation).
     - **Status drift (status=archived, no dummy)**: prompt for user input (file is missing entirely vs needs `replace` re-run vs library is wrong).
     - **Dangling _parts**: remove the directory IF the entry is `uploaded=True` and chunks are confirmed on the remote.
   - NEVER deletes leaf entries automatically — only creates/updates skeletal rows.
+  - Wrap `--apply` mutations in a `RollbackJournal` (the existing record vocabulary covers create_entry/set_field/link_child).
   - Each repair logged via IMP-A3 logging.
 - Rationale: Pairs with IMP-D4. Audit + fix is one mental loop; users won't run audit if there's no fix-it button.
 - Goal: One-shot recovery from common integrity drift, with explicit user consent.
 - Effort estimate: medium
+- Risk: medium — mutates library state by design; dry-run default + journal + never-delete-leaves rule contain it. Reuses (not modifies) the rollback journal, so no change-gate trigger — but say so explicitly in the PR.
+- If skipped: every future integrity finding means another hand-edited-JSON session (the 2026-05-25 method) — error-prone exactly when the library is already inconsistent.
 - Status: pending
 
 ---
@@ -137,7 +156,7 @@
 - Files: new `cmd_prune_dummies` in `main.py`
 - Current behavior: There is no inventory of dummy files. If `cmd_replace` partially fails or a library entry gets corrupted, dummy files can be sitting around for entries that don't reflect them as archived.
 - Proposed change:
-  - New `python main.py prune_dummies` walks `C:\Media\{Movies,Series,Anime}` for files <1024 bytes.
+  - New `python main.py prune_dummies` walks `C:\Media\{Movies,Series,Anime}` for files under `DUMMY_MAX_BYTES` (200 KB — the modern video dummies are ~10 KB, not the old <1 KB text blobs).
   - For each dummy: look up by folder_path+filename in the library.
     - If entry exists AND `status=archived`: OK (normal state).
     - If entry exists AND `status≠archived`: orphan dummy — entry says local file exists but disk says dummy. Print warning.
@@ -146,6 +165,8 @@
 - Rationale: Defensive sweep. Catches the rare partial-replace or library-corruption case.
 - Goal: Surface dummies that disagree with library state. Optional cleanup of true orphans.
 - Effort estimate: small
+- Risk: low read-only; `--delete-orphans` is destructive — require an explicit confirmation listing each file before deleting.
+- If skipped: rare-path inconsistencies (dummy ↔ status disagreements) stay invisible until a fetch/restore trips over them.
 - Status: pending
 
 ---
@@ -154,14 +175,16 @@
 
 - Category: other
 - Priority: low
-- Files: `main.py` argparse dispatch
-- Current behavior: `cmd_fetch_restore` exists (1360-1384) as the combined fetch+restore. Its name describes the pipeline steps but not the user intent. The user's mental model is "I want to UNARCHIVE this" — restore from the cloud.
+- Files: `main.py` dispatch (argparse after IMP-A2, or the manual chain today)
+- Current behavior: `cmd_fetch_restore` exists as the combined fetch+restore. Its name describes the pipeline steps but not the user intent. The user's mental model is "I want to UNARCHIVE this" — restore from the cloud.
 - Proposed change:
-  - Add `unarchive` as an alias for `fetch_restore` in the argparse subparser (IMP-A2).
+  - Add `unarchive` as an alias for `fetch_restore` in the dispatcher.
   - Both names work; documentation prefers `unarchive`.
 - Rationale: Mental-model alignment. A user thinks "this is archived, I want to unarchive it" — that's the verb. `fetch_restore` describes the implementation.
 - Goal: More discoverable command name; zero behaviour change.
 - Effort estimate: small
+- Risk: low — pure alias.
+- If skipped: cosmetic only.
 - Status: pending
 
 ---
@@ -177,13 +200,15 @@
   - Steps:
     1. Verify the new folder exists and contains the expected files.
     2. Move sidecar files if they're at the source.
-    3. Update `entry.folder_path` (and all children if it's a season_map).
+    3. Update `entry.folder_path` (and all children if it's a season_map; aliases carry no folder_path — skip them).
     4. Save atomically.
   - Optional `--also-move-files` to actually move the files (uses `shutil.move`, handles cross-drive).
   - Dry-run by default.
 - Rationale: A real workflow gap. Cross-drive moves are common when libraries grow. Hand-editing JSON is risky.
 - Goal: Safe, atomic relocation of media files with library bookkeeping.
 - Effort estimate: medium
+- Risk: medium — `folder_path` is load-bearing EVERYWHERE (sidecars, `_parts/`, `restore/`, the rollback journal location, remote-path derivation `os.path.relpath(folder, LOCAL_ROOT)`). A relocate to a different drive changes the REMOTE target dir for future pushes (cross-drive fallback path) — document that consequence in the command output. Refuse to relocate while a `.mediavault_txn.json` journal or `_parts/` exists in the source folder.
+- If skipped: drive-pressure reorganizations keep requiring hand-edited JSON across N entries + manual sidecar moves — the exact conditions that created historical integrity drift.
 - Status: pending
 
 ---
@@ -193,7 +218,7 @@
 - Category: other
 - Priority: low
 - Files: new `cmd_rebuild_search_terms` in `main.py`
-- Current behavior: `cmd_prep` writes the `search_term` once at prep time (line 360) as `<filename_base> [<short_id>]<ext>`. If a user renames a file later or the `cmd_prep` formula ever changes, existing entries' search_terms become stale.
+- Current behavior: `cmd_prep` writes the `search_term` once at prep time as `<filename_base> [<short_id>]<ext>`. If a user renames a file later or the `cmd_prep` formula ever changes, existing entries' search_terms become stale.
 - Proposed change:
   - New `python main.py rebuild_search_terms [--id <id>] [--all] [--library movies|series|anime]`.
   - For each target entry, recompute `search_term = f"{filename_base} [{short_id}]{ext}"` from the CURRENT `entry.filename`.
@@ -201,6 +226,8 @@
 - Rationale: Bulk fix after filename changes or formula tweaks. Matches the spirit of `cmd_set_search` but at scale.
 - Goal: One command to bring all `search_term` fields back into formula consistency.
 - Effort estimate: small
+- Risk: medium-for-a-small-command — the search_term must match the name that was UPLOADED, not the current local name. A local rename AFTER upload means the rebuilt term would point at a nonexistent remote name and silently break fetch for that entry. The command must warn when `uploaded=True` (the remote name is frozen at push time) and only auto-apply for `local_ready` entries.
+- If skipped: stale search terms surface as mysterious fetch misses; today fixed one-at-a-time via `set_search`.
 - Status: pending
 
 ---
@@ -224,6 +251,8 @@
 - Rationale: The TYPO ROOT CAUSE. Removes hand-composition for the easy 80% of cases. Even partial automation (proposing the ID and letting the user accept) eliminates most typos.
 - Goal: 80% of prepping is one Y/N keystroke instead of typing a long ID.
 - Effort estimate: medium (heavier with TMDB integration; lighter without)
+- Risk: low-medium — wraps existing `cmd_prep`/`cmd_prep_season` (journaled); the only new failure mode is proposing a WRONG id that the user rubber-stamps — mitigate with the TMDB confirmation step and a loud diff vs the canonical pattern.
+- If skipped: ID typos keep entering the library at hand-typing rates; each one is a future "why doesn't sort/fetch find this" mystery (the 20013 typo still sits at the bottom of every sorted listing).
 - Status: pending
 
 ---
@@ -232,18 +261,20 @@
 
 - Category: other
 - Priority: medium
-- Files: `main.py` — `cmd_local_status` (1071-1152, already does selection) extended; or new `cmd_push_auto_batch`
+- Files: `main.py` — `cmd_local_status` (already does selection) extended; or new `cmd_push_auto_batch`
 - Current behavior: `local_status 40gb` selects items that fit in 40 GB and prints suggested `python main.py push <id>` lines. The user then copy-pastes them one by one.
 - Proposed change:
   - New `python main.py push_auto_batch 40gb` (or `local_status 40gb --execute`):
     - Runs the existing greedy bin-packing selection.
     - Prompts: "Push these N items (~M GB)? [y/N]".
-    - On confirmation, sequentially pushes each. Uses progress.json (IMP-C1) to allow resume on failure.
+    - On confirmation, sequentially pushes each. Uses progress tracking (IMP-C1 pattern) to allow resume on failure.
     - On any failure, stops with clear message (or `--keep-going` to continue past failures).
-  - Default split params from config (IMP-A5).
+  - Default split params from config (IMP-A5); `device <alias>` forwarding.
 - Rationale: Closes the copy-paste loop. Today the user does the human-in-the-loop part for no real reason; just having the script accept "yes go" saves keystrokes.
 - Goal: Push the next 40 GB batch with one command + one keystroke.
 - Effort estimate: small
+- Risk: low-medium — orchestrates existing journaled `cmd_push` calls only; per-item failure semantics are already O-1 resumable. The batch loop itself must not invent new cleanup behavior (stay out of the change-gate).
+- If skipped: Pixel-batch loading stays a copy-paste ritual; the daemon's "keep the upload pipeline fed" loop (Tier S) has no command to drive.
 - Status: pending
 
 ---
@@ -253,17 +284,19 @@
 - Category: other
 - Priority: low
 - Files: new `cmd_seal` in `main.py`
-- Current behavior: For high-value items the user might want maximum verification before `replace` (which destroys the original). Today this means running `check`, then `set_uploaded` (if needed), then `replace` — three commands.
+- Current behavior: For high-value items the user might want maximum verification before `replace` (which destroys the original). Today this means running `check`, then remote verification by hand, then `replace` — three commands.
 - Proposed change:
   - New `python main.py seal <id>` macro:
     1. Run `check` (re-hash local file vs library).
-    2. Run remote verification via ADB (`adb shell md5sum` of expected chunks).
+    2. Run remote verification via ADB (`adb shell sha256sum` of expected chunks — the C8 helper).
     3. Compare local + remote + library hashes for full agreement.
     4. Only if all agree, run `replace`.
   - Aborts loudly on any disagreement.
 - Rationale: For users who archive irreplaceable content. A "belt + suspenders + parachute" command for high-anxiety operations.
 - Goal: Maximum verification before irreversible destruction.
 - Effort estimate: small
+- Risk: low — composes existing commands; the destructive step remains `cmd_replace` with its existing PONR/journal semantics untouched.
+- If skipped: paranoid verification stays a manual 3-command ritual, so in practice it doesn't happen — `replace` keeps trusting the upload-confirmation flag alone.
 - Status: pending
 
 ---
@@ -277,13 +310,15 @@
 - Proposed change:
   - New `python main.py compare <id>` runs a paranoid cross-check across all hash sources:
     - Local file (if not dummy) → SHA256
-    - Library `entry.hash`
-    - Sidecar `<short_id>.sha256` file content
+    - Library `entry.hash` (canonical merged hash if `re_hashed` — label it as such)
+    - Sidecar `<short_id>.sha256` file content (note: for split entries this still holds the ORIGINAL pre-split hash, which legitimately differs from a blessed canonical — the report must explain, not alarm)
     - For each chunk in `entry.split_info.chunks`: hash vs `checksums/<chunk>.sha256` vs actual chunk file (in `_parts/` or `restore/` if present).
-  - Reports any disagreement.
-- Rationale: Maximum confidence diagnostic. Useful before/after risky operations (relocate, hand-edited JSON, etc.).
+  - Reports any disagreement with a verdict line per source.
+- Rationale: Maximum confidence diagnostic. Useful before/after risky operations (relocate, hand-edited JSON, etc.). The original-vs-canonical distinction (PR #20) makes a tool that EXPLAINS hash provenance genuinely valuable.
 - Goal: Pinpoint EXACTLY which hash source disagrees when something looks off.
 - Effort estimate: small
+- Risk: low — read-only.
+- If skipped: hash-provenance confusion (original vs canonical vs chunk) gets debugged by hand each time; the split-hash feature made this MORE likely to come up, not less.
 - Status: pending
 
 ---
@@ -302,6 +337,8 @@
 - Rationale: With IMP-A3 in place, a log file exists. This command makes it usable.
 - Goal: Cheap, ergonomic monitoring of a long-running batch from another shell.
 - Effort estimate: small
+- Risk: low — read-only over log files.
+- If skipped: long-batch monitoring stays "watch the original console or nothing"; superseded longer-term by the daemon's status API (Tier S), so deprioritize if S lands first.
 - Status: pending
 
 ---
@@ -318,4 +355,6 @@
 - Rationale: Bidirectional integration with external tracking services. Long-tail utility.
 - Goal: Connect the archive to existing personal tracking habits.
 - Effort estimate: medium
+- Risk: low — export read-only; import only SUGGESTS ids (never preps automatically).
+- If skipped: nothing operational; external-tracker users keep manual lists. (Jellyfin+Trakt plugin covers much of the watch-state half once Tier S lands.)
 - Status: pending

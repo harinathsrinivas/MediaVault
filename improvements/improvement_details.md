@@ -30,9 +30,42 @@ On 2026-05-25, a deep audit of `main.py`, `mainfetch.py`, `ARCHITECTURE.md`, the
 >
 > | File | Items | Theme | Avg Effort |
 > |---|---:|---|---|
-> | `improvements_tierR.md` | R1–R5 (5) | Auto-rollback hardening & storage efficiency | medium–large |
+> | `improvements_tierR.md` | R1–R9 (9) | Auto-rollback hardening & storage efficiency | small–large |
 >
-> Tier R holds forward-looking work that builds on the merged auto-rollback feature (see `docs/feature-auto-rollback/ROLLBACK_MECHANISM.md`) — e.g. **IMP-R1** (cut the ~40 GB split/upload disk peak via streaming split-upload-delete) and exposing a `recover` CLI command for `recover_journal()`. All `pending`; enrich as ideas arise. **Any change that alters rollback behavior is change-gated — see `CLAUDE.md`.**
+> Tier R holds forward-looking work that builds on the merged auto-rollback feature (see `docs/feature-auto-rollback/ROLLBACK_MECHANISM.md`) — e.g. **IMP-R1** (cut the ~40 GB split/upload disk peak via streaming split-upload-delete). **IMP-R2** (the `recover` CLI) is `done` (PR #18). R6–R9 were added by the 2026-06-12 review as **gate-flagged decision requests** (merge-failure dummy loss, journal clobber on re-run, unjournalled eager temp, alias block outside journal). **Any change that alters rollback behavior is change-gated — see `CLAUDE.md`.**
+
+> **Added 2026-06-12 — Tiers S & U (the couch-vault end goal), by the fable-review session:**
+>
+> | File | Items | Theme | Avg Effort |
+> |---|---:|---|---|
+> | `improvements_tierS.md` | S1–S8 (8) | Streaming & media-server integration (Jellyfin daemon, in-client fetch/notify/archive flows, fetch hardening, watch-while-fetching) | medium–large |
+> | `improvements_tierU.md` | U1–U5 (5) | Couch UX & clients (enrichment-before-archive, status rows, NFO/artwork, DV-FEL paths, eventual C# plugin) | small–large |
+>
+> These two tiers implement the end goal: browse the vault from Apple TV / the Ugoos projector via **Jellyfin**, select → background fetch → in-client "ready" notify → watch → in-client-governed auto-archive. The **master phasing lives in [`ROADMAP_END_GOAL.md`](ROADMAP_END_GOAL.md)**; research grounding in `../docs/feature-fable-review/RESEARCH_*.md`. Locked session decisions: Jellyfin-first (Emby lifetime = fallback, Plex = do-not-buy at $749), in-client-only interaction, 4× Pixel unlimited-upload path untouchable.
+
+> **Added 2026-06-12 — Tier X (cloud resilience & privacy), fable-review follow-up:**
+>
+> | File | Items | Theme | Avg Effort |
+> |---|---:|---|---|
+> | `improvements_tierX.md` | X1–X5 (5) | Multi-account redundancy + encrypted/anti-scanning upload | medium–large |
+>
+> Tier X answers the user's "make the storage super robust + encrypt against content scanning" follow-up. Key research finding it acts on: a **Feb-2026 wave of instant, unrecoverable Google account bans from CSAM-AI false positives** makes the 3-account (movies/series/anime) layout a real single point of failure. **X1** = direct multi-account chunk replication (the only backup that keeps the free-unlimited Pixel path AND survives an account loss — Google Photos *sharing* does NOT, see the tier's §0 decision table). **X3** = encrypt + wrap-in-valid-MKV upload to defeat copyright hash-matching and the CSAM-AI classifier (gated on an upload-acceptance spike + the change-gate). The §0 table also definitively answers "does deleting the main account remove the backup": view-only shares vanish for everyone; only an independent replica survives.
+
+## 1a. The always-current priority list (READ THIS to know what to do next)
+
+[`/PRIORITY.md`](PRIORITY.md) is the **single source of truth for task ordering** — critical bugs
+first, a always-updated **👉 SUGGESTED NEXT TASK** pointer, and five priority bands. Its visual twin is
+[`../docs/priority-graph/priority-graph.html`](../docs/priority-graph/priority-graph.html) — an interactive
+concentric task graph (critical in the center), click any node for details + a jump to its tier file.
+**Both must be updated whenever a task is added, completed, or re-prioritized** — protocol in
+`PRIORITY.md` and `CLAUDE.md`.
+
+> **2026-06-12 fable-review changes to the EXISTING tiers:**
+> - Every pending task gained two attributes: **`Risk`** and **`If skipped`** (see §2).
+> - New tasks from the full code read: **A10–A12** (requirements truth-up, repo hygiene, CI), **B9–B10** (hash-print throttle, harvester re-hash), **C12–C15** (multi_ep_alias crashers in scan_unprepped/local_status, single-id alias handling, parser papercuts, micro-robustness).
+> - Status corrections: **IMP-A7** → done (the pytest harness shipped organically with PRs #14–#21; CI remainder → A12), **IMP-C4** → done (device pinning shipped in PR #2).
+> - Reorientations: E4 (Jellyfin-webhook-primary watch state), E9 (Jellyfin-first + split vs daemon), E10 (demoted to optional fallback — in-client-only decision), E12 (= the daemon's web UI layer), F4/F6/F10 (re-homed against Tiers S), G2 (raised: gphotosdl spike), G4 (graduated: Jellyfin direction confirmed).
+> - Tier F header documents the **container constraint** (raw encrypted/CDC/parity blobs aren't valid videos → Pixel Photos app likely won't upload them; blocks F1/F2/F3 raw forms).
 
 Plus two companion files at the root:
 
@@ -48,7 +81,7 @@ Every task in the tier files follows an identical shape:
 ```
 ## IMP-A1: <short title>
 
-- Category: <performance | code quality | refactor | bug | security | other>
+- Category: <performance | code quality | refactor | bug | security | integration | experiment | other>
 - Priority: <high | medium | low>
 - Files: <affected files with line numbers where useful>
 - Current behavior: <what exists today, with code references>
@@ -56,12 +89,16 @@ Every task in the tier files follows an identical shape:
 - Rationale: <why this matters>
 - Goal: <observable end state>
 - Effort estimate: <small | medium | large>
+- Risk: <low | medium | high> — <blast radius: which working commands/behaviors the CHANGE touches; "(change-gated)" where the rollback gate applies>
+- If skipped: <the failure/limitation that persists if never done, with a concrete scenario>
 - Status: pending
 ```
 
 **Field semantics:**
 
 - **Category** — what TYPE of change it is. Drives reviewer focus.
+- **Risk** *(added 2026-06-12)* — how big the impact of MAKING the change is: which working commands it modifies, whether it brushes the auto-rollback change-gate, what a regression would break. `high` ≈ rewrites a daily-driver path; `low` ≈ additive/read-only.
+- **If skipped** *(added 2026-06-12)* — the failure or issue that persists if the task is never done, ideally with a concrete scenario. The "cost of inaction" counterweight to Risk.
 - **Priority** — `high` = pain felt today or unblocks downstream work; `medium` = clear win, not urgent; `low` = nice-to-have or speculative.
 - **Files** — concrete paths plus line numbers from the active `main.py` (1621 lines) and `mainfetch.py` (507 lines).
 - **Current behavior** — written so an agent who hasn't read the code can still understand the problem. References specific function names and line ranges from the architecture.
@@ -74,6 +111,11 @@ Every task in the tier files follows an identical shape:
 ---
 
 ## 3. Priority distribution
+
+> ⚠️ This table is the **2026-05-25 snapshot** of the original A–G audit and has drifted
+> (new tasks A10–A12/B9–B10/C12–C15/R6–R9/S1–S8/U1–U5; reprioritizations; 11 items now done:
+> A1, A7, C2, C4, C8, C9, C11, E13, G1, H1, R2 — ~104 tasks total as of 2026-06-12).
+> **The tier files are authoritative**; treat this as historical context only.
 
 | Tier | High | Medium | Low |
 |---|---:|---:|---:|
@@ -214,14 +256,21 @@ After Phase 5: daily MediaVault work is dramatically less manual.
 
 After Phase 6: MediaVault is connected to the ecosystem.
 
-### Phase 7 — Web UI (the bridge to Apple TV)
-35. **E12** — `web` command (local web UI)
-36. **F10** — websocket status broadcaster
-37. Apple TV UI roadmap Phase 0-1 (see `apple_tv_ui_roadmap.md`)
+### Phase 7 — Web UI (the bridge to the couch UI)
+35. **E12** — `web` command (local web UI — now the Tier S daemon's UI layer)
+36. **F10** — websocket status broadcaster (now the daemon's event bus)
+37. ~~Apple TV UI roadmap Phase 0-1~~ → superseded by `ROADMAP_END_GOAL.md` Phase 0-1 (Jellyfin stand-up + daemon)
 
-### Phase 8 — Apple TV UI proper
-- See `apple_tv_ui_roadmap.md` Phase 2 onwards.
-- Pull in **G4** (Jellyfin plugin path).
+### Phase 8 — Couch UI proper
+- **SUPERSEDED 2026-06-12**: the end-goal phasing now lives in
+  [`ROADMAP_END_GOAL.md`](ROADMAP_END_GOAL.md)
+  (Tiers S/U), which absorbs `apple_tv_ui_roadmap.md` Phases 0-4 with corrections
+  (video-dummy detection, daemon-first instead of plugin-first, in-client-only interaction).
+- The plugin polish phase is **IMP-U5** (ex-G4 direction).
+
+> **Note (2026-06-12):** Phases 1–6 above remain the valid ordering for the core-CLI work and
+> interleave with the end-goal phases — `ROADMAP_END_GOAL.md` §"Dependency weave" maps which
+> core-phase items each S/U phase needs.
 
 ### Speculative / opportunistic (any time)
 - **B5–B8** — micro-perf

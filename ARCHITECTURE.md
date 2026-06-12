@@ -95,16 +95,25 @@ ignored when reasoning about current behavior.
 ```
 C:\Users\harin\PycharmProjects\MediaVault\
 |
-|-- main.py                          ACTIVE — local pipeline + ADB push + restore (1621 lines)
-|-- mainfetch.py                     ACTIVE — Selenium fetch from Google Photos (507 lines)
-|-- mvcommon.py                      ACTIVE — shared library I/O + hashing constants/helpers imported by both entry points
-|-- requirements.txt                 ACTIVE — pymediainfo / undetected-chromedriver / selenium
+|-- main.py                          ACTIVE — local pipeline + ADB push + restore (3081 lines as of 2026-06-12)
+|-- mainfetch.py                     ACTIVE — Selenium fetch from Google Photos (491 lines)
+|-- mvcommon.py                      ACTIVE — shared library I/O + hashing constants/helpers imported by both entry points (168 lines)
+|-- requirements.txt                 ACTIVE — pymediainfo / undetected-chromedriver / selenium (requests + webdriver-manager still missing — §16)
+|-- requirements-dev.txt             ACTIVE — pytest
 |-- ARCHITECTURE.md                  this document
 |-- README.md                        user-facing overview
-|-- .gitignore                       see below; excludes a.json, PLAN.md, resources/
+|-- improvements/                    the backlog + direction "brain" (start at improvements/README.md):
+|   |-- improvement_details.md         IMP-XN operating manual
+|   |-- improvements_tier{A..H,R,S,U,X}.md  tracked improvement tasks
+|   |-- PRIORITY.md                    always-current task ordering ("what to do next"); visual twin docs/priority-graph/priority-graph.html
+|   |-- ROADMAP_END_GOAL.md            the phased couch-vault roadmap
+|   |-- RESEARCH_*.md, JELLYFIN_SETUP_GUIDE.md, BLOCKERS_AND_MOONSHOTS.md  durable research/direction
+|-- apple_tv_ui_roadmap.md           2026-05 Jellyfin-plugin UI design (partially superseded — see improvements/ROADMAP_END_GOAL.md)
+|-- .gitignore                       excludes a.json, PLAN.md, resources/, Obsidian vault, transcript dumps
 |
 |-- tools/
-|   `-- migrate_lib.py               AUX (one-shot) — splits legacy library.json into the 3 category files
+|   |-- migrate_lib.py               AUX (one-shot) — splits legacy library.json into the 3 category files
+|   `-- migrate_rehash_flag.py       AUX (one-shot, PR #20) — stamps re_hashed=false onto pre-existing split entries
 |
 |-- archive/                         git-tracked history; NOT used at runtime
 |   |-- main/
@@ -126,9 +135,14 @@ C:\Users\harin\PycharmProjects\MediaVault\
 |
 |-- resources/                       gitignored — local snapshots of the three library JSONs +
 |                                    usage_commands.txt for offline analysis; NOT the source of truth
-|-- docs/                            placeholder (.gitkeep only)
+|-- docs/                            per-feature design/plan/decision artifacts (auto-rollback, split-hash,
+|                                    multi-episode, video-dummy, adb-device-select, fable-review, ...)
+|                                    plus git-pr-conventions.md and testing-strategy.md; docs/README.md is the master index
 |-- assets/                          placeholder (.gitkeep only)
-|-- tests/                           placeholder (.gitkeep only); no test suite exists
+|-- tests/                           pytest suite — 13 files (rollback, push partial/retry/verify/mock-device,
+|                                    replace, restore-quarantine, rehash, prep_season parsing, recover CLI,
+|                                    trigger retry, mvcommon, baseline happy path) + conftest fixtures; see §13
+|-- .candidates/                     multi-candidate pipeline artifacts (judge DECISION.md files committed per step)
 |
 |-- .venv\                           dev virtualenv (Python interpreter + site-packages)
 |-- .claude\                         Claude Code settings (settings.json, settings.local.json, agents/)
@@ -588,7 +602,12 @@ remotes are not back-filled.
 
 ## 7. main.py Deep Dive
 
-File: `C:\Users\harin\PycharmProjects\MediaVault\main.py` (1621 lines).
+File: `C:\Users\harin\PycharmProjects\MediaVault\main.py` (3081 lines as of 2026-06-12).
+
+> **Line-number caveat:** inline `main.py:NNN` references in this document are
+> point-in-time. The §12a PONR table was re-verified 2026-06-12; older sections
+> may cite pre-rollback/pre-split-hash positions. Function names are stable —
+> prefer grep-by-name over line numbers.
 
 ### 7.1 Configuration block (lines 15-32)
 Hardcoded constants: library paths, `LOCAL_ROOT = "C:\\Media"`,
@@ -994,8 +1013,11 @@ results in some children skipping cleanly.
 - `cmd_prep_season(base_id, folder_path)` (474-518) — walks a folder of
   videos and runs `cmd_prep` for each, auto-deriving episode numbers
   from filenames using two strategies:
-  - **Strategy 1**: regex `[sS]\d+[eE](\d+(?:\.\d+)?)` (SxxExx) then
-    `\d+[xX](\d+(?:\.\d+)?)` (XxYY anime convention).
+  - **Strategy 1**: regex `[sS]\d+[eE](\d+)` (SxxExx — deliberately does NOT
+    capture decimals since PR #19: in `Fringe S03E20.6.02.AM.EST.mkv` the `.6`
+    is the start of the episode TITLE, not a half-episode; SxxE-style `.5`
+    episodes are not used in production) then `\d+[xX](\d+(?:\.\d+)?)` (XxYY
+    convention, still decimal-capable).
   - **Strategy 2** (only when `base_id.startswith("ani-")`): a looser
     regex looking for any 1-4-digit number surrounded by `[ ._\-[]]`
     delimiters, with a guard against parsing release years
@@ -1036,7 +1058,7 @@ results in some children skipping cleanly.
 
 ## 8. mainfetch.py Deep Dive
 
-File: `C:\Users\harin\PycharmProjects\MediaVault\mainfetch.py` (507 lines).
+File: `C:\Users\harin\PycharmProjects\MediaVault\mainfetch.py` (491 lines).
 
 ### 8.1 Configuration (lines 25-48)
 
@@ -1232,6 +1254,13 @@ by ID prefix (`tv-` -> series, `ani-` -> anime, everything else ->
 movies). Writes with `indent=4`. Idempotent in the sense that re-running
 it overwrites the three files with the same content (provided
 `library.json` itself hasn't changed). Not invoked by anything else.
+
+### 9.1a `tools/migrate_rehash_flag.py` (one-shot, PR #20)
+
+Stamps `re_hashed: false` onto every pre-existing split entry so the
+verify-or-bless logic (§6.4a) has an explicit unblessed marker to key on.
+Idempotent; already run against the live libraries at PR #20 time. Not invoked
+by anything else.
 
 ### 9.2 `archive/legacy/index_file.py` (legacy, 123 lines)
 
@@ -1469,9 +1498,9 @@ The chosen architecture (Step 3 bake-off winner, see `DECISIONS.md` N-6 —
 **Candidate C, selected wholesale for all operations**) is a durable on-disk
 operation journal in `main.py`:
 
-- `class RollbackJournal` (`main.py:410`) — one journal per command, per id. It
+- `class RollbackJournal` (`main.py:550`) — one journal per command, per id. It
   writes `<folder>/.mediavault_txn.json` (constant `TXN_JOURNAL_NAME`,
-  `main.py:395`) and **records each intended mutation BEFORE performing it**, so a
+  `main.py:535`) and **records each intended mutation BEFORE performing it**, so a
   crash mid-action still leaves a replayable inverse on disk. The record vocabulary
   is small and fixed (`record_create_file`, `record_create_dir`, `record_set_field`,
   `record_create_entry`, `record_link_child`, …). The write is fsync-flushed +
@@ -1481,14 +1510,14 @@ operation journal in `main.py`:
   deletes the journal. On clean success `journal.commit()` deletes the journal.
   Inverse failures (e.g. a Windows file lock) are reported as a **partial rollback
   honestly** and the journal is kept for retry.
-- `mark_point_of_no_return()` (`main.py:481`) writes a `crossed_ponr` marker into
-  the journal; thereafter a failure raises `RollbackHardFail` (`main.py:398`)
+- `mark_point_of_no_return()` (`main.py:621`) writes a `crossed_ponr` marker into
+  the journal; thereafter a failure raises `RollbackHardFail` (`main.py:538`)
   rather than attempting a (now-impossible) rollback.
-- `class RollbackHardFail(Exception)` (`main.py:398`) carries `(state, reason,
+- `class RollbackHardFail(Exception)` (`main.py:538`) carries `(state, reason,
   resume_cmd)` — the structured hard-fail that the orchestrators turn into the
   user-facing actionable message. The `resume_cmd` always names an **existing**
   command (never a new "fetch-to-fix" command — decision N-2).
-- `recover_journal(folder_path)` (`main.py:561`) is the crash-recovery entry point:
+- `recover_journal(folder_path)` (`main.py:701`) is the crash-recovery entry point:
   if a journal survives a hard process kill **and** never crossed its PONR, it
   replays the inverses to finish the interrupted rollback. A journal that crossed
   the PONR is left in place for inspection. This is **not** called on the happy
@@ -1507,10 +1536,12 @@ failure.
 
 | Command (def line) | PONR | On failure |
 |---|---|---|
-| `cmd_prep` (`main.py:599`) | none — fully reversible | auto-rollback this-run entry / sidecars / parent child-link (early-skips create no artifacts and never roll back) |
-| `cmd_push` (`main.py:992`) | **none (O-1)** — resumable | resume-message: leave the partial upload, entry stays `local_ready`/`uploaded=False`, print `push <id>`. Roll back this-run `_parts`/`checksums`/`split_info` only if created this run AND failure is pre-any-upload; a pre-existing `_parts/` (resume) is never deleted |
-| `cmd_replace` (`main.py:1335`) | **commit rename `os.rename(original, tobedeleted)` (`main.py:1398`)**, marked at `main.py:1400` | pre-PONR: roll back the dummy temp. At/after PONR: `RollbackHardFail` naming `fetch_restore <id>` (`main.py:1442`). C9 stale-sweep self-heals a torn crash on the next `replace` |
-| `cmd_restore` (`main.py:1598`) | **split-path merged-chunk delete**, marked at `main.py:1690` | pre-PONR: reuse C11 `quarantine_restore_file` + reproducible-output cleanup. At/after PONR: `RollbackHardFail` naming `fetch_restore <id>`. Standard path is a single `shutil.move` — no torn window |
+| `cmd_prep` (`main.py:795`) | none — fully reversible | auto-rollback this-run entry / sidecars / parent child-link (early-skips create no artifacts and never roll back) |
+| `cmd_push` (`main.py:1217`) | **none (O-1)** — resumable | resume-message: leave the partial upload, entry stays `local_ready`/`uploaded=False`, print `push <id>`. Roll back this-run `_parts`/`checksums`/`split_info` only if created this run AND failure is pre-any-upload; a pre-existing `_parts/` (resume) is never deleted |
+| `cmd_replace` (`main.py:1741`) | **commit rename `os.rename(original, tobedeleted)` (`main.py:1804`)**, marked at `main.py:1806` | pre-PONR: roll back the dummy temp. At/after PONR: `RollbackHardFail` naming `fetch_restore <id>` (`main.py:1866`). C9 stale-sweep self-heals a torn crash on the next `replace` |
+| `cmd_restore` (`main.py:2032`) | **split-path merged-chunk delete**, marked at `main.py:2185` | pre-PONR: reuse C11 `quarantine_restore_file` + reproducible-output cleanup. At/after PONR: `RollbackHardFail` naming `fetch_restore <id>`. Standard path is a single `shutil.move` — no torn window |
+
+*(Line numbers re-verified 2026-06-12.)*
 
 ### O-1 resume-message vs O-2 hard-fail split
 
@@ -1525,17 +1556,17 @@ failure.
 
 ### Orchestrator unification + season resume-range messaging
 
-- `cmd_prep_push_rep` (`main.py:2010`) — the ad-hoc cleanup block ("Reverting
+- `cmd_prep_push_rep` (`main.py:2515`) — the ad-hoc cleanup block ("Reverting
   temporary files", `_parts` rmtree, "run 'push' manually") is gone; it relies on
   the wrapped `cmd_push`'s O-1 resume-message and the wrapped `cmd_replace`'s
-  rollback-or-hard-fail. It catches `RollbackHardFail` (`main.py:2040`).
-- `cmd_prep_push_rep_season` (`main.py:2048`) — the bare `break` "to prevent mess"
+  rollback-or-hard-fail. It catches `RollbackHardFail` (`main.py:2545`).
+- `cmd_prep_push_rep_season` (`main.py:2553`) — the bare `break` "to prevent mess"
   is gone. Completed episodes stay; the in-flight item has already rolled itself
   back (reversible) or hard-failed (irreversible) via the wrapped commands; the
   orchestrator computes and prints a **resume-range** command (failing episode →
   end of the range-filtered ids), reconstructing the exact `SIZE_*` / `device` /
   `episodes` args and handling a `.5` episode in the range filter. It catches
-  `RollbackHardFail` at `main.py:2114` / `main.py:2137`. Messaging only — there is
+  `RollbackHardFail` at `main.py:2680` / `main.py:2703`. Messaging only — there is
   no progress-file dependency (C1 is not merged).
 
 ### Constraints honored
@@ -1567,7 +1598,7 @@ the behavior documented here, and ask the user as an explicit decision** — see
 includes the journal format/durability, the PONR locations, the created-this-run
 scoping (D-6/D-7), the `cmd_*` wrapping, `recover_journal` semantics, the season
 resume-range messaging, and the `RollbackHardFail` contract. Forward-looking
-rollback/storage work is tracked in `improvements_tierR.md`.
+rollback/storage work is tracked in `improvements/improvements_tierR.md`.
 
 > **Split-hash-deterministic feature (§6.4a):** the `cmd_restore` verify-or-bless
 > change and the `tempdir` `_parts/` relocation do NOT alter the rollback PONR
@@ -1581,15 +1612,29 @@ rollback/storage work is tracked in `improvements_tierR.md`.
 
 ## 13. Testing Approach
 
-**Automated tests now exist only for the auto-rollback feature.** PR #14
-bootstrapped the first `pytest` suite under `tests/` (`test_rollback.py`,
-`test_baseline_happy_path.py`, plus shared conftest fixtures); `pytest -q` → 67
-passed, 1 ffmpeg-gated skip. The **rest** of the codebase still has no automated
-coverage and there is no `tox.ini` or CI config of any kind — it is "tested by
-use", each pipeline run a manual integration test. The legacy snapshots
-(`main_workingprep.py`, `mainfetchWorking.py`, etc.) are the de-facto
-regression baselines: when something breaks, the user can `diff` the
-active file against the most recent "working" snapshot to triage.
+**A real pytest suite now exists** (bootstrapped by PR #14, grown by every PR
+since). 13 test files under `tests/` as of 2026-06-12:
+
+| File | Covers |
+|---|---|
+| `test_rollback.py` | The full auto-rollback scenario matrix incl. durable-journal crash recovery |
+| `test_baseline_happy_path.py` | Pre-rollback behavior characterization (happy paths) |
+| `test_cmd_push_partial.py` / `test_cmd_push_retry.py` / `test_cmd_push_verify.py` / `test_cmd_push_mock_device.py` | `.partial`+mv protocol, C2 retry, C8 remote verify, data-integrity round-trip |
+| `test_cmd_replace.py` | C9 atomic replace + stale sweep |
+| `test_cmd_restore_quarantine.py` | C11 quarantine + split-restore guards |
+| `test_rehash.py` | PR #20 verify-or-bless / eager / re-split reset |
+| `test_prep_season_episode_parse.py` | PR #19 dotted-title parsing + PR #21 combined-episode aliases |
+| `test_recover_cli.py` | IMP-R2 `recover` / `recover --scan` |
+| `test_trigger_download_retry.py` | C2 Selenium one-retry |
+| `test_mvcommon.py` | Pure helpers + library round-trip |
+
+Mocking philosophy, fixture catalogue (`sandbox`, `sandbox_entry`, `fake_dummy`,
+`mock_device`, `FakeAdb`), the dual-binding patch hazard, and Windows gotchas are
+documented in [`docs/testing-strategy.md`](docs/testing-strategy.md). There is
+still no CI config — the suite runs locally via `pytest -q`. Code paths outside
+the listed areas (Selenium fetch against real Google Photos, MediaInfo parsing,
+sort/scan/status commands) remain "tested by use"; the legacy snapshots under
+`archive/` serve as informal regression baselines.
 
 Implicit safety checks that act as runtime tests:
 - Hash verification at every stage transition (prep stores; check
@@ -1726,11 +1771,20 @@ CLI flags for paths. To re-target the system, you edit the source.
   `entry["tech_spec"]` as a 1-key dict. Downstream code (e.g.,
   `cmd_sort`'s `entry.get('tech_spec', {}).get('size_bytes', 0)`)
   handles this by defaulting to 0, but it's still surprising.
-- **No transactional save**: `save_library` opens each file with `'w'`
-  and writes. A crash mid-write leaves the JSON truncated and
-  unreadable (only partially mitigated by the manual `library - Copy*.json`
-  backups in `C:\Media\`). Writing to a temp file then `os.replace` would
-  fix this.
+- ~~**No transactional save**~~: **FIXED** — duplicate of the first bullet;
+  `save_library` writes via `tempfile.mkstemp` + `os.replace` (mvcommon.py).
+  Only the rotating `<file>.bak` idea from §17.2 remains unimplemented.
+- **`multi_ep_alias` iteration gaps (found 2026-06-12 review)**: PR #21
+  de-aliased the four group loops and `mainfetch.resolve_targets`, but
+  whole-library iterators were missed — `cmd_scan_unprepped` KeyErrors on
+  `entry['folder_path']` and `cmd_local_status` TypeErrors on a `None`
+  filename when any alias exists; direct single-id commands (`push`,
+  `replace`, `restore`, `check`, `verify_restore`, `fetch_restore`) crash
+  with raw tracebacks when given an alias id. Tracked as IMP-C12/IMP-C13;
+  full analysis in `docs/feature-fable-review/REVIEW_NOTES.md` §A.
+- **`push_group` argv parser can infinite-loop** when a value-taking keyword
+  (`SIZE_MB`, `episodes`, `device`) is the final token — the `push` parser
+  exits with usage, `push_group`'s doesn't increment `i`. Tracked as IMP-C14.
 - **Hardcoded `CHROME_PROFILE_NAME = "Default"`** assumes the sub-profile
   inside the user-data-dir is always literally called "Default". Fine
   for fresh profiles but breaks if the user creates a second Chrome
@@ -1784,24 +1838,20 @@ CLI flags for paths. To re-target the system, you edit the source.
   (4K BD anime film, long OAV, etc.) would be the first real
   exercise of `split_video_file` → `mainfetch.fetch_single_entry`'s
   chunk branch under the TV Chrome profile.
-- **`mainfetch.load_library` swallows errors silently** with bare
-  `except: pass` (`mainfetch.py:52-80`), asymmetric with
-  `main.load_library` which now `sys.exit(1)`s on corruption. A
-  corrupt library would cause mainfetch to "find" zero entries and
-  exit cleanly, masking the failure.
+- ~~**`mainfetch.load_library` swallows errors silently**~~: **FIXED** by
+  IMP-A1 — both entry points import the strict `mvcommon.load_library`
+  (`sys.exit(1)` on corruption); the silent-zero-entries behavior is gone.
 - **`cmd_dispatch_fetch` invokes `"python"` literally**
-  (`main.py:1345`) instead of `sys.executable`. On a machine where
+  (`main.py:2719`) instead of `sys.executable`. On a machine where
   `PATH` resolves `python` to a different interpreter than the one
   running `main.py`, the spawned `mainfetch.py` will fail to import
   `selenium`.
 
 ### Code smells
 
-- Heavy code duplication between `main.py` and `mainfetch.py`
-  (`load_library`, `calculate_file_hash`, library path constants). A
-  shared `mvcommon.py` module would DRY this without changing
-  behaviour and would have prevented the asymmetric error-handling
-  between the two `load_library` copies.
+- ~~Heavy code duplication between `main.py` and `mainfetch.py`~~ **DONE** —
+  IMP-A1 extracted `mvcommon.py` (constants + 6 shared helpers + `retry()`);
+  no local copies remain in either entry point.
 - Manual argv parsing across both entry points reimplements features
   `argparse` gives for free (help text, type validation, default
   values).
@@ -1841,12 +1891,9 @@ CLI flags for paths. To re-target the system, you edit the source.
 These are not requested changes, just well-formed seams where future
 work would slot in cleanly:
 
-1. **Extract a shared `mvcommon.py`** with `load_library`,
-   `save_library`, `calculate_file_hash`, `generate_short_id`, and the
-   library path constants. Both `main.py` and `mainfetch.py` import it.
-   Eliminates the duplicated `load_library` and the divergence risk.
-2. **Atomic JSON saves**: write to `<file>.tmp` and `os.replace`. Also
-   write a rotating backup `<file>.bak` before save.
+1. ~~**Extract a shared `mvcommon.py`**~~ — **DONE** (IMP-A1, PR #8).
+2. **Atomic JSON saves** — **DONE** (mkstemp + `os.replace` in mvcommon);
+   the rotating `<file>.bak` backup before save remains open.
 3. **Real CLI**: migrate to `argparse` with subcommands. Self-documenting
    help, less manual indexing.
 4. **Config file**: lift the hardcoded paths into a `mvconfig.json` or
@@ -1857,10 +1904,10 @@ work would slot in cleanly:
    `doc-*` for documentaries would require touching `save_library`,
    `cmd_scan_unprepped`'s `categories` list, and `cmd_fetch_route`'s
    profile selection.
-6. **Multi-device push**: today `REMOTE_ROOT` is a single string. A
-   small refactor of `cmd_push` to take a device serial (and call
-   `adb -s <serial> push ...`) would unlock pushing to multiple
-   phones for redundancy.
+6. **Multi-device push** — **DONE** in its single-device-select form
+   (PR #2: `device <id_or_name>` + `DEVICE_ALIASES` on all four push
+   commands). True *parallel* multi-device orchestration (the user runs
+   4 Pixel 1 XLs) remains open — see IMP-E7 and the end-goal roadmap.
 7. **Better fallback search**: today's "fallback_query" is essentially
    the same query as the precision search. A real fallback would strip
    the UID/extension and try the bare title.
@@ -1882,7 +1929,7 @@ work would slot in cleanly:
     worktrees, but it is a main-session capability and our `orchestrator`
     is itself a subagent (subagents can't spawn subagents). Exploiting it
     means running the orchestrator as the main session (`--agent`). Deferred;
-    see §19 and `improvements_tierH.md` (IMP-H2).
+    see §19 and `improvements/improvements_tierH.md` (IMP-H2).
 
 ---
 
@@ -1997,16 +2044,19 @@ Consequence for this pipeline:
   when per-call effort lands upstream.
 
 See `.claude/AGENT_WORKFLOW_NOTES.md` for the full migration record and the
-pre-migration backup at `.claude/agents_pre_opus48/`, and `improvements_tierH.md`
+pre-migration backup at `.claude/agents_pre_opus48/`, and `improvements/improvements_tierH.md`
 (IMP-H1/H2) for the tracked task and the deferred "dynamic workflows" follow-up.
 
 ---
 
-*Last updated 2026-05-30 — agent pipeline migrated to Opus 4.8 effort tiers
-(new §19; see `.claude/AGENT_WORKFLOW_NOTES.md` and `improvements_tierH.md`).
-Prior content reflects `main.py` (1621 lines, atomic save_library,
-balanced-split, anime auto-parent, half-episode support, dual Chrome profiles,
-parallel trigger-and-harvester restore) and the live-data audit of
-`library_movies/series/anime.json` (102 / 290+28 / 140+5 entries). Repo layout
-uses `archive/` (legacy snapshots), `tools/` (migrate_lib.py), and gitignored
-`resources/` (offline library copies).*
+*Last updated 2026-06-12 (fable-review session, branch `feature_fable_review`):
+refreshed line counts (`main.py` 3081 / `mainfetch.py` 491 / `mvcommon.py` 168),
+repo layout (docs/ + tests/ + .candidates/ real contents, migrate_rehash_flag),
+§7.8 PR #19 regex, §12a anchors re-verified, §13 rewritten for the 13-file test
+suite, §16 fixed-item strikethroughs + the 2026-06-12 multi_ep_alias iteration
+findings (IMP-C12/C13/C14), §17 done-markers. Companion review artifacts live in
+`docs/feature-fable-review/` (REVIEW_NOTES, PR_REVIEW, research dossier,
+end-goal roadmap). Graph views: `ARCHITECTURE_GRAPH.md` +
+`docs/architecture-graph/graph.html`. Earlier milestones: 2026-05-30 agent
+pipeline → Opus 4.8 effort tiers (§19); 2026-05-25 live-data audit
+(102 / 290+28 / 140+5 entries).*

@@ -240,7 +240,7 @@ path that sometimes left `_parts/` behind).
 
 > The ~40 GB transient peak is a property of the **split-then-upload** design, not
 > of rollback. Reducing it (stream split-upload-delete) is tracked separately as
-> **IMP-R1** in [`improvements_tierR.md`](../../improvements_tierR.md).
+> **IMP-R1** in [`improvements_tierR.md`](../../improvements/improvements_tierR.md).
 
 ---
 

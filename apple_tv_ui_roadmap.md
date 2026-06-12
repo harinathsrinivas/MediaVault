@@ -1,6 +1,21 @@
 # Apple TV-style UI — Long-form Roadmap
 
-> Long-horizon goal captured in memory as `[[project-future-apple-tv-ui]]`. This file is the detailed plan. Build only AFTER the Phase 1-6 CLI work in `improvement_details.md` is substantively done.
+> ⚠️ **PARTIALLY SUPERSEDED (2026-06-12, fable-review session).** The current master plan is
+> [`improvements/ROADMAP_END_GOAL.md`](improvements/ROADMAP_END_GOAL.md)
+> with task tracking in `improvements/improvements_tierS.md` / `improvements/improvements_tierU.md`. What changed since this
+> file was written (2026-05):
+> - **§5 dummy detection is STALE**: dummies are no longer `<1 KB` text blobs starting with
+>   `"Original Hash:"` — the video-dummy feature (PRs #1/#3) made them ~10 KB *valid playable videos*.
+>   Detection = size < `DUMMY_MAX_BYTES` (200 KB) + `uid` sidecar / daemon API lookup.
+> - **Sequencing changed**: a webhook-driven daemon (IMP-S2/S3/S4) now delivers ~90% of the experience
+>   BEFORE any C# plugin is written; the plugin described here became the polish phase (IMP-U5).
+>   "Play on a dummy" is no longer a failure to intercept — it IS the fetch-request signal.
+> - **Interaction is in-client-only** (user decision): the "phone buzzes" notification in §10 is now a
+>   Jellyfin `DisplayMessage` / home-row update instead.
+> - **Still valid and confirmed**: the Path-D Jellyfin decision (§3) — re-affirmed by the 2026-06-12
+>   session; the prerequisite analysis (§2); the API-surface sketch (§7), which now describes the
+>   daemon's API; most of §8's open questions (carried into Tier S/U tasks).
+> This file is kept as the original design record — read it WITH the corrections above.
 
 ---
 

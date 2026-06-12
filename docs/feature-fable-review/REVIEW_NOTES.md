@@ -153,10 +153,16 @@ coverage. Low practical risk (idempotent-ish re-run), but inconsistent with ever
 
 ## E. Open questions for the user (ask at next interaction point)
 
-- **E1.** The prompt says uploads run via **4** Pixel 1 XLs in parallel, but `DEVICE_ALIASES` maps only 2
-  serials (movies/series) and the fetch side has 2 Chrome profiles (2 Google accounts). What's the real
-  topology? (4 phones × 1 account each? 2 accounts × 2 phones? Are 2 of the 4 unmapped spares?) Shapes
-  the multi-device push/fetch roadmap items + how many parallel upload lanes the daemon can assume.
+- **E1. RESOLVED 2026-06-12 (user answered):** the topology is **3 Google accounts — one each for
+  movies, series, anime** — with multiple Pixel devices (not one-account-per-phone). `DEVICE_ALIASES`
+  maps 2 device serials; the account split is the meaningful axis.
+  **Two consequences captured as tasks:**
+  - The fetch side has only 2 Chrome profiles and routes `ani-*` to the *series* profile — wrong now
+    that anime is its own account → **IMP-C16** (add a third anime profile + data-driven routing).
+  - 3 accounts = a real single point of failure (any one ban loses that content type), made urgent by
+    the Feb-2026 CSAM-AI false-positive ban wave → **new Tier X** (X1 multi-account replication, X2
+    topology/runbook, X3 encryption, X4 self-heal, X5 ban canary). The full sharing-vs-replication
+    research + the "does deleting the main account remove backups" answer live in `improvements_tierX.md` §0.
 
 ---
 

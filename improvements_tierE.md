@@ -150,8 +150,7 @@
   - With multiple phones connected (different ADB serials), partition the chunks (or whole items in a group push) across them.
   - `concurrent.futures.ThreadPoolExecutor`, one worker per pinned device; each worker `adb -s <serial> push ...`.
   - The library entry merges results from all workers at the end; per-device progress lines.
-  - Honor the per-account mapping: `mov-*` items only to movies-account phones, `tv-*/ani-*` to tv-account phones (chunks of one entry must land in ONE account or fetch-side search breaks).
-  - **Blocked on the topology answer** (REVIEW_NOTES §E1): how many phones per account?
+  - Honor the per-account mapping (topology ANSWERED 2026-06-12: **3 accounts — movies, series, anime**): `mov-*`→movies-account device(s), `tv-*`→series-account device(s), `ani-*`→anime-account device(s). Chunks of one entry must land in ONE account or fetch-side search breaks. (Fetch-side mirror = IMP-C16's data-driven profile map; backup replicas = IMP-X1.)
 - Rationale: The user already runs 4 phones; making MediaVault aware of them turns manual load-balancing into scheduled parallel lanes — push wall-clock ÷ phones-per-account.
 - Goal: Saturate all available phones from one command; the daemon (Tier S) schedules lanes automatically.
 - Effort estimate: medium

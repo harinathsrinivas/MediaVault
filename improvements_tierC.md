@@ -284,3 +284,22 @@
 - Risk: low — strictly-narrower failure behavior in two helpers.
 - If skipped: cosmetic-to-rare failures; the repair_dummies window mainly matters during bulk runs (423 dummies regenerated in one 2026-05-27 sweep — that's 423 windows).
 - Status: pending
+
+---
+
+## IMP-C16: Fetch profile must match the per-content Google account (anime is its own account now)
+
+- Category: bug
+- Priority: high
+- Files: `mainfetch.py` — `CHROME_PROFILES`, `cmd_fetch_route`; relates to IMP-X2 (topology) · found 2026-06-12 (user confirmed the account topology)
+- Current behavior: there are only **two** Chrome profiles — `default` (movies account) and `tv` — and `cmd_fetch_route` sends BOTH `tv-*` and `ani-*` to the `tv` profile. The user has confirmed the real topology is **three separate Google accounts: movies, series, anime**. So anime chunks are uploaded to the *anime* account, but anime fetch drives the *series* account's logged-in Chrome session → the search finds 0 thumbnails and the restore fails, looking exactly like a session expiry (IMP-C6). This is latent today only because anime has never been chunk-restored in production (0 of 140 anime leaves have `split_info`; ARCHITECTURE §6.2) — the first real anime restore would hit it.
+- Proposed change:
+  - Add a third profile `anime` → `C:\Media\Utils\ChromeProfile_Anime` (signed into the anime Google account), and route `ani-*` there in `cmd_fetch_route` (movies→default, `tv-*`→tv, `ani-*`→anime).
+  - Generalize: make the id-prefix → profile map data-driven (config, IMP-A5) so adding a 4th account (e.g., a backup account for X1) is a config edit, not a code edit. This is the fetch-side mirror of the per-account push routing X1 needs.
+  - One-time setup: log the new ChromeProfile_Anime into the anime account (same manual login the other two profiles required).
+- Rationale: with three accounts, the two-profile routing is simply wrong for anime; fixing it is a precondition for ever restoring an archived anime title, and the data-driven map is the seam X1/X4's multi-account fetch fallback builds on.
+- Goal: `fetch`/`restore` of an `ani-*` id drives the anime account's session and succeeds; the profile map is config-driven.
+- Effort estimate: small
+- Risk: low — additive profile + a routing branch; movies/series routing unchanged. Verify the new profile is logged in (pairs with IMP-C6 session detection so a logged-out anime profile fails loudly, not silently).
+- If skipped: the first attempt to restore an archived anime title silently fails (0 thumbnails on the wrong account) and looks like a session problem — a confusing dead-end for a whole third of the library, and it blocks the couch-vault flow for anime entirely.
+- Status: pending

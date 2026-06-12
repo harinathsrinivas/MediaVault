@@ -101,12 +101,17 @@ Two structural notes that make T1 feel far better than it sounds:
 | Offline downloads | Infuse/Swiftfin/Jellyfin app downloads of *local* items (only matters pre-archive) | Free |
 | Beautiful artwork/metadata | IMP-E3 (TMDB/TVDB/AniDB enrichment) feeding Jellyfin NFOs/posters — replaces slug-titles with real metadata | Tracked (E3) |
 
-## 5. Open question for the user (topology) — carried from REVIEW_NOTES E1
+## 5. Topology — ANSWERED (2026-06-12)
 
-Code knows **2** ADB serials (`movies`, `series`) and **2** Chrome profiles (2 Google accounts), but
-the brief says **4× Pixel 1 XL in parallel**. Clarify: 4 phones × 1 account? 2×2? spares? This decides
-how many parallel upload AND fetch lanes the daemon can schedule, and whether erasure-coding across
-accounts (IMP-F3) has 2 or 4 shards to play with.
+**3 Google accounts (movies / series / anime), multiple Pixel devices.** This resolved the open
+question and spawned: **IMP-C16** (fetch needs a third anime Chrome profile — `ani-*` currently
+mis-routes to the series account) and the whole **Tier X** redundancy/privacy workstream (3 accounts =
+single point of failure; the Feb-2026 CSAM-ban wave makes replication urgent). The definitive
+sharing-vs-replication research and the "deleting the main account removes backups?" answer are in
+`improvements_tierX.md` §0 — short version: Google Photos *sharing* is not a safe backup (view-only
+shares vanish on owner loss; saved copies survive but cost the backup account's normal quota and lose
+the Pixel free-unlimited benefit), so **direct re-upload to backup accounts via Pixels signed into them
+is the only robust backup**.
 
 ## 6. Sources
 

@@ -154,8 +154,19 @@ Infuse (already owned) gives the "Plex-grade polish" on Apple TV against Jellyfi
 4. **Scope creep** — the daemon REUSES CLI verbs; any temptation to reimplement pipeline logic inside
    the daemon is a design smell and a change-gate red flag.
 
-## 6. Open question (blocks lane-count decisions only)
+## 6. Topology — ANSWERED (2026-06-12) + the redundancy it demands
 
-**The 4-Pixel topology** (REVIEW_NOTES §E1): 4 phones × 1 account? 2×2? spares? Decides E7
-parallel-push lanes, S5 per-account fetch parallelism, and whether F3-replication has shards to use.
-Everything in Phases 0-4 proceeds without the answer.
+The account topology is **3 Google accounts — movies, series, anime** — with multiple Pixel devices.
+This made two things concrete and added a phase-spanning workstream:
+
+- **Correctness fix:** anime now being its own account means the 2-profile fetch routing is wrong for
+  `ani-*` → **IMP-C16** (Band 0/1; do early — the first archived-anime restore fails without it).
+- **Resilience (new Tier X), folded into Phase 3/6:** 3 accounts = a single point of failure, made
+  urgent by the Feb-2026 CSAM-AI false-positive ban wave (instant, unrecoverable). The plan:
+  **IMP-X1** multi-account chunk replication (every chunk in ≥2 accounts, all on the free-unlimited
+  Pixel path — Google Photos *sharing* is NOT a safe backup, see `improvements_tierX.md` §0),
+  **X2** topology + account-loss runbook, **X5** ban canary, **X4** cross-account self-heal,
+  **X3** encrypted/anti-scanning upload (spike-gated). Sequence X1/X2/X5 alongside Phase 3 (they reuse
+  E7 multi-device push + E5 phone cleanup); X3/X4 in Phase 5/6.
+
+Everything in Phases 0-2 proceeds independently; X-work joins from Phase 3.

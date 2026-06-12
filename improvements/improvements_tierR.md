@@ -2,7 +2,7 @@
 
 > **Added 2026-06-01.** Forward-looking follow-ups that build on the merged
 > auto-rollback feature (PR #14, Candidate C — the on-disk `RollbackJournal`).
-> Read [`docs/feature-auto-rollback/ROLLBACK_MECHANISM.md`](docs/feature-auto-rollback/ROLLBACK_MECHANISM.md)
+> Read `docs/feature-auto-rollback/ROLLBACK_MECHANISM.md` (repo-root-relative)
 > first. This tier is **enrichable** — add `IMP-R<N>` items in the standard
 > format (see `improvement_details.md` §2) as ideas arise.
 >

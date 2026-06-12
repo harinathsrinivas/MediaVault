@@ -8,13 +8,15 @@
 ## 0. Start here (new session / new agent orientation order)
 
 1. [`/CLAUDE.md`](../CLAUDE.md) — project rules: PR conventions pointer, **human merge gates**, the
-   **auto-rollback change-gate**, agent-pipeline execution model, no-silent-handling rule.
-2. [`/ARCHITECTURE.md`](../ARCHITECTURE.md) — THE engineering reference (data model, every command,
+   **auto-rollback change-gate**, the **keep-PRIORITY.md-current rule**, agent-pipeline execution model.
+2. [`/PRIORITY.md`](../PRIORITY.md) — **what to do next** (critical bugs first, suggested-next pointer).
+   Visual twin: [`docs/priority-graph/priority-graph.html`](priority-graph/priority-graph.html).
+3. [`/ARCHITECTURE.md`](../ARCHITECTURE.md) — THE engineering reference (data model, every command,
    rollback mechanism §12a, testing §13, config §14, known issues §16, agent workflow §19).
-3. [`/improvement_details.md`](../improvement_details.md) — how the IMP-task system works + tier map.
-4. [`docs/feature-fable-review/ROADMAP_END_GOAL.md`](feature-fable-review/ROADMAP_END_GOAL.md) — where
+4. [`/improvement_details.md`](../improvement_details.md) — how the IMP-task system works + tier map.
+5. [`docs/feature-fable-review/ROADMAP_END_GOAL.md`](feature-fable-review/ROADMAP_END_GOAL.md) — where
    the project is GOING (the couch-vault phases).
-5. The relevant tier file / feature folder for whatever you're touching.
+6. The relevant tier file / feature folder for whatever you're touching.
 
 ## 1. Root-level documents
 
@@ -24,8 +26,9 @@
 | [`ARCHITECTURE.md`](../ARCHITECTURE.md) | Definitive engineering reference (~2000 lines, 19 sections). Read before changing `main.py`/`mainfetch.py` |
 | [`ARCHITECTURE_GRAPH.md`](../ARCHITECTURE_GRAPH.md) | The architecture as 7 Mermaid graph views (system, lifecycle, state machine, ER model, rollback flow, fetch sequence, seam map) |
 | [`CLAUDE.md`](../CLAUDE.md) | Session rules for AI-assisted work: gates, change-gate, pipeline notes |
+| [`PRIORITY.md`](../PRIORITY.md) | **The always-current "what to do next"** — critical bugs first, a `👉 SUGGESTED NEXT TASK` pointer, five priority bands, and the maintenance protocol. Visual twin: `docs/priority-graph/priority-graph.html` |
 | [`improvement_details.md`](../improvement_details.md) | Index + operating manual for the IMP-XN task system (format spec incl. the 2026-06-12 `Risk`/`If skipped` attributes, dependency chains, phased rollout) |
-| `improvements_tierA..H,R,S,U.md` | The ~104 tracked improvement tasks — see §2 below |
+| `improvements_tierA..H,R,S,U,X.md` | The ~109 tracked improvement tasks — see §2 below |
 | [`apple_tv_ui_roadmap.md`](../apple_tv_ui_roadmap.md) | 2026-05 Jellyfin-plugin UI design. **Partially superseded** — carries a correction banner; current plan is ROADMAP_END_GOAL.md |
 | `PLAN.md`, `STATUS.md` (root) | **Gitignored/stale live working copies** used by the agent pipeline during runs (root STATUS.md is currently still tracked — cleanup tracked as IMP-A11). Canonical copies live under `docs/<feature>/` |
 
@@ -44,6 +47,7 @@
 | [R](../improvements_tierR.md) | Auto-rollback hardening | ⚠️ change-gated tier; R6-R9 = 2026-06-12 gate-flagged findings |
 | [S](../improvements_tierS.md) | **Streaming & media-server integration** | The end-goal backbone: daemon, in-client flows, fetch hardening |
 | [U](../improvements_tierU.md) | **Couch UX & clients** | Enrichment-before-archive, home rows, NFO pipeline, DV-FEL paths |
+| [X](../improvements_tierX.md) | **Cloud resilience & privacy** | X1 multi-account replication (the real backup), X2 topology/runbook + sharing decision, X3 encrypted/anti-scanning upload, X4/X5 self-heal + ban canary |
 
 ## 3. The fable-review dossier (`docs/feature-fable-review/`, 2026-06-12)
 
@@ -69,6 +73,7 @@ The full-repo review + end-goal research session. **Resume protocol lives in its
 | [`testing-strategy.md`](testing-strategy.md) | Mock-at-the-boundary philosophy, fixture catalogue (sandbox/mock_device/FakeAdb), dual-binding hazard, Windows gotchas, per-layer examples |
 | [`next-tasks-planner-prompts.md`](next-tasks-planner-prompts.md) | Ready-to-paste planner prompts for IMP-R2 (done) / IMP-C1 / IMP-R1 |
 | [`architecture-graph/graph.html`](architecture-graph/graph.html) | Interactive vis.js architecture graph (graphify-style: search, kind filters, click-for-details). Open in a browser |
+| [`priority-graph/priority-graph.html`](priority-graph/priority-graph.html) | Interactive **priority** task graph — concentric rings by urgency (critical center), color = priority, hue = tier; click a node for details + a jump to its tier file. Keep in sync with `PRIORITY.md` |
 
 ## 5. Per-feature design archives (`docs/feature-*/`, `docs/imp-*/`)
 
@@ -99,3 +104,6 @@ orchestration decision) · see also `ARCHITECTURE.md` §19 and the public portab
 - Superseding a doc → banner the old one (see `apple_tv_ui_roadmap.md` for the pattern) AND update
   its row here.
 - Feature merged → its `docs/<feature>/` folder gets a row in §5 with PR number + date.
+- **Task added/completed/re-prioritized → update `PRIORITY.md` AND `docs/priority-graph/priority-graph.html`
+  AND the task's tier file, all in the same change** (protocol at the bottom of `PRIORITY.md`; rule also
+  in `CLAUDE.md`).

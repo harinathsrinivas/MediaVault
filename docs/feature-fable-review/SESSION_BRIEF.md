@@ -40,6 +40,46 @@ progress and the resume protocol.
 3. **Pending leftovers — commit both first.** (Done: commit `5000533` carries the README table re-format and `docs/feature-multi-episode/` PLAN+DECISIONS from PR #21.)
 4. **Interaction channel — In-client only (Jellyfin/Emby).** Fetch-done notifications and the post-watch "archive?" prompt should be designed to live inside the media-server clients (plugins / session-message API / library constructs), not via phone push, Telegram, or a separate dashboard. Where something is impossible in-client, the roadmap must say so explicitly and may name a fallback — clearly marked as a fallback.
 
+## Follow-up round (2026-06-12, after the initial PR #22 was opened)
+
+User reviewed the PR ("looks good"), then asked for three additions BEFORE merging:
+
+1. **Topology answer + robustness.** Verbatim: *"there are multiple devices but accounts are
+   currently only 3 google accounts. One for movies, one for series and one for anime. However its
+   true that currently it'll be a single point of failure. Add other ways to make it super robust
+   maybe like adding a backup account. Or using Google Photos sharing feature to share to multiple
+   backup accounts. Research which way is best and if also main account is gone will still direct
+   backup from Google Photos remove from other accounts also? Or we need to manually put into
+   multiple backup accounts for this usecase? Also is there anyway we can encrypt and upload so that
+   if google starts seeing into our files it'll not be caught in copyright and still work as expected?
+   Add these also in a separate tier maybe."*
+   → Delivered: **Tier X** (`improvements_tierX.md`, X1–X5) with a §0 research decision table.
+   Research verdicts: Google Photos *sharing* is NOT a safe backup (view-only shares vanish for
+   everyone if the owner account dies; "saved" copies survive but consume the backup account's
+   normal quota and lose the Pixel free-unlimited benefit) → **direct re-upload to backup accounts
+   via Pixels signed into them** is the only robust backup (X1). Encryption is feasible via
+   encrypt-then-wrap-in-valid-MKV (Matroska attachment, original-quality byte-exact round-trip) but
+   gated on an upload-acceptance spike + the change-gate (X3). Urgency driver found in research: a
+   **Feb-2026 wave of instant, unrecoverable Google CSAM-AI false-positive bans**.
+   → Also surfaced **IMP-C16**: 3 accounts means anime has its own account, but fetch only has 2
+   Chrome profiles and mis-routes `ani-*` to the series account — first anime restore would silently
+   fail. Topology question (was REVIEW_NOTES §E1) now RESOLVED everywhere.
+
+2. **Always-updated priority list + futuristic interactive graph.** Verbatim: *"add a priority list
+   always which will be updated always... which task is suggested to do next. Also tell me which all
+   are critical things like bugs which will break which we need to do first. Add them as first on that
+   list. Maybe store that list also as a graph with nodes being these tasks and clicking the node
+   should directly take it to that task details. Make it super futuristic visually... This list also
+   should be updated each time when we add a task or bug or improvement."*
+   → Delivered: `PRIORITY.md` (root, single source of truth — critical Band 0 first, a
+   `👉 SUGGESTED NEXT TASK` pointer, 5 bands, maintenance protocol) + `docs/priority-graph/priority-graph.html`
+   (concentric-by-urgency vis.js graph, glassmorphism/neon, click-node→details + jump-to-tier-file,
+   search/filters). The "keep both current on every task change" rule is wired into CLAUDE.md,
+   improvement_details.md, and docs/README.md.
+
+3. **Then merge if it looks good** — so the PR now carries this follow-up round too; STILL STOP at
+   Checkpoint 1 for explicit merge approval.
+
 ## Standing constraints (from CLAUDE.md + memories)
 
 - **Auto-rollback change-gate:** any improvement touching rollback behavior must be flagged, never silently altered (`docs/feature-auto-rollback/ROLLBACK_MECHANISM.md` §10).

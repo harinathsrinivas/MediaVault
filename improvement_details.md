@@ -43,6 +43,23 @@ On 2026-05-25, a deep audit of `main.py`, `mainfetch.py`, `ARCHITECTURE.md`, the
 >
 > These two tiers implement the end goal: browse the vault from Apple TV / the Ugoos projector via **Jellyfin**, select → background fetch → in-client "ready" notify → watch → in-client-governed auto-archive. The **master phasing lives in [`docs/feature-fable-review/ROADMAP_END_GOAL.md`](docs/feature-fable-review/ROADMAP_END_GOAL.md)**; research grounding in `docs/feature-fable-review/RESEARCH_*.md`. Locked session decisions: Jellyfin-first (Emby lifetime = fallback, Plex = do-not-buy at $749), in-client-only interaction, 4× Pixel unlimited-upload path untouchable.
 
+> **Added 2026-06-12 — Tier X (cloud resilience & privacy), fable-review follow-up:**
+>
+> | File | Items | Theme | Avg Effort |
+> |---|---:|---|---|
+> | `improvements_tierX.md` | X1–X5 (5) | Multi-account redundancy + encrypted/anti-scanning upload | medium–large |
+>
+> Tier X answers the user's "make the storage super robust + encrypt against content scanning" follow-up. Key research finding it acts on: a **Feb-2026 wave of instant, unrecoverable Google account bans from CSAM-AI false positives** makes the 3-account (movies/series/anime) layout a real single point of failure. **X1** = direct multi-account chunk replication (the only backup that keeps the free-unlimited Pixel path AND survives an account loss — Google Photos *sharing* does NOT, see the tier's §0 decision table). **X3** = encrypt + wrap-in-valid-MKV upload to defeat copyright hash-matching and the CSAM-AI classifier (gated on an upload-acceptance spike + the change-gate). The §0 table also definitively answers "does deleting the main account remove the backup": view-only shares vanish for everyone; only an independent replica survives.
+
+## 1a. The always-current priority list (READ THIS to know what to do next)
+
+[`/PRIORITY.md`](PRIORITY.md) is the **single source of truth for task ordering** — critical bugs
+first, a always-updated **👉 SUGGESTED NEXT TASK** pointer, and five priority bands. Its visual twin is
+[`docs/priority-graph/priority-graph.html`](docs/priority-graph/priority-graph.html) — an interactive
+concentric task graph (critical in the center), click any node for details + a jump to its tier file.
+**Both must be updated whenever a task is added, completed, or re-prioritized** — protocol in
+`PRIORITY.md` and `CLAUDE.md`.
+
 > **2026-06-12 fable-review changes to the EXISTING tiers:**
 > - Every pending task gained two attributes: **`Risk`** and **`If skipped`** (see §2).
 > - New tasks from the full code read: **A10–A12** (requirements truth-up, repo hygiene, CI), **B9–B10** (hash-print throttle, harvester re-hash), **C12–C15** (multi_ep_alias crashers in scan_unprepped/local_status, single-id alias handling, parser papercuts, micro-robustness).

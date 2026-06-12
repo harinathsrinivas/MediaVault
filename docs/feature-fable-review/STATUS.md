@@ -160,4 +160,17 @@
 - 2026-06-12: P6 research dossier (3 docs) — commit `b4e1fc6`. (Usage-limit pause hit during P5 tier D read; resumed cleanly from this tracker.)
 - 2026-06-12: P5 tier overhaul A–U complete — commits `6631926`, `940005b`, `4e6397f`, `42f9d3f`.
 - 2026-06-12: P7 roadmap + blockers/moonshots + supersession banner — commit `072f186`.
-- 2026-06-12: P8 master index + consistency pass; P9 wrap-up: branch pushed, PR opened, **awaiting Checkpoint-1 merge approval**.
+- 2026-06-12: P8 master index + consistency pass; P9 wrap-up: branch pushed, PR #22 opened.
+- 2026-06-12: **Follow-up round** (user reviewed PR, requested additions before merge): added **Tier X**
+  (cloud resilience & privacy — multi-account replication, encryption/anti-scanning, ban canary),
+  **IMP-C16** (anime-account fetch routing), `PRIORITY.md` + the interactive `docs/priority-graph/priority-graph.html`,
+  resolved the 3-account topology question across all docs, wired the keep-priority-current rule into
+  CLAUDE.md/improvement_details.md/docs README. Pushed; PR updated. **Still awaiting Checkpoint-1 merge approval.**
+
+## Follow-up round deliverables (P10)
+- [x] Tier X (X1–X5) with §0 sharing-vs-replication research table + the deletion-cascade answer
+- [x] IMP-C16 (3 accounts ⇒ anime needs its own Chrome profile; fetch currently mis-routes)
+- [x] `PRIORITY.md` (always-current ordering, critical-first, suggested-next pointer, maintenance protocol)
+- [x] `docs/priority-graph/priority-graph.html` (futuristic concentric task graph, click→details + jump)
+- [x] Topology question resolved in REVIEW_NOTES/ROADMAP/RESEARCH/tierE; keep-current rule wired in
+- [x] Tier X + PRIORITY registered in ARCHITECTURE/README/CLAUDE/docs-README/improvement_details

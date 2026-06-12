@@ -212,8 +212,9 @@ MediaVault/
 ├── ARCHITECTURE.md          # Full engineering reference
 ├── ARCHITECTURE_GRAPH.md    # Graph views (Mermaid) of the architecture
 ├── README.md                # This file
+├── PRIORITY.md              # Always-current task ordering ("what to do next"; critical bugs first)
 ├── improvement_details.md   # Index + manual for the improvements_tier*.md task set
-├── improvements_tier*.md    # Tracked improvement tasks (tiers A–H, R, S, U)
+├── improvements_tier*.md    # Tracked improvement tasks (tiers A–H, R, S, U, X)
 ├── apple_tv_ui_roadmap.md   # 2026-05 Jellyfin UI design (see docs/feature-fable-review/ for the current roadmap)
 ├── docs/                    # Per-feature plans/decisions, conventions, testing strategy
 │   └── README.md            # Master index of all documentation

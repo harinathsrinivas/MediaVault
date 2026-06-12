@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MediaVault · Priority Graph</title>
+<script src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
+<style>
+  :root{
+    --crit:#ff2d55; --high:#ff9f0a; --med:#32d4ff; --low:#8a93a7; --done:#30d158;
+    --glass:rgba(20,24,38,.55); --stroke:rgba(120,140,200,.18); --ink:#e8ecf6;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;font-family:"Inter","Segoe UI",system-ui,sans-serif;color:var(--ink);overflow:hidden}
+  body{background:#070912;}
+  /* animated aurora + starfield backdrop */
+  #bg{position:fixed;inset:0;z-index:0;
+    background:
+      radial-gradient(1200px 800px at 70% -10%, rgba(50,212,255,.10), transparent 60%),
+      radial-gradient(1000px 700px at 10% 110%, rgba(187,154,247,.12), transparent 60%),
+      radial-gradient(900px 600px at 90% 90%, rgba(255,45,85,.07), transparent 60%),
+      #070912;
+    animation:drift 22s ease-in-out infinite alternate;}
+  @keyframes drift{from{filter:hue-rotate(0deg) saturate(1)}to{filter:hue-rotate(24deg) saturate(1.15)}}
+  #stars{position:fixed;inset:0;z-index:0;opacity:.5;
+    background-image:radial-gradient(1px 1px at 20% 30%,#fff,transparent),radial-gradient(1px 1px at 80% 60%,#cfe,transparent),radial-gradient(1px 1px at 50% 80%,#fff,transparent),radial-gradient(1px 1px at 35% 65%,#aef,transparent),radial-gradient(1px 1px at 65% 20%,#fff,transparent);
+    background-size:300px 300px,250px 250px,400px 400px,200px 200px,350px 350px;animation:twinkle 6s linear infinite alternate}
+  @keyframes twinkle{from{opacity:.25}to{opacity:.6}}
+  #net{position:fixed;inset:0;z-index:1}
+  /* header */
+  header{position:fixed;top:0;left:0;right:0;z-index:5;display:flex;align-items:center;gap:16px;padding:14px 20px;
+    backdrop-filter:blur(14px);background:linear-gradient(180deg,rgba(10,12,22,.75),rgba(10,12,22,0));pointer-events:none}
+  header .brand{font-weight:800;letter-spacing:.5px;font-size:18px;pointer-events:auto}
+  header .brand span{background:linear-gradient(90deg,var(--med),var(--high));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .next{pointer-events:auto;display:flex;align-items:center;gap:10px;padding:8px 14px;border-radius:14px;
+    background:var(--glass);border:1px solid var(--stroke);box-shadow:0 0 24px rgba(255,45,85,.18) inset;font-size:13px}
+  .next b{color:var(--crit)}
+  .next a{color:var(--med);text-decoration:none;border-bottom:1px dashed rgba(50,212,255,.5)}
+  .grow{flex:1}
+  #search{pointer-events:auto;width:230px;padding:9px 12px;border-radius:12px;border:1px solid var(--stroke);
+    background:rgba(8,10,20,.7);color:var(--ink);outline:none}
+  #search:focus{border-color:var(--med);box-shadow:0 0 0 3px rgba(50,212,255,.15)}
+  /* left rail: legend + filters */
+  #rail{position:fixed;z-index:5;left:16px;top:74px;width:220px;max-height:calc(100vh - 96px);overflow:auto;
+    padding:14px;border-radius:18px;background:var(--glass);border:1px solid var(--stroke);backdrop-filter:blur(16px)}
+  #rail h4{margin:4px 0 8px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:#9fb0d6}
+  .ring{display:flex;align-items:center;gap:9px;font-size:12.5px;margin:5px 0;cursor:pointer;user-select:none}
+  .ring .dot{width:12px;height:12px;border-radius:50%}
+  .chip{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;margin:3px 4px 3px 0;padding:4px 8px;border-radius:9px;
+    background:rgba(255,255,255,.04);border:1px solid var(--stroke);cursor:pointer;user-select:none}
+  .chip.off{opacity:.32;text-decoration:line-through}
+  .ring.off{opacity:.32}
+  .hint{font-size:11px;color:#8593b4;line-height:1.5;margin-top:8px}
+  button.act{pointer-events:auto;font:inherit;font-size:12px;color:var(--ink);background:rgba(255,255,255,.05);
+    border:1px solid var(--stroke);border-radius:10px;padding:7px 10px;cursor:pointer;margin-top:8px;width:100%}
+  button.act:hover{border-color:var(--med);box-shadow:0 0 14px rgba(50,212,255,.2)}
+  /* detail panel */
+  #panel{position:fixed;z-index:6;right:16px;top:74px;width:340px;max-height:calc(100vh - 96px);overflow:auto;
+    padding:18px;border-radius:20px;background:var(--glass);border:1px solid var(--stroke);backdrop-filter:blur(18px);
+    box-shadow:0 18px 60px rgba(0,0,0,.5);transform:translateX(380px);opacity:0;transition:.35s cubic-bezier(.2,.9,.2,1)}
+  #panel.show{transform:none;opacity:1}
+  #panel .pri{display:inline-block;font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;padding:3px 9px;border-radius:8px;font-weight:700}
+  #panel h2{margin:12px 0 4px;font-size:19px;line-height:1.2}
+  #panel .sub{font-size:12px;color:#9fb0d6;margin-bottom:12px}
+  #panel .row{display:flex;gap:8px;margin:8px 0;font-size:13px}
+  #panel .row .k{color:#8aa;min-width:78px;flex:none}
+  #panel .note{margin-top:12px;padding:12px;border-radius:12px;background:rgba(0,0,0,.25);border:1px solid var(--stroke);font-size:13px;line-height:1.5}
+  #panel a.open{display:inline-block;margin-top:14px;padding:9px 14px;border-radius:11px;text-decoration:none;font-size:13px;font-weight:600;
+    color:#06121e;background:linear-gradient(90deg,var(--med),#7ad7ff);box-shadow:0 6px 20px rgba(50,212,255,.3)}
+  #panel .deps{margin-top:12px;font-size:12px;color:#9fb0d6}
+  #panel .deps b{color:var(--ink)}
+  #panel .x{position:absolute;top:12px;right:14px;cursor:pointer;color:#8aa;font-size:18px}
+  .footer{position:fixed;z-index:5;bottom:10px;left:50%;transform:translateX(-50%);font-size:11px;color:#7587ad;
+    background:rgba(8,10,20,.5);padding:5px 12px;border-radius:10px;border:1px solid var(--stroke);backdrop-filter:blur(8px)}
+  @media (max-width:820px){#rail{display:none}#panel{width:min(340px,92vw)}#search{width:140px}}
+</style>
+</head>
+<body>
+<div id="bg"></div><div id="stars"></div>
+<div id="net"></div>
+
+<header>
+  <div class="brand">Media<span>Vault</span> · Priority Graph</div>
+  <div class="next">⚡ Next: <b>IMP-C12</b>&nbsp;<span style="color:#9fb0d6">alias crash, broken in prod</span>&nbsp;·&nbsp;<a href="../../PRIORITY.md">full list →</a></div>
+  <div class="grow"></div>
+  <input id="search" placeholder="search tasks…  (Enter to focus)">
+</header>
+
+<div id="rail">
+  <h4>Priority rings (inner = do first)</h4>
+  <div class="ring" data-p="crit"><span class="dot" style="background:var(--crit);box-shadow:0 0 10px var(--crit)"></span>Critical / decision</div>
+  <div class="ring" data-p="high"><span class="dot" style="background:var(--high);box-shadow:0 0 10px var(--high)"></span>High</div>
+  <div class="ring" data-p="med"><span class="dot" style="background:var(--med);box-shadow:0 0 10px var(--med)"></span>Medium</div>
+  <div class="ring" data-p="low"><span class="dot" style="background:var(--low)"></span>Low</div>
+  <div class="ring" data-p="done"><span class="dot" style="background:var(--done)"></span>Done</div>
+  <h4 style="margin-top:14px">Tiers</h4>
+  <div id="tierchips"></div>
+  <button class="act" id="resetView">⟳ Reset view</button>
+  <div class="hint">Drag to pan · scroll to zoom · click a node for details &amp; a jump-to-task link. Rings cluster by urgency; color = priority, hue = tier.</div>
+</div>
+
+<div id="panel">
+  <span class="x" onclick="hidePanel()">✕</span>
+  <span class="pri" id="p-pri"></span>
+  <h2 id="p-title"></h2>
+  <div class="sub" id="p-sub"></div>
+  <div class="row"><span class="k">Status</span><span id="p-status"></span></div>
+  <div class="row"><span class="k">Risk to do</span><span id="p-risk"></span></div>
+  <div class="note" id="p-note"></div>
+  <div class="deps" id="p-deps"></div>
+  <a class="open" id="p-open" href="#" target="_blank" rel="noopener">Open task in tier file →</a>
+</div>
+
+<div class="footer">Generated 2026-06-12 · keep in sync with <code>PRIORITY.md</code> (see its maintenance protocol) · ~110 tasks</div>
+
+<script>
+/* ───────────────────────── TASK DATA — keep in sync with PRIORITY.md + improvements_tier*.md ─────────────────────────
+   [id, label, tier, priority(crit|high|med|low|done), status(todo|decision|done), note]  */
+const TASKS = [
+ // A — architecture
+ ["A1","Extract mvcommon","A","done","done","Shared module — shipped PR #8"],
+ ["A2","argparse CLI","A","high","todo","Self-documenting CLI; kills the 'episodes' footgun; unblocks every new flag"],
+ ["A3","logging module","A","med","todo","Daemon has no terminal — needs a real log file"],
+ ["A4","--json output","A","high","todo","Machine-readable contract the daemon/UI consume"],
+ ["A5","mvconfig.json","A","med","todo","Portable config; unparks the C8 verify flag"],
+ ["A6","type hints + mypy","A","low","todo","Would have flagged the alias-crash class at write time"],
+ ["A7","pytest harness","A","done","done","13-file suite shipped organically"],
+ ["A8","delete dead mainfetch code","A","low","todo","3 unreachable stubs"],
+ ["A9","[eE|xX] regex typo","A","low","todo","Literal | inside a char class — cosmetic"],
+ ["A10","requirements.txt truth-up","A","high","todo","Clean install is half-broken: missing requests + webdriver-manager"],
+ ["A11","repo hygiene","A","low","todo","Gitignore stale STATUS.md, drop stray files, clean worktrees"],
+ ["A12","CI pipeline","A","high","todo","Lock the suite so nothing merges red"],
+ // B — performance
+ ["B1","cache library handle","B","high","todo","~95% fewer JSON writes per season run (change-gate adjacent)"],
+ ["B2","dirty-save per category","B","med","todo","Write only the file that changed"],
+ ["B3","parallel chunk hashing","B","med","todo","Cuts ~5-8 idle min before a 4K push"],
+ ["B4","WebDriverWait vs sleeps","B","med","todo","~7.5s dead time per chunk trigger"],
+ ["B5","smart Downloads re-listing","B","low","todo","Less Explorer jank during long fetches"],
+ ["B6","cached cmd_check","B","low","todo","Enables periodic integrity sweeps"],
+ ["B7","memoize scan_unprepped","B","low","todo","Do AFTER C12 (it crashes today)"],
+ ["B8","skip MediaInfo on re-prep","B","low","todo","Faster re-prep iterations"],
+ ["B9","throttle hash progress print","B","low","todo","~16k console writes/GB today"],
+ ["B10","persist harvester hashes","B","low","todo","Stop re-hashing Downloads on attempt 2"],
+ // C — robustness
+ ["C1","season auto-resume","C","high","todo","Failed season still needs a manual paste (change-gate adjacent)"],
+ ["C2","retry w/ backoff","C","done","done","Shipped PR #9"],
+ ["C3","doctor health check","C","high","todo","Pre-flight catches 80% of mid-run failures"],
+ ["C4","device pinning","C","done","done","Shipped PR #2"],
+ ["C5","real fallback search","C","high","todo","Today's fallback == precision query → never recovers"],
+ ["C6","session-expiry detection","C","high","todo","Silent logout = 90-min doomed fetch"],
+ ["C7","verify set_uploaded via ADB","C","med","todo","Foot-cannon: can make replace delete the only copy"],
+ ["C8","post-push remote verify","C","done","done","Shipped PR #12 (gated off until A5)"],
+ ["C9","atomic replace","C","done","done","Shipped PR #5"],
+ ["C10","sidecar reconciliation","C","low","todo","Make the unused sidecars a real recovery layer"],
+ ["C11","restore quarantine","C","done","done","Shipped PR #6"],
+ ["C12","alias crash: scan/local_status","C","crit","todo","BROKEN IN PROD: KeyError/TypeError on multi_ep_alias entries"],
+ ["C13","single-id alias handling","C","crit","todo","push/replace/restore/check crash on a secondary-episode id"],
+ ["C14","parser papercuts","C","crit","todo","push_group infinite-loop hang; mainfetch IndexError; silent replace"],
+ ["C15","micro-robustness batch","C","high","todo","repair_dummies atomic swap; verify_chunk IndexError guard"],
+ ["C16","anime fetch profile","C","high","todo","3 accounts now: ani-* mis-routes to series profile → anime restore silently fails"],
+ // D — commands
+ ["D1","library_stats","D","high","todo","At-a-glance archive state; first thing a UI needs"],
+ ["D2","fuzzy find","D","med","todo","Kill ID-recall friction/typos"],
+ ["D3","where_is diagnostic","D","med","todo","One command tells you everything about an entry"],
+ ["D4","verify_library audit","D","high","todo","Catches integrity drift (orphans, bad aliases) early"],
+ ["D5","repair_library fixer","D","med","todo","Audit+fix loop; ends hand-edited JSON"],
+ ["D6","prune_dummies","D","low","todo","Surface dummy↔status disagreements"],
+ ["D7","unarchive alias","D","low","todo","Mental-model command name"],
+ ["D8","relocate","D","med","todo","Cross-drive moves without hand-editing JSON"],
+ ["D9","rebuild_search_terms","D","low","todo","Bulk search-term consistency"],
+ ["D10","prep_auto wizard","D","high","todo","The TYPO root cause; 1-keystroke prepping"],
+ ["D11","push_auto_batch","D","med","todo","Close the local_status copy-paste loop"],
+ ["D12","seal (paranoid replace)","D","low","todo","Max verification before destruction"],
+ ["D13","compare diagnostic","D","low","todo","Explain hash provenance (orig vs canonical)"],
+ ["D14","tail_progress","D","low","todo","Monitor a batch from another shell"],
+ ["D15","export/import watchlist","D","low","todo","Bridge Letterboxd/MAL"],
+ // E — integration
+ ["E1","subtitle pre-extraction","E","med","todo","Subs survive archive; feed F7 grep"],
+ ["E2","low-res preview variant","E","low","todo","Quick preview without full fetch"],
+ ["E3","metadata enrichment","E","high","todo","HARD prereq for a Netflix-looking library"],
+ ["E4","watch-state tracking","E","med","todo","Jellyfin-webhook fed; powers prefetch + archive"],
+ ["E5","phone auto-cleanup","E","high","todo","Phones fill at ~1 load; blocks unattended pipeline"],
+ ["E6","quota tracker","E","med","todo","Per-account exposure + ban early-signal"],
+ ["E7","multi-device parallel push","E","med","todo","Saturate the Pixel fleet; foundation for X1"],
+ ["E8","wifi ADB","E","low","todo","Hands-off upload rack"],
+ ["E9","library-refresh integration","E","med","todo","Tile flips playable seconds after restore"],
+ ["E10","Telegram bot","E","low","todo","Optional away-from-home fallback (not the core flow)"],
+ ["E11","id lookup by folder","E","low","todo","Drag folder → get id; daemon path→id too"],
+ ["E12","web ops UI","E","high","todo","The daemon's status dashboard layer"],
+ ["E13","multi-episode support","E","done","done","Shipped PR #21 (follow-ups → C12/C13)"],
+ // F — moonshots
+ ["F1","encrypt-at-rest","F","med","todo","Privacy — see X3 (container constraint)"],
+ ["F2","CDC dedup","F","low","todo","Blocked by container constraint; small real win"],
+ ["F3","erasure coding / replication","F","low","todo","Replication-lite feeds X1; parity blocked"],
+ ["F4","streamable restore (deep)","F","low","todo","Deep version of S6/S8 tiers"],
+ ["F5","git library sync","F","low","todo","Off-machine library backup (do the backup half early)"],
+ ["F6","policy-engine pruning","F","low","todo","Core absorbed into S5"],
+ ["F7","subtitle grep","F","med","todo","Search the archive by dialogue"],
+ ["F8","CLIP/Whisper tagging","F","low","todo","Semantic search; free-ride the enrichment window"],
+ ["F9","multi-cloud backend","F","low","todo","Strategic hedge; dissolves the container constraint"],
+ ["F10","websocket status","F","low","todo","Becomes the daemon event bus"],
+ // G — lessons
+ ["G1","rclone chunker patterns","G","done","done","Shipped PR #7 (+ mvmeta sidecar)"],
+ ["G2","gphotosdl spike","G","high","todo","De-risk the most fragile piece + T3 probe"],
+ ["G3","tdl patterns","G","low","todo","Reference for A2/E10/F9"],
+ ["G4","Jellyfin direction","G","high","todo","CONFIRMED direction; executes as Tier S/U"],
+ ["G5","restic/borg CDC ref","G","low","todo","Only if F2 proceeds"],
+ // H — agentic
+ ["H1","Opus 4.8 effort tiers","H","done","done","Shipped 2026-05-30"],
+ ["H2","dynamic-workflows spike","H","low","todo","Revisit when plans exceed ~10 steps"],
+ // R — rollback (decisions are change-gated)
+ ["R1","streaming split-upload-delete","R","med","todo","Cut the ~40GB disk peak (change-gate)"],
+ ["R2","recover CLI","R","done","done","Shipped PR #18 (+ --scan)"],
+ ["R3","stale-journal in doctor","R","low","todo","--scan shipped; fold into doctor + add age"],
+ ["R4","group-command rollback parity","R","med","decision","replace_group misses RollbackHardFail (change-gate)"],
+ ["R5","self-describing journal","R","low","decision","Add created_at/command/version (change-gate)"],
+ ["R6","restore-merge dummy loss","R","crit","decision","Failed merge → no file at path → title vanishes from Jellyfin"],
+ ["R7","journal clobber on re-run","R","crit","decision","Re-run after crash destroys recovery inverses"],
+ ["R8","journal eager temp","R","low","decision","Eager rehash temp unjournalled (disk leak on crash)"],
+ ["R9","prep_season alias journaling","R","low","decision","Alias block mutates outside the journal"],
+ // S — streaming / daemon
+ ["S1","Jellyfin stand-up","S","high","todo","ZERO code, immediate couch value — do anytime"],
+ ["S2","mvdaemon service","S","high","todo","The one new component the end goal needs"],
+ ["S3","in-client fetch + notify","S","high","todo","Play-a-dummy = the fetch request; DisplayMessage notify"],
+ ["S4","grace-period archive flow","S","high","todo","Watched → in-client hold/Keep → auto-archive"],
+ ["S5","smart prefetch / binge","S","high","todo","Makes episodic watching feel instant (highest leverage)"],
+ ["S6","watch-while-fetching (T2)","S","med","todo","Chunk-1 plays while rest downloads (spike)"],
+ ["S7","fetch-engine hardening","S","high","todo","Make the fragile fetch boring before nightly runs"],
+ ["S8","proxy-streaming (T3)","S","low","todo","Play originals through a local proxy (moonshot spike)"],
+ // U — couch UX
+ ["U1","enrichment-before-archive","U","high","todo","Trickplay/intro permanence for every fetched title"],
+ ["U2","status home rows","U","high","todo","Fetching/Ready/Leaving-soon as Netflix rows"],
+ ["U3","NFO + artwork pipeline","U","high","todo","Every tile (even dummies) renders beautifully"],
+ ["U4","DV-FEL playback paths","U","med","todo","Right device for reference content (Ugoos)"],
+ ["U5","C# Jellyfin plugin","U","med","todo","Polish phase — last, after the daemon proves out"],
+ // X — cloud resilience & privacy (NEW)
+ ["X1","multi-account replication","X","high","todo","Every chunk in ≥2 accounts — the real backup vs CSAM-ban loss"],
+ ["X2","topology + loss runbook","X","high","todo","Records sharing-vs-replication decision; recovery checklist"],
+ ["X3","encrypted/obfuscated upload","X","med","todo","Defeats copyright-match + CSAM-AI (spike + change-gate)"],
+ ["X4","cross-account self-heal","X","med","todo","Fetch falls back across accounts; rebuild lost replicas"],
+ ["X5","account-health canary","X","med","todo","Early ban warning before a fetch reveals it weeks late"],
+];
+/* dependency / flow edges [from,to] — major chains only */
+const EDGES = [
+ ["A2","A4"],["A4","A5"],["A4","E12"],["A4","D1"],["A4","S2"],["A3","S2"],
+ ["A2","D10"],["E3","U3"],["E3","D10"],["E3","D1"],["D4","D5"],
+ ["S1","S2"],["S2","S3"],["S3","S4"],["S4","S5"],["S2","E9"],["S2","U2"],
+ ["C6","S3"],["S4","U1"],["E4","S4"],["E4","S5"],["E5","S5"],["C1","S2"],
+ ["R6","S3"],["G4","S2"],["G4","U5"],["G2","S7"],["S6","S8"],
+ ["E7","X1"],["F3","X1"],["X1","X2"],["X1","X4"],["X1","X5"],["X3","F1"],
+ ["C12","B7"],["E1","F7"],["U3","U2"],["C16","X1"],["C16","S3"],
+];
+
+const PRI={crit:{c:"#ff2d55",r:140,size:30,lbl:"Critical / decision"},high:{c:"#ff9f0a",r:300,size:22,lbl:"High"},
+           med:{c:"#32d4ff",r:480,size:16,lbl:"Medium"},low:{c:"#8a93a7",r:680,size:12,lbl:"Low"},done:{c:"#30d158",r:860,size:13,lbl:"Done"}};
+const TIER_HUE={A:205,B:165,C:0,D:275,E:45,F:315,G:130,H:240,R:15,S:190,U:95,X:340};
+const TIER_FILE={A:"improvements_tierA.md",B:"improvements_tierB.md",C:"improvements_tierC.md",D:"improvements_tierD.md",
+  E:"improvements_tierE.md",F:"improvements_tierF.md",G:"improvements_tierG.md",H:"improvements_tierH.md",
+  R:"improvements_tierR.md",S:"improvements_tierS.md",U:"improvements_tierU.md",X:"improvements_tierX.md"};
+function tierColor(t){const h=TIER_HUE[t]??220;return `hsl(${h} 70% 22%)`;}
+function tierBorder(t){const h=TIER_HUE[t]??220;return `hsl(${h} 80% 60%)`;}
+
+// concentric placement: group by priority ring, spread by tier within the ring
+const ringMembers={}; TASKS.forEach(t=>{(ringMembers[t[3]] ||= []).push(t);});
+const nodes=[]; const idMap={};
+Object.keys(ringMembers).forEach(p=>{
+  const arr=ringMembers[p].slice().sort((a,b)=>(a[2]+a[0]).localeCompare(b[2]+b[0]));
+  const R=PRI[p].r, n=arr.length;
+  arr.forEach((t,i)=>{
+    const ang=(i/n)*Math.PI*2 - Math.PI/2 + (p==="crit"?0:0.0);
+    const jitter = (p==="low"||p==="done")?0:0;
+    const x=Math.cos(ang)*R, y=Math.sin(ang)*R;
+    const meta={id:t[0],label:t[0],title:t[1],tier:t[2],p:t[3],s:t[4],note:t[5]};
+    idMap[t[0]]=meta;
+    nodes.push({
+      id:t[0], label:t[0], x, y, fixed:false, physics:false,
+      shape:"dot", size:PRI[t[3]].size,
+      color:{background:tierColor(t[2]), border:t[4]==="decision"?"#fff":PRI[t[3]].c, highlight:{background:tierBorder(t[2]),border:"#fff"}},
+      borderWidth:t[4]==="decision"?3:2,
+      shadow:{enabled:true,color:PRI[t[3]].c,size:t[3]==="low"||t[3]==="done"?8:22,x:0,y:0},
+      font:{color:"#dfe7fb",size:t[3]==="crit"?15:12,face:"Inter",strokeWidth:3,strokeColor:"#070912",vadjust:0},
+      _meta:meta
+    });
+  });
+});
+const edges=EDGES.filter(e=>idMap[e[0]]&&idMap[e[1]]).map(e=>({
+  from:e[0],to:e[1],arrows:{to:{enabled:true,scaleFactor:.5}},
+  color:{color:"rgba(120,150,220,.28)",highlight:"#32d4ff"},
+  smooth:{type:"continuous",roundness:.35},width:1.2,shadow:{enabled:true,color:"rgba(50,212,255,.25)",size:6}
+}));
+
+const nodesDS=new vis.DataSet(nodes), edgesDS=new vis.DataSet(edges);
+const net=new vis.Network(document.getElementById("net"),{nodes:nodesDS,edges:edgesDS},{
+  physics:false, interaction:{hover:true,dragNodes:false,tooltipDelay:120,zoomView:true,dragView:true},
+  nodes:{scaling:{min:8,max:34}},
+});
+net.once("afterDrawing",()=>net.fit({animation:{duration:600}}));
+
+// ── detail panel ──
+const panel=document.getElementById("panel");
+function showMeta(m){
+  const pc=PRI[m.p].c;
+  document.getElementById("p-pri").textContent=(m.s==="decision"?"DECISION · ":"")+PRI[m.p].lbl;
+  document.getElementById("p-pri").style.background=pc+"22";
+  document.getElementById("p-pri").style.color=pc;
+  document.getElementById("p-pri").style.border="1px solid "+pc;
+  document.getElementById("p-title").textContent=`IMP-${m.id}: ${m.title}`;
+  document.getElementById("p-sub").textContent=`Tier ${m.tier} · ${TIER_FILE[m.tier]}`;
+  const st={todo:"⬜ pending",decision:"🚦 needs your decision (change-gate)",done:"✅ done"}[m.s];
+  document.getElementById("p-status").textContent=st;
+  document.getElementById("p-risk").textContent=m.p==="crit"?"see task — usually low to fix":"see task";
+  document.getElementById("p-note").textContent=m.note;
+  const outDeps=EDGES.filter(e=>e[0]===m.id).map(e=>e[1]);
+  const inDeps=EDGES.filter(e=>e[1]===m.id).map(e=>e[0]);
+  document.getElementById("p-deps").innerHTML=
+    (inDeps.length?`<b>After:</b> ${inDeps.map(d=>"IMP-"+d).join(", ")}<br>`:"")+
+    (outDeps.length?`<b>Unblocks:</b> ${outDeps.map(d=>"IMP-"+d).join(", ")}`:"");
+  document.getElementById("p-open").href="../../"+TIER_FILE[m.tier];
+  panel.classList.add("show");
+}
+function hidePanel(){panel.classList.remove("show");net.unselectAll();}
+window.hidePanel=hidePanel;
+net.on("click",p=>{ if(p.nodes.length){const m=idMap[p.nodes[0]]; showMeta(m);
+  // emphasize neighborhood
+  const nbr=new Set([m.id]); EDGES.forEach(e=>{if(e[0]===m.id)nbr.add(e[1]);if(e[1]===m.id)nbr.add(e[0]);});
+  nodesDS.forEach(n=>nodesDS.update({id:n.id,opacity:nbr.has(n.id)?1:0.25}));
+} else { hidePanel(); nodesDS.forEach(n=>nodesDS.update({id:n.id,opacity:1})); }});
+
+// ── filters ──
+const tierset=[...new Set(TASKS.map(t=>t[2]))];
+const tc=document.getElementById("tierchips");
+const tierOn={}; tierset.forEach(t=>{tierOn[t]=true;
+  const el=document.createElement("span"); el.className="chip";
+  el.innerHTML=`<span style="width:9px;height:9px;border-radius:2px;background:${tierBorder(t)}"></span>${t}`;
+  el.onclick=()=>{tierOn[t]=!tierOn[t]; el.classList.toggle("off",!tierOn[t]); applyFilters();};
+  tc.appendChild(el);});
+const priOn={crit:1,high:1,med:1,low:1,done:1};
+document.querySelectorAll(".ring").forEach(r=>{ r.onclick=()=>{const p=r.dataset.p;priOn[p]=!priOn[p];r.classList.toggle("off",!priOn[p]);applyFilters();};});
+function applyFilters(){ nodesDS.forEach(n=>{const m=n._meta; const vis=tierOn[m.tier]&&priOn[m.p]; nodesDS.update({id:n.id,hidden:!vis});});}
+
+// ── search ──
+const sb=document.getElementById("search");
+sb.addEventListener("input",()=>{const q=sb.value.toLowerCase();
+  nodesDS.forEach(n=>{const m=n._meta;const hit=!q||m.id.toLowerCase().includes(q)||m.title.toLowerCase().includes(q)||m.note.toLowerCase().includes(q);
+    nodesDS.update({id:n.id,opacity:hit?1:0.12});});});
+sb.addEventListener("keydown",e=>{if(e.key!=="Enter")return;const q=sb.value.toLowerCase();if(!q)return;
+  const hit=TASKS.find(t=>t[0].toLowerCase().includes(q)||t[1].toLowerCase().includes(q));
+  if(hit){net.focus(hit[0],{scale:1.4,animation:true});net.selectNodes([hit[0]]);showMeta(idMap[hit[0]]);}});
+document.getElementById("resetView").onclick=()=>{net.fit({animation:true});hidePanel();nodesDS.forEach(n=>nodesDS.update({id:n.id,opacity:1}));};
+</script>
+</body>
+</html>

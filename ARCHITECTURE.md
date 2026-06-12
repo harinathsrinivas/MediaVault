@@ -103,7 +103,8 @@ C:\Users\harin\PycharmProjects\MediaVault\
 |-- ARCHITECTURE.md                  this document
 |-- README.md                        user-facing overview
 |-- improvement_details.md           improvements index + operating manual (start here for IMP-XN work)
-|-- improvements_tier{A..H,R,S,U}.md  tracked improvement tasks (see improvement_details.md)
+|-- improvements_tier{A..H,R,S,U,X}.md  tracked improvement tasks (see improvement_details.md)
+|-- PRIORITY.md                      always-current task ordering ("what to do next"); visual twin docs/priority-graph/priority-graph.html
 |-- apple_tv_ui_roadmap.md           2026-05 Jellyfin-plugin UI design (partially superseded — see docs/feature-fable-review/)
 |-- .gitignore                       excludes a.json, PLAN.md, resources/, Obsidian vault, transcript dumps
 |

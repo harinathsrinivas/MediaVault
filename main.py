@@ -805,6 +805,11 @@ def cmd_prep(manual_id, filepath, parent_id=None):
     # this-run-created parent season_map per D-7. See the module spec block above.
     if manual_id in library:
         entry = library[manual_id]
+        if entry.get("type") == "multi_ep_alias":
+            # Refuse to prep OVER an existing combined-episode alias — writing a leaf
+            # entry here would clobber the alias and corrupt the alias chain.
+            print(f"❌ {manual_id} is a combined-episode alias of {entry.get('alias_of')}; prep the primary instead.")
+            return False
         if entry.get("uploaded") == True or entry.get("status") == "archived":
             # [ROLLBACK SPEC] Early-skip: returns True having created ZERO artifacts.
             # The wrapper MUST treat this as success and NEVER roll back.
@@ -1091,7 +1096,10 @@ def cmd_check(manual_id):
     print(f"--- CHECKING: {manual_id} ---")
     library = load_library()
     if manual_id not in library: print("❌ ID not found."); return
-    entry = library[manual_id]
+    real_id, entry = _resolve_alias(library, manual_id)
+    if real_id != manual_id:
+        print(f"ℹ️  {manual_id} is part of the combined file registered as {real_id} — operating on that.")
+        manual_id = real_id
 
     file_path = os.path.join(entry['folder_path'], entry['filename'])
     if not os.path.exists(file_path): print("❌ File missing!"); return
@@ -1218,7 +1226,10 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
     print(f"--- PUSHING: {manual_id} ---")
     library = load_library()
     if manual_id not in library: print(f"❌ ID not found."); return False
-    entry = library[manual_id]
+    real_id, entry = _resolve_alias(library, manual_id)
+    if real_id != manual_id:
+        print(f"ℹ️  {manual_id} is part of the combined file registered as {real_id} — operating on that.")
+        manual_id = real_id
 
     # PARENT AWARENESS INFO
     if "parent_id" in entry:
@@ -1741,7 +1752,10 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
 def cmd_replace(manual_id):
     library = load_library()
     if manual_id not in library: return False
-    entry = library[manual_id]
+    real_id, entry = _resolve_alias(library, manual_id)
+    if real_id != manual_id:
+        print(f"ℹ️  {manual_id} is part of the combined file registered as {real_id} — operating on that.")
+        manual_id = real_id
 
     if not entry.get("uploaded", False):
         print(f"⚠️ Skipping {manual_id}: Not marked as uploaded.")
@@ -1957,7 +1971,10 @@ def cmd_verify_restore(manual_id):
     print(f"--- VERIFYING RESTORE (DRY RUN): {manual_id} ---")
     library = load_library()
     if manual_id not in library: print("❌ ID not found."); return
-    entry = library[manual_id]
+    real_id, entry = _resolve_alias(library, manual_id)
+    if real_id != manual_id:
+        print(f"ℹ️  {manual_id} is part of the combined file registered as {real_id} — operating on that.")
+        manual_id = real_id
 
     # Auto-detect restore folder
     restore_folder = os.path.join(entry['folder_path'], RESTORE_DIR_NAME)
@@ -2033,7 +2050,10 @@ def cmd_restore(manual_id):
     print(f"--- RESTORING: {manual_id} ---")
     library = load_library()
     if manual_id not in library: print("❌ ID not found."); return False
-    entry = library[manual_id]
+    real_id, entry = _resolve_alias(library, manual_id)
+    if real_id != manual_id:
+        print(f"ℹ️  {manual_id} is part of the combined file registered as {real_id} — operating on that.")
+        manual_id = real_id
 
     local_folder = entry['folder_path']
     restore_folder = os.path.join(local_folder, RESTORE_DIR_NAME)
@@ -2356,7 +2376,7 @@ def cmd_local_status(limit_arg=None):
     pending_items = []
 
     for mid, entry in library.items():
-        if entry.get("type") == "season_map": continue
+        if entry.get("type") in ("season_map", "multi_ep_alias"): continue
 
         # Condition: Uploaded is False (or missing)
         if not entry.get("uploaded", False):
@@ -2457,7 +2477,7 @@ def cmd_scan_unprepped():
 
         known_paths = set()
         for entry in cat_lib.values():
-            if entry.get("type") == "season_map": continue
+            if entry.get("type") in ("season_map", "multi_ep_alias"): continue
             p = os.path.join(entry['folder_path'], entry['filename'])
             known_paths.add(os.path.normpath(p).lower())
 

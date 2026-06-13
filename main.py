@@ -81,6 +81,42 @@ MVMETA_SUFFIX = ".mvmeta.json"  # Remote disaster-recovery sidecar mirroring spl
 # support (toggle without editing source) arrives with IMP-A5.
 PUSH_VERIFY_REMOTE = False
 
+# ENTRY_TYPE_KEYS — THE single source of truth for "what keys does each top-level
+# library entry type have", and the seam future entry types extend (IMP-H3).
+#
+# A library_*.json maps an id -> entry dict. There are three top-level entry
+# shapes (verified against every `"type": ...` write + `.get("type")` read in
+# main.py / mainfetch.py):
+#   - "leaf"           the implicit, no-`type` entry a prepped file produces
+#                      (cmd_prep, main.py ~906): owns a physical file on disk
+#                      (folder_path + filename), plus status/uploaded/hash/
+#                      short_id/metadata/tech_spec, optional parent_id/split_info.
+#                      A MISSING `type` key IS a leaf — leaves carry no `type`.
+#   - "season_map"     a virtual TV-season container (cmd_prep, main.py ~881):
+#                      type/folder_path/children/total_episodes. It has a
+#                      folder_path but NO filename, so it owns no file of its own.
+#   - "multi_ep_alias" a thin combined-episode alias (cmd_prep_season, main.py
+#                      ~1080, IMP-E13/PR #21): ONLY {type, alias_of, parent_id}.
+#                      No physical-file keys at all — dereferencing folder_path/
+#                      filename on it is the PR #21 crash class.
+#
+# `required` = keys that distinguish the type and are always present; it is the
+# minimal set, not the exhaustive set (leaves also carry hash/metadata/etc.).
+# `physical` = "this entry owns a physical file on disk" (has folder_path AND
+# filename). Only "leaf" is physical; season_map and multi_ep_alias are virtual,
+# so any whole-library iterator that dereferences a physical-only key MUST first
+# skip (or _resolve_alias) every non-physical type.
+#
+# This constant is documentation + a test seam (tests/test_entry_schema_guard.py
+# enforces it). It is intentionally NOT wired into the cmd_* code paths — the
+# guard test is the enforcement. When you add or change an entry type, update
+# THIS registry AND the guard test's non-physical set.
+ENTRY_TYPE_KEYS = {
+    "leaf":           {"required": {"folder_path", "filename", "status"}, "physical": True},
+    "season_map":     {"required": {"folder_path", "children"},           "physical": False},
+    "multi_ep_alias": {"required": {"alias_of", "parent_id"},             "physical": False},
+}
+
 
 # ==========================================
 #               UTILITIES

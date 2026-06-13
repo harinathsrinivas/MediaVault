@@ -99,7 +99,9 @@ Your handling:
    - Confirm STATUS.md was appended.
    - Verify acceptance check the executor reported.
 
-5. Invoke git-agent with operation COMMIT_STEP (step_number=N, step_description=first line of step).
+5. SMOKE GATE (code-touching steps) — BEFORE committing: if this step modified `main.py`, `mainfetch.py`, or `mvcommon.py`, run `pytest tests/smoke -q` (the fast full-command cross-command gate — every command exercised against a library carrying every entry type; it is the single check that answers "did this change break another command?", the gap that let PR #21 ship). If it is RED, do NOT commit — treat it exactly like a failed acceptance check: STOP, do not mark the step done, and report to the user (per ESCALATION RULES). Only when it is green (or the step touched none of those three modules) proceed to commit. (For a multi-candidate step, run this same gate on the MERGED result on the feature branch — see Phase 2B step 8a.)
+
+6. Invoke git-agent with operation COMMIT_STEP (step_number=N, step_description=first line of step).
 
 ### Phase 2B: Multi-candidate mode
 
@@ -173,6 +175,8 @@ This is the heavy path. Follow precisely.
      - all_candidate_letters: list of all letters used (e.g., ["A","B","C"])
      - This tags each candidate branch (`candidates/step-<N>/<letter>-chosen` or `<letter>-rejected`) and removes the worktree directories.
 
+8a. SMOKE GATE on the MERGED result (code-touching multi-candidate steps): the merge in step 8 has landed the winner on the feature branch. If the step modified `main.py`, `mainfetch.py`, or `mvcommon.py`, run `pytest tests/smoke -q` on the feature branch NOW (this is the same cross-command gate as Phase 2A step 5 — judged candidates pass their own tests in isolation, but only this confirms the merged code doesn't break another command). If it is RED, do NOT proceed to mark the step done — STOP and report to the user (treat like a failed acceptance check per ESCALATION RULES); the merge commit can be reverted as a failed step. Only when it is green (or the step touched none of those three modules) continue to step 9.
+
 9. After successful merge and archive:
    - The chosen candidate's code is now on the feature branch.
    - DECISION.md is in the project, committed.
@@ -181,8 +185,8 @@ This is the heavy path. Follow precisely.
    - Append a STATUS.md section noting: multi-candidate step, N candidates, winner letter, DECISION.md path, rationale one-liner.
 
 ### Phase 3: Finalize
-1. After all steps complete: run the Verification commands listed in PLAN.md (bash for tests/linters).
-2. If verification passes:
+1. After all steps complete: run the Verification commands listed in PLAN.md (bash for tests/linters). This gate MUST include BOTH `pytest -q` (the full suite) AND `pytest tests/smoke -q` (the fast full-command cross-command gate) — run both and require both green before any push/PR. If PLAN.md's Verification section omits `pytest tests/smoke -q` but any step touched `main.py`/`mainfetch.py`/`mvcommon.py`, run it anyway; it is a mandatory pre-PR gate (see `CLAUDE.md` cross-command integrity gate).
+2. If verification passes (both `pytest -q` and `pytest tests/smoke -q` green):
    - Ensure the canonical `docs/<feature>/PLAN.md` (and `DECISIONS.md` / completion report) match the final state of the run, then have git-agent COMMIT_STEP those `docs/<feature>/` artifacts (root `/PLAN.md` is gitignored and is NOT committed).
    - Invoke git-agent with operation PUSH_BRANCH.
    - Open a PR per `docs/git-pr-conventions.md`: invoke git-agent with operation CREATE_PR, supplying

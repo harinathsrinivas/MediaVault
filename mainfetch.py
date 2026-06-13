@@ -477,15 +477,19 @@ def cmd_fetch_route(manual_id, ep_range=None):
     print("\n✅ Batch Processing Complete.")
 
 
-if __name__ == "__main__":
-    if len(sys.argv) < 2:
+def parse_fetch_args(argv):
+    """Pure parser for mainfetch CLI args. Takes full argv list, returns (mid, epr).
+    Prints usage and sys.exit(1) on bad invocation — no Selenium/browser side effects."""
+    if len(argv) < 3 or argv[1] != "fetch":
         print("Usage: fetch [id] [episodes] [range]")
         sys.exit(1)
-
-    # Arg parsing: fetch [id] [episodes 1-3]
-    mid = sys.argv[2]
+    mid = argv[2]
     epr = None
-    if len(sys.argv) >= 5 and sys.argv[3] == "episodes":
-        epr = sys.argv[4]
+    if len(argv) >= 5 and argv[3] == "episodes":
+        epr = argv[4]
+    return (mid, epr)
 
+
+if __name__ == "__main__":
+    mid, epr = parse_fetch_args(sys.argv)
     cmd_fetch_route(mid, epr)

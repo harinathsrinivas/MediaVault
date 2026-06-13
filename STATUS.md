@@ -388,3 +388,22 @@ Branch: fix/cli_parser_papercuts (from main)
     - Bonus: trailing `SIZE_MB` and trailing `episodes` each raised `SystemExit` with the correct mirrored message.
   - `python -m pytest -q` → `163 passed in 74.02s`.
   - Smoke gate (required — step touched main.py): `python -m pytest tests/smoke -q` → `50 passed in 14.15s`.
+
+---
+
+## Step 2 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `mainfetch.py` (only)
+- Outcome: Extracted a module-level pure function `parse_fetch_args(argv)` placed immediately before the `if __name__ == "__main__":` block (~`mainfetch.py:480`). The function takes the full argv list, guards with `if len(argv) < 3 or argv[1] != "fetch": print("Usage: fetch [id] [episodes] [range]"); sys.exit(1)` (fixing the bug where `len(sys.argv) < 2` passed but `sys.argv[2]` still raised `IndexError`), then parses `mid = argv[2]` and `epr = argv[4]` (when `len(argv) >= 5 and argv[3] == "episodes"`), and returns `(mid, epr)`. The function has no Selenium/browser side effects — it is pure. The `__main__` block was collapsed to `mid, epr = parse_fetch_args(sys.argv)` followed by the EXISTING `cmd_fetch_route(mid, epr)` call. Bug B (bare `python mainfetch.py fetch` raising `IndexError`) is now fixed: it prints the usage line and exits cleanly.
+- Key decisions: extracted pure parser; guard now `len < 3 or argv[1] != 'fetch'`; cmd_fetch_route stays in __main__; usage string kept byte-identical to existing `"Usage: fetch [id] [episodes] [range]"`; error signal = `sys.exit(1)` (option (a), mirrors push/push_group, assertable via `pytest.raises(SystemExit)`).
+- Verification:
+  - `python -c "import mainfetch"` → `import OK` (no browser/Selenium instantiated at import time).
+  - Inline acceptance checks (all four cases):
+    - `parse_fetch_args(["mainfetch.py","fetch"])` → raised `SystemExit(1)` after printing usage (was `IndexError`).
+    - `parse_fetch_args(["mainfetch.py","fetch","tv-en-2016-strangerthings-s01e03"])` → returned `('tv-en-2016-strangerthings-s01e03', None)`.
+    - `parse_fetch_args(["mainfetch.py","fetch","tv-x","episodes","1-3"])` → returned `('tv-x', '1-3')`.
+    - `parse_fetch_args(["mainfetch.py","wrongverb","x"])` → raised `SystemExit(1)` after printing usage.
+  - `python -m pytest -q` → `163 passed in 64.27s` (0 skipped, no regressions).
+  - Smoke gate (required — step touched mainfetch.py): `python -m pytest tests/smoke -q` → `50 passed in 24.62s`.

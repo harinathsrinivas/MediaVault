@@ -351,3 +351,15 @@ Claude Code docs: agents load at session start (no hot-reload); duplicate `name:
     ```
     All 8 names print, no exception thrown; web grants exactly as required (planner/orchestrator/architect True; executor-haiku/opus/sonnet + git-agent/judge False).
   - No code or test files were modified by this step (agent-doc + CLAUDE.md only); `pytest`/`pytest tests/smoke` state is unchanged from B6 (163 passed / 0 skipped; smoke 50 passed).
+
+---
+
+## Architect — ARCHITECTURE.md + README updates
+- Verified the shipped changes against the code (`ENTRY_TYPE_KEYS` at `main.py:114`; `tests/smoke/` package; `tests/test_alias_consumers.py`; `tests/test_entry_schema_guard.py`) before editing docs.
+- `ARCHITECTURE.md` sections edited (additive, section-targeted):
+  - **§3 Repository Layout** — added the `tests/smoke/` package to the layout tree; bumped the `tests/` file count note (13 → 15) and listed the two new test files.
+  - **§6.3 Entry schemas** — added an authoritative cross-link to `ENTRY_TYPE_KEYS` in `main.py` (type key shapes + `physical` flag) and the rule that whole-library iterators must skip/`_resolve_alias` non-physical types (the PR #21 / IMP-C12 crash class).
+  - **§13 Testing Approach** — updated counts (163 passed + 50 smoke); added the smoke suite description, `test_alias_consumers.py`, `test_entry_schema_guard.py`, the `sandbox_alias` and `ffmpeg_splittable_master_mkv` fixtures, and the `sandbox` LOCAL_ROOT redirect note.
+  - **§19 Agentic Development Workflow** — added §19.5 (IMP-H3): smoke-gate enforcement + Consumer Impact Analysis + the out-of-band DATA_REQUEST web-tool protocol.
+- `README.md` — Status/disclaimers test bullet: added `pytest tests/smoke -q` as the pre-PR cross-command gate alongside `pytest -q`, briefly described the smoke suite, and added the `multi_ep_alias` consumers to the covered areas.
+- Left out intentionally: did not bump the doc's "Last updated" footer / per-file line counts (no code-line changes to re-measure; out of this targeted update's scope), and did not restructure any unrelated section.

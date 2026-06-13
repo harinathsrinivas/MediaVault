@@ -282,13 +282,17 @@ for the migration record, and `improvements_tierH.md` for the tracked task.
 - Solo-developer project, actively used in production by the author.
 - Windows 10/11 only — paths, ADB, and Chrome integration are hardcoded for
   Windows. There is no plan to port to macOS or Linux.
-- Automated tests (13 files under `tests/`, run with `pytest -q`) cover the
-  auto-rollback matrix, push (`.partial`+mv protocol, retry, remote verify,
-  mock-device round-trip), replace, restore quarantine, the deterministic
-  re-hash feature, episode parsing (incl. combined episodes), the `recover`
-  CLI, and the shared helpers. See `docs/testing-strategy.md`. Everything
-  else — notably the live Selenium fetch — is "tested by use"; the legacy
-  snapshots under `archive/` serve as informal regression baselines.
+- Automated tests (run with `pytest -q`) cover the auto-rollback matrix, push
+  (`.partial`+mv protocol, retry, remote verify, mock-device round-trip),
+  replace, restore quarantine, the deterministic re-hash feature, episode
+  parsing (incl. combined episodes), the `recover` CLI, the `multi_ep_alias`
+  consumers, and the shared helpers. There is also a fast (~8-10s) full-command
+  **smoke suite** — `pytest tests/smoke -q` — that drives every command against
+  tiny fixtures (including a `multi_ep_alias` library sweep); run it as the
+  pre-PR cross-command gate alongside `pytest -q`. See
+  `docs/testing-strategy.md`. Everything else — notably the live Selenium
+  fetch — is "tested by use"; the legacy snapshots under `archive/` serve as
+  informal regression baselines.
 - The `undetected-chromedriver` package is listed in `requirements.txt` but
   not imported anywhere; `requests` is imported by `main.py` but not listed
   in `requirements.txt`. Both are known issues documented in

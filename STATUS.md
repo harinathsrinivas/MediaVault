@@ -439,3 +439,23 @@ Branch: fix/cli_parser_papercuts (from main)
   - `python -m pytest tests/test_cli_parsers.py -q` → **21 passed in 2.05s**.
   - `python -m pytest -q` (full suite) → **184 passed in 195.09s** (0 skipped, no regressions; prior 163 still pass + 21 new tests).
   - `python -m pytest tests/smoke -q` → **50 passed in 70.64s** (step is test-only, no main.py/mainfetch.py/mvcommon.py changes; smoke confirms no inadvertent breakage).
+
+---
+
+## Step 5 — [status: done]
+- Executor: architect
+- Model: opus
+- Mode: docs-only (read-only on code)
+- Files changed: `ARCHITECTURE.md`, `README.md` (no code files touched)
+- Outcome: Documented the IMP-C14 user-visible behavior change across the two architect-owned docs. Surgical edits only — no restructuring of either doc, §12a (rollback) untouched.
+- ARCHITECTURE.md changes:
+  - §5 commands table: the `replace` row now notes that an unknown id prints `❌ Error: '<id>' not found in library.` before returning `False` (IMP-C14).
+  - §5: added a new "CLI parsing seams (IMP-C14)" blockquote after the `episodes`-keyword note — documents the extracted pure functions `main.parse_push_group_args(args)` → `(group_id, method, val, ep_range, dev, eager, tdir)` with fail-fast "Missing value" arms mirroring `push` (replacing the prior trailing-value-keyword `while i < len(args)` hang), the preserved silent-skip of unknown tokens, and `mainfetch.parse_fetch_args(argv)` → `(mid, epr)` as Selenium-free/unit-testable.
+  - §5 `python mainfetch.py fetch ...` subsection: rewrote the argv-parsing note (was "argv parsing in mainfetch.py:497-507 ... reads sys.argv[2]") to describe the extracted `parse_fetch_args`, the `len(argv) < 3 or argv[1] != "fetch"` guard, and that a bare `python mainfetch.py fetch` now prints `Usage: fetch [id] [episodes] [range]` and exits cleanly instead of raising `IndexError`.
+  - §16 known-issues: struck through the stale "`push_group` argv parser can infinite-loop" bullet and marked it FIXED (IMP-C14), summarising the three fixes (push_group fail-fast, mainfetch bare-invoke IndexError, cmd_replace not-found message) and pointing at §5. No stale "hangs"/"IndexError" claims remain about these paths.
+- README.md changes:
+  - Commands section (after the `main.py fetch` wrapper note, before the `episodes` literal-trigger callout): added a one-line "Malformed invocations fail fast" blockquote covering push_group/replace trailing-value-keyword fail-fast, the bare `python mainfetch.py fetch` usage exit, and `replace <unknown_id>` reporting not-found.
+- Key decision: documented push_group fail-fast + extracted parsers + mainfetch usage-guard + replace not-found; surgical, no restructure.
+- Verification:
+  - Grep for "IndexError"/"infinite-loop"/"hang" against these paths: the only remaining mentions are the historical/struck-through references in the now-FIXED §16 bullet and the §5 "instead of raising IndexError ... as it did previously" framing — no claim that the current behavior still hangs or throws.
+  - No code files edited (Read-only architect; only `ARCHITECTURE.md` + `README.md` written).

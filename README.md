@@ -159,6 +159,14 @@ python mainfetch.py fetch <id> [episodes <range>]
 
 `main.py fetch` is a thin wrapper that spawns exactly that command.
 
+> **Malformed invocations fail fast.** A `push_group` (or `replace`) call
+> that ends with a value-taking keyword and no value (e.g.
+> `push_group <id> SIZE_GB 8 device`) now prints a "missing value" usage
+> message and exits instead of hanging. A bare `python mainfetch.py fetch`
+> with no id prints `Usage: fetch [id] [episodes] [range]` and exits. And
+> `replace <unknown_id>` now reports `'<id>' not found in library.` rather
+> than silently doing nothing.
+
 > **CRITICAL — the `episodes` keyword is a literal trigger.**
 > The word `episodes` must appear as its own argument immediately before the
 > range value.

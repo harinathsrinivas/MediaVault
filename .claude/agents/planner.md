@@ -23,8 +23,9 @@ WORKFLOW:
 1. Read ARCHITECTURE.md fully
 2. Read any files directly relevant to the task
 3. Identify dependencies, risks, and the right decomposition
-4. For each step, decide: single-executor (default) or multi-candidate (only when justified — see MULTI-CANDIDATE GUARDRAILS below)
-5. Produce PLAN.md (overwrite if exists) using the structure below
+4. If ANY step touches a shared data contract (a library entry type, a library field/key, an ID shape, a `status` value), perform the CONSUMER IMPACT ANALYSIS (see the mandatory rule below) NOW, during planning — grep every consumer and decide the per-consumer fix — and capture it as a required PLAN.md sub-section. This is not optional.
+5. For each step, decide: single-executor (default) or multi-candidate (only when justified — see MULTI-CANDIDATE GUARDRAILS below)
+6. Produce PLAN.md (overwrite if exists) using the structure below
 
 PLAN.md STRUCTURE:
 
@@ -67,11 +68,41 @@ Suggested branch: <type>/<short_name>
 ## Risks and edge cases
 <bulleted list of things that could go wrong, ambiguities, places where assumptions are being made>
 
+## Consumer Impact Analysis
+<REQUIRED ONLY when a step adds/changes/removes a shared data contract — see the CONSUMER IMPACT ANALYSIS rule below. Omit this section entirely when no step touches a shared data contract. When present, it is a table enumerating EVERY consumer of the changed shape with a safe/needs-fix verdict + file:line, exactly like the CONSUMER AUDIT table format below.>
+
 ## Verification
-<exact commands to run after all steps complete: tests, linters, manual checks>
+<exact commands to run after all steps complete: tests, linters, manual checks. If ANY step touches main.py / mainfetch.py / mvcommon.py, the LAST verification line MUST be `pytest tests/smoke -q` (the fast full-command cross-command gate), IN ADDITION to `pytest -q` — see the SMOKE-GATE rule below.>
 
 ## Out of scope
 <things explicitly NOT being done in this task, to prevent scope creep>
+
+CONSUMER IMPACT ANALYSIS (MANDATORY when a shared data contract changes):
+
+A "shared data contract" is anything multiple call sites read or write by an agreed-upon shape: a library entry type, a library field/key, an ID shape, a `status` value, or any cross-module dict/record schema. A change to one of these is exactly the kind of change that silently breaks a DISTANT consumer the author wasn't looking at.
+
+CAUTIONARY EXAMPLE (this is why the rule exists): PR #21 / IMP-E13 added a new top-level library entry type `multi_ep_alias` (entries holding only `type`/`alias_of`/`parent_id`, no `folder_path`/`filename`). It correctly de-aliased the consumers its author was thinking about (group push/replace/restore + fetch), but no consumer-impact audit was done, so `cmd_scan_unprepped` — a whole-library iterator that dereferenced `entry['folder_path']` — shipped a `KeyError` crash in production. A strong model with no audit step still misses the consumer it isn't looking at. The audit below is the enforcement that turns "remember to check every consumer" from a hope into a step.
+
+When ANY step adds, changes, or removes a shared data contract, you MUST, during planning:
+1. Consult `ENTRY_TYPE_KEYS` in `main.py` as the authoritative source of truth for entry-type key shapes (which keys each type has, and whether it owns a physical file). When the change adds or alters an entry type, the plan must include updating `ENTRY_TYPE_KEYS` and the guard test that keys off it.
+2. Grep EVERY consumer of the changed shape and enumerate each one in the plan, in a `## Consumer Impact Analysis` table, with a `safe`/`needs-fix` verdict and a `file:line`. At minimum search for:
+   - whole-library iterators: `.values()` / `.items()` over a `library` / `cat_lib`;
+   - direct dereferences of the changed key: `entry['<key>']` and `entry.get('<key>')` (and the same for any renamed/removed key);
+   - de-alias / resolve sites: every `_resolve_alias` caller (a new entry type that should be resolved must be handled at each).
+3. Verdict every site against the NEW shape, not the old one: `safe` (already tolerates the new shape — say why, e.g. "all access via `.get()`" or "skips the type") or `needs-fix` (would crash/misbehave — and which step fixes it). Use the exact column format below so the audit is scannable and complete.
+
+Required table format (mirrors this project's PLAN.md CONSUMER AUDIT — reproduce these columns):
+
+| # | Site | Line(s) | Access | Verdict | Why |
+|---|------|--------|--------|---------|-----|
+| 1 | `cmd_scan_unprepped` | 2459-2462 | `entry['folder_path']` after skipping only `season_map` | needs-fix | alias lacks `folder_path` → KeyError; fixed in step N |
+| 2 | `cmd_sort` `sort_key` | 2312-2338 | `entry.get('tech_spec',{})...` | safe | all access via `.get()` chains |
+
+Every consumer found by the greps in (2) MUST appear with a verdict — an empty or partial table is a failed analysis. Each `needs-fix` row MUST name the step that fixes it. If the greps surface zero consumers of a changed key, state that explicitly (and re-check the grep — a changed shared key with no consumers is suspicious).
+
+SMOKE-GATE (MANDATORY in the Verification section of any code-touching plan):
+
+If ANY step in the plan touches `main.py`, `mainfetch.py`, or `mvcommon.py`, the plan's `## Verification` section MUST include `pytest tests/smoke -q` (the fast full-command cross-command gate) as a verification line, IN ADDITION to `pytest -q`. Put it as the FINAL verification line so it is the last gate before the plan is considered done. The smoke suite runs every user-facing command against a tiny fixture (including a library carrying every entry type), so it is the single check that answers "did this change break another command?" — the gap that let PR #21 ship. Omit it only for a plan whose steps touch none of those three modules (e.g. a docs-only or agent-file-only plan).
 
 TESTING STEP RULES (read docs/testing-strategy.md for full detail):
 

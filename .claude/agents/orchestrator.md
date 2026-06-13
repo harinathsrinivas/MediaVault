@@ -3,7 +3,7 @@ name: orchestrator
 description: Drives execution of PLAN.md end-to-end. Reads the plan, creates a feature branch via git-agent, dispatches each step to the correct executor with tailored context, handles multi-candidate steps via worktrees and judge, triggers commits after each step, and pushes the branch at the end. Use after planner has produced PLAN.md.
 model: opus
 effort: high
-tools: Read, Write, Edit, Glob, Grep, Bash, Task
+tools: Read, Write, Edit, Glob, Grep, Bash, Task, WebSearch, WebFetch
 ---
 
 EXECUTION MODEL (2026-06-03 — IMPORTANT): This file is the **playbook the MAIN (top-level) session follows**, NOT a sub-agent to spawn for execution. A Claude Code sub-agent cannot spawn sub-agents (nesting depth = 1); if `orchestrator` is launched via `Task` it CANNOT dispatch executors/candidates/judge/git-agent and would silently fall back to doing everything inline — which is forbidden (see "no silent handling" below and `CLAUDE.md`). Therefore the **main session** reads `PLAN.md` and follows the workflow below, spawning the executor / candidate / judge / git sub-agents ITSELF (depth-1 from the main session works). Everywhere this file says "invoke X via Task," that means the MAIN session does so. Do NOT launch `orchestrator` as a sub-agent to run a plan.
@@ -94,12 +94,28 @@ Your handling:
    - [model: sonnet] → executor-sonnet
    - [model: opus] → executor-opus
 
+3a. OUT-OF-BAND DATA REQUESTS (executors have no web tools — you do): if the executor returns a fenced ```DATA_REQUEST``` block instead of a completed step, it has paused mid-step needing external/library/web/doc data it cannot derive from the repo. Handle it yourself — do NOT delegate the fetch back to the executor, and do NOT let the executor fabricate or guess:
+   - Perform the lookup with WebSearch/WebFetch (use the block's `query_or_url`).
+   - Distill the result to EXACTLY the requested `return_format` and the `fields_needed` — hand back the answer, not a page dump.
+   - Record the request + your response in STATUS.md (so the run has an audit trail of what was fetched and from where).
+   - RE-DISPATCH the SAME executor for the SAME step (same model, same context) supplying a fenced ```DATA_RESPONSE``` block in EXACTLY this shape (field names fixed; keep them verbatim and consistent with the executor's DATA_REQUEST):
+     ```
+     DATA_RESPONSE
+     step: <same step id>
+     fields_needed: <echo of what was asked>
+     data: <the fetched answer, formatted per return_format>
+     source: <url/source or "WebSearch: <query>">
+     ```
+   - The executor resumes with the data in hand. This is the ONLY sanctioned way a web-less sub-agent obtains external data; the orchestrator NEVER delegates the fetch back to it. (A candidate executor in Phase 2B may raise a DATA_REQUEST the same way — service it and re-dispatch that candidate identically.)
+
 4. When executor returns:
    - Confirm step is marked [x] in PLAN.md (Edit if missed).
    - Confirm STATUS.md was appended.
    - Verify acceptance check the executor reported.
 
-5. Invoke git-agent with operation COMMIT_STEP (step_number=N, step_description=first line of step).
+5. SMOKE GATE (code-touching steps) — BEFORE committing: if this step modified `main.py`, `mainfetch.py`, or `mvcommon.py`, run `pytest tests/smoke -q` (the fast full-command cross-command gate — every command exercised against a library carrying every entry type; it is the single check that answers "did this change break another command?", the gap that let PR #21 ship). If it is RED, do NOT commit — treat it exactly like a failed acceptance check: STOP, do not mark the step done, and report to the user (per ESCALATION RULES). Only when it is green (or the step touched none of those three modules) proceed to commit. (For a multi-candidate step, run this same gate on the MERGED result on the feature branch — see Phase 2B step 8a.)
+
+6. Invoke git-agent with operation COMMIT_STEP (step_number=N, step_description=first line of step).
 
 ### Phase 2B: Multi-candidate mode
 
@@ -173,6 +189,8 @@ This is the heavy path. Follow precisely.
      - all_candidate_letters: list of all letters used (e.g., ["A","B","C"])
      - This tags each candidate branch (`candidates/step-<N>/<letter>-chosen` or `<letter>-rejected`) and removes the worktree directories.
 
+8a. SMOKE GATE on the MERGED result (code-touching multi-candidate steps): the merge in step 8 has landed the winner on the feature branch. If the step modified `main.py`, `mainfetch.py`, or `mvcommon.py`, run `pytest tests/smoke -q` on the feature branch NOW (this is the same cross-command gate as Phase 2A step 5 — judged candidates pass their own tests in isolation, but only this confirms the merged code doesn't break another command). If it is RED, do NOT proceed to mark the step done — STOP and report to the user (treat like a failed acceptance check per ESCALATION RULES); the merge commit can be reverted as a failed step. Only when it is green (or the step touched none of those three modules) continue to step 9.
+
 9. After successful merge and archive:
    - The chosen candidate's code is now on the feature branch.
    - DECISION.md is in the project, committed.
@@ -181,8 +199,8 @@ This is the heavy path. Follow precisely.
    - Append a STATUS.md section noting: multi-candidate step, N candidates, winner letter, DECISION.md path, rationale one-liner.
 
 ### Phase 3: Finalize
-1. After all steps complete: run the Verification commands listed in PLAN.md (bash for tests/linters).
-2. If verification passes:
+1. After all steps complete: run the Verification commands listed in PLAN.md (bash for tests/linters). This gate MUST include BOTH `pytest -q` (the full suite) AND `pytest tests/smoke -q` (the fast full-command cross-command gate) — run both and require both green before any push/PR. If PLAN.md's Verification section omits `pytest tests/smoke -q` but any step touched `main.py`/`mainfetch.py`/`mvcommon.py`, run it anyway; it is a mandatory pre-PR gate (see `CLAUDE.md` cross-command integrity gate).
+2. If verification passes (both `pytest -q` and `pytest tests/smoke -q` green):
    - Ensure the canonical `docs/<feature>/PLAN.md` (and `DECISIONS.md` / completion report) match the final state of the run, then have git-agent COMMIT_STEP those `docs/<feature>/` artifacts (root `/PLAN.md` is gitignored and is NOT committed).
    - Invoke git-agent with operation PUSH_BRANCH.
    - Open a PR per `docs/git-pr-conventions.md`: invoke git-agent with operation CREATE_PR, supplying

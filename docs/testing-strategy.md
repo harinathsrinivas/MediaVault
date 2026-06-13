@@ -22,6 +22,11 @@ automatically. If you bypass either fixture, you are doing it wrong.
                      │   (pre-release)     │  full GB-scale push/restore
                      └─────────────────────┘
                    ┌───────────────────────────┐
+                   │       SMOKE SUITE         │  tests/smoke/ — every command +
+                   │   (pre-PR gate)           │  major option; tiny fixtures;
+                   │   pytest tests/smoke -q   │  sandbox_alias; ~<30 s
+                   └───────────────────────────┘
+                   ┌───────────────────────────┐
                    │       INTEGRATION         │  mock_device (push round-trip)
                    │   tests/test_cmd_push_    │  mock_fetch  (fetch round-trip)
                    │   mock_device.py          │  sandbox + FakeAdb combined
@@ -189,6 +194,46 @@ def mock_fetch(mock_device, tmp_path, monkeypatch):
 
     monkeypatch.setattr(mainfetch, "trigger_download", _fake_trigger)
     yield restore_dir
+```
+
+### 4.7 `sandbox_alias` — alias + season_map entry seed
+
+**File:** `tests/conftest.py`
+**Use for:** Tests that exercise alias resolution, multi_ep_alias handling, or any
+whole-library iteration that must stay alias/season_map-safe.
+
+Seeds the sandbox with a three-node structure: a `season_map` parent entry, a leaf
+`primary` entry, and a `multi_ep_alias` pointing at the leaf. Used by alias
+regression tests and by the smoke suite's alias-sweep checks.
+
+```python
+def test_alias_does_not_crash(sandbox_alias):
+    # sandbox_alias["season_id"]   -> "tv-en-2023-show"  (season_map entry)
+    # sandbox_alias["primary_id"]  -> "tv-en-2023-show-s01e01"
+    # sandbox_alias["alias_id"]    -> "tv-en-2023-show-s01e01e02"  (multi_ep_alias)
+    lib = mvcommon.load_library()
+    # Iterating must not KeyError on the alias entry
+    for eid, entry in lib.items():
+        resolved = main._resolve_alias(lib, eid, entry)
+        assert resolved is not None
+```
+
+### 4.8 `ENTRY_TYPE_KEYS` registry + `test_entry_schema_guard.py`
+
+`main.py` declares `ENTRY_TYPE_KEYS` — the canonical set of library entry-type
+strings and shared data-field names. `tests/test_entry_schema_guard.py` asserts
+that this registry matches reality (all known types are listed; no stale names).
+
+**Rule:** any change that adds, renames, or removes a library entry type or a
+shared field key **must** update `ENTRY_TYPE_KEYS`. Every whole-library iterator
+must either call `_resolve_alias(lib, eid, entry)` or explicitly skip entries
+where `entry.get("type") == "multi_ep_alias"` — otherwise it will crash or
+silently miscount on alias entries.
+
+Run the guard test in isolation:
+
+```powershell
+pytest tests/test_entry_schema_guard.py -q
 ```
 
 ---
@@ -527,6 +572,9 @@ real md5 of the file in `device_dir`). Tests for C8 verify:
 ```powershell
 # Full suite (should always be green)
 pytest -q
+
+# Smoke gate — run before every PR and every code-touching commit
+pytest tests/smoke -q                              # cross-command integrity (<30 s)
 
 # Per-layer
 pytest tests/test_mvcommon.py -q                  # unit + library

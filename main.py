@@ -81,6 +81,42 @@ MVMETA_SUFFIX = ".mvmeta.json"  # Remote disaster-recovery sidecar mirroring spl
 # support (toggle without editing source) arrives with IMP-A5.
 PUSH_VERIFY_REMOTE = False
 
+# ENTRY_TYPE_KEYS — THE single source of truth for "what keys does each top-level
+# library entry type have", and the seam future entry types extend (IMP-H3).
+#
+# A library_*.json maps an id -> entry dict. There are three top-level entry
+# shapes (verified against every `"type": ...` write + `.get("type")` read in
+# main.py / mainfetch.py):
+#   - "leaf"           the implicit, no-`type` entry a prepped file produces
+#                      (cmd_prep, main.py ~906): owns a physical file on disk
+#                      (folder_path + filename), plus status/uploaded/hash/
+#                      short_id/metadata/tech_spec, optional parent_id/split_info.
+#                      A MISSING `type` key IS a leaf — leaves carry no `type`.
+#   - "season_map"     a virtual TV-season container (cmd_prep, main.py ~881):
+#                      type/folder_path/children/total_episodes. It has a
+#                      folder_path but NO filename, so it owns no file of its own.
+#   - "multi_ep_alias" a thin combined-episode alias (cmd_prep_season, main.py
+#                      ~1080, IMP-E13/PR #21): ONLY {type, alias_of, parent_id}.
+#                      No physical-file keys at all — dereferencing folder_path/
+#                      filename on it is the PR #21 crash class.
+#
+# `required` = keys that distinguish the type and are always present; it is the
+# minimal set, not the exhaustive set (leaves also carry hash/metadata/etc.).
+# `physical` = "this entry owns a physical file on disk" (has folder_path AND
+# filename). Only "leaf" is physical; season_map and multi_ep_alias are virtual,
+# so any whole-library iterator that dereferences a physical-only key MUST first
+# skip (or _resolve_alias) every non-physical type.
+#
+# This constant is documentation + a test seam (tests/test_entry_schema_guard.py
+# enforces it). It is intentionally NOT wired into the cmd_* code paths — the
+# guard test is the enforcement. When you add or change an entry type, update
+# THIS registry AND the guard test's non-physical set.
+ENTRY_TYPE_KEYS = {
+    "leaf":           {"required": {"folder_path", "filename", "status"}, "physical": True},
+    "season_map":     {"required": {"folder_path", "children"},           "physical": False},
+    "multi_ep_alias": {"required": {"alias_of", "parent_id"},             "physical": False},
+}
+
 
 # ==========================================
 #               UTILITIES
@@ -805,6 +841,11 @@ def cmd_prep(manual_id, filepath, parent_id=None):
     # this-run-created parent season_map per D-7. See the module spec block above.
     if manual_id in library:
         entry = library[manual_id]
+        if entry.get("type") == "multi_ep_alias":
+            # Refuse to prep OVER an existing combined-episode alias — writing a leaf
+            # entry here would clobber the alias and corrupt the alias chain.
+            print(f"❌ {manual_id} is a combined-episode alias of {entry.get('alias_of')}; prep the primary instead.")
+            return False
         if entry.get("uploaded") == True or entry.get("status") == "archived":
             # [ROLLBACK SPEC] Early-skip: returns True having created ZERO artifacts.
             # The wrapper MUST treat this as success and NEVER roll back.
@@ -1091,7 +1132,10 @@ def cmd_check(manual_id):
     print(f"--- CHECKING: {manual_id} ---")
     library = load_library()
     if manual_id not in library: print("❌ ID not found."); return
-    entry = library[manual_id]
+    real_id, entry = _resolve_alias(library, manual_id)
+    if real_id != manual_id:
+        print(f"ℹ️  {manual_id} is part of the combined file registered as {real_id} — operating on that.")
+        manual_id = real_id
 
     file_path = os.path.join(entry['folder_path'], entry['filename'])
     if not os.path.exists(file_path): print("❌ File missing!"); return
@@ -1218,7 +1262,10 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
     print(f"--- PUSHING: {manual_id} ---")
     library = load_library()
     if manual_id not in library: print(f"❌ ID not found."); return False
-    entry = library[manual_id]
+    real_id, entry = _resolve_alias(library, manual_id)
+    if real_id != manual_id:
+        print(f"ℹ️  {manual_id} is part of the combined file registered as {real_id} — operating on that.")
+        manual_id = real_id
 
     # PARENT AWARENESS INFO
     if "parent_id" in entry:
@@ -1741,7 +1788,10 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
 def cmd_replace(manual_id):
     library = load_library()
     if manual_id not in library: return False
-    entry = library[manual_id]
+    real_id, entry = _resolve_alias(library, manual_id)
+    if real_id != manual_id:
+        print(f"ℹ️  {manual_id} is part of the combined file registered as {real_id} — operating on that.")
+        manual_id = real_id
 
     if not entry.get("uploaded", False):
         print(f"⚠️ Skipping {manual_id}: Not marked as uploaded.")
@@ -1957,7 +2007,10 @@ def cmd_verify_restore(manual_id):
     print(f"--- VERIFYING RESTORE (DRY RUN): {manual_id} ---")
     library = load_library()
     if manual_id not in library: print("❌ ID not found."); return
-    entry = library[manual_id]
+    real_id, entry = _resolve_alias(library, manual_id)
+    if real_id != manual_id:
+        print(f"ℹ️  {manual_id} is part of the combined file registered as {real_id} — operating on that.")
+        manual_id = real_id
 
     # Auto-detect restore folder
     restore_folder = os.path.join(entry['folder_path'], RESTORE_DIR_NAME)
@@ -2033,7 +2086,10 @@ def cmd_restore(manual_id):
     print(f"--- RESTORING: {manual_id} ---")
     library = load_library()
     if manual_id not in library: print("❌ ID not found."); return False
-    entry = library[manual_id]
+    real_id, entry = _resolve_alias(library, manual_id)
+    if real_id != manual_id:
+        print(f"ℹ️  {manual_id} is part of the combined file registered as {real_id} — operating on that.")
+        manual_id = real_id
 
     local_folder = entry['folder_path']
     restore_folder = os.path.join(local_folder, RESTORE_DIR_NAME)
@@ -2356,7 +2412,7 @@ def cmd_local_status(limit_arg=None):
     pending_items = []
 
     for mid, entry in library.items():
-        if entry.get("type") == "season_map": continue
+        if entry.get("type") in ("season_map", "multi_ep_alias"): continue
 
         # Condition: Uploaded is False (or missing)
         if not entry.get("uploaded", False):
@@ -2457,7 +2513,7 @@ def cmd_scan_unprepped():
 
         known_paths = set()
         for entry in cat_lib.values():
-            if entry.get("type") == "season_map": continue
+            if entry.get("type") in ("season_map", "multi_ep_alias"): continue
             p = os.path.join(entry['folder_path'], entry['filename'])
             known_paths.add(os.path.normpath(p).lower())
 

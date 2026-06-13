@@ -1,179 +1,365 @@
 # Execution Log
 
-Task: Auto-rollback for multi-step commands (feature/auto_rollback)
-Branch: feature/auto_rollback (from origin/main @ a70d118; carried the three uncommitted plan docs over). Initial plan commit: 8b8896a.
-Scope for THIS run: Steps 1 -> 2 -> 3 (flagship uncapped bake-off), then PAUSE at the user-decides gate. Steps 4 + merge + push are OUT OF SCOPE this run (D-2 user-selects the Step 3 winner first).
-Note: the Task subagent tool is UNAVAILABLE in this run (same as the A1/C2/C8 runs), so the orchestrator executes every step directly with Read/Write/Edit/Bash and performs git operations inline (the git-agent's exact step sequences are followed by hand). STATUS.md is a per-step scratchpad artifact committed with the branch.
-Baseline (pre-change, unmodified main.py): `pytest -q` -> 58 passed.
-Model/effort policy (DECISIONS.md N-5): every logic-bearing step is opus/max; no downgrade; 3-candidate cap lifted for Step 3 (uncapped). No effort mismatches — the orchestrator runs at opus effort directly.
+Task: Fix the multi_ep_alias production crash (IMP-C12/C13) AND harden the agent workflow + testing strategy so a feature change can never silently break another command
 
-## Step 1 — [status: done] Behavior-baseline characterization + happy-path smoke harness
-- Executor: orchestrator (direct; Task subagent tool unavailable). Model: opus, effort max (matches the step tag — no mismatch).
-- Files changed: tests/conftest.py (extended, additive only), tests/test_baseline_happy_path.py (new).
-- Outcome:
-  - conftest.py additions (all additive; existing fixtures untouched):
-    - `stub_tech_specs` — deterministic get_tech_specs stub so cmd_prep does not need pymediainfo on the fake fixture file.
-    - `FailNthSubprocess` class + `fail_nth_subprocess` factory fixture — fail the Nth *matching* subprocess.run (e.g. Nth `push`) with CalledProcessError, composing over an optional inner run (e.g. mock_device) so path math / library writes still execute; records `.calls`. Also stubs mvcommon.time.sleep so retry() backoff is instant. (Extends the FakeAdb(fail_push_n=...) pattern rather than duplicating it.)
-    - `fail_merge` factory fixture — patch merge_video_files to return False or raise, for the cmd_restore pre-PONR (reversible) merge-failure scenarios; records attempt count.
-    - `ffmpeg_multichunk_mkv` fixture — ffmpeg-generated ~6 MB testsrc MKV for GENUINE-split tests; `pytest.skip`s cleanly when ffmpeg is absent or the invocation fails (testing-strategy §4/§11).
-  - test_baseline_happy_path.py (the regression ORACLE for D-4): 7 tests snapshotting the happy-path post-state of all five target paths — cmd_prep (no-split movie: entry + uid + <short_id>.sha256, no parent), cmd_prep (season episode: parent season_map created + child linked + total_episodes), cmd_prep early-skip (uploaded -> True, ZERO artifacts), cmd_push (split via mock_device: chunk bytes land at final names, _parts cleaned, entry onboarded/uploaded), cmd_replace (fake_dummy: dummy live, status archived, no .dummy_tmp/.tobedeleted), cmd_restore split (stubbed merge: chunks merge to target + status restored_local + chunks deleted), cmd_restore standard (verified move + status restored_local + restore/ cleaned).
+Branch: fix/alias_crash_and_smoke_gate (from main)
+PLAN: root /PLAN.md (live, gitignored); canonical copy to be restored under docs/feature-alias-crash-and-smoke-gate/ at finalize.
+Baseline (pre-change, unmodified tree): `pytest -q` -> 99 passed, 2 skipped (the 2 skips are ffmpeg/mkvmerge-gated). This is the regression oracle.
+
+Run model: USER-GATED, ONE STEP AT A TIME. The user reviews after each step and says "continue". This log + PLAN.md checkboxes + per-step git commits are the resume record — a fresh session can resume by reading this file, `git log --oneline`, and the PLAN.md `[x]` marks.
+
+Planned step order: A1 -> A2 -> A3 -> B1 -> B2 -> B3 -> B4 -> B5 -> B6 -> B7 -> (bookkeeping: tierC/tierH/PRIORITY/priority-graph) -> (architect: ARCHITECTURE.md/README) -> Phase 3 finalize (restore docs/<feature>/PLAN.md, push, open PR). Merge to main is HUMAN-GATED.
+
+Note on the in-scope pre-existing change: `.claude/agents/planner.md` was already modified (frontmatter) before this run; it is carried onto the feature branch and will be committed as part of step B3 (which edits planner.md), NOT with earlier steps.
+
+---
+
+## RUN BLOCKER — paused before Step A1 (RESUME POINT)
+
+Date: 2026-06-13. State on disk is safe; nothing committed yet on this branch beyond the carried working-tree changes.
+
+**Blocker:** the named executor sub-agents `executor-opus` / `executor-sonnet` / `executor-haiku` are NOT dispatchable in this session. `Task(subagent_type="executor-opus")` returns: `Agent type 'executor-opus' not found. Available agents: architect, claude, claude-code-guide, Explore, general-purpose, git-agent, judge, orchestrator, Plan, planner, statusline-setup`. So only 5 of the 8 project agents in `.claude/agents/` register (architect, git-agent, judge, orchestrator, planner); the 3 executors do not.
+
+**Diagnosis (done this session):** no global `~/.claude/agents/` dir; no agent allowlist in `.claude/settings*.json`; executor frontmatter is structurally identical to the registered architect/judge (same `name/model/effort/tools` fields, same CRLF). No file-level defect found. Cause is environmental (session-fixed agent registry — likely a harness quirk or a custom-agent count cap). This is the same class of failure noted on prior runs (A1/C2/C8/auto-rollback: "Task subagent tool UNAVAILABLE → orchestrator executed inline").
+
+**User decision (2026-06-13):** FIX AGENT REGISTRATION FIRST (do not fall back to inline or generic-agent execution).
+
+**RESUME PROCEDURE after a Claude Code restart:**
+1. Re-set session: `/model` → Opus 4.8, `/effort` → xhigh (saved as defaults, but confirm).
+2. Verify the fix: attempt a trivial `Task(subagent_type="executor-opus")` or check the available-agents list — confirm all of executor-opus/sonnet/haiku now appear.
+3. If registered → resume execution at **Step A1** (the branch `fix/alias_crash_and_smoke_gate` is already created and checked out; baseline is 99 passed/2 skipped). Follow `.claude/agents/orchestrator.md` as the playbook from Phase 2, step A1. Dispatch A1 → executor-opus; commit via git-agent; report; await user "continue".
+4. If STILL not registered → it's a harness cap/limit, not transient. Surface to user; options then are (a) consolidate the 3 executors into fewer agent files, (b) generic `claude` agent + model override, or (c) explicit inline execution.
+
+**Steps completed this run:** none of A1–B7 (the code steps). Setup + registration-fix done: branch `fix/alias_crash_and_smoke_gate` created (27cd911 → 4ce9e4a), baseline captured (99 passed/2 skipped), STATUS.md reset, **2 stale locked worktrees pruned (commit `4ce9e4a`)**. ⏸️ **NEXT ACTION = USER RESTARTS Claude Code** to re-register the executor agents, then `/agents` to verify, then resume at Step A1.
+
+**Diagnosis update (clutter found):** `.claude/` contains duplicate agent definitions:
+- backup dirs `.claude/agents_copy2/`, `.claude/agents_old/`, `.claude/agents_pre_opus48/` (all git-TRACKED) — each a full copy of the 8 agents with DIFFERING content (older pre-Opus-4.8 versions; e.g. their `executor-opus.md` lacks the `effort: max` line).
+- two STALE LOCKED git worktrees `.claude/worktrees/agent-a7378bcf38009429a` (@00e4216) and `.claude/worktrees/agent-a79b36f292a96e1d9` (@d246430), leftover from May-26 candidate runs — each carries its own `.claude/agents/` (+ agents_copy2/old) copy.
+Claude Code docs: agents load at session start (no hot-reload); duplicate `name:` across the scanned tree is "kept once, others discarded without warning"; `/agents` shows the loaded registry. NOTE: `architect.md` also differs across the backup copies yet still registers — so the backup dirs are likely NOT scanned; the 2 git worktrees (real `.claude/agents/` dirs) are the leading scannable-duplicate suspect. Mechanism not 100% proven from inside the session.
+
+**FIX SEQUENCE (requires a Claude Code restart — only the user can do it):**
+1. (optional, zero-risk) run `/agents` in the interactive session to view the loaded registry / any conflict on the executors.
+2. ✅ DONE (2026-06-13, commit `4ce9e4a`): pruned the 2 stale locked worktrees via `git worktree remove --force` + `git worktree prune`. Backup dirs `agents_copy2`/`agents_old`/`agents_pre_opus48` were INTENTIONALLY KEPT (user decision; not named `agents` so almost certainly not scanned — `architect.md` is duplicated there too yet registers fine).
+3. FULLY quit + restart Claude Code; run `/agents` (or attempt `Task(subagent_type="executor-opus")`) to confirm all of executor-opus/sonnet/haiku now register.
+4. Re-set `/model` Opus 4.8 + `/effort` xhigh, then resume execution at Step A1 per orchestrator.md.
+5. If executors STILL missing after a clean restart with no duplicates → it's a harness bug; report via `/feedback`; fall back (with user consent) to generic `claude` agent + model override or explicit inline execution.
+
+---
+
+## Step A1 — [status: done]
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor
+- Files changed: `main.py` (only)
+- Outcome: Fixed the two whole-library iterators (IMP-C12) and de-aliased the five direct single-id commands plus added the `cmd_prep` refuse-over-alias guard (IMP-C13), in one coherent edit. `cmd_local_status` and `cmd_scan_unprepped` now skip `multi_ep_alias` entries alongside `season_map`, so neither dereferences the alias's absent `folder_path`/`filename` (the reported `KeyError`) nor counts it as a phantom pending row / slices `None[:40]`. `cmd_check`, `cmd_push`, `cmd_replace`, `cmd_restore`, `cmd_verify_restore` now resolve a secondary-episode id to the primary at the lookup head via `_resolve_alias`, print exactly one info line, and operate on the primary thereafter. `cmd_prep` refuses to prep over an existing alias id before writing anything. `cmd_fetch_restore` (#8) needed no change — it delegates to `cmd_restore`, which now resolves. Verified by careful code reading, a throwaway sanity snippet (since deleted), and the full suite staying at baseline.
 - Key decisions:
-  - cmd_prep fixture files must exceed DUMMY_MAX_BYTES (200_000) or the @316-318 dummy-detection safety net early-skips them (hit during first run; fixed by writing DUMMY_MAX_BYTES+1 bytes). This is itself a captured fact for the Step 3 candidates: the early-skips create no artifacts and must never roll back.
-  - cmd_push happy path uses `mock_device` (data round-trip) not FakeAdb — O-1 means push FAILURE is resume-message, so only the SUCCESS path is the oracle here; failure scenarios live in Step 3 candidate matrices.
-  - cmd_restore split uses a stubbed merge_video_files (no real mkvmerge) — mirrors test_cmd_restore_quarantine's split-success test.
-- Acceptance: `pytest tests/test_baseline_happy_path.py -q` -> 7 passed against UNMODIFIED main.py. Full `pytest -q` -> 58 passed (was 58 before; conftest additions caused zero regressions). New helpers patch via the existing `sandbox` fixture (both mvcommon.LIBRARY_* and main.LIBRARY_*) — no DIY redirect; no fixture references real C:\Media or real library_*.json. PASS.
+  - **Iterator-skip form used (both sites):** `if entry.get("type") in ("season_map", "multi_ep_alias"): continue` — the explicit tuple form, matching the existing `season_map` skip style (chose this over the belt-and-suspenders `or "folder_path" not in entry`). Applied at `cmd_local_status` (loop head, now `main.py:2369`) and `cmd_scan_unprepped` (loop head, now `main.py:2475`).
+  - **De-alias + rekey strategy:** at each command's lookup head I call `real_id, entry = _resolve_alias(library, manual_id)`, and when `real_id != manual_id` I print the info line then REBIND `manual_id = real_id`. Rebinding the variable (not just `entry`) is what makes every downstream `library[manual_id]` assignment, the `RollbackJournal(local_folder, manual_id)` construction, and the resume-message `push {manual_id}` all land consistently on the PRIMARY id — the rekeying concern in PLAN Risks. The info line prints the ORIGINAL typed id and the resolved id (captured before the rebind), so the user sees both. For a non-alias id `real_id == manual_id`, so `manual_id` is unchanged and the whole path is byte-identical (the info `print` is guarded by `real_id != manual_id`).
+  - **`cmd_prep` guard placement:** added as the FIRST check inside the existing `if manual_id in library:` block (`main.py:808-812`), before the uploaded/archived early-skip. It `return False`s before `folder_path`/`short_id`/journal are computed (those are all after `main.py:824`), so zero artifacts are created and the alias entry is left untouched. Message: `❌ {manual_id} is a combined-episode alias of {alias_of}; prep the primary instead.` (uses `entry.get('alias_of')`).
+- Verification:
+  - `python -c "ast.parse(main.py)"` → parses OK.
+  - Throwaway sanity snippet (created, run, then deleted — no test file added): confirmed `_resolve_alias` one-hops the secondary id to the primary and leaves non-alias ids unchanged; confirmed both iterator-skip loop bodies no longer KeyError on `folder_path`/`filename` and no longer slice a `None` filename. Output: `ALIAS SANITY OK`.
+  - `python -m pytest -q` → **99 passed, 2 skipped in 15.15s** — identical to the recorded baseline (the 2 skips are the ffmpeg/mkvmerge-gated cases). No regressions.
+  - `git status --short` → only `main.py` modified by this step (the pre-existing `M STATUS.md` was carried in before the run; this append updates it).
+  - **Rollback change-gate: RESPECTED — nothing touched.** All de-alias edits sit at the command lookup heads, strictly BEFORE any journal is opened (push journal `main.py:1293`, replace `1775`, restore `2143`) and before any `mark_point_of_no_return()` (replace `1820`, restore `2205`). The edits are read-only alias resolution. No PONR moved, no `mark_point_of_no_return()` placement changed, no `.mediavault_txn.json` journal format/durability changed, no change to what `RollbackJournal` records, and `recover_journal()` is untouched. When an alias id is passed, the journal is now constructed with the resolved PRIMARY id — which is the only coherent behavior (the alias has no physical artifacts/PONR of its own); for non-alias ids the journal id is unchanged.
 
-## Step 2 — [status: done] In-code PONR + artifact-map spec (design-only comments)
-- Executor: orchestrator (direct; Task subagent tool unavailable). Model: opus, effort max (matches the step tag — no mismatch).
-- Commit: `01b18de` (`docs(main): in-code PONR + artifact-map spec for rollback — Step 2`).
-- Files changed: main.py ONLY (+123 lines, all comments — NO behavior change; `python -m py_compile main.py` clean; `git diff --stat` = main.py only).
-- Outcome — transcribed the re-derived PONR table + snapshot/restore contract into main.py as the authoritative implementation spec every Step 3 candidate builds against:
-  - Module-level `AUTO-ROLLBACK SPEC` block inserted before CORE COMMANDS header (location-agnostic per N-4 — does NOT presume the primitive's final home): O-2 invariant (master = source of truth; exactly two PONRs); D-6 snapshot shape (entry_existed, prior_status/uploaded, parent_id/parent_existed, child_already_linked, split_info_existed, preexisting_paths set); inverse action per reversible artifact (entry / split_info / status+uploaded / uid / <short_id>.sha256 / _parts / checksums / restore merged target / parent child-link / parent season_map per D-7); the partial-rollback-on-Windows-lock honesty rule; the PONR toggle -> structured hard-fail naming `fetch_restore <id>` (N-2); D-9 leave-remote-dir; and a per-command PONR summary.
-  - Per-site `[ROLLBACK SPEC]` markers with CURRENT verified line refs: cmd_prep fully reversible + both early-skips @311-318 flagged as zero-artifact / never-roll-back; cmd_push NO rollback PONR (O-1) at the resume `_parts` branch @700 + the split_info save @736 + the chunk delete @858 (all noted resumable, never delete pre-existing _parts); cmd_replace dummy-temp @957 as the only pre-PONR artifact + the PONR seam @990 (augmented the existing C9 seam comment with pre/at-PONR behavior + the don't-double-handle-C9-stale-sweep note); cmd_restore pre-PONR C11 quarantine reuse @1202 + the chunk-delete PONR @1232 + standard-path-no-torn-window note.
-- Acceptance: map names every in-scope artifact (entry, parent season_map + child link, uid, <short_id>.sha256, _parts, checksums, split_info, status, uploaded, restore merge output) with current line refs; matches D-1/D-4/D-6/D-7/D-9 + O-1/O-2. Step 1 baseline remains green: full `pytest -q` -> 58 passed (no runtime change). PASS.
+---
 
-## Step 3 — [status: in_progress] FLAGSHIP UNCAPPED BAKE-OFF (JUDGE-REVIEWS-ONLY / USER-DECIDES)
-- Mode: multi-candidate, executed inline (Task subagent unavailable). Worktrees under .candidates/step-03/{A,B,C} (gitignored), each branched off feature/auto_rollback HEAD 80f7711 (Steps 1+2). Three genuinely-distinct schools per plan: A snapshot/transaction context-manager, B compensating-action stack, C on-disk journal. No D/E (no further genuinely-distinct strategy that isn't a cosmetic variant of these three).
-- Per-candidate deliverable: primitive (3a) + wrapping integration of cmd_prep/push/replace/restore (3b) + orchestrator unification of both ad-hoc paths with season resume-range (3c) + full scenario matrix tests/test_rollback.py (3d) + DESIGN.md. Each committed in its own worktree as it goes green (checkpointing).
+## Step A2 — [status: done]
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor
+- Files changed: `tests/conftest.py` (only) — added the `sandbox_alias` fixture (inserted between `sandbox_entry` and `mock_device`). No change to `main.py`. (A throwaway `tests/test_sandbox_alias_selfcheck_tmp.py` was created to self-verify the fixture, run green, then DELETED — A3 owns the real tests.)
+- Outcome: Added `sandbox_alias`, a Series sandbox library seeded with a full combined-episode (multi_ep_alias) chain that A3 + the B1 smoke suite will reuse. The fixture is built ON TOP OF the existing `sandbox` fixture (it `depends on` sandbox + the same `tmp_path`), so it inherits sandbox's dual `LIBRARY_*` patch (both `mvcommon.LIBRARY_*` AND `main.LIBRARY_*`) and the C:\\Media hard-guard — NO DIY LIBRARY_* patching was added. It seeds three `tv-…` entries via the real `mvcommon.save_library` helper (which routes all three into `library_series.json`, leaving movies/anime `{}`): a `season_map` parent, a leaf primary pointing at a REAL on-disk `.mkv` (> DUMMY_MAX_BYTES), and the `multi_ep_alias`. Verified end-to-end: under the fixture `mvcommon.load_library()` returns exactly the three entries with the alias intact, `_resolve_alias` one-hops the alias to the primary, and `cmd_check(alias_id)` resolves to the primary and the real sha256 verifies (proving the >200_000-byte file + matching hash clear cmd_check's dummy-detection early-skip). Full suite stays at baseline.
+- Key decisions:
+  - **Reused `sandbox`'s dual-patch — confirmed no DIY redirection.** `sandbox_alias(sandbox, tmp_path)` declares `sandbox` as a dependency; pytest builds `sandbox` first (which patches BOTH `mvcommon.LIBRARY_*` and `main.LIBRARY_*` and asserts no `C:\\Media`), so by the time the body runs, `mvcommon.save_library`/`load_library` already point at the sandbox JSON files. The fixture contains zero `monkeypatch.setattr(..., "LIBRARY_*", ...)` calls. Requesting `tmp_path` alongside `sandbox` yields the SAME temp dir (pytest caches `tmp_path` per test), so the season media dir lives under the same sandbox tree. Documented in the fixture docstring that `mainfetch.LIBRARY_*` would ALSO need patching if a test drives mainfetch — A2 doesn't, so it's noted, not added.
+  - **Seeding mechanism = `mvcommon.save_library` (the real helper), not hand-written JSON.** `save_library` splits by id prefix; all three ids start with `tv` so they all land in `library_series.json` (movies/anime become `{}`). This exercises the real persistence path and avoids drift. `load_library` then merges all three files back, returning the three entries.
+  - **EXACT leaf-entry key set + status value (the load-bearing detail).** Modeled byte-for-byte on what `cmd_prep` writes (`main.py:906-919`): `short_id`, `filename`, `folder_path`, `status`, `uploaded`, `search_term`, `hash`, `metadata`, `tech_spec`, plus `parent_id` (since this episode has a season_map parent). `status = "local_ready"` and `uploaded = False` — these are the literal values `cmd_prep` writes for a freshly-prepped, not-yet-uploaded local file (confirmed at `main.py:910-911`), and they match the PLAN's suggestion. `short_id = mvcommon.generate_short_id(primary_id)`, `metadata = main.parse_metadata_from_id(primary_id)`, and `tech_spec` is a fixed `{resolution, video_codec, size_bytes}` dict (the value is opaque to the consumers A3 exercises). There is NO `type` key on the leaf — that's correct: a leaf is the implicit no-`type` entry, which the self-check asserts.
+  - **Primary `.mkv` size + hash approach.** Wrote `b"BSG-COMBINED-EP-MASTER\n" * 9000` = ~207 KB (> `DUMMY_MAX_BYTES` 200_000) of deterministic bytes, and set `hash = hashlib.sha256(orig_path.read_bytes()).hexdigest()` from the real on-disk bytes. The size matters because `cmd_check`/`cmd_restore` early-skip any file `< DUMMY_MAX_BYTES` as an already-archived dummy (`main.py:1108`); since A3 runs check/push/restore on the resolved primary, the file must clear that threshold AND the stored hash must match so `cmd_check` reports a match. Verified in the throwaway test by calling `cmd_check(alias_id)` and asserting the recomputed sha256 equals the stored `hash`.
+  - **season_map shape.** `{type, folder_path, total_episodes, children}` mirroring `cmd_prep`'s season_map creation (`main.py:881-886`). `children = sorted([primary_id, alias_id])` and `total_episodes = 2`, because `cmd_prep_season` appends the alias id to the parent's children and sets `total_episodes = len(children)` (`main.py:1085-1087`) — so a realistic post-combined-prep season_map has BOTH ids in `children`.
+  - **Alias schema.** Exactly `{"type":"multi_ep_alias", "alias_of":<primary_id>, "parent_id":<season_id>}` and nothing else (matches `main.py:1080-1084` and the A1 outcome's documented schema). The self-check asserted the alias dict equals this exactly (no stray keys).
+  - **Hard guards.** Beyond inheriting sandbox's LIBRARY_* guard, the fixture asserts the primary `.mkv` resolves UNDER `tmp_path` and that `"C:\\Media"` is not in its path, and that its size `> DUMMY_MAX_BYTES`. Used `media_dir.mkdir(parents=True)` and `rglob` was not needed here, but the Windows `[id]` glob gotcha is moot since the fixture creates files by exact name (no bracketed-glob lookups).
+  - **Yielded dict keys:** `primary_id`, `alias_id`, `season_id`, `media_dir`, `orig_path`, and `sandbox` (the underlying sandbox paths dict, included so A3 can reach `lib_series`/`media_dir` if helpful). primary_id = `tv-en-2009-bsg-s04e19`; alias_id = `tv-en-2009-bsg-s04e20`; season_id = `tv-en-2009-bsg-s04`.
+- Verification:
+  - Throwaway self-check `tests/test_sandbox_alias_selfcheck_tmp.py` (created, run, then DELETED): `python -m pytest tests/test_sandbox_alias_selfcheck_tmp.py -q` → **1 passed in 0.21s**. It asserted: all 3 entries present (and exactly 3), alias dict == exact 3-key schema, season_map children == sorted [primary, alias] with total_episodes 2, leaf status `local_ready` / uploaded False / parent_id == season_id / no `type` key, the on-disk `.mkv` exists and is > DUMMY_MAX_BYTES with `hash` == its real sha256, `_resolve_alias(lib, alias_id)` returns `(primary_id, leaf)`, and `cmd_check(alias_id)` runs (resolving to the primary and verifying the hash). File then removed; `ls` confirms it is gone.
+  - `python -m pytest -q` (full suite, after deleting the throwaway) → **99 passed, 2 skipped in 8.59s** — identical to the recorded baseline (the 2 skips are the ffmpeg/mkvmerge-gated cases). The new fixture is collectable and breaks nothing; it is not consumed by any committed test until A3.
 
-### Candidate A — [status: done & committed]
-- Architecture: snapshot/transaction context-manager (`RollbackContext` class + `RollbackHardFail` carrier), placement main.py only.
-- Worktree: .candidates/step-03/A · Branch: feature/auto_rollback__cand_a · Commit: e6fde22.
-- pytest tests/ -q -> 66 passed, 1 skipped (ffmpeg-gated genuine-split test skips cleanly; ffmpeg absent on this machine). Baseline oracle (test_baseline_happy_path.py) unchanged & green.
-- DESIGN.md: docs/feature-auto-rollback/rollback-architecture/CANDIDATE_A.md.
-- git diff --stat (vs 80f7711): main.py + tests/test_rollback.py (new) + tests/test_cmd_replace.py (1 except broadened to accept the structured hard-fail) + CANDIDATE_A.md. ~492 ins net. mainfetch.py untouched. Ad-hoc strings gone (only in [ROLLBACK A] comments paraphrasing the removal — reworded to avoid literal forbidden strings).
-- Note: one pre-existing test (test_cmd_replace::test_crash_between_renames) caught only OSError; A raises RollbackHardFail post-PONR. Broadened its `except OSError` -> `except Exception` (the test itself states "raise or return False — we don't care which"; its data-safety assertion is preserved). This is a candidate-specific contract change the judge/user should weigh under D-4.
+---
 
-### Candidate B — [status: done & committed]
-- Architecture: explicit per-command compensating-action stack (`UndoStack` LIFO of inverse closures pushed next to each forward mutation; `mark_point_of_no_return()` clears the stack) + `RollbackHardFail`. No global snapshot. Placement main.py only.
-- Worktree: .candidates/step-03/B · Branch: feature/auto_rollback__cand_b · Commit: 32d21c5.
-- pytest tests/ -q -> 66 passed, 1 skipped (ffmpeg-gated). Baseline oracle unchanged & green.
-- DESIGN.md: docs/feature-auto-rollback/rollback-architecture/CANDIDATE_B.md.
-- git diff --stat (vs 80f7711): main.py + tests/test_rollback.py (new, portable behavior-only matrix) + tests/test_cmd_replace.py (same 1 except broadened) + CANDIDATE_B.md. ~704 ins net. mainfetch.py untouched. No live ad-hoc strings.
-- Same post-PONR-raises contract change as A (broadened the one except). Distinctive vs A: inverses are local/adjacent (no central snapshot), LIFO makes D-7 fall out naturally; more small closures.
+## Step A3 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `tests/test_alias_consumers.py` (NEW — 10 test functions)
+- Outcome: Created a new regression test file that exercises every fixed consumer (#1-#8) and two control cases, using the `sandbox_alias` fixture. All 10 tests pass. Full suite grew from 99 to 109 passed (2 skipped unchanged). No regressions.
+- Key decisions:
+  - **`cmd_push` non-split path:** the primary entry has no `split_info` — it's a non-split single-file push. This exercises the `files_to_upload_paths = [local_file_path]` standard path rather than the split/resume path. The library side effect (`uploaded=True`, `status=onboarded`) is the meaningful assertion; the device file lands under a UID-tagged name, so we assert `len(on_device) >= 1` (name lookup) rather than a specific filename, avoiding the `[id]` Windows glob metachar.
+  - **`cmd_replace` precondition:** `sandbox_alias` seeds `uploaded=False`. Since `cmd_replace` requires `uploaded=True` to proceed past the early-exit guard, the test mutates the library (loads, sets `uploaded=True`/`status=onboarded`, saves) before calling `cmd_replace(alias_id)`. This mirrors real usage (replace is called after push). The info line still prints (the `_resolve_alias` check is before the uploaded guard), and the side effect is asserted.
+  - **`cmd_restore` precondition:** sets up the restore folder with the primary's own bytes (so standard path's hash check passes), places a dummy placeholder at the target, and flips the library to `archived`/`uploaded=True`. Asserts the full side effect (restored bytes at target, `status=restored_local`).
+  - **`cmd_verify_restore`:** same restore-folder setup as cmd_restore but without a dummy at target (verify_restore is dry-run; does not move the file). Asserts info line + "SUCCESS" or "Verified" in stdout.
+  - **`cmd_scan_unprepped`:** the alias id must NOT appear in stdout. The primary's file IS registered (so it won't appear as unprepped either). This assertion would catch any regression where an alias creates a phantom unprepped row.
+  - **Control tests:** two parallel controls — `cmd_check(primary_id)` and `cmd_push(primary_id)` — assert the info line is NOT printed (real_id == manual_id → non-alias path unchanged).
+  - **Library reload assertion for alias schema:** several tests call `mvcommon.load_library()` after the command and assert `set(library[alias_id].keys()) == {"type", "alias_of", "parent_id"}` — confirming the alias entry is never mutated by the command.
+- Verification:
+  - `python -m pytest tests/test_alias_consumers.py -v` → **10 passed in 5.48s** (all tests collected and green).
+  - `python -m pytest -q` → **109 passed, 2 skipped in 76.75s** — prior 99 still pass; 10 new tests added; 2 skips unchanged.
 
-### Candidate C — [status: done & committed]
-- Architecture: durable on-disk operation journal (`RollbackJournal` writes `<folder>/.mediavault_txn.json` with fsync+os.replace, records each intent before acting; `recover_journal()` finishes an interrupted rollback after a hard kill) + `RollbackHardFail`. Placement main.py only.
-- Worktree: .candidates/step-03/C · Branch: feature/auto_rollback__cand_c · Commit: 613fe24.
-- pytest tests/ -q -> 67 passed, 1 skipped (66 shared matrix + a C-only durable-journal crash-recovery test; ffmpeg-gated split skips). Baseline oracle unchanged & green.
-- DESIGN.md: docs/feature-auto-rollback/rollback-architecture/CANDIDATE_C.md.
-- git diff --stat (vs 80f7711): main.py + tests/test_rollback.py (new, matrix + crash-recovery test) + tests/test_cmd_replace.py (same 1 except broadened) + CANDIDATE_C.md. ~932 ins net. mainfetch.py + mvcommon.py untouched. No live ad-hoc strings.
-- Distinctive: only candidate whose REVERT survives a hard process kill (durable journal + recover_journal). Cost: largest main.py diff + an fsync/os.replace per mutation + a transient dot-file per media folder (happy path still byte-identical per the oracle).
+---
 
-## Step 3 — [status: PAUSED at the user-decides gate]
-- All three genuinely-distinct candidates complete, green, committed in their worktrees. mainfetch.py + mvcommon.py untouched across all three; diffs confined to main.py + tests/ + each CANDIDATE_*.md.
-- Comparative review (NO WINNER, D-2): docs/feature-auto-rollback/rollback-architecture/DECISION.md. The three CANDIDATE_{A,B,C}.md were also copied onto feature/auto_rollback alongside DECISION.md for one-place review.
-- Equivalent on correctness/happy-path/in-process failure (all pass the same matrix + unchanged oracle). Differentiators: B smallest/most-local diff; A single cohesive snapshot object; C uniquely survives a hard kill mid-rollback (durable journal) at a larger-diff + per-mutation-fsync cost.
-- PAUSED per the resume brief: NOT auto-selected, NO candidate merged into feature/auto_rollback, Step 4 NOT run, nothing pushed, no PR, no main merge, no archiving. Awaiting the user's winner pick → record as DECISIONS.md N-6 before merge.
+## Step B1 — [status: done]
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor
+- Files changed: `tests/smoke/__init__.py` (NEW), `tests/smoke/conftest.py` (NEW), `tests/smoke/test_smoke_all_commands.py` (NEW). Did NOT touch `main.py`, `tests/conftest.py`, or any existing test (verified `git diff --stat main.py` empty after the revert-probe below).
+- Outcome: Built the fast full-command smoke package — ONE suite that drives every user-facing command + its major options against tiny in-repo fixtures and the existing stub device/browser, asserting "no crash + correct top-level effect". 50 tests total: **49 passed, 1 skipped** (the single real-binary split case). The whole package runs in **~5.5–10.4s** (measured across 4 runs: 21.4s cold first-run, then 6.64s / 10.37s / 5.54s / 8.43s warm) — well under the ~30s budget. Full suite went **109 passed/2 skipped → 158 passed/3 skipped** (+49 passed, +1 skipped), no regressions.
+- Key decisions:
+  - **Two-group structure.** `TestEachCommand` = one fast per-command smoke against a plain `sandbox` library (asserts the top-level effect). `TestAliasSweep` = every user-facing command run against the `sandbox_alias` library (asserts no-crash) — the anti-PR#21 gate. Group 1b is the ONE gated real-binary split push.
+  - **`sandbox_alias` sweep implementation (the crucial anti-PR#21 requirement).** Implemented as a dedicated `TestAliasSweep` class (NOT a fixture-parametrization) so each command can be invoked the exact way the CLI dispatches it and given the ALIAS id where that specifically exercises de-aliasing. Whole-library iterators (`scan_unprepped`, `local_status`, `sort`, `repair_dummies`) run over the alias-bearing library; single-id commands (`check`/`push`/`replace`/`restore`/`verify_restore`/`fetch`/`fetch_restore`) are given the **alias id** (`tv-…e20`) to drive `_resolve_alias`; season/group commands (`push_group`/`replace_group`/`restore_group`/`recover --scan`) run over the season_map whose children include the alias; plus `prep` over the alias id asserts the refuse-guard. **DEMONSTRATED to catch the regression:** temporarily reverting `cmd_scan_unprepped`'s alias skip (`("season_map","multi_ep_alias")` → `"season_map"`) makes `TestAliasSweep::test_scan_unprepped_alias` FAIL with the exact `KeyError: 'folder_path'` from PR #21, while `TestEachCommand::test_scan_unprepped` (plain library) still passes — proving the catch is alias-specific. `main.py` was restored byte-for-byte immediately (git diff empty).
+  - **Root-fixture sharing.** `tests/smoke/` is a package *below* `tests/`, so `tests/conftest.py` fixtures (`sandbox`, `sandbox_alias`, `mock_device`, `mock_fetch`, `fake_dummy`, `stub_tech_specs`, `FakeAdb`, `_ffmpeg_available`/`_mkvmerge_available`, `mkvmerge_split_chunks`) are inherited automatically — NO `pytest_plugins` re-export needed. `tests/smoke/conftest.py` holds ONLY smoke-specific helpers. The skip-gate helpers and `FAKE_DUMMY_BYTES` are imported via `from conftest import …` (root conftest is importable on `sys.path`, same pattern the root `test_alias_consumers.py` already uses).
+  - **New smoke-local fixtures (no new mocking philosophy):** (1) `smoke_local_root` patches **both** `mvcommon.LOCAL_ROOT` and `main.LOCAL_ROOT` to the sandbox `Media/` tree — required because `sandbox` redirects the three `LIBRARY_*` constants but NOT `LOCAL_ROOT`, and the two WALKERS (`cmd_scan_unprepped` @2459-2461, `cmd_recover(scan=True)` @738) build their walk roots from `LOCAL_ROOT/{Movies,Series,Anime}`; without the patch they would read real `C:\Media`. Same import-by-value binding hazard as `LIBRARY_*`, so both bindings are patched + hard-guarded. (This mirrors `test_recover_cli.py::test_scan_read_only`.) (2) `make_video` writes a deterministic ~264 KB `.mkv` (> `DUMMY_MAX_BYTES`). (3) `seed_split_parts` pre-seeds a `_parts/` chunk dir + returns `split_info` so `cmd_push` takes the RESUME branch (@1299) instead of a real split.
+  - **DUMMY_MAX_BYTES choice (the called-out gotcha).** `make_video` writes **~264 KB (> 200_000)** so `cmd_check`/`cmd_prep`/`cmd_restore` exercise the REAL-media path (hash verify / merge) and never hit the dummy early-skip. The ONE place the dummy path is the point — `test_repair_dummies` — DELIBERATELY writes a `<200 KB` file and asserts `regenerated 1` + the file becomes `FAKE_DUMMY_BYTES`. Both are valid, asserted smokes.
+  - **Which command used which mock:**
+    - Library (all): `sandbox` / `sandbox_alias`.
+    - `push`/`push_group`/`prep_push_rep`/`prep_push_rep_season`/`fetch`/`fetch_restore` + every alias-sweep command issuing adb: `mock_device` (stateful). The split-push cases pre-seed `_parts/` (resume) so NO real split runs on the hot path.
+    - `replace`/`replace_group`/`repair_dummies`: `fake_dummy` (ffmpeg dummy stub).
+    - `prep`/`prep_season`/`prep_push_rep*`: `stub_tech_specs` (no pymediainfo).
+    - `scan_unprepped`/`recover --scan`: `smoke_local_root` (LOCAL_ROOT redirect).
+    - `fetch`/`fetch_restore`: NOTE — `cmd_dispatch_fetch` runs `subprocess.run(["python","mainfetch.py",...])`; under `mock_device` that argv is parsed by the fake adb runner, matches none of push/shell/devices, and returns a no-op success, so fetch is exercised WITHOUT spawning a real subprocess/browser/device. `mock_fetch` (the in-process `mainfetch.trigger_download` stub) is exercised by its own round-trip test (`test_fetch_round_trip_with_mock_fetch`).
+    - `set_poster`/`set_fanart`: monkeypatch `main.requests.get` with a fake 200 response so NO network is hit.
+  - **Real-binary-gated skips: 1.** `test_push_real_split` (the one genuine `split_video_file`→mkvmerge split push) is gated on `_ffmpeg_available() and _mkvmerge_available()`. On this box ffmpeg is NOT on PATH (mkvmerge IS, via the configured `MKVMERGE_PATH`), so it skips cleanly — exactly the intended behavior; the suite stays green without the binaries. All other split cases pre-seed `_parts/` and need no real binary.
+  - **Anti-patterns honored:** never touch real `C:\Media`/`library_*.json` (sandbox + `smoke_local_root` hard-guards); device files asserted via `rglob("*.mkv")` + `.name` (never a bracketed `[id]` glob); stdout via `capsys`.
+- Verification:
+  - `python -m pytest tests/smoke -q` → **49 passed, 1 skipped** in 5.54–10.37s (warm; 21.44s cold first run). Wall-time recorded: ~**6–10s typical**, well under the ~30s budget.
+  - Regression-catch proof: with `cmd_scan_unprepped`'s alias skip temporarily reverted → `tests/smoke/.../TestAliasSweep::test_scan_unprepped_alias` **FAILED** (`KeyError: 'folder_path'`, main.py:2481) while `TestEachCommand::test_scan_unprepped` passed → **1 failed, 1 passed**; fix restored, `git diff --stat main.py` empty, sweep green again (**18 passed**).
+  - `python -m pytest -q` (full suite) → **158 passed, 3 skipped in 22.10s** (was 109 passed/2 skipped; +49 passed, +1 skipped from smoke; no regressions).
 
-## Step 3 — [status: done] WINNER SELECTED + MERGED (2026-06-01)
-- User selected **Candidate C** (on-disk operation journal `RollbackJournal` + `recover_journal`), used WHOLESALE for all operations. Recorded as DECISIONS.md N-6 (commit b2041bd). The hybrid (A-for-small / C-for-big) was explicitly considered and rejected (O-1 makes the headline 100GB push a resume-message not a rollback; rollback duration doesn't scale with file size; a hybrid carries both mechanisms + a size-threshold dispatch for marginal gain).
-- Merge: `git merge --squash feature/auto_rollback__cand_c` (613fe24) → squash commit `c27b05e` (`feat: auto-rollback via on-disk journal (RollbackJournal) — Candidate C`). Merge applied cleanly with NO conflict (the candidate's CANDIDATE_C.md / review docs matched the canonical copies already on the feature branch).
-- git diff --stat of the squash: main.py (+) + tests/test_rollback.py (new) + tests/test_cmd_replace.py (1-line except broadened). mainfetch.py + mvcommon.py UNTOUCHED (verified by name-only grep).
-- VERIFY: full `python -m pytest -q` on the merged feature branch → **67 passed, 1 skipped** (the ffmpeg-gated genuine-split test skips cleanly; ffmpeg absent on this machine) — exactly the Candidate-C totals.
-- Step 3 ticked [x] in BOTH PLAN.md (root) and docs/feature-auto-rollback/PLAN.md (byte-identical, MD5 EB15F985...).
-- Losing candidate branches feature/auto_rollback__cand_a (e6fde22) + __cand_b (32d21c5) left in place for a later human-gated archive/delete decision.
+---
 
-## Step 1 — Add cmd_recover to main.py
-Status: complete
-Key decisions: Inserted `cmd_recover(target=None, scan=False)` between `recover_journal` (line 592) and the `# CORE COMMANDS` banner; scan branch walks LOCAL_ROOT/{Movies,Series,Anime} read-only reporting journals; resolve branch strips quotes, checks library for id→folder_path, falls back to direct path, then calls `recover_journal`.
-Acceptance: `python -c "import main; print(main.cmd_recover.__name__)"` → `cmd_recover`; `recover_journal` lines 561-592 byte-for-byte unchanged (verified by read-back).
+## Step B1a — [status: done]
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor
+- Files changed: `tests/conftest.py` (`sandbox` fixture: dual-patch + guard + new `local_root` yield key), `tests/smoke/conftest.py` (`smoke_local_root` reconciled to a no-op confirm), `tests/test_b1a_localroot_probe_tmp.py` (DELETED — the prior executor's throwaway probe).
+- Outcome: Completed across a SESSION-LIMIT INTERRUPTION — the prior B1a executor had already written the `tests/conftest.py` + `tests/smoke/conftest.py` edits (uncommitted in the working tree) and left a throwaway probe; this pass VERIFIED that work is correct/complete, deleted the probe, and ran the gates. The `sandbox` fixture now redirects `LOCAL_ROOT` (in addition to the three `LIBRARY_*` constants) so the whole-tree WALKERS — `cmd_scan_unprepped` (main.py:2459-2461) and `cmd_recover(scan=True)` (main.py:738), which build their walk roots from `LOCAL_ROOT/{Movies,Series,Anime}` — read the sandbox temp tree, never real `C:\Media`. Read-only access to real `C:\Media` was the prior risk; this makes the "no writes to real media" guarantee STRUCTURAL. Full suite + smoke suite both green and unchanged in count.
+- Key decisions:
+  - **LOCAL_ROOT redirect target = `tmp_path / "Media"`** (captured as `media_root` at `tests/conftest.py:45`, also yielded under the new dict key `local_root`). This is exactly `media_dir.parent.parent` (the `sandbox` media file lives at `tmp_path/"Media"/"Movies"/"TestMovie"`), and it is the SAME base under which `sandbox_alias` creates its Series media (`tmp_path/"Media"/"Series"/BSG/Season 04`, conftest.py:164). So the walk roots `LOCAL_ROOT/{Movies,Series,Anime}` resolve to the real fixture media — scan tests stay MEANINGFUL (they walk actual fixture files, not an empty dir) while never escaping `tmp_path`. This matches the value `test_recover_cli.py`'s read-only scan test already used.
+  - **Dual-patch (the binding hazard).** `LOCAL_ROOT` was added to the SAME `for attr, path in [...]` loop that patches `LIBRARY_*` (conftest.py:61-69), so it is patched on BOTH `mvcommon.LOCAL_ROOT` AND `main.LOCAL_ROOT`. `main` does `from mvcommon import LOCAL_ROOT` (import-by-value → a separate binding), identical to the `LIBRARY_*` hazard documented in CLAUDE.md, so patching only one would leave a reader pointed at real `C:\Media`. The hard-guard `assert "C:\\Media" not in path` runs for `LOCAL_ROOT` too (conftest.py:67) — a future regression that forgets either patch trips the guard.
+  - **`smoke_local_root` reconciliation = converted to a thin no-op confirm (NOT deleted).** `tests/smoke/conftest.py`'s `smoke_local_root` previously patched `LOCAL_ROOT` itself; now that `sandbox` owns the dual-patch, it would be redundant double-patching. It was reconciled to a fixture that patches NOTHING and instead ASSERTS the redirect is structurally live on both bindings (`str(media_root) == str(mvcommon.LOCAL_ROOT) == str(main.LOCAL_ROOT)` and no `C:\Media`) then yields the sandbox Media root. Kept (not removed) so existing smoke signatures that already list `smoke_local_root` keep working unchanged and the structural guarantee is double-checked at every use site.
+  - **Guard.** The `C:\Media` hard-guard in `sandbox` now covers all four constants (`LIBRARY_MOVIES/SERIES/ANIME` + `LOCAL_ROOT`); `smoke_local_root` re-asserts the `LOCAL_ROOT` half belt-and-suspenders.
+- Verification:
+  - Verified on this box: `main.resolve_ffmpeg()` returns the configured Emby `FFMPEG_PATH` (exists); `MKVMERGE_PATH` exists; neither binary is on PATH (`shutil.which` → None) — so the 3 ffmpeg/mkvmerge tests skip under the OLD PATH-only `_ffmpeg_available()`, which B1b fixes.
+  - `python -m pytest -q` (full, after deleting the probe) → **159 passed, 3 skipped in 11.35s**. (Was 158/3 at end of B1; +1 is the prior executor's now-deleted-but-already-counted probe net-out — the committed B1a tree is 159/3.)
+  - Probe deletion confirmed: `ls tests/test_b1a_localroot_probe_tmp.py` → "No such file or directory".
+  - `git status --short` before this pass showed only ` M tests/conftest.py`, ` M tests/smoke/conftest.py`, `?? tests/test_b1a_localroot_probe_tmp.py` — i.e. B1a touched exactly the two conftests (plus the now-deleted probe); no stray edits.
 
-## Step 2 — Wire recover dispatch + usage
-Status: complete
-Key decisions: Dispatch joins sys.argv[2:] so space-containing folder paths work; --scan takes priority over positional target; no-args case prints usage error without calling cmd_recover.
-Acceptance: `python main.py` (no args) usage block lists `recover [id|folder]  (or: recover --scan)`; `python main.py recover` (no args) prints `❌ Usage: recover [id|folder]   (or: recover --scan)`. Both passed.
+---
 
-## Step 3 — Add tests/test_recover_cli.py
-Status: complete
-Key decisions: Hand-wrote journals as JSON (no RollbackJournal constructor needed); _seed_library helper writes lib_movies entry + empty series/anime; scan test monkeypatches main.LOCAL_ROOT to tmp_path/Media with C:\Media guard; crossed-PONR test asserts journal survives and result is falsy.
-Acceptance: pytest tests/test_recover_cli.py -v: 5 passed in 0.26s; pytest -q: 72 passed, 1 skipped (no regressions).
+## Step B1b — [status: blocked]
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor
+- Files changed: `tests/conftest.py` (`_ffmpeg_available` body; `ffmpeg_multichunk_mkv` + `mkvmerge_split_chunks` subprocess `cmd[0]`). NO change to `main.py`. NO change to `tests/smoke/test_smoke_all_commands.py` (its `test_push_real_split` skipif already used `_ffmpeg_available() and _mkvmerge_available()` — once `_ffmpeg_available()` was fixed it runs, no edit needed). NO change to `_mkvmerge_available()` (already configured-path-or-PATH, production-aligned).
+- BLOCKED REASON: B1b's own deliverable (reuse `main.resolve_ffmpeg()`, remove the divergent PATH-only ffmpeg detection, single genuine-absence skip) is DONE and correct, and 2 of the 3 previously-skipped tests now RUN and PASS. But the 3rd target — `tests/test_rollback.py::test_push_split_fail_before_upload_rolls_back` — now RUNS and **FAILS**, surfacing a PRE-EXISTING test-setup gap (not a rollback/production bug). Per the step's explicit instruction ("if any of them now FAILS rather than passes, STOP, do NOT mark done, diagnose and report as a finding; do not paper over it or re-skip it"), B1b is NOT marked `[x]`. The conftest edits are left in place (they correctly make the tests RUN — the whole point of B1b); the block is purely the surfaced failing test, which needs a separate decision.
+- B1b edits (exact):
+  - `_ffmpeg_available()` (conftest.py:500-513): body replaced with `return main.resolve_ffmpeg() is not None` — reuses the PRODUCTION resolver (configured `FFMPEG_PATH` if it exists on disk, else `shutil.which("ffmpeg")`), so it now finds Emby's bundled ffmpeg that is NOT on PATH. Docstring rewritten to explain the reuse + why PATH-only was wrong.
+  - `ffmpeg_multichunk_mkv` (conftest.py:~517-533): capture `ffmpeg = main.resolve_ffmpeg()` once; the genuine-absence fallback is now `if ffmpeg is None: pytest.skip(...)`; the subprocess `cmd` list's first element changed from bare `"ffmpeg"` to the resolved `ffmpeg` path.
+  - `mkvmerge_split_chunks` (conftest.py:~592-595): capture `ffmpeg = main.resolve_ffmpeg()` (guaranteed non-None here — this fixture depends on `ffmpeg_multichunk_mkv`, which already skips if ffmpeg is absent) and use it as the subprocess `cmd[0]` in place of bare `"ffmpeg"`. Its OWN top-level skip stays `_mkvmerge_available()`.
+  - **Single genuine-absence skip pattern:** `ffmpeg_multichunk_mkv` skips iff `main.resolve_ffmpeg() is None`; everything else inherits ffmpeg-presence either by depending on that fixture or via the `_ffmpeg_available()` (== `resolve_ffmpeg() is not None`) skipif. mkvmerge absence is the separate `_mkvmerge_available()` skip (left as-is). NO hard collection/import failure on a box without ffmpeg.
+  - Sweep result: the ONLY divergent ffmpeg detection in `tests/` was in `tests/conftest.py`; `tests/test_baseline_happy_path.py` only mentions ffmpeg in comments (no detection). After the edits, every live ffmpeg invocation in `tests/` goes through `main.resolve_ffmpeg()`; no remaining bare-`"ffmpeg"` invocation (only docstring/comment mentions).
+- THE FINDING (diagnosis of the failing test — for the orchestrator/user to decide):
+  - `tests/test_rollback.py::test_push_split_fail_before_upload_rolls_back` (test_rollback.py:106) documents the scenario "a GENUINE ffmpeg split succeeds, then the FIRST adb push fails → this-run _parts/checksums/split_info rolled back, master intact" and asserts `cmd_push(..., split_method="SIZE_MB", split_val="2")` returns `False`.
+  - It uses the `ffmpeg_multichunk_mkv` fixture as its source file. That fixture's `testsrc` recipe compresses to **~50 KB** (measured: 49,998 bytes = 0.048 MB) — the fixture's OWN docstring already admits its "~6 MB" claim is false, and `mkvmerge_split_chunks` was written specifically to generate its own ~60 MB high-entropy source BECAUSE `ffmpeg_multichunk_mkv` is too small to split.
+  - With a 0.048 MB source and `split_val="2"` (2 MB), `cmd_push`'s pre-split size check (`main.py:1311`: `if fsize_mb < target_mb`) prints "File size (0MB) is smaller than split limit (2MB). Skipping split." and falls through to a SINGLE-file push. The forced first-push failure (`fail_nth_subprocess(1, match=push)`) is then absorbed by `cmd_push`'s retry loop ("Retry 1/3 … ✅"), the push SUCCEEDS, so `result is True` and `assert result is False` fails.
+  - Even at the smallest `SIZE_MB` ("1" = 1 MB), `split_video_file` adds a +10 MB per-chunk buffer (`main.py:190`), so a 50 KB source can NEVER produce ≥2 chunks. The test's premise (a real multi-chunk split) is structurally unrealizable with `ffmpeg_multichunk_mkv` as-is.
+  - **Conclusion:** this is a genuine TEST-SETUP gap that real-binary coverage correctly exposed — the test never validated its documented split-rollback scenario because it was always SKIPPED (ffmpeg off PATH). It is NOT a rollback/production defect (the other real-binary rollback-adjacent path, `test_push_real_split`, passes). The auto-rollback mechanism itself was NOT touched and is not implicated.
+  - **Recommended fix (NOT applied — out of B1b scope; needs a decision):** give this test a genuinely-splittable source so `cmd_push` takes the real split path. Cleanest option: depend on the existing `mkvmerge_split_chunks`-style high-entropy source, or generate a >~30 MB high-entropy `.mkv` for this test and split with `SIZE_MB "10"`, mirroring `mkvmerge_split_chunks` (which already reliably yields ≥2 real chunks). That is a test-only change in `tests/test_rollback.py` (and would also pull in mkvmerge, so gate on `_ffmpeg_available() and _mkvmerge_available()`). It does NOT alter any rollback behavior. This should be its own small step/decision, not folded silently into B1b.
+- Verification (exact output):
+  - 3 target tests in isolation (`-v`): `test_rehash.py::test_deterministic_merge_same_seed_yields_identical_hash` **PASSED**; `tests/smoke/test_smoke_all_commands.py::test_push_real_split` **PASSED**; `tests/test_rollback.py::test_push_split_fail_before_upload_rolls_back` **FAILED** (`assert True is False` at test_rollback.py:130) → "1 failed, 2 passed in 12.95s". (Pre-change baseline of the same 3: "3 skipped in 0.19s".)
+  - `python -m pytest -q` (full) → **1 failed, 160 passed in 25.04s** (skip count dropped 3 → 0; all 3 ffmpeg tests now RUN; the single failure is the diagnosed test-setup gap, not a regression). Was 159 passed/3 skipped pre-B1b.
+  - `python -m pytest tests/smoke -q` → **50 passed in 8.60s** (cold) / 8.99s / 9.55s (warm). Was 49 passed/1 skipped — `test_push_real_split` now RUNS and PASSES.
+  - SMOKE-BUDGET CHECK: `test_push_real_split` setup (the `mkvmerge_split_chunks` ~60 MB ffmpeg generation) adds ~4.4s, but total `pytest tests/smoke -q` is ~8.6–9.6s — comfortably under the ~30s fast-gate budget. NO `@pytest.mark.slow`/opt-in needed; the case runs and the gate stays fast.
 
-## Step 4 — [status: done] Architect docs (docs-only) (2026-06-01)
-- Executor: orchestrator (direct; Task subagent unavailable). Model: opus, effort high (matches the step tag — no mismatch).
-- Files changed (DOCS ONLY — `git diff --name-only` confirmed zero `.py` files): ARCHITECTURE.md, docs/feature-auto-rollback/README.md.
-- ARCHITECTURE.md: added §12a "Auto-Rollback for Multi-Step Commands" (the single RollbackJournal mechanism + RollbackHardFail + recover_journal crash recovery; the verified PONR table with current main.py line refs — cmd_prep@599 / cmd_push@992 / cmd_replace@1335 PONR@1398 / cmd_restore@1598; the O-1 resume-message vs O-2 hard-fail split; orchestrator unification + season resume-range messaging; D-4/D-6/D-7/D-9 + C9/C11 seam reuse). Updated the stale §12 bullets that described the two old ad-hoc paths to point at §12a.
-- docs/feature-auto-rollback/README.md: status PLANNING → IMPLEMENTED; cross-links DECISIONS.md N-6 + rollback-architecture/DECISION.md (Candidate C won, wholesale) and ARCHITECTURE.md §12a; notes pytest 67 passed / 1 skipped.
-- Descriptive only — NO code change. Step 4 ticked [x] in BOTH PLAN.md copies (byte-identical, MD5 AA8906AB...).
+---
 
-## Step 4 — Document recover in README + ARCHITECTURE
-Status: complete
-Key decisions: additive doc rows only; recover_journal semantics unchanged
-Acceptance: README row added at line 139 after `sort` (describes `recover [id|folder]` and `recover --scan`); ARCHITECTURE §5 row added at line 226 after `fetch` (describes `cmd_recover` dispatch); ARCHITECTURE §12a notes CLI entry point at line 1394 (new sentence after the alternatives paragraph, before PONR table section).
+## Step B1b — resolution [status: done]
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor
+- Files changed: `tests/conftest.py` (ADDED a new `ffmpeg_splittable_master_mkv` fixture), `tests/test_rollback.py` (rewrote `test_push_split_fail_before_upload_rolls_back` + added a `from conftest import _ffmpeg_available, _mkvmerge_available`). NO change to `main.py` (change-gate honored — nothing in RollbackJournal / recover_journal / PONR / journal format touched). NO change to `ffmpeg_multichunk_mkv` (other tests rely on its ~50 KB size + `bigsample.mkv` name) or to `mkvmerge_split_chunks`.
+- Outcome: Resolves the prior `blocked` finding above. The B1b `resolve_ffmpeg()` reuse (the prior pass's conftest edits) is in the tree and correct; this pass fixes the one test that was left FAILING by giving it a GENUINELY-splittable master so it actually exercises the live split-during-push → pre-upload-rollback path (the first time this scenario has ever run — it was always skipped before). The target test, the full `test_rollback.py` module, the full suite, and the smoke suite are all green; skip count is 0.
+- The fix (exact):
+  - NEW conftest fixture `ffmpeg_splittable_master_mkv` (factored out, reusable, gated): generates a HIGH-ENTROPY ~60 MB MKV via the PROVEN `mkvmerge_split_chunks` recipe — `main.resolve_ffmpeg()` + `color=c=black:s=640x480:d=6:r=25` + `-vf geq=random(1)*255:128:128` + `-c:v libx264 -qp 0 -pix_fmt yuv420p` → `splittable_master.mkv`. Skips cleanly via `_ffmpeg_available()` (the production resolver) on genuine absence; hard-guards the output path against real `C:\Media`. Left `ffmpeg_multichunk_mkv` and `mkvmerge_split_chunks` untouched.
+  - `test_push_split_fail_before_upload_rolls_back` rewritten: now depends on `ffmpeg_splittable_master_mkv` (the ~60 MB master) instead of `ffmpeg_multichunk_mkv`; gated with `@pytest.mark.skipif(not (_ffmpeg_available() and _mkvmerge_available()), …)` (the live split inside cmd_push invokes mkvmerge via `split_video_file`, so both binaries are required); calls `cmd_push(split_method="SIZE_MB", split_val="10")` → `num_chunks=ceil(60/10)=6` → ~20 MB/chunk → ~3 real chunks (main.py:184-194). ALL existing post-state assertions are UNCHANGED (this-run `_parts/` removed, `checksums/` removed, `split_info` popped, master kept, entry `local_ready`/`uploaded=False`).
+- KEY DECISION — failure injection changed from `fail_nth_subprocess(1, match=…push)` to an inline "fail EVERY push" `monkeypatch` (mirroring the established sibling pattern in `test_push_resume_does_not_delete_preexisting_parts`): cmd_push wraps each chunk push in `retry(attempts=3)` (main.py:1537). With a genuine multi-chunk split, failing ONLY the 1st matching push lets the SAME first chunk SUCCEED on retry attempt 2 → `any_upload_done=True` → the O-1 resume-message branch (main.py:1605), which does NOT roll back — so the asserted pre-upload-rollback post-state would be unreachable and the test would fail for a test-construction reason. To genuinely realize "first push fails → roll back this run" (the documented scenario + the assertions), every push must fail so the first chunk never lands and `any_upload_done` stays False → the pre-any-upload rollback branch (main.py:1614). This faithfully keeps the "forced first-push failure" SCENARIO and every assertion; it does NOT weaken the test. Rationale is documented in the test's docstring + an inline comment so it isn't "fixed back" to fail_nth_subprocess by a future editor. Alternative considered: keep `fail_nth_subprocess` and add a "fail all matching" mode — rejected as a needless infra change when the proven inline pattern already exists in this file.
+- Verification (exact output, this machine — Emby ffmpeg + mkvmerge both present, neither on PATH):
+  - `python -m pytest "tests/test_rollback.py::test_push_split_fail_before_upload_rolls_back" -v` → **1 passed in 3.99s** (PASSED; the split-push-fail→rollback scenario validated for the first time).
+  - `python -m pytest tests/test_rollback.py -q` → **10 passed in 4.02s**.
+  - `python -m pytest -q` (full) → **161 passed in 26.46s** (skip count 0; was 159 passed/3 skipped pre-B1b, 160 passed/1 failed at the blocked mid-point — now 161/0).
+  - `python -m pytest tests/smoke -q` → **50 passed in 8.18s**.
 
-## Step 5 — DECISIONS.md + IMP-R2 status flip
-Status: complete
-Key decisions: wrapper-only/change-gate; id-first resolution; scan read-only; argv join
-Acceptance: DECISIONS.md created with 4 entries; improvements_tierR.md IMP-R2 Status: done
+## Step B2 — [status: done]
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor
+- Files changed: `main.py` (added the `ENTRY_TYPE_KEYS` registry constant + its documentation block; the temporary revert-demonstration edit to `cmd_scan_unprepped` was reverted and `main.py` left byte-for-byte in the alias-skipping final state), `tests/test_entry_schema_guard.py` (NEW).
+- Outcome: Added `ENTRY_TYPE_KEYS` — the single documented source of truth for the three top-level library entry shapes (leaf / season_map / multi_ep_alias) and a per-type `physical` flag ("owns a file via folder_path+filename"). It is additive and documentation/test-only — NOT wired into any cmd_* path (the guard test is the enforcement). Added `tests/test_entry_schema_guard.py` with two tests: (a) a round-trip test that builds one entry of EACH registered type and asserts each survives `save_library`→`load_library` intact (byte-for-byte, type discriminator preserved, leaf stays type-less, no required key lost); (b) the load-bearing GUARD test that seeds a `sandbox` library with one entry of every non-physical type (season_map, multi_ep_alias) + a real leaf, then calls `cmd_scan_unprepped()`, `cmd_local_status()` (incl. the size-limit branch) and `cmd_sort()` and asserts none raises. The guard's non-physical set is DERIVED from `ENTRY_TYPE_KEYS` (`physical=False`) so it auto-extends when a new non-physical type is registered; the round-trip's type iteration is likewise registry-driven, so a new type cannot be added without exercising it here. Full suite green (163 passed, 0 skipped) and smoke suite green.
+- Key decisions:
+  - **Verified complete entry-type set (the B2 FIRST requirement):** grepped EVERY `"type": "..."` write and every `.get("type")`/`["type"]` read across `main.py`, `mainfetch.py`, `mvcommon.py`. There are exactly TWO `type` writes in the whole codebase — `season_map` (main.py:882, cmd_prep) and `multi_ep_alias` (main.py:1081, cmd_prep_season/IMP-E13). All `.get("type")` reads compare only against `"season_map"` and `"multi_ep_alias"`. `mvcommon.py` has ZERO type usage. The third type is the implicit LEAF (no `type` key — the cmd_prep entry at main.py:906). **No fourth/unexpected type exists — nothing to flag.** The registry's three types are the complete, verified set.
+  - **Registry placement:** put `ENTRY_TYPE_KEYS` in the top-level config/schema constant block (right after `PUSH_VERIFY_REMOTE`, before the `UTILITIES` divider — main.py:84-116). Chose this over near `MVMETA_SCHEMA_VERSION` (line 1119) because that constant sits mid-function-region (inside the write_remote_mvmeta area) whereas the top-of-module block is where module-level schema/config constants belong and is import-safe + clearly additive.
+  - **Registry `required` key sets (refined to match what the code ACTUALLY writes, per the step):** `leaf` → `{"folder_path","filename","status"}` physical=True (cmd_prep writes these always, main.py:906-916, plus uploaded/hash/short_id/search_term/metadata/tech_spec, optional parent_id/split_info — `required` is the minimal distinguishing set, documented as such); `season_map` → `{"folder_path","children"}` physical=False (main.py:881-886 also writes total_episodes; it HAS folder_path but NO filename, so it owns no physical file → physical=False); `multi_ep_alias` → `{"alias_of","parent_id"}` physical=False (main.py:1081-1083 writes EXACTLY type/alias_of/parent_id and nothing else). These match the plan's example key sets exactly because the example was already correct against the code. `physical` is documented as "owns a physical file on disk (has folder_path AND filename)" — only leaf qualifies.
+  - **Test fixture choice:** used the `sandbox` fixture (LOCAL_ROOT-hermetic per B1a) directly and built the entries inside the test (rather than reusing `sandbox_alias`), because B2 explicitly specifies "build a `sandbox` library containing one entry of EACH type" and the round-trip test must assert against the registry's exact `required` key sets — a self-contained build keeps the test bound to `ENTRY_TYPE_KEYS`. All ids use the `tv-` prefix so `save_library` routes them into a single library file; the leaf's `.mkv` is created under the sandbox media dir (never real C:\Media).
+  - **Two test names:** `test_every_entry_type_round_trips` (a) and `test_guard_read_commands_tolerate_non_physical_entries` (b).
+- Revert-demonstration result (acceptance): temporarily reverted `cmd_scan_unprepped`'s skip from `if entry.get("type") in ("season_map", "multi_ep_alias"): continue` back to `if entry.get("type") == "season_map": continue` (main.py:2516, the pre-A1 / pre-PR-#21 state). The GUARD test then FAILED with exactly the production crash:
+  ```
+  >   p = os.path.join(entry['folder_path'], entry['filename'])
+  E   KeyError: 'folder_path'
+  main.py:2517: KeyError
+  ```
+  (raised when the iterator hit the `multi_ep_alias` entry, which has no `folder_path` — the exact PR #21 class). Then RESTORED `main.py` byte-for-byte to the alias-skipping form; re-ran the guard test → **2 passed**. Confirmed both whole-library iterators are back to the correct state (cmd_local_status main.py:2415 and cmd_scan_unprepped main.py:2516, both `in ("season_map", "multi_ep_alias")`). `main.py` left in the correct final state; rollback code and all other type checks untouched.
+- Verification:
+  - `python -m pytest tests/test_entry_schema_guard.py -q` → **2 passed in 0.17s** (after restore).
+  - (demonstration) guard test with the alias skip reverted → **1 failed** with `KeyError: 'folder_path'` at main.py:2517; restored and re-ran → passes.
+  - `python -m pytest -q` (full suite) → **163 passed in 33.15s** (0 skipped; was 161/0 pre-B2 → 161 + 2 new tests = 163/0). No regressions.
+  - `python -m pytest tests/smoke -q` → **50 passed in 9.29s** (additive registry changes no behavior; smoke gate still green and within budget).
 
-## Step 1 — [status: done] Fix SxxExx episode-extraction regex
-- Executor: executor-opus. Model: opus, effort: high (plan) / max (baked) — over-powered, acceptable.
-- Files changed: main.py line 890 only.
-- Outcome: Dropped the optional decimal group `(?:\.\d+)?` from the `SxxExx` branch on line 890, changing `re.search(r"[sS]\d+[eE](\d+(?:\.\d+)?)", filename)` to `re.search(r"[sS]\d+[eE](\d+)", filename)`. The `NxYY` branch on line 891 (`\d+[xX](\d+(?:\.\d+)?)`) is untouched. REPL checks all printed expected values: `Fringe.S03E20.6.02.AM.EST.2011.1080p.BluRay.mkv` → `20`; `Fringe.S03E19.1080p.BluRay.mkv` → `19`; `[Grp] Show 16x05.5 [hash].mkv` (NxYY) → `05.5`. `git diff` confirmed only line 890 changed. `python -m pytest -q` → 72 passed, 1 skipped (no regressions).
-- Key decisions: SxxExx decimal capture dropped (Option A); NxYY line 891 untouched; rollback code untouched.
+---
 
-## Step 2 — [status: done] Add unit tests for episode-ID extraction
-- Executor: executor-sonnet. Model: sonnet, effort: medium (plan) / medium (baked) — no mismatch.
-- Files changed: tests/test_prep_season_episode_parse.py (new, 3 test cases).
-- Outcome: Tests A (dotted-title e20 fix), B (canonical e19), C (anime NxYY .5). pytest 75 passed, 1 skipped.
-- Key decisions: Used sandbox + stub_tech_specs fixtures; created separate tmp subfolders per test group. Fake .mkv files must write 210_000 bytes (exceeding DUMMY_MAX_BYTES=200_000) or cmd_prep early-skips them as dummy files.
+## Step B3 — [status: done]
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor
+- Files changed: `.claude/agents/planner.md` (BODY only — frontmatter byte-identical, validated). No other file touched. (PLAN.md B3 marked `[x]`; this STATUS.md append.)
+- Outcome: Added two durable, enforced planning rules to the planner agent so the PR #21 bug class (a new shared data shape silently breaking a distant consumer + no cross-command gate) cannot recur. (1) A mandatory **Consumer Impact Analysis** rule + a required `## Consumer Impact Analysis` PLAN.md sub-section, REQUIRED whenever a step adds/changes/removes a shared data contract (entry type, library field/key, ID shape, `status` value, or any cross-module schema). It instructs the planner to (a) consult `ENTRY_TYPE_KEYS` in `main.py` as the authoritative source of truth for entry-type key shapes, and (b) grep EVERY consumer — `.values()`/`.items()` iterators, `entry['<key>']`/`entry.get('<key>')` derefs, and every `_resolve_alias` caller — and enumerate each in the plan with a `safe`/`needs-fix` verdict + `file:line` in a table that mirrors this project's CONSUMER AUDIT format. It cites PR #21 / IMP-E13 as the cautionary example (added `multi_ep_alias`, missed `cmd_scan_unprepped` → production `KeyError`). (2) A standing **SMOKE-GATE** rule: any plan whose steps touch `main.py`/`mainfetch.py`/`mvcommon.py` MUST include `pytest tests/smoke -q` as the final Verification line, in addition to `pytest -q`. Both rules are wired in three places (WORKFLOW step, PLAN.md STRUCTURE section list, and a standalone rule block) so they are unmissable.
+- Key decisions:
+  - **Three-point wiring for each rule (not just one mention), to match how existing mandates are enforced in this file.** The Consumer Impact Analysis is referenced in (i) a new WORKFLOW step 4 ("perform it NOW, during planning … This is not optional"), (ii) the PLAN.md STRUCTURE as a new `## Consumer Impact Analysis` output section placed between `## Risks and edge cases` and `## Verification` (it is risk analysis, and reads naturally there; explicitly marked "Omit … entirely when no step touches a shared data contract"), and (iii) a full standalone `CONSUMER IMPACT ANALYSIS (MANDATORY …)` rule block after the STRUCTURE. This mirrors how TESTING STEP RULES already governs required plan content from a standalone uppercase block. A single buried mention would be easy for the planner to skip; the WORKFLOW step makes it part of the planning loop, the STRUCTURE entry makes it part of the output skeleton, and the rule block carries the how-to + table format.
+  - **WORKFLOW renumber, not ins-in-place.** Inserted the Consumer Impact Analysis as WORKFLOW step 4 and shifted the old 4/5 to 5/6 (single-vs-multi-candidate decision, then Produce PLAN.md). Placing it BEFORE the per-step candidate decision and the "Produce PLAN.md" step is correct: the audit informs how many fix steps the plan needs.
+  - **CONSUMER AUDIT table format reproduced with the exact 6 columns** from this project's PLAN.md (`# | Site | Line(s) | Access | Verdict | Why`), with two worked example rows (one `needs-fix` = `cmd_scan_unprepped`, one `safe` = `cmd_sort`) drawn from this very task's audit, so the planner has a concrete template. Added the completeness guard: "Every consumer found by the greps MUST appear with a verdict — an empty or partial table is a failed analysis; each `needs-fix` row MUST name the step that fixes it." This is what makes the audit exhaustive rather than illustrative (the exact gap that sank PR #21).
+  - **Grep targets enumerated explicitly** (whole-library `.values()`/`.items()` iterators; `entry['<key>']` and `entry.get('<key>')` derefs incl. renamed/removed keys; every `_resolve_alias` caller) so the planner runs concrete searches, not a vague "consider impact". Verdicts are required against the NEW shape, not the old one.
+  - **`ENTRY_TYPE_KEYS` made the authoritative source of truth** (B2's registry): step 1 of the rule says to consult it for key shapes, and — when the change adds/alters an entry type — the plan must include updating `ENTRY_TYPE_KEYS` and its guard test. This closes the loop with B2 (registry) and B5 (executor "update the registry" instruction).
+  - **Smoke-gate placed adjacent to the Verification structure + as its own rule block, with the module trigger explicit.** The `## Verification` STRUCTURE line now states the `pytest tests/smoke -q` requirement inline, and a standalone `SMOKE-GATE (MANDATORY …)` block states the trigger (`main.py`/`mainfetch.py`/`mvcommon.py`), the position (FINAL line, last gate), the rationale ("the single check that answers 'did this change break another command?' — the gap that let PR #21 ship"), and the explicit exception (docs-only / agent-file-only plans omit it). Kept it `pytest tests/smoke -q` (matching the suite invocation B1 created and the PLAN's own Verification block) IN ADDITION to `pytest -q`, never replacing it.
+  - **Style match + surgical scope.** Used the file's existing uppercase rule-block header convention and declarative MUST phrasing; touched only the WORKFLOW list, the STRUCTURE Risks/Verification/Out-of-scope region, and inserted the two new blocks between `## Out of scope` and `TESTING STEP RULES`. No other section (MODEL ASSIGNMENT, MULTI-CANDIDATE GUARDRAILS, etc.) was altered. Frontmatter left byte-identical.
+- Verification:
+  - **Frontmatter footgun check (REQUIRED):** `python -c "import re,yaml; t=open('.claude/agents/planner.md',encoding='utf-8').read(); m=re.match(r'^---\r?\n(.*?)\r?\n---', t, re.S); d=yaml.safe_load(m.group(1)); print('frontmatter OK, name=', d['name'])"` → **`frontmatter OK, name= planner`** (no exception). Re-read of lines 1-7 confirms the `---` block (name/description/model/effort/tools) is byte-identical to the pre-edit original — the agent will still register.
+  - Acceptance grep (`ENTRY_TYPE_KEYS|PR #21|IMP-E13|pytest tests/smoke -q|Consumer Impact Analysis|SMOKE-GATE`) → all present in the BODY: `ENTRY_TYPE_KEYS` at line 87; `PR #21`/`IMP-E13` cautionary citation at line 84; `pytest tests/smoke -q` at lines 75 & 105; `## Consumer Impact Analysis` section at line 71; `SMOKE-GATE` rule block at line 103. Both acceptance requirements satisfied (Consumer Impact Analysis referencing the registry + PR #21/IMP-E13; smoke-gate verification mandate).
+  - No code/tests touched by this step (agent-file-only), so `pytest`/`pytest tests/smoke` were not re-run — unchanged from B2's green state (163 passed / 0 skipped; smoke 50 passed).
 
-## Step 3 — [status: done] Add filter-arithmetic regression tests
-- Executor: executor-sonnet. Model: sonnet, effort: medium (plan) / medium (baked) — no mismatch.
-- Files changed: tests/test_prep_season_episode_parse.py (extended, +2 pure-function tests D and E).
-- Outcome: Test D (e20 included by 20-20), Test E (e20.6 excluded by 20-20). pytest 77 passed, 1 skipped.
-- Key decisions: Approach (i) — inline filter logic, pure function, no I/O. Documents the invariant that a clean `e20` ID yields ep_num==20.0 and passes the 20-20 filter.
+---
 
-## Step 4 — [status: done] Record decisions and update tracked plan
-- Executor: executor-haiku. Model: haiku, effort: low (plan) / low (baked) — no mismatch.
-- Files changed: docs/feature-fix-episode-title-parse/DECISIONS.md (new), docs/feature-fix-episode-title-parse/PLAN.md (steps marked done).
-- Outcome: DECISIONS.md records the 4 decision points. Tracked PLAN.md steps all marked [x].
-- Key decisions: doc-only step; no code changed.
+## Step B4 — [status: done]
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor
+- Files changed: `.claude/agents/orchestrator.md` (BODY only — frontmatter byte-identical, validated). No other file touched. (PLAN.md B4 marked `[x]`; this STATUS.md append.)
+- Outcome: Wired the `pytest tests/smoke -q` cross-command gate into the orchestrator playbook at BOTH mandated points so a code-touching change can never be committed or shipped without proving it didn't break another command (the PR #21 class). (1) **Per-step gate (Phase 2A):** a new step 5 "SMOKE GATE (code-touching steps)" inserted BEFORE the COMMIT_STEP call (old step 5 renumbered to 6) — if the step modified `main.py`/`mainfetch.py`/`mvcommon.py`, run `pytest tests/smoke -q`; if RED, do NOT commit, treat as a failed acceptance check (STOP, don't mark done, report per ESCALATION RULES); proceed to commit only when green or no trigger-module was touched. (2) **Multi-candidate merged-result gate (Phase 2B):** a new step 8a runs the SAME gate on the MERGED result on the feature branch after MERGE_CANDIDATE_WINNER/ARCHIVE_CANDIDATES and before marking the step done (step 9) — judged candidates pass their own isolated tests, but only this confirms the merged code doesn't break another command. (3) **Pre-PR finalize gate (Phase 3):** the Verification gate now MUST include BOTH `pytest -q` AND `pytest tests/smoke -q` green before PUSH_BRANCH/CREATE_PR (with an explicit "run it anyway if PLAN.md omits it but a trigger module was touched"). The existing NO-SILENT-HANDLING preamble, the full ESCALATION RULES block (incl. the capability-gap NEVER-silently-degrade rule), and the Checkpoint 1 human-gated-merge rule are all left fully intact.
+- Key decisions:
+  - **Per-step gate placed BEFORE COMMIT_STEP, not after, in Phase 2A.** Inserted as a new step 5 between "Verify acceptance check" (step 4) and "Invoke git-agent COMMIT_STEP" (renumbered step 6), so the gate genuinely blocks the commit — a red smoke run STOPS before any commit, mirroring how a failed acceptance check is already handled. Wording explicitly says "treat it exactly like a failed acceptance check … (per ESCALATION RULES)" so it inherits the existing STOP/don't-commit/don't-mark-done escalation rather than introducing a parallel mechanism.
+  - **Multi-candidate path handled honestly via a post-merge step 8a, not a pre-commit gate.** In Phase 2B the COMMIT is the squash-MERGE itself (MERGE_CANDIDATE_WINNER), so a literal "before commit" gate is impossible on this path — the winner's code only exists on the feature branch AFTER the merge. I added step 8a to run the gate on the merged feature branch and, if red, STOP before marking the step done (step 9), noting the merge commit "can be reverted as a failed step". This satisfies the plan's "applies to the 2B multi-candidate path's merged result too" requirement without misrepresenting when the commit happens. The per-step gate (Phase 2A step 5) explicitly cross-references step 8a so the reader knows the multi-candidate equivalent.
+  - **Trigger-module set + rationale phrasing kept consistent with B3's planner.md edit.** Used the identical trigger set (`main.py`/`mainfetch.py`/`mvcommon.py`) and the same one-line rationale ("the single check that answers 'did this change break another command?' — the gap that let PR #21 ship") so the planner-mandated smoke-gate and the orchestrator-enforced smoke-gate read as one coherent rule across the two agent files.
+  - **Phase 3 gate made belt-and-suspenders.** Beyond requiring both `pytest -q` and `pytest tests/smoke -q` green, added "If PLAN.md's Verification omits `pytest tests/smoke -q` but any step touched [trigger modules], run it anyway" and cross-referenced `CLAUDE.md`'s cross-command integrity gate — so a plan that under-specifies its Verification block still gets gated. Also updated the step-2 guard text from "If verification passes:" to "If verification passes (both `pytest -q` and `pytest tests/smoke -q` green):" so the pass condition is unambiguous.
+  - **Surgical scope / style match.** Edited only the Phase 2A step-completion list, the Phase 2B step 8/9 boundary, and the Phase 3 Finalize step 1-2 — the three places the plan named. Used the file's existing numbered-step + declarative-MUST style. No change to WORKFLOW Phase 1, EFFORT TAG HANDLING, context-packaging sections, ESCALATION RULES, or the final-summary section. Frontmatter (name/description/model/effort/tools) left byte-identical.
+- Verification:
+  - **Frontmatter footgun check (REQUIRED):** `python -c "import re,yaml; t=open('.claude/agents/orchestrator.md',encoding='utf-8').read(); m=re.match(r'^---\r?\n(.*?)\r?\n---', t, re.S); d=yaml.safe_load(m.group(1)); print('frontmatter OK, name=', d['name'])"` → **`frontmatter OK, name= orchestrator`** (no exception). Re-read of lines 1-7 confirms the `---` block is byte-identical to the pre-edit original — the agent will still register.
+  - Acceptance: smoke gate present at the per-step (code-touching) commit point — Phase 2A step 5 (line 102) + Phase 2B step 8a (line 178, merged-result) — AND at the pre-PR finalize point — Phase 3 step 1-2 (lines 188-189). Both required.
+  - Preserved-rules check (grep `NO SILENT HANDLING|human-gated \(Checkpoint 1\)|NEVER silently degrade`): NO SILENT HANDLING preamble at line 11; Checkpoint 1 human-gated-merge at line 197; ESCALATION RULES capability-gap NEVER-silently-degrade at line 287 — all intact, none altered.
+  - No code/tests touched by this step (agent-file-only), so `pytest`/`pytest tests/smoke` were not re-run — unchanged from B2's green state (163 passed / 0 skipped; smoke 50 passed).
 
-## Step 1 — Extend cmd_prep_season for combined-episode aliases
-- Status: done
-- Files changed: main.py
-- Key decision: Combined-episode detector scoped to SxxExx TV branch only; alias loop runs after primary cmd_prep returns truthy; save_library called once per file after all secondaries.
-- Acceptance: Verified by inspection that S04E19E20 creates e19 primary + e20 alias; S04E19 single creates only e19; anime NxYY unaffected.
+---
 
-## Step 2 — Add _resolve_alias helper
-- Status: done
-- Files changed: main.py
-- Key decision: Single-hop only; returns (real_id, entry); fallback to (mid, alias_entry) if alias target missing.
-- Acceptance: _resolve_alias(lib, "...e20") returns ("...e19", <e19 entry>); _resolve_alias(lib, "...e19") returns ("...e19", <e19 entry>).
+## Step B5 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `.claude/agents/executor-sonnet.md`, `.claude/agents/executor-opus.md`, `.claude/agents/executor-haiku.md` (BODY edits only — all three frontmatters unchanged)
+- Outcome: Added both mandated additions to all three executor agent files. (1) **Smoke-gate on code-touching steps** — in executor-sonnet.md: appended to step 4 of the SINGLE-EXECUTOR WORKFLOW ("Run tests / linters") as an indented note; in executor-opus.md: appended to step 5 of the SINGLE-EXECUTOR WORKFLOW ("Run acceptance checks") as an indented note with additional rationale about regressions; in executor-haiku.md: appended to step 4 of the WORKFLOW ("Run the step's acceptance check") as an indented note. The instruction reads: if the step modified `main.py`, `mainfetch.py`, or `mvcommon.py`, ALSO run `pytest tests/smoke -q`, fix any failure BEFORE marking the step done, and paste the smoke result into STATUS.md Verification. (2) **Respect the entry-type registry** — in executor-sonnet.md and executor-opus.md: added as a new numbered item 8 at the end of the WHEN WRITING TESTS section; in executor-haiku.md: appended after the existing `pytest -q` output instruction in the WHEN TOUCHING TESTS section. The instruction states: if you add or change a library entry type or shared entry field, update `ENTRY_TYPE_KEYS` in `main.py` AND ensure every whole-library iterator skips or `_resolve_alias`-resolves the new type. The opus instruction has additional context about reasoning carefully; the haiku instruction includes a "report blocked if unsure" safeguard matching its more conservative mandate. Each file's existing voice and structure were preserved; no unrelated sections normalized.
+- Key decisions: Smoke-gate placed at the workflow step rather than in FAILURE HANDLING, so it is part of the forward path (not just the error path). Entry-type registry instruction placed in the "when writing/editing code" guidance section (WHEN WRITING TESTS is where all three files already scope code-writing constraints). Haiku's entry-type note includes an explicit "report blocked if unsure" because haiku is restricted from inventing fixes for non-trivial changes.
+- Verification:
+  - Frontmatter validation (all three at once):
+    `python -c "import glob,re,yaml; [print('OK', f, '->', yaml.safe_load(re.match(r'^---\r?\n(.*?)\r?\n---', open(f,encoding='utf-8').read(), re.S).group(1))['name']) for f in sorted(glob.glob('.claude/agents/executor-*.md'))]"`
+    Output:
+    ```
+    OK .claude/agents\executor-haiku.md -> executor-haiku
+    OK .claude/agents\executor-opus.md -> executor-opus
+    OK .claude/agents\executor-sonnet.md -> executor-sonnet
+    ```
+    All three frontmatters valid; no YAML exception; all three agent names print correctly.
+  - No code or test files were modified by this step; `pytest` results are unchanged from the B4 state (163 passed / 0 skipped; smoke 50 passed).
 
-## Step 3 — Make cmd_prep_push_rep_season alias-aware
-- Status: done
-- Files changed: main.py
-- Key decision: De-alias pass runs after range filter, before disk pre-flight; target_ids contains only primary ids from that point on; alias-only range (episodes 20-20) resolves to the primary (e19).
-- Acceptance: With seeded library containing e19(real)+e20(alias), episodes 18-20 and episodes 20-20 both resolve target_ids to [e19] only.
+---
 
-## Step 4 — Defensive resolve in _season_resume_cmd
-- Status: done
-- Files changed: main.py
-- Key decision: ep_str derived from real_id (resolved) not rid (raw); library is in-scope closure variable. Step 3 already de-aliases target_ids so this is belt-and-suspenders only.
-- Acceptance: _season_resume_cmd emits the primary episode number; the RollbackHardFail resume_cmd contract (must name an existing command) is preserved.
+## Step B6 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `CLAUDE.md`, `docs/testing-strategy.md`
+- Outcome: Documented the cross-command integrity gate, smoke suite, `sandbox_alias` fixture, and `ENTRY_TYPE_KEYS` registry in both load-bearing docs. No code or test files were touched; `pytest` results unchanged from B5 state.
+- Key decisions:
+  - **CLAUDE.md — placement:** inserted the new "Cross-command integrity + smoke gate" subsection between "Improvement tasks" and "Auto-rollback is load-bearing — change-gate". This is the natural position — it is a peer enforcement rule alongside the auto-rollback change-gate, and it reads after the backlog/priority guidance where a new contributor would already be thinking about what can change.
+  - **testing-strategy.md — pyramid row:** added the Smoke suite as a new tier box ABOVE the existing INTEGRATION tier (it spans all commands, so it sits above per-command integration tests), keeping the ASCII art pyramid consistent.
+  - **testing-strategy.md — §4.7 / §4.8:** added `sandbox_alias` as §4.7 (with its yielded-dict API and a minimal usage example) and `ENTRY_TYPE_KEYS` + `test_entry_schema_guard.py` as §4.8 (data-shape guardrail). Placed immediately before the existing §5 decision tree so all fixture/guardrail documentation stays in §4.
+  - **testing-strategy.md — §12:** added `pytest tests/smoke -q` as a named command with a comment ("cross-command integrity (<30 s)") immediately after the existing `pytest -q` full-suite line, so the pre-PR gate invocation is visible right at the top of the run section.
+- Verification: No code or tests changed; `pytest`/`pytest tests/smoke` results are unchanged from B5 (163 passed / 0 skipped; smoke 50 passed). Docs verified by reading back both files post-edit and confirming all four required elements are present: smoke-suite pyramid row, `sandbox_alias` §4.7 entry, `ENTRY_TYPE_KEYS` §4.8 note, `pytest tests/smoke -q` in §12, and the "Cross-command integrity + smoke gate" subsection in CLAUDE.md.
 
-## Step 6 — Resolve aliases in mainfetch.resolve_targets
-- Status: done
-- Files changed: mainfetch.py
-- Key decision: Local _resolve_alias helper added (mirrors main._resolve_alias, no import); season_map branch de-aliases children before building target_entries; single-id branch resolves alias to primary. fetch episodes 20-20 and fetch episodes 19-19 both queue the same physical file.
-- Acceptance: fetch by alias id (e20) returns primary's filename/hash/split_info; season range 19-20 queues one entry, not two.
+---
 
-## Step 5 — cmd_push_group / cmd_replace_group alias-aware
-- Status: done
-- Files changed: main.py
-- Key decision: De-alias pass inserted after range filter, before downstream loop, in each group command that accesses entry fields directly. cmd_restore_group was also included (not just push/replace) because cmd_restore accesses entry['folder_path']/entry['filename'] directly and would KeyError on an alias entry.
-- Acceptance: Group push/replace over a library with a multi_ep_alias resolves to a single primary id; existing non-alias group behaviour unchanged (transform is a no-op for non-alias ids).
+## Bookkeeping (IMP-C12/C13 done, IMP-H3 added) — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed:
+  - `improvements/improvements_tierC.md` — IMP-C12 status: `pending` → `done` (note: iterators skip `multi_ep_alias`; regression tests in `test_alias_consumers.py` + smoke suite). IMP-C13 status: `pending` → `done` (note: `_resolve_alias` at lookup head of five commands; `cmd_prep` refuses alias; regression tests added).
+  - `improvements/improvements_tierH.md` — IMP-H3 entry ADDED as `done`: "Cross-command smoke gate + consumer-impact guardrail + agent enforcement + out-of-band data-request protocol" with full deliverable summary (50-test smoke suite, `ENTRY_TYPE_KEYS` registry + guard test, planner Consumer Impact Analysis mandate, orchestrator per-step/pre-PR enforcement, executor smoke-gate + registry instructions, out-of-band DATA_REQUEST protocol across all 8 agent files + CLAUDE.md + docs/testing-strategy.md). Placed after IMP-H2 to match the existing H1/H2 entry format.
+  - `improvements/PRIORITY.md` — (a) IMP-C12 and IMP-C13 removed from Band 0 table; remaining Band-0 rows renumbered (R6, R7, C14, C15). (b) `👉 SUGGESTED NEXT TASK` updated from IMP-C12 → **IMP-C14** (next highest-priority unfixed Band-0 item: the `push_group` infinite-loop hang + `mainfetch` IndexError + silent `replace`). (c) "Last updated" bumped to 2026-06-13. (d) DONE count updated 11 → 14; C12, C13, H3 added to the done list.
+  - `docs/priority-graph/priority-graph.html` — (a) Header banner `⚡ Next: IMP-C12` → `IMP-C14` (text updated to match new NEXT pointer). (b) C12 and C13 node entries changed from `"crit","todo"` → `"done","done"` (rendered in the done ring, green color). (c) IMP-H3 node ADDED as `"done","done"` with a short note string. (d) Footer date 2026-06-12 → 2026-06-13, task count ~110 → ~111.
+- Outcome: All four backlog/doc files now agree: IMP-C12 and IMP-C13 are done, IMP-H3 is a new done entry, and the NEXT pointer is IMP-C14.
+- Key decisions:
+  - **NEXT pointer = IMP-C14**, not any R-tier decision task. The Band-0 table after removing C12/C13 has R6 and R7 at rows 1-2, but both are `🚦 decision` (change-gated — they need a user choice, not code). IMP-C14 is the next actionable, code-level Band-0 bug (no gate, low risk, directly fixable). The NEXT pointer convention in PRIORITY.md is for the "do this first" task, so a decision-gated item shouldn't be the pointer when a code-ready bug is right behind it. The NEXT banner now also surfaces that C12/C13 are done, so the context is clear.
+  - **HTML: no dependency-edge changes.** The existing `["C12","B7"]` edge (C12 unblocks B7 memoize) remains valid and is kept. Done-status nodes still appear in the EDGES filtering (`EDGES.filter(e=>idMap[e[0]]&&idMap[e[1]])`) so the edge remains visible on the graph.
+  - **IMP-H3 tier file placement:** added after H2's `- Status: pending` line using the same `---` separator + `## IMP-H3: …` heading format as H1/H2.
+- Verification: All four files read back and confirmed consistent: C12/C13 status=done in tierC.md; H3 entry present in tierH.md; PRIORITY.md DONE count=14, C12+C13+H3 in done list, Band-0 table has 4 rows (R6/R7/C14/C15), NEXT pointer = C14; priority-graph.html header = C14, C12/C13 nodes = `"done","done"`, H3 node present.
 
-## Step 7 — Tests F–K
-- Status: done
-- Files changed: tests/test_prep_season_episode_parse.py
-- Key decision: Tests H and I are pure unit tests of the de-alias transform (no cmd_prep_season call); others use the standard sandbox+tmp_path fixture pattern.
-- Acceptance: pytest tests/test_prep_season_episode_parse.py -v green (A–K all pass).
+---
 
-## Step 8 — ARCHITECTURE.md update
-- Status: done
-- Files changed: ARCHITECTURE.md
-- Key decision: Added multi_ep_alias as a third entry type in §6.3; added one sentence to the cmd_prep_season bullet in §7.8.
-- Acceptance: §6.3 lists three entry types; §7.8 cmd_prep_season mentions combined-episode aliasing.
+## Step B7 — [status: done]
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor (completed across two sessions — an earlier run landed the bulk and was cut off by a session limit; this run finished the remaining pieces and validated the whole step)
+- Files changed (WHOLE B7 step):
+  - `.claude/agents/orchestrator.md` — FRONTMATTER `tools:` now includes `WebSearch, WebFetch`; BODY has the "OUT-OF-BAND DATA REQUESTS" handler in the Phase 2A dispatch loop (step 3a) that fetches and re-dispatches with a `DATA_RESPONSE` block. *(landed by the prior run; verified coherent this run)*
+  - `.claude/agents/architect.md` — FRONTMATTER `tools:` includes `WebSearch, WebFetch` *(prior run)*; BODY one-line "WEB-CAPABLE (research)" note added *(this run — it was the only missing piece among the 5 pre-edited files)*.
+  - `.claude/agents/executor-haiku.md`, `.claude/agents/executor-opus.md`, `.claude/agents/executor-sonnet.md` — each has the "NEED EXTERNAL DATA? RAISE A DATA_REQUEST — DO NOT BROWSE" rule + fenced `DATA_REQUEST` block; frontmatters correctly have NO web tools. *(landed by the prior run; verified coherent and not truncated this run)*
+  - `.claude/agents/planner.md` — BODY: added the "PRE-RESOLVE EXTERNAL FACTS" rule block (after the SMOKE-GATE rule) + a new WORKFLOW step 5 wiring it in (renumbered subsequent steps); frontmatter untouched. *(this run)*
+  - `CLAUDE.md` — BODY: added the "## Out-of-band data requests" subsection (after "Cross-command integrity + smoke gate", before "Auto-rollback"). *(this run)*
+- Outcome: Completed the out-of-band data-request protocol across all six agent files + CLAUDE.md. Web tools (`WebSearch`/`WebFetch`) live ONLY on planner, orchestrator, and architect; the three executors stay web-less and instead raise a fenced `DATA_REQUEST`, which the orchestrator services and returns as a fenced `DATA_RESPONSE` before re-dispatching the same executor for the same step. This run added the four still-missing pieces: the architect body web-capable note, the planner pre-resolve+tag rule (rule block + workflow step), and the CLAUDE.md subsection; and sanity-checked the five files the interrupted run had already edited — all were coherent and not truncated mid-edit (no fixes needed beyond the architect body note, which the task flagged as a verify-and-add item).
+- Key decisions:
+  - **Field-name consistency (point 3 of the task):** before writing, read the exact block format the prior run used in `orchestrator.md` and the executors and matched it verbatim. Canonical DATA_REQUEST fields: `step`/`purpose`/`query_or_url`/`fields_needed`/`return_format`/`blocking`; DATA_RESPONSE fields: `step`/`fields_needed`/`data`/`source`. CLAUDE.md and planner.md reuse these exact names and the "web/doc access lives only on planner, orchestrator, and architect" phrasing so the protocol reads identically across all files.
+  - **Planner tag wording:** used the exact tag `may require a DATA_REQUEST: <what>` specified in PLAN.md B7 detail #4, and steered the rule to PRESS pre-resolution (bake the fact into step Details) as the strongly-preferred path, with the tag as the sparing fallback — matching the rationale that every executor pause is a stall.
+  - **Placement:** planner rule placed adjacent to the existing SMOKE-GATE / Consumer-Impact-Analysis process rules (peer mandatory-process rules); CLAUDE.md subsection placed between the B6 "Cross-command integrity + smoke gate" section and the "Auto-rollback" change-gate (peer agent-governance subsections). No unrelated content reflowed; no frontmatter touched except the prior run's intended grants.
+  - **Architect body note:** the task listed the architect body note under "verify it also has … if missing, add it"; it was missing, so I added a single concise line rather than restructuring the architect doc.
+- Verification:
+  - Frontmatter + web-grant validation (all 8 agents, the footgun-safety gate):
+    `python -c "import glob,re,yaml; [print(yaml.safe_load(re.match(r'^---\r?\n(.*?)\r?\n---', open(f,encoding='utf-8').read(), re.S).group(1)).get('name'), '::', 'web=' + str(('WebSearch' in str(yaml.safe_load(re.match(r'^---\r?\n(.*?)\r?\n---', open(f,encoding='utf-8').read(), re.S).group(1)).get('tools')) ))) for f in sorted(glob.glob('.claude/agents/*.md'))]"`
+    Output:
+    ```
+    architect :: web=True
+    executor-haiku :: web=False
+    executor-opus :: web=False
+    executor-sonnet :: web=False
+    git-agent :: web=False
+    judge :: web=False
+    orchestrator :: web=True
+    planner :: web=True
+    ```
+    All 8 names print, no exception thrown; web grants exactly as required (planner/orchestrator/architect True; executor-haiku/opus/sonnet + git-agent/judge False).
+  - No code or test files were modified by this step (agent-doc + CLAUDE.md only); `pytest`/`pytest tests/smoke` state is unchanged from B6 (163 passed / 0 skipped; smoke 50 passed).
+
+---
+
+## Architect — ARCHITECTURE.md + README updates
+- Verified the shipped changes against the code (`ENTRY_TYPE_KEYS` at `main.py:114`; `tests/smoke/` package; `tests/test_alias_consumers.py`; `tests/test_entry_schema_guard.py`) before editing docs.
+- `ARCHITECTURE.md` sections edited (additive, section-targeted):
+  - **§3 Repository Layout** — added the `tests/smoke/` package to the layout tree; bumped the `tests/` file count note (13 → 15) and listed the two new test files.
+  - **§6.3 Entry schemas** — added an authoritative cross-link to `ENTRY_TYPE_KEYS` in `main.py` (type key shapes + `physical` flag) and the rule that whole-library iterators must skip/`_resolve_alias` non-physical types (the PR #21 / IMP-C12 crash class).
+  - **§13 Testing Approach** — updated counts (163 passed + 50 smoke); added the smoke suite description, `test_alias_consumers.py`, `test_entry_schema_guard.py`, the `sandbox_alias` and `ffmpeg_splittable_master_mkv` fixtures, and the `sandbox` LOCAL_ROOT redirect note.
+  - **§19 Agentic Development Workflow** — added §19.5 (IMP-H3): smoke-gate enforcement + Consumer Impact Analysis + the out-of-band DATA_REQUEST web-tool protocol.
+- `README.md` — Status/disclaimers test bullet: added `pytest tests/smoke -q` as the pre-PR cross-command gate alongside `pytest -q`, briefly described the smoke suite, and added the `multi_ep_alias` consumers to the covered areas.
+- Left out intentionally: did not bump the doc's "Last updated" footer / per-file line counts (no code-line changes to re-measure; out of this targeted update's scope), and did not restructure any unrelated section.

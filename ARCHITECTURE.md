@@ -139,9 +139,13 @@ C:\Users\harin\PycharmProjects\MediaVault\
 |                                    multi-episode, video-dummy, adb-device-select, fable-review, ...)
 |                                    plus git-pr-conventions.md and testing-strategy.md; docs/README.md is the master index
 |-- assets/                          placeholder (.gitkeep only)
-|-- tests/                           pytest suite — 13 files (rollback, push partial/retry/verify/mock-device,
+|-- tests/                           pytest suite — 15 files (rollback, push partial/retry/verify/mock-device,
 |                                    replace, restore-quarantine, rehash, prep_season parsing, recover CLI,
-|                                    trigger retry, mvcommon, baseline happy path) + conftest fixtures; see §13
+|                                    trigger retry, mvcommon, baseline happy path, alias consumers, entry-schema
+|                                    guard) + conftest fixtures; see §13
+|   `-- smoke/                        fast (~8-10s) full-command smoke suite — drives every command + major
+|                                    options against tiny fixtures/stubs incl. a multi_ep_alias library sweep;
+|                                    the mandated pre-PR cross-command gate (`pytest tests/smoke -q`)
 |-- .candidates/                     multi-candidate pipeline artifacts (judge DECISION.md files committed per step)
 |
 |-- .venv\                           dev virtualenv (Python interpreter + site-packages)
@@ -446,6 +450,20 @@ exactly once regardless of how many episode numbers share it.
 Season maps have no `hash`, no `filename`, no `tech_spec`. They are
 recognised throughout the code by `entry.get("type") == "season_map"` and
 deliberately skipped in `scan_unprepped`, `local_status`, and `sort`.
+
+> **`ENTRY_TYPE_KEYS` is the authoritative source of truth for entry-type
+> key shapes.** `main.py` (top-level config block, ~`main.py:114`) defines a
+> registry mapping each type — `leaf` / `season_map` / `multi_ep_alias` — to its
+> minimal `required` key set and a `physical` flag (`True` only for `leaf`, the
+> one type that owns a file via `folder_path` + `filename`). Only `leaf` is
+> physical; `season_map` and `multi_ep_alias` are non-physical. **Any whole-library
+> iterator (`.values()`/`.items()` over the merged dict) MUST skip non-physical
+> types or de-alias them first** — i.e. `if entry.get("type") in ("season_map",
+> "multi_ep_alias"): continue`, or resolve via `_resolve_alias` — before touching
+> `folder_path`/`filename`/`hash`. Dereferencing those keys on a non-physical entry
+> is the PR #21 / IMP-C12 crash class (`KeyError: 'folder_path'`). The registry is
+> documentation/guard-only (not wired into any `cmd_*` path); it is enforced by
+> `tests/test_entry_schema_guard.py` and the `tests/smoke/` alias sweep (§13).
 
 ### 6.4 Status state machine
 
@@ -1613,11 +1631,13 @@ rollback/storage work is tracked in `improvements/improvements_tierR.md`.
 ## 13. Testing Approach
 
 **A real pytest suite now exists** (bootstrapped by PR #14, grown by every PR
-since). 13 test files under `tests/` as of 2026-06-12:
+since). As of 2026-06-13: **163 passed** in the full suite (`pytest -q`) plus a
+separate **50-test smoke suite** (`pytest tests/smoke -q`). Test files under
+`tests/`:
 
 | File | Covers |
 |---|---|
-| `test_rollback.py` | The full auto-rollback scenario matrix incl. durable-journal crash recovery |
+| `test_rollback.py` | The full auto-rollback scenario matrix incl. durable-journal crash recovery (and, since IMP-H3, a genuine split-during-push → pre-upload rollback via the `ffmpeg_splittable_master_mkv` fixture) |
 | `test_baseline_happy_path.py` | Pre-rollback behavior characterization (happy paths) |
 | `test_cmd_push_partial.py` / `test_cmd_push_retry.py` / `test_cmd_push_verify.py` / `test_cmd_push_mock_device.py` | `.partial`+mv protocol, C2 retry, C8 remote verify, data-integrity round-trip |
 | `test_cmd_replace.py` | C9 atomic replace + stale sweep |
@@ -1627,14 +1647,28 @@ since). 13 test files under `tests/` as of 2026-06-12:
 | `test_recover_cli.py` | IMP-R2 `recover` / `recover --scan` |
 | `test_trigger_download_retry.py` | C2 Selenium one-retry |
 | `test_mvcommon.py` | Pure helpers + library round-trip |
+| `test_alias_consumers.py` | IMP-C12/C13 alias regression — every fixed `multi_ep_alias` consumer (#1-#8) + non-alias controls, on the `sandbox_alias` fixture |
+| `test_entry_schema_guard.py` | IMP-H3 — round-trips one entry of every `ENTRY_TYPE_KEYS` type through `save`/`load`, and asserts the whole-library read commands tolerate non-physical entries (the registry-driven guard) |
 
-Mocking philosophy, fixture catalogue (`sandbox`, `sandbox_entry`, `fake_dummy`,
-`mock_device`, `FakeAdb`), the dual-binding patch hazard, and Windows gotchas are
-documented in [`docs/testing-strategy.md`](docs/testing-strategy.md). There is
-still no CI config — the suite runs locally via `pytest -q`. Code paths outside
-the listed areas (Selenium fetch against real Google Photos, MediaInfo parsing,
-sort/scan/status commands) remain "tested by use"; the legacy snapshots under
-`archive/` serve as informal regression baselines.
+The **smoke suite** (`tests/smoke/`, IMP-H3) is a fast (~8-10s) full-command
+gate: `TestEachCommand` drives every user-facing command + its major options
+against tiny fixtures and the existing stubs (asserting the top-level effect),
+and `TestAliasSweep` runs every command over a `multi_ep_alias`-bearing library
+(asserting no crash) — the anti-PR-#21 cross-command gate. It is the **mandated
+pre-PR cross-command check** (`pytest tests/smoke -q`), enforced by the agent
+pipeline (§19).
+
+Mocking philosophy, fixture catalogue (`sandbox` — now also redirects
+`LOCAL_ROOT` so tests never touch real `C:\Media`; `sandbox_alias` — a Series
+library seeded with a full combined-episode alias chain; `sandbox_entry`,
+`fake_dummy`, `mock_device`, `FakeAdb`, `ffmpeg_splittable_master_mkv` — a
+genuinely-splittable ~60 MB MKV reusing production `main.resolve_ffmpeg()`), the
+dual-binding patch hazard, and Windows gotchas are documented in
+[`docs/testing-strategy.md`](docs/testing-strategy.md). There is still no CI
+config — the suite runs locally via `pytest -q` (and `pytest tests/smoke -q`).
+Code paths outside the listed areas (Selenium fetch against real Google Photos,
+MediaInfo parsing) remain "tested by use"; the legacy snapshots under `archive/`
+serve as informal regression baselines.
 
 Implicit safety checks that act as runtime tests:
 - Hash verification at every stage transition (prep stores; check
@@ -2046,6 +2080,24 @@ Consequence for this pipeline:
 See `.claude/AGENT_WORKFLOW_NOTES.md` for the full migration record and the
 pre-migration backup at `.claude/agents_pre_opus48/`, and `improvements/improvements_tierH.md`
 (IMP-H1/H2) for the tracked task and the deferred "dynamic workflows" follow-up.
+
+### 19.5 Pipeline hardening (IMP-H3)
+
+Two cross-cutting rules were added to close the PR #21 failure class (a new
+shared data shape silently breaking a distant consumer, with no gate to catch
+it):
+
+- **Smoke gate.** Any plan whose steps touch `main.py` / `mainfetch.py` /
+  `mvcommon.py` must run `pytest tests/smoke -q` as a final gate. The planner
+  mandates it in the plan's Verification, and the orchestrator/executors enforce
+  it at the per-step commit point, on the merged multi-candidate result, and
+  pre-PR. The planner also mandates a **Consumer Impact Analysis** that consults
+  `ENTRY_TYPE_KEYS` and greps every consumer of any changed shared data contract.
+- **Out-of-band DATA_REQUEST protocol.** Web tools (`WebSearch` / `WebFetch`) are
+  granted only to `planner`, `orchestrator`, and `architect`. The three executors
+  are web-less; when one needs an external fact it raises a fenced `DATA_REQUEST`
+  block, which the orchestrator services and returns as a `DATA_RESPONSE` before
+  re-dispatching the same step.
 
 ---
 

@@ -25,6 +25,9 @@ Thumbs.db
 .claude/.env
 .claude/settings.local.json
 
+# Local date-wise agent backups (snapshot-before-edit; git history is the real backup)
+.claude/agent-backups/
+
 # Legacy / unrelated secrets file (lives under archive/unrelated/)
 archive/unrelated/a.json
 

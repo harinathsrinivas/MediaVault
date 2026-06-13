@@ -18,17 +18,31 @@ TEST_ENTRY_ID = "mov_test_c9_001"  # "mov" prefix -> goes to LIBRARY_MOVIES
 @pytest.fixture()
 def sandbox(tmp_path, monkeypatch):
     """
-    Redirects all three LIBRARY_* constants to sandbox JSON files,
+    Redirects all three LIBRARY_* constants AND LOCAL_ROOT to a sandbox tree,
     creates the required directories, and hard-guards against real C:\\Media.
+
+    The LOCAL_ROOT redirect makes the "no writes to real C:\\Media" guarantee
+    STRUCTURAL: the whole-tree walkers (cmd_scan_unprepped @main.py:2459-2461,
+    cmd_recover(scan=True) @main.py:738) and any LOCAL_ROOT-derived path build
+    their roots from LOCAL_ROOT/{Movies,Series,Anime}; without this patch they
+    would walk (and, for write paths, touch) the real C:\\Media. LOCAL_ROOT is
+    pointed at tmp_path/"Media" — the same dir under which this fixture (and the
+    sandbox_alias fixture, which seeds Series/.../*.mkv) create their media — so
+    scan tests stay MEANINGFUL (they walk the real fixture files, not an empty
+    dir) while never escaping tmp_path. Same value test_recover_cli.py and the
+    old smoke_local_root used; smoke_local_root is now a thin confirm of this.
 
     Yields: dict with keys:
         media_dir    - Path: sandbox folder holding media files
         lib_movies   - Path: sandbox LIBRARY_MOVIES json
         lib_series   - Path: sandbox LIBRARY_SERIES json
         lib_anime    - Path: sandbox LIBRARY_ANIME json
+        local_root   - Path: tmp_path/"Media" (the patched LOCAL_ROOT, == media_dir.parent.parent)
     """
     media_dir = tmp_path / "Media" / "Movies" / "TestMovie"
     media_dir.mkdir(parents=True)
+
+    media_root = tmp_path / "Media"  # the LOCAL_ROOT redirect target (holds Movies/Series/Anime)
 
     lib_dir = tmp_path / "library"
     lib_dir.mkdir()
@@ -41,11 +55,14 @@ def sandbox(tmp_path, monkeypatch):
     # After the mvcommon extraction, load_library/save_library read mvcommon's
     # OWN module-level LIBRARY_* bindings, so mvcommon is the authoritative patch
     # target. main imported the names by value (a separate binding), so we patch
-    # both mvcommon and main to keep every reader pointed at the sandbox.
+    # both mvcommon and main to keep every reader pointed at the sandbox. The
+    # SAME import-by-value hazard applies to LOCAL_ROOT, so it is dual-patched too
+    # (a future regression that forgets either patch trips the C:\Media guard).
     for attr, path in [
         ("LIBRARY_MOVIES", str(lib_movies)),
         ("LIBRARY_SERIES", str(lib_series)),
         ("LIBRARY_ANIME",  str(lib_anime)),
+        ("LOCAL_ROOT",     str(media_root)),
     ]:
         assert "C:\\Media" not in path, f"Safety check failed: {attr} still points to real media!"
         monkeypatch.setattr(mvcommon, attr, path)
@@ -56,6 +73,7 @@ def sandbox(tmp_path, monkeypatch):
         "lib_movies": lib_movies,
         "lib_series": lib_series,
         "lib_anime":  lib_anime,
+        "local_root": media_root,
     }
 
 
@@ -94,6 +112,120 @@ def sandbox_entry(sandbox, tmp_path):
         "media_dir": sandbox["media_dir"],
         "filename":  filename,
         "orig_path": orig_path,
+    }
+
+
+@pytest.fixture()
+def sandbox_alias(sandbox, tmp_path):
+    """Sandbox library seeded with a combined-episode (multi_ep_alias) chain.
+
+    Built ON TOP OF the `sandbox` fixture — it inherits sandbox's dual LIBRARY_*
+    patch (BOTH mvcommon.LIBRARY_* AND main.LIBRARY_*, the IMP-A1 binding hazard)
+    and its hard-guard against real C:\\Media. This fixture does NOT re-implement
+    that redirection; it only seeds an alias-bearing Series library into it via
+    the real `mvcommon.save_library` helper (which routes the three `tv-…` ids
+    into library_series.json and leaves movies/anime empty).
+
+    Seeds three Series entries that mirror what `cmd_prep_season` produces for a
+    combined-episode file (e.g. `…S04E19E20.mkv`):
+      1. season_map  `tv-en-2009-bsg-s04`        — type/folder_path/total_episodes/children
+                       (children = [primary, alias], sorted; total_episodes = 2)
+      2. leaf primary `tv-en-2009-bsg-s04e19`     — the SAME key set cmd_prep writes
+                       (short_id/filename/folder_path/status="local_ready"/uploaded=False/
+                        search_term/hash/metadata/tech_spec/parent_id), pointing at a REAL
+                        .mkv on disk under the sandbox media dir.
+      3. multi_ep_alias `tv-en-2009-bsg-s04e20`   — the exact 3-key schema and NOTHING else:
+                        {type:"multi_ep_alias", alias_of:<primary>, parent_id:<season>}.
+
+    The primary's .mkv is written LARGER than DUMMY_MAX_BYTES (200_000) with
+    deterministic bytes, and the leaf `hash` is that file's real sha256, so
+    cmd_check/cmd_restore treat it as real media (not an already-archived dummy)
+    and the hash verifies. (Files < DUMMY_MAX_BYTES are early-skipped as dummies
+    by cmd_check at main.py:1108 — A3 exercises check/push/restore on the primary,
+    so the file must clear that threshold.)
+
+    Note: if a test ever drives `mainfetch`, that module's `mainfetch.LIBRARY_*`
+    bindings would ALSO need patching (same import-by-value hazard). A2 does not
+    exercise mainfetch, so this fixture does not patch it — add it if needed.
+
+    Yields a dict:
+        primary_id - str: "tv-en-2009-bsg-s04e19" (the real leaf, holds the file)
+        alias_id   - str: "tv-en-2009-bsg-s04e20" (the multi_ep_alias)
+        season_id  - str: "tv-en-2009-bsg-s04"    (the season_map parent)
+        media_dir  - Path: the season folder holding the .mkv (under tmp_path)
+        orig_path  - Path: full path to the primary's on-disk .mkv
+        sandbox    - dict: the underlying sandbox fixture's paths (lib_*/media_dir)
+    """
+    season_id = "tv-en-2009-bsg-s04"
+    primary_id = "tv-en-2009-bsg-s04e19"
+    alias_id = "tv-en-2009-bsg-s04e20"
+
+    # Season media dir under the SANDBOX temp tree (Series path) — never C:\Media.
+    media_dir = tmp_path / "Media" / "Series" / "BSG" / "Season 04"
+    media_dir.mkdir(parents=True)
+
+    # Real primary file, LARGER than DUMMY_MAX_BYTES so check/restore don't treat
+    # it as an archived dummy. Deterministic bytes -> stable sha256 for `hash`.
+    filename = "BSG.S04E19E20.mkv"
+    orig_path = media_dir / filename
+    orig_path.write_bytes(b"BSG-COMBINED-EP-MASTER\n" * 9000)  # ~207 KB > 200_000
+
+    # Hard guard: the file we just created must live under tmp_path and must NEVER
+    # be a real-media path. (sandbox already hard-guards the LIBRARY_* constants.)
+    tmp_resolved = tmp_path.resolve()
+    op_resolved = orig_path.resolve()
+    assert tmp_resolved in op_resolved.parents, f"primary .mkv escaped tmp_path: {orig_path}"
+    assert "C:\\Media" not in str(op_resolved), f"primary .mkv must never touch real C:\\Media: {orig_path}"
+    assert os.path.getsize(orig_path) > main.DUMMY_MAX_BYTES, "primary .mkv must exceed DUMMY_MAX_BYTES"
+
+    short_id = mvcommon.generate_short_id(primary_id)
+    file_hash = hashlib.sha256(orig_path.read_bytes()).hexdigest()
+    name_no_ext, ext = os.path.splitext(filename)
+
+    # Leaf primary: byte-for-byte the key set cmd_prep writes (main.py:906-919),
+    # plus parent_id since this episode belongs to a season_map.
+    primary_entry = {
+        "short_id": short_id,
+        "filename": filename,
+        "folder_path": str(media_dir),
+        "status": "local_ready",
+        "uploaded": False,
+        "search_term": f"{name_no_ext} [{short_id}]{ext}",
+        "hash": file_hash,
+        "metadata": main.parse_metadata_from_id(primary_id),
+        "tech_spec": {"resolution": "1080p", "video_codec": "HEVC", "size_bytes": os.path.getsize(orig_path)},
+        "parent_id": season_id,
+    }
+
+    library = {
+        # season_map parent — mirrors cmd_prep's season_map shape (main.py:881-886);
+        # children includes the alias (appended at main.py:1085-1087), sorted.
+        season_id: {
+            "type": "season_map",
+            "folder_path": str(media_dir),
+            "total_episodes": 2,
+            "children": sorted([primary_id, alias_id]),
+        },
+        primary_id: primary_entry,
+        # multi_ep_alias — EXACT schema, nothing else (main.py:1080-1084).
+        alias_id: {
+            "type": "multi_ep_alias",
+            "alias_of": primary_id,
+            "parent_id": season_id,
+        },
+    }
+
+    # Seed via the real helper (routes all three tv- ids into library_series.json,
+    # leaves movies/anime as {}). The sandbox hard-guard governs the write paths.
+    mvcommon.save_library(library)
+
+    yield {
+        "primary_id": primary_id,
+        "alias_id": alias_id,
+        "season_id": season_id,
+        "media_dir": media_dir,
+        "orig_path": orig_path,
+        "sandbox": sandbox,
     }
 
 
@@ -366,10 +498,19 @@ def fail_merge(monkeypatch):
 
 
 def _ffmpeg_available():
-    """True if an ffmpeg binary is callable. Used to gate the real-split
-    fixture so machines without ffmpeg skip those tests cleanly."""
-    import shutil as _sh
-    return _sh.which("ffmpeg") is not None
+    """True if an ffmpeg binary is reachable, via the SAME resolver PRODUCTION
+    uses (`main.resolve_ffmpeg()` → configured `FFMPEG_PATH` if it exists on disk,
+    else `shutil.which("ffmpeg")`). Used to gate the real-split fixtures so
+    machines without any ffmpeg skip those tests cleanly.
+
+    B1b: this deliberately reuses the production resolver instead of a divergent
+    PATH-only `shutil.which("ffmpeg")` check. On a box where ffmpeg lives only at
+    the configured path (e.g. Emby's bundled binary, not on PATH), the PATH-only
+    check wrongly reported "no ffmpeg" and the real-binary tests skipped even
+    though the ffmpeg the app uses is present. Mirrors `_mkvmerge_available`'s
+    configured-path-or-PATH logic. Genuine absence (resolver returns None) still
+    skips cleanly — it does not hard-fail collection on a machine with no ffmpeg."""
+    return main.resolve_ffmpeg() is not None
 
 
 @pytest.fixture()
@@ -382,13 +523,16 @@ def ffmpeg_multichunk_mkv(tmp_path):
     Generates a ~6 MB testsrc MKV at tmp_path. Yields its Path. The caller pairs
     it with a small split target (e.g. SIZE_MB 2) to force multiple chunks.
     Never writes under real C:\\Media."""
-    if not _ffmpeg_available():
+    ffmpeg = main.resolve_ffmpeg()  # configured FFMPEG_PATH, else PATH; None if truly absent
+    if ffmpeg is None:
         pytest.skip("ffmpeg not available — skipping real-split fixture")
 
     out = tmp_path / "bigsample.mkv"
     # testsrc at a modest resolution/duration produces a few MB of real MKV.
+    # Invoke the RESOLVED binary (B1b) — not bare "ffmpeg" — so this runs against
+    # the same ffmpeg production uses (e.g. Emby's bundled binary, off PATH).
     cmd = [
-        "ffmpeg", "-y", "-f", "lavfi",
+        ffmpeg, "-y", "-f", "lavfi",
         "-i", "testsrc=duration=8:size=640x480:rate=25",
         "-c:v", "libx264", "-pix_fmt", "yuv420p",
         str(out),
@@ -396,6 +540,52 @@ def ffmpeg_multichunk_mkv(tmp_path):
     proc = subprocess.run(cmd, capture_output=True)
     if proc.returncode != 0 or not out.exists():
         pytest.skip("ffmpeg invocation failed — skipping real-split fixture")
+    yield out
+
+
+@pytest.fixture()
+def ffmpeg_splittable_master_mkv(tmp_path):
+    """ffmpeg-generated HIGH-ENTROPY ~60 MB MKV master for tests that drive the
+    LIVE split path inside cmd_push (split_video_file called during the push),
+    not a pre-seeded _parts/ folder. Yields its Path. Never writes under real
+    C:\\Media.
+
+    Why this is separate from `ffmpeg_multichunk_mkv`: that fixture's `testsrc`
+    pattern compresses to ~50 KB, and `split_video_file` adds a +10 MB per-chunk
+    buffer (main.py:190), so a tiny source can NEVER split into ≥2 chunks —
+    cmd_push's `should_split` size check (main.py:1308-1314) would skip the split
+    entirely and fall through to a single-file push. This fixture mirrors the
+    PROVEN recipe `mkvmerge_split_chunks` uses for its own internal source:
+    `color=…:d=6` + `-vf geq=random(1)*255:128:128` + `-c:v libx264 -qp 0`,
+    invoked via the RESOLVED ffmpeg binary (so it runs against the same ffmpeg
+    production uses, e.g. Emby's bundled binary off PATH). The result is
+    incompressible (~60 MB), so a SIZE_MB "10" push splits it into ~3 real chunks
+    (num_chunks=ceil(60/10)=6 → ~20 MB/chunk → 3 chunks; main.py:184-194).
+
+    Gating (testing-strategy §4 / §11): skips cleanly via `_ffmpeg_available()`
+    (the production resolver) when ffmpeg is genuinely absent, so the suite stays
+    green on a binary-less box. `ffmpeg_multichunk_mkv` is intentionally left
+    unchanged (other tests rely on its ~50 KB size and `bigsample.mkv` name)."""
+    ffmpeg = main.resolve_ffmpeg()  # configured FFMPEG_PATH, else PATH; None if truly absent
+    if ffmpeg is None:
+        pytest.skip("ffmpeg not available — skipping splittable-master fixture")
+
+    out = tmp_path / "splittable_master.mkv"
+    cmd = [
+        ffmpeg, "-y", "-f", "lavfi",
+        "-i", "color=c=black:s=640x480:d=6:r=25",
+        "-vf", "geq=random(1)*255:128:128",
+        "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv420p",
+        str(out),
+    ]
+    proc = subprocess.run(cmd, capture_output=True)
+    if proc.returncode != 0 or not out.exists():
+        pytest.skip("ffmpeg invocation failed — skipping splittable-master fixture")
+
+    # Hard guard: the master must live under tmp_path and never touch real C:\Media.
+    out_resolved = out.resolve()
+    assert tmp_path.resolve() in out_resolved.parents, f"master escaped tmp_path: {out}"
+    assert "C:\\Media" not in str(out_resolved), f"master must never touch real C:\\Media: {out}"
     yield out
 
 
@@ -444,9 +634,13 @@ def mkvmerge_split_chunks(ffmpeg_multichunk_mkv, tmp_path):
     # Build a high-entropy (incompressible) multi-MB source so a real split with
     # split_video_file's +10 MB buffer still produces ≥2 chunks. testsrc would
     # compress to a few KB and collapse to a single chunk.
+    # ffmpeg is guaranteed present here: this fixture depends on
+    # ffmpeg_multichunk_mkv, which already skips if ffmpeg is absent. Use the
+    # RESOLVED binary (B1b), not bare "ffmpeg", to match production.
+    ffmpeg = main.resolve_ffmpeg()
     src = tmp_path / "det_source.mkv"
     cmd = [
-        "ffmpeg", "-y", "-f", "lavfi",
+        ffmpeg, "-y", "-f", "lavfi",
         "-i", "color=c=black:s=640x480:d=6:r=25",
         "-vf", "geq=random(1)*255:128:128",
         "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv420p",

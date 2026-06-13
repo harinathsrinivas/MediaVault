@@ -23,6 +23,7 @@ import os
 import pytest
 
 import main
+from conftest import _ffmpeg_available, _mkvmerge_available
 
 
 def _movies(sandbox):
@@ -103,15 +104,35 @@ def _seed_split_master(sandbox):
     return media_dir
 
 
-def test_push_split_fail_before_upload_rolls_back(sandbox, ffmpeg_multichunk_mkv, fail_nth_subprocess):
-    """SIMULATED FAILURE: a genuine ffmpeg split succeeds, then the FIRST adb push
-    fails (1st matching push). ASSERTED POST-STATE (reversible, pre-any-upload):
-    this-run _parts/ + checksums/ + split_info are rolled back; the master stays;
-    the entry stays local_ready/uploaded=False."""
+@pytest.mark.skipif(not (_ffmpeg_available() and _mkvmerge_available()),
+                    reason="real split-during-push needs ffmpeg + mkvmerge")
+def test_push_split_fail_before_upload_rolls_back(sandbox, ffmpeg_splittable_master_mkv, monkeypatch):
+    """SIMULATED FAILURE: a GENUINE multi-chunk split runs inside cmd_push (real
+    split_video_file → mkvmerge on a high-entropy ~60 MB master), then the FIRST
+    chunk's adb push fails permanently (every push attempt fails, so retry()
+    exhausts and the first chunk never reaches the device). ASSERTED POST-STATE
+    (reversible, pre-any-upload): this-run _parts/ + checksums/ + split_info are
+    rolled back; the master stays; the entry stays local_ready/uploaded=False.
+
+    This is the FIRST time the live split-push-fail→rollback path is exercised:
+    the test was always skipped before (ffmpeg off PATH), and the old
+    `ffmpeg_multichunk_mkv` source (~50 KB) could never split (split_video_file's
+    +10 MB buffer → 1 chunk → cmd_push skipped the split → single-file push that
+    retry() absorbed → push SUCCEEDED). A SIZE_MB "10" push of the ~60 MB master
+    splits into ~3 real chunks (main.py:184-194), so the split branch actually runs.
+
+    Why fail EVERY push (not fail_nth_subprocess(1)): cmd_push wraps each chunk
+    push in retry(attempts=3) (main.py:1537). Failing only the 1st matching push
+    lets the SAME first chunk succeed on retry attempt 2 → any_upload_done=True →
+    the O-1 resume-message branch (main.py:1605), NOT the pre-upload rollback the
+    assertions below require. To genuinely hit "first push fails → roll back this
+    run" we fail every push so the first chunk never lands and any_upload_done
+    stays False (main.py:1614 branch). Mirrors the established inline fail-every-
+    matching-push pattern in test_push_resume_does_not_delete_preexisting_parts."""
     media_dir = sandbox["media_dir"]
     base = "bigsample.mkv"
     import shutil as _sh
-    _sh.copy2(str(ffmpeg_multichunk_mkv), str(media_dir / base))
+    _sh.copy2(str(ffmpeg_splittable_master_mkv), str(media_dir / base))
     entry = {
         _SPLIT_ID: {
             "short_id": "rbk123", "filename": base, "folder_path": str(media_dir),
@@ -123,10 +144,30 @@ def test_push_split_fail_before_upload_rolls_back(sandbox, ffmpeg_multichunk_mkv
     sandbox["lib_series"].write_text("{}", encoding="utf-8")
     sandbox["lib_anime"].write_text("{}", encoding="utf-8")
 
-    # Fail the first actual push (mkdir is shell, not push).
-    fail_nth_subprocess(1, match=lambda a: "push" in a)
+    # Fail EVERY adb push permanently; let the mkdir (shell) and any other shell
+    # calls through. The first chunk's push exhausts all 3 retry attempts and
+    # raises, so the upload loop breaks before any chunk reaches the device
+    # (any_upload_done stays False) → the pre-any-upload rollback branch.
+    import subprocess as _sp
 
-    result = main.cmd_push(_SPLIT_ID, split_method="SIZE_MB", split_val="2")
+    def fake_run(argv, check=False, **kw):
+        argv = list(argv)
+
+        class _R:
+            returncode = 0
+            stdout = ""
+
+        if "push" in argv:
+            if check:
+                raise _sp.CalledProcessError(1, argv)
+            _R.returncode = 1
+        return _R()
+
+    monkeypatch.setattr(main.subprocess, "run", fake_run)
+    import mvcommon
+    monkeypatch.setattr(mvcommon.time, "sleep", lambda *a, **k: None)
+
+    result = main.cmd_push(_SPLIT_ID, split_method="SIZE_MB", split_val="10")
     assert result is False
 
     parts_dir = media_dir / main.SPLIT_DIR_NAME

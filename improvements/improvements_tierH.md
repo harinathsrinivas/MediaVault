@@ -41,3 +41,24 @@
 - Risk: low for the spike (no production code, no agent files changed); large restructures of `.claude/agents/` would change how every future task is built — gate behind a written decision doc, keep `agents_pre_*` backups like the H1 migration did.
 - If skipped: the pipeline stays sequential — perfectly adequate at MediaVault's current task sizes; revisit only when a plan regularly exceeds ~10 steps or wall-clock pain appears. (2026-06-12 note: the main-session-as-orchestrator pattern mandated by CLAUDE.md after the nested-Task failures is a partial, manual version of this idea.)
 - Status: pending
+
+---
+
+## IMP-H3: Cross-command smoke gate + consumer-impact guardrail + agent enforcement + out-of-band data-request protocol
+
+- Category: other (dev tooling / agent infrastructure)
+- Priority: high
+- Files: `tests/smoke/__init__.py`, `tests/smoke/conftest.py`, `tests/smoke/test_smoke_all_commands.py` (NEW — 50-test fast gate); `tests/test_entry_schema_guard.py` (NEW — ENTRY_TYPE_KEYS registry guard); `main.py` (`ENTRY_TYPE_KEYS` constant); `.claude/agents/planner.md` (Consumer Impact Analysis mandate + smoke-gate rule + DATA_REQUEST pre-resolve rule); `.claude/agents/orchestrator.md` (per-step + pre-PR smoke gate enforcement + DATA_REQUEST handler); `.claude/agents/executor-opus.md`, `executor-sonnet.md`, `executor-haiku.md` (smoke-gate + ENTRY_TYPE_KEYS instructions + DATA_REQUEST protocol); `.claude/agents/architect.md` (web-capable note); `CLAUDE.md` (cross-command integrity + smoke-gate + out-of-band data-request subsections); `docs/testing-strategy.md` (smoke-suite pyramid tier, `sandbox_alias` §4.7, `ENTRY_TYPE_KEYS` §4.8)
+- Current behavior (pre-fix): PR #21 shipped `multi_ep_alias` without auditing whole-library consumers — `cmd_scan_unprepped` and `cmd_local_status` silently broke (production KeyError / TypeError). No cross-command gate existed; no planning mandate to audit consumers; agents had no web-access discipline.
+- Proposed change (delivered):
+  1. `tests/smoke/` — 50-test cross-command gate; runs every user-facing command + aliases against `sandbox` and `sandbox_alias` libraries in <10 s. Demonstrated to catch the PR #21 regression (`TestAliasSweep::test_scan_unprepped_alias` → `KeyError: 'folder_path'`) while the plain-library case still passes.
+  2. `ENTRY_TYPE_KEYS` registry in `main.py` + `tests/test_entry_schema_guard.py` — authoritative record of the three entry shapes (leaf/season_map/multi_ep_alias); guard test auto-extends when a new type is registered.
+  3. Planner Consumer Impact Analysis mandate — any step that changes a shared data contract must audit every consumer in a PLAN.md table (file:line, safe/needs-fix verdict) before coding begins; cites PR #21 / IMP-E13 as the cautionary example.
+  4. Orchestrator smoke-gate enforcement — per-step (before commit), post-merge (multi-candidate), and pre-PR; red smoke blocks commit.
+  5. Executor smoke-gate + ENTRY_TYPE_KEYS instructions — wired into all three executor agent files.
+  6. Out-of-band DATA_REQUEST protocol — web tools (`WebSearch`/`WebFetch`) granted only to planner/orchestrator/architect; executors raise a fenced `DATA_REQUEST` block (never browse); orchestrator services and re-dispatches with a `DATA_RESPONSE`. Protocol documented in all 8 agent files + CLAUDE.md.
+- Rationale: The PR #21 bug class (a new shared data shape silently breaks a distant consumer, shipped because no cross-command test existed and no planning mandate required a consumer audit) was the root cause of IMP-C12/C13. This task makes the class structurally unshippable.
+- Goal: Any future feature that touches a shared data contract must pass a consumer audit in the plan AND a cross-command smoke run before commit — or the pipeline refuses to proceed.
+- Effort estimate: medium
+- Risk: low — purely additive tests/docs/agent-files; no production code paths changed.
+- Status: done (fix/alias_crash_and_smoke_gate — all six deliverables shipped in steps A1–B7; full suite 163 passed / 0 skipped; smoke suite 50 passed in <10 s)

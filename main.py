@@ -1850,7 +1850,9 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
 
 def cmd_replace(manual_id):
     library = load_library()
-    if manual_id not in library: return False
+    if manual_id not in library:
+        print(f"❌ Error: '{manual_id}' not found in library.")
+        return False
     real_id, entry = _resolve_alias(library, manual_id)
     if real_id != manual_id:
         print(f"ℹ️  {manual_id} is part of the combined file registered as {real_id} — operating on that.")

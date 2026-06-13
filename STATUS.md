@@ -407,3 +407,17 @@ Branch: fix/cli_parser_papercuts (from main)
     - `parse_fetch_args(["mainfetch.py","wrongverb","x"])` → raised `SystemExit(1)` after printing usage.
   - `python -m pytest -q` → `163 passed in 64.27s` (0 skipped, no regressions).
   - Smoke gate (required — step touched mainfetch.py): `python -m pytest tests/smoke -q` → `50 passed in 24.62s`.
+
+---
+
+## Step 3 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `main.py` (only)
+- Outcome: Expanded the one-liner `if manual_id not in library: return False` in `cmd_replace` (main.py:1853) into a three-line block that prints `❌ Error: '<id>' not found in library.` before returning False. Previously a typo'd id returned False with zero output, indistinguishable from success. The rest of `cmd_replace` is byte-identical — the `_resolve_alias` call and the existing "not marked as uploaded" `⚠️ Skipping` path are untouched. `cmd_replace_group` was not touched (out of scope per Open Decision #3).
+- Key decisions: `cmd_replace` now prints `❌ Error: '<manual_id>' not found in library.` before `return False`; `cmd_replace_group` left untouched (it already prints `❌ No items found.` for an empty group, and any per-child not-found message is now covered for free via the updated `cmd_replace`).
+- Verification:
+  - Edit verified: `cmd_replace` at main.py:1851 now has the three-line guard (print then return False).
+  - Smoke gate (required — step touched main.py): `python -m pytest tests/smoke -q` → **50 passed in 39.62s**.
+  - Full suite: `python -m pytest -q` → **163 passed in 68.35s** (0 skipped, no regressions).

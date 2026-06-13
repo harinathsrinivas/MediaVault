@@ -1,6 +1,6 @@
 ---
 name: executor-opus
-description: Executes a single PLAN.md step marked [model: opus]. Use only when the planner explicitly flagged a step as needing strong reasoning. Supports both single-executor mode and multi-candidate mode (when invoked as one of N candidates for a step).
+description: "Executes a single PLAN.md step marked [model: opus]. Use only when the planner explicitly flagged a step as needing strong reasoning. Supports both single-executor mode and multi-candidate mode (when invoked as one of N candidates for a step)."
 model: opus
 effort: max
 tools: Read, Write, Edit, Glob, Grep, Bash

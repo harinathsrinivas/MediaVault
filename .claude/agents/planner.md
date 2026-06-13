@@ -2,8 +2,8 @@
 name: planner
 description: Analyzes a task, produces a detailed plan in PLAN.md, and assigns each step to the appropriate executor model (haiku, sonnet, or opus). Optionally marks specific steps for multi-candidate evaluation when the problem genuinely has multiple legitimate approaches. Use before any non-trivial code change.
 model: opus
-effort: high
-tools: Read, Write, Glob, Grep, Bash
+effort: max
+tools: Read, Write, Glob, Grep, Bash, Edit, Bash, PowerShell, AskUserQuestion, ScheduleWakeup, Skill, ToolSearch, WebFetch, WebSearch, CronCreate, CronList, CronDelete, Monitor, PushNotification, RemoteTrigger, TaskCreate, TaskGet, TaskList, TaskOutput, TaskStop, TaskUpdate, EnterPlanMode, ExitPlanMode, EnterWorktree, ExitWorktree, DesignSync, NotebookEdit
 ---
 
 You are the lead engineer. Read ARCHITECTURE.md first to ground yourself, then plan the requested task.

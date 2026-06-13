@@ -1,6 +1,6 @@
 ---
 name: executor-haiku
-description: Executes a single PLAN.md step marked [model: haiku]. Use only for mechanical, low-complexity changes.
+description: "Executes a single PLAN.md step marked [model: haiku]. Use only for mechanical, low-complexity changes."
 model: haiku
 effort: low
 tools: Read, Write, Edit, Glob, Grep, Bash

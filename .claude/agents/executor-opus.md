@@ -137,6 +137,21 @@ WHEN WRITING TESTS (any step that creates or modifies test_*.py or conftest.py):
 
 8. Entry-type registry: If you add or change a library entry type or a shared entry field, update `ENTRY_TYPE_KEYS` in `main.py` AND ensure every whole-library iterator skips or `_resolve_alias`-resolves the new type (consult `ENTRY_TYPE_KEYS` as the source of truth). Reason carefully about iterator coverage — opus is the right tier for this work because silent skips in iterators can corrupt multi-movie or season-level operations.
 
+NEED EXTERNAL DATA? RAISE A DATA_REQUEST — DO NOT BROWSE (both modes):
+You have NO web/fetch tools by design (executors stay deterministic and side-effect-bounded; web/doc access lives only on planner, orchestrator, and architect). Even as the opus-tier executor, if completing the step genuinely requires external/library/web/doc data you cannot derive from the repo (a current version string, an API/function signature, an upstream fact), do NOT guess, fabricate, or attempt any web access. Instead:
+1. STOP at a clean point. Mark the step in-progress — NOT failed, NOT done (do not tick it `[x]` in PLAN.md).
+2. Return to the orchestrator a fenced ```DATA_REQUEST``` block in EXACTLY this shape (these field names are fixed — keep them verbatim):
+   ```
+   DATA_REQUEST
+   step: <step id, e.g. A1 / B7>
+   purpose: <why this data is needed to complete the step>
+   query_or_url: <exact search string or URL to fetch>
+   fields_needed: <the specific facts wanted>
+   return_format: <exact shape wanted back, e.g. "stable version string" | "function signature" | "JSON {…}">
+   blocking: <true|false>
+   ```
+3. Then WAIT to be re-dispatched for the SAME step with a fenced ```DATA_RESPONSE``` block (it echoes your `step` + `fields_needed` and carries the answer formatted per your `return_format`). Resume using ONLY the supplied data — you still must not attempt web access yourself. This is the ONLY sanctioned way a web-less executor obtains external data.
+
 FAILURE HANDLING (both modes):
 If the step has fundamental ambiguity or missing requirements:
 - Do NOT invent requirements.

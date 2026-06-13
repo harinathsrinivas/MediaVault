@@ -24,8 +24,9 @@ WORKFLOW:
 2. Read any files directly relevant to the task
 3. Identify dependencies, risks, and the right decomposition
 4. If ANY step touches a shared data contract (a library entry type, a library field/key, an ID shape, a `status` value), perform the CONSUMER IMPACT ANALYSIS (see the mandatory rule below) NOW, during planning — grep every consumer and decide the per-consumer fix — and capture it as a required PLAN.md sub-section. This is not optional.
-5. For each step, decide: single-executor (default) or multi-candidate (only when justified — see MULTI-CANDIDATE GUARDRAILS below)
-6. Produce PLAN.md (overwrite if exists) using the structure below
+5. PRE-RESOLVE external facts the steps depend on (you have `WebSearch`/`WebFetch`; executors do not) and bake them into the step text, tagging any step still likely to need a lookup `may require a DATA_REQUEST: <what>` — see the PRE-RESOLVE EXTERNAL FACTS rule below.
+6. For each step, decide: single-executor (default) or multi-candidate (only when justified — see MULTI-CANDIDATE GUARDRAILS below)
+7. Produce PLAN.md (overwrite if exists) using the structure below
 
 PLAN.md STRUCTURE:
 
@@ -103,6 +104,12 @@ Every consumer found by the greps in (2) MUST appear with a verdict — an empty
 SMOKE-GATE (MANDATORY in the Verification section of any code-touching plan):
 
 If ANY step in the plan touches `main.py`, `mainfetch.py`, or `mvcommon.py`, the plan's `## Verification` section MUST include `pytest tests/smoke -q` (the fast full-command cross-command gate) as a verification line, IN ADDITION to `pytest -q`. Put it as the FINAL verification line so it is the last gate before the plan is considered done. The smoke suite runs every user-facing command against a tiny fixture (including a library carrying every entry type), so it is the single check that answers "did this change break another command?" — the gap that let PR #21 ship. Omit it only for a plan whose steps touch none of those three modules (e.g. a docs-only or agent-file-only plan).
+
+PRE-RESOLVE EXTERNAL FACTS — YOU HAVE WEB TOOLS (so executors rarely have to pause):
+
+You hold `WebSearch`/`WebFetch`; executors do NOT (web/doc access lives only on planner, orchestrator, and architect — executors raise a `DATA_REQUEST` mid-step, which the orchestrator services and returns as a `DATA_RESPONSE`). Every such pause is a stall, so it is YOUR job to remove them during planning:
+1. When a step depends on an external/library/upstream fact (a current version string, an API/function signature, a documented default, an upstream behavior), LOOK IT UP NOW with `WebSearch`/`WebFetch` and bake the resolved fact directly into the step's Details (cite the source) so the executor needs no lookup at all.
+2. When a step is still LIKELY to need a lookup you cannot fully pre-resolve (the exact value depends on runtime state, or the source is paywalled/unstable), tag the step text `may require a DATA_REQUEST: <what>` so the orchestrator expects the pause and the executor knows the protocol applies. Use this sparingly — pre-resolving per (1) is strongly preferred.
 
 TESTING STEP RULES (read docs/testing-strategy.md for full detail):
 

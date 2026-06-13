@@ -298,3 +298,38 @@ Claude Code docs: agents load at session start (no hot-reload); duplicate `name:
   - **testing-strategy.md — §4.7 / §4.8:** added `sandbox_alias` as §4.7 (with its yielded-dict API and a minimal usage example) and `ENTRY_TYPE_KEYS` + `test_entry_schema_guard.py` as §4.8 (data-shape guardrail). Placed immediately before the existing §5 decision tree so all fixture/guardrail documentation stays in §4.
   - **testing-strategy.md — §12:** added `pytest tests/smoke -q` as a named command with a comment ("cross-command integrity (<30 s)") immediately after the existing `pytest -q` full-suite line, so the pre-PR gate invocation is visible right at the top of the run section.
 - Verification: No code or tests changed; `pytest`/`pytest tests/smoke` results are unchanged from B5 (163 passed / 0 skipped; smoke 50 passed). Docs verified by reading back both files post-edit and confirming all four required elements are present: smoke-suite pyramid row, `sandbox_alias` §4.7 entry, `ENTRY_TYPE_KEYS` §4.8 note, `pytest tests/smoke -q` in §12, and the "Cross-command integrity + smoke gate" subsection in CLAUDE.md.
+
+---
+
+## Step B7 — [status: done]
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor (completed across two sessions — an earlier run landed the bulk and was cut off by a session limit; this run finished the remaining pieces and validated the whole step)
+- Files changed (WHOLE B7 step):
+  - `.claude/agents/orchestrator.md` — FRONTMATTER `tools:` now includes `WebSearch, WebFetch`; BODY has the "OUT-OF-BAND DATA REQUESTS" handler in the Phase 2A dispatch loop (step 3a) that fetches and re-dispatches with a `DATA_RESPONSE` block. *(landed by the prior run; verified coherent this run)*
+  - `.claude/agents/architect.md` — FRONTMATTER `tools:` includes `WebSearch, WebFetch` *(prior run)*; BODY one-line "WEB-CAPABLE (research)" note added *(this run — it was the only missing piece among the 5 pre-edited files)*.
+  - `.claude/agents/executor-haiku.md`, `.claude/agents/executor-opus.md`, `.claude/agents/executor-sonnet.md` — each has the "NEED EXTERNAL DATA? RAISE A DATA_REQUEST — DO NOT BROWSE" rule + fenced `DATA_REQUEST` block; frontmatters correctly have NO web tools. *(landed by the prior run; verified coherent and not truncated this run)*
+  - `.claude/agents/planner.md` — BODY: added the "PRE-RESOLVE EXTERNAL FACTS" rule block (after the SMOKE-GATE rule) + a new WORKFLOW step 5 wiring it in (renumbered subsequent steps); frontmatter untouched. *(this run)*
+  - `CLAUDE.md` — BODY: added the "## Out-of-band data requests" subsection (after "Cross-command integrity + smoke gate", before "Auto-rollback"). *(this run)*
+- Outcome: Completed the out-of-band data-request protocol across all six agent files + CLAUDE.md. Web tools (`WebSearch`/`WebFetch`) live ONLY on planner, orchestrator, and architect; the three executors stay web-less and instead raise a fenced `DATA_REQUEST`, which the orchestrator services and returns as a fenced `DATA_RESPONSE` before re-dispatching the same executor for the same step. This run added the four still-missing pieces: the architect body web-capable note, the planner pre-resolve+tag rule (rule block + workflow step), and the CLAUDE.md subsection; and sanity-checked the five files the interrupted run had already edited — all were coherent and not truncated mid-edit (no fixes needed beyond the architect body note, which the task flagged as a verify-and-add item).
+- Key decisions:
+  - **Field-name consistency (point 3 of the task):** before writing, read the exact block format the prior run used in `orchestrator.md` and the executors and matched it verbatim. Canonical DATA_REQUEST fields: `step`/`purpose`/`query_or_url`/`fields_needed`/`return_format`/`blocking`; DATA_RESPONSE fields: `step`/`fields_needed`/`data`/`source`. CLAUDE.md and planner.md reuse these exact names and the "web/doc access lives only on planner, orchestrator, and architect" phrasing so the protocol reads identically across all files.
+  - **Planner tag wording:** used the exact tag `may require a DATA_REQUEST: <what>` specified in PLAN.md B7 detail #4, and steered the rule to PRESS pre-resolution (bake the fact into step Details) as the strongly-preferred path, with the tag as the sparing fallback — matching the rationale that every executor pause is a stall.
+  - **Placement:** planner rule placed adjacent to the existing SMOKE-GATE / Consumer-Impact-Analysis process rules (peer mandatory-process rules); CLAUDE.md subsection placed between the B6 "Cross-command integrity + smoke gate" section and the "Auto-rollback" change-gate (peer agent-governance subsections). No unrelated content reflowed; no frontmatter touched except the prior run's intended grants.
+  - **Architect body note:** the task listed the architect body note under "verify it also has … if missing, add it"; it was missing, so I added a single concise line rather than restructuring the architect doc.
+- Verification:
+  - Frontmatter + web-grant validation (all 8 agents, the footgun-safety gate):
+    `python -c "import glob,re,yaml; [print(yaml.safe_load(re.match(r'^---\r?\n(.*?)\r?\n---', open(f,encoding='utf-8').read(), re.S).group(1)).get('name'), '::', 'web=' + str(('WebSearch' in str(yaml.safe_load(re.match(r'^---\r?\n(.*?)\r?\n---', open(f,encoding='utf-8').read(), re.S).group(1)).get('tools')) ))) for f in sorted(glob.glob('.claude/agents/*.md'))]"`
+    Output:
+    ```
+    architect :: web=True
+    executor-haiku :: web=False
+    executor-opus :: web=False
+    executor-sonnet :: web=False
+    git-agent :: web=False
+    judge :: web=False
+    orchestrator :: web=True
+    planner :: web=True
+    ```
+    All 8 names print, no exception thrown; web grants exactly as required (planner/orchestrator/architect True; executor-haiku/opus/sonnet + git-agent/judge False).
+  - No code or test files were modified by this step (agent-doc + CLAUDE.md only); `pytest`/`pytest tests/smoke` state is unchanged from B6 (163 passed / 0 skipped; smoke 50 passed).

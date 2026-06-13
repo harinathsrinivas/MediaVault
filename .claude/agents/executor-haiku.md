@@ -58,6 +58,21 @@ WHEN TOUCHING TESTS (haiku is only assigned doc-level test changes — updating 
 - If you run `pytest -q` as an acceptance check, paste the exact output in STATUS.md.
 - Entry-type registry: If the step adds or changes a library entry type or a shared entry field, update `ENTRY_TYPE_KEYS` in `main.py` AND ensure every whole-library iterator skips or `_resolve_alias`-resolves the new type (consult `ENTRY_TYPE_KEYS` as the source of truth). If this is needed and you are unsure, report blocked — do NOT invent a fix.
 
+NEED EXTERNAL DATA? RAISE A DATA_REQUEST — DO NOT BROWSE:
+You have NO web/fetch tools by design (web/doc access lives only on planner, orchestrator, and architect). If the step genuinely requires external/library/web/doc data you cannot get from the repo, do NOT guess, fabricate, or attempt any web access. Instead:
+1. STOP at a clean point. Mark the step in-progress — NOT failed, NOT done (do not tick it `[x]` in PLAN.md).
+2. Return to the orchestrator a fenced ```DATA_REQUEST``` block in EXACTLY this shape (these field names are fixed — keep them verbatim):
+   ```
+   DATA_REQUEST
+   step: <step id, e.g. A1 / B7>
+   purpose: <why this data is needed to complete the step>
+   query_or_url: <exact search string or URL to fetch>
+   fields_needed: <the specific facts wanted>
+   return_format: <exact shape wanted back, e.g. "stable version string" | "function signature" | "JSON {…}">
+   blocking: <true|false>
+   ```
+3. Then WAIT to be re-dispatched for the SAME step with a fenced ```DATA_RESPONSE``` block (it echoes your `step` + `fields_needed` and carries the answer formatted per your `return_format`). Resume using ONLY the supplied data — you still must not attempt web access yourself. This is the ONLY sanctioned way a web-less executor obtains external data.
+
 FAILURE HANDLING:
 If the step turns out harder than it looks, or requires decisions not in the plan:
 - Do NOT improvise.

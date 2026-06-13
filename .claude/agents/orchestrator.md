@@ -3,7 +3,7 @@ name: orchestrator
 description: Drives execution of PLAN.md end-to-end. Reads the plan, creates a feature branch via git-agent, dispatches each step to the correct executor with tailored context, handles multi-candidate steps via worktrees and judge, triggers commits after each step, and pushes the branch at the end. Use after planner has produced PLAN.md.
 model: opus
 effort: high
-tools: Read, Write, Edit, Glob, Grep, Bash, Task
+tools: Read, Write, Edit, Glob, Grep, Bash, Task, WebSearch, WebFetch
 ---
 
 EXECUTION MODEL (2026-06-03 — IMPORTANT): This file is the **playbook the MAIN (top-level) session follows**, NOT a sub-agent to spawn for execution. A Claude Code sub-agent cannot spawn sub-agents (nesting depth = 1); if `orchestrator` is launched via `Task` it CANNOT dispatch executors/candidates/judge/git-agent and would silently fall back to doing everything inline — which is forbidden (see "no silent handling" below and `CLAUDE.md`). Therefore the **main session** reads `PLAN.md` and follows the workflow below, spawning the executor / candidate / judge / git sub-agents ITSELF (depth-1 from the main session works). Everywhere this file says "invoke X via Task," that means the MAIN session does so. Do NOT launch `orchestrator` as a sub-agent to run a plan.
@@ -93,6 +93,20 @@ Your handling:
    - [model: haiku] → executor-haiku
    - [model: sonnet] → executor-sonnet
    - [model: opus] → executor-opus
+
+3a. OUT-OF-BAND DATA REQUESTS (executors have no web tools — you do): if the executor returns a fenced ```DATA_REQUEST``` block instead of a completed step, it has paused mid-step needing external/library/web/doc data it cannot derive from the repo. Handle it yourself — do NOT delegate the fetch back to the executor, and do NOT let the executor fabricate or guess:
+   - Perform the lookup with WebSearch/WebFetch (use the block's `query_or_url`).
+   - Distill the result to EXACTLY the requested `return_format` and the `fields_needed` — hand back the answer, not a page dump.
+   - Record the request + your response in STATUS.md (so the run has an audit trail of what was fetched and from where).
+   - RE-DISPATCH the SAME executor for the SAME step (same model, same context) supplying a fenced ```DATA_RESPONSE``` block in EXACTLY this shape (field names fixed; keep them verbatim and consistent with the executor's DATA_REQUEST):
+     ```
+     DATA_RESPONSE
+     step: <same step id>
+     fields_needed: <echo of what was asked>
+     data: <the fetched answer, formatted per return_format>
+     source: <url/source or "WebSearch: <query>">
+     ```
+   - The executor resumes with the data in hand. This is the ONLY sanctioned way a web-less sub-agent obtains external data; the orchestrator NEVER delegates the fetch back to it. (A candidate executor in Phase 2B may raise a DATA_REQUEST the same way — service it and re-dispatch that candidate identically.)
 
 4. When executor returns:
    - Confirm step is marked [x] in PLAN.md (Edit if missed).

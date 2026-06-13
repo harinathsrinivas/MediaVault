@@ -459,3 +459,21 @@ Branch: fix/cli_parser_papercuts (from main)
 - Verification:
   - Grep for "IndexError"/"infinite-loop"/"hang" against these paths: the only remaining mentions are the historical/struck-through references in the now-FIXED §16 bullet and the §5 "instead of raising IndexError ... as it did previously" framing — no claim that the current behavior still hangs or throws.
   - No code files edited (Read-only architect; only `ARCHITECTURE.md` + `README.md` written).
+
+---
+
+## Step 6 — [status: done]
+- Executor: executor-haiku
+- Model: haiku
+- Mode: docs-only (find/replace only; no code touched)
+- Files changed: `improvements/improvements_tierC.md`, `improvements/PRIORITY.md`, `docs/priority-graph/priority-graph.html`, `PLAN.md`
+- Outcome: Marked IMP-C14 done across the three tracking artifacts per the maintenance protocol. All three files now agree: IMP-C14 is `done` with the fix/cli_parser_papercuts branch summary; the 👉 SUGGESTED NEXT TASK and header "Next" pointers advanced to IMP-C15 (micro-robustness batch — repair_dummies atomic swap + _verify_chunk_hash IndexError guard). The DONE count in PRIORITY.md bumped from 14 to 15, and C14 was added to the DONE roster line. Band 0 table removed the C14 row and renumbered C15 from 4 to 3. No code files touched; pure bookkeeping.
+- Key decisions: None — exact edits per the PLAN step 6 instructions, using the Edit tool for surgical find/replace.
+- Verification:
+  - Edits confirmed:
+    - `improvements/improvements_tierC.md` IMP-C14: `- Status: done (fix/cli_parser_papercuts — ... unit tests in tests/test_cli_parsers.py)`
+    - `improvements/PRIORITY.md`: Last updated line = "2026-06-14 (IMP-C14 done — fix/cli_parser_papercuts)"; 👉 SUGGESTED NEXT = IMP-C15 (micro-robustness batch); DONE count = 15; Band 0 table C14 row removed, C15 renumbered 4→3; C14 added to DONE roster.
+    - `docs/priority-graph/priority-graph.html`: C14 TASKS array node = `["C14","parser papercuts","C","done","done","Fixed ..."]`; header "Next" = IMP-C15 with micro-robustness label.
+    - `PLAN.md`: Step 6 marked `[x]`.
+  - No code files modified; `python -c "import main, mainfetch"` clean (prior steps' changes remain in tree).
+  - No test run required per step specification; full suite still green from prior step verification (184 passed, 0 skipped, smoke 50 passed).

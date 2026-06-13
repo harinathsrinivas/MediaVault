@@ -9,16 +9,16 @@
 > Full task text lives in `improvements_tier*.md`; this file only orders them. Legend:
 > 🔴 critical · 🟠 high · 🟡 medium · ⚪ low · ✅ done · 🚦 needs a user decision (change-gate).
 >
-> **Last updated:** 2026-06-13 (IMP-C12/C13 done, IMP-H3 added — fix/alias_crash_and_smoke_gate).
+> **Last updated:** 2026-06-14 (IMP-C14 done — fix/cli_parser_papercuts).
 
 ---
 
-## 👉 SUGGESTED NEXT TASK: **IMP-C14** — CLI parser papercuts
+## 👉 SUGGESTED NEXT TASK: **IMP-C15** — micro-robustness batch
 
-`push_group` **infinite-loops** on a trailing keyword token (console hangs, Ctrl-C needed);
-`mainfetch.py` bare-invoke hits `IndexError`; `cmd_replace` on a bad id returns False with **no output
-at all** (looks like success). Three small parser fixes, low risk, no change-gate. IMP-C12 and
-IMP-C13 are now fixed — clear the remaining Band 0.
+`repair_dummies` does a non-atomic `os.remove`+`os.rename` (a kill between the two leaves no file at
+the path — the C9 atomic-swap lesson un-applied here); `_verify_chunk_hash` can `IndexError` on empty
+device stdout instead of its promised warn-and-skip. Two small guards, low risk, no change-gate.
+IMP-C14 is now fixed — IMP-C15 is the last remaining Band-0 bug-fix item.
 
 **Also awaiting your decision (do not need code first):** 🚦 **R6** and 🚦 **R7** — two change-gated
 rollback findings with options written in `improvements_tierR.md`. R6 (a failed restore-merge deletes
@@ -32,8 +32,7 @@ the dummy → the title vanishes from Jellyfin/Plex) is the more urgent; pick an
 |---|---|---|---|---|
 | 1 | 🚦 **IMP-R6** | failed restore-merge leaves NO file at the path → title disappears from every media server | medium | **decision** |
 | 2 | 🚦 **IMP-R7** | re-running a command after a crash silently destroys the leftover recovery journal → orphaned artifacts | medium | **decision** |
-| 3 | 🔴 **IMP-C14** | `push_group` infinite-loops on a trailing keyword; `mainfetch` bare-invoke IndexError; silent `replace` on bad id | low | — |
-| 4 | 🟠 **IMP-C15** | `repair_dummies` non-atomic swap; `_verify_chunk_hash` IndexError on empty stdout | low | — |
+| 3 | 🟠 **IMP-C15** | `repair_dummies` non-atomic swap; `_verify_chunk_hash` IndexError on empty stdout | low | — |
 
 ## 🟠 BAND 1 — SUGGESTED NEXT after Band 0 (cheap foundations + immediate value)
 
@@ -80,11 +79,11 @@ Perf: `B1`–`B10`. Utility commands: `D2`,`D3`,`D6`–`D15`. Integration long-t
 `E8`,`E10`,`E11`. Rollback hardening: `R1`,`R3`,`R4`,`R5`,`R8`,`R9` (R4/R8/R9 are 🚦 change-gated).
 Moonshots: `F1`–`F9`. Research-only: `G3`,`G5`,`H2`,`A6`.
 
-## ✅ DONE (14)
+## ✅ DONE (15)
 
 `A1` (mvcommon) · `A7` (pytest harness) · `C2` (retry) · `C4` (device pinning) · `C8` (post-push verify) ·
 `C9` (atomic replace) · `C11` (restore quarantine) · `C12` (alias crash: scan/local_status) ·
-`C13` (single-id alias handling) · `E13` (multi-episode) · `G1` (chunker patterns) ·
+`C13` (single-id alias handling) · `C14` (CLI parser papercuts) · `E13` (multi-episode) · `G1` (chunker patterns) ·
 `H1` (Opus 4.8 effort tiers) · `H3` (smoke gate + consumer-impact guardrail + data-request protocol) ·
 `R2` (recover CLI).
 

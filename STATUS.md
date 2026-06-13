@@ -363,3 +363,28 @@ Claude Code docs: agents load at session start (no hot-reload); duplicate `name:
   - **§19 Agentic Development Workflow** — added §19.5 (IMP-H3): smoke-gate enforcement + Consumer Impact Analysis + the out-of-band DATA_REQUEST web-tool protocol.
 - `README.md` — Status/disclaimers test bullet: added `pytest tests/smoke -q` as the pre-PR cross-command gate alongside `pytest -q`, briefly described the smoke suite, and added the `multi_ep_alias` consumers to the covered areas.
 - Left out intentionally: did not bump the doc's "Last updated" footer / per-file line counts (no code-line changes to re-measure; out of this targeted update's scope), and did not restructure any unrelated section.
+
+---
+
+# Execution Log
+
+Task: IMP-C14 — CLI parser papercuts (push_group hang, mainfetch argv guard, silent replace)
+
+Branch: fix/cli_parser_papercuts (from main)
+
+## Step 1 — [status: done]
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor
+- Files changed: main.py, PLAN.md
+- Outcome: Extracted a module-level pure function `parse_push_group_args(args)` (placed immediately before `cmd_push_group`, ~`main.py:1679`) that reproduces the old `push_group` argv parse loop verbatim, moves the empty-args usage guard into the function, and ADDS the three missing `else:` fail-fast arms (for `SIZE_MB/SIZE_GB/COUNT` → "Missing value for split method.", `episodes` → "Missing value for episodes range.", `device` → "Missing value for device.") mirroring the sibling `push` parser's wording. `rehash` (no-value flag) and `tempdir` (already had its else arm) are unchanged; the final `else: i += 1` unknown-token silent-skip is preserved exactly. The function returns the 7-tuple `(group_id, method, val, ep_range, dev, eager, tdir)` and is side-effect-free apart from the print+`sys.exit(1)` on bad input (no `resolve_device`, no `cmd_push_group`). The `elif cmd == "push_group":` dispatch block was collapsed to one parse call + the EXISTING `cmd_push_group(...)` call, with `resolve_device(dev)` left in `__main__`. Bug A (a trailing value-keyword spinning `while i < len(args)` forever) is fixed: it now terminates via `sys.exit(1)`. The `push` (single-id) parser, `cmd_push_group`, and everything else were left untouched.
+- Key decisions: extracted pure parser mirroring push; fail-fast via sys.exit (chose Open-Decision option (a) — smallest diff, matches `push`'s exit semantics, assertable via `pytest.raises(SystemExit)` with no hang); silent-skip of unknown tokens preserved unchanged (resolved decision #2). Used `episodes range.` (not `chunks range.`) in the new episodes arm to match `push_group`'s keyword name while keeping the `push` arm style.
+- Verification:
+  - `python -c "import main"` → `import OK` (clean import, no syntax/import-time error).
+  - Inline acceptance script (imports main, asserts):
+    - `parse_push_group_args(["g","SIZE_GB","8","device"])` → raised `SystemExit(1)` after printing `❌ Error: Missing value for device.` (does NOT hang).
+    - `parse_push_group_args(["g","SIZE_GB","8","device","series","rehash"])` → returned `('g','SIZE_GB','8',None,'series',True,None)` (exact expected tuple).
+    - `parse_push_group_args(["g","episdoes","1-3"])` → returned `('g',None,None,None,None,False,None)` (typo silently skipped, ep_range None, group_id preserved).
+    - Bonus: trailing `SIZE_MB` and trailing `episodes` each raised `SystemExit` with the correct mirrored message.
+  - `python -m pytest -q` → `163 passed in 74.02s`.
+  - Smoke gate (required — step touched main.py): `python -m pytest tests/smoke -q` → `50 passed in 14.15s`.

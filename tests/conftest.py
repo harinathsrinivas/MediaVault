@@ -98,6 +98,120 @@ def sandbox_entry(sandbox, tmp_path):
 
 
 @pytest.fixture()
+def sandbox_alias(sandbox, tmp_path):
+    """Sandbox library seeded with a combined-episode (multi_ep_alias) chain.
+
+    Built ON TOP OF the `sandbox` fixture — it inherits sandbox's dual LIBRARY_*
+    patch (BOTH mvcommon.LIBRARY_* AND main.LIBRARY_*, the IMP-A1 binding hazard)
+    and its hard-guard against real C:\\Media. This fixture does NOT re-implement
+    that redirection; it only seeds an alias-bearing Series library into it via
+    the real `mvcommon.save_library` helper (which routes the three `tv-…` ids
+    into library_series.json and leaves movies/anime empty).
+
+    Seeds three Series entries that mirror what `cmd_prep_season` produces for a
+    combined-episode file (e.g. `…S04E19E20.mkv`):
+      1. season_map  `tv-en-2009-bsg-s04`        — type/folder_path/total_episodes/children
+                       (children = [primary, alias], sorted; total_episodes = 2)
+      2. leaf primary `tv-en-2009-bsg-s04e19`     — the SAME key set cmd_prep writes
+                       (short_id/filename/folder_path/status="local_ready"/uploaded=False/
+                        search_term/hash/metadata/tech_spec/parent_id), pointing at a REAL
+                        .mkv on disk under the sandbox media dir.
+      3. multi_ep_alias `tv-en-2009-bsg-s04e20`   — the exact 3-key schema and NOTHING else:
+                        {type:"multi_ep_alias", alias_of:<primary>, parent_id:<season>}.
+
+    The primary's .mkv is written LARGER than DUMMY_MAX_BYTES (200_000) with
+    deterministic bytes, and the leaf `hash` is that file's real sha256, so
+    cmd_check/cmd_restore treat it as real media (not an already-archived dummy)
+    and the hash verifies. (Files < DUMMY_MAX_BYTES are early-skipped as dummies
+    by cmd_check at main.py:1108 — A3 exercises check/push/restore on the primary,
+    so the file must clear that threshold.)
+
+    Note: if a test ever drives `mainfetch`, that module's `mainfetch.LIBRARY_*`
+    bindings would ALSO need patching (same import-by-value hazard). A2 does not
+    exercise mainfetch, so this fixture does not patch it — add it if needed.
+
+    Yields a dict:
+        primary_id - str: "tv-en-2009-bsg-s04e19" (the real leaf, holds the file)
+        alias_id   - str: "tv-en-2009-bsg-s04e20" (the multi_ep_alias)
+        season_id  - str: "tv-en-2009-bsg-s04"    (the season_map parent)
+        media_dir  - Path: the season folder holding the .mkv (under tmp_path)
+        orig_path  - Path: full path to the primary's on-disk .mkv
+        sandbox    - dict: the underlying sandbox fixture's paths (lib_*/media_dir)
+    """
+    season_id = "tv-en-2009-bsg-s04"
+    primary_id = "tv-en-2009-bsg-s04e19"
+    alias_id = "tv-en-2009-bsg-s04e20"
+
+    # Season media dir under the SANDBOX temp tree (Series path) — never C:\Media.
+    media_dir = tmp_path / "Media" / "Series" / "BSG" / "Season 04"
+    media_dir.mkdir(parents=True)
+
+    # Real primary file, LARGER than DUMMY_MAX_BYTES so check/restore don't treat
+    # it as an archived dummy. Deterministic bytes -> stable sha256 for `hash`.
+    filename = "BSG.S04E19E20.mkv"
+    orig_path = media_dir / filename
+    orig_path.write_bytes(b"BSG-COMBINED-EP-MASTER\n" * 9000)  # ~207 KB > 200_000
+
+    # Hard guard: the file we just created must live under tmp_path and must NEVER
+    # be a real-media path. (sandbox already hard-guards the LIBRARY_* constants.)
+    tmp_resolved = tmp_path.resolve()
+    op_resolved = orig_path.resolve()
+    assert tmp_resolved in op_resolved.parents, f"primary .mkv escaped tmp_path: {orig_path}"
+    assert "C:\\Media" not in str(op_resolved), f"primary .mkv must never touch real C:\\Media: {orig_path}"
+    assert os.path.getsize(orig_path) > main.DUMMY_MAX_BYTES, "primary .mkv must exceed DUMMY_MAX_BYTES"
+
+    short_id = mvcommon.generate_short_id(primary_id)
+    file_hash = hashlib.sha256(orig_path.read_bytes()).hexdigest()
+    name_no_ext, ext = os.path.splitext(filename)
+
+    # Leaf primary: byte-for-byte the key set cmd_prep writes (main.py:906-919),
+    # plus parent_id since this episode belongs to a season_map.
+    primary_entry = {
+        "short_id": short_id,
+        "filename": filename,
+        "folder_path": str(media_dir),
+        "status": "local_ready",
+        "uploaded": False,
+        "search_term": f"{name_no_ext} [{short_id}]{ext}",
+        "hash": file_hash,
+        "metadata": main.parse_metadata_from_id(primary_id),
+        "tech_spec": {"resolution": "1080p", "video_codec": "HEVC", "size_bytes": os.path.getsize(orig_path)},
+        "parent_id": season_id,
+    }
+
+    library = {
+        # season_map parent — mirrors cmd_prep's season_map shape (main.py:881-886);
+        # children includes the alias (appended at main.py:1085-1087), sorted.
+        season_id: {
+            "type": "season_map",
+            "folder_path": str(media_dir),
+            "total_episodes": 2,
+            "children": sorted([primary_id, alias_id]),
+        },
+        primary_id: primary_entry,
+        # multi_ep_alias — EXACT schema, nothing else (main.py:1080-1084).
+        alias_id: {
+            "type": "multi_ep_alias",
+            "alias_of": primary_id,
+            "parent_id": season_id,
+        },
+    }
+
+    # Seed via the real helper (routes all three tv- ids into library_series.json,
+    # leaves movies/anime as {}). The sandbox hard-guard governs the write paths.
+    mvcommon.save_library(library)
+
+    yield {
+        "primary_id": primary_id,
+        "alias_id": alias_id,
+        "season_id": season_id,
+        "media_dir": media_dir,
+        "orig_path": orig_path,
+        "sandbox": sandbox,
+    }
+
+
+@pytest.fixture()
 def mock_device(tmp_path, monkeypatch):
     """
     Stateful fake Android device backed by tmp_path/device/.

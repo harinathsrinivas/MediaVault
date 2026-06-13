@@ -265,7 +265,7 @@
 - Effort estimate: small
 - Risk: low — parser error-arms and one print; happy paths untouched. (Made obsolete by IMP-A2 eventually — do this cheap fix first anyway; argparse migration is a bigger lift.)
 - If skipped: a forgotten trailing `device` token freezes the console mid-session and the user must kill the process, wondering if a push was in flight; typo'd replaces keep masquerading as successes.
-- Status: pending
+- Status: done (fix/cli_parser_papercuts — push_group missing-value fail-fast arms mirroring push; parse logic extracted to main.parse_push_group_args / mainfetch.parse_fetch_args; mainfetch bare-invoke guard fixed; cmd_replace prints not-found; unit tests in tests/test_cli_parsers.py)
 
 ---
 

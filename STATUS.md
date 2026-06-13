@@ -363,3 +363,117 @@ Claude Code docs: agents load at session start (no hot-reload); duplicate `name:
   - **§19 Agentic Development Workflow** — added §19.5 (IMP-H3): smoke-gate enforcement + Consumer Impact Analysis + the out-of-band DATA_REQUEST web-tool protocol.
 - `README.md` — Status/disclaimers test bullet: added `pytest tests/smoke -q` as the pre-PR cross-command gate alongside `pytest -q`, briefly described the smoke suite, and added the `multi_ep_alias` consumers to the covered areas.
 - Left out intentionally: did not bump the doc's "Last updated" footer / per-file line counts (no code-line changes to re-measure; out of this targeted update's scope), and did not restructure any unrelated section.
+
+---
+
+# Execution Log
+
+Task: IMP-C14 — CLI parser papercuts (push_group hang, mainfetch argv guard, silent replace)
+
+Branch: fix/cli_parser_papercuts (from main)
+
+## Step 1 — [status: done]
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor
+- Files changed: main.py, PLAN.md
+- Outcome: Extracted a module-level pure function `parse_push_group_args(args)` (placed immediately before `cmd_push_group`, ~`main.py:1679`) that reproduces the old `push_group` argv parse loop verbatim, moves the empty-args usage guard into the function, and ADDS the three missing `else:` fail-fast arms (for `SIZE_MB/SIZE_GB/COUNT` → "Missing value for split method.", `episodes` → "Missing value for episodes range.", `device` → "Missing value for device.") mirroring the sibling `push` parser's wording. `rehash` (no-value flag) and `tempdir` (already had its else arm) are unchanged; the final `else: i += 1` unknown-token silent-skip is preserved exactly. The function returns the 7-tuple `(group_id, method, val, ep_range, dev, eager, tdir)` and is side-effect-free apart from the print+`sys.exit(1)` on bad input (no `resolve_device`, no `cmd_push_group`). The `elif cmd == "push_group":` dispatch block was collapsed to one parse call + the EXISTING `cmd_push_group(...)` call, with `resolve_device(dev)` left in `__main__`. Bug A (a trailing value-keyword spinning `while i < len(args)` forever) is fixed: it now terminates via `sys.exit(1)`. The `push` (single-id) parser, `cmd_push_group`, and everything else were left untouched.
+- Key decisions: extracted pure parser mirroring push; fail-fast via sys.exit (chose Open-Decision option (a) — smallest diff, matches `push`'s exit semantics, assertable via `pytest.raises(SystemExit)` with no hang); silent-skip of unknown tokens preserved unchanged (resolved decision #2). Used `episodes range.` (not `chunks range.`) in the new episodes arm to match `push_group`'s keyword name while keeping the `push` arm style.
+- Verification:
+  - `python -c "import main"` → `import OK` (clean import, no syntax/import-time error).
+  - Inline acceptance script (imports main, asserts):
+    - `parse_push_group_args(["g","SIZE_GB","8","device"])` → raised `SystemExit(1)` after printing `❌ Error: Missing value for device.` (does NOT hang).
+    - `parse_push_group_args(["g","SIZE_GB","8","device","series","rehash"])` → returned `('g','SIZE_GB','8',None,'series',True,None)` (exact expected tuple).
+    - `parse_push_group_args(["g","episdoes","1-3"])` → returned `('g',None,None,None,None,False,None)` (typo silently skipped, ep_range None, group_id preserved).
+    - Bonus: trailing `SIZE_MB` and trailing `episodes` each raised `SystemExit` with the correct mirrored message.
+  - `python -m pytest -q` → `163 passed in 74.02s`.
+  - Smoke gate (required — step touched main.py): `python -m pytest tests/smoke -q` → `50 passed in 14.15s`.
+
+---
+
+## Step 2 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `mainfetch.py` (only)
+- Outcome: Extracted a module-level pure function `parse_fetch_args(argv)` placed immediately before the `if __name__ == "__main__":` block (~`mainfetch.py:480`). The function takes the full argv list, guards with `if len(argv) < 3 or argv[1] != "fetch": print("Usage: fetch [id] [episodes] [range]"); sys.exit(1)` (fixing the bug where `len(sys.argv) < 2` passed but `sys.argv[2]` still raised `IndexError`), then parses `mid = argv[2]` and `epr = argv[4]` (when `len(argv) >= 5 and argv[3] == "episodes"`), and returns `(mid, epr)`. The function has no Selenium/browser side effects — it is pure. The `__main__` block was collapsed to `mid, epr = parse_fetch_args(sys.argv)` followed by the EXISTING `cmd_fetch_route(mid, epr)` call. Bug B (bare `python mainfetch.py fetch` raising `IndexError`) is now fixed: it prints the usage line and exits cleanly.
+- Key decisions: extracted pure parser; guard now `len < 3 or argv[1] != 'fetch'`; cmd_fetch_route stays in __main__; usage string kept byte-identical to existing `"Usage: fetch [id] [episodes] [range]"`; error signal = `sys.exit(1)` (option (a), mirrors push/push_group, assertable via `pytest.raises(SystemExit)`).
+- Verification:
+  - `python -c "import mainfetch"` → `import OK` (no browser/Selenium instantiated at import time).
+  - Inline acceptance checks (all four cases):
+    - `parse_fetch_args(["mainfetch.py","fetch"])` → raised `SystemExit(1)` after printing usage (was `IndexError`).
+    - `parse_fetch_args(["mainfetch.py","fetch","tv-en-2016-strangerthings-s01e03"])` → returned `('tv-en-2016-strangerthings-s01e03', None)`.
+    - `parse_fetch_args(["mainfetch.py","fetch","tv-x","episodes","1-3"])` → returned `('tv-x', '1-3')`.
+    - `parse_fetch_args(["mainfetch.py","wrongverb","x"])` → raised `SystemExit(1)` after printing usage.
+  - `python -m pytest -q` → `163 passed in 64.27s` (0 skipped, no regressions).
+  - Smoke gate (required — step touched mainfetch.py): `python -m pytest tests/smoke -q` → `50 passed in 24.62s`.
+
+---
+
+## Step 3 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `main.py` (only)
+- Outcome: Expanded the one-liner `if manual_id not in library: return False` in `cmd_replace` (main.py:1853) into a three-line block that prints `❌ Error: '<id>' not found in library.` before returning False. Previously a typo'd id returned False with zero output, indistinguishable from success. The rest of `cmd_replace` is byte-identical — the `_resolve_alias` call and the existing "not marked as uploaded" `⚠️ Skipping` path are untouched. `cmd_replace_group` was not touched (out of scope per Open Decision #3).
+- Key decisions: `cmd_replace` now prints `❌ Error: '<manual_id>' not found in library.` before `return False`; `cmd_replace_group` left untouched (it already prints `❌ No items found.` for an empty group, and any per-child not-found message is now covered for free via the updated `cmd_replace`).
+- Verification:
+  - Edit verified: `cmd_replace` at main.py:1851 now has the three-line guard (print then return False).
+  - Smoke gate (required — step touched main.py): `python -m pytest tests/smoke -q` → **50 passed in 39.62s**.
+  - Full suite: `python -m pytest -q` → **163 passed in 68.35s** (0 skipped, no regressions).
+
+---
+
+## Step 4 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `tests/test_cli_parsers.py` (NEW — 21 tests)
+- Outcome: Created a new focused unit-test file covering the two extracted parsers and the cmd_replace not-found path. Tests are grouped into `class TestParsePushGroupArgs` (12 tests), `class TestParseFetchArgs` (7 tests), and two standalone `test_cmd_replace_*` functions. All 21 tests pass. Full suite grew from 163 to 184 passed (0 skipped). Smoke suite confirmed green at 50 passed.
+- Key decisions:
+  - **Fixture choice for parsers: NONE (pure function calls).** `parse_push_group_args` and `parse_fetch_args` are pure — they take a plain list and return a tuple or call `sys.exit(1)`. No library I/O, no ADB, no Selenium. All parser tests call the functions directly inside the test body with no fixtures, matching the "unit test (no fixtures)" stratum of docs/testing-strategy.md §7.1.
+  - **Fixture choice for cmd_replace: `sandbox` + `capsys`.** `cmd_replace` calls `load_library()`, which reads `mvcommon.LIBRARY_*` bindings. The `sandbox` fixture (already in `tests/conftest.py`) redirects ALL three `LIBRARY_*` constants on BOTH `mvcommon` and `main` (the binding-hazard dual-patch), hard-guards against real `C:\Media`, and yields a dict of temp-dir paths. No DIY redirection was done. `capsys` (built-in pytest) captures stdout for the not-found message assertion.
+  - **Trailing-value-keyword tests prove no-hang.** Each `pytest.raises(SystemExit)` case returns immediately because the production code calls `sys.exit(1)` — there is no infinite loop to time out on. If the old looping behavior had been left in place, these tests would hang pytest, making them a structural guard against regression.
+  - **Unknown-token test mirrors push behavior.** `["myshow", "episdoes", "1-3"]` passes `"episdoes"` and `"1-3"` both through the silent-skip branch (`else: i += 1`) — neither is a recognised keyword, so both are skipped and `ep_range` remains `None`. This confirms resolved decision #2 is preserved.
+- Verification:
+  - `python -m pytest tests/test_cli_parsers.py -q` → **21 passed in 2.05s**.
+  - `python -m pytest -q` (full suite) → **184 passed in 195.09s** (0 skipped, no regressions; prior 163 still pass + 21 new tests).
+  - `python -m pytest tests/smoke -q` → **50 passed in 70.64s** (step is test-only, no main.py/mainfetch.py/mvcommon.py changes; smoke confirms no inadvertent breakage).
+
+---
+
+## Step 5 — [status: done]
+- Executor: architect
+- Model: opus
+- Mode: docs-only (read-only on code)
+- Files changed: `ARCHITECTURE.md`, `README.md` (no code files touched)
+- Outcome: Documented the IMP-C14 user-visible behavior change across the two architect-owned docs. Surgical edits only — no restructuring of either doc, §12a (rollback) untouched.
+- ARCHITECTURE.md changes:
+  - §5 commands table: the `replace` row now notes that an unknown id prints `❌ Error: '<id>' not found in library.` before returning `False` (IMP-C14).
+  - §5: added a new "CLI parsing seams (IMP-C14)" blockquote after the `episodes`-keyword note — documents the extracted pure functions `main.parse_push_group_args(args)` → `(group_id, method, val, ep_range, dev, eager, tdir)` with fail-fast "Missing value" arms mirroring `push` (replacing the prior trailing-value-keyword `while i < len(args)` hang), the preserved silent-skip of unknown tokens, and `mainfetch.parse_fetch_args(argv)` → `(mid, epr)` as Selenium-free/unit-testable.
+  - §5 `python mainfetch.py fetch ...` subsection: rewrote the argv-parsing note (was "argv parsing in mainfetch.py:497-507 ... reads sys.argv[2]") to describe the extracted `parse_fetch_args`, the `len(argv) < 3 or argv[1] != "fetch"` guard, and that a bare `python mainfetch.py fetch` now prints `Usage: fetch [id] [episodes] [range]` and exits cleanly instead of raising `IndexError`.
+  - §16 known-issues: struck through the stale "`push_group` argv parser can infinite-loop" bullet and marked it FIXED (IMP-C14), summarising the three fixes (push_group fail-fast, mainfetch bare-invoke IndexError, cmd_replace not-found message) and pointing at §5. No stale "hangs"/"IndexError" claims remain about these paths.
+- README.md changes:
+  - Commands section (after the `main.py fetch` wrapper note, before the `episodes` literal-trigger callout): added a one-line "Malformed invocations fail fast" blockquote covering push_group/replace trailing-value-keyword fail-fast, the bare `python mainfetch.py fetch` usage exit, and `replace <unknown_id>` reporting not-found.
+- Key decision: documented push_group fail-fast + extracted parsers + mainfetch usage-guard + replace not-found; surgical, no restructure.
+- Verification:
+  - Grep for "IndexError"/"infinite-loop"/"hang" against these paths: the only remaining mentions are the historical/struck-through references in the now-FIXED §16 bullet and the §5 "instead of raising IndexError ... as it did previously" framing — no claim that the current behavior still hangs or throws.
+  - No code files edited (Read-only architect; only `ARCHITECTURE.md` + `README.md` written).
+
+---
+
+## Step 6 — [status: done]
+- Executor: executor-haiku
+- Model: haiku
+- Mode: docs-only (find/replace only; no code touched)
+- Files changed: `improvements/improvements_tierC.md`, `improvements/PRIORITY.md`, `docs/priority-graph/priority-graph.html`, `PLAN.md`
+- Outcome: Marked IMP-C14 done across the three tracking artifacts per the maintenance protocol. All three files now agree: IMP-C14 is `done` with the fix/cli_parser_papercuts branch summary; the 👉 SUGGESTED NEXT TASK and header "Next" pointers advanced to IMP-C15 (micro-robustness batch — repair_dummies atomic swap + _verify_chunk_hash IndexError guard). The DONE count in PRIORITY.md bumped from 14 to 15, and C14 was added to the DONE roster line. Band 0 table removed the C14 row and renumbered C15 from 4 to 3. No code files touched; pure bookkeeping.
+- Key decisions: None — exact edits per the PLAN step 6 instructions, using the Edit tool for surgical find/replace.
+- Verification:
+  - Edits confirmed:
+    - `improvements/improvements_tierC.md` IMP-C14: `- Status: done (fix/cli_parser_papercuts — ... unit tests in tests/test_cli_parsers.py)`
+    - `improvements/PRIORITY.md`: Last updated line = "2026-06-14 (IMP-C14 done — fix/cli_parser_papercuts)"; 👉 SUGGESTED NEXT = IMP-C15 (micro-robustness batch); DONE count = 15; Band 0 table C14 row removed, C15 renumbered 4→3; C14 added to DONE roster.
+    - `docs/priority-graph/priority-graph.html`: C14 TASKS array node = `["C14","parser papercuts","C","done","done","Fixed ..."]`; header "Next" = IMP-C15 with micro-robustness label.
+    - `PLAN.md`: Step 6 marked `[x]`.
+  - No code files modified; `python -c "import main, mainfetch"` clean (prior steps' changes remain in tree).
+  - No test run required per step specification; full suite still green from prior step verification (184 passed, 0 skipped, smoke 50 passed).

@@ -81,7 +81,7 @@
 
 <header>
   <div class="brand">Media<span>Vault</span> · Priority Graph</div>
-  <div class="next">⚡ Next: <b>IMP-C14</b>&nbsp;<span style="color:#9fb0d6">push_group hang + parser papercuts</span>&nbsp;·&nbsp;<a href="../../improvements/PRIORITY.md">full list →</a></div>
+  <div class="next">⚡ Next: <b>IMP-C15</b>&nbsp;<span style="color:#9fb0d6">micro-robustness: repair_dummies atomic swap + verify_chunk guard</span>&nbsp;·&nbsp;<a href="../../improvements/PRIORITY.md">full list →</a></div>
   <div class="grow"></div>
   <input id="search" placeholder="search tasks…  (Enter to focus)">
 </header>
@@ -155,7 +155,7 @@ const TASKS = [
  ["C11","restore quarantine","C","done","done","Shipped PR #6"],
  ["C12","alias crash: scan/local_status","C","done","done","Fixed fix/alias_crash_and_smoke_gate: iterators skip multi_ep_alias; regression tests added"],
  ["C13","single-id alias handling","C","done","done","Fixed fix/alias_crash_and_smoke_gate: _resolve_alias at lookup head of check/push/replace/restore/verify_restore; cmd_prep refuses alias"],
- ["C14","parser papercuts","C","crit","todo","push_group infinite-loop hang; mainfetch IndexError; silent replace"],
+ ["C14","parser papercuts","C","done","done","Fixed fix/cli_parser_papercuts: push_group fail-fast arms (parse_push_group_args); mainfetch guard (parse_fetch_args); cmd_replace prints not-found"],
  ["C15","micro-robustness batch","C","high","todo","repair_dummies atomic swap; verify_chunk IndexError guard"],
  ["C16","anime fetch profile","C","high","todo","3 accounts now: ani-* mis-routes to series profile → anime restore silently fails"],
  // D — commands

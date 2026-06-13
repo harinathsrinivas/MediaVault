@@ -1676,6 +1676,69 @@ def _resolve_alias(lib, mid):
     return (mid, entry)
 
 
+def parse_push_group_args(args):
+    """Parse the token list for the `push_group` command (= sys.argv[2:]).
+
+    Pure: parses tokens and returns
+    (group_id, method, val, ep_range, dev, eager, tdir), or prints a usage/
+    error message and calls sys.exit(1) on bad input. Mirrors the `push`
+    parser's missing-value fail-fast arms so a trailing value-keyword
+    terminates instead of spinning the parse loop. Unknown/typo'd tokens are
+    silently skipped (same behavior as `push`). Performs no device resolution
+    or I/O beyond the print+exit on bad input.
+    """
+    if not args:
+        print("❌ Usage: push_group [id] ...")
+        sys.exit(1)
+
+    group_id = args[0]
+    method = None
+    val = None
+    ep_range = None
+    dev = None
+    eager = False
+    tdir = None
+
+    i = 1
+    while i < len(args):
+        if args[i] in ["SIZE_MB", "SIZE_GB", "COUNT"]:
+            if i + 1 < len(args):
+                method = args[i]
+                val = args[i + 1]
+                i += 2
+            else:
+                print("❌ Error: Missing value for split method.")
+                sys.exit(1)
+        elif args[i] == "episodes":
+            if i + 1 < len(args):
+                ep_range = args[i + 1]
+                i += 2
+            else:
+                print("❌ Error: Missing value for episodes range.")
+                sys.exit(1)
+        elif args[i] == "device":
+            if i + 1 < len(args):
+                dev = args[i + 1]
+                i += 2
+            else:
+                print("❌ Error: Missing value for device.")
+                sys.exit(1)
+        elif args[i] == "rehash":
+            eager = True
+            i += 1
+        elif args[i] == "tempdir":
+            if i + 1 < len(args):
+                tdir = args[i + 1]
+                i += 2
+            else:
+                print("❌ Error: Missing value for tempdir.")
+                sys.exit(1)
+        else:
+            i += 1
+
+    return (group_id, method, val, ep_range, dev, eager, tdir)
+
+
 def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False, temp_dir=None):
     print(f"=== BATCH PUSH GROUP: {group_id} ===")
     library = load_library()
@@ -1787,7 +1850,9 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
 
 def cmd_replace(manual_id):
     library = load_library()
-    if manual_id not in library: return False
+    if manual_id not in library:
+        print(f"❌ Error: '{manual_id}' not found in library.")
+        return False
     real_id, entry = _resolve_alias(library, manual_id)
     if real_id != manual_id:
         print(f"ℹ️  {manual_id} is part of the combined file registered as {real_id} — operating on that.")
@@ -3056,47 +3121,7 @@ if __name__ == "__main__":
         cmd_push(mid, method, val, c_range, device_id=resolve_device(dev), eager_rehash=eager, temp_dir=tdir)
 
     elif cmd == "push_group":
-        args = sys.argv[2:]
-        if not args:
-            print("❌ Usage: push_group [id] ...")
-            sys.exit(1)
-
-        group_id = args[0]
-        method = None
-        val = None
-        ep_range = None
-        dev = None
-        eager = False
-        tdir = None
-
-        i = 1
-        while i < len(args):
-            if args[i] in ["SIZE_MB", "SIZE_GB", "COUNT"]:
-                if i + 1 < len(args):
-                    method = args[i]
-                    val = args[i + 1]
-                    i += 2
-            elif args[i] == "episodes":
-                if i + 1 < len(args):
-                    ep_range = args[i + 1]
-                    i += 2
-            elif args[i] == "device":
-                if i + 1 < len(args):
-                    dev = args[i + 1]
-                    i += 2
-            elif args[i] == "rehash":
-                eager = True
-                i += 1
-            elif args[i] == "tempdir":
-                if i + 1 < len(args):
-                    tdir = args[i + 1]
-                    i += 2
-                else:
-                    print("❌ Error: Missing value for tempdir.")
-                    sys.exit(1)
-            else:
-                i += 1
-
+        group_id, method, val, ep_range, dev, eager, tdir = parse_push_group_args(sys.argv[2:])
         cmd_push_group(group_id, method, val, ep_range, device_id=resolve_device(dev), eager_rehash=eager, temp_dir=tdir)
 
     elif cmd == "sort":

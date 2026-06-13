@@ -262,3 +262,24 @@ Claude Code docs: agents load at session start (no hot-reload); duplicate `name:
   - Acceptance: smoke gate present at the per-step (code-touching) commit point — Phase 2A step 5 (line 102) + Phase 2B step 8a (line 178, merged-result) — AND at the pre-PR finalize point — Phase 3 step 1-2 (lines 188-189). Both required.
   - Preserved-rules check (grep `NO SILENT HANDLING|human-gated \(Checkpoint 1\)|NEVER silently degrade`): NO SILENT HANDLING preamble at line 11; Checkpoint 1 human-gated-merge at line 197; ESCALATION RULES capability-gap NEVER-silently-degrade at line 287 — all intact, none altered.
   - No code/tests touched by this step (agent-file-only), so `pytest`/`pytest tests/smoke` were not re-run — unchanged from B2's green state (163 passed / 0 skipped; smoke 50 passed).
+
+---
+
+## Step B5 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `.claude/agents/executor-sonnet.md`, `.claude/agents/executor-opus.md`, `.claude/agents/executor-haiku.md` (BODY edits only — all three frontmatters unchanged)
+- Outcome: Added both mandated additions to all three executor agent files. (1) **Smoke-gate on code-touching steps** — in executor-sonnet.md: appended to step 4 of the SINGLE-EXECUTOR WORKFLOW ("Run tests / linters") as an indented note; in executor-opus.md: appended to step 5 of the SINGLE-EXECUTOR WORKFLOW ("Run acceptance checks") as an indented note with additional rationale about regressions; in executor-haiku.md: appended to step 4 of the WORKFLOW ("Run the step's acceptance check") as an indented note. The instruction reads: if the step modified `main.py`, `mainfetch.py`, or `mvcommon.py`, ALSO run `pytest tests/smoke -q`, fix any failure BEFORE marking the step done, and paste the smoke result into STATUS.md Verification. (2) **Respect the entry-type registry** — in executor-sonnet.md and executor-opus.md: added as a new numbered item 8 at the end of the WHEN WRITING TESTS section; in executor-haiku.md: appended after the existing `pytest -q` output instruction in the WHEN TOUCHING TESTS section. The instruction states: if you add or change a library entry type or shared entry field, update `ENTRY_TYPE_KEYS` in `main.py` AND ensure every whole-library iterator skips or `_resolve_alias`-resolves the new type. The opus instruction has additional context about reasoning carefully; the haiku instruction includes a "report blocked if unsure" safeguard matching its more conservative mandate. Each file's existing voice and structure were preserved; no unrelated sections normalized.
+- Key decisions: Smoke-gate placed at the workflow step rather than in FAILURE HANDLING, so it is part of the forward path (not just the error path). Entry-type registry instruction placed in the "when writing/editing code" guidance section (WHEN WRITING TESTS is where all three files already scope code-writing constraints). Haiku's entry-type note includes an explicit "report blocked if unsure" because haiku is restricted from inventing fixes for non-trivial changes.
+- Verification:
+  - Frontmatter validation (all three at once):
+    `python -c "import glob,re,yaml; [print('OK', f, '->', yaml.safe_load(re.match(r'^---\r?\n(.*?)\r?\n---', open(f,encoding='utf-8').read(), re.S).group(1))['name']) for f in sorted(glob.glob('.claude/agents/executor-*.md'))]"`
+    Output:
+    ```
+    OK .claude/agents\executor-haiku.md -> executor-haiku
+    OK .claude/agents\executor-opus.md -> executor-opus
+    OK .claude/agents\executor-sonnet.md -> executor-sonnet
+    ```
+    All three frontmatters valid; no YAML exception; all three agent names print correctly.
+  - No code or test files were modified by this step; `pytest` results are unchanged from the B4 state (163 passed / 0 skipped; smoke 50 passed).

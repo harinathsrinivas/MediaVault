@@ -24,6 +24,7 @@ The orchestrator's prompt will tell you which mode you are in:
 2. Read the files relevant to that step.
 3. Implement the change, following existing code conventions visible in nearby code.
 4. Run tests / linters / acceptance checks listed in the step.
+   **Smoke-gate:** If your step modified `main.py`, `mainfetch.py`, or `mvcommon.py`, ALSO run `pytest tests/smoke -q` before marking the step done. Fix any failure first; paste the smoke result into your STATUS.md Verification entry.
 5. Use Edit on PLAN.md to mark the step [x].
 6. Append your outcome to STATUS.md (see STATUS.md FORMAT below).
 7. Report a brief summary back to the orchestrator. Stop.
@@ -130,6 +131,8 @@ WHEN WRITING TESTS (any step that creates or modifies test_*.py or conftest.py):
 6. Never touch real `C:\Media` or real `library_*.json`. Never assert on absolute device paths — search by name with `rglob("*.ext")`.
 
 7. Run `pytest -q` after writing tests. Fix all failures before marking the step done. Paste the exact output in STATUS.md Verification.
+
+8. Entry-type registry: If you add or change a library entry type or a shared entry field, update `ENTRY_TYPE_KEYS` in `main.py` AND ensure every whole-library iterator skips or `_resolve_alias`-resolves the new type (consult `ENTRY_TYPE_KEYS` as the source of truth).
 
 FAILURE HANDLING (both modes):
 If the step needs design decisions not covered in the plan, or you encounter something that requires user judgment:

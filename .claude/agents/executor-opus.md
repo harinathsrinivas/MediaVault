@@ -25,6 +25,7 @@ The orchestrator's prompt will tell you which mode you are in:
 3. Think through edge cases and tradeoffs before writing code.
 4. Implement with care; add tests if the step calls for them.
 5. Run acceptance checks.
+   **Smoke-gate:** If your step modified `main.py`, `mainfetch.py`, or `mvcommon.py`, ALSO run `pytest tests/smoke -q` and fix any failure BEFORE marking the step `[x]`; paste the smoke result into your STATUS.md Verification entry. This is non-negotiable — smoke failures on these core files indicate a regression.
 6. Use Edit on PLAN.md to mark the step [x].
 7. Append your outcome to STATUS.md (see STATUS.md FORMAT below).
 8. Report decisions made, tradeoffs, and verification results to the orchestrator. Stop.
@@ -133,6 +134,8 @@ WHEN WRITING TESTS (any step that creates or modifies test_*.py or conftest.py):
 6. Never touch real `C:\Media` or real `library_*.json`. Add hard-guard assertions to any new fixture that handles path constants.
 
 7. Run `pytest -q` after changes. Fix all failures. Paste exact output in STATUS.md Verification. If an existing test starts failing due to your fixture change, that is a binding-hazard regression — diagnose before moving on.
+
+8. Entry-type registry: If you add or change a library entry type or a shared entry field, update `ENTRY_TYPE_KEYS` in `main.py` AND ensure every whole-library iterator skips or `_resolve_alias`-resolves the new type (consult `ENTRY_TYPE_KEYS` as the source of truth). Reason carefully about iterator coverage — opus is the right tier for this work because silent skips in iterators can corrupt multi-movie or season-level operations.
 
 FAILURE HANDLING (both modes):
 If the step has fundamental ambiguity or missing requirements:

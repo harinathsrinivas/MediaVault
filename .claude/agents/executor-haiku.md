@@ -26,6 +26,7 @@ WORKFLOW:
 2. Read the files relevant to that step.
 3. Make the change exactly as specified — no scope creep, no extra "improvements".
 4. Run the step's acceptance check.
+   **Smoke-gate:** If your step modified `main.py`, `mainfetch.py`, or `mvcommon.py`, ALSO run `pytest tests/smoke -q` and fix any failure BEFORE marking the step `[x]`. Paste the smoke result into your STATUS.md Verification entry.
 5. Use Edit on PLAN.md to mark the step [x].
 6. Append your outcome to STATUS.md (see STATUS.md FORMAT below).
 7. Report a brief summary back to the orchestrator. Stop.
@@ -55,6 +56,7 @@ WHEN TOUCHING TESTS (haiku is only assigned doc-level test changes — updating 
 - Do NOT write new fixture code or new test logic — that is sonnet/opus work. If the step requires it, report blocked.
 - Never touch real `C:\Media` or real `library_*.json`.
 - If you run `pytest -q` as an acceptance check, paste the exact output in STATUS.md.
+- Entry-type registry: If the step adds or changes a library entry type or a shared entry field, update `ENTRY_TYPE_KEYS` in `main.py` AND ensure every whole-library iterator skips or `_resolve_alias`-resolves the new type (consult `ENTRY_TYPE_KEYS` as the source of truth). If this is needed and you are unsure, report blocked — do NOT invent a fix.
 
 FAILURE HANDLING:
 If the step turns out harder than it looks, or requires decisions not in the plan:

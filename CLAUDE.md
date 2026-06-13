@@ -32,6 +32,13 @@ If any agent — or the main session — hits a **fundamental capability gap or 
 
 **Priority list is load-bearing — keep it current.** `improvements/PRIORITY.md` is the single source of truth for "what to do next" (critical bugs first, a `👉 SUGGESTED NEXT TASK` pointer, five priority bands), and `docs/priority-graph/priority-graph.html` is its interactive visual twin. **Whenever you add, complete, or re-prioritize a task, update BOTH** (and the task's tier file) in the same change — the maintenance protocol is at the bottom of `improvements/PRIORITY.md`. A new bug that breaks something goes into PRIORITY.md Band 0 and is a candidate for the NEXT pointer.
 
+## Cross-command integrity + smoke gate
+
+A change to one feature must never silently break another command. Two mechanisms enforce this:
+
+- **Smoke gate — run before any PR (and before committing any code-touching step):** `pytest tests/smoke -q` drives every command and major option against tiny fixtures and the existing stubs. It should complete in under 30 seconds. If it is red, nothing ships.
+- **`ENTRY_TYPE_KEYS` registry + guard test:** `main.py` declares `ENTRY_TYPE_KEYS` — the canonical set of library entry types and shared data-field names. `tests/test_entry_schema_guard.py` asserts this registry stays consistent. Any change that adds, renames, or removes a library entry type or shared field **must** update `ENTRY_TYPE_KEYS` and keep every whole-library iterator alias/season_map-safe (call `_resolve_alias` or skip `type == "multi_ep_alias"` entries).
+
 ## Auto-rollback is load-bearing — change-gate
 The unified auto-rollback mechanism (`RollbackJournal` / `recover_journal` / `RollbackHardFail` in `main.py`, the per-`cmd_*` point-of-no-return markers, the `.mediavault_txn.json` journal format, the O-1 resume-message vs O-2 hard-fail split, and the `cmd_prep_push_rep_season` resume-range messaging) was chosen via a user-decided bake-off (`docs/feature-auto-rollback/DECISIONS.md` N-6, PR #14). Many commands depend on it for safe failure handling.
 

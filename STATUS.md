@@ -283,3 +283,18 @@ Claude Code docs: agents load at session start (no hot-reload); duplicate `name:
     ```
     All three frontmatters valid; no YAML exception; all three agent names print correctly.
   - No code or test files were modified by this step; `pytest` results are unchanged from the B4 state (163 passed / 0 skipped; smoke 50 passed).
+
+---
+
+## Step B6 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `CLAUDE.md`, `docs/testing-strategy.md`
+- Outcome: Documented the cross-command integrity gate, smoke suite, `sandbox_alias` fixture, and `ENTRY_TYPE_KEYS` registry in both load-bearing docs. No code or test files were touched; `pytest` results unchanged from B5 state.
+- Key decisions:
+  - **CLAUDE.md — placement:** inserted the new "Cross-command integrity + smoke gate" subsection between "Improvement tasks" and "Auto-rollback is load-bearing — change-gate". This is the natural position — it is a peer enforcement rule alongside the auto-rollback change-gate, and it reads after the backlog/priority guidance where a new contributor would already be thinking about what can change.
+  - **testing-strategy.md — pyramid row:** added the Smoke suite as a new tier box ABOVE the existing INTEGRATION tier (it spans all commands, so it sits above per-command integration tests), keeping the ASCII art pyramid consistent.
+  - **testing-strategy.md — §4.7 / §4.8:** added `sandbox_alias` as §4.7 (with its yielded-dict API and a minimal usage example) and `ENTRY_TYPE_KEYS` + `test_entry_schema_guard.py` as §4.8 (data-shape guardrail). Placed immediately before the existing §5 decision tree so all fixture/guardrail documentation stays in §4.
+  - **testing-strategy.md — §12:** added `pytest tests/smoke -q` as a named command with a comment ("cross-command integrity (<30 s)") immediately after the existing `pytest -q` full-suite line, so the pre-PR gate invocation is visible right at the top of the run section.
+- Verification: No code or tests changed; `pytest`/`pytest tests/smoke` results are unchanged from B5 (163 passed / 0 skipped; smoke 50 passed). Docs verified by reading back both files post-edit and confirming all four required elements are present: smoke-suite pyramid row, `sandbox_alias` §4.7 entry, `ENTRY_TYPE_KEYS` §4.8 note, `pytest tests/smoke -q` in §12, and the "Cross-command integrity + smoke gate" subsection in CLAUDE.md.

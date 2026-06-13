@@ -83,3 +83,23 @@ Claude Code docs: agents load at session start (no hot-reload); duplicate `name:
 - Verification:
   - Throwaway self-check `tests/test_sandbox_alias_selfcheck_tmp.py` (created, run, then DELETED): `python -m pytest tests/test_sandbox_alias_selfcheck_tmp.py -q` → **1 passed in 0.21s**. It asserted: all 3 entries present (and exactly 3), alias dict == exact 3-key schema, season_map children == sorted [primary, alias] with total_episodes 2, leaf status `local_ready` / uploaded False / parent_id == season_id / no `type` key, the on-disk `.mkv` exists and is > DUMMY_MAX_BYTES with `hash` == its real sha256, `_resolve_alias(lib, alias_id)` returns `(primary_id, leaf)`, and `cmd_check(alias_id)` runs (resolving to the primary and verifying the hash). File then removed; `ls` confirms it is gone.
   - `python -m pytest -q` (full suite, after deleting the throwaway) → **99 passed, 2 skipped in 8.59s** — identical to the recorded baseline (the 2 skips are the ffmpeg/mkvmerge-gated cases). The new fixture is collectable and breaks nothing; it is not consumed by any committed test until A3.
+
+---
+
+## Step A3 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `tests/test_alias_consumers.py` (NEW — 10 test functions)
+- Outcome: Created a new regression test file that exercises every fixed consumer (#1-#8) and two control cases, using the `sandbox_alias` fixture. All 10 tests pass. Full suite grew from 99 to 109 passed (2 skipped unchanged). No regressions.
+- Key decisions:
+  - **`cmd_push` non-split path:** the primary entry has no `split_info` — it's a non-split single-file push. This exercises the `files_to_upload_paths = [local_file_path]` standard path rather than the split/resume path. The library side effect (`uploaded=True`, `status=onboarded`) is the meaningful assertion; the device file lands under a UID-tagged name, so we assert `len(on_device) >= 1` (name lookup) rather than a specific filename, avoiding the `[id]` Windows glob metachar.
+  - **`cmd_replace` precondition:** `sandbox_alias` seeds `uploaded=False`. Since `cmd_replace` requires `uploaded=True` to proceed past the early-exit guard, the test mutates the library (loads, sets `uploaded=True`/`status=onboarded`, saves) before calling `cmd_replace(alias_id)`. This mirrors real usage (replace is called after push). The info line still prints (the `_resolve_alias` check is before the uploaded guard), and the side effect is asserted.
+  - **`cmd_restore` precondition:** sets up the restore folder with the primary's own bytes (so standard path's hash check passes), places a dummy placeholder at the target, and flips the library to `archived`/`uploaded=True`. Asserts the full side effect (restored bytes at target, `status=restored_local`).
+  - **`cmd_verify_restore`:** same restore-folder setup as cmd_restore but without a dummy at target (verify_restore is dry-run; does not move the file). Asserts info line + "SUCCESS" or "Verified" in stdout.
+  - **`cmd_scan_unprepped`:** the alias id must NOT appear in stdout. The primary's file IS registered (so it won't appear as unprepped either). This assertion would catch any regression where an alias creates a phantom unprepped row.
+  - **Control tests:** two parallel controls — `cmd_check(primary_id)` and `cmd_push(primary_id)` — assert the info line is NOT printed (real_id == manual_id → non-alias path unchanged).
+  - **Library reload assertion for alias schema:** several tests call `mvcommon.load_library()` after the command and assert `set(library[alias_id].keys()) == {"type", "alias_of", "parent_id"}` — confirming the alias entry is never mutated by the command.
+- Verification:
+  - `python -m pytest tests/test_alias_consumers.py -v` → **10 passed in 5.48s** (all tests collected and green).
+  - `python -m pytest -q` → **109 passed, 2 skipped in 76.75s** — prior 99 still pass; 10 new tests added; 2 skips unchanged.

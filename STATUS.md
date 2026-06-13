@@ -421,3 +421,21 @@ Branch: fix/cli_parser_papercuts (from main)
   - Edit verified: `cmd_replace` at main.py:1851 now has the three-line guard (print then return False).
   - Smoke gate (required — step touched main.py): `python -m pytest tests/smoke -q` → **50 passed in 39.62s**.
   - Full suite: `python -m pytest -q` → **163 passed in 68.35s** (0 skipped, no regressions).
+
+---
+
+## Step 4 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `tests/test_cli_parsers.py` (NEW — 21 tests)
+- Outcome: Created a new focused unit-test file covering the two extracted parsers and the cmd_replace not-found path. Tests are grouped into `class TestParsePushGroupArgs` (12 tests), `class TestParseFetchArgs` (7 tests), and two standalone `test_cmd_replace_*` functions. All 21 tests pass. Full suite grew from 163 to 184 passed (0 skipped). Smoke suite confirmed green at 50 passed.
+- Key decisions:
+  - **Fixture choice for parsers: NONE (pure function calls).** `parse_push_group_args` and `parse_fetch_args` are pure — they take a plain list and return a tuple or call `sys.exit(1)`. No library I/O, no ADB, no Selenium. All parser tests call the functions directly inside the test body with no fixtures, matching the "unit test (no fixtures)" stratum of docs/testing-strategy.md §7.1.
+  - **Fixture choice for cmd_replace: `sandbox` + `capsys`.** `cmd_replace` calls `load_library()`, which reads `mvcommon.LIBRARY_*` bindings. The `sandbox` fixture (already in `tests/conftest.py`) redirects ALL three `LIBRARY_*` constants on BOTH `mvcommon` and `main` (the binding-hazard dual-patch), hard-guards against real `C:\Media`, and yields a dict of temp-dir paths. No DIY redirection was done. `capsys` (built-in pytest) captures stdout for the not-found message assertion.
+  - **Trailing-value-keyword tests prove no-hang.** Each `pytest.raises(SystemExit)` case returns immediately because the production code calls `sys.exit(1)` — there is no infinite loop to time out on. If the old looping behavior had been left in place, these tests would hang pytest, making them a structural guard against regression.
+  - **Unknown-token test mirrors push behavior.** `["myshow", "episdoes", "1-3"]` passes `"episdoes"` and `"1-3"` both through the silent-skip branch (`else: i += 1`) — neither is a recognised keyword, so both are skipped and `ep_range` remains `None`. This confirms resolved decision #2 is preserved.
+- Verification:
+  - `python -m pytest tests/test_cli_parsers.py -q` → **21 passed in 2.05s**.
+  - `python -m pytest -q` (full suite) → **184 passed in 195.09s** (0 skipped, no regressions; prior 163 still pass + 21 new tests).
+  - `python -m pytest tests/smoke -q` → **50 passed in 70.64s** (step is test-only, no main.py/mainfetch.py/mvcommon.py changes; smoke confirms no inadvertent breakage).

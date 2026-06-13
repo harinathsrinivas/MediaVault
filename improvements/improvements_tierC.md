@@ -230,7 +230,7 @@
 - Effort estimate: small
 - Risk: low — two one-line skips in read-only commands + tests.
 - If skipped: `scan_unprepped` and `local_status` remain crash-on-invoke for any library containing a combined-episode file — i.e., **already today**: the user runs `local_status` to plan the next Pixel batch and gets a TypeError instead of the list.
-- Status: pending
+- Status: done (fix/alias_crash_and_smoke_gate — multi_ep_alias alias-safety; both iterators now skip `multi_ep_alias` alongside `season_map`; regression tests in `tests/test_alias_consumers.py` and `tests/smoke/test_smoke_all_commands.py`)
 
 ---
 
@@ -246,7 +246,7 @@
 - Effort estimate: small
 - Risk: low-medium — touches the entry-lookup head of six commands; behavior for non-alias ids must stay byte-identical (guard with tests per command).
 - If skipped: every direct operation on a secondary episode id keeps crashing with a traceback; worst variant is the `cmd_prep` overwrite corrupting an alias into a fake leaf (then group ops process the same file twice).
-- Status: pending
+- Status: done (fix/alias_crash_and_smoke_gate — multi_ep_alias alias-safety; `_resolve_alias` called at lookup head of `cmd_check`/`cmd_push`/`cmd_replace`/`cmd_restore`/`cmd_verify_restore`; `cmd_prep` refuses to prep over an alias; regression tests in `tests/test_alias_consumers.py` and `tests/smoke/test_smoke_all_commands.py`)
 
 ---
 

@@ -81,7 +81,7 @@
 
 <header>
   <div class="brand">Media<span>Vault</span> · Priority Graph</div>
-  <div class="next">⚡ Next: <b>IMP-C12</b>&nbsp;<span style="color:#9fb0d6">alias crash, broken in prod</span>&nbsp;·&nbsp;<a href="../../improvements/PRIORITY.md">full list →</a></div>
+  <div class="next">⚡ Next: <b>IMP-C14</b>&nbsp;<span style="color:#9fb0d6">push_group hang + parser papercuts</span>&nbsp;·&nbsp;<a href="../../improvements/PRIORITY.md">full list →</a></div>
   <div class="grow"></div>
   <input id="search" placeholder="search tasks…  (Enter to focus)">
 </header>
@@ -111,7 +111,7 @@
   <a class="open" id="p-open" href="#" target="_blank" rel="noopener">Open task in tier file →</a>
 </div>
 
-<div class="footer">Generated 2026-06-12 · keep in sync with <code>PRIORITY.md</code> (see its maintenance protocol) · ~110 tasks</div>
+<div class="footer">Generated 2026-06-13 · keep in sync with <code>PRIORITY.md</code> (see its maintenance protocol) · ~111 tasks</div>
 
 <script>
 /* ───────────────────────── TASK DATA — keep in sync with PRIORITY.md + improvements_tier*.md ─────────────────────────
@@ -153,8 +153,8 @@ const TASKS = [
  ["C9","atomic replace","C","done","done","Shipped PR #5"],
  ["C10","sidecar reconciliation","C","low","todo","Make the unused sidecars a real recovery layer"],
  ["C11","restore quarantine","C","done","done","Shipped PR #6"],
- ["C12","alias crash: scan/local_status","C","crit","todo","BROKEN IN PROD: KeyError/TypeError on multi_ep_alias entries"],
- ["C13","single-id alias handling","C","crit","todo","push/replace/restore/check crash on a secondary-episode id"],
+ ["C12","alias crash: scan/local_status","C","done","done","Fixed fix/alias_crash_and_smoke_gate: iterators skip multi_ep_alias; regression tests added"],
+ ["C13","single-id alias handling","C","done","done","Fixed fix/alias_crash_and_smoke_gate: _resolve_alias at lookup head of check/push/replace/restore/verify_restore; cmd_prep refuses alias"],
  ["C14","parser papercuts","C","crit","todo","push_group infinite-loop hang; mainfetch IndexError; silent replace"],
  ["C15","micro-robustness batch","C","high","todo","repair_dummies atomic swap; verify_chunk IndexError guard"],
  ["C16","anime fetch profile","C","high","todo","3 accounts now: ani-* mis-routes to series profile → anime restore silently fails"],
@@ -208,6 +208,7 @@ const TASKS = [
  // H — agentic
  ["H1","Opus 4.8 effort tiers","H","done","done","Shipped 2026-05-30"],
  ["H2","dynamic-workflows spike","H","low","todo","Revisit when plans exceed ~10 steps"],
+ ["H3","smoke gate + consumer-impact guardrail + agent enforcement + data-request protocol","H","done","done","Shipped fix/alias_crash_and_smoke_gate: 50-test cross-command smoke suite; ENTRY_TYPE_KEYS registry; planner Consumer Impact Analysis mandate; orchestrator+executor smoke-gate enforcement; out-of-band DATA_REQUEST protocol"],
  // R — rollback (decisions are change-gated)
  ["R1","streaming split-upload-delete","R","med","todo","Cut the ~40GB disk peak (change-gate)"],
  ["R2","recover CLI","R","done","done","Shipped PR #18 (+ --scan)"],

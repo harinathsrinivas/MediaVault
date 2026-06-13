@@ -301,6 +301,24 @@ Claude Code docs: agents load at session start (no hot-reload); duplicate `name:
 
 ---
 
+## Bookkeeping (IMP-C12/C13 done, IMP-H3 added) — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed:
+  - `improvements/improvements_tierC.md` — IMP-C12 status: `pending` → `done` (note: iterators skip `multi_ep_alias`; regression tests in `test_alias_consumers.py` + smoke suite). IMP-C13 status: `pending` → `done` (note: `_resolve_alias` at lookup head of five commands; `cmd_prep` refuses alias; regression tests added).
+  - `improvements/improvements_tierH.md` — IMP-H3 entry ADDED as `done`: "Cross-command smoke gate + consumer-impact guardrail + agent enforcement + out-of-band data-request protocol" with full deliverable summary (50-test smoke suite, `ENTRY_TYPE_KEYS` registry + guard test, planner Consumer Impact Analysis mandate, orchestrator per-step/pre-PR enforcement, executor smoke-gate + registry instructions, out-of-band DATA_REQUEST protocol across all 8 agent files + CLAUDE.md + docs/testing-strategy.md). Placed after IMP-H2 to match the existing H1/H2 entry format.
+  - `improvements/PRIORITY.md` — (a) IMP-C12 and IMP-C13 removed from Band 0 table; remaining Band-0 rows renumbered (R6, R7, C14, C15). (b) `👉 SUGGESTED NEXT TASK` updated from IMP-C12 → **IMP-C14** (next highest-priority unfixed Band-0 item: the `push_group` infinite-loop hang + `mainfetch` IndexError + silent `replace`). (c) "Last updated" bumped to 2026-06-13. (d) DONE count updated 11 → 14; C12, C13, H3 added to the done list.
+  - `docs/priority-graph/priority-graph.html` — (a) Header banner `⚡ Next: IMP-C12` → `IMP-C14` (text updated to match new NEXT pointer). (b) C12 and C13 node entries changed from `"crit","todo"` → `"done","done"` (rendered in the done ring, green color). (c) IMP-H3 node ADDED as `"done","done"` with a short note string. (d) Footer date 2026-06-12 → 2026-06-13, task count ~110 → ~111.
+- Outcome: All four backlog/doc files now agree: IMP-C12 and IMP-C13 are done, IMP-H3 is a new done entry, and the NEXT pointer is IMP-C14.
+- Key decisions:
+  - **NEXT pointer = IMP-C14**, not any R-tier decision task. The Band-0 table after removing C12/C13 has R6 and R7 at rows 1-2, but both are `🚦 decision` (change-gated — they need a user choice, not code). IMP-C14 is the next actionable, code-level Band-0 bug (no gate, low risk, directly fixable). The NEXT pointer convention in PRIORITY.md is for the "do this first" task, so a decision-gated item shouldn't be the pointer when a code-ready bug is right behind it. The NEXT banner now also surfaces that C12/C13 are done, so the context is clear.
+  - **HTML: no dependency-edge changes.** The existing `["C12","B7"]` edge (C12 unblocks B7 memoize) remains valid and is kept. Done-status nodes still appear in the EDGES filtering (`EDGES.filter(e=>idMap[e[0]]&&idMap[e[1]])`) so the edge remains visible on the graph.
+  - **IMP-H3 tier file placement:** added after H2's `- Status: pending` line using the same `---` separator + `## IMP-H3: …` heading format as H1/H2.
+- Verification: All four files read back and confirmed consistent: C12/C13 status=done in tierC.md; H3 entry present in tierH.md; PRIORITY.md DONE count=14, C12+C13+H3 in done list, Band-0 table has 4 rows (R6/R7/C14/C15), NEXT pointer = C14; priority-graph.html header = C14, C12/C13 nodes = `"done","done"`, H3 node present.
+
+---
+
 ## Step B7 — [status: done]
 - Executor: executor-opus
 - Model: opus

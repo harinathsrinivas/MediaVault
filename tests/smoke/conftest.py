@@ -11,11 +11,14 @@ in tests/conftest.py and is inherited automatically (tests/smoke sits below test
   - real ffmpeg/mkvmerge -> `_ffmpeg_available()` / `_mkvmerge_available()` skip gates
 
 What this file adds:
-  - `smoke_local_root` : patches main.LOCAL_ROOT + mvcommon.LOCAL_ROOT to the sandbox
-    Media tree so the two whole-tree WALKERS (cmd_scan_unprepped, cmd_recover --scan)
-    walk the temp dir instead of the real C:\Media. The `sandbox` fixture redirects the
-    three LIBRARY_* constants but NOT LOCAL_ROOT, so without this the walkers would
-    read real C:\Media\{Movies,Series,Anime}. Hard-guards against C:\Media.
+  - `smoke_local_root` : thin confirm that the `sandbox` fixture has redirected
+    LOCAL_ROOT (BOTH mvcommon.LOCAL_ROOT and main.LOCAL_ROOT) into the sandbox Media
+    tree. As of B1a the `sandbox` fixture ITSELF dual-patches LOCAL_ROOT (same
+    import-by-value binding hazard as LIBRARY_*), so the two whole-tree WALKERS
+    (cmd_scan_unprepped, cmd_recover --scan) already walk the temp dir, never real
+    C:\Media. This fixture no longer patches anything — it just asserts the redirect
+    is in place and yields the sandbox Media root, so existing smoke signatures that
+    request it keep working and the structural guarantee is double-checked.
   - `make_video`     : factory writing a tiny but >DUMMY_MAX_BYTES .mkv (so cmd_check /
     cmd_prep / cmd_restore treat it as REAL media, not an early-skipped dummy).
   - `seed_split_parts`: pre-seeds a _parts/ chunk dir + writes split_info into a library
@@ -43,23 +46,26 @@ _REAL_MEDIA_BYTES = b"SMOKE-REAL-MEDIA-MASTER\n" * 11000  # ~264 KB > 200_000
 
 
 @pytest.fixture()
-def smoke_local_root(sandbox, monkeypatch):
-    """Redirect LOCAL_ROOT (BOTH bindings) to the sandbox Media tree.
+def smoke_local_root(sandbox):
+    """Confirm the `sandbox` fixture has redirected LOCAL_ROOT into the temp tree.
 
-    cmd_scan_unprepped (main.py:2459-2461) and cmd_recover(scan=True) (main.py:738)
-    build their walk roots from LOCAL_ROOT/{Movies,Series,Anime}. The sandbox fixture
-    only patches LIBRARY_*, so those walkers would otherwise read the real C:\\Media.
-    Like the LIBRARY_* dual-patch (the IMP-A1 binding hazard), LOCAL_ROOT is imported
-    by value into main, so patch BOTH mvcommon.LOCAL_ROOT and main.LOCAL_ROOT.
-
-    sandbox["media_dir"] is tmp/Media/Movies/TestMovie, so its parent.parent is the
-    tmp Media root. Yields that Path (already created by the sandbox fixture).
+    The LOCAL_ROOT dual-patch now lives in the `sandbox` fixture itself (B1a): it
+    points BOTH mvcommon.LOCAL_ROOT and main.LOCAL_ROOT at tmp_path/"Media" so the
+    two whole-tree WALKERS — cmd_scan_unprepped (main.py:2459-2461) and
+    cmd_recover(scan=True) (main.py:738) — walk the sandbox tree, never real
+    C:\\Media. This fixture is therefore no longer a patcher; it just verifies the
+    redirect is structurally in place (both bindings, no C:\\Media) and yields the
+    sandbox Media root, so smoke tests that already list `smoke_local_root` keep
+    working unchanged. New tests can rely on `sandbox` alone.
     """
-    media_root = sandbox["media_dir"].parent.parent  # tmp_path / "Media"
+    media_root = sandbox["local_root"]  # tmp_path / "Media", set + guarded by sandbox
+    # Belt-and-suspenders: the redirect must be live on BOTH import-by-value bindings.
+    assert str(media_root) == str(mvcommon.LOCAL_ROOT) == str(main.LOCAL_ROOT), (
+        "sandbox must have redirected LOCAL_ROOT on both mvcommon and main bindings; "
+        f"got mvcommon={mvcommon.LOCAL_ROOT!r} main={main.LOCAL_ROOT!r} want={media_root!r}"
+    )
     assert "C:\\Media" not in str(media_root), \
-        f"Safety check failed: smoke LOCAL_ROOT still points at real media: {media_root}"
-    monkeypatch.setattr(mvcommon, "LOCAL_ROOT", str(media_root))
-    monkeypatch.setattr(main, "LOCAL_ROOT", str(media_root))
+        f"Safety check failed: LOCAL_ROOT still points at real media: {media_root}"
     yield media_root
 
 

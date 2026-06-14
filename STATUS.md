@@ -658,6 +658,19 @@ Verification: File edited; C16->X1 and C16->S3 edges present and intact. No synt
 
 ---
 
+## Step 4 — Create tools/notify_toast.py — dependency-free Windows toast [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `tools/notify_toast.py` (NEW), `tools/__init__.py` (NEW — empty, required for `import tools.notify_toast` to resolve from repo root)
+- Outcome: Implemented `send_toast(title, message) -> bool` in ~55 lines. The function builds a PowerShell `-Command` string using the WinRT `Windows.UI.Notifications.ToastNotificationManager` pattern (no BurntToast, no pip dependency), invokes it via `subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ...], capture_output=True, timeout=20)`, and returns `True` on returncode 0. No-op-safe in all failure modes: returns `False` (never raises) when `sys.platform != "win32"`, when PowerShell is missing (`FileNotFoundError`), or when the subprocess times out or errors. Input sanitization collapses `\r`/`\n` to spaces and escapes single quotes (`'` → `''`) so neither can break the `-Command` string or inject code. Uses the built-in PowerShell AppId `{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe` so the toast surfaces. Added an empty `tools/__init__.py` (step 8 will confirm it exists; idempotent). Module-level structure: docstring, `import subprocess`, `import sys`, `send_toast` function, trivial `__main__` block.
+- Key decisions: (1) Built the `PS_SCRIPT` as a single Python string using Python f-string interpolation of `safe_title`/`safe_message` into the XML `<text>` nodes — the XML stays on one line inside the PowerShell invocation per design guidance. (2) Broad `except Exception` after `FileNotFoundError` covers `subprocess.TimeoutExpired`, `OSError`, and any other failure — all return `False`. (3) Added empty `tools/__init__.py` in this step (not step 8) because the acceptance check `import tools.notify_toast` requires it now; step 8 will just confirm it exists.
+- Verification:
+  - `python -c "import tools.notify_toast"` → no output, no traceback (clean import).
+  - `python -c "import tools.notify_toast as t; result = t.send_toast('MediaVault test', 'step 4 verify'); print(type(result).__name__, result)"` → `bool True` (a toast briefly appeared on the Windows desktop; returncode 0).
+
+---
+
 ## Step 2 — Wire the detector into trigger_download + cmd_fetch_route (IMP-C6 early-abort) + single-flight lock [status: done]
 - Executor: executor-opus
 - Model: opus

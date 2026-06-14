@@ -129,7 +129,7 @@
 - Effort estimate: small
 - Risk: low — adds early-exit detection; trigger behavior on healthy sessions unchanged.
 - If skipped: the single most likely silent killer of unattended fetches stays silent. Scenario: cookies expire while you're on vacation; every couch fetch that week "times out" after 5+ minutes with no explanation until someone checks the PC.
-- Status: pending
+- Status: done (satisfied by IMP-C17 — shared mainfetch.SessionExpiredError + check_session_alive; trigger_download/cmd_fetch_route abort a logged-out fetch fast with a remediation message + a 3-consecutive-zero backstop; tests in tests/test_session_detector.py)
 
 ---
 
@@ -303,3 +303,41 @@
 - Risk: low — additive profile + a routing branch; movies/series routing unchanged. Verify the new profile is logged in (pairs with IMP-C6 session detection so a logged-out anime profile fails loudly, not silently).
 - If skipped: the first attempt to restore an archived anime title silently fails (0 thumbnails on the wrong account) and looks like a session problem — a confusing dead-end for a whole third of the library, and it blocks the couch-vault flow for anime entirely.
 - Status: done (fix/anime_fetch_profile — added 3rd Chrome profile `anime` → ChromeProfile_Anime; id-prefix→profile routing extracted to data-driven mainfetch.ID_PREFIX_PROFILE + pure profile_for_id(); ani-* now drives anime account, tv-* series, movies movies; external-config sourcing deferred to IMP-A5; unit tests in tests/test_anime_fetch_routing.py + smoke coverage in test_anime_fetch_routing_profile_selection)
+
+---
+
+## IMP-C17: Fetch-session keep-alive + shared logged-out detector (prevents the silent logged-out dead-end)
+
+- Category: other
+- Priority: high
+- Files: `mainfetch.py`, `mvcommon.py`, `tools/warm_profiles.py`, `tools/notify_toast.py`, `tools/mediavault_warm_profiles.xml`
+- Current behavior: When a Chrome profile's Google session expires during an idle period between fetches, the next fetch silently fails (0 thumbnails, looks like session expiry). The user doesn't learn the session is dead until attempting a manual fetch or waiting for a scheduled one. Meanwhile, time and bandwidth are wasted.
+- Proposed change:
+  - Hybrid approach: (1) shared `SessionExpiredError` + `check_session_alive()` in mainfetch.py reused by both the live fetch path (IMP-C6 fast-fail + remediation) and the keep-alive runner; (2) a daily idle-gated Selenium keep-alive `tools/warm_profiles.py` (per-profile OK/LOGGED_OUT/LAUNCH_FAIL → console + `~/.mediavault/logs/warm_profiles.log` + Windows toast via `tools/notify_toast.py` + non-zero exit), registered via `tools/mediavault_warm_profiles.xml` (Task Scheduler, daily 03:00, run-only-if-idle); (3) a single-flight `mvcommon.fetch_session_lock` so the warm-up never collides with a live fetch on CDP port 9222. One-time profile-hardening checklist in README.
+- Rationale: Silent session-expiry between fetches is a failure mode that wasted the most user time in initial testing — the warm-up catches it fast, and the shared check routine lets the live fetch abort early with a clear remediation. Together they ensure a logged-out session is detected within hours, not days.
+- Goal: Sessions stay warm or get detected fast. No 90-minute fetch waits. Unattended multi-day pipelines no longer silently fail at the session.
+- Effort estimate: medium
+- Risk: low — a daemon/scheduler component that touches the session but does not mutate the library. The shared `check_session_alive` routine undergoes the same testing as IMP-C6, and the lock mechanism is proven in prior work (atomic commit patterns).
+- If skipped: unattended fetch pipelines (e.g., couch-vault daemon) will silently fail on session expiry and require manual intervention to diagnose (the C6 fix only helps live fetches, not idle detection). One logged-out profile can orphan days of scheduled fetches.
+- Note: satisfies IMP-C6 session-expiry detection (shares the check routine with it); the ban-sentinel (`IMP-X5`) stays out of scope.
+- Status: done (feature/fetch_session_keepalive — shared SessionExpiredError + check_session_alive in mainfetch.py reused by both live fetch (IMP-C6) and keep-alive runner; daily Selenium warm_profiles.py (per-profile status log + Windows toast); Task Scheduler registration via mediavault_warm_profiles.xml; single-flight fetch_session_lock in mvcommon.py; tests in tests/test_session_detector.py, tests/test_warm_profiles.py, tests/test_notify_toast.py + smoke test_fetch_route_logged_out_aborts)
+
+---
+
+## IMP-C18: Episode-range filter mis-parses season-glued anime IDs (sSSEE) → range fetch/restore silently filters to 0
+
+- Category: bug
+- Priority: high (Band 0 — silent breakage; reports success while doing nothing)
+- Files: `mainfetch.py` — `resolve_targets` (fetch range filter, the `[eE](\d+)$` → `x(\d+)$` → `(\d+)$` ladder); `main.py` — the batch-restore range filter (~line 2393-2403). A CORRECT reference implementation already exists at `main.py` (~line 2705) which strips the base id first. Found 2026-06-14 via `python main.py fetch_restore ani-ja-2013-kurokosbasketball-s02 episodes 2-3`.
+- Current behavior / WHEN IT OCCURS: For anime season-maps whose child IDs glue the season and episode together with NO `e`/`x` separator — e.g. `ani-ja-2013-kurokosbasketball-s0202` = season 02 + episode 02 — the range filter's fallback regex `(\d+(?:\.\d+)?)$` captures the WHOLE trailing run of digits (`0202` → **202**), i.e. the season digits glued to the episode, instead of just the episode (`2`). So `… episodes 2-3` compares 201 / 202 / 203 … against the range [2, 3], matches NONE, prints "🎯 Filtered to 0 episodes" → "❌ No valid targets found", the restore phase likewise prints "Filtered to 0 items", and the run still reports "✅✅✅ FETCH & RESTORE COMPLETE." with 0 files — a misleading silent success. Triggers on ANY `sSSEE`-style anime season whenever an `episodes <range>` is supplied to fetch / fetch_restore / batch restore. NOT affected: single-id fetches (`…-s0202` directly), whole-season fetches (no range), and TV/anime IDs that use an `e`/`x` separator (the first two regexes match those correctly). Verified 2026-06-14: naive filter `'2-3'` → `[]`; `'202-203'` → `[s0202, s0203]`; base-stripped leftover for `s0202` = `'02'` (parses correctly to episode 2).
+- Proposed change:
+  - Make both broken filters season-aware by STRIPPING the base/season id before reading the episode number — exactly the approach already working at `main.py` (~line 2705): `ep_str = mid.replace(base_id, "")` then `re.search(r'^[eExXsS]?(\d+(?:\.\d+)?)$', ep_str)`. For the fetch path the base id is the season-map `manual_id` (in scope in `resolve_targets`); for the batch-restore path the group/season id is already in scope. Then `…-s0202`.replace(`…-s02`) → `02` → episode 2, and `episodes 2-3` works as the user expects.
+  - Keep the existing `eNN`/`xNN` handling for separator-style IDs (they already parse correctly).
+  - Factor the episode-number extraction into ONE shared helper (e.g. `mvcommon.episode_num_from_id(child_id, base_id)` or a `mainfetch`/`main` shared util) used by ALL range-filter sites (fetch + batch restore + the existing main.py:2705 site) so the three copies can't drift again.
+- Rationale: A user typing the obvious `episodes 2-3` silently gets nothing AND a success message — the worst kind of bug (wrong result, no error, no exit code). It affects a whole class of anime seasons (every `sSSEE` season), and the same regex is duplicated across fetch + restore so both halves of the couch flow are broken in lockstep.
+- Goal: `fetch` / `fetch_restore` / batch restore with `episodes 2-3` on an `sSSEE` anime season selects EXACTLY episodes 2 and 3; a regression test pins the `ani-…-s0202` ID shape (and a `…s0216.5` half-episode); all existing TV/`eNN` ranges still pass.
+- Effort estimate: small (one shared extractor + 2-3 call-site swaps + a unit/smoke test).
+- Risk: low — it narrows the extraction; separator-style IDs are unchanged. Cross-command smoke gate (`tests/smoke`) must stay green; add a case covering BOTH `sSSEE` and `…eNN` so the two formats can't regress.
+- Workaround until fixed: fetch per-episode by full child id (`python main.py fetch_restore ani-ja-2013-kurokosbasketball-s0202`), or use the glued numbers as the range (`episodes 202-203`) — the latter RELIES on the bug and will stop working once it is fixed.
+- If skipped: every range-based anime season fetch/restore for the `sSSEE` ID format silently no-ops while reporting success — users believe episodes were fetched/restored when nothing happened, and only notice later when the files are missing.
+- Status: pending

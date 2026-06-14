@@ -4,6 +4,7 @@ import subprocess
 import shutil
 import time
 import re
+import urllib.parse
 from datetime import datetime
 # --- SELENIUM IMPORTS ---
 try:
@@ -25,7 +26,7 @@ except ImportError:
 # truth imported by both entry points). load_library is now the loud/strict
 # version (sys.exit(1) on a corrupt library) — mainfetch's old silent-zero-
 # entries behavior is intentionally removed.
-from mvcommon import RESTORE_DIR_NAME, load_library, calculate_file_hash
+from mvcommon import RESTORE_DIR_NAME, load_library, calculate_file_hash, fetch_session_lock
 
 # --- AUTOMATION CONFIG ---
 CHROME_PROFILES = {
@@ -89,6 +90,41 @@ def init_driver(profile_key="movies"):
         return None
 
 
+# The only signed-in host for the Photos web app. Google redirects an expired
+# session to accounts.google.com, so a current_url that is not on photos.google.com
+# means the profile is logged out.
+PHOTOS_URL = "https://photos.google.com"
+
+
+class SessionExpiredError(Exception):
+    pass
+
+
+def check_session_alive(driver, profile_key=None):
+    """Side-effect-free login check: inspect driver.current_url (the CALLER must
+    have navigated to PHOTOS_URL already — this does NOT call driver.get).
+
+    Returns True if still on photos.google.com (www./locale subpaths tolerated).
+    Raises SessionExpiredError if redirected to accounts.google.com or anywhere
+    that is not a photos.google.com host. If reading current_url raises (a genuine
+    Selenium fault), returns True so the existing retry/handle paths deal with it —
+    the detector must not invent a logged-out failure from a browser glitch.
+    """
+    try:
+        current_url = driver.current_url
+    except Exception:
+        return True
+
+    host = (urllib.parse.urlparse(current_url).hostname or "").lower()
+    if host.endswith("photos.google.com"):
+        return True
+    if host == "accounts.google.com" or "photos.google.com" not in host:
+        raise SessionExpiredError(
+            f"profile {profile_key!r} appears logged out (redirected to {host})"
+        )
+    return True
+
+
 def trigger_download(driver, query, index=0):
     """
     RAPID MODE: Navigates, Searches, Clicks, Triggers Download, Exits Player.
@@ -102,8 +138,9 @@ def trigger_download(driver, query, index=0):
         """One navigate→search→click→Shift+D→Esc pass. Returns True if the
         trigger was sent, False on a 0-thumbnail miss / index out of range.
         May raise on a Selenium fault (caught/retried by the caller below)."""
-        driver.get("https://photos.google.com")
+        driver.get(PHOTOS_URL)
         wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        check_session_alive(driver)
         time.sleep(1.5)
 
         actions = webdriver.ActionChains(driver)
@@ -159,24 +196,44 @@ def trigger_download(driver, query, index=0):
     # [IMP-C2] Retry the whole attempt ONCE after ~5s when the first pass either
     # returns False (0 thumbnails / index out of range) OR raises a Selenium
     # fault. The second pass's result is final; a second-attempt failure/error
-    # yields False, preserving today's failure signal exactly (the function
-    # still returns True/False with the same meaning). This explicit one-retry
-    # block is intentionally NOT routed through mvcommon.retry(), which only
-    # treats exceptions (not a False return) as retryable (Resolved Decision 5).
+    # yields False, preserving today's failure signal exactly. This explicit
+    # one-retry block is intentionally NOT routed through mvcommon.retry(), which
+    # only treats exceptions (not a False return) as retryable (Resolved Dec. 5).
+    # [IMP-C6] A SessionExpiredError (logged-out) is NEVER retried/swallowed —
+    # the dedicated except arms re-raise it past the broad Exception arms so it
+    # fails fast for cmd_fetch_route to handle.
+    result = False
     try:
-        first = _attempt()
-        if first:
-            return True
+        if _attempt():
+            result = True
+    except SessionExpiredError:
+        raise
     except Exception as e:
         print(f"     ⚠️ Error: {e}")
 
-    print("⏳ Retry 2/2 after 5s (no results / error)…")
-    time.sleep(5)
-    try:
-        return _attempt()
-    except Exception as e:
-        print(f"     ⚠️ Error: {e}")
-        return False
+    if not result:
+        print("⏳ Retry 2/2 after 5s (no results / error)…")
+        time.sleep(5)
+        try:
+            result = bool(_attempt())
+        except SessionExpiredError:
+            raise
+        except Exception as e:
+            print(f"     ⚠️ Error: {e}")
+            result = False
+
+    # [IMP-C6] backstop: 3 consecutive 0-thumbnail results on the same driver
+    # (batch) => the session is logged in but search is dead => fail loudly.
+    if result:
+        setattr(driver, "_mv_zero_streak", 0)
+    else:
+        streak = getattr(driver, "_mv_zero_streak", 0) + 1
+        setattr(driver, "_mv_zero_streak", streak)
+        if streak >= 3:
+            raise SessionExpiredError(
+                "3 consecutive 0-thumbnail results — session likely logged out or search is dead"
+            )
+    return result
 
 
 def wait_for_download(filename_snippet, timeout=300):
@@ -461,26 +518,37 @@ def cmd_fetch_route(manual_id, ep_range=None):
 
     print(f"   > 📋 Processing {len(targets)} items...")
 
-    # Init Selenium ONCE for the whole batch
-    driver = None
-    try:
-        # Pass the selected profile
-        driver = init_driver(active_profile)
-        if not driver: return
+    # [IMP-C17] Single-flight: only one interactive fetch batch may drive the
+    # browser at a time (blocking=True polls then reclaims a stale/contended
+    # lock — it never hard-blocks). Placed AFTER the no-targets guard so an
+    # empty batch never touches the lock file.
+    with fetch_session_lock(blocking=True):
+        # Init Selenium ONCE for the whole batch
+        driver = None
+        try:
+            # Pass the selected profile
+            driver = init_driver(active_profile)
+            if not driver: return
 
-        for entry in targets:
-            fetch_single_entry(driver, entry)
+            for entry in targets:
+                fetch_single_entry(driver, entry)
 
-    except KeyboardInterrupt:
-        print("\n🛑 Stopped by user.")
-    except Exception as e:
-        print(f"\n❌ Critical Error: {e}")
-    finally:
-        if driver:
-            try:
-                driver.quit()
-            except:
-                pass
+        except SessionExpiredError:
+            # [IMP-C6] One logged-out detection aborts the whole batch loudly.
+            print(f"❌ Profile '{active_profile}' is logged out. Open Chrome with "
+                  f"--user-data-dir={CHROME_PROFILES[active_profile]}, sign in to "
+                  f"photos.google.com, then re-run.")
+            return
+        except KeyboardInterrupt:
+            print("\n🛑 Stopped by user.")
+        except Exception as e:
+            print(f"\n❌ Critical Error: {e}")
+        finally:
+            if driver:
+                try:
+                    driver.quit()
+                except:
+                    pass
 
     print("\n✅ Batch Processing Complete.")
 

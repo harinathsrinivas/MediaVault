@@ -6,6 +6,8 @@ import re
 import tempfile
 import time
 import random
+import contextlib
+import errno
 from subprocess import SubprocessError
 
 # ==========================================
@@ -26,6 +28,13 @@ SPLIT_DIR_NAME = "_parts"  # Temp folder for chunks during push
 CHECKSUM_DIR_NAME = "checksums"  # Permanent local folder for parity hashes
 RESTORE_DIR_NAME = "restore"  # Folder where you dump downloaded files for restore
 VIDEO_EXTENSIONS = ('.mkv', '.mp4', '.avi', '.mov')
+
+# Per-user state directory (locks, logs). Kept in the home dir so it survives
+# regardless of the working directory and never collides with the media tree.
+MV_STATE_DIR = os.path.join(os.path.expanduser("~"), ".mediavault")
+MV_LOCK_DIR = os.path.join(MV_STATE_DIR, "locks")
+MV_LOG_DIR = os.path.join(MV_STATE_DIR, "logs")
+FETCH_SESSION_LOCK = os.path.join(MV_LOCK_DIR, "fetch_session.lock")
 
 
 # ==========================================
@@ -62,6 +71,103 @@ def retry(fn, attempts=3, backoff=(1, 4, 16), jitter=1.0,
                 except Exception:
                     pass
             time.sleep(delay)
+
+
+class LockHeldError(Exception):
+    """Raised by fetch_session_lock(blocking=False) when the lock is already held."""
+    pass
+
+
+@contextlib.contextmanager
+def fetch_session_lock(blocking=True, timeout=30, stale_after=3600):
+    """Single-flight advisory lock for the interactive fetch session.
+
+    A generic cross-platform OS-file lock built on the atomic
+    ``os.O_CREAT | os.O_EXCL`` ("create only if absent") idiom — no fcntl/msvcrt
+    platform branches needed for single-flight here. The lock file lives at
+    ``FETCH_SESSION_LOCK`` and stores the holder's pid + acquisition timestamp.
+
+    Behaviour:
+      - Acquire succeeds by atomically creating the lock file.
+      - If the lock already exists but its mtime is older than ``stale_after``
+        seconds, it is treated as stale: removed and re-created (reclaim).
+      - blocking=True (the interactive-fetch path): if held, poll up to
+        ``timeout`` seconds for it to free; if it frees, acquire it; if the
+        timeout elapses, RECLAIM it (remove + create) and proceed. A blocking
+        acquire therefore NEVER hard-blocks the caller — an interactive fetch is
+        never starved (proceeding on a stale/contended lock is the chosen
+        behaviour).
+      - blocking=False: if held (and not stale), raise LockHeldError.
+      - On exit the lock file is always best-effort removed (a missing file
+        never raises).
+    """
+    os.makedirs(MV_LOCK_DIR, exist_ok=True)
+
+    def _write_lock(fd):
+        try:
+            os.write(fd, f"{os.getpid()} {time.time()}\n".encode())
+        finally:
+            os.close(fd)
+
+    def _try_create():
+        """Atomically create the lock file; return True on success, False on collision."""
+        try:
+            fd = os.open(FETCH_SESSION_LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except (FileExistsError, OSError) as e:
+            if isinstance(e, FileExistsError) or getattr(e, "errno", None) == errno.EEXIST:
+                return False
+            raise
+        _write_lock(fd)
+        return True
+
+    def _is_stale():
+        try:
+            return (time.time() - os.path.getmtime(FETCH_SESSION_LOCK)) > stale_after
+        except OSError:
+            # File vanished between checks -> not stale; let the caller retry create.
+            return False
+
+    def _reclaim():
+        """Remove an existing lock and recreate it; force the create to succeed."""
+        try:
+            os.remove(FETCH_SESSION_LOCK)
+        except OSError:
+            pass
+        if not _try_create():
+            # A racing creator slipped in; clear it and take the lock unconditionally.
+            try:
+                os.remove(FETCH_SESSION_LOCK)
+            except OSError:
+                pass
+            fd = os.open(FETCH_SESSION_LOCK, os.O_CREAT | os.O_WRONLY | os.O_TRUNC)
+            _write_lock(fd)
+
+    if not _try_create():
+        # Collision. A stale lock is reclaimable regardless of blocking mode.
+        if _is_stale():
+            _reclaim()
+        elif blocking:
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                time.sleep(0.1)
+                if _try_create():
+                    break
+                if _is_stale():
+                    _reclaim()
+                    break
+            else:
+                # Timed out and still held -> reclaim and proceed (never starve).
+                _reclaim()
+        else:
+            raise LockHeldError(f"fetch session lock is held: {FETCH_SESSION_LOCK}")
+
+    try:
+        yield
+    finally:
+        try:
+            os.remove(FETCH_SESSION_LOCK)
+        except OSError:
+            pass
 
 
 def load_library():

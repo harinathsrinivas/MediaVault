@@ -614,3 +614,205 @@ Verification: File edited; C16->X1 and C16->S3 edges present and intact. No synt
 - Outcome: Replaced the draft `docs/feature-anime-fetch-profile/PLAN.md` with the finalized version documenting all 10 completed steps, resolved Open Decisions (OD-1 to OD-4), bug summary, files changed, verification results, and next task (IMP-A10). Created `docs/feature-anime-fetch-profile/DECISIONS.md` recording the four decisions (OD-1: data-driven constant now, config later via IMP-A5; OD-2: rename "default" to "movies" for consistency; OD-3: confirmed anime profile path + user one-time login; OD-4: live end-to-end test with all 3 profiles verified). Both files now serve as permanent archived artifacts of the IMP-C16 task completion.
 - Key decisions: Overwrote PLAN.md with finalized version (all 10 steps checked, verification results confirmed). Created DECISIONS.md as a per-decision summary table documenting the option chosen and rationale for each OD.
 - Verification: Both files written successfully; PLAN.md reflects complete task status with all steps marked done and verification results listed; DECISIONS.md captures all four decisions with clear rationale per the OD format.
+
+---
+
+# Execution Log — Fetch-session keep-alive + shared Google-Photos logged-out detector (IMP-C17, satisfies IMP-C6)
+
+## Step 1 — Add the shared logged-out detector to mainfetch.py
+- Status: done
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor
+- Files changed: `mainfetch.py`
+- Outcome: Added `import urllib.parse` to the stdlib import group (line 7), OUTSIDE the selenium `try/except ImportError` block so the new code never depends on selenium. Added module constant `PHOTOS_URL = "https://photos.google.com"`, `class SessionExpiredError(Exception): pass`, and `def check_session_alive(driver, profile_key=None)` — placed right after `init_driver` and before `trigger_download` (in the SELENIUM section but pure-stdlib, lines 93-125). The detector reads `driver.current_url`, parses the host with `urllib.parse.urlparse(...).hostname`, returns `True` when the host endswith `photos.google.com` (so `www.`/locale subpaths pass), and raises `SessionExpiredError(f"profile {profile_key!r} appears logged out (redirected to {host})")` when the host is `accounts.google.com` or does not contain `photos.google.com`. If reading `current_url` raises (genuine Selenium fault) it returns `True` (does not invent a logged-out failure). It calls no `driver.get` (caller navigates) and references no selenium symbol. Rewired the single inline literal at the `driver.get(...)` line in `trigger_download._attempt` to use `PHOTOS_URL` (the only such literal in the file — verified by grep). Detector NOT yet wired into `trigger_download`/`cmd_fetch_route` and no single-flight lock added — those are steps 2/3.
+- Key decisions: (1) Used `urlparse(...).hostname` (not `.netloc`) and `.lower()` so any port/userinfo is stripped and matching is case-insensitive; coerced a `None` hostname to `""` so an unparseable URL falls through to the "does not contain photos.google.com" raise rather than crashing. (2) Kept BOTH the explicit `host == "accounts.google.com"` check and the `"photos.google.com" not in host` check even though the latter subsumes the former — the explicit accounts check documents intent and guards against a future loosening of the contains-check. (3) Matched on host suffix (`endswith`) per the spec's "tolerate www./locale subpaths — not exact equality" requirement. Considered but rejected adding any selenium-typed exception catch — `except Exception` is correct and keeps the function selenium-free.
+- Verification:
+  - `python -c "import mainfetch; print(callable(mainfetch.check_session_alive)); print(issubclass(mainfetch.SessionExpiredError, Exception)); print(mainfetch.PHOTOS_URL)"` → `True` / `True` / `https://photos.google.com`.
+  - `python -m pytest tests/test_anime_fetch_routing.py -q` → **12 passed in 0.64s** (stays green).
+  - Smoke gate (mainfetch is a core file): `python -m pytest tests/smoke -q` → **51 passed in 14.93s**.
+  - Behavioral check with a fake driver covering all branches: signed-in host → True; `www.photos.google.com` → True; `current_url` raising → True; `accounts.google.com` redirect → `SessionExpiredError("profile 'anime' appears logged out (redirected to accounts.google.com)")`; unrelated host `example.com` → `SessionExpiredError`. All as specified.
+
+---
+
+## Step 3 — Add the single-flight lock helper + state-dir constants to mvcommon.py
+- Status: done
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor
+- Files changed: `mvcommon.py` (only)
+- Outcome: Purely additive, stdlib-only change to `mvcommon.py`. (1) Added `import contextlib` and `import errno` to the import group (lines 9-10), leaving the existing `os/json/sys/hashlib/re/tempfile/time/random` + `from subprocess import SubprocessError` intact. (2) Appended four module constants at the end of the SHARED CONFIGURATION block (after `VIDEO_EXTENSIONS`): `MV_STATE_DIR = os.path.join(os.path.expanduser("~"), ".mediavault")`, `MV_LOCK_DIR = os.path.join(MV_STATE_DIR, "locks")`, `MV_LOG_DIR = os.path.join(MV_STATE_DIR, "logs")`, `FETCH_SESSION_LOCK = os.path.join(MV_LOCK_DIR, "fetch_session.lock")`. (3) Added `class LockHeldError(Exception)` and the `@contextlib.contextmanager def fetch_session_lock(blocking=True, timeout=30, stale_after=3600)` in the UTILITIES section immediately after the existing `retry` function (before `load_library`). No existing symbol was modified; `mvcommon` still imports zero of main/mainfetch (no cycle). It is a generic cross-platform OS-file advisory lock built on the atomic `os.O_CREAT|os.O_EXCL` create-exclusive idiom — NO `fcntl`/`msvcrt` platform branches, per the step's constraint.
+- Key decisions:
+  - **Factored the atomic create into a local `_try_create()` helper** returning `True`/`False` (False on EEXIST) and reused it across the stale-reclaim, non-blocking, and polling branches — one correct create primitive instead of three copies. The collision detection is `isinstance(e, FileExistsError) or getattr(e, "errno", None) == errno.EEXIST` so it catches BOTH the modern `FileExistsError` and a raw `OSError(EEXIST)` exactly as the step specified; any other `OSError` (e.g. permission) re-raises rather than being silently swallowed as a collision.
+  - **`fd` is closed in a `finally` inside `_write_lock`** so the descriptor never leaks even if `os.write` fails.
+  - **A blocking acquire NEVER hard-blocks (the load-bearing contract).** On collision: a STALE lock (mtime older than `stale_after`) is reclaimed regardless of mode; otherwise blocking polls every 0.1s up to `timeout`, taking the lock the instant it frees (or if it goes stale mid-wait); on timeout it RECLAIMS (remove + create) and proceeds. `_reclaim()` is hardened against a racing `O_EXCL` creator: if the post-remove `_try_create()` still collides it force-removes and does a non-exclusive `O_CREAT|O_TRUNC` create so the blocking path can never raise or spin. This realizes the plan's "interactive fetch is never starved; proceeding on a stale/contended lock is the chosen behavior."
+  - **Non-blocking + held + not-stale → `LockHeldError`** (message includes the lock path). Non-blocking still honors stale-reclaim first, so a crashed prior holder's stale lock does not wrongly block a non-blocking caller.
+  - **`__exit__` always best-effort removes the lock** inside `try/except OSError`, so a vanished/already-removed lock file never raises on context teardown.
+  - Did NOT add `MV_LOG_DIR` usage or any `os.makedirs` for logs — the step only asked for the constant; log-dir creation belongs to whatever later step writes a log. `fetch_session_lock` makes only `MV_LOCK_DIR`.
+- Verification:
+  - `python -c "import mvcommon; print(callable(mvcommon.fetch_session_lock)); print(issubclass(mvcommon.LockHeldError, Exception))"` → `True` / `True`.
+  - Throwaway script `_tmp_lock_check.py` (created, run, then DELETED — `ls` confirmed gone): `nested-nonblocking-raises True` (second non-blocking acquire while first held raised `LockHeldError`); `cleaned-up True` (no `fetch_session.lock` after context exit); `reacquire-ok True` (fresh non-blocking acquire succeeds post-release); `blocking-reclaims-and-proceeds True` (a blocking acquire over an already-held lock with `timeout=1` returned in <5s — reclaimed, did not hang). `ls ~/.mediavault/locks/` after the run showed `total 0` (dir created, no leftover lock file).
+  - `python -m pytest tests/test_mvcommon.py -q` → **12 passed in 0.29s** (identical to the pre-change baseline of 12 passed).
+  - Smoke gate (mvcommon is a core file): `python -m pytest tests/smoke -q` → **51 passed in 12.72s** (under the 30s budget).
+  - `git status --short` → only ` M mvcommon.py` changed by this step (surgical/additive confirmed; no other file touched before this STATUS append).
+
+---
+
+## Step 4 — Create tools/notify_toast.py — dependency-free Windows toast [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `tools/notify_toast.py` (NEW), `tools/__init__.py` (NEW — empty, required for `import tools.notify_toast` to resolve from repo root)
+- Outcome: Implemented `send_toast(title, message) -> bool` in ~55 lines. The function builds a PowerShell `-Command` string using the WinRT `Windows.UI.Notifications.ToastNotificationManager` pattern (no BurntToast, no pip dependency), invokes it via `subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ...], capture_output=True, timeout=20)`, and returns `True` on returncode 0. No-op-safe in all failure modes: returns `False` (never raises) when `sys.platform != "win32"`, when PowerShell is missing (`FileNotFoundError`), or when the subprocess times out or errors. Input sanitization collapses `\r`/`\n` to spaces and escapes single quotes (`'` → `''`) so neither can break the `-Command` string or inject code. Uses the built-in PowerShell AppId `{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe` so the toast surfaces. Added an empty `tools/__init__.py` (step 8 will confirm it exists; idempotent). Module-level structure: docstring, `import subprocess`, `import sys`, `send_toast` function, trivial `__main__` block.
+- Key decisions: (1) Built the `PS_SCRIPT` as a single Python string using Python f-string interpolation of `safe_title`/`safe_message` into the XML `<text>` nodes — the XML stays on one line inside the PowerShell invocation per design guidance. (2) Broad `except Exception` after `FileNotFoundError` covers `subprocess.TimeoutExpired`, `OSError`, and any other failure — all return `False`. (3) Added empty `tools/__init__.py` in this step (not step 8) because the acceptance check `import tools.notify_toast` requires it now; step 8 will just confirm it exists.
+- Verification:
+  - `python -c "import tools.notify_toast"` → no output, no traceback (clean import).
+  - `python -c "import tools.notify_toast as t; result = t.send_toast('MediaVault test', 'step 4 verify'); print(type(result).__name__, result)"` → `bool True` (a toast briefly appeared on the Windows desktop; returncode 0).
+
+---
+
+## Step 2 — Wire the detector into trigger_download + cmd_fetch_route (IMP-C6 early-abort) + single-flight lock [status: done]
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor
+- Files changed: `mainfetch.py` (only)
+- Outcome: Four surgical edits to `mainfetch.py` wiring the step-1 detector and step-3 lock into the live fetch path (IMP-C6 early-abort). (a) Extended the existing `from mvcommon import ...` to also import `fetch_session_lock` (line 29). (b) Inserted `check_session_alive(driver)` in `trigger_download._attempt()` immediately after the body-wait line (line 145), before the `time.sleep(1.5)`. (c) Rewrote the C2 one-retry wrapper at the bottom of `trigger_download` (lines ~196-236): it now accumulates a `result` flag instead of early-returning, and each of the two `_attempt()` calls is wrapped with `except SessionExpiredError: raise` placed BEFORE the broad `except Exception` arm — so a logged-out session fails fast and is NEVER degraded to a `False` by the retry arms. Added the IMP-C6 driver-scoped consecutive-zero backstop: on a `True` result `driver._mv_zero_streak` is reset to 0; on a `False` result it increments, and the 3rd consecutive zero on the same driver raises `SessionExpiredError` (logged-in-but-search-dead case). (d) In `cmd_fetch_route` (lines ~507-547), wrapped the whole browser batch (`driver = None` through the `finally`) in `with fetch_session_lock(blocking=True):`, placed AFTER the `if not targets: return` guard so an empty batch never touches the lock; added an `except SessionExpiredError` arm BEFORE the existing `KeyboardInterrupt`/`Exception` arms that prints the exact remediation message (`❌ Profile '{active_profile}' is logged out. Open Chrome with --user-data-dir=... , sign in to photos.google.com, then re-run.`) and `return`s to abort (still runs the `finally` driver.quit and releases the lock via the with-block; correctly skips the trailing "Batch Processing Complete").
+- Key decisions:
+  - **Driver-scoped backstop counter (an attribute on `driver`), not a function/module-level counter.** Storing the consecutive-zero streak as `driver._mv_zero_streak` makes it naturally BATCH-scoped — `cmd_fetch_route` creates exactly one driver per batch, so the streak is per-batch and per-profile, and it can never leak across calls or across tests (each test in `test_trigger_download_retry.py` uses a fresh `_FakeDriver`, so the streak starts at 0 and reaches at most 1 within a test → the `>= 3` backstop never trips). Alternative considered: a counter threaded through `cmd_fetch_route` and passed into `trigger_download` — rejected because it would change `trigger_download`'s signature (the plan forbids touching the healthy-path contract and the existing tests call it positionally) and a module-level counter would leak across tests. The attribute approach keeps `trigger_download`'s signature byte-identical.
+  - **Verified the `driver=None` concern is not reachable.** The new backstop does `setattr(driver, "_mv_zero_streak", ...)`, which would raise `AttributeError` if `driver is None`. The only test that calls `trigger_download(None, ...)` is the smoke `test_fetch_round_trip_with_mock_fetch`, but the `mock_fetch` fixture (`tests/conftest.py:356`) monkeypatches `mainfetch.trigger_download` ENTIRELY with a fake, so the real function (and thus the backstop) is never reached with a `None` driver. The only callers of the REAL `trigger_download` are in `test_trigger_download_retry.py`, all using `_FakeDriver` instances that support arbitrary attribute set/get. Confirmed by grepping every `trigger_download` reference under `tests/`.
+  - **Healthy-path contract preserved byte-for-byte.** First-attempt success → `result=True`, no "Retry 2/2" print, no 5s sleep, returns `True`. 0-then-success → one retry (prints "Retry 2/2", sleeps 5), returns `True`. 0-both → one retry, returns `False` (fresh driver streak 0→1, no raise). Exception-then-success → first non-Session exception caught, one retry, returns `True`. These match the 4 assertions in `test_trigger_download_retry.py` exactly (the `except SessionExpiredError: raise` arms are inert when `check_session_alive` does not raise — and `_FakeDriver` has no `current_url`, so `check_session_alive` hits its defensive branch and returns `True`).
+  - **Lock placement after the no-targets guard.** Put the `with fetch_session_lock(blocking=True):` AFTER `if not targets: return` (and after the `Processing N items` print) so the smoke `test_anime_fetch_routing_profile_selection` (which resolves to empty targets) returns BEFORE the lock and never creates `~/.mediavault/locks/fetch_session.lock`. This is also semantically correct — an empty batch should not contend for the single-flight lock.
+  - **Comment hygiene:** preserved the existing `# [IMP-C2]` explanatory block above the retry wrapper (lightly trimmed for width) and added a `# [IMP-C6]` note explaining the never-swallow re-raise + the backstop, per the project's IMP-code convention.
+  - No new selenium imports; `init_driver`/`fetch_single_entry`/`resolve_targets`/`build_download_queue` untouched; `SessionExpiredError`/`PHOTOS_URL`/`check_session_alive`/`CHROME_PROFILES` referenced unqualified (same module). No test files written (steps 7-9 own those). Change-gate N/A — this touches the fetch path only; no RollbackJournal/PONR/journal-format/`ENTRY_TYPE_KEYS` code is involved.
+- Verification (exact output, this machine):
+  - `python -m pytest tests/test_trigger_download_retry.py tests/test_anime_fetch_routing.py -q` → **17 passed in 0.64s** (healthy retry path + anime routing unchanged).
+  - Smoke gate (mainfetch is a core file): `python -m pytest tests/smoke -q` → **51 passed in 16.68s** (under the 30s budget). The one `cmd_fetch_route("ani-...")` smoke resolves to empty targets and returns before the lock — no lock file created.
+  - `python -m pytest -q` (full suite) → **204 passed in 38.45s** — no regressions (prior 51-test smoke + the rest all green).
+
+---
+
+## Step 5 — Create tools/warm_profiles.py (the keep-alive runner) [status: done]
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor
+- Files changed: `tools/warm_profiles.py` (NEW). No change to `mainfetch.py` / `mvcommon.py` / `tools/notify_toast.py` (all consumed as-is).
+- Outcome: Created the daily keep-alive runner exactly per the step spec (~190 lines incl. docstring). `warm_all(profile_keys=None) -> int` returns the intended PROCESS EXIT CODE. Flow: (1) acquire `fetch_session_lock(blocking=False)` around ONLY the browser loop; if it raises `LockHeldError`, print `⏭️ Live fetch in progress — skipping warm-up.`, append a `_run=SKIPPED_LOCK_HELD` log line, and `return 0`. (2) For each key (default `list(mainfetch.CHROME_PROFILES.keys())`) call `_warm_one(key)`: `mainfetch.init_driver(key)` → `None` ⇒ `LAUNCH_FAIL`; else `driver.get(mainfetch.PHOTOS_URL)`, `time.sleep(2)`, `mainfetch.check_session_alive(driver, key)` in try/except catching `mainfetch.SessionExpiredError` (⇒ `LOGGED_OUT`), success ⇒ `OK`, with `driver.quit()` ALWAYS in a guarded `finally`. (3) `_append_log(results)` writes ONE line `<ts> key=STATUS …` to `LOG_PATH` after `os.makedirs(mvcommon.MV_LOG_DIR, exist_ok=True)`, the whole write guarded so a logging failure never crashes the run. (4) any `LOGGED_OUT`/`LAUNCH_FAIL` ⇒ console summary + `send_toast("MediaVault: account needs attention", "<comma-joined failed keys> logged out — re-login required")` + `return 1`; else print `✅ All profiles healthy.` + `return 0`. `main(argv=None)` parses `--profile <key>`, VALIDATES against `mainfetch.CHROME_PROFILES` (unknown key ⇒ stderr error naming the valid keys + `sys.exit(2)`, no traceback), then `return warm_all(...)`; `if __name__ == "__main__": sys.exit(main())`.
+- Key decisions:
+  - **Lock handling = `try: with fetch_session_lock(blocking=False): <loop> except LockHeldError:` (NOT manual `__enter__`/`__exit__`).** `LockHeldError` is raised on `__enter__`, so wrapping the whole `with` in `try/except LockHeldError` is the idiomatic way to both catch the held-lock case AND scope release to the context manager. This deliberately holds the lock ONLY for the browser work — `_append_log`, the toast, and the return-code logic all run AFTER the lock is released, so a slow log/toast never extends the single-flight window. Alternative considered: manual `lock.__enter__()` in a try and a separate `try/finally` for release — rejected as more error-prone (double-release / leak risk) with no benefit.
+  - **Patchable seams (step 8 depends on these — verified at runtime).** `init_driver`/`check_session_alive`/`PHOTOS_URL`/`SessionExpiredError`/`CHROME_PROFILES` are accessed QUALIFIED via the `mainfetch` module object (no `from mainfetch import ...`), so `monkeypatch.setattr(mainfetch, "init_driver", ...)` is seen by `warm_all`/`_warm_one` at call time. `send_toast`, `fetch_session_lock`, `LockHeldError` are module-level names on `tools.warm_profiles` (patch as `tools.warm_profiles.send_toast` etc.) and are called by the BARE name. `LOG_PATH` is a module-level constant referenced inside `_append_log` via a plain `open(LOG_PATH, "a")` (NOT captured as a default arg), so `monkeypatch.setattr(tools.warm_profiles, "LOG_PATH", <tmp file>)` redirects the write. Confirmed via introspection: `hasattr(w, 'send_toast'/'fetch_session_lock'/'LockHeldError'/'LOG_PATH')` all True; `not hasattr(w, 'init_driver')` and `not hasattr(w, 'check_session_alive')` (no local shadow); `w.mainfetch is mainfetch`.
+  - **Factored `_warm_one(key) -> str` and `_append_log(results)` as independently-testable helpers**, so step 8 can drive either the whole `warm_all` or a single profile. `warm_all` loops keys → `_warm_one` → aggregate into an ordered `dict` (insertion order preserved → log/console list profiles in the order warmed).
+  - **`time.sleep(2)` is `mainfetch.time`-independent — it's `tools.warm_profiles.time.sleep`**, so step 8 stubs it via `monkeypatch.setattr(tools.warm_profiles.time, "sleep", ...)` (or sets `w.time.sleep`). Used a 2s settle after `driver.get` (the live path needs Photos to finish its redirect before the URL check is meaningful; the brief wait mirrors `trigger_download`'s post-get settle).
+  - **Toast message shape follows the step-4 spec verbatim** (`"<profile(s)> logged out — re-login required"`) for ALL failed profiles including `LAUNCH_FAIL` — the spec mandates that fixed message and step 8 only asserts the message NAMES the failed profile key(s); I did not invent per-status wording (surgical / spec-faithful). The failed-key list is the comma-joined keys whose status is `LOGGED_OUT` or `LAUNCH_FAIL`.
+  - **Emoji console strings kept** (`⏭️`, `✅`, `⚠️`) to match both the mandated exact strings and the established codebase convention (19 emoji `print()`s in `mainfetch.py` alone; `notify_toast.py`'s own `__main__` prints fine). The real invocation paths (Task Scheduler `.venv\Scripts\python.exe` and the user's interactive PowerShell on this UTF-8 box) render them; a nested `python -c` sub-shell here defaulted to cp1252 and could not encode them — a harness artifact, not a code issue (re-ran the full behavioral sweep under `PYTHONIOENCODING=utf-8` to confirm).
+  - **sys.path bootstrap** inserts the repo root (`os.path.dirname(os.path.dirname(__file__))`) at `sys.path[0]` BEFORE importing `mainfetch`/`mvcommon`/`tools.notify_toast`, so `python tools/warm_profiles.py` (where `sys.path[0]` is `tools/`, not the repo root) imports the repo-root modules. The guard `if _REPO_ROOT not in sys.path` keeps `import tools.warm_profiles` (already on path under pytest) idempotent.
+  - No selenium import (all browser access via `mainfetch.init_driver`); did not touch `mainfetch.py`/`mvcommon.py`/`notify_toast.py`; did not write the unit tests (step 8). Change-gate N/A (no RollbackJournal/PONR/journal-format/`ENTRY_TYPE_KEYS` code touched).
+- Verification (exact output, this machine):
+  - Acceptance 1 — `python tools/warm_profiles.py --help` → prints `usage: warm_profiles.py [-h] [--profile KEY]` + the description + the `--profile KEY` help naming `movies, tv, anime`; **exit=0, no traceback**.
+  - Acceptance 2 — `python tools/warm_profiles.py --profile bogus` → `❌ Unknown profile 'bogus'. Valid profiles: movies, tv, anime.` (to stderr); **exit=2, no traceback**.
+  - Acceptance 3 — `python -c "import tools.warm_profiles"` → imports cleanly; `warm_all` callable; `LOG_PATH == C:\Users\harin\.mediavault\logs\warm_profiles.log`.
+  - Behavioral sweep (own verification, NOT the step-8 tests — driven with `mainfetch.init_driver`/`send_toast`/`fetch_session_lock`/`LOG_PATH` mocked, `time.sleep` no-op, log redirected to a tmp file, under `PYTHONIOENCODING=utf-8`): S1 all-healthy → rc=0, no toast, log `movies=OK tv=OK anime=OK`; S2 one logged out (anime) → rc=1, toast called once, title exactly `MediaVault: account needs attention`, message `anime logged out — re-login required`, log `anime=LOGGED_OUT`; S3 launch fail (tv) → rc=1, toast names `tv`, log `tv=LAUNCH_FAIL`; S4 lock held → rc=0, ZERO drivers launched, no toast, prints the skip line, log `_run=SKIPPED_LOCK_HELD`; S5 `warm_all(["anime"])` → rc=0, exactly one `init_driver` call for `anime`.
+  - Smoke gate — `python -m pytest tests/smoke -q` → **51 passed in 22.72s** (under the 30s budget). (Run defensively; this step adds a new `tools/` file and does not touch the three core files, but the smoke suite exercises the import surface.)
+
+---
+
+## Step 6 — Create tools/mediavault_warm_profiles.xml (Task Scheduler XML) [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `tools/mediavault_warm_profiles.xml` (NEW)
+- Outcome: Created a well-formed Task Scheduler v1.2 XML definition for the daily keep-alive warm-up. The task fires at 03:00 daily, runs only when idle (10-min wait, 1-hour timeout), uses `StartWhenAvailable=true` to catch up if the PC was off at trigger time, uses `InteractiveToken`/`LeastPrivilege` (current user, no admin — required for the desktop toast to surface), and limits execution to 30 minutes. The `<Actions>` block calls `.venv\Scripts\python.exe` with `-X utf8` flag and the full repo path to `tools\warm_profiles.py`. A header comment notes: (a) paths to adjust on a different machine, (b) why `-X utf8` is needed under a no-console scheduled context, (c) why `InteractiveToken` is required for the toast, and (d) the exact `schtasks /create` registration command.
+- Key decisions: Used `-X utf8` in `<Arguments>` (as the step specification required) rather than only in the comment. Used plain UTF-8 encoding (not UTF-16) as `schtasks /xml` accepts UTF-8. All paths are absolute and machine-specific as documented; the header comment explicitly calls out the need to adjust them on a different machine.
+- Verification: `python -c "import xml.dom.minidom; xml.dom.minidom.parse(r'tools/mediavault_warm_profiles.xml'); print('xml ok')"` → **`xml ok`** (well-formed XML confirmed). `schtasks /create` registration is the manual user step; not run here.
+
+---
+
+## Step 7 — Unit tests for the session detector + early-abort [status: done]
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor
+- Files changed: `tests/test_session_detector.py` (NEW)
+- Outcome: Added 8 Selenium-free unit tests covering the logged-out detector and its early-abort plumbing, mirroring `tests/test_trigger_download_retry.py`'s stub style (a `_FakeDriver` with a settable `current_url` + `get()` counter, `_NoOpWait`/`_NoOpActions`, and an autouse fixture that patches `mainfetch.time.sleep`→no-op, `mainfetch.WebDriverWait`→`_NoOpWait`, `mainfetch.webdriver.ActionChains`→`_NoOpActions`). Coverage maps 1:1 to the step spec: (a) `check_session_alive` returns `True` on a `photos.google.com` URL — parametrized over plain, search-subpath, and `www.`/locale `u/0/photo` variants (the `www.` case exercises the `host.endswith("photos.google.com")` branch); (b) raises `SessionExpiredError` on an `accounts.google.com` host; (c) raises on a non-photos host (`example.com`); (d) returns `True` (no raise) when reading `driver.current_url` itself raises — via a dedicated `_RaisingUrlDriver` whose `current_url` is a property that throws; (e) `trigger_download` PROPAGATES `SessionExpiredError` and does NOT retry — drives a `_FakeDriver` whose post-`get` `current_url` is the accounts redirect, asserts `pytest.raises(SessionExpiredError)` AND `driver._get_calls == 1` (proves the detector raised on the first attempt, before any retry navigation); (f) `cmd_fetch_route` catches the error once and prints the remediation — uses a `mov-…` id (→ `active_profile == "movies"`) and asserts captured stdout contains `is logged out` and `--user-data-dir={CHROME_PROFILES['movies']}`.
+- Key decisions:
+  - **No `~/.mediavault` / no real library / no `C:\Media` touched in (f).** Per the step's implementation guidance, (f) injects the logged-out condition at the `fetch_single_entry` boundary (`monkeypatch.setattr(mainfetch, "fetch_single_entry", _raise_logged_out)`) rather than driving it through the real `trigger_download` — test (e) already covers the REAL propagation, so (f) stays focused on `cmd_fetch_route`'s `except SessionExpiredError` arm. `resolve_targets` is stubbed to one synthetic entry (no `load_library`/`C:\Media`), `init_driver` returns a tiny `_FakeRouteDriver` with a no-op `quit()` (so the `finally: driver.quit()` arm doesn't `AttributeError` on a bare `object()`), and CRITICALLY `fetch_session_lock` is stubbed to `contextlib.nullcontext()` so no `fetch_session.lock` is ever created. All four patches target the `mainfetch` module namespace, which is exactly where `cmd_fetch_route` looks them up.
+  - **(d) uses a separate `_RaisingUrlDriver` class** instead of trying to make `_FakeDriver.current_url` raise, because the latter is a plain settable attribute used by the other tests; a property-based raiser is the cleanest way to simulate the Selenium fault on read.
+  - **(a) is parametrized** to fold the three photos-host variants into one test while still exercising both the `endswith` host match and a non-root subpath; kept the bare `www.`-prefixed host to prove the `endswith` (not exact-equality) check.
+  - Did NOT modify `mainfetch.py`/`mvcommon.py`/any non-test file; no network/browser calls; no `ENTRY_TYPE_KEYS`/rollback code touched (change-gate N/A). Did not run git (orchestrator commits).
+- Verification (exact output, this machine):
+  - Acceptance — `python -m pytest tests/test_session_detector.py -q` → **`8 passed in 1.33s`**.
+  - Sibling regression — `python -m pytest tests/test_trigger_download_retry.py -q` → **`5 passed in 1.84s`** (no regression in the file this one mirrors).
+  - Full suite — `python -m pytest -q` → **`212 passed in 48.08s`**.
+  - Lock-leak check — `ls -la ~/.mediavault/locks/` before and after the run: directory remains **empty** (no `fetch_session.lock` left behind; the (f) `fetch_session_lock` stub held).
+  - Smoke gate not required: this step adds only a new test file and does not touch `main.py`/`mainfetch.py`/`mvcommon.py`.
+
+---
+
+## Step 9 — Unit tests for tools/notify_toast.py + smoke extension [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `tests/test_notify_toast.py` (NEW), `tests/smoke/test_smoke_all_commands.py` (EXTEND — added `test_fetch_route_logged_out_aborts`)
+- Outcome: Created 5 focused unit tests for `send_toast()` in `tests/test_notify_toast.py`. A `_Recorder` class captures `subprocess.run` args and optionally raises on demand. Tests cover: (1) happy path — correct argv shape (`powershell -NoProfile -Command ...`), script contains `ToastNotificationManager` plus both title and message strings, returns `True` on exit-0; (2) returns `False` on non-zero exit code; (3) returns `False` on `OSError` (never raises); (4) returns `False` on `subprocess.TimeoutExpired` (never raises); (5) non-Windows short-circuit — `sys.platform` patched to `"linux"` → returns `False` without calling subprocess (recorder's `called` flag stays `False`). Added `test_fetch_route_logged_out_aborts` to the smoke class `TestEachCommand` (OPTION 2 injection): stubs `fetch_session_lock` → `contextlib.nullcontext()`, `init_driver` → fake truthy driver, `resolve_targets` → one synthetic entry, `fetch_single_entry` → raises `SessionExpiredError`. Confirms `cmd_fetch_route`'s `except SessionExpiredError` arm fires and prints the IMP-C6 remediation (`is logged out`). No real browser, no `~/.mediavault` lock writes, no `C:\Media` access.
+- Key decisions:
+  - OPTION 2 (boundary injection at `fetch_single_entry`) preferred over OPTION 1 (selenium stubbing through `trigger_download`) because OPTION 1's deeper stub chain (`WebDriverWait`, `time.sleep`, `check_session_alive` URL match) would have been fragile and slow. Step 7's `test_session_detector.py` already covers the real propagation path; this test focuses solely on `cmd_fetch_route`'s except arm.
+  - `init_driver` must return a TRUTHY object (not `None`) because `cmd_fetch_route` has `if not driver: return` immediately after the call. A bare `types.SimpleNamespace(get=..., quit=..., current_url=...)` is sufficient.
+  - Used `contextlib.nullcontext()` (stdlib, no import needed) to bypass `fetch_session_lock`'s real file-backed lock, preventing any `~/.mediavault/locks/` write.
+- Verification:
+  - `python -m pytest tests/test_notify_toast.py -q` → **5 passed in 0.18s**
+  - `python -m pytest tests/smoke -q` → **52 passed in 13.63s** (new smoke included; up from 51)
+  - `python -m pytest -q` (full suite) → **223 passed in 47.50s** (no regressions)
+  - `~/.mediavault/locks/` confirmed empty after the run (no lock files created)
+
+---
+
+## Step 8 — Unit tests for tools/warm_profiles.py [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `tests/test_warm_profiles.py` (NEW)
+- Outcome: Created 5 unit tests for `tools/warm_profiles.py` covering all scenarios specified in the plan. Tests drive `warm_all()` with all I/O boundaries mocked. An autouse fixture redirects `LOG_PATH` → `tmp_path/"warm.log"`, stubs `time.sleep` → no-op, stubs `fetch_session_lock` → `contextlib.nullcontext()`, and redirects `mvcommon.MV_LOG_DIR` to `tmp_path` so no real `~/.mediavault` directory is created. The real `mainfetch.check_session_alive` is used (letting the URL-check logic run against fake drivers), and `mainfetch.init_driver` is monkeypatched per test. All 5 tests pass; no real browser is launched; `~/.mediavault` was confirmed not created/written.
+- Key decisions:
+  - Let the REAL `mainfetch.check_session_alive` run (not patched) — healthy drivers have `current_url="https://photos.google.com/"`, logged-out drivers have `current_url="https://accounts.google.com/ServiceLogin?..."`. This means the test exercises the full detector logic, not just a stub.
+  - `send_toast` is patched on `tools.warm_profiles` namespace (the module-level import) so call recording works correctly.
+  - For test (d), the lock raises as a bare function (not a context manager), since `fetch_session_lock` in `warm_profiles.py` is called as `fetch_session_lock(blocking=False)` with the result used in a `with`-statement. The patch replaces it with a function that raises immediately, simulating a `LockHeldError` on `__enter__`.
+  - `mvcommon.MV_LOG_DIR` is patched to `tmp_path` so `_append_log`'s `os.makedirs(mvcommon.MV_LOG_DIR, ...)` call stays in the temp dir.
+  - `tools/__init__.py` already existed from step 4, so no new package marker needed.
+- Verification:
+  - `python -m pytest tests/test_warm_profiles.py -q` → **5 passed in 1.03s**
+  - `python -m pytest -q` (full suite) → **217 passed in 48.26s** (no regressions)
+  - `python -m pytest tests/smoke -q` → **51 passed in 15.90s** (smoke gate green)
+  - `ls ~/.mediavault/logs/warm_profiles.log` → "No such file or directory" (no `~/.mediavault` writes during test run)
+
+---
+
+## Step 10 — Update README + ARCHITECTURE [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `README.md`, `ARCHITECTURE.md`
+- Outcome: Added a "Fetch session keep-alive (IMP-C17)" subsection to README immediately after the Chrome-profile prerequisites. It covers: the one-time profile-hardening checklist (keep-signed-in, no clear-on-exit, leave Chrome closed between runs), the `python tools/warm_profiles.py` warm-up commands (all profiles and `--profile <key>`), the Task Scheduler registration/removal one-liners (`schtasks /create /xml ...`), and logged-out remediation (console + log + toast + non-zero exit). The subsection also briefly describes `check_session_alive` and `fetch_session_lock` so the prerequisite context is complete for users. Added ARCHITECTURE section 8.8 under the mainfetch deep-dive documenting `SessionExpiredError`, `check_session_alive` (shared detector contract, two callers, confident-logout vs. uncertain distinction, 3-consecutive-zero backstop), and `mvcommon.fetch_session_lock` (lock file path, blocking vs. non-blocking acquire, `LockHeldError`). Also added section 9.1b "Fetch-session tooling" describing `warm_profiles.py`, `notify_toast.py`, and `mediavault_warm_profiles.xml`. Included the IMP-X5 reuse seam note.
+- Key decisions: README insertion placed as a sub-heading within the prerequisites section (not a top-level section) to match the existing doc structure. The four required strings (`warm_profiles.py`, `schtasks /create /xml`, `check_session_alive`, `fetch_session_lock`) were verified to appear in both files.
+- Verification:
+  - grep -c "warm_profiles.py" README.md → 2
+  - grep -c "schtasks /create /xml" README.md → 1
+  - grep -c "check_session_alive" README.md → 1
+  - grep -c "fetch_session_lock" README.md → 1
+  - grep -c "warm_profiles.py" ARCHITECTURE.md → 3
+  - grep -c "schtasks /create /xml" ARCHITECTURE.md → 1
+  - grep -c "check_session_alive" ARCHITECTURE.md → 6
+  - grep -c "fetch_session_lock" ARCHITECTURE.md → 2
+  - No code or test files were modified.
+
+---
+
+## Step 11 — [status: done]
+- Executor: executor-haiku
+- Model: haiku
+- Files changed: `improvements/improvements_tierC.md`, `improvements/PRIORITY.md`, `docs/priority-graph/priority-graph.html`, `PLAN.md`
+- Outcome: Pure documentation and registry edits only. (1) In `improvements_tierC.md`: updated IMP-C6 Status line (line 132) from `pending` to done with a summary of how IMP-C17 satisfies it via shared `SessionExpiredError` + `check_session_alive`. (2) Added new `## IMP-C17` block (after C16 at line 309) documenting the hybrid keep-alive approach, shared detector, Task Scheduler registration, lock mechanism, and Windows toast. (3) In `PRIORITY.md`: updated Last-updated line (line 12) to mention IMP-C17 done; updated Band 2 reference (line 46) to note C6 now ✅ done via C17; bumped DONE count from 17 to 19 (line 77); added C17 and C6 to the DONE list (line 81). (4) In `priority-graph.html`: changed C6 entry in TASKS array (line 150) from high/todo to done/done; added new C17 entry in TASKS (line 161) after C16; added two edges ["C17","C6"] and ["C16","C17"] in EDGES array (line 253). (5) Marked step 11 [x] in PLAN.md.
+- Key decisions: None—followed the exact edit specifications from the orchestrator prompt. All three priority surfaces (tierC.md, PRIORITY.md, priority-graph.html) are now consistent: C6 and C17 both show done status, count is bumped to 19, and the graph edges properly reflect the C16→C17→C6 dependency chain.
+- Verification:
+  - `grep -n "C17" improvements/PRIORITY.md improvements/improvements_tierC.md docs/priority-graph/priority-graph.html` → found C17 in all three files at lines 12, 46, 81 (PRIORITY.md) and lines 132, 309, 323 (improvements_tierC.md) and lines 150, 161, 253 (priority-graph.html).
+  - `grep -n "C6.*done" improvements/improvements_tierC.md docs/priority-graph/priority-graph.html` → C6 shows done status in both files (line 132 tierC.md, line 150 priority-graph.html).
+  - `grep "DONE (19)" improvements/PRIORITY.md` → found (line 77).
+  - `grep "Last updated.*C17 done" improvements/PRIORITY.md` → confirmed (line 12).
+  - HTML well-formedness check: `grep -c "\[" docs/priority-graph/priority-graph.html` → 155 opening brackets (file structure intact, no parse errors during the edits).

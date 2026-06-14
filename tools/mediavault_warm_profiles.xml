@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MediaVault Warm Profiles — Task Scheduler definition (IMP-C17)
+
+  BEFORE REGISTERING:
+  (a) Adjust <Command> and the repo paths in <Arguments>/<WorkingDirectory> if
+      your install location differs from C:\Users\harin\PycharmProjects\MediaVault.
+  (b) The -X utf8 flag forces UTF-8 stdout so the runner's emoji status prints
+      don't crash under the no-console scheduled-task context.
+  (c) The InteractiveToken principal is required for the desktop toast to surface;
+      do not change it to S4U or a service account.
+  (d) Register with:
+        schtasks /create /xml "tools\mediavault_warm_profiles.xml" /tn "MediaVault Warm Profiles"
+      To update an existing registration add /f (force-overwrite).
+-->
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Author>MediaVault</Author>
+    <Description>Daily Google-Photos session keep-alive for the MediaVault Chrome profiles — IMP-C17</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <CalendarTrigger>
+      <StartBoundary>2026-01-01T03:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <RunOnlyIfIdle>true</RunOnlyIfIdle>
+    <IdleSettings>
+      <Duration>PT10M</Duration>
+      <WaitTimeout>PT1H</WaitTimeout>
+      <StopOnIdleEnd>true</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <Enabled>true</Enabled>
+    <ExecutionTimeLimit>PT30M</ExecutionTimeLimit>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>C:\Users\harin\PycharmProjects\MediaVault\.venv\Scripts\python.exe</Command>
+      <Arguments>-X utf8 C:\Users\harin\PycharmProjects\MediaVault\tools\warm_profiles.py</Arguments>
+      <WorkingDirectory>C:\Users\harin\PycharmProjects\MediaVault</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>

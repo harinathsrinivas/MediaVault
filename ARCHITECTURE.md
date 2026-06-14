@@ -1296,6 +1296,56 @@ downloaded blob.
 These are leftover scaffolding from earlier iterations; safe to delete
 in a future cleanup.
 
+### 8.8 Session-alive detector + keep-alive tooling (IMP-C17 / IMP-C6)
+
+#### `SessionExpiredError` and `check_session_alive`
+
+`mainfetch.py` defines:
+
+```python
+class SessionExpiredError(Exception): ...
+
+def check_session_alive(driver) -> bool:
+    """Return True if the session looks alive (or the check is uncertain,
+    e.g. a Selenium fault); raise SessionExpiredError on a confident logout
+    (current URL host is accounts.google.com or is not photos.google.com
+    after a navigation attempt)."""
+```
+
+The detector is **shared** by two callers:
+
+- **Live fetch path (`cmd_fetch_route` / `trigger_download`)** — called before
+  each trigger to fast-fail with a clear `SessionExpiredError` rather than
+  silently burning minutes waiting for downloads that will never arrive (IMP-C6).
+  A backstop of **3 consecutive zero-result trigger rounds** also raises
+  `SessionExpiredError` so a subtler mid-session expiry is caught too.
+- **Warm-up runner (`tools/warm_profiles.py`)** — calls `check_session_alive`
+  after navigating to Google Photos to determine the `OK` / `LOGGED_OUT` /
+  `LAUNCH_FAIL` status for each profile.
+
+`check_session_alive` returns `True` on alive or uncertain (Selenium fault,
+unexpected page structure) and raises `SessionExpiredError` only when it is
+confident the session is gone — specifically when the browser URL host is
+`accounts.google.com` (redirected to login) or is not `photos.google.com`
+after a navigation attempt to `https://photos.google.com`.
+
+> **IMP-X5 reuse seam**: the planned account-health canary command will import
+> `check_session_alive` directly. The ban-sentinel logic is out of scope for
+> IMP-C17.
+
+#### Single-flight session lock (`mvcommon.fetch_session_lock`)
+
+`mvcommon.py` exposes a `fetch_session_lock` context manager backed by a lock
+file at `~/.mediavault/locks/fetch_session.lock`.
+
+- **`cmd_fetch_route`** acquires it in blocking mode for the entire batch so
+  only one fetch session owns Chrome's CDP port 9222 at a time.
+- **The warm-up runner** tries it in **non-blocking** mode before launching
+  Chrome; if the lock is held (a fetch is running) it skips that profile's
+  warm-up and logs accordingly.
+- `LockHeldError` is raised by `mvcommon` when a non-blocking acquire fails;
+  callers catch it and decide whether to skip or abort.
+
 ---
 
 ## 9. Auxiliary Scripts
@@ -1315,6 +1365,16 @@ Stamps `re_hashed: false` onto every pre-existing split entry so the
 verify-or-bless logic (§6.4a) has an explicit unblessed marker to key on.
 Idempotent; already run against the live libraries at PR #20 time. Not invoked
 by anything else.
+
+### 9.1b Fetch-session tooling (IMP-C17)
+
+Three files added under `tools/`:
+
+| File | Purpose |
+|------|---------|
+| `tools/warm_profiles.py` | Daily keep-alive runner. Launches Chrome for each profile (or a single `--profile <key>`), calls `check_session_alive`, logs `OK` / `LOGGED_OUT` / `LAUNCH_FAIL` to `~/.mediavault/logs/warm_profiles.log`, fires a Windows desktop toast on failure, and exits non-zero if any profile is degraded. |
+| `tools/notify_toast.py` | Dependency-free Windows toast helper. Calls the WinRT `ToastNotification` API via `ctypes` / `winrt` if available; falls back to a `print` so non-Windows or headless environments don't crash. `send_toast(title, body)` is the only public function. |
+| `tools/mediavault_warm_profiles.xml` | Windows Task Scheduler definition. Runs `warm_profiles.py` daily at ~03:00 as the current interactive user, only when the machine has been idle for 5 minutes, without requiring elevated privileges. Register with `schtasks /create /xml "tools\mediavault_warm_profiles.xml" /tn "MediaVault Warm Profiles"`; remove with `schtasks /delete /tn "MediaVault Warm Profiles" /f`. |
 
 ### 9.2 `archive/legacy/index_file.py` (legacy, 123 lines)
 

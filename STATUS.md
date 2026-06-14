@@ -632,3 +632,26 @@ Verification: File edited; C16->X1 and C16->S3 edges present and intact. No synt
   - `python -m pytest tests/test_anime_fetch_routing.py -q` → **12 passed in 0.64s** (stays green).
   - Smoke gate (mainfetch is a core file): `python -m pytest tests/smoke -q` → **51 passed in 14.93s**.
   - Behavioral check with a fake driver covering all branches: signed-in host → True; `www.photos.google.com` → True; `current_url` raising → True; `accounts.google.com` redirect → `SessionExpiredError("profile 'anime' appears logged out (redirected to accounts.google.com)")`; unrelated host `example.com` → `SessionExpiredError`. All as specified.
+
+---
+
+## Step 3 — Add the single-flight lock helper + state-dir constants to mvcommon.py
+- Status: done
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor
+- Files changed: `mvcommon.py` (only)
+- Outcome: Purely additive, stdlib-only change to `mvcommon.py`. (1) Added `import contextlib` and `import errno` to the import group (lines 9-10), leaving the existing `os/json/sys/hashlib/re/tempfile/time/random` + `from subprocess import SubprocessError` intact. (2) Appended four module constants at the end of the SHARED CONFIGURATION block (after `VIDEO_EXTENSIONS`): `MV_STATE_DIR = os.path.join(os.path.expanduser("~"), ".mediavault")`, `MV_LOCK_DIR = os.path.join(MV_STATE_DIR, "locks")`, `MV_LOG_DIR = os.path.join(MV_STATE_DIR, "logs")`, `FETCH_SESSION_LOCK = os.path.join(MV_LOCK_DIR, "fetch_session.lock")`. (3) Added `class LockHeldError(Exception)` and the `@contextlib.contextmanager def fetch_session_lock(blocking=True, timeout=30, stale_after=3600)` in the UTILITIES section immediately after the existing `retry` function (before `load_library`). No existing symbol was modified; `mvcommon` still imports zero of main/mainfetch (no cycle). It is a generic cross-platform OS-file advisory lock built on the atomic `os.O_CREAT|os.O_EXCL` create-exclusive idiom — NO `fcntl`/`msvcrt` platform branches, per the step's constraint.
+- Key decisions:
+  - **Factored the atomic create into a local `_try_create()` helper** returning `True`/`False` (False on EEXIST) and reused it across the stale-reclaim, non-blocking, and polling branches — one correct create primitive instead of three copies. The collision detection is `isinstance(e, FileExistsError) or getattr(e, "errno", None) == errno.EEXIST` so it catches BOTH the modern `FileExistsError` and a raw `OSError(EEXIST)` exactly as the step specified; any other `OSError` (e.g. permission) re-raises rather than being silently swallowed as a collision.
+  - **`fd` is closed in a `finally` inside `_write_lock`** so the descriptor never leaks even if `os.write` fails.
+  - **A blocking acquire NEVER hard-blocks (the load-bearing contract).** On collision: a STALE lock (mtime older than `stale_after`) is reclaimed regardless of mode; otherwise blocking polls every 0.1s up to `timeout`, taking the lock the instant it frees (or if it goes stale mid-wait); on timeout it RECLAIMS (remove + create) and proceeds. `_reclaim()` is hardened against a racing `O_EXCL` creator: if the post-remove `_try_create()` still collides it force-removes and does a non-exclusive `O_CREAT|O_TRUNC` create so the blocking path can never raise or spin. This realizes the plan's "interactive fetch is never starved; proceeding on a stale/contended lock is the chosen behavior."
+  - **Non-blocking + held + not-stale → `LockHeldError`** (message includes the lock path). Non-blocking still honors stale-reclaim first, so a crashed prior holder's stale lock does not wrongly block a non-blocking caller.
+  - **`__exit__` always best-effort removes the lock** inside `try/except OSError`, so a vanished/already-removed lock file never raises on context teardown.
+  - Did NOT add `MV_LOG_DIR` usage or any `os.makedirs` for logs — the step only asked for the constant; log-dir creation belongs to whatever later step writes a log. `fetch_session_lock` makes only `MV_LOCK_DIR`.
+- Verification:
+  - `python -c "import mvcommon; print(callable(mvcommon.fetch_session_lock)); print(issubclass(mvcommon.LockHeldError, Exception))"` → `True` / `True`.
+  - Throwaway script `_tmp_lock_check.py` (created, run, then DELETED — `ls` confirmed gone): `nested-nonblocking-raises True` (second non-blocking acquire while first held raised `LockHeldError`); `cleaned-up True` (no `fetch_session.lock` after context exit); `reacquire-ok True` (fresh non-blocking acquire succeeds post-release); `blocking-reclaims-and-proceeds True` (a blocking acquire over an already-held lock with `timeout=1` returned in <5s — reclaimed, did not hang). `ls ~/.mediavault/locks/` after the run showed `total 0` (dir created, no leftover lock file).
+  - `python -m pytest tests/test_mvcommon.py -q` → **12 passed in 0.29s** (identical to the pre-change baseline of 12 passed).
+  - Smoke gate (mvcommon is a core file): `python -m pytest tests/smoke -q` → **51 passed in 12.72s** (under the 30s budget).
+  - `git status --short` → only ` M mvcommon.py` changed by this step (surgical/additive confirmed; no other file touched before this STATUS append).

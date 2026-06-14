@@ -513,3 +513,14 @@ Branch: fix/cli_parser_papercuts (from main)
   - `python -m pytest tests/test_cmd_push_verify.py tests/test_repair_dummies.py -q` → **12 passed in 0.81s**
   - `python -m pytest -q` (full suite) → **191 passed in 39.58s**
   - `python -m pytest tests/smoke -q` → **50 passed in 11.42s**
+
+---
+
+## Step 4 (IMP-C15) — [status: done]
+- Executor: architect
+- Model: opus
+- Mode: docs-only (Read-only architect; only `ARCHITECTURE.md` + `README.md` written)
+- Files changed: `ARCHITECTURE.md` (§7.5 push-verify warn-and-skip clause, §7.6 dummy-system iterator note + step 5 atomic-swap), `README.md` (`repair_dummies` command-table row)
+- Outcome: Grounded every edit against the shipped Step 1-2 code (`main.py:_verify_chunk_hash` @1235-1266, `cmd_repair_dummies` @2027-2073) before writing. (A) ARCHITECTURE.md §7.5: extended the IMP-C8 post-push-verification warn-and-skip clause to state that warn-and-skip now covers TWO non-fatal cases — `sha256sum` unavailable (non-zero exit) AND empty/garbled device stdout (the verifier requires a well-formed 64-hex first token; empty or non-hex output → one warning + `return`, push stays alive, no `IndexError`); only a well-formed 64-hex token that differs from the expected hash still raises `CalledProcessError` and is retried under IMP-C2. (B) ARCHITECTURE.md §7.6: (1) added a sentence to the `cmd_repair_dummies` intro noting the whole-library iterator now explicitly skips both `season_map` and `multi_ep_alias` (an explicit `continue` for each), alias-safe by design per the ENTRY_TYPE_KEYS guardrail; (2) rewrote per-candidate step 5 to state the replacement is a SINGLE ATOMIC `os.replace(tmp, current)` — no window in which the path has no file (the prior `os.remove` + `os.rename` left such a gap) — mirroring `make_video_dummy`'s own atomic write and the IMP-C9 atomic-swap lesson. (C) README.md: appended a brief "; atomic swap" note to the `repair_dummies` command-table row (~line 138). Left the remote-verify test-coverage line (~line 294) untouched — it already reads "remote verify" accurately and needed no behavioral restructure.
+- Key decisions: Surgical edits only — described the two shipped behaviors without restructuring either ARCHITECTURE.md section. README touch kept minimal (one-row note) per the plan's "do not over-edit; README has no behavioral push-verify section to restructure"; the §294 test line was judged accurate as-is and left alone. No code files edited (Read-only architect).
+- Verification: docs-only, no tests run.

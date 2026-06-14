@@ -535,3 +535,12 @@ Branch: fix/cli_parser_papercuts (from main)
 - Outcome: Marked IMP-C15 done in the tracking trio (tierC + PRIORITY.md + priority graph) with synchronized updates. (1) `improvements_tierC.md`: changed IMP-C15 `Status: pending` to `Status: done (fix/micro_robustness_c15 — cmd_repair_dummies non-atomic remove+rename replaced with single atomic os.replace + explicit multi_ep_alias skip; _verify_chunk_hash hex-validates the device sha256 first token (empty/garbled → warn-and-skip, only a well-formed differing hash raises CalledProcessError); unit tests in tests/test_repair_dummies.py + new cases in tests/test_cmd_push_verify.py)`. (2) PRIORITY.md: (a) bumped `Last updated` to `2026-06-14 (IMP-C15 done — fix/micro_robustness_c15)`; (b) rewrote the `## 👉 SUGGESTED NEXT TASK` block to point at **IMP-C16** (anime fetch profile routing) with its rationale, keeping the R6/R7 decision-awaiting note; (c) removed IMP-C15 from BAND 0, leaving only R6 and R7; (d) updated DONE count `## ✅ DONE (15)` → `## ✅ DONE (16)` and added `C15` (micro-robustness) to the done list. (3) priority-graph.html: updated C15 task node from `["C15","…","C","high","todo",…]` to `["C15","…","C","done","done",…]` with the final detail string, and updated the ⚡ Next banner from C15 to C16. All three files now agree: C15 is done, the next code task is C16, DONE count is 16.
 - Key decisions: None. Mechanical edits following the established done-status pattern used by C12/C13/C14.
 - Verification: No code touched → no smoke gate needed. No pytest run. All three tracking files edited; consistency confirmed by re-reading changed regions (no target string drifts, all edits applied cleanly).
+
+---
+
+## Step 1 — Add anime profile + data-driven map + profile_for_id()
+Status: done
+Key decisions: Added CHROME_PROFILES["anime"] -> ChromeProfile_Anime; added ID_PREFIX_PROFILE ordered list + DEFAULT_PROFILE + pure profile_for_id() helper above cmd_fetch_route. CHROME_PROFILES["default"] renamed to "movies" (key only; path unchanged). init_driver not touched (Step 2 scope).
+Verification:
+- `python -c "import mainfetch; print(mainfetch.profile_for_id('ani-x'), mainfetch.profile_for_id('tv-x'), mainfetch.profile_for_id('mov-x'), mainfetch.profile_for_id('legacy'))"` → `anime tv movies movies`
+- `python -c "import mainfetch; print(mainfetch.CHROME_PROFILES)"` → `{'movies': 'C:\\Media\\Utils\\ChromeProfile', 'tv': 'C:\\Media\\Utils\\ChromeProfile_TV', 'anime': 'C:\\Media\\Utils\\ChromeProfile_Anime'}`

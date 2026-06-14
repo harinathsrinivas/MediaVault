@@ -29,9 +29,14 @@ from mvcommon import RESTORE_DIR_NAME, load_library, calculate_file_hash
 
 # --- AUTOMATION CONFIG ---
 CHROME_PROFILES = {
-    "default": r"C:\Media\Utils\ChromeProfile",
-    "tv": r"C:\Media\Utils\ChromeProfile_TV"
+    "movies": r"C:\Media\Utils\ChromeProfile",
+    "tv":     r"C:\Media\Utils\ChromeProfile_TV",
+    "anime":  r"C:\Media\Utils\ChromeProfile_Anime",
 }
+# Ordered id-prefix -> profile map. Most-specific prefix FIRST.
+# IMP-A5 will source these two constants from mvconfig.json.
+ID_PREFIX_PROFILE = [("ani", "anime"), ("tv", "tv"), ("mov", "movies")]
+DEFAULT_PROFILE = "movies"
 CHROME_PROFILE_NAME = "Default"
 SYSTEM_DOWNLOADS_FOLDER = os.path.join(os.path.expanduser("~"), "Downloads")
 
@@ -433,6 +438,13 @@ def build_download_queue(entries):
             })
 
     return queue
+
+
+def profile_for_id(manual_id):
+    for prefix, key in ID_PREFIX_PROFILE:
+        if manual_id.startswith(prefix):
+            return key
+    return DEFAULT_PROFILE
 
 
 def cmd_fetch_route(manual_id, ep_range=None):

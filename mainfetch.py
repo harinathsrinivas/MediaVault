@@ -4,6 +4,7 @@ import subprocess
 import shutil
 import time
 import re
+import urllib.parse
 from datetime import datetime
 # --- SELENIUM IMPORTS ---
 try:
@@ -89,6 +90,41 @@ def init_driver(profile_key="movies"):
         return None
 
 
+# The only signed-in host for the Photos web app. Google redirects an expired
+# session to accounts.google.com, so a current_url that is not on photos.google.com
+# means the profile is logged out.
+PHOTOS_URL = "https://photos.google.com"
+
+
+class SessionExpiredError(Exception):
+    pass
+
+
+def check_session_alive(driver, profile_key=None):
+    """Side-effect-free login check: inspect driver.current_url (the CALLER must
+    have navigated to PHOTOS_URL already — this does NOT call driver.get).
+
+    Returns True if still on photos.google.com (www./locale subpaths tolerated).
+    Raises SessionExpiredError if redirected to accounts.google.com or anywhere
+    that is not a photos.google.com host. If reading current_url raises (a genuine
+    Selenium fault), returns True so the existing retry/handle paths deal with it —
+    the detector must not invent a logged-out failure from a browser glitch.
+    """
+    try:
+        current_url = driver.current_url
+    except Exception:
+        return True
+
+    host = (urllib.parse.urlparse(current_url).hostname or "").lower()
+    if host.endswith("photos.google.com"):
+        return True
+    if host == "accounts.google.com" or "photos.google.com" not in host:
+        raise SessionExpiredError(
+            f"profile {profile_key!r} appears logged out (redirected to {host})"
+        )
+    return True
+
+
 def trigger_download(driver, query, index=0):
     """
     RAPID MODE: Navigates, Searches, Clicks, Triggers Download, Exits Player.
@@ -102,7 +138,7 @@ def trigger_download(driver, query, index=0):
         """One navigate→search→click→Shift+D→Esc pass. Returns True if the
         trigger was sent, False on a 0-thumbnail miss / index out of range.
         May raise on a Selenium fault (caught/retried by the caller below)."""
-        driver.get("https://photos.google.com")
+        driver.get(PHOTOS_URL)
         wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         time.sleep(1.5)
 

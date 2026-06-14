@@ -555,3 +555,10 @@ Verification:
 - `python -c "import mainfetch; print(mainfetch.profile_for_id('ani-ja-2006-deathnote01'))"` → `anime`
 - `python -c "import mainfetch; print(mainfetch.init_driver.__defaults__)"` → `('movies',)`
 - `python -m pytest tests/smoke -q` → 50 passed in 10.49s
+
+---
+
+## Step 3 — Pure unit tests for the routing map
+Status: done
+Key decisions: Created tests/test_anime_fetch_routing.py with 12 test cases covering all prefix patterns, the regression guard (ani != tv profile), and map-integrity guards.
+Verification: python -m pytest tests/test_anime_fetch_routing.py -q → 12 passed in 0.62s; python -m pytest tests/test_cli_parsers.py -q → 21 passed in 0.76s (regression check).

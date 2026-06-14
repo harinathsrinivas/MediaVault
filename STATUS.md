@@ -743,3 +743,23 @@ Verification: File edited; C16->X1 and C16->S3 edges present and intact. No synt
   - Full suite — `python -m pytest -q` → **`212 passed in 48.08s`**.
   - Lock-leak check — `ls -la ~/.mediavault/locks/` before and after the run: directory remains **empty** (no `fetch_session.lock` left behind; the (f) `fetch_session_lock` stub held).
   - Smoke gate not required: this step adds only a new test file and does not touch `main.py`/`mainfetch.py`/`mvcommon.py`.
+
+---
+
+## Step 8 — Unit tests for tools/warm_profiles.py [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `tests/test_warm_profiles.py` (NEW)
+- Outcome: Created 5 unit tests for `tools/warm_profiles.py` covering all scenarios specified in the plan. Tests drive `warm_all()` with all I/O boundaries mocked. An autouse fixture redirects `LOG_PATH` → `tmp_path/"warm.log"`, stubs `time.sleep` → no-op, stubs `fetch_session_lock` → `contextlib.nullcontext()`, and redirects `mvcommon.MV_LOG_DIR` to `tmp_path` so no real `~/.mediavault` directory is created. The real `mainfetch.check_session_alive` is used (letting the URL-check logic run against fake drivers), and `mainfetch.init_driver` is monkeypatched per test. All 5 tests pass; no real browser is launched; `~/.mediavault` was confirmed not created/written.
+- Key decisions:
+  - Let the REAL `mainfetch.check_session_alive` run (not patched) — healthy drivers have `current_url="https://photos.google.com/"`, logged-out drivers have `current_url="https://accounts.google.com/ServiceLogin?..."`. This means the test exercises the full detector logic, not just a stub.
+  - `send_toast` is patched on `tools.warm_profiles` namespace (the module-level import) so call recording works correctly.
+  - For test (d), the lock raises as a bare function (not a context manager), since `fetch_session_lock` in `warm_profiles.py` is called as `fetch_session_lock(blocking=False)` with the result used in a `with`-statement. The patch replaces it with a function that raises immediately, simulating a `LockHeldError` on `__enter__`.
+  - `mvcommon.MV_LOG_DIR` is patched to `tmp_path` so `_append_log`'s `os.makedirs(mvcommon.MV_LOG_DIR, ...)` call stays in the temp dir.
+  - `tools/__init__.py` already existed from step 4, so no new package marker needed.
+- Verification:
+  - `python -m pytest tests/test_warm_profiles.py -q` → **5 passed in 1.03s**
+  - `python -m pytest -q` (full suite) → **217 passed in 48.26s** (no regressions)
+  - `python -m pytest tests/smoke -q` → **51 passed in 15.90s** (smoke gate green)
+  - `ls ~/.mediavault/logs/warm_profiles.log` → "No such file or directory" (no `~/.mediavault` writes during test run)

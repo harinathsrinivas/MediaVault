@@ -499,3 +499,17 @@ Branch: fix/cli_parser_papercuts (from main)
 - Verification:
   - `python -m pytest tests/smoke -q` → **50 passed in 14.91s**
   - `python -m pytest tests/test_cmd_push_verify.py -q` → **5 passed in 0.54s**
+
+---
+
+## Step 3 (IMP-C15) — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `tests/test_cmd_push_verify.py` (extended with 5 new unit tests), `tests/test_repair_dummies.py` (NEW file with 2 tests)
+- Outcome: Added direct unit tests for `_verify_chunk_hash` (Bug 2) and an atomic-swap regression test for `cmd_repair_dummies` (Bug 1). For Bug 2, 5 new tests monkeypatch `main.subprocess.run` directly against `_verify_chunk_hash`, covering: empty stdout (IndexError regression guard), garbled stdout (warn-and-skip), valid matching hash (no warning/raise), valid mismatched hash (raises `CalledProcessError`), and command-not-found (existing arm guard). For Bug 1, 2 new tests: `test_repair_dummies_atomic_swap` seeds a tiny archived file, runs the repair, asserts the result at `current_path` contains `FAKE_DUMMY_BYTES`, asserts no `.repair_tmp` orphan, and uses a spy on `main.os.remove` to assert `current_path` was NOT passed to `os.remove` (regression guard against reverting to remove+rename); `test_repair_dummies_skips_alias` seeds both an archived entry and a `multi_ep_alias` entry, asserts the repair runs clean (no KeyError), and asserts the alias entry is untouched.
+- Key decisions: Used two module-level helper functions `_stub_run(returncode, stdout)` and `_stub_run_raise(exc)` to build fake subprocess.run callables without adding fixtures or conftest entries. The `os.remove` spy wraps the real `os.remove` (via `monkeypatch.setattr(main.os, "remove", _spy_remove)`) so unrelated cleanup is unaffected; the assertion checks that `current_path`'s absolute path is not in the recorded-removed set. The alias case seeds the alias entry directly into the movies lib JSON alongside the archived entry, mirroring how the sandbox_alias fixture structures the multi_ep_alias schema (3 keys only: type/alias_of/parent_id).
+- Verification:
+  - `python -m pytest tests/test_cmd_push_verify.py tests/test_repair_dummies.py -q` → **12 passed in 0.81s**
+  - `python -m pytest -q` (full suite) → **191 passed in 39.58s**
+  - `python -m pytest tests/smoke -q` → **50 passed in 11.42s**

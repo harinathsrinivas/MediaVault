@@ -231,3 +231,72 @@ def test_verify_unavailable_warns_and_skips(split_resume_entry, monkeypatch, cap
     entry = _load_entry(split_resume_entry)
     assert entry["uploaded"] is True
     assert entry["status"] == "onboarded"
+
+
+# ===========================================================================
+# Direct unit tests for _verify_chunk_hash — pin the helper's contract
+# without threading odd stdout through the whole cmd_push closure.
+# ===========================================================================
+
+def _stub_run(returncode=0, stdout=""):
+    """Return a factory that produces a fake subprocess.run returning the given values."""
+    def _run(argv, check=False, capture_output=False, text=False, **kwargs):
+        if returncode != 0 and check:
+            raise subprocess.CalledProcessError(returncode, argv)
+        return type("_R", (), {"returncode": returncode, "stdout": stdout})()
+    return _run
+
+
+def _stub_run_raise(exc):
+    """Return a factory that always raises exc when called."""
+    def _run(argv, check=False, capture_output=False, text=False, **kwargs):
+        raise exc
+    return _run
+
+
+# (f) Empty stdout, exit 0 -> IndexError regression guard: returns None, no raise, skip warning
+def test_verify_empty_stdout_warns_and_skips(monkeypatch, capsys):
+    monkeypatch.setattr(main.subprocess, "run", _stub_run(returncode=0, stdout=""))
+    result = main._verify_chunk_hash(["adb"], "/sdcard/x", "/sdcard/x", GOOD_HASH)
+    assert result is None
+    out = capsys.readouterr().out
+    assert "remote verification skipped" in out
+
+
+# (g) Garbled stdout, exit 0 -> warn-and-skip (lenient/Option-A behavior)
+def test_verify_garbled_stdout_warns_and_skips(monkeypatch, capsys):
+    monkeypatch.setattr(main.subprocess, "run",
+                        _stub_run(returncode=0, stdout="sha256sum: applet not found\n"))
+    result = main._verify_chunk_hash(["adb"], "/sdcard/x", "/sdcard/x", GOOD_HASH)
+    assert result is None
+    out = capsys.readouterr().out
+    assert "remote verification skipped" in out
+
+
+# (h) Valid hash == expected -> returns None, no warning, no raise
+def test_verify_matching_hash_passes_silently(monkeypatch, capsys):
+    stdout = f"{GOOD_HASH}  /sdcard/x\n"
+    monkeypatch.setattr(main.subprocess, "run", _stub_run(returncode=0, stdout=stdout))
+    result = main._verify_chunk_hash(["adb"], "/sdcard/x", "/sdcard/x", GOOD_HASH)
+    assert result is None
+    out = capsys.readouterr().out
+    assert "skipped" not in out
+    assert "unavailable" not in out
+
+
+# (i) Valid hash != expected -> raises CalledProcessError
+def test_verify_mismatched_hash_raises(monkeypatch):
+    stdout = f"{BAD_HASH}  /sdcard/x\n"
+    monkeypatch.setattr(main.subprocess, "run", _stub_run(returncode=0, stdout=stdout))
+    with pytest.raises(subprocess.CalledProcessError):
+        main._verify_chunk_hash(["adb"], "/sdcard/x", "/sdcard/x", GOOD_HASH)
+
+
+# (j) Command-not-found: subprocess.run raises CalledProcessError -> warn and skip
+def test_verify_command_not_found_warns_and_skips(monkeypatch, capsys):
+    exc = subprocess.CalledProcessError(127, ["adb", "shell", "sha256sum"])
+    monkeypatch.setattr(main.subprocess, "run", _stub_run_raise(exc))
+    result = main._verify_chunk_hash(["adb"], "/sdcard/x", "/sdcard/x", GOOD_HASH)
+    assert result is None
+    out = capsys.readouterr().out
+    assert "sha256sum unavailable" in out

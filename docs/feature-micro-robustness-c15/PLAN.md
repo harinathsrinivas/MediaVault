@@ -42,7 +42,7 @@ Two tiny, mechanical-to-standard edits to two helpers in `main.py`, each backed 
 
 ## Steps
 
-- [ ] 1. [model: sonnet] [effort: medium] Bug 1 — atomic dummy swap in `cmd_repair_dummies` + explicit `multi_ep_alias` skip (Open Decision (b) RESOLVED 2026-06-14: INCLUDE).
+- [x] 1. [model: sonnet] [effort: medium] Bug 1 — atomic dummy swap in `cmd_repair_dummies` + explicit `multi_ep_alias` skip (Open Decision (b) RESOLVED 2026-06-14: INCLUDE).
   - Files: `main.py`
   - Details: At `main.py:2060-2061`, replace the two lines
     ```python
@@ -62,7 +62,7 @@ Two tiny, mechanical-to-standard edits to two helpers in `main.py`, each backed 
     This makes the whole-library iterator explicitly alias-safe per the CLAUDE.md ENTRY_TYPE_KEYS guardrail (today it is alias-safe only by accident — `multi_ep_alias` entries lack a `status` key, so the `status != "archived"` guard at line 2032 filters them before `entry['folder_path']` is dereferenced at line 2036). One line, no behavior change for non-alias entries.
   - Acceptance: The function does a single `os.replace(tmp_path, current_path)` and no longer calls `os.remove`/`os.rename` for the swap; `python -m pytest tests/smoke/test_smoke_all_commands.py -q -k repair_dummies` stays green; `python -m pytest tests/test_repair_dummies.py -q` (Step 3) passes including the os.remove-not-called guard. verify: `python -m pytest tests/test_repair_dummies.py tests/smoke -q`
 
-- [ ] 2. [model: sonnet] [effort: medium] Bug 2 — hex-validate guard + docstring in `_verify_chunk_hash`.
+- [x] 2. [model: sonnet] [effort: medium] Bug 2 — hex-validate guard + docstring in `_verify_chunk_hash`.
   - Files: `main.py`
   - Details: At `main.py:1254`, replace the single line
     ```python
@@ -92,7 +92,7 @@ Two tiny, mechanical-to-standard edits to two helpers in `main.py`, each backed 
     - Update the function docstring (lines 1236-1244) to note that empty/garbled stdout (a well-formed 64-hex first token is required) is ALSO a warn-and-skip path, alongside the existing command-not-found note — so the docstring matches the new behavior.
   - Acceptance: empty stdout (exit 0) no longer `IndexError`s — it warns and returns; a garbled token warns and returns; a valid hash == expected returns None; a valid hash != expected raises `CalledProcessError`; the command-not-found arm still warns and returns. verify: `python -m pytest tests/test_cmd_push_verify.py -q`
 
-- [ ] 3. [model: sonnet] [effort: medium] Tests — Bug 2 cases (extend existing file) + Bug 1 atomic-swap regression (new file).
+- [x] 3. [model: sonnet] [effort: medium] Tests — Bug 2 cases (extend existing file) + Bug 1 atomic-swap regression (new file).
   - Files: `tests/test_cmd_push_verify.py`, `tests/test_repair_dummies.py` (NEW)
   - Details:
     Constraints (MUST hold in this step): "Never touch real C:\\Media files or real library_*.json." and "Run `python -m pytest -q` and fix failures before marking the step done." Use existing fixtures/stubs only — do NOT add conftest fixtures (no binding-hazard patches needed here, so no `conftest.py` change → no opus needed).
@@ -112,7 +112,7 @@ Two tiny, mechanical-to-standard edits to two helpers in `main.py`, each backed 
       - REQUIRED (Open Decision (b) RESOLVED 2026-06-14: INCLUDE): add a case using the existing `sandbox_alias` fixture (seeds a `multi_ep_alias` chain) and assert `main.cmd_repair_dummies()` runs clean (no KeyError) and does not touch the alias entry. NOTE: the smoke suite already has `test_repair_dummies_alias` (`tests/smoke/test_smoke_all_commands.py:566`) asserting the alias is skipped via the no-`status` path — this added case asserts the EXPLICIT skip is in place.
   - Acceptance: all new cases pass; `python -m pytest tests/test_cmd_push_verify.py tests/test_repair_dummies.py -q` green; no real `C:\Media` / real `library_*.json` touched. verify: `python -m pytest tests/test_cmd_push_verify.py tests/test_repair_dummies.py -q`
 
-- [ ] 4. [model: sonnet] [effort: medium] Docs — the architect agent updates `ARCHITECTURE.md` (+ `README.md` if warranted) for the documented behavior change.
+- [x] 4. [model: sonnet] [effort: medium] Docs — the architect agent updates `ARCHITECTURE.md` (+ `README.md` if warranted) for the documented behavior change.
   - Files: `ARCHITECTURE.md`, `README.md`
   - Details: The architect agent updates the two ARCHITECTURE.md anchors to reflect the shipped behavior:
     - §7.5 push-verify (`ARCHITECTURE.md` ~826-834): the warn-and-skip clause currently says only "If `sha256sum` itself is unavailable (non-zero exit), the verifier prints one warning and skips." Extend it to note that warn-and-skip ALSO covers empty/garbled device stdout (the verifier now requires a well-formed 64-hex first token; empty or non-hex output → warn-and-skip, push stays alive), so the documented promise matches `_verify_chunk_hash` after this change.
@@ -121,7 +121,7 @@ Two tiny, mechanical-to-standard edits to two helpers in `main.py`, each backed 
     Keep edits surgical — describe the two behaviors, do not restructure the sections.
   - Acceptance: ARCHITECTURE.md §7.5 and §7.6 describe the empty/garbled warn-and-skip and the atomic dummy swap respectively; wording is consistent with the code shipped in Steps 1-2; no unrelated sections changed. verify: re-read the two ARCHITECTURE.md anchors and confirm they match Steps 1-2; `git diff --stat` shows only ARCHITECTURE.md (and optionally README.md).
 
-- [ ] 5. [model: haiku] [effort: low] Mark IMP-C15 done in the tracking trio (tierC + PRIORITY.md + priority graph) — all three must agree.
+- [x] 5. [model: haiku] [effort: low] Mark IMP-C15 done in the tracking trio (tierC + PRIORITY.md + priority graph) — all three must agree.
   - Files: `improvements/improvements_tierC.md`, `improvements/PRIORITY.md`, `docs/priority-graph/priority-graph.html`
   - Details: Per the PRIORITY.md maintenance protocol (bottom of that file). Mirror the style of C12/C13/C14's done lines (name the branch + what shipped):
     - `improvements/improvements_tierC.md`: change the IMP-C15 `- Status: pending` line (line ~286) to:

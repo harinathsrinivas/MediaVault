@@ -102,6 +102,61 @@ interrupted rollback can be finished afterward via `recover_journal`. See
   - `ChromeProfile_Anime` — signed into the Google account that holds your anime.
   Each profile must be signed in manually at least once before MediaVault can
   attach to it.
+
+### Fetch session keep-alive (IMP-C17)
+
+Google Photos sessions expire if a profile's Chrome is idle for long periods.
+The warm-up tool re-visits Google Photos in each profile daily so the session
+stays alive, and the live fetch path fast-fails with a clear error if a session
+has expired rather than burning several minutes in a silent dead-end (IMP-C6).
+
+**One-time profile-hardening checklist** (do this once per profile after the
+first manual sign-in):
+
+1. In each Chrome profile, check **"Keep me signed in"** / **"Stay signed in"**
+   on the Google sign-in page.
+2. Do **not** enable Chrome's *"Sign out on close"* setting and do **not** turn
+   on *"Clear cookies and site data when you close Chrome"* for any of the three
+   profiles — both would invalidate the session on every restart.
+3. Leave each profile's Chrome **closed** between runs. The warm-up tool and the
+   live fetch both launch Chrome themselves; a profile already using port 9222
+   will cause a conflict.
+4. If your Google org enforces frequent re-authentication, consider a personal
+   Google account or an app-specific session for these profiles.
+
+**Warm-up commands:**
+
+```
+# Warm all three profiles (movies, tv, anime)
+python tools/warm_profiles.py
+
+# Warm a single profile (valid keys: movies, tv, anime)
+python tools/warm_profiles.py --profile anime
+```
+
+Each warm-up launches Chrome for the profile, navigates to Google Photos, and
+calls `check_session_alive` to verify the session. A `fetch_session_lock` (at
+`~/.mediavault/locks/fetch_session.lock`) prevents the warm-up from interfering
+with a concurrently running fetch. A logged-out or unreachable profile prints a
+console message, appends a line to `~/.mediavault/logs/warm_profiles.log`, fires
+a Windows desktop toast notification, and exits non-zero. Re-login to that profile
+and re-run.
+
+**Scheduled daily warm-up (optional but recommended):**
+
+Register the included Task Scheduler definition (runs daily ~03:00 as the current
+user, only when idle, no admin rights required):
+
+```
+schtasks /create /xml "tools\mediavault_warm_profiles.xml" /tn "MediaVault Warm Profiles"
+```
+
+Remove it with:
+
+```
+schtasks /delete /tn "MediaVault Warm Profiles" /f
+```
+
 - The three library JSON files at `C:\Media\library_movies.json`,
   `C:\Media\library_series.json`, and `C:\Media\library_anime.json`. These
   are created on first `prep` if missing.

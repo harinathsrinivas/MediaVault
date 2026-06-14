@@ -781,3 +781,23 @@ Verification: File edited; C16->X1 and C16->S3 edges present and intact. No synt
   - `python -m pytest -q` (full suite) → **217 passed in 48.26s** (no regressions)
   - `python -m pytest tests/smoke -q` → **51 passed in 15.90s** (smoke gate green)
   - `ls ~/.mediavault/logs/warm_profiles.log` → "No such file or directory" (no `~/.mediavault` writes during test run)
+
+---
+
+## Step 10 — Update README + ARCHITECTURE [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `README.md`, `ARCHITECTURE.md`
+- Outcome: Added a "Fetch session keep-alive (IMP-C17)" subsection to README immediately after the Chrome-profile prerequisites. It covers: the one-time profile-hardening checklist (keep-signed-in, no clear-on-exit, leave Chrome closed between runs), the `python tools/warm_profiles.py` warm-up commands (all profiles and `--profile <key>`), the Task Scheduler registration/removal one-liners (`schtasks /create /xml ...`), and logged-out remediation (console + log + toast + non-zero exit). The subsection also briefly describes `check_session_alive` and `fetch_session_lock` so the prerequisite context is complete for users. Added ARCHITECTURE section 8.8 under the mainfetch deep-dive documenting `SessionExpiredError`, `check_session_alive` (shared detector contract, two callers, confident-logout vs. uncertain distinction, 3-consecutive-zero backstop), and `mvcommon.fetch_session_lock` (lock file path, blocking vs. non-blocking acquire, `LockHeldError`). Also added section 9.1b "Fetch-session tooling" describing `warm_profiles.py`, `notify_toast.py`, and `mediavault_warm_profiles.xml`. Included the IMP-X5 reuse seam note.
+- Key decisions: README insertion placed as a sub-heading within the prerequisites section (not a top-level section) to match the existing doc structure. The four required strings (`warm_profiles.py`, `schtasks /create /xml`, `check_session_alive`, `fetch_session_lock`) were verified to appear in both files.
+- Verification:
+  - grep -c "warm_profiles.py" README.md → 2
+  - grep -c "schtasks /create /xml" README.md → 1
+  - grep -c "check_session_alive" README.md → 1
+  - grep -c "fetch_session_lock" README.md → 1
+  - grep -c "warm_profiles.py" ARCHITECTURE.md → 3
+  - grep -c "schtasks /create /xml" ARCHITECTURE.md → 1
+  - grep -c "check_session_alive" ARCHITECTURE.md → 6
+  - grep -c "fetch_session_lock" ARCHITECTURE.md → 2
+  - No code or test files were modified.

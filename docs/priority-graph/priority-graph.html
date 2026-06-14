@@ -147,7 +147,7 @@ const TASKS = [
  ["C3","doctor health check","C","high","todo","Pre-flight catches 80% of mid-run failures"],
  ["C4","device pinning","C","done","done","Shipped PR #2"],
  ["C5","real fallback search","C","high","todo","Today's fallback == precision query → never recovers"],
- ["C6","session-expiry detection","C","high","todo","Silent logout = 90-min doomed fetch"],
+ ["C6","session-expiry detection","C","done","done","Satisfied by IMP-C17: shared check_session_alive; trigger_download/cmd_fetch_route abort a logged-out fetch fast with remediation"],
  ["C7","verify set_uploaded via ADB","C","med","todo","Foot-cannon: can make replace delete the only copy"],
  ["C8","post-push remote verify","C","done","done","Shipped PR #12 (gated off until A5)"],
  ["C9","atomic replace","C","done","done","Shipped PR #5"],
@@ -158,6 +158,7 @@ const TASKS = [
  ["C14","parser papercuts","C","done","done","Fixed fix/cli_parser_papercuts: push_group fail-fast arms (parse_push_group_args); mainfetch guard (parse_fetch_args); cmd_replace prints not-found"],
  ["C15","micro-robustness batch","C","done","done","Fixed fix/micro_robustness_c15: repair_dummies single atomic os.replace + explicit multi_ep_alias skip; _verify_chunk_hash hex-validates first token (empty/garbled → warn-and-skip)"],
  ["C16","anime fetch profile","C","done","done","Fixed fix/anime_fetch_profile: 3rd Chrome profile anime->ChromeProfile_Anime; data-driven mainfetch.ID_PREFIX_PROFILE + profile_for_id(); ani-* routes anime account (was series); external config deferred to IMP-A5"],
+ ["C17","fetch-session keep-alive","C","done","done","feature/fetch_session_keepalive: shared SessionExpiredError+check_session_alive (satisfies C6); daily warm_profiles.py keep-alive + Task Scheduler + Windows toast; single-flight fetch_session_lock"],
  // D — commands
  ["D1","library_stats","D","high","todo","At-a-glance archive state; first thing a UI needs"],
  ["D2","fuzzy find","D","med","todo","Kill ID-recall friction/typos"],
@@ -249,7 +250,7 @@ const EDGES = [
  ["C6","S3"],["S4","U1"],["E4","S4"],["E4","S5"],["E5","S5"],["C1","S2"],
  ["R6","S3"],["G4","S2"],["G4","U5"],["G2","S7"],["S6","S8"],
  ["E7","X1"],["F3","X1"],["X1","X2"],["X1","X4"],["X1","X5"],["X3","F1"],
- ["C12","B7"],["E1","F7"],["U3","U2"],["C16","X1"],["C16","S3"],
+ ["C12","B7"],["E1","F7"],["U3","U2"],["C16","X1"],["C16","S3"],["C17","C6"],["C16","C17"],
 ];
 
 const PRI={crit:{c:"#ff2d55",r:140,size:30,lbl:"Critical / decision"},high:{c:"#ff9f0a",r:300,size:22,lbl:"High"},

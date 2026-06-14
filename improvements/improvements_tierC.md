@@ -129,7 +129,7 @@
 - Effort estimate: small
 - Risk: low — adds early-exit detection; trigger behavior on healthy sessions unchanged.
 - If skipped: the single most likely silent killer of unattended fetches stays silent. Scenario: cookies expire while you're on vacation; every couch fetch that week "times out" after 5+ minutes with no explanation until someone checks the PC.
-- Status: pending
+- Status: done (satisfied by IMP-C17 — shared mainfetch.SessionExpiredError + check_session_alive; trigger_download/cmd_fetch_route abort a logged-out fetch fast with a remediation message + a 3-consecutive-zero backstop; tests in tests/test_session_detector.py)
 
 ---
 
@@ -303,3 +303,21 @@
 - Risk: low — additive profile + a routing branch; movies/series routing unchanged. Verify the new profile is logged in (pairs with IMP-C6 session detection so a logged-out anime profile fails loudly, not silently).
 - If skipped: the first attempt to restore an archived anime title silently fails (0 thumbnails on the wrong account) and looks like a session problem — a confusing dead-end for a whole third of the library, and it blocks the couch-vault flow for anime entirely.
 - Status: done (fix/anime_fetch_profile — added 3rd Chrome profile `anime` → ChromeProfile_Anime; id-prefix→profile routing extracted to data-driven mainfetch.ID_PREFIX_PROFILE + pure profile_for_id(); ani-* now drives anime account, tv-* series, movies movies; external-config sourcing deferred to IMP-A5; unit tests in tests/test_anime_fetch_routing.py + smoke coverage in test_anime_fetch_routing_profile_selection)
+
+---
+
+## IMP-C17: Fetch-session keep-alive + shared logged-out detector (prevents the silent logged-out dead-end)
+
+- Category: other
+- Priority: high
+- Files: `mainfetch.py`, `mvcommon.py`, `tools/warm_profiles.py`, `tools/notify_toast.py`, `tools/mediavault_warm_profiles.xml`
+- Current behavior: When a Chrome profile's Google session expires during an idle period between fetches, the next fetch silently fails (0 thumbnails, looks like session expiry). The user doesn't learn the session is dead until attempting a manual fetch or waiting for a scheduled one. Meanwhile, time and bandwidth are wasted.
+- Proposed change:
+  - Hybrid approach: (1) shared `SessionExpiredError` + `check_session_alive()` in mainfetch.py reused by both the live fetch path (IMP-C6 fast-fail + remediation) and the keep-alive runner; (2) a daily idle-gated Selenium keep-alive `tools/warm_profiles.py` (per-profile OK/LOGGED_OUT/LAUNCH_FAIL → console + `~/.mediavault/logs/warm_profiles.log` + Windows toast via `tools/notify_toast.py` + non-zero exit), registered via `tools/mediavault_warm_profiles.xml` (Task Scheduler, daily 03:00, run-only-if-idle); (3) a single-flight `mvcommon.fetch_session_lock` so the warm-up never collides with a live fetch on CDP port 9222. One-time profile-hardening checklist in README.
+- Rationale: Silent session-expiry between fetches is a failure mode that wasted the most user time in initial testing — the warm-up catches it fast, and the shared check routine lets the live fetch abort early with a clear remediation. Together they ensure a logged-out session is detected within hours, not days.
+- Goal: Sessions stay warm or get detected fast. No 90-minute fetch waits. Unattended multi-day pipelines no longer silently fail at the session.
+- Effort estimate: medium
+- Risk: low — a daemon/scheduler component that touches the session but does not mutate the library. The shared `check_session_alive` routine undergoes the same testing as IMP-C6, and the lock mechanism is proven in prior work (atomic commit patterns).
+- If skipped: unattended fetch pipelines (e.g., couch-vault daemon) will silently fail on session expiry and require manual intervention to diagnose (the C6 fix only helps live fetches, not idle detection). One logged-out profile can orphan days of scheduled fetches.
+- Note: satisfies IMP-C6 session-expiry detection (shares the check routine with it); the ban-sentinel (`IMP-X5`) stays out of scope.
+- Status: done (feature/fetch_session_keepalive — shared SessionExpiredError + check_session_alive in mainfetch.py reused by both live fetch (IMP-C6) and keep-alive runner; daily Selenium warm_profiles.py (per-profile status log + Windows toast); Task Scheduler registration via mediavault_warm_profiles.xml; single-flight fetch_session_lock in mvcommon.py; tests in tests/test_session_detector.py, tests/test_warm_profiles.py, tests/test_notify_toast.py + smoke test_fetch_route_logged_out_aborts)

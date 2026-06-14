@@ -801,3 +801,18 @@ Verification: File edited; C16->X1 and C16->S3 edges present and intact. No synt
   - grep -c "check_session_alive" ARCHITECTURE.md → 6
   - grep -c "fetch_session_lock" ARCHITECTURE.md → 2
   - No code or test files were modified.
+
+---
+
+## Step 11 — [status: done]
+- Executor: executor-haiku
+- Model: haiku
+- Files changed: `improvements/improvements_tierC.md`, `improvements/PRIORITY.md`, `docs/priority-graph/priority-graph.html`, `PLAN.md`
+- Outcome: Pure documentation and registry edits only. (1) In `improvements_tierC.md`: updated IMP-C6 Status line (line 132) from `pending` to done with a summary of how IMP-C17 satisfies it via shared `SessionExpiredError` + `check_session_alive`. (2) Added new `## IMP-C17` block (after C16 at line 309) documenting the hybrid keep-alive approach, shared detector, Task Scheduler registration, lock mechanism, and Windows toast. (3) In `PRIORITY.md`: updated Last-updated line (line 12) to mention IMP-C17 done; updated Band 2 reference (line 46) to note C6 now ✅ done via C17; bumped DONE count from 17 to 19 (line 77); added C17 and C6 to the DONE list (line 81). (4) In `priority-graph.html`: changed C6 entry in TASKS array (line 150) from high/todo to done/done; added new C17 entry in TASKS (line 161) after C16; added two edges ["C17","C6"] and ["C16","C17"] in EDGES array (line 253). (5) Marked step 11 [x] in PLAN.md.
+- Key decisions: None—followed the exact edit specifications from the orchestrator prompt. All three priority surfaces (tierC.md, PRIORITY.md, priority-graph.html) are now consistent: C6 and C17 both show done status, count is bumped to 19, and the graph edges properly reflect the C16→C17→C6 dependency chain.
+- Verification:
+  - `grep -n "C17" improvements/PRIORITY.md improvements/improvements_tierC.md docs/priority-graph/priority-graph.html` → found C17 in all three files at lines 12, 46, 81 (PRIORITY.md) and lines 132, 309, 323 (improvements_tierC.md) and lines 150, 161, 253 (priority-graph.html).
+  - `grep -n "C6.*done" improvements/improvements_tierC.md docs/priority-graph/priority-graph.html` → C6 shows done status in both files (line 132 tierC.md, line 150 priority-graph.html).
+  - `grep "DONE (19)" improvements/PRIORITY.md` → found (line 77).
+  - `grep "Last updated.*C17 done" improvements/PRIORITY.md` → confirmed (line 12).
+  - HTML well-formedness check: `grep -c "\[" docs/priority-graph/priority-graph.html` → 155 opening brackets (file structure intact, no parse errors during the edits).

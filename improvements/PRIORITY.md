@@ -9,16 +9,20 @@
 > Full task text lives in `improvements_tier*.md`; this file only orders them. Legend:
 > 🔴 critical · 🟠 high · 🟡 medium · ⚪ low · ✅ done · 🚦 needs a user decision (change-gate).
 >
-> **Last updated:** 2026-06-14 (IMP-C17 done — fetch-session keep-alive; IMP-C6 satisfied).
+> **Last updated:** 2026-06-14 (IMP-C18 logged — anime `sSSEE` episode-range filter bug, Band 0; IMP-C17 done).
 
 ---
 
-## 👉 SUGGESTED NEXT TASK: **IMP-A10** — truth-up `requirements.txt`
+## 👉 SUGGESTED NEXT TASK: **IMP-C18** — fix anime season-range episode filter (silent 0-match)
 
-A clean install is half-broken today: `requests` and `webdriver-manager` are missing from
-`requirements.txt`, so `pip install -r requirements.txt` leaves the project non-functional.
-Low risk, immediate value. No open decisions.
+`episodes N-M` on an anime season whose child IDs glue season+episode with no `e`/`x` separator
+(e.g. `…-s0202`) silently filters to **0** in BOTH fetch and restore and still reports
+"✅✅✅ FETCH & RESTORE COMPLETE." with 0 files — a misleading no-op. Low-risk fix: strip the
+base/season id before reading the episode number (the working pattern already at `main.py:~2705`)
+and factor one shared extractor used by all range-filter sites. Found 2026-06-14. Full writeup +
+workaround in `improvements_tierC.md` (IMP-C18); see also the Band 0 table.
 
+> Then **IMP-A10** — truth-up `requirements.txt` (missing `requests`/`webdriver-manager`; a clean install is half-broken).
 > 🚦 **IMP-R6** and **IMP-R7** still await user decisions before any code — see Band 0 table.
 
 ---
@@ -29,6 +33,7 @@ Low risk, immediate value. No open decisions.
 |---|---|---|---|---|
 | 1 | 🚦 **IMP-R6** | failed restore-merge leaves NO file at the path → title disappears from every media server | medium | **decision** |
 | 2 | 🚦 **IMP-R7** | re-running a command after a crash silently destroys the leftover recovery journal → orphaned artifacts | medium | **decision** |
+| 3 | 🔴 **IMP-C18** | `episodes N-M` on `sSSEE` anime seasons (e.g. `…-s0202`) silently filters to 0 in fetch + restore (season digits glued to episode) → reports "COMPLETE" with 0 files | low | fix |
 
 ## 🟠 BAND 1 — SUGGESTED NEXT after Band 0 (cheap foundations + immediate value)
 

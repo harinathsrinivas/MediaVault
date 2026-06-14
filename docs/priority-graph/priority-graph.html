@@ -159,6 +159,7 @@ const TASKS = [
  ["C15","micro-robustness batch","C","done","done","Fixed fix/micro_robustness_c15: repair_dummies single atomic os.replace + explicit multi_ep_alias skip; _verify_chunk_hash hex-validates first token (empty/garbled → warn-and-skip)"],
  ["C16","anime fetch profile","C","done","done","Fixed fix/anime_fetch_profile: 3rd Chrome profile anime->ChromeProfile_Anime; data-driven mainfetch.ID_PREFIX_PROFILE + profile_for_id(); ani-* routes anime account (was series); external config deferred to IMP-A5"],
  ["C17","fetch-session keep-alive","C","done","done","feature/fetch_session_keepalive: shared SessionExpiredError+check_session_alive (satisfies C6); daily warm_profiles.py keep-alive + Task Scheduler + Windows toast; single-flight fetch_session_lock"],
+ ["C18","anime range-filter bug","C","crit","todo","sSSEE ids (…-s0202): range regex grabs 0202=202 not 2 → episodes 2-3 filters to 0 in fetch+restore, reports COMPLETE w/ 0 files; fix=strip base id like main.py:2705 + one shared extractor"],
  // D — commands
  ["D1","library_stats","D","high","todo","At-a-glance archive state; first thing a UI needs"],
  ["D2","fuzzy find","D","med","todo","Kill ID-recall friction/typos"],

@@ -712,3 +712,14 @@ Verification: File edited; C16->X1 and C16->S3 edges present and intact. No synt
   - Acceptance 3 — `python -c "import tools.warm_profiles"` → imports cleanly; `warm_all` callable; `LOG_PATH == C:\Users\harin\.mediavault\logs\warm_profiles.log`.
   - Behavioral sweep (own verification, NOT the step-8 tests — driven with `mainfetch.init_driver`/`send_toast`/`fetch_session_lock`/`LOG_PATH` mocked, `time.sleep` no-op, log redirected to a tmp file, under `PYTHONIOENCODING=utf-8`): S1 all-healthy → rc=0, no toast, log `movies=OK tv=OK anime=OK`; S2 one logged out (anime) → rc=1, toast called once, title exactly `MediaVault: account needs attention`, message `anime logged out — re-login required`, log `anime=LOGGED_OUT`; S3 launch fail (tv) → rc=1, toast names `tv`, log `tv=LAUNCH_FAIL`; S4 lock held → rc=0, ZERO drivers launched, no toast, prints the skip line, log `_run=SKIPPED_LOCK_HELD`; S5 `warm_all(["anime"])` → rc=0, exactly one `init_driver` call for `anime`.
   - Smoke gate — `python -m pytest tests/smoke -q` → **51 passed in 22.72s** (under the 30s budget). (Run defensively; this step adds a new `tools/` file and does not touch the three core files, but the smoke suite exercises the import surface.)
+
+---
+
+## Step 6 — Create tools/mediavault_warm_profiles.xml (Task Scheduler XML) [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `tools/mediavault_warm_profiles.xml` (NEW)
+- Outcome: Created a well-formed Task Scheduler v1.2 XML definition for the daily keep-alive warm-up. The task fires at 03:00 daily, runs only when idle (10-min wait, 1-hour timeout), uses `StartWhenAvailable=true` to catch up if the PC was off at trigger time, uses `InteractiveToken`/`LeastPrivilege` (current user, no admin — required for the desktop toast to surface), and limits execution to 30 minutes. The `<Actions>` block calls `.venv\Scripts\python.exe` with `-X utf8` flag and the full repo path to `tools\warm_profiles.py`. A header comment notes: (a) paths to adjust on a different machine, (b) why `-X utf8` is needed under a no-console scheduled context, (c) why `InteractiveToken` is required for the toast, and (d) the exact `schtasks /create` registration command.
+- Key decisions: Used `-X utf8` in `<Arguments>` (as the step specification required) rather than only in the comment. Used plain UTF-8 encoding (not UTF-16) as `schtasks /xml` accepts UTF-8. All paths are absolute and machine-specific as documented; the header comment explicitly calls out the need to adjust them on a different machine.
+- Verification: `python -c "import xml.dom.minidom; xml.dom.minidom.parse(r'tools/mediavault_warm_profiles.xml'); print('xml ok')"` → **`xml ok`** (well-formed XML confirmed). `schtasks /create` registration is the manual user step; not run here.

@@ -451,7 +451,7 @@ def cmd_fetch_route(manual_id, ep_range=None):
     print(f"--- FETCH ROUTER: {manual_id} ---")
 
     active_profile = profile_for_id(manual_id)
-    print(f"   > 🗂️  Account/profile for {manual_id}: '{active_profile}' "
+    print(f"   > [Account] Profile for {manual_id}: '{active_profile}' "
           f"({CHROME_PROFILES.get(active_profile, '?')})")
 
     targets = resolve_targets(manual_id, ep_range)

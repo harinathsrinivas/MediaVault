@@ -486,3 +486,16 @@ Branch: fix/cli_parser_papercuts (from main)
     - `PLAN.md`: Step 6 marked `[x]`.
   - No code files modified; `python -c "import main, mainfetch"` clean (prior steps' changes remain in tree).
   - No test run required per step specification; full suite still green from prior step verification (184 passed, 0 skipped, smoke 50 passed).
+
+---
+
+## Step 2 (IMP-C15) — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `main.py` (`_verify_chunk_hash` parse-and-compare block + docstring)
+- Outcome: Replaced the single-line `result.stdout.strip().split()[0]` parse with a hex-validating guard. Empty stdout (`""`) produces `[]` from `.split()`, and the old `split()[0]` would raise `IndexError` — not in the C2 `retry_on=(CalledProcessError,)` set, so it escaped as a raw traceback aborting the push. The new code extracts `first = parts[0] if parts else ""` and validates it with `re.fullmatch(r"[0-9a-fA-F]{64}", first)`. Empty or garbled output (e.g. "sha256sum: applet not found") warns-and-returns, keeping the push alive (same pattern as the command-not-found `except` arm already in place). Only a well-formed 64-hex token that differs from `expected_sha256` raises `CalledProcessError` — the C2 retry path is byte-for-byte unchanged on genuine mismatches. The docstring was extended to document both warn-and-skip paths (command-not-found + empty/garbled stdout).
+- Key decisions: Used `re.fullmatch` (already imported at `main.py:6`) for the hex validation. Warning message matches the style of the existing `sha256sum unavailable` message at line 1251 exactly (same two-space indent, same ⚠️ emoji, same "remote verification skipped for {basename}" tail). Case-sensitive comparison preserved (`first != expected_sha256`).
+- Verification:
+  - `python -m pytest tests/smoke -q` → **50 passed in 14.91s**
+  - `python -m pytest tests/test_cmd_push_verify.py -q` → **5 passed in 0.54s**

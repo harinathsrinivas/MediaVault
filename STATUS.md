@@ -562,3 +562,10 @@ Verification:
 Status: done
 Key decisions: Created tests/test_anime_fetch_routing.py with 12 test cases covering all prefix patterns, the regression guard (ani != tv profile), and map-integrity guards.
 Verification: python -m pytest tests/test_anime_fetch_routing.py -q → 12 passed in 0.62s; python -m pytest tests/test_cli_parsers.py -q → 21 passed in 0.76s (regression check).
+
+---
+
+## Step 4 — Smoke test for anime routing without a browser
+Status: done
+Key decisions: Added test_anime_fetch_routing_profile_selection to TestEachCommand; uses sandbox (empty libs) + optional init_driver monkeypatch; asserts 'anime' and 'ChromeProfile_Anime' in stdout; regression guard asserts no 'tv' routing for ani-* id.
+Verification: python -m pytest tests/smoke -q → 51 passed in 12.41s (all green).

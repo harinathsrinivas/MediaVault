@@ -283,7 +283,7 @@
 - Effort estimate: small
 - Risk: low — strictly-narrower failure behavior in two helpers.
 - If skipped: cosmetic-to-rare failures; the repair_dummies window mainly matters during bulk runs (423 dummies regenerated in one 2026-05-27 sweep — that's 423 windows).
-- Status: pending
+- Status: done (fix/micro_robustness_c15 — cmd_repair_dummies non-atomic remove+rename replaced with single atomic os.replace + explicit multi_ep_alias skip; _verify_chunk_hash hex-validates the device sha256 first token (empty/garbled → warn-and-skip, only a well-formed differing hash raises CalledProcessError); unit tests in tests/test_repair_dummies.py + new cases in tests/test_cmd_push_verify.py)
 
 ---
 

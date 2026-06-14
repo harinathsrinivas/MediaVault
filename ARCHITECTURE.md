@@ -828,10 +828,15 @@ High-level sequence inside one `cmd_push` call:
      `adb shell sha256sum '<remote>'` on the device and compares the result
      to the stored chunk hash (`split_info.chunks[i].hash`). A mismatch raises
      `CalledProcessError` *inside* the retried closure, so the same C2 retry
-     wrapper re-runs push→mv→verify; on exhaustion the push fails normally. If
-     `sha256sum` itself is unavailable (non-zero exit), the verifier prints one
-     warning and skips (warn-and-skip), so a device without `sha256sum` never
-     blocks a push. With `PUSH_VERIFY_REMOTE=False` the verify body never runs
+     wrapper re-runs push→mv→verify; on exhaustion the push fails normally.
+     Warn-and-skip (one warning, `return`, push stays alive) covers two
+     non-fatal cases: (1) `sha256sum` itself is unavailable (non-zero exit),
+     and (2) EMPTY or GARBLED device stdout — the verifier requires a
+     well-formed 64-hex first token from the `sha256sum` output, so empty or
+     non-hex output is skipped rather than crashing on an `IndexError`. Only a
+     well-formed 64-hex token that *differs* from the expected hash still
+     raises `CalledProcessError` and is retried under IMP-C2, so the documented
+     promise matches the code. With `PUSH_VERIFY_REMOTE=False` the verify body never runs
      and the happy path is byte-for-byte unchanged. Toggling the flag without
      editing source is deferred to IMP-A5 (config file).
 7. **Post-loop bookkeeping**:
@@ -937,7 +942,10 @@ There is one code path — no derived-mode or fallback-mode distinction.
 
 Generic regenerator that brings every archived dummy on disk up to the
 current recipe spec. Walks every leaf entry with `status ==
-"archived"`, optionally filtered by a manual-ID prefix.
+"archived"`, optionally filtered by a manual-ID prefix. The whole-library
+iterator explicitly skips both `season_map` and `multi_ep_alias` entries
+(an explicit `continue` for each) so it is alias-safe by design rather than
+by accident — consistent with the `ENTRY_TYPE_KEYS` alias-safety guardrail.
 
 For each candidate:
 
@@ -949,7 +957,11 @@ For each candidate:
 4. Call `make_video_dummy(file_path, ext)` using the per-container
    recipe. Prints `Regenerating dummy: <path>` for each file.
    On failure, increment `failed` and continue.
-5. Replace the existing dummy with the regenerated video dummy.
+5. Replace the existing dummy with the regenerated video dummy via a
+   SINGLE ATOMIC `os.replace(tmp, current)` — there is no window in which
+   the path has no file (the previous `os.remove` + `os.rename` pair left
+   such a gap on a crash or lock). This mirrors `make_video_dummy`'s own
+   atomic write (§7.6 above) and the IMP-C9 atomic-swap lesson.
 
 There is no magic-header sniff — any archived-entry video file under
 `DUMMY_MAX_BYTES` is treated as a dummy and regenerated. This makes the

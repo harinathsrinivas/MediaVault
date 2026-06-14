@@ -1237,10 +1237,13 @@ def _verify_chunk_hash(adb_base, remote_path, safe_path, expected_sha256):
 
     On command-not-found / file-not-found (non-zero exit from the sha256sum call
     itself), print a warning and return WITHOUT raising — the push is kept alive
-    (OD-2a, warn-and-skip). A genuine hash mismatch raises subprocess.CalledProcessError
-    so the surrounding IMP-C2 retry(retry_on=(CalledProcessError,)) wrapper re-runs the
-    whole push->mv->verify closure, and after exhaustion cmd_push returns False with the
-    existing failure contract.
+    (OD-2a, warn-and-skip). Similarly, empty OR garbled device stdout (a well-formed
+    64-hex first token is required) is treated as a warn-and-skip — the push is kept
+    alive rather than crashing with an IndexError or ValueError. A genuine hash mismatch
+    (well-formed 64-hex token that differs from expected_sha256) raises
+    subprocess.CalledProcessError so the surrounding IMP-C2 retry(retry_on=(CalledProcessError,))
+    wrapper re-runs the whole push->mv->verify closure, and after exhaustion cmd_push
+    returns False with the existing failure contract.
     """
     try:
         result = subprocess.run(
@@ -1250,9 +1253,14 @@ def _verify_chunk_hash(adb_base, remote_path, safe_path, expected_sha256):
     except subprocess.CalledProcessError:
         print(f"  ⚠️  sha256sum unavailable on device — remote verification skipped for {os.path.basename(remote_path)}")
         return
-    # Format: "<hash>  <path>\n"
-    remote_hash = result.stdout.strip().split()[0]
-    if remote_hash != expected_sha256:
+    # Format: "<hash>  <path>\n". Require a well-formed 64-hex first token;
+    # empty OR garbled device stdout → warn-and-skip (keep the push alive).
+    parts = result.stdout.split()
+    first = parts[0] if parts else ""
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", first):
+        print(f"  ⚠️  sha256sum produced no usable output on device — remote verification skipped for {os.path.basename(remote_path)}")
+        return
+    if first != expected_sha256:
         raise subprocess.CalledProcessError(
             1, f"hash mismatch for {os.path.basename(remote_path)}"
         )
@@ -2027,6 +2035,8 @@ def cmd_repair_dummies(prefix_filter=None):
     for entry_id, entry in library.items():
         if entry.get("type") == "season_map":
             continue
+        if entry.get("type") == "multi_ep_alias":
+            continue
         if prefix_filter and not entry_id.startswith(prefix_filter):
             continue
         if entry.get("status") != "archived":
@@ -2057,8 +2067,7 @@ def cmd_repair_dummies(prefix_filter=None):
             failed += 1
             continue
 
-        os.remove(current_path)
-        os.rename(tmp_path, current_path)
+        os.replace(tmp_path, current_path)
         regenerated += 1
 
     print(f"✅ repair_dummies complete: scanned {scanned}, regenerated {regenerated}, skipped {skipped}, missing {missing}, failed {failed}")

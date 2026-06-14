@@ -12,6 +12,15 @@ Planned step order: A1 -> A2 -> A3 -> B1 -> B2 -> B3 -> B4 -> B5 -> B6 -> B7 -> 
 
 Note on the in-scope pre-existing change: `.claude/agents/planner.md` was already modified (frontmatter) before this run; it is carried onto the feature branch and will be committed as part of step B3 (which edits planner.md), NOT with earlier steps.
 
+## Step 1 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `main.py`
+- Outcome: Two surgical edits to `cmd_repair_dummies` (lines ~2028-2062). (A) Added explicit `if entry.get("type") == "multi_ep_alias": continue` guard immediately after the existing `season_map` skip at line 2029, making the whole-library iterator explicitly alias-safe per CLAUDE.md/ENTRY_TYPE_KEYS guardrail. (B) Replaced the non-atomic two-line swap `os.remove(current_path)` + `os.rename(tmp_path, current_path)` with the single atomic `os.replace(tmp_path, current_path)`, eliminating the window where a crash between the two calls would leave no file at `current_path`. Both changes are identical in behavior for all valid non-alias entries under normal operation.
+- Key decisions: `multi_ep_alias` skip placed immediately after `season_map` skip (before `prefix_filter` and `status` guards), matching the pattern established by IMP-C12 in `cmd_scan_unprepped`/`cmd_local_status`. The atomic `os.replace` idiom matches `make_video_dummy` at line 469.
+- Verification: `python -m pytest tests/smoke -q` → 50 passed in 13.83s. `python -m pytest tests/smoke/test_smoke_all_commands.py -q -k repair_dummies` → 2 passed, 48 deselected in 0.33s.
+
 ---
 
 ## RUN BLOCKER — paused before Step A1 (RESUME POINT)
@@ -477,3 +486,52 @@ Branch: fix/cli_parser_papercuts (from main)
     - `PLAN.md`: Step 6 marked `[x]`.
   - No code files modified; `python -c "import main, mainfetch"` clean (prior steps' changes remain in tree).
   - No test run required per step specification; full suite still green from prior step verification (184 passed, 0 skipped, smoke 50 passed).
+
+---
+
+## Step 2 (IMP-C15) — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `main.py` (`_verify_chunk_hash` parse-and-compare block + docstring)
+- Outcome: Replaced the single-line `result.stdout.strip().split()[0]` parse with a hex-validating guard. Empty stdout (`""`) produces `[]` from `.split()`, and the old `split()[0]` would raise `IndexError` — not in the C2 `retry_on=(CalledProcessError,)` set, so it escaped as a raw traceback aborting the push. The new code extracts `first = parts[0] if parts else ""` and validates it with `re.fullmatch(r"[0-9a-fA-F]{64}", first)`. Empty or garbled output (e.g. "sha256sum: applet not found") warns-and-returns, keeping the push alive (same pattern as the command-not-found `except` arm already in place). Only a well-formed 64-hex token that differs from `expected_sha256` raises `CalledProcessError` — the C2 retry path is byte-for-byte unchanged on genuine mismatches. The docstring was extended to document both warn-and-skip paths (command-not-found + empty/garbled stdout).
+- Key decisions: Used `re.fullmatch` (already imported at `main.py:6`) for the hex validation. Warning message matches the style of the existing `sha256sum unavailable` message at line 1251 exactly (same two-space indent, same ⚠️ emoji, same "remote verification skipped for {basename}" tail). Case-sensitive comparison preserved (`first != expected_sha256`).
+- Verification:
+  - `python -m pytest tests/smoke -q` → **50 passed in 14.91s**
+  - `python -m pytest tests/test_cmd_push_verify.py -q` → **5 passed in 0.54s**
+
+---
+
+## Step 3 (IMP-C15) — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `tests/test_cmd_push_verify.py` (extended with 5 new unit tests), `tests/test_repair_dummies.py` (NEW file with 2 tests)
+- Outcome: Added direct unit tests for `_verify_chunk_hash` (Bug 2) and an atomic-swap regression test for `cmd_repair_dummies` (Bug 1). For Bug 2, 5 new tests monkeypatch `main.subprocess.run` directly against `_verify_chunk_hash`, covering: empty stdout (IndexError regression guard), garbled stdout (warn-and-skip), valid matching hash (no warning/raise), valid mismatched hash (raises `CalledProcessError`), and command-not-found (existing arm guard). For Bug 1, 2 new tests: `test_repair_dummies_atomic_swap` seeds a tiny archived file, runs the repair, asserts the result at `current_path` contains `FAKE_DUMMY_BYTES`, asserts no `.repair_tmp` orphan, and uses a spy on `main.os.remove` to assert `current_path` was NOT passed to `os.remove` (regression guard against reverting to remove+rename); `test_repair_dummies_skips_alias` seeds both an archived entry and a `multi_ep_alias` entry, asserts the repair runs clean (no KeyError), and asserts the alias entry is untouched.
+- Key decisions: Used two module-level helper functions `_stub_run(returncode, stdout)` and `_stub_run_raise(exc)` to build fake subprocess.run callables without adding fixtures or conftest entries. The `os.remove` spy wraps the real `os.remove` (via `monkeypatch.setattr(main.os, "remove", _spy_remove)`) so unrelated cleanup is unaffected; the assertion checks that `current_path`'s absolute path is not in the recorded-removed set. The alias case seeds the alias entry directly into the movies lib JSON alongside the archived entry, mirroring how the sandbox_alias fixture structures the multi_ep_alias schema (3 keys only: type/alias_of/parent_id).
+- Verification:
+  - `python -m pytest tests/test_cmd_push_verify.py tests/test_repair_dummies.py -q` → **12 passed in 0.81s**
+  - `python -m pytest -q` (full suite) → **191 passed in 39.58s**
+  - `python -m pytest tests/smoke -q` → **50 passed in 11.42s**
+
+---
+
+## Step 4 (IMP-C15) — [status: done]
+- Executor: architect
+- Model: opus
+- Mode: docs-only (Read-only architect; only `ARCHITECTURE.md` + `README.md` written)
+- Files changed: `ARCHITECTURE.md` (§7.5 push-verify warn-and-skip clause, §7.6 dummy-system iterator note + step 5 atomic-swap), `README.md` (`repair_dummies` command-table row)
+- Outcome: Grounded every edit against the shipped Step 1-2 code (`main.py:_verify_chunk_hash` @1235-1266, `cmd_repair_dummies` @2027-2073) before writing. (A) ARCHITECTURE.md §7.5: extended the IMP-C8 post-push-verification warn-and-skip clause to state that warn-and-skip now covers TWO non-fatal cases — `sha256sum` unavailable (non-zero exit) AND empty/garbled device stdout (the verifier requires a well-formed 64-hex first token; empty or non-hex output → one warning + `return`, push stays alive, no `IndexError`); only a well-formed 64-hex token that differs from the expected hash still raises `CalledProcessError` and is retried under IMP-C2. (B) ARCHITECTURE.md §7.6: (1) added a sentence to the `cmd_repair_dummies` intro noting the whole-library iterator now explicitly skips both `season_map` and `multi_ep_alias` (an explicit `continue` for each), alias-safe by design per the ENTRY_TYPE_KEYS guardrail; (2) rewrote per-candidate step 5 to state the replacement is a SINGLE ATOMIC `os.replace(tmp, current)` — no window in which the path has no file (the prior `os.remove` + `os.rename` left such a gap) — mirroring `make_video_dummy`'s own atomic write and the IMP-C9 atomic-swap lesson. (C) README.md: appended a brief "; atomic swap" note to the `repair_dummies` command-table row (~line 138). Left the remote-verify test-coverage line (~line 294) untouched — it already reads "remote verify" accurately and needed no behavioral restructure.
+- Key decisions: Surgical edits only — described the two shipped behaviors without restructuring either ARCHITECTURE.md section. README touch kept minimal (one-row note) per the plan's "do not over-edit; README has no behavioral push-verify section to restructure"; the §294 test line was judged accurate as-is and left alone. No code files edited (Read-only architect).
+- Verification: docs-only, no tests run.
+
+---
+
+## Step 5 (IMP-C15) — [status: done]
+- Executor: executor-haiku
+- Model: haiku
+- Mode: single-executor
+- Files changed: `improvements/improvements_tierC.md` (IMP-C15 status line), `improvements/PRIORITY.md` (Last updated, SUGGESTED NEXT TASK block, BAND 0 table, DONE count+list), `docs/priority-graph/priority-graph.html` (C15 task node, Next banner), `PLAN.md` (step 5 marked `[x]`)
+- Outcome: Marked IMP-C15 done in the tracking trio (tierC + PRIORITY.md + priority graph) with synchronized updates. (1) `improvements_tierC.md`: changed IMP-C15 `Status: pending` to `Status: done (fix/micro_robustness_c15 — cmd_repair_dummies non-atomic remove+rename replaced with single atomic os.replace + explicit multi_ep_alias skip; _verify_chunk_hash hex-validates the device sha256 first token (empty/garbled → warn-and-skip, only a well-formed differing hash raises CalledProcessError); unit tests in tests/test_repair_dummies.py + new cases in tests/test_cmd_push_verify.py)`. (2) PRIORITY.md: (a) bumped `Last updated` to `2026-06-14 (IMP-C15 done — fix/micro_robustness_c15)`; (b) rewrote the `## 👉 SUGGESTED NEXT TASK` block to point at **IMP-C16** (anime fetch profile routing) with its rationale, keeping the R6/R7 decision-awaiting note; (c) removed IMP-C15 from BAND 0, leaving only R6 and R7; (d) updated DONE count `## ✅ DONE (15)` → `## ✅ DONE (16)` and added `C15` (micro-robustness) to the done list. (3) priority-graph.html: updated C15 task node from `["C15","…","C","high","todo",…]` to `["C15","…","C","done","done",…]` with the final detail string, and updated the ⚡ Next banner from C15 to C16. All three files now agree: C15 is done, the next code task is C16, DONE count is 16.
+- Key decisions: None. Mechanical edits following the established done-status pattern used by C12/C13/C14.
+- Verification: No code touched → no smoke gate needed. No pytest run. All three tracking files edited; consistency confirmed by re-reading changed regions (no target string drifts, all edits applied cleanly).

@@ -173,7 +173,8 @@ C:\Media\
 |-- Anime\                           media root for Anime category
 |-- Utils\
     |-- ChromeProfile\               Selenium-attached Chrome user data dir for movies
-    |-- ChromeProfile_TV\            Selenium-attached Chrome user data dir for TV + anime
+    |-- ChromeProfile_TV\            Selenium-attached Chrome user data dir for TV (series account)
+    |-- ChromeProfile_Anime\         Selenium-attached Chrome user data dir for anime
 ```
 
 > The current `main.py` and `mainfetch.py` read/write
@@ -268,6 +269,7 @@ Brackets denote optional args; `[id]` is the manual library ID like
 ### `python mainfetch.py fetch <id> [episodes <range>]`
 
 Single entry: `cmd_fetch_route(manual_id, ep_range)` at `mainfetch.py:455`.
+Profile selection is now data-driven via `profile_for_id(manual_id)` (IMP-C16).
 
 Note the argv parsing (extracted as `mainfetch.parse_fetch_args(argv)`)
 requires `fetch` as `argv[1]` and the ID at `argv[2]`; episodes go at
@@ -1112,22 +1114,28 @@ Same library paths as `main.py`. Adds:
 
 ```python
 CHROME_PROFILES = {
-    "default": r"C:\Media\Utils\ChromeProfile",
-    "tv":      r"C:\Media\Utils\ChromeProfile_TV"
+    "movies": r"C:\Media\Utils\ChromeProfile",
+    "tv":     r"C:\Media\Utils\ChromeProfile_TV",
+    "anime":  r"C:\Media\Utils\ChromeProfile_Anime",
 }
 CHROME_PROFILE_NAME       = "Default"
 SYSTEM_DOWNLOADS_FOLDER   = os.path.join(os.path.expanduser("~"), "Downloads")
 ```
 
-Two separate Chrome user-data directories exist because the user has two
-distinct Google accounts: one with the movie collection in Photos and
-another with TV/anime. Routing is decided in `cmd_fetch_route`:
+Three separate Chrome user-data directories exist because the user has three
+distinct Google accounts: movies, TV series, and anime. Routing is decided
+in `cmd_fetch_route` via a data-driven map (IMP-C16; IMP-A5 will source
+this from `mvconfig.json`):
 
 ```python
-if manual_id.startswith("tv") or manual_id.startswith("ani"):
-    active_profile = "tv"
-else:
-    active_profile = "default"
+ID_PREFIX_PROFILE = [("ani", "anime"), ("tv", "tv"), ("mov", "movies")]
+DEFAULT_PROFILE = "movies"
+
+def profile_for_id(manual_id):
+    for prefix, key in ID_PREFIX_PROFILE:
+        if manual_id.startswith(prefix):
+            return key
+    return DEFAULT_PROFILE
 ```
 
 ### 8.2 Selenium + Chrome attach-mode setup (`init_driver`, lines 105-147)

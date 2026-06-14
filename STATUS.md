@@ -544,3 +544,14 @@ Key decisions: Added CHROME_PROFILES["anime"] -> ChromeProfile_Anime; added ID_P
 Verification:
 - `python -c "import mainfetch; print(mainfetch.profile_for_id('ani-x'), mainfetch.profile_for_id('tv-x'), mainfetch.profile_for_id('mov-x'), mainfetch.profile_for_id('legacy'))"` → `anime tv movies movies`
 - `python -c "import mainfetch; print(mainfetch.CHROME_PROFILES)"` → `{'movies': 'C:\\Media\\Utils\\ChromeProfile', 'tv': 'C:\\Media\\Utils\\ChromeProfile_TV', 'anime': 'C:\\Media\\Utils\\ChromeProfile_Anime'}`
+
+---
+
+## Step 2 — Rewrite cmd_fetch_route + fix init_driver default key
+Status: done
+Key decisions: cmd_fetch_route now calls profile_for_id(manual_id) for routing; init_driver default and fallback changed from "default" to "movies"; no remaining "default" references in CHROME_PROFILES context.
+Verification:
+- `grep -n "default" mainfetch.py` → only `CHROME_PROFILE_NAME = "Default"` (line 40) and `--no-default-browser-check` (line 66) — zero CHROME_PROFILES["default"] or profile_key="default" references.
+- `python -c "import mainfetch; print(mainfetch.profile_for_id('ani-ja-2006-deathnote01'))"` → `anime`
+- `python -c "import mainfetch; print(mainfetch.init_driver.__defaults__)"` → `('movies',)`
+- `python -m pytest tests/smoke -q` → 50 passed in 10.49s

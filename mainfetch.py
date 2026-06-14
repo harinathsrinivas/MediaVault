@@ -44,10 +44,10 @@ SYSTEM_DOWNLOADS_FOLDER = os.path.join(os.path.expanduser("~"), "Downloads")
 # ==========================================
 #      AUTOMATION LOGIC (SELENIUM)
 # ==========================================
-def init_driver(profile_key="default"):
+def init_driver(profile_key="movies"):
     """Initializes the Chrome Driver with the selected profile."""
 
-    user_data_dir = CHROME_PROFILES.get(profile_key, CHROME_PROFILES["default"])
+    user_data_dir = CHROME_PROFILES.get(profile_key, CHROME_PROFILES["movies"])
     print(f"   > 🤖 Launching Chrome ({profile_key.upper()}) on Debug Port 9222...")
     print(f"   > Profile Path: {user_data_dir}")
 
@@ -450,13 +450,9 @@ def profile_for_id(manual_id):
 def cmd_fetch_route(manual_id, ep_range=None):
     print(f"--- FETCH ROUTER: {manual_id} ---")
 
-    # [UPDATED] Profile Selection Logic
-    active_profile = "default"
-    if manual_id.startswith("tv") or manual_id.startswith("ani"):
-        print("   > 📺 TV Series detected: Using 'ChromeProfile_TV'")
-        active_profile = "tv"
-    else:
-        print("   > 🎬 Movie (or other) detected: Using Default Profile")
+    active_profile = profile_for_id(manual_id)
+    print(f"   > 🗂️  Account/profile for {manual_id}: '{active_profile}' "
+          f"({CHROME_PROFILES.get(active_profile, '?')})")
 
     targets = resolve_targets(manual_id, ep_range)
     if not targets:

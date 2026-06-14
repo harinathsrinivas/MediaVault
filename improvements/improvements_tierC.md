@@ -302,4 +302,4 @@
 - Effort estimate: small
 - Risk: low — additive profile + a routing branch; movies/series routing unchanged. Verify the new profile is logged in (pairs with IMP-C6 session detection so a logged-out anime profile fails loudly, not silently).
 - If skipped: the first attempt to restore an archived anime title silently fails (0 thumbnails on the wrong account) and looks like a session problem — a confusing dead-end for a whole third of the library, and it blocks the couch-vault flow for anime entirely.
-- Status: pending
+- Status: done (fix/anime_fetch_profile — added 3rd Chrome profile `anime` → ChromeProfile_Anime; id-prefix→profile routing extracted to data-driven mainfetch.ID_PREFIX_PROFILE + pure profile_for_id(); ani-* now drives anime account, tv-* series, movies movies; external-config sourcing deferred to IMP-A5; unit tests in tests/test_anime_fetch_routing.py + smoke coverage in test_anime_fetch_routing_profile_selection)

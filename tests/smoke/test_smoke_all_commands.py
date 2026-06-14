@@ -421,6 +421,25 @@ class TestEachCommand:
         assert ok is True
         assert (mock_fetch / "BSG.S01E01.mkv").exists()
 
+    # ---- anime fetch routing (profile selection; no browser) -----------------
+    def test_anime_fetch_routing_profile_selection(self, sandbox, monkeypatch, capsys):
+        """Routing smoke: ani-* ids must drive the 'anime' profile, not 'tv'."""
+        import mainfetch
+        # Safety net: prevent any accidental browser launch (not needed since
+        # resolve_targets returns empty first, but guards against future code reorder)
+        monkeypatch.setattr(mainfetch, "init_driver", lambda *_a, **_k: None)
+
+        mainfetch.cmd_fetch_route("ani-ja-2006-deathnote01")
+        out = capsys.readouterr().out
+
+        # The profile-selection print happens before resolve_targets, so it is always emitted
+        assert "anime" in out, f"Expected 'anime' in output, got: {out!r}"
+        assert "ChromeProfile_Anime" in out, f"Expected 'ChromeProfile_Anime' in output, got: {out!r}"
+        # Regression guard: must NOT have routed to the tv/series profile
+        assert "'tv'" not in out or "anime" in out, (
+            f"Anime id was routed to tv profile — regression! output: {out!r}"
+        )
+
     # ---- sort -----------------------------------------------------------------
     def test_sort(self, sandbox, make_video, capsys):
         _seed_season_two(sandbox, make_video)

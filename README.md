@@ -96,10 +96,10 @@ interrupted rollback can be finished afterward via `recover_journal`. See
 - A Google Pixel phone connected over USB with ADB debugging authorised and
   the Google Photos app configured to back up the `/sdcard/Media` folder at
   original quality.
-- Two persistent Chrome user-data directories under `C:\Media\Utils\`:
+- Three persistent Chrome user-data directories under `C:\Media\Utils\`:
   - `ChromeProfile` — signed into the Google account that holds your movies.
-  - `ChromeProfile_TV` — signed into the Google account that holds your TV
-    series and anime.
+  - `ChromeProfile_TV` — signed into the Google account that holds your TV series.
+  - `ChromeProfile_Anime` — signed into the Google account that holds your anime.
   Each profile must be signed in manually at least once before MediaVault can
   attach to it.
 - The three library JSON files at `C:\Media\library_movies.json`,

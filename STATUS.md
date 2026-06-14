@@ -535,3 +535,82 @@ Branch: fix/cli_parser_papercuts (from main)
 - Outcome: Marked IMP-C15 done in the tracking trio (tierC + PRIORITY.md + priority graph) with synchronized updates. (1) `improvements_tierC.md`: changed IMP-C15 `Status: pending` to `Status: done (fix/micro_robustness_c15 — cmd_repair_dummies non-atomic remove+rename replaced with single atomic os.replace + explicit multi_ep_alias skip; _verify_chunk_hash hex-validates the device sha256 first token (empty/garbled → warn-and-skip, only a well-formed differing hash raises CalledProcessError); unit tests in tests/test_repair_dummies.py + new cases in tests/test_cmd_push_verify.py)`. (2) PRIORITY.md: (a) bumped `Last updated` to `2026-06-14 (IMP-C15 done — fix/micro_robustness_c15)`; (b) rewrote the `## 👉 SUGGESTED NEXT TASK` block to point at **IMP-C16** (anime fetch profile routing) with its rationale, keeping the R6/R7 decision-awaiting note; (c) removed IMP-C15 from BAND 0, leaving only R6 and R7; (d) updated DONE count `## ✅ DONE (15)` → `## ✅ DONE (16)` and added `C15` (micro-robustness) to the done list. (3) priority-graph.html: updated C15 task node from `["C15","…","C","high","todo",…]` to `["C15","…","C","done","done",…]` with the final detail string, and updated the ⚡ Next banner from C15 to C16. All three files now agree: C15 is done, the next code task is C16, DONE count is 16.
 - Key decisions: None. Mechanical edits following the established done-status pattern used by C12/C13/C14.
 - Verification: No code touched → no smoke gate needed. No pytest run. All three tracking files edited; consistency confirmed by re-reading changed regions (no target string drifts, all edits applied cleanly).
+
+---
+
+## Step 1 — Add anime profile + data-driven map + profile_for_id()
+Status: done
+Key decisions: Added CHROME_PROFILES["anime"] -> ChromeProfile_Anime; added ID_PREFIX_PROFILE ordered list + DEFAULT_PROFILE + pure profile_for_id() helper above cmd_fetch_route. CHROME_PROFILES["default"] renamed to "movies" (key only; path unchanged). init_driver not touched (Step 2 scope).
+Verification:
+- `python -c "import mainfetch; print(mainfetch.profile_for_id('ani-x'), mainfetch.profile_for_id('tv-x'), mainfetch.profile_for_id('mov-x'), mainfetch.profile_for_id('legacy'))"` → `anime tv movies movies`
+- `python -c "import mainfetch; print(mainfetch.CHROME_PROFILES)"` → `{'movies': 'C:\\Media\\Utils\\ChromeProfile', 'tv': 'C:\\Media\\Utils\\ChromeProfile_TV', 'anime': 'C:\\Media\\Utils\\ChromeProfile_Anime'}`
+
+---
+
+## Step 2 — Rewrite cmd_fetch_route + fix init_driver default key
+Status: done
+Key decisions: cmd_fetch_route now calls profile_for_id(manual_id) for routing; init_driver default and fallback changed from "default" to "movies"; no remaining "default" references in CHROME_PROFILES context.
+Verification:
+- `grep -n "default" mainfetch.py` → only `CHROME_PROFILE_NAME = "Default"` (line 40) and `--no-default-browser-check` (line 66) — zero CHROME_PROFILES["default"] or profile_key="default" references.
+- `python -c "import mainfetch; print(mainfetch.profile_for_id('ani-ja-2006-deathnote01'))"` → `anime`
+- `python -c "import mainfetch; print(mainfetch.init_driver.__defaults__)"` → `('movies',)`
+- `python -m pytest tests/smoke -q` → 50 passed in 10.49s
+
+---
+
+## Step 3 — Pure unit tests for the routing map
+Status: done
+Key decisions: Created tests/test_anime_fetch_routing.py with 12 test cases covering all prefix patterns, the regression guard (ani != tv profile), and map-integrity guards.
+Verification: python -m pytest tests/test_anime_fetch_routing.py -q → 12 passed in 0.62s; python -m pytest tests/test_cli_parsers.py -q → 21 passed in 0.76s (regression check).
+
+---
+
+## Step 4 — Smoke test for anime routing without a browser
+Status: done
+Key decisions: Added test_anime_fetch_routing_profile_selection to TestEachCommand; uses sandbox (empty libs) + optional init_driver monkeypatch; asserts 'anime' and 'ChromeProfile_Anime' in stdout; regression guard asserts no 'tv' routing for ani-* id.
+Verification: python -m pytest tests/smoke -q → 51 passed in 12.41s (all green).
+
+---
+
+## Step 7 — Mark IMP-C16 done in improvements_tierC.md
+Status: done
+Key decisions: IMP-C16 status changed from pending to done with branch + summary.
+Outcome: Updated improvements/improvements_tierC.md line 305 from "- Status: pending" to "- Status: done (fix/anime_fetch_profile — added 3rd Chrome profile `anime` → ChromeProfile_Anime; id-prefix→profile routing extracted to data-driven mainfetch.ID_PREFIX_PROFILE + pure profile_for_id(); ani-* now drives anime account, tv-* series, movies movies; external-config sourcing deferred to IMP-A5; unit tests in tests/test_anime_fetch_routing.py + smoke coverage in test_anime_fetch_routing_profile_selection)".
+Verification: File edited successfully; IMP-C16 block (starts at line 290) now shows status: done with complete summary.
+
+---
+
+## Step 8 — Update PRIORITY.md
+Status: done
+Key decisions: Last updated bumped to C16; NEXT pointer changed from C16 to A10; C16 removed from Band 1; DONE count 16→17, C16 added to done list.
+Outcome: Made four targeted edits to improvements/PRIORITY.md: (1) bumped "Last updated" line from "2026-06-14 (IMP-C15 done — fix/micro_robustness_c15)" to "2026-06-14 (IMP-C16 done — fix/anime_fetch_profile)"; (2) rewrote "## 👉 SUGGESTED NEXT TASK" block from IMP-C16 (anime fetch profile routing) to IMP-A10 (truth-up requirements.txt) with updated rationale; (3) removed the C16 row from BAND 1 table (previously row 7); (4) updated "## ✅ DONE (16)" to "## ✅ DONE (17)" and added "C16 (anime fetch profile)" to the done list immediately after C15.
+Verification: All four edits applied cleanly via the Edit tool. PRIORITY.md now reflects: Last updated is C16, NEXT task is A10 (not C16), DONE count is 17 with C16 in the list, Band 1 no longer mentions C16.
+
+---
+
+## Step 9 — Update priority-graph HTML
+Status: done
+Key decisions: Banner updated from C16 to A10; C16 node flipped from "high","todo" to "done","done" with new tooltip; C16->X1 and C16->S3 edges confirmed present and unchanged.
+Outcome: Made three edits to docs/priority-graph/priority-graph.html: (1) Updated the ⚡ Next banner (line 84) from "IMP-C16 · anime fetch profile routing" to "IMP-A10 · truth-up requirements.txt", reflecting the new highest-priority next task from PRIORITY.md. (2) Changed the C16 node in the TASKS array (line 160) from priority "high" / status "todo" to "done" / "done", with updated tooltip text documenting the fix/anime_fetch_profile implementation (3rd profile, data-driven routing, ani-* now routes anime). (3) Verified EDGES array contains both required edges ["C16","X1"] and ["C16","S3"] (found at line 252) — both present, no changes needed. No other changes made.
+Verification: File edited; C16->X1 and C16->S3 edges present and intact. No syntax errors.
+
+---
+
+## Step 6 — [status: done]
+- Executor: executor-haiku
+- Model: haiku
+- Files changed: `ARCHITECTURE.md`, `README.md`, `PLAN.md`
+- Outcome: Updated documentation to reflect the three Chrome profiles (anime profile added and routed separately from TV). Four targeted edits to ARCHITECTURE.md: (1) §3 repo-layout Utils block — updated ChromeProfile_TV comment from "TV + anime" to "TV (series account)" and added ChromeProfile_Anime entry for anime. (2) §8.1 CHROME_PROFILES configuration snippet — replaced the two-key dict with three keys ("movies", "tv", "anime") pointing to their respective paths. (3) §8.1 routing prose — replaced the hardcoded `if startswith("tv") or startswith("ani")` chain with description of the data-driven `ID_PREFIX_PROFILE` ordered list and pure `profile_for_id()` function, noting that IMP-A5 will source this from mvconfig.json. (4) §8.6 cmd_fetch_route bullet — added note that profile selection is now data-driven via `profile_for_id(manual_id)` (IMP-C16). One edit to README.md: prerequisites section — changed "Two persistent Chrome user-data directories" to "Three", added ChromeProfile_Anime entry for the anime account, updated ChromeProfile_TV description to say "TV series" (not "and anime"), clarified that each profile must be manually logged in once.
+- Key decisions: All edits are pure documentation of the already-shipped code behavior from Steps 1-5; no behavioral changes introduced by this step; all target strings found and replaced cleanly per the spec; README section rewritten as specified.
+- Verification: `python -m pytest tests/smoke -q` → **51 passed in 15.35s** (smoke gate passed; documentation-only step, no code changes, but all smoke tests remain green)
+
+---
+
+## Step 10 — Write tracked feature docs
+- Status: done
+- Executor: executor-haiku
+- Model: haiku
+- Files changed: `docs/feature-anime-fetch-profile/PLAN.md` (overwritten with finalized version), `docs/feature-anime-fetch-profile/DECISIONS.md` (created)
+- Outcome: Replaced the draft `docs/feature-anime-fetch-profile/PLAN.md` with the finalized version documenting all 10 completed steps, resolved Open Decisions (OD-1 to OD-4), bug summary, files changed, verification results, and next task (IMP-A10). Created `docs/feature-anime-fetch-profile/DECISIONS.md` recording the four decisions (OD-1: data-driven constant now, config later via IMP-A5; OD-2: rename "default" to "movies" for consistency; OD-3: confirmed anime profile path + user one-time login; OD-4: live end-to-end test with all 3 profiles verified). Both files now serve as permanent archived artifacts of the IMP-C16 task completion.
+- Key decisions: Overwrote PLAN.md with finalized version (all 10 steps checked, verification results confirmed). Created DECISIONS.md as a per-decision summary table documenting the option chosen and rationale for each OD.
+- Verification: Both files written successfully; PLAN.md reflects complete task status with all steps marked done and verification results listed; DECISIONS.md captures all four decisions with clear rationale per the OD format.

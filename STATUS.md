@@ -12,6 +12,15 @@ Planned step order: A1 -> A2 -> A3 -> B1 -> B2 -> B3 -> B4 -> B5 -> B6 -> B7 -> 
 
 Note on the in-scope pre-existing change: `.claude/agents/planner.md` was already modified (frontmatter) before this run; it is carried onto the feature branch and will be committed as part of step B3 (which edits planner.md), NOT with earlier steps.
 
+## Step 1 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `main.py`
+- Outcome: Two surgical edits to `cmd_repair_dummies` (lines ~2028-2062). (A) Added explicit `if entry.get("type") == "multi_ep_alias": continue` guard immediately after the existing `season_map` skip at line 2029, making the whole-library iterator explicitly alias-safe per CLAUDE.md/ENTRY_TYPE_KEYS guardrail. (B) Replaced the non-atomic two-line swap `os.remove(current_path)` + `os.rename(tmp_path, current_path)` with the single atomic `os.replace(tmp_path, current_path)`, eliminating the window where a crash between the two calls would leave no file at `current_path`. Both changes are identical in behavior for all valid non-alias entries under normal operation.
+- Key decisions: `multi_ep_alias` skip placed immediately after `season_map` skip (before `prefix_filter` and `status` guards), matching the pattern established by IMP-C12 in `cmd_scan_unprepped`/`cmd_local_status`. The atomic `os.replace` idiom matches `make_video_dummy` at line 469.
+- Verification: `python -m pytest tests/smoke -q` → 50 passed in 13.83s. `python -m pytest tests/smoke/test_smoke_all_commands.py -q -k repair_dummies` → 2 passed, 48 deselected in 0.33s.
+
 ---
 
 ## RUN BLOCKER — paused before Step A1 (RESUME POINT)

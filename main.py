@@ -2027,6 +2027,8 @@ def cmd_repair_dummies(prefix_filter=None):
     for entry_id, entry in library.items():
         if entry.get("type") == "season_map":
             continue
+        if entry.get("type") == "multi_ep_alias":
+            continue
         if prefix_filter and not entry_id.startswith(prefix_filter):
             continue
         if entry.get("status") != "archived":
@@ -2057,8 +2059,7 @@ def cmd_repair_dummies(prefix_filter=None):
             failed += 1
             continue
 
-        os.remove(current_path)
-        os.rename(tmp_path, current_path)
+        os.replace(tmp_path, current_path)
         regenerated += 1
 
     print(f"✅ repair_dummies complete: scanned {scanned}, regenerated {regenerated}, skipped {skipped}, missing {missing}, failed {failed}")

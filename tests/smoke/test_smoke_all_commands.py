@@ -440,6 +440,59 @@ class TestEachCommand:
             f"Anime id was routed to tv profile — regression! output: {out!r}"
         )
 
+    # ---- fetch: logged-out IMP-C6 remediation --------------------------------
+    def test_fetch_route_logged_out_aborts(self, sandbox, monkeypatch, capsys, tmp_path):
+        """Smoke: cmd_fetch_route must print 'is logged out' when SessionExpiredError fires.
+
+        Constraints:
+            Never touch real C:\\Media files or real library_*.json.
+            Run `python -m pytest` and fix failures before marking the step done.
+
+        Uses OPTION 2 (boundary injection): resolve_targets returns one fake target,
+        fetch_single_entry raises SessionExpiredError so cmd_fetch_route's except arm
+        fires and prints the IMP-C6 remediation message.  No real browser, no real
+        subprocess, no ~/.mediavault writes (fetch_session_lock is bypassed with
+        contextlib.nullcontext).
+        """
+        import contextlib
+        import mainfetch
+
+        # Bypass the file-backed session lock so the test never writes ~/.mediavault/locks/
+        monkeypatch.setattr(mainfetch, "fetch_session_lock",
+                            lambda *_a, **_k: contextlib.nullcontext())
+
+        # Return a fake driver (truthy, no real browser) so init_driver check passes
+        import types as _types
+        fake_driver = _types.SimpleNamespace(
+            get=lambda *_a, **_k: None,
+            quit=lambda: None,
+            current_url="https://accounts.google.com/signin",
+        )
+        monkeypatch.setattr(mainfetch, "init_driver", lambda *_a, **_k: fake_driver)
+
+        # Return one fake target (enough for cmd_fetch_route to enter the batch loop)
+        fake_target = {
+            "filename": "x.mkv",
+            "folder_path": str(tmp_path),
+            "hash": "deadbeef",
+            "search_term": "x",
+        }
+        monkeypatch.setattr(mainfetch, "resolve_targets",
+                            lambda *_a, **_k: [fake_target])
+
+        # Inject a logged-out error at the entry boundary (re-raises into cmd_fetch_route)
+        def _raise_session_expired(*_a, **_k):
+            raise mainfetch.SessionExpiredError("profile appears logged out")
+
+        monkeypatch.setattr(mainfetch, "fetch_single_entry", _raise_session_expired)
+
+        mainfetch.cmd_fetch_route("mov-en-2024-testmovie")
+        out = capsys.readouterr().out
+
+        assert "is logged out" in out, (
+            f"Expected 'is logged out' in output for IMP-C6 remediation, got: {out!r}"
+        )
+
     # ---- sort -----------------------------------------------------------------
     def test_sort(self, sandbox, make_video, capsys):
         _seed_season_two(sandbox, make_video)

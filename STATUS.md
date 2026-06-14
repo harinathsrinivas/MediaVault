@@ -746,6 +746,24 @@ Verification: File edited; C16->X1 and C16->S3 edges present and intact. No synt
 
 ---
 
+## Step 9 — Unit tests for tools/notify_toast.py + smoke extension [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `tests/test_notify_toast.py` (NEW), `tests/smoke/test_smoke_all_commands.py` (EXTEND — added `test_fetch_route_logged_out_aborts`)
+- Outcome: Created 5 focused unit tests for `send_toast()` in `tests/test_notify_toast.py`. A `_Recorder` class captures `subprocess.run` args and optionally raises on demand. Tests cover: (1) happy path — correct argv shape (`powershell -NoProfile -Command ...`), script contains `ToastNotificationManager` plus both title and message strings, returns `True` on exit-0; (2) returns `False` on non-zero exit code; (3) returns `False` on `OSError` (never raises); (4) returns `False` on `subprocess.TimeoutExpired` (never raises); (5) non-Windows short-circuit — `sys.platform` patched to `"linux"` → returns `False` without calling subprocess (recorder's `called` flag stays `False`). Added `test_fetch_route_logged_out_aborts` to the smoke class `TestEachCommand` (OPTION 2 injection): stubs `fetch_session_lock` → `contextlib.nullcontext()`, `init_driver` → fake truthy driver, `resolve_targets` → one synthetic entry, `fetch_single_entry` → raises `SessionExpiredError`. Confirms `cmd_fetch_route`'s `except SessionExpiredError` arm fires and prints the IMP-C6 remediation (`is logged out`). No real browser, no `~/.mediavault` lock writes, no `C:\Media` access.
+- Key decisions:
+  - OPTION 2 (boundary injection at `fetch_single_entry`) preferred over OPTION 1 (selenium stubbing through `trigger_download`) because OPTION 1's deeper stub chain (`WebDriverWait`, `time.sleep`, `check_session_alive` URL match) would have been fragile and slow. Step 7's `test_session_detector.py` already covers the real propagation path; this test focuses solely on `cmd_fetch_route`'s except arm.
+  - `init_driver` must return a TRUTHY object (not `None`) because `cmd_fetch_route` has `if not driver: return` immediately after the call. A bare `types.SimpleNamespace(get=..., quit=..., current_url=...)` is sufficient.
+  - Used `contextlib.nullcontext()` (stdlib, no import needed) to bypass `fetch_session_lock`'s real file-backed lock, preventing any `~/.mediavault/locks/` write.
+- Verification:
+  - `python -m pytest tests/test_notify_toast.py -q` → **5 passed in 0.18s**
+  - `python -m pytest tests/smoke -q` → **52 passed in 13.63s** (new smoke included; up from 51)
+  - `python -m pytest -q` (full suite) → **223 passed in 47.50s** (no regressions)
+  - `~/.mediavault/locks/` confirmed empty after the run (no lock files created)
+
+---
+
 ## Step 8 — Unit tests for tools/warm_profiles.py [status: done]
 - Executor: executor-sonnet
 - Model: sonnet

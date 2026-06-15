@@ -1766,6 +1766,8 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
         try:
             start, end = map(float, episode_range.split('-'))
             print(f"   > 🎯 Filter: Episodes {start} to {end} only.")
+            pre_filter_count = len(target_ids)
+            pre_filter_sample = target_ids[0] if target_ids else None
             filtered_ids = []
 
             for mid in target_ids:
@@ -1774,6 +1776,15 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
                     filtered_ids.append(mid)
 
             target_ids = filtered_ids
+
+            # [IMP-C18] 0-match guard: a NON-EMPTY pre-filter list reduced to 0 by
+            # the range is the silent-no-op signal — warn loudly (parsed range +
+            # a sample child id) so the user sees WHY nothing matched. Continue;
+            # the `if not target_ids` guard below stops cleanly with no banner.
+            if pre_filter_count and not filtered_ids:
+                print(f"⚠️ Range {episode_range} matched 0 of {pre_filter_count} "
+                      f"episodes (e.g. id '{pre_filter_sample}'). Nothing to push — "
+                      f"check the range vs the season's episode numbers.")
 
         except ValueError:
             print("❌ Invalid episode range format. Use '1-3'.")
@@ -2381,9 +2392,12 @@ def cmd_restore_group(group_id, episode_range=None):
         target_ids = sorted([k for k in library.keys() if k.startswith(group_id) and k != group_id])
 
     # Filter Items if Range Provided
+    empty_via_range = False  # [IMP-C18] set when a range nukes a non-empty list to 0
     if episode_range:
         try:
             start, end = map(float, episode_range.split('-'))
+            pre_filter_count = len(target_ids)
+            pre_filter_sample = target_ids[0] if target_ids else None
             filtered = []
             for mid in target_ids:
                 ep = episode_num_from_id(mid, group_id)
@@ -2391,6 +2405,14 @@ def cmd_restore_group(group_id, episode_range=None):
                     filtered.append(mid)
             target_ids = filtered
             print(f"   > Filtered to {len(target_ids)} items (Episodes {episode_range}).")
+            # [IMP-C18] 0-match guard: NON-EMPTY pre-filter list reduced to 0 by the
+            # range is the silent-no-op signal. Flag it so the celebratory "Complete"
+            # line below is replaced with a ⚠️ (continue normally, no exception).
+            if pre_filter_count and not filtered:
+                empty_via_range = True
+                print(f"⚠️ Range {episode_range} matched 0 of {pre_filter_count} "
+                      f"episodes (e.g. id '{pre_filter_sample}'). Nothing to restore — "
+                      f"check the range vs the season's episode numbers.")
         except:
             print("   ⚠️ Invalid range. Processing all.")
 
@@ -2410,7 +2432,11 @@ def cmd_restore_group(group_id, episode_range=None):
         if cmd_restore(mid):
             count += 1
 
-    print(f"\n=== Batch Restore Complete: {count} files restored. ===")
+    # [IMP-C18] On a 0-via-range run the warning above already explained the no-op;
+    # skip the green "Complete" line so we don't celebrate restoring nothing.
+    if not (empty_via_range and count == 0):
+        print(f"\n=== Batch Restore Complete: {count} files restored. ===")
+    return count
 
 
 def cmd_sort():
@@ -2866,15 +2892,26 @@ def cmd_fetch_restore(manual_id, episode_range=None):
 
     entry = library[manual_id]
 
-    if entry.get("type") == "season_map":
+    is_season_map = entry.get("type") == "season_map"
+    restored_count = None
+    if is_season_map:
         # [UPDATED] Pass the range to restore_group
         print(f"   > Season Map detected. Running Batch Restore...")
-        cmd_restore_group(manual_id, episode_range)
+        restored_count = cmd_restore_group(manual_id, episode_range)
     else:
         print(f"   > Single Item detected. Running Restore...")
         cmd_restore(manual_id)
 
-    print("\n✅✅✅ FETCH & RESTORE COMPLETE.")
+    # [IMP-C18] Don't lie with a green banner over zero work: when a range was
+    # supplied to a season_map and 0 items were restored (range selected nothing),
+    # suppress the ✅✅✅ banner and print a ⚠️ summary instead. Exit code unchanged
+    # (this function returns None throughout) — the run still "succeeds", it just
+    # reports the truth. Single-item / no-range runs keep the original banner.
+    if is_season_map and episode_range and restored_count == 0:
+        print(f"\n⚠️ FETCH & RESTORE finished with 0 items "
+              f"(range {episode_range} selected nothing).")
+    else:
+        print("\n✅✅✅ FETCH & RESTORE COMPLETE.")
 
 
 # ==========================================

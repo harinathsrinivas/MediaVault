@@ -421,6 +421,8 @@ def resolve_targets(manual_id, ep_range=None):
         if ep_range:
             try:
                 s, e = map(float, ep_range.split('-'))
+                pre_filter_count = len(children_ids)
+                pre_filter_sample = children_ids[0] if children_ids else None
                 filtered = []
                 for child_id in children_ids:
                     ep = episode_num_from_id(child_id, manual_id)
@@ -428,6 +430,16 @@ def resolve_targets(manual_id, ep_range=None):
                         filtered.append(child_id)
                 children_ids = filtered
                 print(f"   > 🎯 Filtered to {len(children_ids)} episodes ({ep_range})")
+                # [IMP-C18] 0-match guard: a NON-EMPTY children list reduced to 0 by
+                # the range is the silent-no-op signal. Warn (range + sample child id)
+                # so the user sees WHY 0 matched. This is DISTINCT from the logged-out
+                # SessionExpiredError path; do not route through that remediation. The
+                # empty-list return contract is unchanged (caller prints "No valid
+                # targets found" downstream) — this only ADDS the diagnostic.
+                if pre_filter_count and not filtered:
+                    print(f"⚠️ Range {ep_range} matched 0 of {pre_filter_count} "
+                          f"episodes (e.g. id '{pre_filter_sample}'). Nothing selected — "
+                          f"check the range vs the season's episode numbers.")
             except:
                 print("   > ⚠️ Invalid range format. Processing all.")
 

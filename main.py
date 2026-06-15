@@ -27,7 +27,7 @@ from mvcommon import (
     LIBRARY_MOVIES, LIBRARY_SERIES, LIBRARY_ANIME, LOCAL_ROOT, MKVMERGE_PATH,
     SPLIT_DIR_NAME, CHECKSUM_DIR_NAME, RESTORE_DIR_NAME, VIDEO_EXTENSIONS,
     load_library, save_library, generate_short_id, calculate_file_hash,
-    human_readable_size, parse_size_str, retry,
+    human_readable_size, parse_size_str, retry, episode_num_from_id,
 )
 
 REMOTE_ROOT = "/sdcard/Media"  # Your Pixel Root
@@ -1769,15 +1769,9 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
             filtered_ids = []
 
             for mid in target_ids:
-                # Look for e01, e12.5, E01 etc at the end of the ID
-                # Or for Anime: ani-series-01, ani-series-16.5
-                match = re.search(r'[eE](\d+(?:\.\d+)?)$', mid)  # Standard
-                if not match: match = re.search(r'(\d+(?:\.\d+)?)$', mid)  # Anime numbers
-
-                if match:
-                    ep_num = float(match.group(1))
-                    if start <= ep_num <= end:
-                        filtered_ids.append(mid)
+                ep_num = episode_num_from_id(mid, group_id)
+                if ep_num is not None and start <= ep_num <= end:
+                    filtered_ids.append(mid)
 
             target_ids = filtered_ids
 
@@ -2392,13 +2386,9 @@ def cmd_restore_group(group_id, episode_range=None):
             start, end = map(float, episode_range.split('-'))
             filtered = []
             for mid in target_ids:
-                match = re.search(r'[eE](\d+(?:\.\d+)?)$', mid) or re.search(r'x(\d+(?:\.\d+)?)$', mid)
-                if not match: match = re.search(r'(\d+(?:\.\d+)?)$', mid)  # Anime numbers
-
-                if match:
-                    ep = float(match.group(1))
-                    if start <= ep <= end:
-                        filtered.append(mid)
+                ep = episode_num_from_id(mid, group_id)
+                if ep is not None and start <= ep <= end:
+                    filtered.append(mid)
             target_ids = filtered
             print(f"   > Filtered to {len(target_ids)} items (Episodes {episode_range}).")
         except:

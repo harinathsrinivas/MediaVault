@@ -26,7 +26,7 @@ except ImportError:
 # truth imported by both entry points). load_library is now the loud/strict
 # version (sys.exit(1) on a corrupt library) — mainfetch's old silent-zero-
 # entries behavior is intentionally removed.
-from mvcommon import RESTORE_DIR_NAME, load_library, calculate_file_hash, fetch_session_lock
+from mvcommon import RESTORE_DIR_NAME, load_library, calculate_file_hash, fetch_session_lock, episode_num_from_id
 
 # --- AUTOMATION CONFIG ---
 CHROME_PROFILES = {
@@ -423,11 +423,8 @@ def resolve_targets(manual_id, ep_range=None):
                 s, e = map(float, ep_range.split('-'))
                 filtered = []
                 for child_id in children_ids:
-                    # Match 'e01' or 'x01' or 'e16.5' at end of string
-                    m = re.search(r'[eE](\d+(?:\.\d+)?)$', child_id) or re.search(r'x(\d+(?:\.\d+)?)$', child_id)
-                    if not m: m = re.search(r'(\d+(?:\.\d+)?)$', child_id)  # Anime
-
-                    if m and s <= float(m.group(1)) <= e:
+                    ep = episode_num_from_id(child_id, manual_id)
+                    if ep is not None and s <= ep <= e:
                         filtered.append(child_id)
                 children_ids = filtered
                 print(f"   > 🎯 Filtered to {len(children_ids)} episodes ({ep_range})")

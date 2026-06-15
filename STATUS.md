@@ -31,3 +31,22 @@ Decisions baked in (from user, pre-run): A+C (shared helper + loud guard); scope
   - Empirical helper check (all plan shapes) confirmed: s0202→2.0, s0216.5→16.5, s03e20→20.0, x05.5→5.5, e20→20.0, deathnote07 w/ correct base→7.0, deathnote07 w/ wrong-base→None, empty-leftover→None, foo/foo→None, falsy base + bare token→7.0.
 
 ---
+
+## Step 2 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `mainfetch.py` (import line ~29, `resolve_targets` filter block ~427-430), `main.py` (import block ~29-31, `cmd_push_group` filter loop ~1771-1780, `cmd_restore_group` filter loop ~2394-2401).
+- Outcome: Replaced the three unanchored two-line regex ladders in `resolve_targets` (mainfetch.py), `cmd_push_group` (main.py), and `cmd_restore_group` (main.py) with calls to the new shared `episode_num_from_id` helper from mvcommon. Added `episode_num_from_id` to the import lines in both files. The unanchored `re.search(r'(\d+(?:\.\d+)?)$', ...)` fallback is now gone from all three sites. All other code (range-parse `map(float, ...)`, `try/except`, "Filtered to N" prints, de-alias loops) is unchanged.
+- Key decisions:
+  - Confirmed variable names by reading each function: `resolve_targets` uses `child_id` / `s` / `e` / `filtered`; `cmd_push_group` uses `mid` / `start` / `end` / `filtered_ids`; `cmd_restore_group` uses `mid` / `start` / `end` / `filtered`.
+  - `resolve_targets` base is `manual_id` (season-map key, in scope); `cmd_push_group` and `cmd_restore_group` base is `group_id` (the function argument).
+  - Did NOT touch the two already-correct sites (`cmd_prep_push_rep_season` ~2707, `_season_resume_cmd` ~2741) — those are step 3.
+  - Did NOT add the 0-match guard — that is step 4.
+- Verification:
+  - `python -m pytest tests/test_prep_season_episode_parse.py -q` → `11 passed in 1.29s`
+  - `python -m pytest -q` → `236 passed in 59.35s` (baseline 236; no regressions)
+  - `python -m pytest tests/smoke -q` → `52 passed in 14.28s` (smoke gate; main.py + mainfetch.py modified; well under 30s)
+  - Grep for unanchored fallback in main.py + mainfetch.py at the three function sites: 0 matches confirmed.
+
+---

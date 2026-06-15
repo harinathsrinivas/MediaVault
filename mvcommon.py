@@ -271,3 +271,19 @@ def parse_size_str(size_str):
 
     multipliers = {'b': 1, 'kb': 1024, 'mb': 1024 ** 2, 'gb': 1024 ** 3, 'tb': 1024 ** 4}
     return int(val * multipliers.get(unit, 1))
+
+
+def episode_num_from_id(child_id, base_id):
+    """Episode number from a library child ID, season-aware.
+
+    Strips base_id as a prefix first (so glued anime ids like
+    '…-s0202' with base '…-s02' leave '02' = episode 2, NOT 0202=202),
+    then matches an optional e/E/x/X separator + number at end-of-string.
+    Returns a float (handles half-eps like 16.5) or None if unparseable.
+    """
+    if base_id and child_id.startswith(base_id):
+        ep_str = child_id[len(base_id):]
+    else:
+        ep_str = child_id            # base not a prefix -> parse the whole id
+    m = re.search(r'^[eExX]?(\d+(?:\.\d+)?)$', ep_str)
+    return float(m.group(1)) if m else None

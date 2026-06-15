@@ -92,3 +92,19 @@ Decisions baked in (from user, pre-run): A+C (shared helper + loud guard); scope
   - Full suite: `python -m pytest -q` → `238 passed in 42.88s` (baseline 236 + 2 new smoke tests; no regressions).
 
 ---
+
+## Step 5 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `tests/test_episode_range_filter.py` (appended 3 integration-level tests + import block for `json` and `mainfetch`; existing 13 unit tests untouched).
+- Outcome: Extended `tests/test_episode_range_filter.py` with a `resolve_targets`-level integration test tier using the `sandbox` fixture. The three new tests drive `mainfetch.resolve_targets` against a seeded in-memory library (written as JSON to `sandbox["lib_anime"]` / `sandbox["lib_series"]` / `sandbox["lib_movies"]`). No real Selenium, ADB, device I/O, or browser is involved. `resolve_targets` returns a list of entry dicts (confirmed by reading `mainfetch.py:456-459`: `target_entries.append(lib[cid])`); assertions check both `len(results) == 2` and that the correct filenames appear in the result set. Tests added: (1) `test_resolve_targets_kuroko_range_2_3_selects_exactly_two` — the exact original repro: a 4-child season (s0201/s0202/s0203 + half-ep s0216.5) with `ep_range="2-3"` must return exactly 2 entries (s0202/s0203); the half-ep must be excluded; (2) `test_resolve_targets_kuroko_old_bug_range_202_203_returns_empty` — `ep_range="202-203"` must now return `[]` (old unanchored fallback would have matched 202/203, but that bug is fixed); (3) `test_resolve_targets_tv_series_separator_range_2_3` — cross-format guard: a `tv-` separator-style season (eNN children, written to `lib_series`) with `ep_range="2-3"` over 4 episodes must return exactly 2 (e02, e03). The minimal leaf helper (`_minimal_leaf`) omits fields not needed by `resolve_targets`. Full suite increased from 238 to 241. All existing tests remain green.
+- Key decisions:
+  - `resolve_targets` return shape confirmed by reading mainfetch.py: returns a list of **entry dicts** (the raw library entry objects, not IDs), so assertions check `r["filename"]`.
+  - `mainfetch.py` imports `load_library` directly from `mvcommon` via `from mvcommon import ..., load_library`; `sandbox` patches `mvcommon.LIBRARY_*`; no additional mainfetch-specific patching is needed.
+  - `_seed_libs` writes `{}` to unused lib files so `load_library` never skips a missing file; direct `json.dumps` writes used (not `save_library`) for explicit control over which library file receives which entries.
+- Verification:
+  - `python -m pytest tests/test_episode_range_filter.py -q` → `16 passed in 2.13s` (13 original + 3 new; all green)
+  - `python -m pytest -q` → `241 passed in 46.07s` (baseline 238 + 3 new; no regressions)
+
+---

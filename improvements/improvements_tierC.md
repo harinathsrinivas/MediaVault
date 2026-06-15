@@ -340,4 +340,4 @@
 - Risk: low — it narrows the extraction; separator-style IDs are unchanged. Cross-command smoke gate (`tests/smoke`) must stay green; add a case covering BOTH `sSSEE` and `…eNN` so the two formats can't regress.
 - Workaround until fixed: fetch per-episode by full child id (`python main.py fetch_restore ani-ja-2013-kurokosbasketball-s0202`), or use the glued numbers as the range (`episodes 202-203`) — the latter RELIES on the bug and will stop working once it is fixed.
 - If skipped: every range-based anime season fetch/restore for the `sSSEE` ID format silently no-ops while reporting success — users believe episodes were fetched/restored when nothing happened, and only notice later when the files are missing.
-- Status: pending
+- Status: done (fix/imp_c18_episode_range — shared mvcommon.episode_num_from_id (prefix-strip + anchored ^[eExX]?(\d+(?:\.\d+)?)$) routes all 5 range-filter sites so glued sSSEE ids like …-s0202 parse to episode 2 not 202; 0-via-range now warns + suppresses the false ✅✅✅ auto-pilot banner; tests in tests/test_episode_range_filter.py + smoke sSSEE cases)

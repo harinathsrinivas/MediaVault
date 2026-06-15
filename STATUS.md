@@ -125,3 +125,11 @@ Decisions baked in (from user, pre-run): A+C (shared helper + loud guard); scope
   - `python -m pytest -q` → `243 passed in 61.70s` (241 before + 2 new; no regressions; new baseline 243)
 
 ---
+
+## Step 7 — [status: done]
+- Executor: executor-haiku
+- Model: haiku
+- Files changed: `improvements/improvements_tierC.md` (line 343, IMP-C18 Status field only)
+- Outcome: Changed line 343 of the IMP-C18 block in `improvements/improvements_tierC.md` from `- Status: pending` to `- Status: done (fix/imp_c18_episode_range — shared mvcommon.episode_num_from_id (prefix-strip + anchored ^[eExX]?(\d+(?:\.\d+)?)$) routes all 5 range-filter sites so glued sSSEE ids like …-s0202 parse to episode 2 not 202; 0-via-range now warns + suppresses the false ✅✅✅ auto-pilot banner; tests in tests/test_episode_range_filter.py + smoke sSSEE cases)`. This is a pure documentation edit (tier-file bookkeeping). No other task block was modified; all other IMP-C blocks remain unchanged. The resolution note follows the existing style of sibling done tasks (branch name + short summary of what was changed).
+- Key decisions: None.
+- Verification: Confirmed via `grep "^- Status:" improvements/improvements_tierC.md` that IMP-C18 line 343 is now `done` with the full note and no other Status lines changed. File still reads correctly; only the single Status field was edited.

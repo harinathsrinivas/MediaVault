@@ -133,3 +133,14 @@ Decisions baked in (from user, pre-run): A+C (shared helper + loud guard); scope
 - Outcome: Changed line 343 of the IMP-C18 block in `improvements/improvements_tierC.md` from `- Status: pending` to `- Status: done (fix/imp_c18_episode_range — shared mvcommon.episode_num_from_id (prefix-strip + anchored ^[eExX]?(\d+(?:\.\d+)?)$) routes all 5 range-filter sites so glued sSSEE ids like …-s0202 parse to episode 2 not 202; 0-via-range now warns + suppresses the false ✅✅✅ auto-pilot banner; tests in tests/test_episode_range_filter.py + smoke sSSEE cases)`. This is a pure documentation edit (tier-file bookkeeping). No other task block was modified; all other IMP-C blocks remain unchanged. The resolution note follows the existing style of sibling done tasks (branch name + short summary of what was changed).
 - Key decisions: None.
 - Verification: Confirmed via `grep "^- Status:" improvements/improvements_tierC.md` that IMP-C18 line 343 is now `done` with the full note and no other Status lines changed. File still reads correctly; only the single Status field was edited.
+
+---
+
+## Step 8 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `improvements/PRIORITY.md`, `docs/priority-graph/priority-graph.html`
+- Outcome: Updated both priority tracking files in one step per the maintenance protocol. Four changes in PRIORITY.md: (1) Removed the IMP-C18 row from the Band 0 table — Band 0 now retains only the two 🚦 decision-gated items IMP-R6 and IMP-R7. (2) Bumped Last updated to 2026-06-15 with a note that C18 is done and Band 0 is now only the R6/R7 decisions. (3) Rewrote the 👉 SUGGESTED NEXT TASK block to point at IMP-A10 (truth-up requirements.txt) with its rationale, retaining the 🚦 R6/R7 note. (4) Added C18 to the ✅ DONE list and bumped the count from (19) to (20) with the compact-style entry: `C18 (anime sSSEE episode-range filter: shared episode_num_from_id + 0-match guard)`. In `priority-graph.html`, the C18 TASKS array entry was updated from `"crit","todo"` to `"done","done"` and the note field updated to a one-line resolution matching the fix branch and outcome. The two files now agree: C18 is done in both; NEXT points to A10; last-updated is 2026-06-15.
+- Key decisions: None. All changes are purely documentation/tracker updates following the established maintenance protocol.
+- Verification: Read back both files' edited regions after each edit. PRIORITY.md: Band 0 table has 2 rows (R6, R7 only); NEXT header reads IMP-A10; DONE count is (20) with C18 present; Last updated is 2026-06-15. priority-graph.html line 162: C18 node is `["C18","anime range-filter bug","C","done","done","Fixed fix/imp_c18_episode_range: ..."]` — valid JS array entry with correct quoting, no trailing-comma breakage, sibling C16/C17 node format matches.

@@ -495,6 +495,42 @@ class TestEachCommand:
         assert lib[info["ep_ids"][2]]["status"] == "restored_local"
         assert lib[info["ep_ids"][0]]["status"] != "restored_local"
 
+    # ---- IMP-C18: push_group / restore_group select correctly on sSSEE ids ----
+    def test_push_group_episode_range_anime_ssee(
+            self, sandbox, make_video, mock_device, capsys):
+        """push_group with episode_range="2-3" selects …-s0202 and …-s0203 only.
+
+        This is the cross-command push coverage for the IMP-C18 fix: previously the
+        unanchored fallback would parse '0202' as 202, skipping all episodes in a
+        sSSEE season. Range "2-3" must match exactly ep02 and ep03 (not ep01).
+        """
+        info = _seed_anime_ssee_season(sandbox, make_video, uploaded=False)
+        main.cmd_push_group(info["season_id"], episode_range="2-3")
+        lib = mvcommon.load_library()
+        # Episodes 2 and 3 were selected; episode 1 was NOT.
+        assert lib[info["ep_ids"][1]]["uploaded"] is True   # …-s0202 pushed
+        assert lib[info["ep_ids"][2]]["uploaded"] is True   # …-s0203 pushed
+        assert lib[info["ep_ids"][0]]["uploaded"] is False  # …-s0201 skipped
+
+    def test_restore_group_episode_range_anime_ssee(
+            self, sandbox, make_video, capsys):
+        """restore_group with episode_range="2-3" restores …-s0202 and …-s0203 only.
+
+        Mirrors test_restore_group seeding (restore/ copies + placeholder live files)
+        but for the sSSEE id shape. Asserts exactly 2 episodes reach restored_local
+        and the unselected …-s0201 is not touched.
+        """
+        info = _seed_anime_ssee_season(sandbox, make_video, uploaded=True)
+        # Seed restore/ copies only for ep02 and ep03 (s0202, s0203).
+        self._seed_anime_restore_copies(info, info["ep_ids"][1:])  # s0202, s0203
+        count = main.cmd_restore_group(info["season_id"], "2-3")
+        lib = mvcommon.load_library()
+        assert lib[info["ep_ids"][1]]["status"] == "restored_local"  # …-s0202 restored
+        assert lib[info["ep_ids"][2]]["status"] == "restored_local"  # …-s0203 restored
+        assert lib[info["ep_ids"][0]]["status"] != "restored_local"  # …-s0201 untouched
+        # cmd_restore_group returns the count of successfully restored entries.
+        assert count == 2
+
     # ---- mock_fetch round-trip (the in-process browser stub) -----------------
     def test_fetch_round_trip_with_mock_fetch(self, mock_device, mock_fetch):
         # Seed the fake device, then the mock browser copies it into restore_dir.

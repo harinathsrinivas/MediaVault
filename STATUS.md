@@ -108,3 +108,20 @@ Decisions baked in (from user, pre-run): A+C (shared helper + loud guard); scope
   - `python -m pytest -q` → `241 passed in 46.07s` (baseline 238 + 3 new; no regressions)
 
 ---
+
+## Step 6 — [status: done]
+- Executor: executor-sonnet
+- Model: claude-sonnet-4-6
+- Mode: single-executor
+- Files changed: `tests/smoke/test_smoke_all_commands.py` (added 2 new test methods to `TestEachCommand`).
+- Outcome: Added two cross-command sSSEE selection-count assertions to the smoke suite, reusing the existing `_seed_anime_ssee_season` helper, `ANIME_SEASON_ID`, `ANIME_EP_IDS` constants, and `_seed_anime_restore_copies` helper from step 4. No new helpers or constants were added. The two new tests: (1) `test_push_group_episode_range_anime_ssee` — seeds via `_seed_anime_ssee_season(uploaded=False)`, calls `main.cmd_push_group(ANIME_SEASON_ID, episode_range="2-3")`, asserts `uploaded=True` for s0202/s0203 and `uploaded=False` for s0201. Uses `mock_device` fixture. (2) `test_restore_group_episode_range_anime_ssee` — seeds via `_seed_anime_ssee_season(uploaded=True)`, seeds restore/ copies for ep02/ep03 via `_seed_anime_restore_copies`, calls `main.cmd_restore_group(ANIME_SEASON_ID, "2-3")`, asserts `status=="restored_local"` for s0202/s0203 and status not restored for s0201, and asserts return value `== 2`. No `mock_device` needed (restore_group is local FS only). Both new tests inserted after the existing step-4 banner tests (before `test_fetch_round_trip_with_mock_fetch`). Full suite grew from 241 to 243 (the 2 new tests); all existing tests stayed green.
+- Key decisions:
+  - Invocation pattern taken verbatim from `test_push_group_episode_range` (line 350) for push and `test_restore_group` (line 420) / `_seed_anime_restore_copies` (step 4) for restore.
+  - `cmd_restore_group` returns the integer count (changed in step 4); the test asserts `count == 2` as a secondary check alongside the per-entry status assertions.
+  - `test_restore_group_episode_range_anime_ssee` does NOT seed restore copies for ep01 (`info["ep_ids"][0]`), only for ep02/ep03 (`info["ep_ids"][1:]`), matching the real scenario where the range selects 2-3 only.
+  - `mock_device` not needed for restore_group (no ADB calls); the push_group test needs it (ADB push).
+- Verification:
+  - `python -m pytest tests/smoke -q` → `56 passed in 45.31s` (54 before + 2 new; all green)
+  - `python -m pytest -q` → `243 passed in 61.70s` (241 before + 2 new; no regressions; new baseline 243)
+
+---

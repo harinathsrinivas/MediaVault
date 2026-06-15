@@ -9,20 +9,17 @@
 > Full task text lives in `improvements_tier*.md`; this file only orders them. Legend:
 > 🔴 critical · 🟠 high · 🟡 medium · ⚪ low · ✅ done · 🚦 needs a user decision (change-gate).
 >
-> **Last updated:** 2026-06-14 (IMP-C18 logged — anime `sSSEE` episode-range filter bug, Band 0; IMP-C17 done).
+> **Last updated:** 2026-06-15 (IMP-C18 done — anime sSSEE episode-range filter fixed; Band 0 now only the 🚦 R6/R7 decisions).
 
 ---
 
-## 👉 SUGGESTED NEXT TASK: **IMP-C18** — fix anime season-range episode filter (silent 0-match)
+## 👉 SUGGESTED NEXT TASK: **IMP-A10** — truth-up `requirements.txt`
 
-`episodes N-M` on an anime season whose child IDs glue season+episode with no `e`/`x` separator
-(e.g. `…-s0202`) silently filters to **0** in BOTH fetch and restore and still reports
-"✅✅✅ FETCH & RESTORE COMPLETE." with 0 files — a misleading no-op. Low-risk fix: strip the
-base/season id before reading the episode number (the working pattern already at `main.py:~2705`)
-and factor one shared extractor used by all range-filter sites. Found 2026-06-14. Full writeup +
-workaround in `improvements_tierC.md` (IMP-C18); see also the Band 0 table.
+A clean install of MediaVault is half-broken today: `requests` and `webdriver-manager` are used at
+runtime but absent from `requirements.txt`, so any fresh checkout fails on first use. Low-risk,
+high-impact foundation fix — one of the cheapest tasks on the board and a blocker for CI and any
+new contributor. Full details in `improvements_tierA.md` (IMP-A10).
 
-> Then **IMP-A10** — truth-up `requirements.txt` (missing `requests`/`webdriver-manager`; a clean install is half-broken).
 > 🚦 **IMP-R6** and **IMP-R7** still await user decisions before any code — see Band 0 table.
 
 ---
@@ -33,7 +30,6 @@ workaround in `improvements_tierC.md` (IMP-C18); see also the Band 0 table.
 |---|---|---|---|---|
 | 1 | 🚦 **IMP-R6** | failed restore-merge leaves NO file at the path → title disappears from every media server | medium | **decision** |
 | 2 | 🚦 **IMP-R7** | re-running a command after a crash silently destroys the leftover recovery journal → orphaned artifacts | medium | **decision** |
-| 3 | 🔴 **IMP-C18** | `episodes N-M` on `sSSEE` anime seasons (e.g. `…-s0202`) silently filters to 0 in fetch + restore (season digits glued to episode) → reports "COMPLETE" with 0 files | low | fix |
 
 ## 🟠 BAND 1 — SUGGESTED NEXT after Band 0 (cheap foundations + immediate value)
 
@@ -79,11 +75,11 @@ Perf: `B1`–`B10`. Utility commands: `D2`,`D3`,`D6`–`D15`. Integration long-t
 `E8`,`E10`,`E11`. Rollback hardening: `R1`,`R3`,`R4`,`R5`,`R8`,`R9` (R4/R8/R9 are 🚦 change-gated).
 Moonshots: `F1`–`F9`. Research-only: `G3`,`G5`,`H2`,`A6`.
 
-## ✅ DONE (19)
+## ✅ DONE (20)
 
 `A1` (mvcommon) · `A7` (pytest harness) · `C2` (retry) · `C4` (device pinning) · `C8` (post-push verify) ·
 `C9` (atomic replace) · `C11` (restore quarantine) · `C12` (alias crash: scan/local_status) ·
-`C13` (single-id alias handling) · `C14` (CLI parser papercuts) · `C15` (micro-robustness) · `C16` (anime fetch profile) · `C17` (fetch-session keep-alive + logged-out detector) · `C6` (session-expiry detect — via C17) · `E13` (multi-episode) · `G1` (chunker patterns) ·
+`C13` (single-id alias handling) · `C14` (CLI parser papercuts) · `C15` (micro-robustness) · `C16` (anime fetch profile) · `C17` (fetch-session keep-alive + logged-out detector) · `C18` (anime sSSEE episode-range filter: shared episode_num_from_id + 0-match guard) · `C6` (session-expiry detect — via C17) · `E13` (multi-episode) · `G1` (chunker patterns) ·
 `H1` (Opus 4.8 effort tiers) · `H3` (smoke gate + consumer-impact guardrail + data-request protocol) ·
 `R2` (recover CLI).
 

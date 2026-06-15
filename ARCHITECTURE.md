@@ -254,6 +254,30 @@ Brackets denote optional args; `[id]` is the manual library ID like
 > uses a token-scanner loop (`main.py:1464-1479`) so the keyword can appear
 > anywhere after the folder path.
 
+> **The `episodes <range>` filter is season-aware (IMP-C18).** All five
+> range-filter sites — `mainfetch.resolve_targets`, `cmd_push_group`,
+> `cmd_restore_group`, `cmd_prep_push_rep_season`, and `_season_resume_cmd`
+> — read each child's episode number through the single shared helper
+> `mvcommon.episode_num_from_id(child_id, base_id)`. It strips `base_id`
+> as a prefix first, THEN matches an anchored `^[eExX]?(\d+(?:\.\d+)?)$`,
+> so for a glued anime season id like
+> `ani-ja-2013-kurokosbasketball-s0202` (base `…-s02`) the leftover `02`
+> reads as episode 2 and `episodes 2-3` correctly selects episodes 2-3.
+> Previously the first three sites used an unanchored fallback
+> (`re.search(r'(\d+(?:\.\d+)?)$', child_id)`) that read `0202` as
+> episode **202**, so `episodes 2-3` matched nothing while the auto-pilot
+> still printed a green success banner. The glued-number workaround
+> `episodes 202-203` RELIED on that bug and no longer works.
+
+> **0-match guard (IMP-C18).** When an `episodes <range>` selects 0 items
+> from a NON-EMPTY season, the tools print a `⚠️` warning naming the
+> parsed range and a sample child id, and the `cmd_fetch_restore`
+> auto-pilot SUPPRESSES the green `✅✅✅ FETCH & RESTORE COMPLETE.`
+> banner — printing a `⚠️ … 0 items` summary instead. The run continues:
+> no error, no non-zero exit (an empty range is informative, not a
+> failure). `cmd_restore_group` now returns its int restored-count so the
+> auto-pilot can make this call (`main.py:2910`).
+
 > **CLI parsing seams (IMP-C14).** `push_group`'s argv parsing is now an
 > extracted pure function `main.parse_push_group_args(args)` →
 > `(group_id, method, val, ep_range, dev, eager, tdir)`. It mirrors the
@@ -340,7 +364,13 @@ These work today but step around the documented conventions:
   Basketball" pattern): `ani-ja-2012-kurokosbasketball-s0101..s0125`.
   Anime library prefix (`ani-`) + season segment + 2-digit episode with
   no `e`. Used for multi-season anime where pure absolute numbering
-  would collide. **This shape is only safe via `cmd_prep_season`**,
+  would collide. **Range filtering on this shape is now season-aware
+  (IMP-C18):** `mvcommon.episode_num_from_id` strips the `…-s02` base
+  before reading the episode number, so `episodes 2-3` on
+  `ani-ja-2013-kurokosbasketball-s02` selects the glued
+  `…-s0202`/`…-s0203` children as episodes 2-3 (the old unanchored
+  fallback read `0202` as 202 and silently matched nothing). **This shape
+  is only safe via `cmd_prep_season`**,
   which passes `parent_id` explicitly. Calling `python main.py prep
   ani-ja-2012-kurokosbasketball-s0125 ...` directly on such an ID would
   trip the anime auto-parent regex (`^(ani-.*?)[\d\.]+$`) and produce a
@@ -1044,7 +1074,14 @@ For single-file entries:
 `cmd_restore_group` (lines 987-1022) iterates a season's children with
 optional `episodes 1-3` filter and is tolerant: each child's
 `cmd_restore` self-checks for missing chunks, so a partial fetch just
-results in some children skipping cleanly.
+results in some children skipping cleanly. The episode-range filter
+reads each child's number via the shared
+`mvcommon.episode_num_from_id(child_id, group_id)` (strip the base/season
+id, then anchored `^[eExX]?(\d+(?:\.\d+)?)$`), so glued anime `sSSEE`
+ids filter correctly (IMP-C18). When a NON-EMPTY season is reduced to 0
+by the range, it prints a `⚠️` naming the parsed range + a sample id and
+restores nothing. The function now RETURNS its int restored-count so
+`cmd_fetch_restore` can suppress the success banner on a 0-via-range run.
 
 ### 7.8 Other commands
 
@@ -1074,7 +1111,9 @@ results in some children skipping cleanly.
 - `cmd_push_group(group_id, ...)` (714-759) — same logic as
   `cmd_restore_group` but for pushing: season-map mode OR prefix-match
   mode, with optional `episodes A-B` filter, skipping items already
-  marked uploaded.
+  marked uploaded. The range filter reads episode numbers via the shared
+  `mvcommon.episode_num_from_id` (IMP-C18), so glued anime `sSSEE` ids
+  filter the same way as restore.
 - `cmd_scan_unprepped()` (1162-1241) — walks `C:\Media\{Movies,Series,
   Anime}` recursively (excluding `_parts`, `checksums`, `restore`,
   `.git`, `.idea`, `__pycache__`, `Utils`) and lists every `.mkv/.mp4/
@@ -1094,13 +1133,19 @@ results in some children skipping cleanly.
   `_parts/` so the user is back in `local_ready` state.
 - `cmd_prep_push_rep_season(...)` (1286-1347) — same auto-pilot for an
   entire season, **sequential** (one episode at a time end-to-end) with
-  optional `episodes A-B` filter; stops the whole batch on any push
-  failure to "prevent mess".
+  optional `episodes A-B` filter (resolved via the shared
+  `mvcommon.episode_num_from_id`, IMP-C18); stops the whole batch on any
+  push failure to "prevent mess".
 - `cmd_dispatch_fetch(manual_id, episode_range)` (1350-1364) — shells
   out: `subprocess.run(["python", "mainfetch.py", "fetch", id, "episodes", range])`.
-- `cmd_fetch_restore(manual_id, episode_range)` (1367-1391) — dispatch
-  fetch, then call `cmd_restore_group`/`cmd_restore` depending on entry
-  type.
+- `cmd_fetch_restore(manual_id, episode_range)` (`main.py:2879`) —
+  dispatch fetch, then call `cmd_restore_group`/`cmd_restore` depending
+  on entry type. **0-match guard (IMP-C18):** for a season_map run with
+  an `episode_range`, if `cmd_restore_group` returns 0 it suppresses the
+  green `✅✅✅ FETCH & RESTORE COMPLETE.` banner and prints a
+  `⚠️ … 0 items (range … selected nothing)` summary instead (`main.py:2910`).
+  Single-item / no-range runs keep the original banner; exit code is
+  unchanged (the function returns `None` throughout).
 
 ---
 
@@ -1275,9 +1320,15 @@ downloaded blob.
 - `resolve_targets(manual_id, ep_range)` (375-410): if the ID is a
   season_map, returns the list of leaf children (filtered by
   `ep_range` if provided), else returns a 1-element list with the leaf
-  entry itself. The episode-range parsing supports `.5` half-episodes:
-  `re.search(r'[eE](\d+(?:\.\d+)?)$', id)` then `r'x(\d+(?:\.\d+)?)$'`
-  then trailing digits for anime.
+  entry itself. The episode-range parsing now reads each child's number
+  via the shared `mvcommon.episode_num_from_id(child_id, base_id)`
+  (IMP-C18) — strip `base_id` as a prefix, then anchored
+  `^[eExX]?(\d+(?:\.\d+)?)$` (still `.5`-half-episode capable). This
+  replaced the old unanchored ladder (`[eE](…)$` → `x(…)$` → trailing
+  digits) whose final arm read glued anime `…-s0202` as episode 202.
+  When a NON-EMPTY season is reduced to 0 by the range, `resolve_targets`
+  prints a `⚠️` naming the parsed range + a sample child id and returns
+  `[]` (the caller fetches nothing — no error).
 - `cmd_fetch_route(manual_id, ep_range)` (455-494): picks Chrome
   profile, calls `init_driver`, iterates targets calling
   `fetch_single_entry`. Wraps in try/except/finally so KeyboardInterrupt

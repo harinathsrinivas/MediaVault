@@ -27,7 +27,7 @@ from mvcommon import (
     LIBRARY_MOVIES, LIBRARY_SERIES, LIBRARY_ANIME, LOCAL_ROOT, MKVMERGE_PATH,
     SPLIT_DIR_NAME, CHECKSUM_DIR_NAME, RESTORE_DIR_NAME, VIDEO_EXTENSIONS,
     load_library, save_library, generate_short_id, calculate_file_hash,
-    human_readable_size, parse_size_str, retry,
+    human_readable_size, parse_size_str, retry, episode_num_from_id,
 )
 
 REMOTE_ROOT = "/sdcard/Media"  # Your Pixel Root
@@ -1766,20 +1766,25 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
         try:
             start, end = map(float, episode_range.split('-'))
             print(f"   > 🎯 Filter: Episodes {start} to {end} only.")
+            pre_filter_count = len(target_ids)
+            pre_filter_sample = target_ids[0] if target_ids else None
             filtered_ids = []
 
             for mid in target_ids:
-                # Look for e01, e12.5, E01 etc at the end of the ID
-                # Or for Anime: ani-series-01, ani-series-16.5
-                match = re.search(r'[eE](\d+(?:\.\d+)?)$', mid)  # Standard
-                if not match: match = re.search(r'(\d+(?:\.\d+)?)$', mid)  # Anime numbers
-
-                if match:
-                    ep_num = float(match.group(1))
-                    if start <= ep_num <= end:
-                        filtered_ids.append(mid)
+                ep_num = episode_num_from_id(mid, group_id)
+                if ep_num is not None and start <= ep_num <= end:
+                    filtered_ids.append(mid)
 
             target_ids = filtered_ids
+
+            # [IMP-C18] 0-match guard: a NON-EMPTY pre-filter list reduced to 0 by
+            # the range is the silent-no-op signal — warn loudly (parsed range +
+            # a sample child id) so the user sees WHY nothing matched. Continue;
+            # the `if not target_ids` guard below stops cleanly with no banner.
+            if pre_filter_count and not filtered_ids:
+                print(f"⚠️ Range {episode_range} matched 0 of {pre_filter_count} "
+                      f"episodes (e.g. id '{pre_filter_sample}'). Nothing to push — "
+                      f"check the range vs the season's episode numbers.")
 
         except ValueError:
             print("❌ Invalid episode range format. Use '1-3'.")
@@ -2387,20 +2392,27 @@ def cmd_restore_group(group_id, episode_range=None):
         target_ids = sorted([k for k in library.keys() if k.startswith(group_id) and k != group_id])
 
     # Filter Items if Range Provided
+    empty_via_range = False  # [IMP-C18] set when a range nukes a non-empty list to 0
     if episode_range:
         try:
             start, end = map(float, episode_range.split('-'))
+            pre_filter_count = len(target_ids)
+            pre_filter_sample = target_ids[0] if target_ids else None
             filtered = []
             for mid in target_ids:
-                match = re.search(r'[eE](\d+(?:\.\d+)?)$', mid) or re.search(r'x(\d+(?:\.\d+)?)$', mid)
-                if not match: match = re.search(r'(\d+(?:\.\d+)?)$', mid)  # Anime numbers
-
-                if match:
-                    ep = float(match.group(1))
-                    if start <= ep <= end:
-                        filtered.append(mid)
+                ep = episode_num_from_id(mid, group_id)
+                if ep is not None and start <= ep <= end:
+                    filtered.append(mid)
             target_ids = filtered
             print(f"   > Filtered to {len(target_ids)} items (Episodes {episode_range}).")
+            # [IMP-C18] 0-match guard: NON-EMPTY pre-filter list reduced to 0 by the
+            # range is the silent-no-op signal. Flag it so the celebratory "Complete"
+            # line below is replaced with a ⚠️ (continue normally, no exception).
+            if pre_filter_count and not filtered:
+                empty_via_range = True
+                print(f"⚠️ Range {episode_range} matched 0 of {pre_filter_count} "
+                      f"episodes (e.g. id '{pre_filter_sample}'). Nothing to restore — "
+                      f"check the range vs the season's episode numbers.")
         except:
             print("   ⚠️ Invalid range. Processing all.")
 
@@ -2420,7 +2432,11 @@ def cmd_restore_group(group_id, episode_range=None):
         if cmd_restore(mid):
             count += 1
 
-    print(f"\n=== Batch Restore Complete: {count} files restored. ===")
+    # [IMP-C18] On a 0-via-range run the warning above already explained the no-op;
+    # skip the green "Complete" line so we don't celebrate restoring nothing.
+    if not (empty_via_range and count == 0):
+        print(f"\n=== Batch Restore Complete: {count} files restored. ===")
+    return count
 
 
 def cmd_sort():
@@ -2702,13 +2718,9 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
             start, end = map(float, episode_range.split('-'))
             filtered_ids = []
             for mid in target_ids:
-                # Strip the base_id to leave only the episode string (e.g. "e01" or "22.5")
-                ep_str = mid.replace(base_id, "")
-                match = re.search(r'^[eExX]?(\d+(?:\.\d+)?)$', ep_str)
-                if match:
-                    ep_num = float(match.group(1))
-                    if start <= ep_num <= end:
-                        filtered_ids.append(mid)
+                ep_num = episode_num_from_id(mid, base_id)
+                if ep_num is not None and start <= ep_num <= end:
+                    filtered_ids.append(mid)
             target_ids = filtered_ids
             print(f"   > Filtered to {len(target_ids)} episodes ({episode_range})")
         except ValueError:
@@ -2737,10 +2749,13 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
         ep_nums = []
         for rid in remaining:
             real_id, _ = _resolve_alias(library, rid)
-            ep_str = real_id.replace(base_id, "")
-            m = re.search(r'^[eExX]?(\d+(?:\.\d+)?)$', ep_str)
-            if m:
-                ep_nums.append(m.group(1))
+            ep = episode_num_from_id(real_id, base_id)
+            if ep is not None:
+                # Preserve original digit string (e.g. "02", "16.5") for the resume command.
+                # Strip base_id prefix, then strip optional e/E/x/X separator — no regex needed.
+                ep_str = real_id[len(base_id):] if real_id.startswith(base_id) else real_id
+                ep_digits = ep_str[1:] if ep_str and ep_str[0].lower() in ('e', 'x') else ep_str
+                ep_nums.append(ep_digits)
         parts = [f"prep_push_rep_season {base_id} \"{folder_path}\""]
         if split_method and split_val:
             parts.append(f"{split_method} {split_val}")
@@ -2877,15 +2892,26 @@ def cmd_fetch_restore(manual_id, episode_range=None):
 
     entry = library[manual_id]
 
-    if entry.get("type") == "season_map":
+    is_season_map = entry.get("type") == "season_map"
+    restored_count = None
+    if is_season_map:
         # [UPDATED] Pass the range to restore_group
         print(f"   > Season Map detected. Running Batch Restore...")
-        cmd_restore_group(manual_id, episode_range)
+        restored_count = cmd_restore_group(manual_id, episode_range)
     else:
         print(f"   > Single Item detected. Running Restore...")
         cmd_restore(manual_id)
 
-    print("\n✅✅✅ FETCH & RESTORE COMPLETE.")
+    # [IMP-C18] Don't lie with a green banner over zero work: when a range was
+    # supplied to a season_map and 0 items were restored (range selected nothing),
+    # suppress the ✅✅✅ banner and print a ⚠️ summary instead. Exit code unchanged
+    # (this function returns None throughout) — the run still "succeeds", it just
+    # reports the truth. Single-item / no-range runs keep the original banner.
+    if is_season_map and episode_range and restored_count == 0:
+        print(f"\n⚠️ FETCH & RESTORE finished with 0 items "
+              f"(range {episode_range} selected nothing).")
+    else:
+        print("\n✅✅✅ FETCH & RESTORE COMPLETE.")
 
 
 # ==========================================

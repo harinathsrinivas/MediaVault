@@ -144,6 +144,42 @@ def _seed_season_two(sandbox, make_video, *, uploaded=False):
     return {"season_id": SEASON_ID, "ep_ids": [EP1_ID, EP2_ID], "media_dir": media_dir}
 
 
+# Glued anime sSSEE shape (the IMP-C18 repro): child ids stick season+episode with no
+# e/x separator (…-s0202 = season 02, episode 02). The base/season id is …-s02, so
+# stripping it leaves "02" = ep 2 (NOT 0202=202, the old unanchored-fallback bug).
+ANIME_SEASON_ID = "ani-ja-2013-kurokosbasketball-s02"
+ANIME_EP_IDS = [f"{ANIME_SEASON_ID}{n:02d}" for n in (1, 2, 3)]  # …-s0201/02/03
+
+
+def _seed_anime_ssee_season(sandbox, make_video, *, uploaded=False):
+    """Seed a season_map with glued anime children (…-s0201/02/03), real files on disk.
+
+    Mirrors _seed_season_two but for the sSSEE id shape that exposed IMP-C18 (the range
+    filter must strip the season base before reading the episode number). All three lib
+    files are written; ani-* ids route to library_anime.json via save_library.
+    """
+    media_dir = sandbox["media_dir"]
+    out = {}
+    for ep_id in ANIME_EP_IDS:
+        fname = f"Kuroko {ep_id[-4:]}.mkv"  # e.g. "Kuroko s0202.mkv"
+        path, fhash = make_video(media_dir / fname, marker=ep_id.encode())
+        out[ep_id] = {
+            "short_id": _short(ep_id), "filename": fname, "folder_path": str(media_dir),
+            "status": "onboarded" if uploaded else "local_ready", "uploaded": uploaded,
+            "hash": fhash, "metadata": {"title": "Kuroko", "year": 2013},
+            "tech_spec": {"resolution": "1080p", "size_bytes": os.path.getsize(path)},
+            "parent_id": ANIME_SEASON_ID,
+        }
+    library = {
+        ANIME_SEASON_ID: {"type": "season_map", "folder_path": str(media_dir),
+                          "total_episodes": len(ANIME_EP_IDS),
+                          "children": list(ANIME_EP_IDS)},
+        **out,
+    }
+    _write_all_libs(sandbox, library)
+    return {"season_id": ANIME_SEASON_ID, "ep_ids": list(ANIME_EP_IDS), "media_dir": media_dir}
+
+
 # ===========================================================================
 # Group 1 — one fast smoke per command (+ major options)
 # ===========================================================================
@@ -411,6 +447,89 @@ class TestEachCommand:
         main.cmd_fetch_restore(EP1_ID)
         out = capsys.readouterr().out
         assert "FETCH & RESTORE COMPLETE" in out
+
+    # ---- IMP-C18: 0-via-range guard suppresses the auto-pilot ✅✅✅ banner -----
+    def _seed_anime_restore_copies(self, info, ep_ids):
+        """Seed restore/ copies for the given anime episodes (so cmd_restore moves
+        them back) and overwrite the live files with placeholders. Mirrors the
+        test_restore_group seeding so a real selection actually restores > 0 files."""
+        restore_folder = info["media_dir"] / main.RESTORE_DIR_NAME
+        restore_folder.mkdir(exist_ok=True)
+        lib = mvcommon.load_library()
+        for ep_id in ep_ids:
+            fname = lib[ep_id]["filename"]
+            src = info["media_dir"] / fname
+            (restore_folder / fname).write_bytes(open(src, "rb").read())
+            with open(src, "wb") as f:
+                f.write(b"PLACEHOLDER")
+
+    def test_fetch_restore_empty_range_suppresses_banner(
+            self, sandbox, make_video, mock_device, capsys):
+        """0-via-range run: the ⚠️ warning fires, the green ✅✅✅ banner is SUPPRESSED,
+        and nothing raises / no sys.exit (acceptance (a) + (c) of step 4)."""
+        info = _seed_anime_ssee_season(sandbox, make_video, uploaded=True)
+        # 98-99 matches no episode in a non-empty (3-child) season -> 0-via-range.
+        main.cmd_fetch_restore(info["season_id"], "98-99")  # must not raise / exit
+        out = capsys.readouterr().out
+        assert "⚠️" in out, f"expected the 0-match warning, got: {out!r}"
+        assert "0 items" in out, f"expected the suppressed-banner summary, got: {out!r}"
+        assert "✅✅✅ FETCH & RESTORE COMPLETE." not in out, (
+            f"the green banner must be suppressed over 0 items, got: {out!r}"
+        )
+
+    def test_fetch_restore_real_range_keeps_banner(
+            self, sandbox, make_video, mock_device, capsys):
+        """Real selection (episodes 2-3 over a glued sSSEE season) restores 2 files,
+        so the ✅✅✅ banner STILL prints (acceptance (b) of step 4)."""
+        info = _seed_anime_ssee_season(sandbox, make_video, uploaded=True)
+        # Episodes 2 and 3 are …-s0202 / …-s0203 (the original IMP-C18 repro shape).
+        self._seed_anime_restore_copies(info, info["ep_ids"][1:])  # s0202, s0203
+        main.cmd_fetch_restore(info["season_id"], "2-3")
+        out = capsys.readouterr().out
+        assert "✅✅✅ FETCH & RESTORE COMPLETE." in out, (
+            f"a real 2-item selection must keep the success banner, got: {out!r}"
+        )
+        lib = mvcommon.load_library()
+        # The two selected episodes restored; the unselected ep01 did not.
+        assert lib[info["ep_ids"][1]]["status"] == "restored_local"
+        assert lib[info["ep_ids"][2]]["status"] == "restored_local"
+        assert lib[info["ep_ids"][0]]["status"] != "restored_local"
+
+    # ---- IMP-C18: push_group / restore_group select correctly on sSSEE ids ----
+    def test_push_group_episode_range_anime_ssee(
+            self, sandbox, make_video, mock_device, capsys):
+        """push_group with episode_range="2-3" selects …-s0202 and …-s0203 only.
+
+        This is the cross-command push coverage for the IMP-C18 fix: previously the
+        unanchored fallback would parse '0202' as 202, skipping all episodes in a
+        sSSEE season. Range "2-3" must match exactly ep02 and ep03 (not ep01).
+        """
+        info = _seed_anime_ssee_season(sandbox, make_video, uploaded=False)
+        main.cmd_push_group(info["season_id"], episode_range="2-3")
+        lib = mvcommon.load_library()
+        # Episodes 2 and 3 were selected; episode 1 was NOT.
+        assert lib[info["ep_ids"][1]]["uploaded"] is True   # …-s0202 pushed
+        assert lib[info["ep_ids"][2]]["uploaded"] is True   # …-s0203 pushed
+        assert lib[info["ep_ids"][0]]["uploaded"] is False  # …-s0201 skipped
+
+    def test_restore_group_episode_range_anime_ssee(
+            self, sandbox, make_video, capsys):
+        """restore_group with episode_range="2-3" restores …-s0202 and …-s0203 only.
+
+        Mirrors test_restore_group seeding (restore/ copies + placeholder live files)
+        but for the sSSEE id shape. Asserts exactly 2 episodes reach restored_local
+        and the unselected …-s0201 is not touched.
+        """
+        info = _seed_anime_ssee_season(sandbox, make_video, uploaded=True)
+        # Seed restore/ copies only for ep02 and ep03 (s0202, s0203).
+        self._seed_anime_restore_copies(info, info["ep_ids"][1:])  # s0202, s0203
+        count = main.cmd_restore_group(info["season_id"], "2-3")
+        lib = mvcommon.load_library()
+        assert lib[info["ep_ids"][1]]["status"] == "restored_local"  # …-s0202 restored
+        assert lib[info["ep_ids"][2]]["status"] == "restored_local"  # …-s0203 restored
+        assert lib[info["ep_ids"][0]]["status"] != "restored_local"  # …-s0201 untouched
+        # cmd_restore_group returns the count of successfully restored entries.
+        assert count == 2
 
     # ---- mock_fetch round-trip (the in-process browser stub) -----------------
     def test_fetch_round_trip_with_mock_fetch(self, mock_device, mock_fetch):

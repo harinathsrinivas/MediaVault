@@ -50,3 +50,21 @@ Decisions baked in (from user, pre-run): A+C (shared helper + loud guard); scope
   - Grep for unanchored fallback in main.py + mainfetch.py at the three function sites: 0 matches confirmed.
 
 ---
+
+## Step 3 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `main.py` (`cmd_prep_push_rep_season` filter loop ~2694-2701; `_season_resume_cmd` ~2729-2737).
+- Outcome: Replaced the two inline episode-range patterns in `cmd_prep_push_rep_season` and `_season_resume_cmd` with calls to the shared `episode_num_from_id` helper. The filter site (`cmd_prep_push_rep_season`) is a straightforward swap: `ep_num = episode_num_from_id(mid, base_id)` + guard. The resume-string site (`_season_resume_cmd`) required special handling to preserve the original digit string (e.g. `"02"`, `"16.5"`) for byte-identical output: the helper is used as the gatekeeper (None check), then the raw digit string is extracted without regex via prefix-strip + single-char e/E/x/X strip. This avoids floating-point formatting (`2.0` vs `2`) and preserves leading zeros (`02` not `2`). After the edit, `grep eExX main.py` returns no matches — the helper in `mvcommon.py` is now the single source of truth for all 5 range-filter sites.
+- Key decisions:
+  - Confirmed variable names: filter loop uses `mid` / `base_id` / `start` / `end` / `filtered_ids`; resume function uses `rid` / `real_id` / `base_id` / `ep_nums`.
+  - The plan's suggested conversion `str(int(ep)) if ep == int(ep) else str(ep)` would break the existing test `test_season_mid_failure_keeps_completed_and_prints_resume` which asserts `"episodes 02"` (leading-zero format from IDs like `tv-en-2022-showe02`). The float-to-int path drops leading zeros. Instead: use the helper as the None-gate only, then extract the raw digit string from the ID by prefix-strip + optional e/E/x/X single-char strip (no regex). This is byte-identical to the original `m.group(1)` string and satisfies the acceptance criteria.
+  - The `eExX` regex literal is gone from both functions; the regex lives only in `mvcommon.episode_num_from_id`.
+- Verification:
+  - `python -m pytest tests/test_prep_season_episode_parse.py -q` → `11 passed in 1.13s`
+  - `python -m pytest -q` → `236 passed in 38.44s` (baseline 236; no regressions)
+  - `python -m pytest tests/smoke -q` → `52 passed in 9.92s` (smoke gate; main.py modified; well under 30s)
+  - `grep eExX main.py` → no matches confirmed.
+
+---

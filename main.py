@@ -2692,13 +2692,9 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
             start, end = map(float, episode_range.split('-'))
             filtered_ids = []
             for mid in target_ids:
-                # Strip the base_id to leave only the episode string (e.g. "e01" or "22.5")
-                ep_str = mid.replace(base_id, "")
-                match = re.search(r'^[eExX]?(\d+(?:\.\d+)?)$', ep_str)
-                if match:
-                    ep_num = float(match.group(1))
-                    if start <= ep_num <= end:
-                        filtered_ids.append(mid)
+                ep_num = episode_num_from_id(mid, base_id)
+                if ep_num is not None and start <= ep_num <= end:
+                    filtered_ids.append(mid)
             target_ids = filtered_ids
             print(f"   > Filtered to {len(target_ids)} episodes ({episode_range})")
         except ValueError:
@@ -2727,10 +2723,13 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
         ep_nums = []
         for rid in remaining:
             real_id, _ = _resolve_alias(library, rid)
-            ep_str = real_id.replace(base_id, "")
-            m = re.search(r'^[eExX]?(\d+(?:\.\d+)?)$', ep_str)
-            if m:
-                ep_nums.append(m.group(1))
+            ep = episode_num_from_id(real_id, base_id)
+            if ep is not None:
+                # Preserve original digit string (e.g. "02", "16.5") for the resume command.
+                # Strip base_id prefix, then strip optional e/E/x/X separator — no regex needed.
+                ep_str = real_id[len(base_id):] if real_id.startswith(base_id) else real_id
+                ep_digits = ep_str[1:] if ep_str and ep_str[0].lower() in ('e', 'x') else ep_str
+                ep_nums.append(ep_digits)
         parts = [f"prep_push_rep_season {base_id} \"{folder_path}\""]
         if split_method and split_val:
             parts.append(f"{split_method} {split_val}")

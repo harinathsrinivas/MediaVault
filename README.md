@@ -228,6 +228,19 @@ python mainfetch.py fetch <id> [episodes <range>]
 > Correct: `python main.py fetch tv-TheBoys episodes 1-3`
 > Wrong:   `python main.py fetch tv-TheBoys 1-3` (range silently ignored)
 
+> **Range filtering is season-aware (IMP-C18).** The range counts real
+> episode numbers even for glued anime `sSSEE` ids. For a season like
+> `ani-ja-2013-kurokosbasketball-s02` whose children are `…-s0201`,
+> `…-s0202`, `…-s0203`, …:
+> `python main.py fetch_restore ani-ja-2013-kurokosbasketball-s02 episodes 2-3`
+> selects episodes 2 and 3 (the `…-s0202`/`…-s0203` children).
+> Earlier versions misread `s0202` as episode 202 — so you had to type the
+> glued numbers (`episodes 202-203`) as a workaround. **That workaround
+> relied on the bug and no longer works; use the real episode numbers.**
+> If a range matches nothing in a non-empty season, the tool prints a
+> `⚠️` (and the `fetch_restore` auto-pilot skips its green success banner)
+> rather than silently reporting success.
+
 ### Pinning a push to a specific phone (multi-device)
 
 All four push-flavoured subcommands (`push`, `push_group`, `prep_push_rep`,

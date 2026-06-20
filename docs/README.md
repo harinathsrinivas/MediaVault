@@ -26,6 +26,7 @@
 | [`README.md`](../README.md) | User-facing overview: what MediaVault does, install, full CLI reference table, ID conventions, layout |
 | [`ARCHITECTURE.md`](../ARCHITECTURE.md) | Definitive engineering reference (~2000 lines, 19 sections). Read before changing `main.py`/`mainfetch.py` |
 | [`ARCHITECTURE_GRAPH.md`](../ARCHITECTURE_GRAPH.md) | The architecture as 7 Mermaid graph views (system, lifecycle, state machine, ER model, rollback flow, fetch sequence, seam map) |
+| [`BEST_PRACTICES.md`](../BEST_PRACTICES.md) | Compounding decisions: choices to lock now (chunk size, DV/HDR verification, multi-account replication, enrich-before-archive, automation gates) that are cheap today and expensive to fix once the library scales / the daemon automates |
 | [`CLAUDE.md`](../CLAUDE.md) | Session rules for AI-assisted work: gates, change-gate, keep-PRIORITY-current rule, pipeline notes |
 | [`apple_tv_ui_roadmap.md`](../apple_tv_ui_roadmap.md) | 2026-05 Jellyfin-plugin UI design. **Partially superseded** — carries a correction banner; current plan is `improvements/ROADMAP_END_GOAL.md` |
 | `PLAN.md`, `STATUS.md` (root) | **Gitignored/stale live working copies** used by the agent pipeline during runs (root STATUS.md is currently still tracked — cleanup tracked as IMP-A11). Canonical copies live under `docs/<feature>/` |

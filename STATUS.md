@@ -140,6 +140,27 @@ Updated `test_sort_enqueues_and_finishes` (test "(e)"): now asserts terminal sta
 - `python -m pytest tests/smoke -q` → **56 passed in 29.86s**.
 - Focused re-run `test_sort_enqueues_and_finishes` + `test_replace_with_confirm_runs_and_archives` → **2 passed** (sort polls to `done`, replace polls to `done` against the sandbox — the optional sanity check, covered by the endpoint test).
 
+## Step 8 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `requirements.txt`
+- Outcome: Updated `requirements.txt` to add the full IMP-A10 truth-up plus the web-app runtime and test deps. Added `requests`, `webdriver-manager`, `fastapi`, `uvicorn[standard]`, and `httpx`. Attached the exact reserved comment to `undetected-chromedriver` per `improvements/improvements_tierA.md` line 200. `httpx` is noted as a test dep (one addition beyond the A10 list) required by `fastapi.testclient.TestClient` used in `tests/test_web_endpoints.py`. No version pins added (file was unpinned; style preserved). No other files touched.
+- Key decisions: Used exact comment wording from improvements_tierA.md line 200 for `undetected-chromedriver`: `# reserved: anti-bot fallback for Google Photos (see RESEARCH_STORAGE_STREAMING.md §1.3)`. Added `httpx` with explicit comment explaining it is a test dep for TestClient — this is one dep beyond the A10 list, justified because the endpoint tests use `importorskip` and silently skip without it.
+- Verification: `C:/Users/harin/PycharmProjects/MediaVault/.venv/Scripts/python.exe -c "import fastapi, uvicorn, httpx, requests; print('imports ok')"` → `imports ok`. All four packages imported cleanly.
+
+Final `requirements.txt` content:
+```
+pymediainfo
+selenium
+undetected-chromedriver  # reserved: anti-bot fallback for Google Photos (see RESEARCH_STORAGE_STREAMING.md §1.3)
+requests
+webdriver-manager
+fastapi
+uvicorn[standard]
+httpx  # test: required by fastapi.testclient.TestClient (tests/test_web_endpoints.py)
+```
+
 ## Step 7 — [status: done]
 - Executor: executor-opus
 - Model: opus

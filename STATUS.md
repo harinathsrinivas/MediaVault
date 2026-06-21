@@ -39,3 +39,34 @@ Task: `web` command — local FastAPI operations/console UI (Disk Reclaim view +
 
 ### Follow-up (from DECISION.md "what we keep", NOT auto-applied)
 - Candidate C's unified-normpath-index architecture is the ideal target for a future perf refactor of `collect_reclaimable` (keep A's semantics + the UNPREPPED size-gate + the informational in-library `suggest_target_folder`). C also sorted items largest-first — a cheap nicety A could adopt.
+
+## Step 3 — [status: done] (multi-candidate, 3 candidates, opus-max)
+- Winner: Candidate C (serialized single-worker FIFO queue) — branch `feature/web_console__s3cand_c`, tag `candidates/step-3/C-chosen`. Losers A (thread+stdout-proxy) / B (subprocess) preserved as `candidates/step-3/A-rejected`/`B-rejected`.
+- DECISION.md: `.candidates/step-3/DECISION.md` (committed on the feature branch).
+- Merge commit: `0d77a68` (squash-merge of s3cand_c; root `CRITIQUE.md` excluded; `DECISION.md` force-added). +454 lines, 4 files.
+- Files added: `webui/__init__.py`, `webui/server.py` (~316 lines — `create_app()` + the queue/worker action model), `webui/static/index.html` (placeholder — step 6 overwrites the real SPA).
+- NOTE: a fresh executor session FINISHED candidate C after the original died on an auth drop (it had written the code but not validated/critiqued); the finisher confirmed ZERO code changes were needed.
+
+### Key decisions (carry into downstream steps — esp. step 4 endpoint tests + step 6 frontend)
+- **FIXED HTTP contract (all candidates honored it; step 4 tests + step 6 frontend bind to THIS):** `GET /api/reclaim` → `collect_reclaimable()` dict; `GET /api/library` → status-counts-by-category; `POST /api/action/{name}` body `{id?,filepath?,confirm?,options?}` — allow-list EXACTLY `{prep,push,replace,sort,prep_push_rep}` (404 else), `replace` needs `confirm is True` else **409**, else **202** `{job_id}`; `GET /api/job/{job_id}` → job record (404 unknown); StaticFiles(html=True) mounted LAST at `/`. NO uvicorn import (step 5 owns that).
+- Job record shape: `{id, name, status: running|done|error, output, started_at}` in a module dict under a Lock. Progress = POLLING `/api/job/{id}`.
+- C's model = ONE daemon worker draining a `queue.Queue`, in-process, one action at a time → device-safety + stdout-isolation by construction. Worker catches `SystemExit` FIRST (load_library does sys.exit(1) on corrupt lib) so it can't wedge. The Tier-S/IMP-S2 daemon seed.
+- **C's arg-mapping gap (recoverable follow-up, NOT a contract miss):** C threads only `id`/`filepath`/`split_method`/`split_val` into `cmd_*`; it omits `device_id`/`eager_rehash`/`temp_dir`/`parent_id` (all default cleanly in main.py) and skips A's `422` pre-validation. Per the judge's "what we keep", FOLD A's richer arg mapping + 422 validation into STEP 6 (or a follow-up). Also add the documented `redirect_stdout` "no unrelated concurrent stdout writer" caveat + `_JOBS` eviction before IMP-S2.
+
+### Environment / deps
+- Installed into `.venv` ahead of the plan's step 8 (needed now to validate create_app/TestClient): `fastapi 0.138.0`, `uvicorn[standard] 0.49.0`, `httpx 0.28.1`. **`httpx` is a TestClient dependency NOT in the plan's requirements list — step 8 should add it (as a test/dev dep at minimum).**
+
+### Verification
+- `create_app()` OK on the merged tree (no uvicorn import). Read-only contract verified on the merged branch.
+- Smoke gate on the MERGED feature branch: initially 1 failed / 55 passed due to **flaky `test_push_real_split` (transient OSError in a REAL file-split — Windows file-handle/temp contention under full-suite load; pre-existing, unrelated to step 3 which added no code to the tested modules)**; it PASSED in isolation and the full smoke suite PASSED 56/56 on clean retry. Flaky-test candidate worth a future stabilization (own follow-up).
+
+## Step 4 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `tests/test_web_endpoints.py` (NEW — 5 tests)
+- Outcome: Created `tests/test_web_endpoints.py` with 5 endpoint tests using FastAPI `TestClient`. Module skips cleanly via `pytest.importorskip("fastapi")` + `pytest.importorskip("httpx")` when those packages are absent. Tests cover: (a) `GET /api/reclaim` 200 with correct shape + at least one `PUSHED_NOT_ARCHIVED` item for a seeded onboarded+real-file entry; (b) `POST /api/action/replace` without `confirm` → 409 and file byte-content unchanged; (c) `POST /api/action/replace` with `confirm=True` → 202 + job_id, poll until `done`, assert dummy bytes on disk and `status=="archived"` in library; (d) `POST /api/action/bogus` → 404; (e) `POST /api/action/sort` → 202 + terminal state (accepts `done` or `error` since `cmd_sort` returns `None`, which the worker maps to `error`). All tests use the sandbox fixture dual-patch (LIBRARY_* + LOCAL_ROOT); `fake_dummy` neutralizes ffmpeg for replace; no ADB calls needed (replace only does local file renames). A shared `_seed_onboarded` helper writes a real (>DUMMY_MAX_BYTES) file via `make_video` and populates lib_movies.
+- Key decisions: `cmd_sort` returns `None` (implicit return on the success path), which the worker maps to `status="error"`. Test (e) therefore accepts either terminal state and documents the behavior, rather than asserting `done`. No `mock_device` needed for replace tests — `cmd_replace` does local file renames only, no ADB calls. The `fake_dummy` fixture is sufficient to neutralize the `make_video_dummy` ffmpeg call.
+- Verification:
+  - `python -m pytest tests/test_web_endpoints.py -q` → **5 passed, 1 warning in 2.14s**
+  - `python -m pytest tests/smoke -q` → **56 passed in 13.00s**

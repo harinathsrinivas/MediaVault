@@ -4,20 +4,80 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>MediaVault Console</title>
+  <link rel="stylesheet" href="./styles.css" />
 </head>
-<body>
-  <main>
-    <h1>MediaVault Console</h1>
-    <p>
-      Placeholder shell. The real single-page console is built in a later step.
-      The JSON API is already live:
-    </p>
-    <ul>
-      <li><code>GET /api/reclaim</code> — reclaimable-disk report</li>
-      <li><code>GET /api/library</code> — library status summary</li>
-      <li><code>POST /api/action/{name}</code> — enqueue an action (202 + job_id)</li>
-      <li><code>GET /api/job/{job_id}</code> — poll a job record</li>
-    </ul>
-  </main>
+<body data-view="list">
+  <!-- ============================ Header ============================ -->
+  <header class="app-header">
+    <div class="brand">
+      <span class="mark">Media<span class="accent">Vault</span></span>
+      <span class="tag">Reclaim Console</span>
+    </div>
+
+    <div class="reclaim-total" title="Total local disk reclaimable by acting on the items below">
+      <span class="num" id="reclaim-total-num">—</span>
+      <span class="label">reclaimable</span>
+    </div>
+
+    <div class="header-spacer"></div>
+
+    <!-- Filter chips: toggle visibility of each badge group client-side. -->
+    <nav class="chips" id="filter-chips" aria-label="Filter by state"></nav>
+
+    <div class="header-actions">
+      <button class="btn ghost" id="btn-refresh" title="Re-scan reclaimable disk">↻ Refresh</button>
+      <button class="btn" id="btn-sort" title="Run library sort">Sort library</button>
+    </div>
+  </header>
+
+  <!-- Load-error banner (hidden unless /api/reclaim fails). -->
+  <div class="banner" id="load-banner" hidden></div>
+
+  <!-- ============================ Workspace ============================ -->
+  <div class="workspace">
+    <!-- LEFT: filterable item rail (independently scrolls). -->
+    <aside class="rail">
+      <div class="rail-head">
+        <span class="title">Items</span>
+        <span class="shown" id="rail-shown"></span>
+      </div>
+      <div class="rail-list" id="rail-list" role="listbox" tabindex="0"
+           aria-label="Reclaimable items (use up and down arrows)"></div>
+    </aside>
+
+    <!-- RIGHT: detail of the selected item (independently scrolls). -->
+    <section class="detail" id="detail">
+      <div class="detail-placeholder" id="detail-placeholder">
+        <div class="big">Select an item</div>
+        <div>Pick a row on the left to see its path, suggested command, and actions.</div>
+      </div>
+      <div class="detail-inner" id="detail-inner" hidden></div>
+    </section>
+  </div>
+
+  <!-- ============================ Replace confirm modal ============================ -->
+  <div class="modal-backdrop" id="confirm-modal" hidden role="dialog"
+       aria-modal="true" aria-labelledby="confirm-title">
+    <div class="modal">
+      <div class="modal-head">
+        <span class="warn-ico" aria-hidden="true">⚠️</span>
+        <h2 id="confirm-title">Confirm replace</h2>
+      </div>
+      <div class="modal-body">
+        <p class="danger-note">This deletes the original after verifying the cloud upload.</p>
+        <p>Run <code>replace</code> on:</p>
+        <div class="target" id="confirm-target"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn ghost" id="confirm-cancel">Cancel</button>
+        <button class="btn danger" id="confirm-ok">Delete original &amp; replace</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Transient toast (copy feedback / errors). -->
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="./app.js"></script>
 </body>
 </html>

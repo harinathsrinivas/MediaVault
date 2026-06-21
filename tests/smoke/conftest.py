@@ -31,19 +31,12 @@ treated by cmd_check / cmd_restore / cmd_prep as already-archived dummies and EA
 place we WANT the dummy path (cmd_repair_dummies regenerating an archived dummy) writes
 a <200 KB file on purpose and asserts the regenerate path — both are valid smokes.
 """
-import hashlib
 import os
 
 import pytest
 
 import main
 import mvcommon
-
-# A tiny payload, repeated, that comfortably clears DUMMY_MAX_BYTES (200_000) so
-# the "real media" code paths (hash check, prep, restore) run instead of the
-# dummy early-skip. ~250 KB keeps hashing fast while staying well over the limit.
-_REAL_MEDIA_BYTES = b"SMOKE-REAL-MEDIA-MASTER\n" * 11000  # ~264 KB > 200_000
-
 
 @pytest.fixture()
 def smoke_local_root(sandbox):
@@ -67,26 +60,6 @@ def smoke_local_root(sandbox):
     assert "C:\\Media" not in str(media_root), \
         f"Safety check failed: LOCAL_ROOT still points at real media: {media_root}"
     yield media_root
-
-
-@pytest.fixture()
-def make_video():
-    """Factory: write a tiny (~264 KB) .mkv that clears DUMMY_MAX_BYTES.
-
-    Returns write(path, marker=b"") -> (Path, sha256_hex). Deterministic bytes so
-    the caller can store the returned hash in a library entry and have cmd_check /
-    cmd_restore verify it. `marker` (optional) is prepended so two files can differ.
-    """
-    def write(path, marker=b""):
-        path = str(path)
-        data = marker + _REAL_MEDIA_BYTES
-        with open(path, "wb") as f:
-            f.write(data)
-        assert os.path.getsize(path) > main.DUMMY_MAX_BYTES, \
-            "make_video must write > DUMMY_MAX_BYTES so the real-media path is taken"
-        return path, hashlib.sha256(data).hexdigest()
-
-    return write
 
 
 @pytest.fixture()

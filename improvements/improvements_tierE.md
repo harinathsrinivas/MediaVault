@@ -244,15 +244,12 @@
 
 - Category: other
 - Priority: high
-- Files: new `mvweb.py` — FastAPI; HTML/CSS/JS frontend; new `cmd_web` to launch
+- Files: new `webui/` package (`server.py` FastAPI `create_app()` + a serialized single-worker job queue; `static/` no-build card-grid SPA); `main.py` `cmd_web` + `web` dispatch arm + the read-only data-functions (`collect_reclaimable`, `classify_entry_state`, `guess_manual_id`, `suggest_target_folder`, `suggest_next_command`)
 - Current behavior: MediaVault is CLI-only. There's no graphical view of the library.
 - Proposed change:
   - New `python main.py web` starts a local web server on `localhost:8765`.
-  - Backend: FastAPI exposing JSON APIs (built on IMP-A4 `--json` foundations):
-    - `GET /library` — full library data
-    - `GET /entry/<id>` — full entry
-    - `POST /command/<name>` — run any `cmd_*` and stream progress via SSE/WebSocket (IMP-F10)
-  - Frontend: a clean responsive HTML page with poster grid (uses `poster.jpg`), status filters, entry detail with action buttons (fetch/restore/replace), live progress streams.
+  - Backend (as shipped): FastAPI `create_app()` exposing `GET /api/reclaim` (the four-state reclaim scan), `GET /api/library` (status counts by category), `POST /api/action/{name}` (allow-list `prep`/`push`/`replace`/`sort`/`prep_push_rep`; `replace` requires `confirm:true` else **409**; returns **202** + `job_id`), `GET /api/job/{id}` (polling). Actions call the existing `cmd_*` UNCHANGED via a serialized single-worker queue. Progress = polling for v1 (SSE/WebSocket = IMP-F10). (A4's `--json` will later reuse the same data-functions.)
+  - Frontend (as shipped): a no-build dark responsive **card-grid SPA** (`webui/static/`) — the merged Disk Reclaim view: per-item state badge, total-reclaimable-GB header, filter chips, suggested next command + suggested target folder (editable curly provider tag, NEW items only), one-click actions with an unmissable confirm modal on `replace`. A poster grid with real posters/titles is future polish (see Follow-ups).
   - Auth: optional basic-auth via config; default localhost-only.
   - **Relationship to Tier S (2026-06-12):** the daemon (IMP-S2) IS this backend grown up — one FastAPI process serving webhook ingestion + job queue + these APIs + this status UI. Build E12 as the daemon's UI layer, not a separate server. The "complete modern Web UI to track all operations" ambition from the original brief = this + IMP-F10 + D1's stats feed.
 - Rationale: The ops dashboard for the whole system (queue, progress, errors, library state) and the validation surface for the data model the couch UI consumes. Jellyfin remains the *viewing* UI; this is the *operations* UI.
@@ -260,7 +257,8 @@
 - Effort estimate: large
 - Risk: low-medium — additive new module; the only core-code coupling is via `--json`/function calls. Keep it localhost-bound by default (it can trigger destructive commands).
 - If skipped: operations stay CLI-only; daemon behavior is observable only through logs (IMP-A3) — workable but the "never come to the computer" goal then has no at-a-glance health surface when something DOES go wrong.
-- Status: pending
+- **Follow-ups / forward vision (user-decided 2026-06-22):** the shipped frontend is the **card-grid** (the bake-off's candidate B), chosen at the human C3 gate over the denser table specifically as the **substrate for a future "Apple-like" local media UI** that grows beyond disk-reclaim — adding real movie **titles**, **posters/artwork**, and **fetch-in-the-UI**. Those are explicitly OUT of scope for E12 (which stays the *operations* console; *viewing/playback* remains Jellyfin, locked 2026-06-12) and are tracked as: poster/title enrichment → **IMP-D10 / IMP-E3**; fetch-in-UI + the always-on service → **IMP-S2** (this FastAPI app is that daemon's seed). The card's poster-placeholder is the slot real posters drop into.
+- Status: **done** (`feature/web_console` — implemented via the multi-agent pipeline with 3-candidate bake-offs on the reclaim data model, the action-execution model, and the UI; PR to `main` pending). Bundled IMP-A10 (requirements truth-up) and introduced IMP-D16 (`scan_reclaimable`).
 
 ---
 

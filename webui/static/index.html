@@ -4,20 +4,93 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>MediaVault Console</title>
+  <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
-  <main>
-    <h1>MediaVault Console</h1>
-    <p>
-      Placeholder shell. The real single-page console is built in a later step.
-      The JSON API is already live:
+  <!-- ====================== Sticky command header ====================== -->
+  <header class="topbar" id="topbar">
+    <div class="topbar__main">
+      <div class="brand">
+        <span class="brand__logo">MediaVault</span>
+        <span class="brand__sub">Reclaim Console</span>
+      </div>
+
+      <div class="readout" title="Total local disk reclaimable across all listed items">
+        <span class="readout__label">Reclaimable</span>
+        <span class="readout__value" id="reclaim-total">—</span>
+        <span class="readout__bytes" id="reclaim-bytes"></span>
+      </div>
+    </div>
+
+    <!-- Filter chips: one per badge + an ALL toggle + the global Sort button. -->
+    <div class="chips" id="chips">
+      <span class="chips__title">Filter</span>
+      <button type="button" class="chip chip--all" id="chip-all" aria-pressed="true">
+        <span class="chip__dot"></span>ALL
+        <span class="chip__count" id="count-all">0</span>
+      </button>
+      <!-- Per-badge chips are injected here by app.js -->
+      <span class="chips__spacer"></span>
+      <button type="button" class="btn-sort" id="btn-sort"
+              title="Run library sort (cmd_sort)">Sort library</button>
+    </div>
+
+    <p class="hint">
+      <kbd>↑</kbd><kbd>↓</kbd> move &nbsp; <kbd>Enter</kbd> run focused row's action
+      &nbsp; <kbd>Tab</kbd> fields &nbsp;·&nbsp; click a column header to sort
     </p>
-    <ul>
-      <li><code>GET /api/reclaim</code> — reclaimable-disk report</li>
-      <li><code>GET /api/library</code> — library status summary</li>
-      <li><code>POST /api/action/{name}</code> — enqueue an action (202 + job_id)</li>
-      <li><code>GET /api/job/{job_id}</code> — poll a job record</li>
-    </ul>
-  </main>
+  </header>
+
+  <!-- ====================== Mission-control table ====================== -->
+  <div class="tablewrap" id="tablewrap">
+    <table class="grid" id="grid" hidden>
+      <thead>
+        <tr>
+          <th class="sortable" data-sort="badge" scope="col">State</th>
+          <th class="sortable" data-sort="id" scope="col">ID / Path</th>
+          <th class="sortable num" data-sort="size_bytes" scope="col">Size</th>
+          <th scope="col">Suggested command</th>
+          <th scope="col">Suggested folder</th>
+          <th scope="col">Action</th>
+        </tr>
+      </thead>
+      <tbody id="rows"><!-- rows injected by app.js --></tbody>
+    </table>
+
+    <!-- Loading / empty / error banners swap in here. -->
+    <div class="banner" id="banner">
+      <h2>Loading…</h2>
+      <p>Fetching <code>/api/reclaim</code></p>
+    </div>
+  </div>
+
+  <!-- ====================== Replace confirm modal ====================== -->
+  <div class="modal-backdrop" id="modal" hidden role="dialog"
+       aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal">
+      <div class="modal__head">
+        <span class="modal__icon" aria-hidden="true">!</span>
+        <span class="modal__title" id="modal-title">Confirm destructive replace</span>
+      </div>
+      <div class="modal__body">
+        <p class="modal__warn">
+          This deletes the original after verifying the cloud upload.
+        </p>
+        <div class="modal__target">
+          <span class="lbl">Target&nbsp;·&nbsp;</span><span class="mid" id="modal-id"></span>
+        </div>
+      </div>
+      <div class="modal__foot">
+        <button type="button" class="modal__btn modal__btn--cancel" id="modal-cancel">Cancel</button>
+        <button type="button" class="modal__btn modal__btn--confirm" id="modal-confirm">
+          Delete original
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <span class="sr-only" id="aria-live" role="status" aria-live="polite"></span>
+
+  <script src="./app.js"></script>
 </body>
 </html>

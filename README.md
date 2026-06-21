@@ -205,6 +205,7 @@ help text and no `--help` flag; this table is the reference.
 | `set_uploaded`         | `set_uploaded [id]`                                                                                                                 | Force-mark as uploaded (emergency rescue)                                                                                                              |
 | `sort`                 | `sort`                                                                                                                              | Re-sort all library JSONs by language -> year -> size                                                                                                  |
 | `recover`              | `recover [id\|folder]` (or `recover --scan`)                                                                                        | Finish an interrupted auto-rollback for a media folder (resolves by id or path); `--scan` reports leftover `.mediavault_txn.json` journals (read-only) |
+| `web`                  | `web [--port N] [--host H] [--no-browser]`                                                                                          | Launch the local web operations console (Disk Reclaim view) at `http://127.0.0.1:8765` — requires `fastapi`+`uvicorn` (in `requirements.txt`)          |
 
 The Selenium fetcher can also be invoked directly:
 
@@ -213,6 +214,21 @@ python mainfetch.py fetch <id> [episodes <range>]
 ```
 
 `main.py fetch` is a thin wrapper that spawns exactly that command.
+
+### Web operations console (`web`)
+
+`python main.py web` opens a local, dark **operations console** at
+`http://127.0.0.1:8765` (override with `--port`/`--host`; `--no-browser` skips
+the auto-open). It presents ONE merged **Disk Reclaim** view of every local
+file that still occupies reclaimable space, each tagged with a state badge —
+`UNPREPPED` / `LOCAL·NOT-PUSHED` / `PUSHED·NOT-ARCHIVED` / `RESTORED·REPLACE-AGAIN` —
+with a total-reclaimable-GB header, per-state filter chips, a deterministic
+suggested next command and a suggested target folder per item, and one-click
+`prep` / `push` / `replace` / `sort` actions (the destructive `replace` is gated
+by a confirm modal; long actions report via a polled job mechanism). It manages
+files only — it never plays video (Jellyfin remains the viewing surface) and
+never moves or renames files (it shows you the command to copy). Install the
+deps first: `pip install -r requirements.txt` (adds `fastapi` + `uvicorn`).
 
 > **Malformed invocations fail fast.** A `push_group` (or `replace`) call
 > that ends with a value-taking keyword and no value (e.g.

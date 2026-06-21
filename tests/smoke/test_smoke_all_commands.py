@@ -251,6 +251,47 @@ class TestEachCommand:
         assert "SCANNING FOR UNPREPPED FILES" in out
         assert "Unprepped.S01E99.mkv" in out
 
+    # ---- web / collect_reclaimable (the web command's testable core) ---------
+    def test_web_collect_reclaimable(self, sandbox, make_video, smoke_local_root, capsys):
+        """Exercise collect_reclaimable (the `web` data layer) — NOT uvicorn.
+
+        Starting the server would bind a port / hang the suite, so the smoke
+        drives the pure data-function that powers GET /api/reclaim. Mirrors
+        test_scan_unprepped's on-disk seeding: a known leaf (LOCAL_NOT_PUSHED)
+        plus an EXTRA file unknown to the library. The extra file MUST be written
+        via make_video (>DUMMY_MAX_BYTES) — collect_reclaimable gates UNPREPPED
+        emission on real on-disk size, so a sub-threshold file would NOT appear.
+        """
+        _seed_single(sandbox, make_video)  # one local_ready leaf, real file on disk
+        # An UNPREPPED extra file in the Series tree: real (>DUMMY_MAX_BYTES) so it
+        # qualifies as reclaimable, and not in the library so it classifies UNPREPPED.
+        extra_path, _ = make_video(sandbox["media_dir"] / "Unprepped.S01E99.mkv")
+
+        result = main.collect_reclaimable()   # must not raise
+
+        # Contract keys present and well-typed.
+        assert set(result) >= {"items", "total_reclaimable_bytes", "total_reclaimable_human"}
+        assert isinstance(result["items"], list)
+        assert isinstance(result["total_reclaimable_bytes"], int)
+        assert isinstance(result["total_reclaimable_human"], str)
+
+        # The extra on-disk file appears as an UNPREPPED row (match by basename,
+        # never a bracketed glob; path is a walk-join so compare on the name).
+        extra_name = os.path.basename(str(extra_path))
+        unprepped = [it for it in result["items"]
+                     if it["badge"] == "UNPREPPED"
+                     and os.path.basename(it["path"]) == extra_name]
+        assert len(unprepped) == 1, (
+            f"expected one UNPREPPED row for {extra_name}, got: "
+            f"{[(it['badge'], it['path']) for it in result['items']]!r}"
+        )
+
+        # Optional, lightweight: the FastAPI app factory imports (no port bound,
+        # no server started). Skipped cleanly where fastapi is absent.
+        pytest.importorskip("fastapi")
+        from webui.server import create_app
+        assert create_app() is not None
+
     # ---- local_status (+ size limit) -----------------------------------------
     def test_local_status_plain(self, sandbox, make_video, capsys):
         _seed_single(sandbox, make_video, uploaded=False)
@@ -743,6 +784,13 @@ class TestAliasSweep:
     # -- whole-library iterators / status commands -----------------------------
     def test_scan_unprepped_alias(self, sandbox_alias, smoke_local_root):
         main.cmd_scan_unprepped()
+
+    def test_web_reclaim_alias(self, sandbox_alias, smoke_local_root):
+        """Anti-PR#21 guard: the NEW collect_reclaimable whole-library walker must
+        tolerate season_map + multi_ep_alias rows (skip them before dereferencing
+        folder_path/filename). Asserts it does not raise and honours the contract."""
+        result = main.collect_reclaimable()
+        assert set(result) >= {"items", "total_reclaimable_bytes", "total_reclaimable_human"}
 
     def test_local_status_alias(self, sandbox_alias):
         main.cmd_local_status()

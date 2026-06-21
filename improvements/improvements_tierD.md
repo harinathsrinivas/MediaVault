@@ -34,11 +34,8 @@
 - Effort estimate: small
 - Risk: low — new read-only command; no existing path changes.
 - If skipped: no breakage — but capacity questions ("how much would a second cloud account need to hold?", "what's my local-disk exposure?") keep requiring ad-hoc JSON spelunking, and the daemon's status surface has nothing to serve.
+- Partial delivery (2026-06-22): the **total-reclaimable-GB** slice is now delivered by `web` / `collect_reclaimable` (IMP-E12 / IMP-D16); D1's full per-library / per-language `library_stats` dashboard remains pending (consume `collect_reclaimable` + add the other aggregations).
 - Status: pending
-
----
-
-## IMP-D2: Fuzzy `find` command
 
 - Category: other
 - Priority: medium
@@ -358,3 +355,19 @@
 - Risk: low — export read-only; import only SUGGESTS ids (never preps automatically).
 - If skipped: nothing operational; external-tracker users keep manual lists. (Jellyfin+Trakt plugin covers much of the watch-state half once Tier S lands.)
 - Status: pending
+
+---
+
+## IMP-D16: `scan_reclaimable` — four-state reclaim scan (data layer behind `web`)
+
+- Category: other
+- Priority: high
+- Files: `main.py` data-functions (`collect_reclaimable` + `classify_entry_state` / `suggest_target_folder` / `suggest_next_command` / `guess_manual_id`)
+- Current behavior: `scan_unprepped` only finds on-disk files NOT in any library; there was no single scan that ALSO surfaces prepped/pushed-but-still-local files occupying reclaimable space, nor what to do next about each.
+- Proposed change (SHIPPED with IMP-E12): `collect_reclaimable()` loads the library once + walks the three category roots and classifies every physical file into one of four reclaim badges — `UNPREPPED` / `LOCAL_NOT_PUSHED` / `PUSHED_NOT_ARCHIVED` / `RESTORED_REPLACE_AGAIN` — excluding `archived`+dummy and the `season_map`/`multi_ep_alias` aliases; reclaimability is decided by **actual on-disk size** (`>= DUMMY_MAX_BYTES`), de-duped by normpath; returns `{items, total_reclaimable_bytes, total_reclaimable_human}`. Each item also carries a deterministic suggested next command + suggested target folder. Pure, read-only, alias/`season_map`-safe.
+- Rationale: the data layer behind the `web` console (IMP-E12); also delivers IMP-D1's total-reclaimable-GB slice and is the reuse surface for IMP-A4's `--json`.
+- Goal: one read-only scan that answers "what local files can I reclaim, and what's the next command for each".
+- Effort estimate: small-medium
+- Risk: low — read-only; the only hazard is the new whole-library iterator (the PR#21 / IMP-C12 class), handled by the alias-skip + the smoke `TestAliasSweep` sweep.
+- If skipped: N/A — shipped.
+- Status: **done** (`feature/web_console` / IMP-E12; PR to `main` pending).

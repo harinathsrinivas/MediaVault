@@ -241,6 +241,7 @@ Brackets denote optional args; `[id]` is the manual library ID like
 | `restore` | `restore [id]` | `cmd_restore` — re-merge chunks + verify + move into place |
 | `restore_group` | `restore_group [id]` | `cmd_restore_group` |
 | `sort` | `sort` | `cmd_sort` — re-order JSONs by lang -> year -> size |
+| `web` | `web [--port N] [--host H] [--no-browser]` | `cmd_web` — launch the local FastAPI operations console (Disk Reclaim view) at `http://127.0.0.1:8765`; lazy-imports fastapi/uvicorn so importing `main` never hard-requires them (IMP-E12) |
 | `fetch` | `fetch [id] [OPT: episodes <range>]` | `cmd_dispatch_fetch` — spawns `python mainfetch.py fetch ...` |
 | `recover` | `recover [id\|folder]` / `recover --scan` | `cmd_recover` — finish an interrupted rollback (calls `recover_journal`); `--scan` lists leftover journals read-only |
 
@@ -302,6 +303,49 @@ prints `Usage: fetch [id] [episodes] [range]` and `sys.exit(1)`, so a bare
 `python mainfetch.py fetch` (no id) prints usage and exits cleanly instead
 of raising `IndexError` on `argv[2]` as it did previously.
 `main.py:cmd_dispatch_fetch` (line 1350) constructs exactly that argv shape.
+
+### `python main.py web` — the local operations console (IMP-E12)
+
+`cmd_web(host="127.0.0.1", port=8765, open_browser=True)` lazily imports
+`uvicorn` + `webui.server.create_app` *inside the function* (so importing
+`main` — and the whole test suite — never hard-requires fastapi/uvicorn; a
+missing dep degrades to a clear `pip install -r requirements.txt` message).
+It binds **localhost only**.
+
+- **`webui/` package** (the seed of the Tier-S daemon, IMP-S2): `server.py`'s
+  `create_app()` returns a FastAPI app with a **serialized single-worker job
+  queue** — one daemon thread drains a `queue.Queue` and runs each action
+  in-process one at a time, so the two mutating actions (`push`/`replace`)
+  can never collide on the single ADB device and per-job stdout capture is
+  race-free by construction. The worker catches `SystemExit` first (a corrupt
+  library makes `load_library` call `sys.exit(1)`) so it can never wedge.
+  Routes: `GET /api/reclaim` (the reclaim scan), `GET /api/library` (status
+  counts by category), `POST /api/action/{name}` (allow-list
+  `{prep,push,replace,sort,prep_push_rep}`; `replace` requires `confirm:true`
+  or returns **409**; returns **202** + a `job_id`), `GET /api/job/{id}`
+  (polling). `webui/static/` is a no-build card-grid SPA mounted via
+  `StaticFiles`.
+- **Pure read-only data layer in `main.py`** (near `cmd_scan_unprepped`):
+  `collect_reclaimable`, `classify_entry_state`, `guess_manual_id`,
+  `suggest_target_folder`, `suggest_next_command`. They only READ existing
+  keys and the on-disk size; they never mutate the library or touch media.
+  `collect_reclaimable` is a whole-library iterator, so it is
+  **alias/`season_map`-safe** (skips `season_map`/`multi_ep_alias` before
+  dereferencing `folder_path`/`filename`) — the IMP-C12/PR#21 crash class,
+  guarded by the `TestAliasSweep` entry in `tests/smoke`.
+- **Four reclaim badges** (`classify_entry_state`): `UNPREPPED` (on disk, not
+  in library), `LOCAL_NOT_PUSHED` (`local_ready`, not uploaded),
+  `PUSHED_NOT_ARCHIVED` (`onboarded`, uploaded, original still on disk),
+  `RESTORED_REPLACE_AGAIN` (`restored_local`, uploaded). Reclaimability is
+  decided by **actual on-disk size** (real ⇔ `size >= DUMMY_MAX_BYTES`), not
+  status alone, so an already-dummied entry never shows phantom GB; `archived`
+  + dummy is excluded.
+- **The web tier calls the existing `cmd_*` UNCHANGED** — no copy of their
+  logic. `replace` reuses `cmd_replace` verbatim, so the **auto-rollback
+  change-gate is NOT tripped** (journal/PONR/`RollbackHardFail` contract
+  untouched) and **`ENTRY_TYPE_KEYS` is unchanged** (no new entry type, no
+  shared-field change). The console suggests folders/commands but never moves
+  or renames files (move = IMP-D8).
 
 ---
 
@@ -497,7 +541,8 @@ exactly once regardless of how many episode numbers share it.
 
 Season maps have no `hash`, no `filename`, no `tech_spec`. They are
 recognised throughout the code by `entry.get("type") == "season_map"` and
-deliberately skipped in `scan_unprepped`, `local_status`, and `sort`.
+deliberately skipped in `scan_unprepped`, `local_status`, `sort`, and
+`collect_reclaimable` (the `web` console's reclaim scan — IMP-E12/D16).
 
 > **`ENTRY_TYPE_KEYS` is the authoritative source of truth for entry-type
 > key shapes.** `main.py` (top-level config block, ~`main.py:114`) defines a

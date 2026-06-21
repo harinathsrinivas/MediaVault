@@ -204,7 +204,7 @@
 - Effort estimate: small
 - Risk: low — dependency manifest only; no code change.
 - If skipped: every machine rebuild / venv refresh re-discovers the gap at the worst time (mid-fetch `ModuleNotFoundError` after a Chrome update forces a driver refetch).
-- Status: pending
+- Status: **done** (bundled into `feature/web_console` / IMP-E12 — `requirements.txt` now lists `fastapi`, `uvicorn[standard]`, `requests`, `webdriver-manager`, keeps `undetected-chromedriver` with the reserved-comment, and adds `httpx` as the FastAPI TestClient test dep; PR to `main` pending).
 
 ---
 

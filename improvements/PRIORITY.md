@@ -9,16 +9,17 @@
 > Full task text lives in `improvements_tier*.md`; this file only orders them. Legend:
 > 🔴 critical · 🟠 high · 🟡 medium · ⚪ low · ✅ done · 🚦 needs a user decision (change-gate).
 >
-> **Last updated:** 2026-06-15 (IMP-C18 done — anime sSSEE episode-range filter fixed; Band 0 now only the 🚦 R6/R7 decisions).
+> **Last updated:** 2026-06-22 (IMP-E12 web ops console done via the multi-agent pipeline — bundled IMP-A10 requirements truth-up + introduced IMP-D16 `scan_reclaimable`; IMP-D1 advanced: the reclaimable-GB slice is delivered, the full dashboard remains pending).
 
 ---
 
-## 👉 SUGGESTED NEXT TASK: **IMP-A10** — truth-up `requirements.txt`
+## 👉 SUGGESTED NEXT TASK: **IMP-A12** — CI pipeline (lock the test suite green)
 
-A clean install of MediaVault is half-broken today: `requests` and `webdriver-manager` are used at
-runtime but absent from `requirements.txt`, so any fresh checkout fails on first use. Low-risk,
-high-impact foundation fix — one of the cheapest tasks on the board and a blocker for CI and any
-new contributor. Full details in `improvements_tierA.md` (IMP-A10).
+The `feature/web_console` work just added four web test modules + smoke wiring on top of the existing
+suite; IMP-A12 stands up CI so nothing merges red again — the natural protector of everything just
+built, 🟠 high and low-risk. (IMP-A10, the prior NEXT, shipped bundled into IMP-E12.) A cheap zero-code
+parallel win is still available: **IMP-S1** — stand up Jellyfin (immediate couch value). Full details in
+`improvements_tierA.md` (IMP-A12).
 
 > 🚦 **IMP-R6** and **IMP-R7** still await user decisions before any code — see Band 0 table.
 
@@ -35,7 +36,6 @@ new contributor. Full details in `improvements_tierA.md` (IMP-A10).
 
 | # | Task | Payoff | Risk |
 |---|---|---|---|
-| 7 | 🟠 **IMP-A10** | truth-up `requirements.txt` (a clean install is half-broken today: missing `requests`/`webdriver-manager`) | low |
 | 9 | 🟠 **IMP-S1** | stand up Jellyfin (the `JELLYFIN_SETUP_GUIDE.md` run) — **zero code, immediate couch value**, can run in parallel | low |
 | 10 | ⚪ **IMP-A11** | repo hygiene (gitignore stale root `STATUS.md`, drop stray files, clean leftover worktrees) | low |
 | 11 | 🟠 **IMP-A12** | CI pipeline — lock the 13-file suite so nothing merges red | low |
@@ -67,7 +67,7 @@ The vault's three accounts are a single point of failure. Prioritize:
 with `E4` (watch-state), `E9` (library refresh), `E5` (phone cleanup), `U1` (enrichment-before-archive),
 `U2` (status home rows). Library beauty: `E3` (metadata) → `U3` (NFO/artwork), `U4` (DV-FEL paths).
 Feels-instant spikes: `G2` (gphotosdl) → `S7` (fetch hardening); `S6` (watch-while-fetching); `S8`
-(proxy-stream). Polish: `U5` (C# plugin), `E12`/`F10` (ops web UI).
+(proxy-stream). Polish: `U5` (C# plugin), `E12` ✅ /`F10` (ops web UI — E12 shipped; its card-grid SPA is the substrate the future media UI grows on).
 
 ## ⚪ BAND 5 — QUALITY / PERF / UTILITY (opportunistic, any time)
 
@@ -75,13 +75,14 @@ Perf: `B1`–`B10`. Utility commands: `D2`,`D3`,`D6`–`D15`. Integration long-t
 `E8`,`E10`,`E11`. Rollback hardening: `R1`,`R3`,`R4`,`R5`,`R8`,`R9` (R4/R8/R9 are 🚦 change-gated).
 Moonshots: `F1`–`F9`. Research-only: `G3`,`G5`,`H2`,`A6`.
 
-## ✅ DONE (20)
+## ✅ DONE (23)
 
 `A1` (mvcommon) · `A7` (pytest harness) · `C2` (retry) · `C4` (device pinning) · `C8` (post-push verify) ·
 `C9` (atomic replace) · `C11` (restore quarantine) · `C12` (alias crash: scan/local_status) ·
 `C13` (single-id alias handling) · `C14` (CLI parser papercuts) · `C15` (micro-robustness) · `C16` (anime fetch profile) · `C17` (fetch-session keep-alive + logged-out detector) · `C18` (anime sSSEE episode-range filter: shared episode_num_from_id + 0-match guard) · `C6` (session-expiry detect — via C17) · `E13` (multi-episode) · `G1` (chunker patterns) ·
 `H1` (Opus 4.8 effort tiers) · `H3` (smoke gate + consumer-impact guardrail + data-request protocol) ·
-`R2` (recover CLI).
+`R2` (recover CLI) · `E12` (web ops console — Disk Reclaim view + suggested next-commands + integrated sort/replace) ·
+`A10` (requirements truth-up) · `D16` (scan_reclaimable — four-state reclaim scan behind `web`).
 
 ---
 

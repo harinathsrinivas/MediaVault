@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MediaVault Console</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="hero">
+      <div class="brand">
+        <div class="logo">MV</div>
+        <div>
+          <h1>MediaVault Console</h1>
+          <p class="sub">Local Reclaim Operations</p>
+        </div>
+      </div>
+      <div class="reclaim-stat">
+        <div class="label">Reclaimable</div>
+        <div class="value empty" id="reclaim-total">—</div>
+        <div class="count" id="reclaim-count"></div>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <div class="chip-row" id="chip-row" role="group" aria-label="Filter by state"></div>
+      <span class="spacer"></span>
+      <button type="button" class="btn-sort" id="btn-sort" title="Run library sort">
+        <span aria-hidden="true">⇅</span> Sort library
+      </button>
+    </div>
+  </header>
+
+  <main>
+    <p class="status-line" id="status-line" role="status" aria-live="polite"></p>
+    <div class="grid" id="grid"></div>
+    <div class="job-panel" id="sort-job-panel" style="margin-top:18px"></div>
+  </main>
+
+  <!-- Shared destructive-confirm modal for `replace`. -->
+  <div class="modal-backdrop" id="modal" role="dialog" aria-modal="true"
+       aria-labelledby="modal-title" hidden>
+    <div class="modal">
+      <div class="modal-head">
+        <div class="warn-icon" aria-hidden="true">!</div>
+        <h2 id="modal-title">Confirm replace</h2>
+      </div>
+      <div class="modal-body">
+        <p class="warn-line">This deletes the original after verifying the cloud upload.</p>
+        <div class="target" id="modal-target"></div>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="cancel" id="modal-cancel">Cancel</button>
+        <button type="button" class="confirm" id="modal-confirm">Delete original</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Hidden card template cloned per item. -->
+  <template id="card-tpl">
+    <article class="card">
+      <div class="poster">
+        <span class="initial"></span>
+        <span class="badge"><span class="dot"></span><span class="badge-label"></span></span>
+      </div>
+      <div class="card-body">
+        <div class="id-row">
+          <span class="item-id"></span>
+          <span class="item-size"></span>
+        </div>
+        <div class="item-path"></div>
+
+        <div class="field field-cmd">
+          <span class="field-label">Suggested command</span>
+          <div class="field-row">
+            <code class="code-box cmd-text"></code>
+            <button type="button" class="copy-btn cmd-copy" title="Copy command">⧉</button>
+          </div>
+        </div>
+
+        <div class="field field-folder">
+          <span class="field-label">Suggested folder</span>
+          <div class="field-row">
+            <input type="text" class="provider-input folder-input" spellcheck="false" />
+            <button type="button" class="copy-btn folder-copy" title="Copy folder">⧉</button>
+          </div>
+          <span class="field-note folder-note"></span>
+        </div>
+
+        <div class="card-actions"></div>
+
+        <div class="job-panel item-job"></div>
+      </div>
+    </article>
+  </template>
+
+  <script src="./app.js"></script>
+</body>
+</html>

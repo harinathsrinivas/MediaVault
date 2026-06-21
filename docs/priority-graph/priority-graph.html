@@ -81,7 +81,7 @@
 
 <header>
   <div class="brand">Media<span>Vault</span> · Priority Graph</div>
-  <div class="next">⚡ Next: <b>IMP-A10</b>&nbsp;<span style="color:#9fb0d6">truth-up requirements.txt</span>&nbsp;·&nbsp;<a href="../../improvements/PRIORITY.md">full list →</a></div>
+  <div class="next">⚡ Next: <b>IMP-A12</b>&nbsp;<span style="color:#9fb0d6">CI pipeline — lock the test suite green</span>&nbsp;·&nbsp;<a href="../../improvements/PRIORITY.md">full list →</a></div>
   <div class="grow"></div>
   <input id="search" placeholder="search tasks…  (Enter to focus)">
 </header>
@@ -127,7 +127,7 @@ const TASKS = [
  ["A7","pytest harness","A","done","done","13-file suite shipped organically"],
  ["A8","delete dead mainfetch code","A","low","todo","3 unreachable stubs"],
  ["A9","[eE|xX] regex typo","A","low","todo","Literal | inside a char class — cosmetic"],
- ["A10","requirements.txt truth-up","A","high","todo","Clean install is half-broken: missing requests + webdriver-manager"],
+ ["A10","requirements.txt truth-up","A","done","done","Done — bundled into IMP-E12 (feature/web_console): fastapi/uvicorn/requests/webdriver-manager + httpx test dep"],
  ["A11","repo hygiene","A","low","todo","Gitignore stale STATUS.md, drop stray files, clean worktrees"],
  ["A12","CI pipeline","A","high","todo","Lock the suite so nothing merges red"],
  // B — performance
@@ -176,6 +176,7 @@ const TASKS = [
  ["D13","compare diagnostic","D","low","todo","Explain hash provenance (orig vs canonical)"],
  ["D14","tail_progress","D","low","todo","Monitor a batch from another shell"],
  ["D15","export/import watchlist","D","low","todo","Bridge Letterboxd/MAL"],
+ ["D16","scan_reclaimable","D","done","done","Four-state reclaim scan behind web (feature/web_console)"],
  // E — integration
  ["E1","subtitle pre-extraction","E","med","todo","Subs survive archive; feed F7 grep"],
  ["E2","low-res preview variant","E","low","todo","Quick preview without full fetch"],
@@ -188,7 +189,7 @@ const TASKS = [
  ["E9","library-refresh integration","E","med","todo","Tile flips playable seconds after restore"],
  ["E10","Telegram bot","E","low","todo","Optional away-from-home fallback (not the core flow)"],
  ["E11","id lookup by folder","E","low","todo","Drag folder → get id; daemon path→id too"],
- ["E12","web ops UI","E","high","todo","The daemon's status dashboard layer"],
+ ["E12","web ops UI","E","done","done","Done (feature/web_console): FastAPI Disk Reclaim console + card-grid SPA; bundled A10, introduced D16"],
  ["E13","multi-episode support","E","done","done","Shipped PR #21 (follow-ups → C12/C13)"],
  // F — moonshots
  ["F1","encrypt-at-rest","F","med","todo","Privacy — see X3 (container constraint)"],
@@ -245,7 +246,7 @@ const TASKS = [
 ];
 /* dependency / flow edges [from,to] — major chains only */
 const EDGES = [
- ["A2","A4"],["A4","A5"],["A4","E12"],["A4","D1"],["A4","S2"],["A3","S2"],
+ ["A2","A4"],["A4","A5"],["A4","E12"],["A4","D1"],["A4","S2"],["A3","S2"],["E12","D16"],
  ["A2","D10"],["E3","U3"],["E3","D10"],["E3","D1"],["D4","D5"],
  ["S1","S2"],["S2","S3"],["S3","S4"],["S4","S5"],["S2","E9"],["S2","U2"],
  ["C6","S3"],["S4","U1"],["E4","S4"],["E4","S5"],["E5","S5"],["C1","S2"],

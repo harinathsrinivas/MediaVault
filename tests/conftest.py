@@ -12,6 +12,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FAKE_ORIGINAL_BYTES = b"ORIGINAL-MASTER-BYTES"
 FAKE_DUMMY_BYTES    = b"DUMMY"
 
+# A tiny payload, repeated, that comfortably clears DUMMY_MAX_BYTES (200_000)
+# so the "real media" code paths (hash check, prep, restore) run instead of
+# the dummy early-skip. ~264 KB keeps hashing fast while staying well over.
+# Shared here (parent conftest) so both top-level tests/ and tests/smoke/ can
+# resolve the `make_video` fixture (child dirs inherit parent conftest fixtures).
+_REAL_MEDIA_BYTES = b"SMOKE-REAL-MEDIA-MASTER\n" * 11000  # ~264 KB > 200_000
+
 TEST_ENTRY_ID = "mov_test_c9_001"  # "mov" prefix -> goes to LIBRARY_MOVIES
 
 
@@ -369,6 +376,33 @@ def fake_dummy(monkeypatch):
         return True
 
     monkeypatch.setattr(main, "make_video_dummy", _fake_make_video_dummy)
+
+
+@pytest.fixture()
+def make_video():
+    """Factory: write a tiny (~264 KB) .mkv that clears DUMMY_MAX_BYTES.
+
+    Returns write(path, marker=b"") -> (Path, sha256_hex). Deterministic bytes
+    so the caller can store the returned hash in a library entry and have
+    cmd_check / cmd_restore verify it. `marker` (optional) is prepended so two
+    files can differ.
+
+    Promoted to tests/conftest.py from tests/smoke/conftest.py so that both
+    top-level tests/ files and tests/smoke/ (which inherits the parent conftest)
+    can resolve this fixture.
+    """
+    import hashlib as _hashlib
+
+    def write(path, marker=b""):
+        path = str(path)
+        data = marker + _REAL_MEDIA_BYTES
+        with open(path, "wb") as f:
+            f.write(data)
+        assert os.path.getsize(path) > main.DUMMY_MAX_BYTES, \
+            "make_video must write > DUMMY_MAX_BYTES so the real-media path is taken"
+        return path, _hashlib.sha256(data).hexdigest()
+
+    return write
 
 
 # ===========================================================================

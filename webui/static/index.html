@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MediaVault Console</title>
+</head>
+<body>
+  <main>
+    <h1>MediaVault Console</h1>
+    <p>
+      Placeholder shell. The real single-page console is built in a later step.
+      The JSON API is already live:
+    </p>
+    <ul>
+      <li><code>GET /api/reclaim</code> — reclaimable-disk report</li>
+      <li><code>GET /api/library</code> — library status summary</li>
+      <li><code>POST /api/action/{name}</code> — enqueue an action (202 + job_id)</li>
+      <li><code>GET /api/job/{job_id}</code> — poll a job record</li>
+    </ul>
+  </main>
+</body>
+</html>

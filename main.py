@@ -2658,6 +2658,384 @@ def cmd_scan_unprepped():
         print("\n✅ All libraries are completely in sync.")
 
 
+# ==========================================
+#   DISK-RECLAIM DATA LAYER (web console)
+# ==========================================
+# Five read-only pure helpers behind the `web` console's Disk Reclaim view
+# (IMP-E12). They NEVER write/delete/rename anything — disk + library are read
+# as the source of truth and the output is advisory (suggested commands the
+# user runs themselves). The five-state classification (badge ↔ status ↔
+# on-disk real/dummy) is documented in the State table in the step spec and
+# mirrors the cmd_check / cmd_repair_dummies dummy rule: real ⇔
+# size >= DUMMY_MAX_BYTES, dummy ⇔ size < DUMMY_MAX_BYTES.
+#
+# CRASH-CLASS GUARD (IMP-C12 / PR #21): every library iteration here skips
+# non-physical types (season_map / multi_ep_alias) BEFORE touching
+# folder_path/filename, exactly like cmd_scan_unprepped (main.py:2606) and
+# cmd_local_status (main.py:2505).
+
+# Scan roots and the folder-exclusion set, kept identical to cmd_scan_unprepped
+# so "what counts as an on-disk video" is one definition in two places.
+_RECLAIM_CATEGORY_ROOTS = (
+    ("Movies", os.path.join(LOCAL_ROOT, "Movies")),
+    ("Series", os.path.join(LOCAL_ROOT, "Series")),
+    ("Anime", os.path.join(LOCAL_ROOT, "Anime")),
+)
+_RECLAIM_EXCLUDE_DIRS = {
+    SPLIT_DIR_NAME, CHECKSUM_DIR_NAME, RESTORE_DIR_NAME,
+    ".git", ".idea", "__pycache__", "Utils",
+}
+
+# status -> reclaimable badge when the on-disk file is REAL (size >= threshold).
+# archived is intentionally absent: an archived entry's file is a dummy by
+# definition, so it is never reclaimable (and a real file under an archived
+# entry is anomalous -> no badge).
+_RECLAIM_STATUS_TO_BADGE = {
+    "local_ready":    "LOCAL_NOT_PUSHED",
+    "onboarded":      "PUSHED_NOT_ARCHIVED",
+    "restored_local": "RESTORED_REPLACE_AGAIN",
+}
+
+# Release-noise tokens stripped by guess_manual_id. A token at-or-after any of
+# these (case-insensitive) is dropped from the title slug. Lower-cased set.
+_RELEASE_NOISE_TOKENS = {
+    "2160p", "1080p", "720p", "480p", "4k", "uhd",
+    "bluray", "blu-ray", "brrip", "bdrip", "webrip", "web-dl", "webdl", "web",
+    "hdtv", "dvdrip", "remux", "proper", "repack", "extended", "unrated",
+    "nf", "amzn", "hmax", "dsnp", "atvp", "max",
+    "x265", "x264", "h265", "h264", "hevc", "avc", "h", "265", "264",
+    "ddp5", "ddp", "dd5", "ac3", "aac", "dts", "dts-hd", "truehd", "atmos",
+    "dv", "hdr", "hdr10", "sdr", "dolby", "vision",
+    "10bit", "8bit",
+}
+
+
+def classify_entry_state(entry, on_disk_real):
+    """Map (library entry, on-disk-real?) to a Disk-Reclaim badge or None.
+
+    Pure. `entry=None` means "no library row for this on-disk file" -> the file
+    occupies space but is unknown to the library -> UNPREPPED. Non-physical
+    library rows (season_map / multi_ep_alias) own no reclaimable file -> None.
+
+    `on_disk_real` is the caller's verdict from the size threshold
+    (True ⇔ size >= DUMMY_MAX_BYTES). When False the file is a dummy/absent and
+    is NEVER reclaimable: an archived entry yields the (excluded-by-caller)
+    ARCHIVED badge, anything else yields None.
+
+    Returns one of:
+      "UNPREPPED" | "LOCAL_NOT_PUSHED" | "PUSHED_NOT_ARCHIVED"
+      | "RESTORED_REPLACE_AGAIN" | "ARCHIVED" | None
+    """
+    if entry is None:
+        return "UNPREPPED"
+
+    # CRASH-CLASS GUARD: non-physical rows own no file -> no reclaim badge.
+    if entry.get("type") in ("season_map", "multi_ep_alias"):
+        return None
+
+    status = entry.get("status")
+
+    if not on_disk_real:
+        # Dummy or absent on disk: not reclaimable. Only distinguish the
+        # archived case so the caller can label/exclude it explicitly.
+        return "ARCHIVED" if status == "archived" else None
+
+    # On-disk file is real (occupies space): badge is driven purely by status.
+    # archived/real is anomalous (archived implies a dummy) -> no badge.
+    return _RECLAIM_STATUS_TO_BADGE.get(status)
+
+
+def _slugify_ascii(text):
+    """Lower-case ascii [a-z0-9] slug with all separators/non-ascii dropped."""
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+def guess_manual_id(path):
+    """Best-effort EDITABLE manual-id proposal for an unprepped on-disk file.
+
+    NEVER raises. Returns a plausible canonical-shape id the user will edit
+    before prepping (a wrong guess is fine — the web console never auto-preps
+    a guessed id). Category (mov/tv/ani) is inferred from which root the path
+    lives under; default language is `en`; the year uses the same 4-digit-token
+    rule as parse_metadata_from_id (main.py:178).
+
+    Canonical shapes (ARCHITECTURE.md §6.2):
+      Movies: mov-<lang2>-<year>-<slug>
+      TV:     tv-<lang2>-<year>-<slug>-sNNeMM
+      Anime:  ani-<lang2>-<year>-<slug><EE>   (no `e` before the episode)
+    """
+    try:
+        norm = os.path.normpath(path)
+        parts_lower = norm.lower().split(os.sep)
+
+        # Category + prefix + default lang from the containing root.
+        if "anime" in parts_lower:
+            prefix, lang = "ani", "ja"
+        elif "series" in parts_lower:
+            prefix, lang = "tv", "en"
+        else:
+            # Movies, or anything not under Series/Anime, defaults to a movie.
+            prefix, lang = "mov", "en"
+
+        base = os.path.splitext(os.path.basename(norm))[0]
+        # Drop any UID tag like " [68b7b8]" before tokenising.
+        base = re.sub(r"\[[^\]]*\]", " ", base)
+        # Split on the usual scene separators.
+        tokens = [t for t in re.split(r"[.\s_\-]+", base) if t]
+
+        # Year via the parse_metadata_from_id rule: first 4-digit token.
+        year = None
+        for t in tokens:
+            if t.isdigit() and len(t) == 4:
+                year = t
+                break
+
+        # Episode hint (best-effort) for TV/anime from the raw base.
+        season_num, episode_num = None, None
+        m_tv = re.search(r"[sS](\d{1,2})[\s._-]*[eExX](\d{1,3})", base)
+        if m_tv:
+            season_num = int(m_tv.group(1))
+            episode_num = int(m_tv.group(2))
+        else:
+            m_ep = re.search(r"[eExX](\d{1,3})\b", base)
+            if m_ep:
+                episode_num = int(m_ep.group(1))
+
+        # Title = tokens BEFORE the first year token, first release-noise
+        # token, or first season/episode marker (whichever comes first); fall
+        # back to all tokens. Stopping at the episode marker keeps the leaked
+        # "s01e03"/"e07" tail out of the title slug.
+        ep_marker = re.compile(r"^(?:[sS]\d{1,2}(?:[eExX]\d{1,3})?|[eExX]\d{1,3})$")
+        title_tokens = []
+        for idx, t in enumerate(tokens):
+            tl = t.lower()
+            if (t.isdigit() and len(t) == 4) or tl in _RELEASE_NOISE_TOKENS:
+                break
+            if ep_marker.match(t):
+                break
+            # Anime episode is often a bare trailing number (e.g. "Death Note 07").
+            if (prefix == "ani" and idx == len(tokens) - 1
+                    and t.isdigit() and len(t) <= 3 and title_tokens):
+                break
+            title_tokens.append(t)
+        if not title_tokens:
+            title_tokens = tokens
+
+        slug = _slugify_ascii("".join(title_tokens)) or "untitled"
+        year_part = year if year else "0000"
+
+        if prefix == "tv":
+            s = season_num if season_num is not None else 1
+            e = episode_num if episode_num is not None else 1
+            return f"tv-{lang}-{year_part}-{slug}-s{s:02d}e{e:02d}"
+        if prefix == "ani":
+            e = episode_num if episode_num is not None else 1
+            return f"ani-{lang}-{year_part}-{slug}{e:02d}"
+        return f"mov-{lang}-{year_part}-{slug}"
+    except Exception:
+        # Hard guarantee: never raise. Return a usable, obviously-editable stub.
+        return "mov-en-0000-untitled"
+
+
+def suggest_target_folder(item):
+    """Suggest a leaf folder name + editable provider-id tag for a reclaim item.
+
+    For a NEW (UNPREPPED) item -> propose a leaf folder named per the
+    provider-tag template (NEW items only):
+        Movies:        <Title> (<Year>) {tmdb-0000000}
+        TV / Anime:    <Title> (<Year>) {tvdb-000000}   (anime treated as series)
+    with `applies=True`. The braces hold an EDITABLE placeholder id — this step
+    performs NO TMDB/TVDB lookup, nor does it fabricate the Language/Genre path
+    segments (those require provider data); only the leaf folder name is
+    proposed.
+
+    For an in-library item -> EXISTING folders are NEVER renamed: return the
+    item's existing folder_path verbatim with `applies=False` (informational).
+
+    Returns {folder, provider_tag, editable_provider_field, applies}.
+    """
+    path = item.get("path", "")
+    guessed = item.get("guessed", False)
+    mid = item.get("id", "")
+
+    # In-library item: never rename an existing folder.
+    if not guessed:
+        existing = item.get("folder_path") or os.path.dirname(path)
+        return {
+            "folder": existing,
+            "provider_tag": None,
+            "editable_provider_field": None,
+            "applies": False,
+        }
+
+    # NEW item: build a leaf folder name from the guessed id's title + year.
+    # Category drives which provider tag the template uses.
+    parts = mid.split("-")
+    category = parts[0] if parts else "mov"
+
+    meta = parse_metadata_from_id(mid)
+    year = meta.get("year")
+    year_str = str(year) if year else "????"
+
+    # Derive a human title from the slug segment of the guessed id. For movies
+    # the slug is parts[3:]; for tv/ani it is parts[3] (episode info trails).
+    slug = parts[3] if len(parts) > 3 else (parts[-1] if parts else "Untitled")
+    # Strip a trailing sNNeMM / sNN / episode tail off the slug for the title.
+    slug_clean = re.sub(r"-?s\d{1,2}(?:e\d{1,3})?$", "", slug)
+    slug_clean = re.sub(r"\d+$", "", slug_clean) if category == "ani" else slug_clean
+    title = slug_clean.strip("-") or "Untitled"
+    # Title-case the slug for display (best effort; the user edits it).
+    title_display = title[:1].upper() + title[1:] if title else "Untitled"
+
+    if category == "mov":
+        provider_tag = "tmdb-0000000"
+    else:
+        # tv and ani both map to the series/tvdb template.
+        provider_tag = "tvdb-000000"
+
+    folder_name = f"{title_display} ({year_str}) {{{provider_tag}}}"
+    return {
+        "folder": folder_name,
+        "provider_tag": provider_tag,
+        "editable_provider_field": provider_tag.split("-", 1)[0],  # "tmdb" | "tvdb"
+        "applies": True,
+    }
+
+
+def suggest_next_command(item):
+    """The exact suggested-next-command string for a reclaim item's badge.
+
+    Strings are verbatim from the State table; the badge selects the template
+    and `id`/`path` fill it in. Returns "" for a badge with no action (ARCHIVED
+    is excluded upstream and never reaches here).
+    """
+    badge = item.get("badge")
+    mid = item.get("id", "")
+    path = item.get("path", "")
+
+    if badge == "UNPREPPED":
+        return f'python main.py prep {mid} "{path}"'
+    if badge == "LOCAL_NOT_PUSHED":
+        return f"python main.py push {mid} SIZE_GB 8"
+    if badge in ("PUSHED_NOT_ARCHIVED", "RESTORED_REPLACE_AGAIN"):
+        return f"python main.py replace {mid}"
+    return ""
+
+
+def collect_reclaimable():
+    """Read-only scan of library + disk -> reclaimable Disk-Reclaim items.
+
+    LIBRARY-FIRST strategy: iterate the library's PHYSICAL leaves first and
+    os.stat each entry's folder_path/filename directly (no walk-then-match) to
+    decide real/dummy/absent and its badge; then do a SINGLE os.walk of the
+    three category roots whose only job is to surface on-disk videos NOT already
+    known to the library and emit them as UNPREPPED. De-dupes by normpath-lower
+    so a library leaf and its on-disk file produce exactly ONE row.
+
+    Returns {"items": [...], "total_reclaimable_bytes": N,
+             "total_reclaimable_human": "..."}.
+
+    Never mutates anything. Missing roots degrade gracefully (warn + continue),
+    matching cmd_scan_unprepped.
+    """
+    library = load_library()
+
+    items = []
+    seen = set()           # normpath-lower keys already emitted (de-dupe)
+    known_paths = set()    # normpath-lower of every physical leaf's file
+
+    # -- PASS 1: library physical leaves (stat each path directly) --------
+    for mid, entry in library.items():
+        # CRASH-CLASS GUARD: skip non-physical rows before folder_path/filename.
+        if entry.get("type") in ("season_map", "multi_ep_alias"):
+            continue
+
+        folder_path = entry.get("folder_path")
+        filename = entry.get("filename")
+        if not folder_path or not filename:
+            continue
+
+        full_path = os.path.join(folder_path, filename)
+        key = os.path.normpath(full_path).lower()
+        known_paths.add(key)
+
+        # Stat directly; absent -> not reclaimable (no disk used), skip.
+        try:
+            size = os.path.getsize(full_path)
+        except OSError:
+            continue
+
+        on_disk_real = size >= DUMMY_MAX_BYTES
+        badge = classify_entry_state(entry, on_disk_real)
+        # Only reclaimable, real-file badges occupy space we can reclaim.
+        if badge in _RECLAIM_STATUS_TO_BADGE.values() and key not in seen:
+            base_item = {
+                "id": mid,
+                "badge": badge,
+                "path": full_path,
+                "size_bytes": size,
+                "guessed": False,
+                "folder_path": folder_path,
+            }
+            base_item["suggested_command"] = suggest_next_command(base_item)
+            base_item["suggested_folder"] = suggest_target_folder(base_item)
+            items.append(base_item)
+            seen.add(key)
+
+    # -- PASS 2: single walk of the roots for UNKNOWN on-disk videos ------
+    for _cat_name, root in _RECLAIM_CATEGORY_ROOTS:
+        if not os.path.exists(root):
+            print(f"     ⚠️ Folder not found: {root}")
+            continue
+
+        for dirpath, dirs, files in os.walk(root):
+            dirs[:] = [d for d in dirs if d not in _RECLAIM_EXCLUDE_DIRS]
+            for f in files:
+                if not f.lower().endswith(VIDEO_EXTENSIONS):
+                    continue
+                if f.endswith(".temp_dummy"):
+                    continue
+                if ".chunk." in f:
+                    continue
+
+                full_path = os.path.join(dirpath, f)
+                key = os.path.normpath(full_path).lower()
+                # Known to the library (handled in pass 1) or already emitted.
+                if key in known_paths or key in seen:
+                    continue
+
+                try:
+                    size = os.path.getsize(full_path)
+                except OSError:
+                    continue
+
+                # Unknown on-disk file -> entry=None -> UNPREPPED (any size;
+                # an unknown file occupies whatever space it occupies).
+                badge = classify_entry_state(None, size >= DUMMY_MAX_BYTES)
+                if badge != "UNPREPPED":
+                    continue
+
+                guessed_id = guess_manual_id(full_path)
+                new_item = {
+                    "id": guessed_id,
+                    "badge": badge,
+                    "path": full_path,
+                    "size_bytes": size,
+                    "guessed": True,
+                }
+                new_item["suggested_command"] = suggest_next_command(new_item)
+                new_item["suggested_folder"] = suggest_target_folder(new_item)
+                items.append(new_item)
+                seen.add(key)
+
+    total_bytes = sum(it["size_bytes"] for it in items)
+    return {
+        "items": items,
+        "total_reclaimable_bytes": total_bytes,
+        "total_reclaimable_human": human_readable_size(total_bytes),
+    }
+
+
 def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, device_id=None, eager_rehash=False, temp_dir=None):
     print(f"=== 🚀 AUTO-PILOT: PREP -> PUSH -> REPLACE for {manual_id} ===")
 

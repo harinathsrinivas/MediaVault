@@ -70,3 +70,18 @@ Task: `web` command — local FastAPI operations/console UI (Disk Reclaim view +
 - Verification:
   - `python -m pytest tests/test_web_endpoints.py -q` → **5 passed, 1 warning in 2.14s**
   - `python -m pytest tests/smoke -q` → **56 passed in 13.00s**
+
+## Step 5 — [status: done]
+- Executor: executor-sonnet
+- Model: sonnet
+- Mode: single-executor
+- Files changed: `main.py`
+- Outcome: Added three things to `main.py`: (1) `import webbrowser` at the top (line 11, after `import tempfile`); (2) `def cmd_web(host="127.0.0.1", port=8765, open_browser=True)` function with lazy internal imports of `uvicorn` and `webui.server.create_app` (wrapped in `try/except ImportError` that prints a clear remediation and calls `sys.exit(1)`), then builds the app, prints the URL, best-effort opens the browser, and calls `uvicorn.run`; (3) usage line `web [--port N] [--host H] [--no-browser]` in the help block; (4) `elif cmd == "web":` dispatch arm that manually parses `--host`, `--port` (validates int, exits non-zero on non-int), and `--no-browser` flag, then calls `cmd_web`.
+- Key decisions: `import webbrowser` at module top is conventional (standard library, no dep issue). `uvicorn` and `from webui.server import create_app` are INSIDE the function body only — this is the load-bearing lazy import constraint: `import main` never pulls in fastapi/uvicorn. The dispatch arm follows the existing manual `sys.argv` parsing style (no argparse). The `--port` validation prints `❌ --port must be an integer` and calls `sys.exit(1)` matching the project's error style.
+- Verification:
+  - `python -c "import sys, main; assert 'uvicorn' not in sys.modules and 'webui.server' not in sys.modules, 'lazy import leaked'; print('lazy import OK')"` → **lazy import OK**
+  - `python main.py web --port notanint` → exits with returncode 1, stdout contains `--port must be an integer` (tested via subprocess, no traceback)
+  - Happy path (monkeypatched): `cmd_web` called with fake `uvicorn.run` and `webbrowser.open` → printed `🌐 MediaVault web UI: http://127.0.0.1:8765`, called `uvicorn.run` with correct host/port, called `webbrowser.open` with correct URL. **PASS**
+  - `python -m pytest tests/smoke -q` → **56 passed in 14.37s**
+  - `python -m pytest tests/test_web_endpoints.py tests/test_web_datafns.py -q` → **41 passed, 1 warning in 2.66s**
+  - Did NOT run `python main.py web` to completion (would block; uvicorn.run is blocking). Tested via monkeypatching only.

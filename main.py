@@ -8,6 +8,7 @@ import math
 import time
 import stat
 import tempfile
+import webbrowser
 import requests
 from datetime import datetime, timezone
 from pymediainfo import MediaInfo
@@ -3297,6 +3298,25 @@ def collect_reclaimable():
     }
 
 
+def cmd_web(host="127.0.0.1", port=8765, open_browser=True):
+    """Launch the local web operations console (IMP-E12)."""
+    try:
+        import uvicorn
+        from webui.server import create_app
+    except ImportError:
+        print("❌ web requires fastapi+uvicorn — pip install -r requirements.txt")
+        sys.exit(1)
+
+    app = create_app()
+    print(f"🌐 MediaVault web UI: http://{host}:{port}")
+    if open_browser:
+        try:
+            webbrowser.open(f"http://{host}:{port}")
+        except Exception:
+            pass
+    uvicorn.run(app, host=host, port=port, log_level="warning")
+
+
 # ==========================================
 #               MAIN EXECUTION
 # ==========================================
@@ -3326,6 +3346,7 @@ if __name__ == "__main__":
         print("  sort")
         print("  fetch [id]")
         print("  recover [id|folder]  (or: recover --scan)")
+        print("  web [--port N] [--host H] [--no-browser]  — Launch the local web operations console (Disk Reclaim view)")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -3578,3 +3599,27 @@ if __name__ == "__main__":
             epr = sys.argv[4]
 
         cmd_fetch_restore(mid, epr)
+
+    elif cmd == "web":
+        args = sys.argv[2:]
+        host = "127.0.0.1"
+        port = 8765
+        open_browser = True
+        i = 0
+        while i < len(args):
+            if args[i] == "--host" and i + 1 < len(args):
+                host = args[i + 1]
+                i += 2
+            elif args[i] == "--port" and i + 1 < len(args):
+                try:
+                    port = int(args[i + 1])
+                except ValueError:
+                    print("❌ --port must be an integer")
+                    sys.exit(1)
+                i += 2
+            elif args[i] == "--no-browser":
+                open_browser = False
+                i += 1
+            else:
+                i += 1
+        cmd_web(host=host, port=port, open_browser=open_browser)

@@ -197,12 +197,12 @@ def test_bogus_action_returns_404():
 
 def test_sort_enqueues_and_finishes(sandbox, make_video):
     """POST /api/action/sort must return 202 with a job_id and the job must
-    reach a terminal state (done or error) without hanging.
+    poll to status='done'.
 
-    Note: cmd_sort() does not return True — it returns None implicitly on the
-    success path — so the worker maps its result to status='error' (the worker
-    treats None the same as False). The test therefore accepts either terminal
-    state and just asserts the endpoint + polling mechanism works end-to-end.
+    cmd_sort() returns None on its success path (it falls off the end). The
+    worker's per-action success convention lists "sort" in _NONE_IS_SUCCESS, so
+    a None return from a successful sort maps to status='done' (not 'error').
+    This test asserts that fixed behavior end-to-end.
     """
     from webui.server import create_app
 
@@ -219,8 +219,8 @@ def test_sort_enqueues_and_finishes(sandbox, make_video):
     job_id = body["job_id"]
 
     job = _poll(client, job_id)
-    # Accept both terminal states: cmd_sort returns None which the worker maps
-    # to "error", but the endpoint and job-tracking mechanism is what we verify.
-    assert job["status"] in ("done", "error"), (
-        f"sort job did not reach terminal state: {job}"
+    # cmd_sort returns None on success; the worker maps None->done for "sort".
+    assert job["status"] == "done", (
+        f"sort job ended with status={job['status']!r}. "
+        f"Output:\n{job.get('output', '')}"
     )

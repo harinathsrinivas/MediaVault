@@ -86,6 +86,35 @@ ACTION_TABLE = {
     "prep_push_rep": (_run_prep_push_rep, False),
 }
 
+# Per-action success convention for the no-exception (else) branch of the worker.
+#
+# The five cmd_* functions do NOT share one return convention — verified by
+# reading main.py:
+#   * cmd_prep / cmd_push / cmd_replace : return True on success, and an
+#     explicit `return False` on every HANDLED failure (never None). Internal
+#     exceptions are caught and turned into `return False`; cmd_replace is the
+#     sole one that re-raises (RollbackHardFail) past its point-of-no-return,
+#     which the worker's BaseException branch already maps to "error".
+#   * cmd_sort / cmd_prep_push_rep : fall off the end (return None) on SUCCESS,
+#     but ALSO `return` None on a HANDLED FAILURE (cmd_sort on an empty library;
+#     cmd_prep_push_rep on prep/push/replace failure — and it even swallows a
+#     post-PONR RollbackHardFail into a bare `return`). For these two, the
+#     return value ALONE cannot distinguish success from failure.
+#
+# Because some actions return None-on-failure, a blanket `ok = result is not
+# False` is UNSAFE: it would mark a FAILED prep_push_rep (file pushed but NOT
+# archived, or an original lost past the PONR) as "done" — a safety regression.
+#
+# So None counts as success ONLY for actions listed here. We list ONLY "sort":
+# it is non-destructive and its single None-on-failure path is a read-only
+# "library empty" check that creates nothing, so a None->done there is benign.
+# "prep_push_rep" is deliberately EXCLUDED: its None is ambiguous, and the safe
+# direction for a destructive autopilot is to NOT auto-mark it "done" — a
+# successful run still prints "AUTO-PILOT COMPLETE" in the captured output and
+# the subsequent reclaim refresh shows the archived state. (We do NOT change any
+# cmd_* return value — main.py is intentionally left untouched.)
+_NONE_IS_SUCCESS = {"sort"}
+
 # ---------------------------------------------------------------------------
 # Job registry + the single serialized worker.
 #
@@ -129,7 +158,7 @@ def _worker_loop():
     """
     while True:
         try:
-            job_id, runner, body = WORK_QUEUE.get()
+            job_id, name, runner, body = WORK_QUEUE.get()
         except Exception:
             # A failure pulling from the queue is not attributable to any job;
             # keep the worker alive and retry.
@@ -163,10 +192,22 @@ def _worker_loop():
                     output=buf.getvalue() + f"\n[{type(exc).__name__}] {exc}",
                 )
             else:
-                # cmd_* return falsey (typically False/None) on a handled
-                # validation failure and truthy on success. `False`/`None` is
-                # reported as an error so the UI can surface it.
-                ok = result is not False and result is not None
+                # No exception was raised — decide done vs error from the return
+                # value, using each action's success convention (see
+                # _NONE_IS_SUCCESS above for the per-command analysis):
+                #   * An explicit `return False` is ALWAYS a handled failure ->
+                #     "error" (covers prep/push/replace's validation failures).
+                #   * Truthy (e.g. True) is success -> "done".
+                #   * None is success ONLY for actions in _NONE_IS_SUCCESS (sort,
+                #     which returns None on success); for any other action None is
+                #     treated as failure, so a None-on-failure action (e.g.
+                #     prep_push_rep) is never wrongly marked "done".
+                if result is False:
+                    ok = False
+                elif result is None:
+                    ok = name in _NONE_IS_SUCCESS
+                else:
+                    ok = True
                 _set_job(
                     job_id,
                     status="done" if ok else "error",
@@ -216,7 +257,7 @@ def _enqueue(name, runner, body):
             "output": "",
             "started_at": time.time(),
         }
-    WORK_QUEUE.put((job_id, runner, body))
+    WORK_QUEUE.put((job_id, name, runner, body))
     return job_id
 
 

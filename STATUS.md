@@ -85,3 +85,57 @@ Task: `web` command — local FastAPI operations/console UI (Disk Reclaim view +
   - `python -m pytest tests/smoke -q` → **56 passed in 14.37s**
   - `python -m pytest tests/test_web_endpoints.py tests/test_web_datafns.py -q` → **41 passed, 1 warning in 2.66s**
   - Did NOT run `python main.py web` to completion (would block; uvicorn.run is blocking). Tested via monkeypatching only.
+
+## Step 6 — [status: done] (multi-candidate, 3 candidates, opus-max)
+- Winner: **Candidate B (card grid)** — branch `feature/web_console__s6cand_b`, tag `candidates/step-6/B-chosen`. **USER-SELECTED at the C3 human gate, overriding the judge's pick of A** (per W-13 the choice is the user's). Losers A (mission-control table) / C (master-detail) preserved as `candidates/step-6/A-rejected` / `C-rejected`.
+- DECISION.md: `.candidates/step-6/DECISION.md` (judge advisory; committed on the feature branch).
+- Merge commit: `e2d76c4` (squash-merge of s6cand_b; root `CRITIQUE.md` excluded; `DECISION.md` force-added). +1395/-11.
+- Files: `webui/static/index.html` (overwrote placeholder), `webui/static/app.js` (new, ~17.7 KB), `webui/static/styles.css` (new). Vanilla HTML/CSS/JS, no framework/build/CDN.
+- All three candidates were verified correct + safe by the judge (exact action→endpoint→body mappings; replace POSTed ONLY from the confirm modal with `confirm:true`; exact modal copy; XSS-safe `<pre>.textContent` stdout). Judge ranked A first on at-a-glance density; user chose B.
+- **Why B (user rationale, recorded):** B's card grid is the intended SUBSTRATE for a future "Apple-like" local media UI that grows beyond disk-reclaim — posters, movie titles, fetch-in-UI. Card tiles naturally hold artwork/titles; a dense table does not. B's poster-placeholder is the slot real posters drop into later. Aligns with W-2 (this FastAPI app = the Tier-S/IMP-S2 daemon-UI seed) and the project's future-media-UI direction.
+- **Scope caveat (kept explicit):** this PR (E12) remains the OPERATIONS console; viewing/playback stays Jellyfin (W-1, locked 2026-06-12). Posters/titles/fetch-in-UI are NOT in this PR — follow-ons (poster/title enrichment → IMP-D10/E3; fetch-in-UI + always-on service → IMP-S2). Logged on the board in step 9.
+- Live preview: all 3 candidates were launched (ports 8771/8772/8773) against the real read-only reclaim list (38 items / 160.84 GB) for the user's visual comparison, then stopped before archival.
+
+### Verification
+- Merged tree: `GET /`→200 serving B's SPA, `/app.js` + `/styles.css` 200, `/api/reclaim` 200 (TestClient).
+- Smoke gate on merged feature branch: **56 passed**.
+
+### Pending pre-PR touch-up (user-approved — fold the judge's "what we keep")
+- **Server fix (`webui/server.py`):** the worker maps a falsy `cmd_*` return to `status="error"`, so a SUCCESSFUL `cmd_sort()` (returns `None`) shows as "error" in the UI. Fix the worker to treat "no exception (and not an explicit `False`)" as `done` (None/True/truthy → done; explicit False → error; exception → error). Then tighten step-4 endpoint test (e) to assert sort → `done`.
+- **Frontend (`webui/static/app.js`, B):** add C's auto-refresh of `/api/reclaim` after a terminal job (B shares A's no-auto-refresh gap) so badges update without a manual reload; also port C's explicit 409/404/non-202 runner handling.
+
+## Pre-PR touch-up — [status: done]
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor
+- Files changed: `webui/server.py`, `webui/static/app.js`, `tests/test_web_endpoints.py` (main.py NOT touched — cmd_* left unchanged by design).
+
+### Change 1 — worker success/error mapping (`webui/server.py`) — SAFETY-CRITICAL
+Verified the return convention of all five actions by reading `main.py` BEFORE choosing a rule:
+
+| Command | Success return | Handled failure (no raise) | Raises? |
+|---|---|---|---|
+| `cmd_prep` (832) | `True` (incl. early-skips) | `False` — every path (file-not-found, alias clobber, hash fail, `except`) | internal exceptions caught → `False` |
+| `cmd_push` (1270) | `True` (full + chunk-range) | `False` — every path (incl. both resume-message and rollback branches) | internal exceptions caught → `False` |
+| `cmd_replace` (1865) | `True` | `False` — every pre-PONR path | `RollbackHardFail` post-PONR (PROPAGATES → worker BaseException → error) |
+| `cmd_sort` (2443) | `None` (falls off end) | `None` — empty/unloadable library (line 2448) | — |
+| `cmd_prep_push_rep` (2662) | `None` (falls off end) | `None` — prep/push/replace failed (2669/2682/2691); **swallows post-PONR `RollbackHardFail` into a bare `return` (2692-2695)** | — |
+
+**Decisive finding: SOME actions return `None`-on-failure** — `cmd_sort` AND `cmd_prep_push_rep`. So the blanket rule `ok = result is not False` is UNSAFE (the instructions' branch 2): it would mark a FAILED `prep_push_rep` (file pushed but NOT archived, or original lost past the PONR that prep_push_rep swallowed) as `done` — a real safety regression on a destructive autopilot.
+
+**Rule implemented (per-action convention):** introduced module-level `_NONE_IS_SUCCESS = {"sort"}` and changed the worker `else` (no-exception) branch to: `result is False → error`; `result is None → ok only if action in _NONE_IS_SUCCESS`; else (truthy) → `done`. Threaded the action `name` through the work-queue tuple (`_enqueue` puts `(job_id, name, runner, body)`; `_worker_loop` unpacks it). `None`-as-success is granted ONLY to `sort` (non-destructive; its single None-on-failure path is a read-only empty-library check that creates nothing → benign). `prep_push_rep` is deliberately EXCLUDED so its ambiguous `None` never auto-marks "done" — the safe direction for a destructive autopilot (a successful run still prints "AUTO-PILOT COMPLETE" in captured output and the reclaim refresh shows the archived state). The `SystemExit` and `BaseException`/`RollbackHardFail` branches were left untouched. Updated the stale comment at the former lines 166-168.
+
+### Change 2 — fold candidate C robustness into candidate B frontend (`webui/static/app.js`)
+- (a) **Auto-refresh after a terminal job:** added `scheduleReclaimRefresh()` (debounced via `_refreshTimer`, fires `load()` after `REFRESH_AFTER_JOB_MS = 2500`); called from `pollJob`'s terminal branch. The delay keeps the just-shown job result visible briefly before the grid rebuild re-renders badges (e.g. a replaced item drops PUSHED·NOT-ARCHIVED). Debounce coalesces back-to-back terminal jobs into one refresh. The global `sort` panel lives outside `#grid` so its result persists across the refresh.
+- (b) **Explicit response-status handling:** added `actionHttpError(status, detail)` mapping 409→"needs explicit confirmation", 404→"unknown action", else a generic "HTTP {status}". `runAction` now reads `job_id` ONLY on 202; every other status parses the FastAPI `{"detail":…}` body (falls back to raw text) and throws a readable error rendered inline via the existing `.catch`. The modal-gated `confirm:true` replace flow is unchanged (replace still POSTed only from the modal).
+- Kept vanilla JS, XSS-safe (textContent/`<pre>.textContent`, no innerHTML for data).
+
+### Change 3 — tighten step-4 sort test (`tests/test_web_endpoints.py`)
+Updated `test_sort_enqueues_and_finishes` (test "(e)"): now asserts terminal status is exactly `done` (was: accepts `done` or `error`). Docstring/comment updated to describe the fixed `_NONE_IS_SUCCESS` behavior instead of the old bug.
+
+### Validation (all green)
+- `node --check webui/static/app.js` → `NODE_CHECK_OK`.
+- `python -m pytest tests/test_web_endpoints.py -q` → **5 passed, 1 warning in 2.93s** (incl. sort→`done` and replace-with-confirm→`done`, confirming `cmd_replace` `True`→`done` path intact).
+- `python -m pytest tests/test_web_datafns.py -q` → **36 passed in 0.96s**.
+- `python -m pytest tests/smoke -q` → **56 passed in 29.86s**.
+- Focused re-run `test_sort_enqueues_and_finishes` + `test_replace_with_confirm_runs_and_archives` → **2 passed** (sort polls to `done`, replace polls to `done` against the sandbox — the optional sanity check, covered by the endpoint test).

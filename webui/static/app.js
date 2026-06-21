@@ -61,6 +61,12 @@ var BADGE_ORDER = [
 
 var POLL_MS = 1000;
 
+// After a job reaches a terminal state we re-fetch /api/reclaim so badges
+// reflect the new state (e.g. PUSHED·NOT-ARCHIVED -> archived/dropped). We wait
+// this long first so the just-shown job result stays visible briefly instead of
+// being yanked away the instant the job ends.
+var REFRESH_AFTER_JOB_MS = 2500;
+
 // Active filter: badge value -> shown? Default: all on.
 var filterState = {
   UNPREPPED: true,
@@ -345,6 +351,21 @@ function onActionClick(item, m, btn, jobPanel) {
   runAction(m.action, item, btn, jobPanel);
 }
 
+// Turn a non-202 action response into a readable, human-facing error message.
+// Only 202 carries a {job_id}; for anything else we must NOT try to read one.
+function actionHttpError(status, detail) {
+  if (status === 409) {
+    // Destructive action posted without confirm:true. The modal path always
+    // sends confirm:true, so this is a defensive guard, not an expected path.
+    return "Refused (409): this action needs explicit confirmation.";
+  }
+  if (status === 404) {
+    return "Unknown action (404): the server does not expose this action.";
+  }
+  var base = "Request failed (HTTP " + status + ")";
+  return detail ? base + ": " + detail : base + ".";
+}
+
 function runAction(action, item, btn, jobPanel) {
   if (btn) btn.disabled = true;
   renderJob(jobPanel, { status: "running", name: action, output: "" }, true);
@@ -355,10 +376,21 @@ function runAction(action, item, btn, jobPanel) {
     body: JSON.stringify(bodyForAction(action, item)),
   })
     .then(function (res) {
+      // ONLY 202 returns {job_id}. Handle every other status explicitly so we
+      // never read a job_id that isn't there (409 confirm-gate, 404 unknown
+      // action, 422 validation, 5xx, …) — surface a readable inline error.
       if (res.status === 202) return res.json();
-      // Surface any non-202 (e.g. 409 if confirm somehow missing, 404 unknown).
       return res.text().then(function (t) {
-        throw new Error("HTTP " + res.status + (t ? ": " + t : ""));
+        // FastAPI error bodies are JSON {"detail": "..."}; show the detail text
+        // when present, else the raw body.
+        var detail = t;
+        try {
+          var parsed = JSON.parse(t);
+          if (parsed && parsed.detail) detail = parsed.detail;
+        } catch (e) {
+          /* non-JSON body — keep the raw text */
+        }
+        throw new Error(actionHttpError(res.status, detail));
       });
     })
     .then(function (data) {
@@ -390,8 +422,12 @@ function pollJob(jobId, jobPanel, btn, action) {
         renderJob(jobPanel, job, running);
         if (running) {
           setTimeout(tick, POLL_MS);
-        } else if (btn) {
-          btn.disabled = false; // re-enable on done OR error
+        } else {
+          if (btn) btn.disabled = false; // re-enable on done OR error
+          // Terminal (done|error): refresh the reclaim list so badges reflect
+          // the new state. Delayed + debounced so the result panel stays visible
+          // briefly and back-to-back jobs don't double-rebuild the grid.
+          scheduleReclaimRefresh();
         }
       })
       .catch(function (err) {
@@ -576,6 +612,21 @@ function load() {
     .catch(function (err) {
       setStatus("Failed to load /api/reclaim — " + (err && err.message || err), true);
     });
+}
+
+// Debounced post-job refresh. A terminal job (done|error) means the on-disk
+// state likely changed, so we re-fetch /api/reclaim and re-render. The grid
+// rebuild in render() naturally replaces a card's inline panel — by then the
+// REFRESH_AFTER_JOB_MS delay has let the user read the result. The timer is
+// coalesced so several jobs finishing close together trigger a single refresh.
+var _refreshTimer = null;
+
+function scheduleReclaimRefresh() {
+  if (_refreshTimer) clearTimeout(_refreshTimer);
+  _refreshTimer = setTimeout(function () {
+    _refreshTimer = null;
+    load();
+  }, REFRESH_AFTER_JOB_MS);
 }
 
 function init() {

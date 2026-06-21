@@ -1,0 +1,26 @@
+<!doctype html>
+<!--
+  PLACEHOLDER ONLY (IMP-E12, plan step 3).
+
+  This file exists so StaticFiles(directory=..., html=True) has a real
+  directory + index to mount, which lets create_app() and the TestClient
+  succeed before the real single-page console is built.
+
+  Step 6 of the plan OVERWRITES this file with the actual operations-console
+  SPA. Do not build the UI here.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MediaVault Console</title>
+</head>
+<body>
+  <h1>MediaVault Console</h1>
+  <p>Placeholder UI. The console is served from this page once step 6 lands.</p>
+  <p>API is live: try
+    <code>/api/reclaim</code>,
+    <code>/api/library</code>.
+  </p>
+</body>
+</html>

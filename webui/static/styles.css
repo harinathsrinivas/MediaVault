@@ -1,5 +1,5 @@
-/* MediaVault Console — Candidate B: card grid, dark, self-contained.
-   No external fonts/assets/CDNs. System font stack only. */
+/* MediaVault Console — Candidate B: media-type tabs + segmented sub-nav rail.
+   Dark, self-contained. No external fonts/assets/CDNs. System font stack only. */
 
 :root {
   --bg: #0b0f17;
@@ -17,11 +17,13 @@
   --danger-deep: #b3243a;
   --focus: #5aa0ff;
 
-  /* Badge palette — one hue per state so the 4 read at a glance. */
+  /* Badge palette — one hue per state so they read at a glance. */
   --b-unprepped: #f0b429;       /* amber  */
   --b-local: #5aa0ff;           /* blue   */
   --b-pushed: #b07bff;          /* violet */
   --b-restored: #ff8a5c;        /* orange */
+  --b-archived: #7fe0a8;        /* mint — cold/cloud-resident */
+  --b-unknown: #8aa0b8;         /* slate — odd out-of-sync status */
 
   --radius: 14px;
   --radius-sm: 9px;
@@ -128,62 +130,138 @@ button, input { font-family: inherit; }
   margin-top: 2px;
 }
 
-/* ---------------- Filter chips ---------------- */
+/* ---------------- Primary media-type tabs ---------------- */
 
-.toolbar {
+.tabbar-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 10px;
-  margin-top: 14px;
+  margin-top: 16px;
 }
-.chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.tabbar-row .spacer { flex: 1 1 auto; }
 
-.chip {
+.tabbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  padding: 5px;
+}
+
+.tab {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  padding: 7px 13px;
+  gap: 9px;
+  padding: 9px 18px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  user-select: none;
+  transition: background 0.16s, color 0.16s, border-color 0.16s;
+}
+.tab:hover { color: var(--text); background: var(--bg-card-hover); }
+.tab .tab-count {
+  font-variant-numeric: tabular-nums;
+  font-size: 11.5px;
+  font-weight: 800;
+  color: var(--text-faint);
+  background: rgba(255, 255, 255, 0.05);
   border-radius: 999px;
-  border: 1px solid var(--line);
+  padding: 1px 8px;
+  min-width: 22px;
+  text-align: center;
+}
+.tab.active {
+  color: #06121a;
+  background: linear-gradient(135deg, var(--accent), var(--focus));
+  box-shadow: 0 4px 16px rgba(56, 224, 200, 0.28);
+}
+.tab.active .tab-count {
+  color: #06121a;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+/* ---------------- Secondary segmented sub-view rail ---------------- */
+
+.subnav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin: 4px 0 18px;
+  padding: 6px;
   background: var(--bg-elev);
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+}
+
+.seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
   color: var(--text-dim);
   cursor: pointer;
   font-size: 12.5px;
   font-weight: 600;
-  letter-spacing: 0.3px;
+  letter-spacing: 0.2px;
   user-select: none;
-  transition: background 0.12s, border-color 0.12s, color 0.12s, transform 0.05s;
+  transition: background 0.14s, color 0.14s, border-color 0.14s, opacity 0.14s;
 }
-.chip:hover { background: var(--bg-card-hover); }
-.chip:active { transform: translateY(1px); }
-.chip .dot {
+.seg:hover { color: var(--text); background: var(--bg-card-hover); }
+.seg .seg-dot {
   width: 9px;
   height: 9px;
   border-radius: 50%;
   flex: none;
   box-shadow: 0 0 7px currentColor;
 }
-.chip .ct {
+.seg .seg-count {
   font-variant-numeric: tabular-nums;
-  color: var(--text-faint);
-  font-weight: 700;
   font-size: 11px;
+  font-weight: 800;
+  color: var(--text-faint);
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 999px;
+  padding: 1px 7px;
+  min-width: 20px;
+  text-align: center;
 }
-.chip[aria-pressed="true"] {
+.seg.empty { opacity: 0.4; cursor: default; }
+.seg.empty:hover { background: transparent; color: var(--text-dim); }
+.seg.active {
   color: var(--text);
-  border-color: var(--accent-deep);
-  background: linear-gradient(180deg, rgba(56, 224, 200, 0.14), rgba(56, 224, 200, 0.05));
+  background: var(--bg-card);
+  border-color: var(--line);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
 }
-.chip[aria-pressed="false"] { opacity: 0.62; }
-.chip[aria-pressed="false"]:hover { opacity: 0.85; }
+.seg.active .seg-count { color: var(--text); background: rgba(255, 255, 255, 0.09); }
 
-.chip.c-unprepped .dot { color: var(--b-unprepped); background: var(--b-unprepped); }
-.chip.c-local .dot     { color: var(--b-local);     background: var(--b-local); }
-.chip.c-pushed .dot    { color: var(--b-pushed);    background: var(--b-pushed); }
-.chip.c-restored .dot  { color: var(--b-restored);  background: var(--b-restored); }
+/* Per-state dot hue (reuses the badge palette). */
+.seg.s-unprepped .seg-dot { color: var(--b-unprepped); background: var(--b-unprepped); }
+.seg.s-local .seg-dot     { color: var(--b-local);     background: var(--b-local); }
+.seg.s-pushed .seg-dot    { color: var(--b-pushed);    background: var(--b-pushed); }
+.seg.s-restored .seg-dot  { color: var(--b-restored);  background: var(--b-restored); }
+.seg.s-archived .seg-dot  { color: var(--b-archived);  background: var(--b-archived); }
+.seg.s-unknown .seg-dot   { color: var(--b-unknown);   background: var(--b-unknown); }
 
-.toolbar .spacer { flex: 1 1 auto; }
+/* The active segment gets a tinted underline matching its state hue. */
+.seg.active.s-unprepped { box-shadow: 0 2px 10px rgba(0,0,0,.3), inset 0 -2px 0 var(--b-unprepped); }
+.seg.active.s-local     { box-shadow: 0 2px 10px rgba(0,0,0,.3), inset 0 -2px 0 var(--b-local); }
+.seg.active.s-pushed    { box-shadow: 0 2px 10px rgba(0,0,0,.3), inset 0 -2px 0 var(--b-pushed); }
+.seg.active.s-restored  { box-shadow: 0 2px 10px rgba(0,0,0,.3), inset 0 -2px 0 var(--b-restored); }
+.seg.active.s-archived  { box-shadow: 0 2px 10px rgba(0,0,0,.3), inset 0 -2px 0 var(--b-archived); }
+.seg.active.s-unknown   { box-shadow: 0 2px 10px rgba(0,0,0,.3), inset 0 -2px 0 var(--b-unknown); }
 
 .btn-sort {
   display: inline-flex;
@@ -213,6 +291,23 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   min-height: 18px;
 }
 .status-line.err { color: var(--danger); }
+
+/* The single sub-view panel. One grid shown at a time; switching fades + slides
+   the panel so segment changes feel smooth rather than a hard cut. */
+.panel {
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+  outline: none;
+}
+.panel.swapping {
+  opacity: 0;
+  transform: translateY(8px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .panel { transition: none; }
+  .panel.swapping { opacity: 1; transform: none; }
+}
 
 /* Responsive auto-fitting card grid. Reflows to 1-up on narrow screens. */
 .grid {
@@ -280,6 +375,8 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 .poster.p-local     { background: linear-gradient(135deg, #16335e, #0a1424); }
 .poster.p-pushed    { background: linear-gradient(135deg, #3a2360, #150d24); }
 .poster.p-restored  { background: linear-gradient(135deg, #5e2f18, #241008); }
+.poster.p-archived  { background: linear-gradient(135deg, #103a2c, #08201a); }
+.poster.p-unknown   { background: linear-gradient(135deg, #28323e, #131a22); }
 
 .badge {
   display: inline-flex;
@@ -303,10 +400,14 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 .badge.b-local     { color: var(--b-local); }
 .badge.b-pushed    { color: var(--b-pushed); }
 .badge.b-restored  { color: var(--b-restored); }
+.badge.b-archived  { color: var(--b-archived); }
+.badge.b-unknown   { color: var(--b-unknown); }
 .badge.b-unprepped .dot { background: var(--b-unprepped); }
 .badge.b-local .dot     { background: var(--b-local); }
 .badge.b-pushed .dot    { background: var(--b-pushed); }
 .badge.b-restored .dot  { background: var(--b-restored); }
+.badge.b-archived .dot  { background: var(--b-archived); }
+.badge.b-unknown .dot   { background: var(--b-unknown); }
 
 .card-body {
   padding: 14px 15px 15px;
@@ -345,6 +446,16 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   padding: 1px 5px;
   margin-left: 6px;
   vertical-align: middle;
+}
+
+/* Secondary canonical id, shown under the title when a human title exists. */
+.item-subid {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+  margin-top: -6px;
+  letter-spacing: 0.2px;
 }
 
 .item-path {
@@ -456,6 +567,18 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   border-color: rgba(255, 92, 114, 0.45);
 }
 .action-btn.destructive:hover:not(:disabled) { background: linear-gradient(135deg, #4d1c2a, #34121c); }
+
+/* Archived "Fetch & Restore — coming next" stub (Phase 2 wires the real one). */
+.action-btn.coming-soon {
+  background: rgba(127, 224, 168, 0.08);
+  color: var(--b-archived);
+  border: 1px dashed rgba(127, 224, 168, 0.4);
+  cursor: default;
+}
+
+/* Archived card: poster-forward, taller placeholder so it reads as cold/cloud. */
+.card.archived .poster { height: 150px; }
+.card.archived .poster .initial { color: rgba(127, 224, 168, 0.16); }
 
 /* Job result panel */
 .job-panel {
@@ -603,3 +726,8 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 .modal-actions .confirm:hover { filter: brightness(1.08); }
 
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+/* Tabs/segments sit on tinted backgrounds — give their focus ring a clear,
+   inset-safe offset so keyboard focus is always obvious. */
+.tab:focus-visible,
+.seg:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 9px; }
+.panel:focus-visible { outline: none; }

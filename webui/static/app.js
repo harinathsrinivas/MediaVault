@@ -1,123 +1,357 @@
-/* MediaVault Console — Candidate B (card grid).
+/* MediaVault Console — media-type tabs + segmented sub-nav rail (IMP-E14).
+ * CANDIDATE B: "Tabs + segmented sub-nav rail (one sub-view at a time)".
  *
- * Single-page, no framework, no build step. All logic lives here so
- * `node --check app.js` covers the behavior. Rendering uses DOM APIs and
- * textContent only — captured job output is NEVER injected via innerHTML
- * (XSS safety on a localhost console that shells out to main.cmd_*).
+ * ES module entrypoint (loaded via <script type="module">). Splits into
+ * data.js (fetch+merge model), card.js (card render + actions + job poll),
+ * modal.js (confirm modal). Each module passes `node --check` on its own; there
+ * is NO build step (hard constraint).
  *
- * Behavior contract:
- *   - On load, GET /api/reclaim, render one card per item.
- *   - Header shows the reclaimable-GB hero stat + 4 filter chips (client-side).
- *   - Per card: badge / id / path / size / suggested command (+Copy) /
- *     suggested folder with editable provider-id (+Copy) / action button(s).
- *   - Action -> POST /api/action/{name} (202 {job_id}) -> poll
- *     GET /api/job/{job_id} every ~1s until done|error -> show status+output.
- *   - `replace` is gated by an unmissable confirm modal; only on confirm do we
- *     POST {id, confirm:true}. Server returns 409 without confirm:true.
+ * LAYOUT
+ *   Top tab bar     : Movies / TV series / Anime / Others, with count badges.
+ *                     role=tablist, roving tabindex, Left/Right/Home/End nav.
+ *   Sub-nav rail    : a SECONDARY segmented control under the tabs listing the 5
+ *                     sub-views (Unprepped → Local·not-pushed → Pushed·not-
+ *                     archived → Fetched·not-archived → Archived) with counts.
+ *                     Selecting ONE shows a SINGLE grid for it (one screen per
+ *                     selection — the eventual couch-UI feel), not all stacked.
+ *                     aria-selected segments, keyboard navigable. Default = the
+ *                     first non-empty sub-view of the active tab.
+ *   Grid panel      : role=tabpanel; the single sub-view's cards, with a smooth
+ *                     fade/slide swap on every selection change.
+ *
+ * State grouping follows the SHARED data model in data.js (union of /api/items +
+ * reclaim, UNPREPPED sourced from reclaim, ARCHIVED included). XSS-safe: all
+ * id/title/path/output render via textContent (see card.js / modal.js).
  */
 
 "use strict";
 
-// Badge (underscore value from the API) -> presentation + action mapping.
-// `action` is the POST /api/action/{name}; `confirm` flags the gated modal.
-var BADGE_META = {
-  UNPREPPED: {
-    label: "UNPREPPED",
-    cssKey: "unprepped",
-    action: "prep",
-    verb: "Prep",
-    confirm: false,
-  },
-  LOCAL_NOT_PUSHED: {
-    label: "LOCAL·NOT-PUSHED",
-    cssKey: "local",
-    action: "push",
-    verb: "Push",
-    confirm: false,
-  },
-  PUSHED_NOT_ARCHIVED: {
-    label: "PUSHED·NOT-ARCHIVED",
-    cssKey: "pushed",
-    action: "replace",
-    verb: "Replace",
-    confirm: true,
-  },
-  RESTORED_REPLACE_AGAIN: {
-    label: "RESTORED·REPLACE-AGAIN",
-    cssKey: "restored",
-    action: "replace",
-    verb: "Replace",
-    confirm: true,
-  },
-};
-
-// Stable chip order.
-var BADGE_ORDER = [
-  "UNPREPPED",
-  "LOCAL_NOT_PUSHED",
-  "PUSHED_NOT_ARCHIVED",
-  "RESTORED_REPLACE_AGAIN",
-];
-
-var POLL_MS = 1000;
-
-// After a job reaches a terminal state we re-fetch /api/reclaim so badges
-// reflect the new state (e.g. PUSHED·NOT-ARCHIVED -> archived/dropped). We wait
-// this long first so the just-shown job result stays visible briefly instead of
-// being yanked away the instant the job ends.
-var REFRESH_AFTER_JOB_MS = 2500;
-
-// Active filter: badge value -> shown? Default: all on.
-var filterState = {
-  UNPREPPED: true,
-  LOCAL_NOT_PUSHED: true,
-  PUSHED_NOT_ARCHIVED: true,
-  RESTORED_REPLACE_AGAIN: true,
-};
-
-// id -> card element, for filter re-application after data load.
-var cardIndex = [];
-
-// ---------------------------------------------------------------------------
-// Small helpers
-// ---------------------------------------------------------------------------
+import {
+  loadModel,
+  CATEGORY_ORDER,
+  CATEGORY_META,
+  STATE_ORDER,
+  metaFor,
+} from "./data.js";
+import { buildCard, runAction, setRefreshHandler } from "./card.js";
+import { wireModal } from "./modal.js";
 
 function $(sel, root) {
   return (root || document).querySelector(sel);
 }
 
-function meta(badge) {
-  return BADGE_META[badge] || {
-    label: String(badge || "UNKNOWN"),
-    cssKey: "unprepped",
-    action: null,
-    verb: "—",
-    confirm: false,
+// ---------------------------------------------------------------------------
+// UI state
+// ---------------------------------------------------------------------------
+
+// The full merged model (from data.js) and the two selection coordinates.
+var MODEL = null;
+var activeCategory = CATEGORY_ORDER[0];
+var activeState = null; // chosen sub-view within the active category
+
+// Sub-view order = the 5 known states, PLUS any unexpected state that actually
+// appears (appended after ARCHIVED) so an odd out-of-sync row is still reachable
+// rather than silently dropped. Computed per render from the live model.
+function subViewStatesFor(category) {
+  var counts = (MODEL && MODEL.counts.byCatState[category]) || {};
+  var order = STATE_ORDER.slice();
+  // Append any present-but-unknown states in first-seen order.
+  Object.keys(counts).forEach(function (s) {
+    if (order.indexOf(s) === -1) order.push(s);
+  });
+  return order;
+}
+
+function countFor(category, state) {
+  var byCat = (MODEL && MODEL.counts.byCatState[category]) || {};
+  return byCat[state] || 0;
+}
+
+function categoryCount(category) {
+  return (MODEL && MODEL.counts.byCategory[category]) || 0;
+}
+
+// First sub-view of a category that has at least one item; null if the category
+// is entirely empty.
+function firstNonEmptyState(category) {
+  var states = subViewStatesFor(category);
+  for (var i = 0; i < states.length; i += 1) {
+    if (countFor(category, states[i]) > 0) return states[i];
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Main tab bar (role=tablist)
+// ---------------------------------------------------------------------------
+
+function buildTabs() {
+  var bar = $("#tabbar");
+  bar.textContent = "";
+  CATEGORY_ORDER.forEach(function (cat) {
+    var tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = "tab";
+    tab.id = "tab-" + cat;
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-controls", "panel");
+    tab.dataset.cat = cat;
+
+    var label = document.createElement("span");
+    label.className = "tab-label";
+    label.textContent = CATEGORY_META[cat].label;
+    tab.appendChild(label);
+
+    var ct = document.createElement("span");
+    ct.className = "tab-count";
+    ct.textContent = String(categoryCount(cat));
+    tab.appendChild(ct);
+
+    tab.addEventListener("click", function () {
+      selectCategory(cat, { focus: true });
+    });
+    tab.addEventListener("keydown", function (e) {
+      handleBarKeydown(e, CATEGORY_ORDER, activeCategory, function (next) {
+        selectCategory(next, { focus: true });
+      });
+    });
+
+    bar.appendChild(tab);
+  });
+}
+
+// Reflect the active category on the tab bar (aria-selected + roving tabindex).
+function refreshTabSelection() {
+  var bar = $("#tabbar");
+  CATEGORY_ORDER.forEach(function (cat) {
+    var tab = $("#tab-" + cat, bar);
+    if (!tab) return;
+    var on = cat === activeCategory;
+    tab.setAttribute("aria-selected", on ? "true" : "false");
+    tab.tabIndex = on ? 0 : -1;
+    tab.classList.toggle("active", on);
+    var ct = $(".tab-count", tab);
+    if (ct) ct.textContent = String(categoryCount(cat));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Sub-nav segmented rail
+// ---------------------------------------------------------------------------
+
+function buildSubnav() {
+  var rail = $("#subnav");
+  rail.textContent = "";
+  var states = subViewStatesFor(activeCategory);
+
+  states.forEach(function (state) {
+    var n = countFor(activeCategory, state);
+    var m = metaFor(state);
+    var seg = document.createElement("button");
+    seg.type = "button";
+    seg.className = "seg s-" + m.cssKey;
+    seg.id = "seg-" + state;
+    seg.setAttribute("role", "tab");
+    seg.setAttribute("aria-controls", "panel");
+    seg.dataset.state = state;
+    if (n === 0) seg.classList.add("empty");
+
+    var dot = document.createElement("span");
+    dot.className = "seg-dot";
+    seg.appendChild(dot);
+
+    var label = document.createElement("span");
+    label.className = "seg-label";
+    label.textContent = m.short;
+    seg.appendChild(label);
+
+    var ct = document.createElement("span");
+    ct.className = "seg-count";
+    ct.textContent = String(n);
+    seg.appendChild(ct);
+
+    seg.addEventListener("click", function () {
+      selectState(state, { focus: true });
+    });
+    seg.addEventListener("keydown", function (e) {
+      // Arrow nav across the rail; skip empty segments so the keyboard lands on
+      // a sub-view that actually has content.
+      handleBarKeydown(
+        e,
+        states,
+        activeState,
+        function (next) {
+          selectState(next, { focus: true });
+        },
+        function (s) {
+          return countFor(activeCategory, s) > 0;
+        }
+      );
+    });
+
+    rail.appendChild(seg);
+  });
+
+  refreshSubnavSelection();
+}
+
+function refreshSubnavSelection() {
+  var rail = $("#subnav");
+  var states = subViewStatesFor(activeCategory);
+  states.forEach(function (state) {
+    var seg = $("#seg-" + state, rail);
+    if (!seg) return;
+    var on = state === activeState;
+    seg.setAttribute("aria-selected", on ? "true" : "false");
+    // Roving tabindex: the active segment is the single tab stop; empty
+    // segments are removed from the tab order entirely.
+    var empty = countFor(activeCategory, state) === 0;
+    seg.tabIndex = on ? 0 : -1;
+    if (empty && !on) seg.tabIndex = -1;
+    seg.classList.toggle("active", on);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Shared keyboard navigation for a roving-tabindex bar.
+//   e        : the keydown event
+//   order    : ordered list of values (categories or states)
+//   current  : currently-active value
+//   onSelect : called with the next value
+//   isEnabled: optional predicate; values failing it are skipped (empty segs)
+// ---------------------------------------------------------------------------
+
+function handleBarKeydown(e, order, current, onSelect, isEnabled) {
+  var key = e.key;
+  var horizontal = key === "ArrowRight" || key === "ArrowLeft";
+  if (!horizontal && key !== "Home" && key !== "End") return;
+  e.preventDefault();
+
+  var enabledOf = function (v) {
+    return isEnabled ? isEnabled(v) : true;
   };
+  var candidates = order.filter(enabledOf);
+  if (candidates.length === 0) candidates = order.slice(); // never trap focus
+
+  if (key === "Home") {
+    onSelect(candidates[0]);
+    return;
+  }
+  if (key === "End") {
+    onSelect(candidates[candidates.length - 1]);
+    return;
+  }
+
+  var step = key === "ArrowRight" ? 1 : -1;
+  // Find current position within the enabled candidates; if the current value
+  // isn't enabled (e.g. it became empty), start from the nearest end.
+  var idx = candidates.indexOf(current);
+  if (idx === -1) idx = step > 0 ? -1 : candidates.length;
+  var next = candidates[(idx + step + candidates.length) % candidates.length];
+  onSelect(next);
 }
 
-function initialFor(id) {
-  var s = String(id || "?");
-  // Prefer the slug segment of a canonical id (cat-lang-year-slug); else first char.
-  var parts = s.split("-");
-  var seg = parts.length > 3 ? parts[3] : (parts[parts.length - 1] || s);
-  var ch = (seg || s).replace(/[^A-Za-z0-9]/g, "").charAt(0);
-  return (ch || "?").toUpperCase();
+// ---------------------------------------------------------------------------
+// Selection -> render
+// ---------------------------------------------------------------------------
+
+function selectCategory(cat, opts) {
+  if (CATEGORY_ORDER.indexOf(cat) === -1) return;
+  activeCategory = cat;
+  // Reset the sub-view to the first non-empty one for the new category.
+  activeState = firstNonEmptyState(cat) || subViewStatesFor(cat)[0];
+  refreshTabSelection();
+  buildSubnav();
+  renderPanel(true);
+  if (opts && opts.focus) {
+    var tab = $("#tab-" + cat);
+    if (tab) tab.focus();
+  }
 }
 
-// Human-readable bytes (binary units), mirrors human_readable_size on the server.
-function humanSize(bytes) {
-  var n = Number(bytes);
-  if (!isFinite(n) || n < 0) return "—";
-  if (n < 1024) return n + " B";
-  var units = ["KB", "MB", "GB", "TB", "PB"];
-  var i = -1;
-  do {
-    n = n / 1024;
-    i += 1;
-  } while (n >= 1024 && i < units.length - 1);
-  return n.toFixed(n >= 100 ? 0 : n >= 10 ? 1 : 2) + " " + units[i];
+function selectState(state, opts) {
+  if (state === activeState) {
+    // Re-focus only; no transition needed.
+    if (opts && opts.focus) {
+      var same = $("#seg-" + state);
+      if (same) same.focus();
+    }
+    return;
+  }
+  activeState = state;
+  refreshSubnavSelection();
+  renderPanel(true);
+  if (opts && opts.focus) {
+    var seg = $("#seg-" + state);
+    if (seg) seg.focus();
+  }
 }
+
+// Render the single grid for (activeCategory, activeState). When `animate` is
+// true, fade/slide the panel: hide -> swap on the next frame -> show.
+function renderPanel(animate) {
+  var panel = $("#panel");
+  panel.setAttribute("aria-labelledby", "seg-" + activeState);
+
+  function paint() {
+    panel.textContent = "";
+
+    var rows = (MODEL ? MODEL.items : []).filter(function (it) {
+      return it.category === activeCategory && it.state === activeState;
+    });
+
+    if (rows.length === 0) {
+      panel.appendChild(buildEmptyState());
+    } else {
+      var grid = document.createElement("div");
+      grid.className = "grid";
+      var frag = document.createDocumentFragment();
+      rows.forEach(function (it) {
+        frag.appendChild(buildCard(it));
+      });
+      grid.appendChild(frag);
+      panel.appendChild(grid);
+    }
+
+    // Reveal (next frame so the transition runs).
+    requestAnimationFrame(function () {
+      panel.classList.remove("swapping");
+    });
+  }
+
+  if (animate) {
+    panel.classList.add("swapping");
+    // Wait one frame for the fade-out, then swap + fade-in.
+    requestAnimationFrame(function () {
+      setTimeout(paint, 110);
+    });
+  } else {
+    paint();
+  }
+}
+
+function buildEmptyState() {
+  var wrap = document.createElement("div");
+  wrap.className = "empty-state";
+  var big = document.createElement("div");
+  big.className = "big";
+  big.textContent = "∅";
+  var p = document.createElement("div");
+  var m = metaFor(activeState);
+  p.textContent =
+    "No items in this view — " +
+    CATEGORY_META[activeCategory].label +
+    " · " +
+    m.short +
+    ".";
+  wrap.appendChild(big);
+  wrap.appendChild(p);
+  return wrap;
+}
+
+// ---------------------------------------------------------------------------
+// Header stats + status line
+// ---------------------------------------------------------------------------
 
 function setStatus(msg, isErr) {
   var el = $("#status-line");
@@ -125,418 +359,80 @@ function setStatus(msg, isErr) {
   el.classList.toggle("err", !!isErr);
 }
 
-// Clipboard with execCommand fallback (localhost is a non-secure context where
-// navigator.clipboard may be undefined).
-function copyText(text) {
-  if (navigator.clipboard && window.isSecureContext) {
-    return navigator.clipboard.writeText(text).catch(function () {
-      return legacyCopy(text);
-    });
-  }
-  return Promise.resolve(legacyCopy(text));
-}
-
-function legacyCopy(text) {
-  try {
-    var ta = document.createElement("textarea");
-    ta.value = text;
-    ta.setAttribute("readonly", "");
-    ta.style.position = "fixed";
-    ta.style.top = "-1000px";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    var ok = document.execCommand("copy");
-    document.body.removeChild(ta);
-    return ok;
-  } catch (e) {
-    return false;
-  }
-}
-
-function flashCopied(btn) {
-  var prev = btn.textContent;
-  btn.classList.add("copied");
-  btn.textContent = "✓";
-  setTimeout(function () {
-    btn.classList.remove("copied");
-    btn.textContent = prev;
-  }, 1100);
-}
-
-function wireCopy(btn, getText) {
-  btn.addEventListener("click", function () {
-    copyText(getText()).then(function () {
-      flashCopied(btn);
-    });
-  });
+function refreshHero() {
+  var totalEl = $("#reclaim-total");
+  var human = MODEL && MODEL.reclaimTotalHuman;
+  totalEl.textContent = human || "0 B";
+  totalEl.classList.toggle("empty", !MODEL || MODEL.reclaimCount === 0);
+  var countEl = $("#reclaim-count");
+  var n = MODEL ? MODEL.reclaimCount : 0;
+  countEl.textContent = n === 1 ? "1 reclaimable item" : n + " reclaimable items";
 }
 
 // ---------------------------------------------------------------------------
-// Filter chips
+// Load + (re)render
 // ---------------------------------------------------------------------------
 
-function buildChips(counts) {
-  var row = $("#chip-row");
-  row.textContent = "";
-  BADGE_ORDER.forEach(function (badge) {
-    var m = meta(badge);
-    var chip = document.createElement("button");
-    chip.type = "button";
-    chip.className = "chip c-" + m.cssKey;
-    chip.setAttribute("aria-pressed", filterState[badge] ? "true" : "false");
-    chip.dataset.badge = badge;
+// Render everything from the current MODEL. On the FIRST paint, or when the
+// previously-active category/sub-view no longer has any items, fall back to a
+// sensible non-empty default; otherwise PRESERVE the user's current view across
+// a post-job refresh so a finished action doesn't yank them elsewhere.
+function renderAll(isFirst) {
+  refreshHero();
+  buildTabs();
 
-    var dot = document.createElement("span");
-    dot.className = "dot";
-    chip.appendChild(dot);
-
-    var lbl = document.createElement("span");
-    lbl.textContent = m.label;
-    chip.appendChild(lbl);
-
-    var ct = document.createElement("span");
-    ct.className = "ct";
-    ct.textContent = String(counts[badge] || 0);
-    chip.appendChild(ct);
-
-    chip.addEventListener("click", function () {
-      filterState[badge] = !filterState[badge];
-      chip.setAttribute("aria-pressed", filterState[badge] ? "true" : "false");
-      applyFilters();
-    });
-
-    row.appendChild(chip);
-  });
-}
-
-function applyFilters() {
-  var shown = 0;
-  cardIndex.forEach(function (rec) {
-    var on = !!filterState[rec.badge];
-    rec.el.dataset.hidden = on ? "false" : "true";
-    if (on) shown += 1;
-  });
-  var grid = $("#grid");
-  var emptyEl = $("#filter-empty");
-  if (cardIndex.length > 0 && shown === 0) {
-    if (!emptyEl) {
-      emptyEl = document.createElement("div");
-      emptyEl.id = "filter-empty";
-      emptyEl.className = "empty-state";
-      var big = document.createElement("div");
-      big.className = "big";
-      big.textContent = "⌕";
-      var p = document.createElement("div");
-      p.textContent = "No items match the active filters.";
-      emptyEl.appendChild(big);
-      emptyEl.appendChild(p);
-      grid.parentNode.insertBefore(emptyEl, grid.nextSibling);
+  // Preserve category if it still exists in the order (it always does), but if
+  // it is empty and this is the first paint, jump to the first category that
+  // has items so the user lands on something useful.
+  if (isFirst) {
+    if (categoryCount(activeCategory) === 0) {
+      var firstCat = CATEGORY_ORDER.filter(function (c) {
+        return categoryCount(c) > 0;
+      })[0];
+      if (firstCat) activeCategory = firstCat;
     }
-    emptyEl.style.display = "";
-  } else if (emptyEl) {
-    emptyEl.style.display = "none";
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Card rendering
-// ---------------------------------------------------------------------------
-
-function buildCard(item) {
-  var m = meta(item.badge);
-  var tpl = $("#card-tpl");
-  var node = tpl.content.firstElementChild.cloneNode(true);
-
-  // Poster + badge (color-coded by state).
-  var poster = $(".poster", node);
-  poster.classList.add("p-" + m.cssKey);
-  $(".initial", poster).textContent = initialFor(item.id);
-  var badge = $(".badge", poster);
-  badge.classList.add("b-" + m.cssKey);
-  $(".badge-label", badge).textContent = m.label;
-
-  // Id + size.
-  var idEl = $(".item-id", node);
-  idEl.textContent = item.id;
-  if (item.guessed) {
-    var g = document.createElement("span");
-    g.className = "guess-tag";
-    g.title = "Editable guessed id for an unprepped file";
-    g.textContent = "GUESS";
-    idEl.appendChild(g);
-  }
-  $(".item-size", node).textContent = humanSize(item.size_bytes);
-
-  // Path.
-  $(".item-path", node).textContent = item.path || "";
-
-  // Suggested command (read-only) + Copy.
-  var cmd = item.suggested_command || "";
-  var cmdField = $(".field-cmd", node);
-  if (cmd) {
-    $(".cmd-text", cmdField).textContent = cmd;
-    wireCopy($(".cmd-copy", cmdField), function () { return cmd; });
+    activeState = firstNonEmptyState(activeCategory) || STATE_ORDER[0];
   } else {
-    cmdField.style.display = "none";
-  }
-
-  // Suggested folder with editable provider id + Copy. When applies=false the
-  // folder is an existing path shown informationally (input disabled).
-  var sf = item.suggested_folder || {};
-  var folderInput = $(".folder-input", node);
-  var folderNote = $(".folder-note", node);
-  folderInput.value = sf.folder || "";
-  if (sf.applies) {
-    folderInput.disabled = false;
-    folderInput.setAttribute(
-      "aria-label",
-      "Editable suggested folder — replace the " +
-        (sf.editable_provider_field || "provider") + " placeholder"
-    );
-    folderNote.textContent =
-      "New-item suggestion — edit the {" +
-      (sf.editable_provider_field || "provider") + "-…} id before creating.";
-    folderNote.classList.add("editable");
-  } else {
-    folderInput.disabled = true;
-    folderInput.setAttribute("aria-label", "Existing folder (read-only)");
-    folderNote.textContent = "Existing folder — never renamed (informational).";
-  }
-  wireCopy($(".folder-copy", node), function () { return folderInput.value; });
-
-  // Action button(s) for this badge.
-  var actions = $(".card-actions", node);
-  var jobPanel = $(".item-job", node);
-  if (m.action) {
-    var btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "action-btn " + (m.confirm ? "destructive" : "primary");
-    btn.textContent = m.verb;
-    if (m.confirm) {
-      btn.title = "Destructive — confirmation required";
-    }
-    btn.addEventListener("click", function () {
-      onActionClick(item, m, btn, jobPanel);
-    });
-    actions.appendChild(btn);
-  } else {
-    actions.style.display = "none";
-  }
-
-  cardIndex.push({ el: node, badge: item.badge, id: item.id });
-  return node;
-}
-
-// ---------------------------------------------------------------------------
-// Action dispatch + job polling
-// ---------------------------------------------------------------------------
-
-function bodyForAction(action, item) {
-  if (action === "prep") return { id: item.id, filepath: item.path };
-  if (action === "push") return { id: item.id };
-  if (action === "replace") return { id: item.id, confirm: true };
-  if (action === "sort") return {};
-  return { id: item.id };
-}
-
-function onActionClick(item, m, btn, jobPanel) {
-  if (m.confirm) {
-    // Gate destructive `replace` behind the modal. POST only on confirm.
-    openConfirmModal(item, function () {
-      runAction(m.action, item, btn, jobPanel);
-    });
-    return;
-  }
-  runAction(m.action, item, btn, jobPanel);
-}
-
-// Turn a non-202 action response into a readable, human-facing error message.
-// Only 202 carries a {job_id}; for anything else we must NOT try to read one.
-function actionHttpError(status, detail) {
-  if (status === 409) {
-    // Destructive action posted without confirm:true. The modal path always
-    // sends confirm:true, so this is a defensive guard, not an expected path.
-    return "Refused (409): this action needs explicit confirmation.";
-  }
-  if (status === 404) {
-    return "Unknown action (404): the server does not expose this action.";
-  }
-  var base = "Request failed (HTTP " + status + ")";
-  return detail ? base + ": " + detail : base + ".";
-}
-
-function runAction(action, item, btn, jobPanel) {
-  if (btn) btn.disabled = true;
-  renderJob(jobPanel, { status: "running", name: action, output: "" }, true);
-
-  fetch("/api/action/" + action, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(bodyForAction(action, item)),
-  })
-    .then(function (res) {
-      // ONLY 202 returns {job_id}. Handle every other status explicitly so we
-      // never read a job_id that isn't there (409 confirm-gate, 404 unknown
-      // action, 422 validation, 5xx, …) — surface a readable inline error.
-      if (res.status === 202) return res.json();
-      return res.text().then(function (t) {
-        // FastAPI error bodies are JSON {"detail": "..."}; show the detail text
-        // when present, else the raw body.
-        var detail = t;
-        try {
-          var parsed = JSON.parse(t);
-          if (parsed && parsed.detail) detail = parsed.detail;
-        } catch (e) {
-          /* non-JSON body — keep the raw text */
+    // Re-render after a job. Keep the active sub-view if it still has items;
+    // else drop to the first non-empty sub-view of the same category; else the
+    // first category that has anything.
+    if (countFor(activeCategory, activeState) === 0) {
+      var fallback = firstNonEmptyState(activeCategory);
+      if (fallback) {
+        activeState = fallback;
+      } else {
+        var nextCat = CATEGORY_ORDER.filter(function (c) {
+          return categoryCount(c) > 0;
+        })[0];
+        if (nextCat) {
+          activeCategory = nextCat;
+          activeState = firstNonEmptyState(nextCat) || STATE_ORDER[0];
+        } else {
+          activeState = STATE_ORDER[0];
         }
-        throw new Error(actionHttpError(res.status, detail));
-      });
-    })
-    .then(function (data) {
-      pollJob(data.job_id, jobPanel, btn, action);
+      }
+    }
+  }
+
+  refreshTabSelection();
+  buildSubnav();
+  renderPanel(false);
+  setStatus("");
+}
+
+function load(isFirst) {
+  if (isFirst) setStatus("Scanning library…");
+  loadModel()
+    .then(function (model) {
+      MODEL = model;
+      renderAll(isFirst);
     })
     .catch(function (err) {
-      renderJob(
-        jobPanel,
-        { status: "error", name: action, output: String(err && err.message || err) },
-        false
+      setStatus(
+        "Failed to load library — " + ((err && err.message) || err),
+        true
       );
-      if (btn) btn.disabled = false;
     });
-}
-
-function pollJob(jobId, jobPanel, btn, action) {
-  function tick() {
-    fetch("/api/job/" + encodeURIComponent(jobId))
-      .then(function (res) {
-        if (!res.ok) {
-          return res.text().then(function (t) {
-            throw new Error("HTTP " + res.status + (t ? ": " + t : ""));
-          });
-        }
-        return res.json();
-      })
-      .then(function (job) {
-        var running = job.status === "running";
-        renderJob(jobPanel, job, running);
-        if (running) {
-          setTimeout(tick, POLL_MS);
-        } else {
-          if (btn) btn.disabled = false; // re-enable on done OR error
-          // Terminal (done|error): refresh the reclaim list so badges reflect
-          // the new state. Delayed + debounced so the result panel stays visible
-          // briefly and back-to-back jobs don't double-rebuild the grid.
-          scheduleReclaimRefresh();
-        }
-      })
-      .catch(function (err) {
-        renderJob(
-          jobPanel,
-          { status: "error", name: action, output: String(err && err.message || err) },
-          false
-        );
-        if (btn) btn.disabled = false;
-      });
-  }
-  tick();
-}
-
-// Render a job record into a panel. Output goes through textContent (a <pre>),
-// never innerHTML. `error` status is shown faithfully — output is NOT hidden.
-function renderJob(panel, job, running) {
-  panel.classList.add("show");
-  panel.textContent = "";
-
-  var head = document.createElement("div");
-  head.className = "job-head";
-
-  var state = document.createElement("span");
-  var status = job.status || (running ? "running" : "done");
-  state.className = "job-state " + status;
-  if (status === "running") {
-    var sp = document.createElement("span");
-    sp.className = "spinner";
-    head.appendChild(sp);
-    state.textContent = "Running";
-  } else if (status === "error") {
-    state.textContent = "✕ Error";
-  } else {
-    state.textContent = "✓ Done";
-  }
-  head.appendChild(state);
-
-  var name = document.createElement("span");
-  name.className = "job-name";
-  name.textContent = job.name ? "· " + job.name : "";
-  head.appendChild(name);
-
-  panel.appendChild(head);
-
-  var out = (job.output || "").toString();
-  if (out.trim()) {
-    var pre = document.createElement("pre");
-    pre.className = "job-output";
-    pre.textContent = out; // XSS-safe rendering of captured stdout.
-    panel.appendChild(pre);
-  } else if (status === "running") {
-    var pre2 = document.createElement("pre");
-    pre2.className = "job-output";
-    pre2.textContent = "Waiting for output…";
-    panel.appendChild(pre2);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Confirm modal (shared, for `replace`)
-// ---------------------------------------------------------------------------
-
-var modalOnConfirm = null;
-
-function openConfirmModal(item, onConfirm) {
-  modalOnConfirm = onConfirm;
-  var modal = $("#modal");
-  var target = $("#modal-target");
-  target.textContent = "";
-  var idline = document.createElement("div");
-  var b = document.createElement("b");
-  b.textContent = item.id;
-  idline.appendChild(b);
-  target.appendChild(idline);
-  var pathline = document.createElement("div");
-  pathline.textContent = item.path || "";
-  pathline.style.marginTop = "4px";
-  pathline.style.opacity = "0.8";
-  target.appendChild(pathline);
-
-  modal.hidden = false;
-  modal.classList.add("show");
-  // Focus the safe default (Cancel).
-  $("#modal-cancel").focus();
-}
-
-function closeModal() {
-  var modal = $("#modal");
-  modal.classList.remove("show");
-  modal.hidden = true;
-  modalOnConfirm = null;
-}
-
-function wireModal() {
-  $("#modal-cancel").addEventListener("click", closeModal);
-  $("#modal-confirm").addEventListener("click", function () {
-    var fn = modalOnConfirm;
-    closeModal();
-    if (fn) fn();
-  });
-  // Backdrop click cancels (but not clicks inside the dialog).
-  $("#modal").addEventListener("click", function (e) {
-    if (e.target === $("#modal")) closeModal();
-  });
-  // Esc cancels.
-  document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape" && !$("#modal").hidden) closeModal();
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -552,87 +448,17 @@ function wireSort() {
 }
 
 // ---------------------------------------------------------------------------
-// Load + render
+// Init
 // ---------------------------------------------------------------------------
-
-function render(data) {
-  var items = (data && data.items) || [];
-
-  // Hero total.
-  var totalEl = $("#reclaim-total");
-  var human =
-    data && (data.total_reclaimable_human || humanSize(data.total_reclaimable_bytes));
-  totalEl.textContent = human || "0 B";
-  totalEl.classList.toggle("empty", !items.length);
-  $("#reclaim-count").textContent =
-    items.length === 1 ? "1 reclaimable item" : items.length + " reclaimable items";
-
-  // Counts per badge for chips.
-  var counts = {};
-  items.forEach(function (it) {
-    counts[it.badge] = (counts[it.badge] || 0) + 1;
-  });
-  buildChips(counts);
-
-  // Cards.
-  cardIndex = [];
-  var grid = $("#grid");
-  grid.textContent = "";
-  if (!items.length) {
-    var empty = document.createElement("div");
-    empty.className = "empty-state";
-    var big = document.createElement("div");
-    big.className = "big";
-    big.textContent = "✓";
-    var p = document.createElement("div");
-    p.textContent = "Nothing reclaimable. Local disk is clean.";
-    empty.appendChild(big);
-    empty.appendChild(p);
-    grid.appendChild(empty);
-  } else {
-    var frag = document.createDocumentFragment();
-    items.forEach(function (it) {
-      frag.appendChild(buildCard(it));
-    });
-    grid.appendChild(frag);
-  }
-
-  applyFilters();
-  setStatus("");
-}
-
-function load() {
-  setStatus("Scanning reclaimable disk…");
-  fetch("/api/reclaim")
-    .then(function (res) {
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      return res.json();
-    })
-    .then(render)
-    .catch(function (err) {
-      setStatus("Failed to load /api/reclaim — " + (err && err.message || err), true);
-    });
-}
-
-// Debounced post-job refresh. A terminal job (done|error) means the on-disk
-// state likely changed, so we re-fetch /api/reclaim and re-render. The grid
-// rebuild in render() naturally replaces a card's inline panel — by then the
-// REFRESH_AFTER_JOB_MS delay has let the user read the result. The timer is
-// coalesced so several jobs finishing close together trigger a single refresh.
-var _refreshTimer = null;
-
-function scheduleReclaimRefresh() {
-  if (_refreshTimer) clearTimeout(_refreshTimer);
-  _refreshTimer = setTimeout(function () {
-    _refreshTimer = null;
-    load();
-  }, REFRESH_AFTER_JOB_MS);
-}
 
 function init() {
   wireModal();
   wireSort();
-  load();
+  // After any terminal job, reload the model and repaint (preserving the view).
+  setRefreshHandler(function () {
+    load(false);
+  });
+  load(true);
 }
 
 if (document.readyState === "loading") {

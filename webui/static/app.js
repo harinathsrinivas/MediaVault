@@ -1,547 +1,320 @@
-/* MediaVault Console — Candidate B (card grid).
+/* MediaVault Console — Candidate A: media-type-first console (IMP-E14 Phase 1).
  *
- * Single-page, no framework, no build step. All logic lives here so
- * `node --check app.js` covers the behavior. Rendering uses DOM APIs and
- * textContent only — captured job output is NEVER injected via innerHTML
- * (XSS safety on a localhost console that shells out to main.cmd_*).
+ * Layout: a top TAB BAR (Movies / TV series / Anime / Others). Selecting a tab
+ * shows ONLY that category's items, grouped into the five disk-state sub-views,
+ * each rendered as a LABELLED COLLAPSIBLE SECTION (accordion) stacked in one
+ * scrolling column. Denser, fewer moving parts; everything for a category is
+ * visible by scrolling.
  *
- * Behavior contract:
- *   - On load, GET /api/reclaim, render one card per item.
- *   - Header shows the reclaimable-GB hero stat + 4 filter chips (client-side).
- *   - Per card: badge / id / path / size / suggested command (+Copy) /
- *     suggested folder with editable provider-id (+Copy) / action button(s).
- *   - Action -> POST /api/action/{name} (202 {job_id}) -> poll
- *     GET /api/job/{job_id} every ~1s until done|error -> show status+output.
- *   - `replace` is gated by an unmissable confirm modal; only on confirm do we
- *     POST {id, confirm:true}. Server returns 409 without confirm:true.
+ * No framework, no build step, no CDNs/external fonts. Split into ES modules
+ * loaded via <script type="module">; each file passes `node --check`.
+ *   - data.js : pure merge/categorize/group of /api/items + /api/reclaim.
+ *   - card.js : card rendering + action/job flow + confirm modal (preserved).
+ *   - app.js  : this orchestrator — tabs, accordions, load, refresh.
+ *
+ * Accessibility: tab bar is role="tablist" with role="tab"/aria-selected and
+ * LEFT/RIGHT (and Home/End) arrow-key navigation; one tab active at a time; the
+ * panel is role="tabpanel". Accordion headers are <button> with aria-expanded
+ * controlling an aria-labelledby region.
  */
 
 "use strict";
 
-// Badge (underscore value from the API) -> presentation + action mapping.
-// `action` is the POST /api/action/{name}; `confirm` flags the gated modal.
-var BADGE_META = {
-  UNPREPPED: {
-    label: "UNPREPPED",
-    cssKey: "unprepped",
-    action: "prep",
-    verb: "Prep",
-    confirm: false,
-  },
-  LOCAL_NOT_PUSHED: {
-    label: "LOCAL·NOT-PUSHED",
-    cssKey: "local",
-    action: "push",
-    verb: "Push",
-    confirm: false,
-  },
-  PUSHED_NOT_ARCHIVED: {
-    label: "PUSHED·NOT-ARCHIVED",
-    cssKey: "pushed",
-    action: "replace",
-    verb: "Replace",
-    confirm: true,
-  },
-  RESTORED_REPLACE_AGAIN: {
-    label: "RESTORED·REPLACE-AGAIN",
-    cssKey: "restored",
-    action: "replace",
-    verb: "Replace",
-    confirm: true,
-  },
-};
+import {
+  STATE_ORDER,
+  STATE_TITLE,
+  CATEGORY_ORDER,
+  CATEGORY_TITLE,
+  buildRenderList,
+  groupByCategoryState,
+  categoryCounts,
+} from "./data.js";
 
-// Stable chip order.
-var BADGE_ORDER = [
-  "UNPREPPED",
-  "LOCAL_NOT_PUSHED",
-  "PUSHED_NOT_ARCHIVED",
-  "RESTORED_REPLACE_AGAIN",
-];
-
-var POLL_MS = 1000;
-
-// After a job reaches a terminal state we re-fetch /api/reclaim so badges
-// reflect the new state (e.g. PUSHED·NOT-ARCHIVED -> archived/dropped). We wait
-// this long first so the just-shown job result stays visible briefly instead of
-// being yanked away the instant the job ends.
-var REFRESH_AFTER_JOB_MS = 2500;
-
-// Active filter: badge value -> shown? Default: all on.
-var filterState = {
-  UNPREPPED: true,
-  LOCAL_NOT_PUSHED: true,
-  PUSHED_NOT_ARCHIVED: true,
-  RESTORED_REPLACE_AGAIN: true,
-};
-
-// id -> card element, for filter re-application after data load.
-var cardIndex = [];
-
-// ---------------------------------------------------------------------------
-// Small helpers
-// ---------------------------------------------------------------------------
+import { STATE_META, buildCard, wireModal, runAction, setRefreshHook } from "./card.js";
 
 function $(sel, root) {
   return (root || document).querySelector(sel);
 }
 
-function meta(badge) {
-  return BADGE_META[badge] || {
-    label: String(badge || "UNKNOWN"),
-    cssKey: "unprepped",
-    action: null,
-    verb: "—",
-    confirm: false,
-  };
+// After a job reaches a terminal state we re-fetch both endpoints so states
+// reflect the new reality. We wait this long first so the just-shown job result
+// stays visible briefly instead of being yanked away the instant the job ends.
+var REFRESH_AFTER_JOB_MS = 2500;
+
+// --------------------------------------------------------------------------
+// View state (session-scoped, in-memory)
+// --------------------------------------------------------------------------
+
+var state = {
+  groups: null,          // {category: {state: [records]}}
+  counts: { movies: 0, series: 0, anime: 0, other: 0 },
+  activeCategory: "movies",
+  // Per-(category,state) accordion open flag. Key "category|state". When a key is
+  // absent we fall back to the default-open rule (non-empty sections open).
+  open: Object.create(null),
+};
+
+function openKey(category, st) {
+  return category + "|" + st;
 }
 
-function initialFor(id) {
-  var s = String(id || "?");
-  // Prefer the slug segment of a canonical id (cat-lang-year-slug); else first char.
-  var parts = s.split("-");
-  var seg = parts.length > 3 ? parts[3] : (parts[parts.length - 1] || s);
-  var ch = (seg || s).replace(/[^A-Za-z0-9]/g, "").charAt(0);
-  return (ch || "?").toUpperCase();
+// Whether a section should render expanded. Explicit user toggles win; otherwise
+// non-empty sections default open, empty ones default collapsed.
+function isOpen(category, st, count) {
+  var k = openKey(category, st);
+  if (k in state.open) return state.open[k];
+  return count > 0;
 }
 
-// Human-readable bytes (binary units), mirrors human_readable_size on the server.
-function humanSize(bytes) {
-  var n = Number(bytes);
-  if (!isFinite(n) || n < 0) return "—";
-  if (n < 1024) return n + " B";
-  var units = ["KB", "MB", "GB", "TB", "PB"];
-  var i = -1;
-  do {
-    n = n / 1024;
-    i += 1;
-  } while (n >= 1024 && i < units.length - 1);
-  return n.toFixed(n >= 100 ? 0 : n >= 10 ? 1 : 2) + " " + units[i];
-}
+// --------------------------------------------------------------------------
+// Tab bar
+// --------------------------------------------------------------------------
 
-function setStatus(msg, isErr) {
-  var el = $("#status-line");
-  el.textContent = msg || "";
-  el.classList.toggle("err", !!isErr);
-}
+function buildTabs() {
+  var bar = $("#tabbar");
+  bar.textContent = "";
+  CATEGORY_ORDER.forEach(function (cat) {
+    var tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = "tab";
+    tab.id = "tab-" + cat;
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-controls", "panel");
+    tab.dataset.cat = cat;
 
-// Clipboard with execCommand fallback (localhost is a non-secure context where
-// navigator.clipboard may be undefined).
-function copyText(text) {
-  if (navigator.clipboard && window.isSecureContext) {
-    return navigator.clipboard.writeText(text).catch(function () {
-      return legacyCopy(text);
+    var label = document.createElement("span");
+    label.className = "tab-label";
+    label.textContent = CATEGORY_TITLE[cat];
+    tab.appendChild(label);
+
+    var count = document.createElement("span");
+    count.className = "tab-count";
+    count.textContent = String(state.counts[cat] || 0);
+    tab.appendChild(count);
+
+    tab.addEventListener("click", function () {
+      selectCategory(cat, true);
     });
-  }
-  return Promise.resolve(legacyCopy(text));
+    bar.appendChild(tab);
+  });
+  // Keyboard: roving tabindex + Left/Right/Home/End on the tablist.
+  bar.addEventListener("keydown", onTablistKeydown);
+  syncTabSelection();
 }
 
-function legacyCopy(text) {
-  try {
-    var ta = document.createElement("textarea");
-    ta.value = text;
-    ta.setAttribute("readonly", "");
-    ta.style.position = "fixed";
-    ta.style.top = "-1000px";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    var ok = document.execCommand("copy");
-    document.body.removeChild(ta);
-    return ok;
-  } catch (e) {
-    return false;
-  }
+function tabEls() {
+  return Array.prototype.slice.call(document.querySelectorAll("#tabbar .tab"));
 }
 
-function flashCopied(btn) {
-  var prev = btn.textContent;
-  btn.classList.add("copied");
-  btn.textContent = "✓";
-  setTimeout(function () {
-    btn.classList.remove("copied");
-    btn.textContent = prev;
-  }, 1100);
-}
-
-function wireCopy(btn, getText) {
-  btn.addEventListener("click", function () {
-    copyText(getText()).then(function () {
-      flashCopied(btn);
-    });
+// Reflect activeCategory onto aria-selected + roving tabindex (only the active
+// tab is tabbable; arrows move among the rest).
+function syncTabSelection() {
+  tabEls().forEach(function (tab) {
+    var active = tab.dataset.cat === state.activeCategory;
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+    tab.tabIndex = active ? 0 : -1;
+    tab.classList.toggle("active", active);
   });
 }
 
-// ---------------------------------------------------------------------------
-// Filter chips
-// ---------------------------------------------------------------------------
-
-function buildChips(counts) {
-  var row = $("#chip-row");
-  row.textContent = "";
-  BADGE_ORDER.forEach(function (badge) {
-    var m = meta(badge);
-    var chip = document.createElement("button");
-    chip.type = "button";
-    chip.className = "chip c-" + m.cssKey;
-    chip.setAttribute("aria-pressed", filterState[badge] ? "true" : "false");
-    chip.dataset.badge = badge;
-
-    var dot = document.createElement("span");
-    dot.className = "dot";
-    chip.appendChild(dot);
-
-    var lbl = document.createElement("span");
-    lbl.textContent = m.label;
-    chip.appendChild(lbl);
-
-    var ct = document.createElement("span");
-    ct.className = "ct";
-    ct.textContent = String(counts[badge] || 0);
-    chip.appendChild(ct);
-
-    chip.addEventListener("click", function () {
-      filterState[badge] = !filterState[badge];
-      chip.setAttribute("aria-pressed", filterState[badge] ? "true" : "false");
-      applyFilters();
-    });
-
-    row.appendChild(chip);
+function onTablistKeydown(e) {
+  var tabs = tabEls();
+  if (!tabs.length) return;
+  var idx = tabs.findIndex(function (t) {
+    return t.dataset.cat === state.activeCategory;
   });
-}
-
-function applyFilters() {
-  var shown = 0;
-  cardIndex.forEach(function (rec) {
-    var on = !!filterState[rec.badge];
-    rec.el.dataset.hidden = on ? "false" : "true";
-    if (on) shown += 1;
-  });
-  var grid = $("#grid");
-  var emptyEl = $("#filter-empty");
-  if (cardIndex.length > 0 && shown === 0) {
-    if (!emptyEl) {
-      emptyEl = document.createElement("div");
-      emptyEl.id = "filter-empty";
-      emptyEl.className = "empty-state";
-      var big = document.createElement("div");
-      big.className = "big";
-      big.textContent = "⌕";
-      var p = document.createElement("div");
-      p.textContent = "No items match the active filters.";
-      emptyEl.appendChild(big);
-      emptyEl.appendChild(p);
-      grid.parentNode.insertBefore(emptyEl, grid.nextSibling);
-    }
-    emptyEl.style.display = "";
-  } else if (emptyEl) {
-    emptyEl.style.display = "none";
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Card rendering
-// ---------------------------------------------------------------------------
-
-function buildCard(item) {
-  var m = meta(item.badge);
-  var tpl = $("#card-tpl");
-  var node = tpl.content.firstElementChild.cloneNode(true);
-
-  // Poster + badge (color-coded by state).
-  var poster = $(".poster", node);
-  poster.classList.add("p-" + m.cssKey);
-  $(".initial", poster).textContent = initialFor(item.id);
-  var badge = $(".badge", poster);
-  badge.classList.add("b-" + m.cssKey);
-  $(".badge-label", badge).textContent = m.label;
-
-  // Id + size.
-  var idEl = $(".item-id", node);
-  idEl.textContent = item.id;
-  if (item.guessed) {
-    var g = document.createElement("span");
-    g.className = "guess-tag";
-    g.title = "Editable guessed id for an unprepped file";
-    g.textContent = "GUESS";
-    idEl.appendChild(g);
-  }
-  $(".item-size", node).textContent = humanSize(item.size_bytes);
-
-  // Path.
-  $(".item-path", node).textContent = item.path || "";
-
-  // Suggested command (read-only) + Copy.
-  var cmd = item.suggested_command || "";
-  var cmdField = $(".field-cmd", node);
-  if (cmd) {
-    $(".cmd-text", cmdField).textContent = cmd;
-    wireCopy($(".cmd-copy", cmdField), function () { return cmd; });
+  if (idx < 0) idx = 0;
+  var next = null;
+  if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+    next = (idx + 1) % tabs.length;
+  } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+    next = (idx - 1 + tabs.length) % tabs.length;
+  } else if (e.key === "Home") {
+    next = 0;
+  } else if (e.key === "End") {
+    next = tabs.length - 1;
   } else {
-    cmdField.style.display = "none";
-  }
-
-  // Suggested folder with editable provider id + Copy. When applies=false the
-  // folder is an existing path shown informationally (input disabled).
-  var sf = item.suggested_folder || {};
-  var folderInput = $(".folder-input", node);
-  var folderNote = $(".folder-note", node);
-  folderInput.value = sf.folder || "";
-  if (sf.applies) {
-    folderInput.disabled = false;
-    folderInput.setAttribute(
-      "aria-label",
-      "Editable suggested folder — replace the " +
-        (sf.editable_provider_field || "provider") + " placeholder"
-    );
-    folderNote.textContent =
-      "New-item suggestion — edit the {" +
-      (sf.editable_provider_field || "provider") + "-…} id before creating.";
-    folderNote.classList.add("editable");
-  } else {
-    folderInput.disabled = true;
-    folderInput.setAttribute("aria-label", "Existing folder (read-only)");
-    folderNote.textContent = "Existing folder — never renamed (informational).";
-  }
-  wireCopy($(".folder-copy", node), function () { return folderInput.value; });
-
-  // Action button(s) for this badge.
-  var actions = $(".card-actions", node);
-  var jobPanel = $(".item-job", node);
-  if (m.action) {
-    var btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "action-btn " + (m.confirm ? "destructive" : "primary");
-    btn.textContent = m.verb;
-    if (m.confirm) {
-      btn.title = "Destructive — confirmation required";
-    }
-    btn.addEventListener("click", function () {
-      onActionClick(item, m, btn, jobPanel);
-    });
-    actions.appendChild(btn);
-  } else {
-    actions.style.display = "none";
-  }
-
-  cardIndex.push({ el: node, badge: item.badge, id: item.id });
-  return node;
-}
-
-// ---------------------------------------------------------------------------
-// Action dispatch + job polling
-// ---------------------------------------------------------------------------
-
-function bodyForAction(action, item) {
-  if (action === "prep") return { id: item.id, filepath: item.path };
-  if (action === "push") return { id: item.id };
-  if (action === "replace") return { id: item.id, confirm: true };
-  if (action === "sort") return {};
-  return { id: item.id };
-}
-
-function onActionClick(item, m, btn, jobPanel) {
-  if (m.confirm) {
-    // Gate destructive `replace` behind the modal. POST only on confirm.
-    openConfirmModal(item, function () {
-      runAction(m.action, item, btn, jobPanel);
-    });
     return;
   }
-  runAction(m.action, item, btn, jobPanel);
+  e.preventDefault();
+  var cat = tabs[next].dataset.cat;
+  selectCategory(cat, false);
+  tabs[next].focus();
 }
 
-// Turn a non-202 action response into a readable, human-facing error message.
-// Only 202 carries a {job_id}; for anything else we must NOT try to read one.
-function actionHttpError(status, detail) {
-  if (status === 409) {
-    // Destructive action posted without confirm:true. The modal path always
-    // sends confirm:true, so this is a defensive guard, not an expected path.
-    return "Refused (409): this action needs explicit confirmation.";
+function selectCategory(cat, fromClick) {
+  if (state.activeCategory === cat && fromClick) {
+    // Re-clicking the active tab is a no-op (keeps accordion state).
+    return;
   }
-  if (status === 404) {
-    return "Unknown action (404): the server does not expose this action.";
-  }
-  var base = "Request failed (HTTP " + status + ")";
-  return detail ? base + ": " + detail : base + ".";
+  state.activeCategory = cat;
+  syncTabSelection();
+  renderPanel();
 }
 
-function runAction(action, item, btn, jobPanel) {
-  if (btn) btn.disabled = true;
-  renderJob(jobPanel, { status: "running", name: action, output: "" }, true);
+// --------------------------------------------------------------------------
+// Panel: stacked accordion sub-view sections for the active category
+// --------------------------------------------------------------------------
 
-  fetch("/api/action/" + action, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(bodyForAction(action, item)),
-  })
-    .then(function (res) {
-      // ONLY 202 returns {job_id}. Handle every other status explicitly so we
-      // never read a job_id that isn't there (409 confirm-gate, 404 unknown
-      // action, 422 validation, 5xx, …) — surface a readable inline error.
-      if (res.status === 202) return res.json();
-      return res.text().then(function (t) {
-        // FastAPI error bodies are JSON {"detail": "..."}; show the detail text
-        // when present, else the raw body.
-        var detail = t;
-        try {
-          var parsed = JSON.parse(t);
-          if (parsed && parsed.detail) detail = parsed.detail;
-        } catch (e) {
-          /* non-JSON body — keep the raw text */
-        }
-        throw new Error(actionHttpError(res.status, detail));
-      });
-    })
-    .then(function (data) {
-      pollJob(data.job_id, jobPanel, btn, action);
-    })
-    .catch(function (err) {
-      renderJob(
-        jobPanel,
-        { status: "error", name: action, output: String(err && err.message || err) },
-        false
-      );
-      if (btn) btn.disabled = false;
-    });
-}
-
-function pollJob(jobId, jobPanel, btn, action) {
-  function tick() {
-    fetch("/api/job/" + encodeURIComponent(jobId))
-      .then(function (res) {
-        if (!res.ok) {
-          return res.text().then(function (t) {
-            throw new Error("HTTP " + res.status + (t ? ": " + t : ""));
-          });
-        }
-        return res.json();
-      })
-      .then(function (job) {
-        var running = job.status === "running";
-        renderJob(jobPanel, job, running);
-        if (running) {
-          setTimeout(tick, POLL_MS);
-        } else {
-          if (btn) btn.disabled = false; // re-enable on done OR error
-          // Terminal (done|error): refresh the reclaim list so badges reflect
-          // the new state. Delayed + debounced so the result panel stays visible
-          // briefly and back-to-back jobs don't double-rebuild the grid.
-          scheduleReclaimRefresh();
-        }
-      })
-      .catch(function (err) {
-        renderJob(
-          jobPanel,
-          { status: "error", name: action, output: String(err && err.message || err) },
-          false
-        );
-        if (btn) btn.disabled = false;
-      });
-  }
-  tick();
-}
-
-// Render a job record into a panel. Output goes through textContent (a <pre>),
-// never innerHTML. `error` status is shown faithfully — output is NOT hidden.
-function renderJob(panel, job, running) {
-  panel.classList.add("show");
+function renderPanel() {
+  var panel = $("#panel");
   panel.textContent = "";
+  panel.setAttribute("aria-labelledby", "tab-" + state.activeCategory);
 
-  var head = document.createElement("div");
-  head.className = "job-head";
+  var cat = state.activeCategory;
+  var byState = (state.groups && state.groups[cat]) || {};
 
-  var state = document.createElement("span");
-  var status = job.status || (running ? "running" : "done");
-  state.className = "job-state " + status;
-  if (status === "running") {
-    var sp = document.createElement("span");
-    sp.className = "spinner";
-    head.appendChild(sp);
-    state.textContent = "Running";
-  } else if (status === "error") {
-    state.textContent = "✕ Error";
+  var totalInCat = state.counts[cat] || 0;
+  if (totalInCat === 0) {
+    panel.appendChild(emptyCategoryNotice());
+    return;
+  }
+
+  var frag = document.createDocumentFragment();
+  STATE_ORDER.forEach(function (st) {
+    var records = byState[st] || [];
+    frag.appendChild(buildAccordionSection(cat, st, records));
+  });
+  panel.appendChild(frag);
+}
+
+function emptyCategoryNotice() {
+  var el = document.createElement("div");
+  el.className = "empty-state";
+  var big = document.createElement("div");
+  big.className = "big";
+  big.textContent = "✓";
+  var p = document.createElement("div");
+  p.textContent = "No items in this category.";
+  el.appendChild(big);
+  el.appendChild(p);
+  return el;
+}
+
+function buildAccordionSection(category, st, records) {
+  var m = STATE_META[st] || { cssKey: "unprepped" };
+  var count = records.length;
+  var open = isOpen(category, st, count);
+
+  var section = document.createElement("section");
+  section.className = "accordion s-" + m.cssKey;
+  if (count === 0) section.classList.add("is-empty");
+
+  var headId = "acc-h-" + category + "-" + st;
+  var bodyId = "acc-b-" + category + "-" + st;
+
+  // Header is a <button> so it is natively focusable / Enter+Space activatable.
+  var header = document.createElement("button");
+  header.type = "button";
+  header.className = "accordion-head";
+  header.id = headId;
+  header.setAttribute("aria-expanded", open ? "true" : "false");
+  header.setAttribute("aria-controls", bodyId);
+
+  var caret = document.createElement("span");
+  caret.className = "acc-caret";
+  caret.setAttribute("aria-hidden", "true");
+  caret.textContent = "▸";
+  header.appendChild(caret);
+
+  var dot = document.createElement("span");
+  dot.className = "acc-dot";
+  header.appendChild(dot);
+
+  var title = document.createElement("span");
+  title.className = "acc-title";
+  title.textContent = STATE_TITLE[st] || st;
+  header.appendChild(title);
+
+  var ct = document.createElement("span");
+  ct.className = "acc-count";
+  ct.textContent = String(count);
+  header.appendChild(ct);
+
+  header.addEventListener("click", function () {
+    toggleSection(category, st, section, header, body);
+  });
+
+  // Body region: a height/opacity transition wrapper around the grid.
+  var body = document.createElement("div");
+  body.className = "accordion-body";
+  body.id = bodyId;
+  body.setAttribute("role", "region");
+  body.setAttribute("aria-labelledby", headId);
+
+  var inner = document.createElement("div");
+  inner.className = "accordion-inner";
+
+  if (count === 0) {
+    var none = document.createElement("div");
+    none.className = "sub-empty";
+    none.textContent = "No items";
+    inner.appendChild(none);
   } else {
-    state.textContent = "✓ Done";
+    var grid = document.createElement("div");
+    grid.className = "grid";
+    var gridFrag = document.createDocumentFragment();
+    records.forEach(function (rec) {
+      gridFrag.appendChild(buildCard(rec));
+    });
+    grid.appendChild(gridFrag);
+    inner.appendChild(grid);
   }
-  head.appendChild(state);
+  body.appendChild(inner);
 
-  var name = document.createElement("span");
-  name.className = "job-name";
-  name.textContent = job.name ? "· " + job.name : "";
-  head.appendChild(name);
+  section.appendChild(header);
+  section.appendChild(body);
 
-  panel.appendChild(head);
+  // Apply initial expand/collapse without animating the first paint.
+  setSectionState(section, header, body, open, false);
 
-  var out = (job.output || "").toString();
-  if (out.trim()) {
-    var pre = document.createElement("pre");
-    pre.className = "job-output";
-    pre.textContent = out; // XSS-safe rendering of captured stdout.
-    panel.appendChild(pre);
-  } else if (status === "running") {
-    var pre2 = document.createElement("pre");
-    pre2.className = "job-output";
-    pre2.textContent = "Waiting for output…";
-    panel.appendChild(pre2);
+  return section;
+}
+
+function toggleSection(category, st, section, header, body) {
+  var willOpen = header.getAttribute("aria-expanded") !== "true";
+  state.open[openKey(category, st)] = willOpen;
+  setSectionState(section, header, body, willOpen, true);
+}
+
+// Drive the open/closed visual + a11y state. When `animate` is false we set the
+// final state immediately (initial paint). When true we animate max-height from
+// the measured content height, then release to `none` so later content changes
+// don't get clipped.
+function setSectionState(section, header, body, open, animate) {
+  header.setAttribute("aria-expanded", open ? "true" : "false");
+  section.classList.toggle("open", open);
+
+  if (!animate) {
+    body.style.maxHeight = open ? "none" : "0px";
+    body.style.opacity = open ? "1" : "0";
+    return;
+  }
+
+  if (open) {
+    body.style.maxHeight = body.scrollHeight + "px";
+    body.style.opacity = "1";
+    var release = function () {
+      // Only release if still open (user may have re-collapsed mid-transition).
+      if (section.classList.contains("open")) body.style.maxHeight = "none";
+      body.removeEventListener("transitionend", release);
+    };
+    body.addEventListener("transitionend", release);
+  } else {
+    // From "none" we must first pin to the current pixel height so the
+    // transition has a start value, then collapse on the next frame.
+    body.style.maxHeight = body.scrollHeight + "px";
+    body.style.opacity = "1";
+    requestAnimationFrame(function () {
+      body.style.maxHeight = "0px";
+      body.style.opacity = "0";
+    });
   }
 }
 
-// ---------------------------------------------------------------------------
-// Confirm modal (shared, for `replace`)
-// ---------------------------------------------------------------------------
-
-var modalOnConfirm = null;
-
-function openConfirmModal(item, onConfirm) {
-  modalOnConfirm = onConfirm;
-  var modal = $("#modal");
-  var target = $("#modal-target");
-  target.textContent = "";
-  var idline = document.createElement("div");
-  var b = document.createElement("b");
-  b.textContent = item.id;
-  idline.appendChild(b);
-  target.appendChild(idline);
-  var pathline = document.createElement("div");
-  pathline.textContent = item.path || "";
-  pathline.style.marginTop = "4px";
-  pathline.style.opacity = "0.8";
-  target.appendChild(pathline);
-
-  modal.hidden = false;
-  modal.classList.add("show");
-  // Focus the safe default (Cancel).
-  $("#modal-cancel").focus();
-}
-
-function closeModal() {
-  var modal = $("#modal");
-  modal.classList.remove("show");
-  modal.hidden = true;
-  modalOnConfirm = null;
-}
-
-function wireModal() {
-  $("#modal-cancel").addEventListener("click", closeModal);
-  $("#modal-confirm").addEventListener("click", function () {
-    var fn = modalOnConfirm;
-    closeModal();
-    if (fn) fn();
-  });
-  // Backdrop click cancels (but not clicks inside the dialog).
-  $("#modal").addEventListener("click", function (e) {
-    if (e.target === $("#modal")) closeModal();
-  });
-  // Esc cancels.
-  document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape" && !$("#modal").hidden) closeModal();
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Sort library (global action)
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------
+// Global Sort action
+// --------------------------------------------------------------------------
 
 function wireSort() {
   var btn = $("#btn-sort");
@@ -551,77 +324,58 @@ function wireSort() {
   });
 }
 
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------
 // Load + render
-// ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------
 
-function render(data) {
-  var items = (data && data.items) || [];
+function setStatus(msg, isErr) {
+  var el = $("#status-line");
+  el.textContent = msg || "";
+  el.classList.toggle("err", !!isErr);
+}
 
-  // Hero total.
-  var totalEl = $("#reclaim-total");
-  var human =
-    data && (data.total_reclaimable_human || humanSize(data.total_reclaimable_bytes));
-  totalEl.textContent = human || "0 B";
-  totalEl.classList.toggle("empty", !items.length);
-  $("#reclaim-count").textContent =
-    items.length === 1 ? "1 reclaimable item" : items.length + " reclaimable items";
-
-  // Counts per badge for chips.
-  var counts = {};
-  items.forEach(function (it) {
-    counts[it.badge] = (counts[it.badge] || 0) + 1;
+function fetchJson(url) {
+  return fetch(url).then(function (res) {
+    if (!res.ok) throw new Error(url + " — HTTP " + res.status);
+    return res.json();
   });
-  buildChips(counts);
+}
 
-  // Cards.
-  cardIndex = [];
-  var grid = $("#grid");
-  grid.textContent = "";
-  if (!items.length) {
-    var empty = document.createElement("div");
-    empty.className = "empty-state";
-    var big = document.createElement("div");
-    big.className = "big";
-    big.textContent = "✓";
-    var p = document.createElement("div");
-    p.textContent = "Nothing reclaimable. Local disk is clean.";
-    empty.appendChild(big);
-    empty.appendChild(p);
-    grid.appendChild(empty);
-  } else {
-    var frag = document.createDocumentFragment();
-    items.forEach(function (it) {
-      frag.appendChild(buildCard(it));
-    });
-    grid.appendChild(frag);
-  }
+function applyData(itemsPayload, reclaimPayload) {
+  var records = buildRenderList(itemsPayload, reclaimPayload);
+  state.groups = groupByCategoryState(records);
+  state.counts = categoryCounts(records);
 
-  applyFilters();
-  setStatus("");
+  // Refresh tab count badges in place (tabs already built).
+  tabEls().forEach(function (tab) {
+    var c = $(".tab-count", tab);
+    if (c) c.textContent = String(state.counts[tab.dataset.cat] || 0);
+  });
+
+  renderPanel();
+
+  var total = records.length;
+  setStatus(
+    total === 0
+      ? "Library is empty."
+      : total + (total === 1 ? " item across all categories." : " items across all categories.")
+  );
 }
 
 function load() {
-  setStatus("Scanning reclaimable disk…");
-  fetch("/api/reclaim")
+  setStatus("Loading library…");
+  Promise.all([fetchJson("/api/items"), fetchJson("/api/reclaim")])
     .then(function (res) {
-      if (!res.ok) throw new Error("HTTP " + res.status);
-      return res.json();
+      applyData(res[0], res[1]);
     })
-    .then(render)
     .catch(function (err) {
-      setStatus("Failed to load /api/reclaim — " + (err && err.message || err), true);
+      setStatus("Failed to load — " + ((err && err.message) || err), true);
     });
 }
 
-// Debounced post-job refresh. A terminal job (done|error) means the on-disk
-// state likely changed, so we re-fetch /api/reclaim and re-render. The grid
-// rebuild in render() naturally replaces a card's inline panel — by then the
-// REFRESH_AFTER_JOB_MS delay has let the user read the result. The timer is
-// coalesced so several jobs finishing close together trigger a single refresh.
+// Debounced post-job refresh — coalesces several jobs finishing close together.
 var _refreshTimer = null;
-
-function scheduleReclaimRefresh() {
+function scheduleRefresh() {
   if (_refreshTimer) clearTimeout(_refreshTimer);
   _refreshTimer = setTimeout(function () {
     _refreshTimer = null;
@@ -632,6 +386,8 @@ function scheduleReclaimRefresh() {
 function init() {
   wireModal();
   wireSort();
+  setRefreshHook(scheduleRefresh);
+  buildTabs();
   load();
 }
 

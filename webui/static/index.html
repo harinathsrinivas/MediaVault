@@ -13,28 +13,25 @@
         <div class="logo">MV</div>
         <div>
           <h1>MediaVault Console</h1>
-          <p class="sub">Local Reclaim Operations</p>
+          <p class="sub">Media Library Operations</p>
         </div>
       </div>
-      <div class="reclaim-stat">
-        <div class="label">Reclaimable</div>
-        <div class="value empty" id="reclaim-total">—</div>
-        <div class="count" id="reclaim-count"></div>
-      </div>
-    </div>
-
-    <div class="toolbar">
-      <div class="chip-row" id="chip-row" role="group" aria-label="Filter by state"></div>
-      <span class="spacer"></span>
       <button type="button" class="btn-sort" id="btn-sort" title="Run library sort">
         <span aria-hidden="true">⇅</span> Sort library
       </button>
     </div>
+
+    <!-- Media-type tab bar. role=tablist + arrow-key nav wired in app.js. -->
+    <div class="tabbar" id="tabbar" role="tablist" aria-label="Media type"></div>
   </header>
 
   <main>
     <p class="status-line" id="status-line" role="status" aria-live="polite"></p>
-    <div class="grid" id="grid"></div>
+
+    <!-- One tabpanel; its content is the active category's stacked accordion
+         sub-views. aria-labelledby is set to the active tab in app.js. -->
+    <div class="panel" id="panel" role="tabpanel" tabindex="0"></div>
+
     <div class="job-panel" id="sort-job-panel" style="margin-top:18px"></div>
   </main>
 
@@ -57,7 +54,9 @@
     </div>
   </div>
 
-  <!-- Hidden card template cloned per item. -->
+  <!-- Hidden card template cloned per item. `.poster` is the POSTER SLOT — for
+       ARCHIVED items it carries the gradient+initial placeholder now and is the
+       element Phase 5 fills with a real poster image. -->
   <template id="card-tpl">
     <article class="card">
       <div class="poster">
@@ -95,6 +94,6 @@
     </article>
   </template>
 
-  <script src="./app.js"></script>
+  <script type="module" src="./app.js"></script>
 </body>
 </html>

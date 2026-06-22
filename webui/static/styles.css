@@ -1,5 +1,5 @@
-/* MediaVault Console — Candidate B: card grid, dark, self-contained.
-   No external fonts/assets/CDNs. System font stack only. */
+/* MediaVault Console — Candidate A: media-type tabs + accordion sub-views.
+   Dark, self-contained. No external fonts/assets/CDNs. System font stack only. */
 
 :root {
   --bg: #0b0f17;
@@ -17,11 +17,12 @@
   --danger-deep: #b3243a;
   --focus: #5aa0ff;
 
-  /* Badge palette — one hue per state so the 4 read at a glance. */
+  /* Badge palette — one hue per state so they read at a glance. */
   --b-unprepped: #f0b429;       /* amber  */
   --b-local: #5aa0ff;           /* blue   */
   --b-pushed: #b07bff;          /* violet */
   --b-restored: #ff8a5c;        /* orange */
+  --b-archived: #6f8198;        /* slate — cold/parked  */
 
   --radius: 14px;
   --radius-sm: 9px;
@@ -61,7 +62,7 @@ button, input { font-family: inherit; }
 .hero {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
+  align-items: center;
   justify-content: space-between;
   gap: 18px;
 }
@@ -98,92 +99,68 @@ button, input { font-family: inherit; }
   text-transform: uppercase;
 }
 
-.reclaim-stat {
-  text-align: right;
-  line-height: 1.05;
-}
-.reclaim-stat .label {
-  font-size: 11px;
-  letter-spacing: 1.4px;
-  text-transform: uppercase;
-  color: var(--text-faint);
-}
-.reclaim-stat .value {
-  font-size: clamp(30px, 5.5vw, 46px);
-  font-weight: 800;
-  letter-spacing: -1px;
-  background: linear-gradient(120deg, var(--accent), var(--focus));
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-  margin-top: 2px;
-}
-.reclaim-stat .value.empty {
-  background: none;
-  color: var(--text-dim);
-}
-.reclaim-stat .count {
-  font-size: 12px;
-  color: var(--text-dim);
-  margin-top: 2px;
-}
+/* ---------------- Media-type tab bar ---------------- */
 
-/* ---------------- Filter chips ---------------- */
-
-.toolbar {
+.tabbar {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  margin-top: 14px;
+  gap: 6px;
+  margin-top: 16px;
 }
-.chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
 
-.chip {
+.tab {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
-  padding: 7px 13px;
-  border-radius: 999px;
-  border: 1px solid var(--line);
-  background: var(--bg-elev);
+  gap: 9px;
+  padding: 10px 18px;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  border: 1px solid transparent;
+  border-bottom: none;
+  background: transparent;
   color: var(--text-dim);
   cursor: pointer;
-  font-size: 12.5px;
+  font-size: 14px;
   font-weight: 600;
-  letter-spacing: 0.3px;
-  user-select: none;
-  transition: background 0.12s, border-color 0.12s, color 0.12s, transform 0.05s;
+  letter-spacing: 0.2px;
+  position: relative;
+  transition: background 0.14s, color 0.14s;
 }
-.chip:hover { background: var(--bg-card-hover); }
-.chip:active { transform: translateY(1px); }
-.chip .dot {
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  flex: none;
-  box-shadow: 0 0 7px currentColor;
-}
-.chip .ct {
+.tab:hover { color: var(--text); background: rgba(255, 255, 255, 0.03); }
+.tab .tab-count {
   font-variant-numeric: tabular-nums;
-  color: var(--text-faint);
+  font-size: 11.5px;
   font-weight: 700;
-  font-size: 11px;
+  color: var(--text-faint);
+  background: var(--bg-elev);
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  padding: 1px 8px;
+  min-width: 22px;
+  text-align: center;
 }
-.chip[aria-pressed="true"] {
+.tab[aria-selected="true"] {
+  color: var(--text);
+  background: linear-gradient(180deg, rgba(56, 224, 200, 0.10), transparent);
+  border-color: var(--line);
+}
+/* Active-tab underline accent, drawn over the header's bottom border. */
+.tab[aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent), var(--focus));
+  box-shadow: 0 0 10px rgba(56, 224, 200, 0.4);
+}
+.tab[aria-selected="true"] .tab-count {
   color: var(--text);
   border-color: var(--accent-deep);
-  background: linear-gradient(180deg, rgba(56, 224, 200, 0.14), rgba(56, 224, 200, 0.05));
+  background: rgba(56, 224, 200, 0.12);
 }
-.chip[aria-pressed="false"] { opacity: 0.62; }
-.chip[aria-pressed="false"]:hover { opacity: 0.85; }
-
-.chip.c-unprepped .dot { color: var(--b-unprepped); background: var(--b-unprepped); }
-.chip.c-local .dot     { color: var(--b-local);     background: var(--b-local); }
-.chip.c-pushed .dot    { color: var(--b-pushed);    background: var(--b-pushed); }
-.chip.c-restored .dot  { color: var(--b-restored);  background: var(--b-restored); }
-
-.toolbar .spacer { flex: 1 1 auto; }
+.tab:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
 
 .btn-sort {
   display: inline-flex;
@@ -234,6 +211,102 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 }
 .empty-state .big { font-size: 40px; margin-bottom: 8px; }
 
+.panel { display: flex; flex-direction: column; gap: 12px; }
+.panel:focus-visible { outline: 2px solid var(--focus); outline-offset: 4px; border-radius: var(--radius); }
+
+/* ---------------- Accordion sub-view sections ---------------- */
+
+.accordion {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent);
+  overflow: hidden;
+}
+.accordion.open { border-color: var(--line); }
+/* Empty sub-views collapse to a slim, muted header — present but quiet. */
+.accordion.is-empty { opacity: 0.72; }
+
+.accordion-head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  width: 100%;
+  padding: 13px 16px;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 14.5px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  text-align: left;
+  transition: background 0.12s;
+}
+.accordion-head:hover { background: rgba(255, 255, 255, 0.025); }
+.accordion-head:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+
+.acc-caret {
+  flex: none;
+  font-size: 12px;
+  color: var(--text-faint);
+  transition: transform 0.2s ease;
+  transform: rotate(0deg);
+  width: 12px;
+  display: inline-block;
+}
+.accordion.open .acc-caret { transform: rotate(90deg); }
+
+.acc-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  box-shadow: 0 0 8px currentColor;
+}
+.accordion.s-unprepped .acc-dot { color: var(--b-unprepped); background: var(--b-unprepped); }
+.accordion.s-local     .acc-dot { color: var(--b-local);     background: var(--b-local); }
+.accordion.s-pushed    .acc-dot { color: var(--b-pushed);    background: var(--b-pushed); }
+.accordion.s-restored  .acc-dot { color: var(--b-restored);  background: var(--b-restored); }
+.accordion.s-archived  .acc-dot { color: var(--b-archived);  background: var(--b-archived); }
+
+.acc-title { flex: 1 1 auto; }
+
+.acc-count {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-dim);
+  background: var(--bg-elev);
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  padding: 2px 10px;
+  min-width: 26px;
+  text-align: center;
+}
+
+/* Animated collapse region. JS sets max-height/opacity; we transition both.
+   prefers-reduced-motion users get an instant toggle. */
+.accordion-body {
+  max-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  transition: max-height 0.26s ease, opacity 0.2s ease;
+}
+.accordion-inner { padding: 4px 16px 18px; }
+
+.sub-empty {
+  color: var(--text-faint);
+  font-size: 13px;
+  font-style: italic;
+  padding: 8px 2px 10px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .accordion-body { transition: none; }
+  .acc-caret { transition: none; }
+}
+
 /* ---------------- Card ---------------- */
 
 .card {
@@ -280,6 +353,10 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 .poster.p-local     { background: linear-gradient(135deg, #16335e, #0a1424); }
 .poster.p-pushed    { background: linear-gradient(135deg, #3a2360, #150d24); }
 .poster.p-restored  { background: linear-gradient(135deg, #5e2f18, #241008); }
+.poster.p-archived  { background: linear-gradient(135deg, #2a3340, #11161e); }
+/* Archived poster slot reads as "cold / parked" — slightly dimmer until Phase 5
+   fills it with a real poster image. */
+.poster.archived .initial { color: rgba(255, 255, 255, 0.07); }
 
 .badge {
   display: inline-flex;
@@ -303,10 +380,12 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 .badge.b-local     { color: var(--b-local); }
 .badge.b-pushed    { color: var(--b-pushed); }
 .badge.b-restored  { color: var(--b-restored); }
+.badge.b-archived  { color: var(--b-archived); }
 .badge.b-unprepped .dot { background: var(--b-unprepped); }
 .badge.b-local .dot     { background: var(--b-local); }
 .badge.b-pushed .dot    { background: var(--b-pushed); }
 .badge.b-restored .dot  { background: var(--b-restored); }
+.badge.b-archived .dot  { background: var(--b-archived); }
 
 .card-body {
   padding: 14px 15px 15px;
@@ -456,6 +535,19 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   border-color: rgba(255, 92, 114, 0.45);
 }
 .action-btn.destructive:hover:not(:disabled) { background: linear-gradient(135deg, #4d1c2a, #34121c); }
+
+/* Archived: disabled "Fetch & Restore — coming next" placeholder (Phase 2 wires
+   the live button). Distinct from a normal disabled action — it is a teaser, not
+   a blocked control, so it carries the archived slate hue rather than dimmed. */
+.action-btn.fetch-soon {
+  background: rgba(111, 129, 152, 0.10);
+  color: var(--text-dim);
+  border: 1px dashed rgba(111, 129, 152, 0.5);
+  cursor: not-allowed;
+  opacity: 1;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
 
 /* Job result panel */
 .job-panel {

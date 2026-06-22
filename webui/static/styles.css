@@ -332,6 +332,7 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 /* ---------------- Card ---------------- */
 
 .card {
+  position: relative; /* anchor for the absolute .fetch-ring SVG overlay */
   display: flex;
   flex-direction: column;
   background: linear-gradient(180deg, var(--bg-card), #121a28);
@@ -536,6 +537,8 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 
 /* Action zone */
 .card-actions {
+  position: relative; /* sit above the fetch-ring SVG (z-index:3) so the */
+  z-index: 5;         /* button + chunk label stay interactive and on top */
   margin-top: auto;
   display: flex;
   flex-wrap: wrap;
@@ -568,12 +571,111 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 }
 .action-btn.destructive:hover:not(:disabled) { background: linear-gradient(135deg, #4d1c2a, #34121c); }
 
-/* Archived "Fetch & Restore — coming next" stub (Phase 2 wires the real one). */
-.action-btn.coming-soon {
-  background: rgba(127, 224, 168, 0.08);
+/* Archived "Fetch & Restore" — working button (IMP-E14 Phase 2). Mint-tinted to
+   match the cold/cloud ARCHIVED hue, distinct from the primary/destructive
+   actions on the warmer states. */
+.action-btn.fetch-restore {
+  background: linear-gradient(135deg, rgba(127, 224, 168, 0.18), rgba(56, 224, 200, 0.10));
   color: var(--b-archived);
-  border: 1px dashed rgba(127, 224, 168, 0.4);
-  cursor: default;
+  border: 1px solid rgba(127, 224, 168, 0.42);
+}
+.action-btn.fetch-restore:hover:not(:disabled) {
+  filter: brightness(1.1);
+  background: linear-gradient(135deg, rgba(127, 224, 168, 0.26), rgba(56, 224, 200, 0.14));
+}
+
+/* ----- Fetch progress ring (CANDIDATE B: inline SVG, animated dashoffset) ----
+   An <svg> overlay sized to the card's pixel box (see ring.js). Two coincident
+   rounded-rect <path>s: a faint full-perimeter TRACK and the growing FILL whose
+   stroke-dashoffset shrinks from `perimeter` (0%) to 0 (100%). pointer-events is
+   none so the button underneath stays clickable; z-index keeps it above the
+   poster but the card-actions (z-index:1 below) stay interactive. */
+.fetch-ring {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  overflow: visible;
+}
+.fetch-ring[hidden] { display: none; }
+
+.fetch-ring-track {
+  stroke: rgba(127, 224, 168, 0.14);
+  stroke-width: 3;
+}
+.fetch-ring-fill {
+  stroke: var(--b-archived);
+  stroke-width: 3;
+  /* Smooth the discrete chunk ticks into a buttery grow. The cubic-bezier eases
+     each jump; ~0.55s comfortably covers the 1s poll cadence without lagging. */
+  transition: stroke-dashoffset 0.55s cubic-bezier(0.22, 0.61, 0.36, 1);
+  filter: drop-shadow(0 0 3px rgba(127, 224, 168, 0.5));
+}
+/* Resize / reset must NOT look like progress moving — snap with no transition. */
+.fetch-ring-fill.no-anim { transition: none; }
+
+/* Closed-loop complete state: stronger, gently breathing glow. The dashoffset is
+   already 0 (full outline) by the time this class lands. */
+.fetch-ring.complete .fetch-ring-fill {
+  stroke: var(--accent);
+  filter: drop-shadow(0 0 7px rgba(56, 224, 200, 0.85));
+  animation: ringGlow 1.8s ease-in-out infinite;
+}
+@keyframes ringGlow {
+  0%, 100% { filter: drop-shadow(0 0 5px rgba(56, 224, 200, 0.55)); }
+  50%      { filter: drop-shadow(0 0 11px rgba(56, 224, 200, 0.95)); }
+}
+
+/* While a fetch runs, lift the card edge a touch so the ring reads as "active". */
+.card.fetching { border-color: rgba(127, 224, 168, 0.35); }
+
+/* Numeric "k/N chunks" / "%" label beside the button — the accessible, always-on
+   readout of progress (carries the full state under reduced motion). */
+.fetch-ring-label {
+  flex: none;
+  align-self: center;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  color: var(--b-archived);
+  background: rgba(127, 224, 168, 0.10);
+  border: 1px solid rgba(127, 224, 168, 0.28);
+  border-radius: 7px;
+  padding: 4px 9px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  min-width: 64px;
+  text-align: center;
+}
+.fetch-ring-label[hidden] { display: none; }
+/* When the ring reaches its glowing complete state, the label tints to the same
+   accent so the readout and the outline agree. (.fetch-ring is a sibling of
+   .card-body, which contains the label inside .card-actions.) */
+.fetch-ring.complete ~ .card-body .fetch-ring-label { color: var(--accent); }
+
+/* Small DEMO tag for the ?demo live preview (sits on the poster). */
+.demo-tag {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 4;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1.2px;
+  color: #06121a;
+  background: linear-gradient(135deg, var(--accent), var(--focus));
+  border-radius: 6px;
+  padding: 2px 7px;
+  box-shadow: 0 2px 8px rgba(56, 224, 200, 0.4);
+  user-select: none;
+}
+
+/* Reduced motion: no smoothing transition, no glow animation. The outline still
+   FILLS to the exact fraction (set instantly) and the numeric label carries the
+   live state, so progress is fully conveyed without movement. */
+@media (prefers-reduced-motion: reduce) {
+  .fetch-ring-fill { transition: none; }
+  .fetch-ring.complete .fetch-ring-fill { animation: none; }
 }
 
 /* Archived card: poster-forward, taller placeholder so it reads as cold/cloud. */

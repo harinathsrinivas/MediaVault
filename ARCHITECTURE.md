@@ -323,8 +323,8 @@ It binds **localhost only**.
   counts by category), `POST /api/action/{name}` (allow-list
   `{prep,push,replace,sort,prep_push_rep}`; `replace` requires `confirm:true`
   or returns **409**; returns **202** + a `job_id`), `GET /api/job/{id}`
-  (polling). `webui/static/` is a no-build card-grid SPA mounted via
-  `StaticFiles`.
+  (polling), `GET /api/items` (see below). `webui/static/` is a no-build
+  card-grid SPA mounted via `StaticFiles`.
 - **Pure read-only data layer in `main.py`** (near `cmd_scan_unprepped`):
   `collect_reclaimable`, `classify_entry_state`, `guess_manual_id`,
   `suggest_target_folder`, `suggest_next_command`. They only READ existing
@@ -340,6 +340,25 @@ It binds **localhost only**.
   decided by **actual on-disk size** (real ⇔ `size >= DUMMY_MAX_BYTES`), not
   status alone, so an already-dummied entry never shows phantom GB; `archived`
   + dummy is excluded.
+- **`GET /api/items` — media-type inventory endpoint (IMP-E14 Phase 1):** returns
+  `main.items_payload()` = `{"items":[...], "by_category":{"movies":...,"series":...,"anime":...,"other":...}}`.
+  Iterates every PHYSICAL leaf (skips `season_map`/`multi_ep_alias`); each item
+  carries `id, category, state, size_bytes, path, title, year, tmdb_id,
+  poster_available, chunk_count` (plus `parent_id` for episodic leaves). Unlike
+  `/api/reclaim`, which excludes `archived` entries, **`/api/items` includes ALL
+  states including `archived`** — it is the complete library inventory for the
+  media-type UI. `items_payload` and `collect_reclaimable` share a `_classify_item`
+  helper so the two endpoints can't drift on state semantics; `/api/reclaim` output
+  is unchanged.
+- **Media-type SPA (IMP-E14 Phase 1):** the front end gained a **media-type tab
+  rail** (Movies / TV series / Anime / Others) — category derived from the entry's
+  id prefix via `_category_of`. Within each tab a **sub-view rail** offers the
+  disk-state groups: Unprepped / Local·not-pushed / Pushed·not-archived /
+  Fetched·not-archived / Archived. Data source: `/api/items` (library entries by
+  state) unioned with `/api/reclaim` (the only source of UNPREPPED rows, which have
+  no library entry). No build step — vanilla ES modules, same no-build constraint
+  as the existing SPA. Fetch-in-UI, posters, and mobile/Tailscale/auth are tracked
+  in later phases (E14 Phases 2–5 and IMP-E15/E3/U3/D17).
 - **The web tier calls the existing `cmd_*` UNCHANGED** — no copy of their
   logic. `replace` reuses `cmd_replace` verbatim, so the **auto-rollback
   change-gate is NOT tripped** (journal/PONR/`RollbackHardFail` contract

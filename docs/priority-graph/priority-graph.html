@@ -81,7 +81,7 @@
 
 <header>
   <div class="brand">Media<span>Vault</span> · Priority Graph</div>
-  <div class="next">⚡ Next: <b>IMP-A12</b>&nbsp;<span style="color:#9fb0d6">CI pipeline — lock the test suite green</span>&nbsp;·&nbsp;<a href="../../improvements/PRIORITY.md">full list →</a></div>
+  <div class="next">⚡ Next: <b>IMP-E14</b>&nbsp;<span style="color:#9fb0d6">web media-type UI — Phase 2 fetch-in-UI (Phase 1 done)</span>&nbsp;·&nbsp;<a href="../../improvements/PRIORITY.md">full list →</a></div>
   <div class="grow"></div>
   <input id="search" placeholder="search tasks…  (Enter to focus)">
 </header>
@@ -191,6 +191,7 @@ const TASKS = [
  ["E11","id lookup by folder","E","low","todo","Drag folder → get id; daemon path→id too"],
  ["E12","web ops UI","E","done","done","Done (feature/web_console): FastAPI Disk Reclaim console + card-grid SPA; bundled A10, introduced D16"],
  ["E13","multi-episode support","E","done","done","Shipped PR #21 (follow-ups → C12/C13)"],
+ ["E14","web media-type UI","E","high","todo","Phase 1 done (api/items + media-type tabs); phases 2-5 fetch/polish/mobile/TMDB — see docs/feature-web-media-ui/PLAN.md"],
  // F — moonshots
  ["F1","encrypt-at-rest","F","med","todo","Privacy — see X3 (container constraint)"],
  ["F2","CDC dedup","F","low","todo","Blocked by container constraint; small real win"],
@@ -246,7 +247,7 @@ const TASKS = [
 ];
 /* dependency / flow edges [from,to] — major chains only */
 const EDGES = [
- ["A2","A4"],["A4","A5"],["A4","E12"],["A4","D1"],["A4","S2"],["A3","S2"],["E12","D16"],
+ ["A2","A4"],["A4","A5"],["A4","E12"],["A4","D1"],["A4","S2"],["A3","S2"],["E12","D16"],["E12","E14"],["A12","E14"],
  ["A2","D10"],["E3","U3"],["E3","D10"],["E3","D1"],["D4","D5"],
  ["S1","S2"],["S2","S3"],["S3","S4"],["S4","S5"],["S2","E9"],["S2","U2"],
  ["C6","S3"],["S4","U1"],["E4","S4"],["E4","S5"],["E5","S5"],["C1","S2"],

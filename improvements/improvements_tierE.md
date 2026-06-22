@@ -276,3 +276,24 @@
   - Generalises to 3+ episodes per file (`E17E18E19`) with no extra code.
   - 6 new tests (F–K); 11 total pass.
 - Status: done (follow-up bugs found in the 2026-06-12 review — whole-library iterators and single-id commands missed the de-alias memo — are tracked as IMP-C12 / IMP-C13)
+
+---
+
+## IMP-E14: Web media-type UI (tabs + fetch-in-UI + posters)
+
+- Category: other
+- Priority: high
+- Files: `webui/server.py` (new `GET /api/items` route, `items_payload()` helper, `_classify_item` shared with `collect_reclaimable`); `webui/static/` (media-type tab rail + sub-view rail SPA additions); `main.py` (`items_payload`, `_classify_item`, `_category_of`)
+- Parent / prerequisite: IMP-E12 (the FastAPI ops console and card-grid SPA substrate)
+- Tracked plan: `docs/feature-web-media-ui/PLAN.md`
+- Phased scope:
+  - **Phase 1 ✓ done** (branch `feature/imp_e14_web_media_tabs`): new read-only `GET /api/items` endpoint returning `main.items_payload()` = `{"items":[...], "by_category":{movies,series,anime,other}}`; every PHYSICAL leaf (skips `season_map`/`multi_ep_alias`) with `id, category, state, size_bytes, path, title, year, tmdb_id, poster_available, chunk_count` (+ `parent_id`); includes ALL states incl. `archived` (divergence from `/api/reclaim` which excludes archived). `items_payload` and `collect_reclaimable` share a `_classify_item` helper so the two endpoints can't drift on state semantics. Frontend: media-type tab rail (Movies / TV series / Anime / Others, keyed by id-prefix via `_category_of`) + sub-view rail (Unprepped / Local·not-pushed / Pushed·not-archived / Fetched·not-archived / Archived); UNPREPPED rows still sourced from `/api/reclaim`. No build step — vanilla ES modules. Tests added.
+  - **Phase 2** (fetch-in-UI + per-item fetch action + progress polling): surface the fetch workflow inside the media-type UI; progress via the existing polled job mechanism.
+  - **Phase 3** (polish + PWA): visual polish, PWA manifest, keyboard nav, accessibility.
+  - **Phase 4** (mobile + Tailscale + auth): responsive layout, Tailscale-safe binding, optional basic-auth (IMP-A5).
+  - **Phase 5** (TMDB posters + rename): real poster artwork (IMP-E3/D17), proper title display (IMP-U3).
+- Rationale: The ops console was the disk-reclaim foundation; the media-type UI is the step toward a usable library browser that surfaces what you have by type, not just by disk pressure. The phased approach ships Phase 1 immediately (the `api/items` endpoint + tab structure) while the fuller phases land as later PRs.
+- Effort estimate: large overall (phased — Phase 1 was medium; Phases 2-5 each small-to-medium)
+- Risk: low (Phase 1 is read-only; later phases call existing `cmd_*` unchanged via the existing job queue — no rollback-contract change)
+- If skipped: the console stays disk-reclaim-only; there's no browsable media-type view, and fetch-in-UI/mobile access stay future-only.
+- Status: in_progress (Phase 1 done on `feature/imp_e14_web_media_tabs`; Phases 2–5 pending)

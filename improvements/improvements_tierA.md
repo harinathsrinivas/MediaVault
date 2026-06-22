@@ -246,4 +246,5 @@
 - Effort estimate: small
 - Risk: low — additive workflow file; no runtime code. Main risk is runner-path assumptions in fixtures (sandbox already tmp-pathed).
 - If skipped: a future PR (or a multi-candidate pipeline run) merges with a silently broken suite — the exact failure mode the suite was built to prevent, one `pytest` invocation away from being caught.
-- Status: pending
+- Status: done
+- Note (2026-06-22): GitHub Actions CI (`.github/workflows/ci.yml`) runs `pytest -q` + `pytest tests/smoke -q` on every PR into main; required-status-check on main is a one-time repo setting.

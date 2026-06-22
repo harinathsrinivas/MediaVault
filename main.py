@@ -2938,6 +2938,22 @@ _RECLAIMABLE_STATUS_BADGE = {
     "restored_local": "RESTORED_REPLACE_AGAIN",
 }
 
+# Full library-status -> lifecycle-state map for items_payload (IMP-E14). It is
+# _RECLAIMABLE_STATUS_BADGE plus the "archived" terminal state that
+# collect_reclaimable deliberately drops but the media-type UI must show. The
+# four keys are the ONLY statuses a physical leaf ever carries (verified against
+# every library-entry status write in main.py — "pending"/"done" are
+# download-queue statuses in mainfetch.py, never a leaf). Used only as a
+# fallback when classify_entry_state returns None for a known leaf (its
+# disk-truth gate fired); classify_entry_state remains the primary classifier so
+# the four reclaim states match collect_reclaimable byte-for-byte.
+_LIFECYCLE_STATE_BY_STATUS = {
+    "local_ready":    "LOCAL_NOT_PUSHED",
+    "onboarded":      "PUSHED_NOT_ARCHIVED",
+    "restored_local": "RESTORED_REPLACE_AGAIN",
+    "archived":       "ARCHIVED",
+}
+
 # Disk-walk exclusions — identical set to cmd_scan_unprepped (main.py:2613).
 _RECLAIM_EXCLUDE_DIRS = [SPLIT_DIR_NAME, CHECKSUM_DIR_NAME, RESTORE_DIR_NAME,
                          ".git", ".idea", "__pycache__", "Utils"]
@@ -3296,6 +3312,174 @@ def collect_reclaimable():
         "total_reclaimable_bytes": total_bytes,
         "total_reclaimable_human": human_readable_size(total_bytes),
     }
+
+
+def _items_category_of(mid):
+    """Library-id prefix -> media category, mirroring webui/server.py:_category_of
+    (server.py:268-276). Kept here so items_payload has no webui dependency."""
+    if mid.startswith("mov"):
+        return "movies"
+    if mid.startswith("tv"):
+        return "series"
+    if mid.startswith("ani"):
+        return "anime"
+    return "other"
+
+
+def items_payload():
+    """Read-only enumeration of EVERY physical library leaf for the media-type UI
+    (IMP-E14, Phase 1). The data layer behind the SPA's movies/series/anime tabs.
+
+    Unlike collect_reclaimable (which lists only what occupies *reclaimable* local
+    disk and deliberately EXCLUDES archived rows), items_payload INCLUDES archived
+    leaves — a leaf with status "archived" whose on-disk file is a dummy is a real
+    row here (state ARCHIVED). That is the new data path this builder adds.
+
+    Disk-anchored, like collect_reclaimable: it walks the three category roots
+    (PASS 1) and then sweeps the library for any physical leaf the walk missed —
+    notably ARCHIVED leaves whose dummy file lives outside the walked roots, or
+    whose root is absent (PASS 2). Rows are de-duped by normpath-lower so a
+    library leaf and its on-disk file yield exactly ONE row.
+
+    Each row is flat and JSON-serializable:
+      {id, category, state, size_bytes, path, title, year, tmdb_id,
+       poster_available, chunk_count, parent_id?}
+
+    - category in movies|series|anime|other (by id prefix, _items_category_of).
+    - state in UNPREPPED|LOCAL_NOT_PUSHED|PUSHED_NOT_ARCHIVED|
+      RESTORED_REPLACE_AGAIN|ARCHIVED. Primary classifier is
+      classify_entry_state(entry, on_disk_real) so the four reclaim states match
+      collect_reclaimable exactly; when it returns None for a *known* leaf (its
+      disk-truth gate fired, e.g. an onboarded entry already dummied on disk) the
+      state falls back to _LIFECYCLE_STATE_BY_STATUS[status] so every physical
+      leaf still carries a definite lifecycle state.
+    - parent_id is present only when the entry carries one (season episodes).
+    - tmdb_id / poster_available are Phase-5 fields wired now: tmdb_id reads
+      metadata.tmdb_id if present else None; poster_available is always False
+      until the media-image route lands.
+
+    Strictly READ-ONLY: loads the library once via load_library(); never mutates
+    it, never save_library, never touches a media byte. Non-physical entry types
+    ("season_map", "multi_ep_alias") are skipped BEFORE any folder_path/filename
+    access (the PR #21 crash class) and never emit a row.
+    """
+    library = load_library()
+
+    # Index physical leaves once: normpath-lower(folder_path/filename) -> (id, entry).
+    # Skip non-physical types up front — they own no folder_path/filename (PR #21).
+    known_paths = {}
+    for mid, entry in library.items():
+        if entry.get("type") in ("season_map", "multi_ep_alias"):
+            continue
+        fp = entry.get("folder_path")
+        fn = entry.get("filename")
+        if not fp or not fn:
+            continue
+        key = os.path.normpath(os.path.join(fp, fn)).lower()
+        known_paths[key] = (mid, entry)
+
+    items = []
+    seen = set()  # normpath-lower keys already emitted — single anti-double-count source.
+
+    def _resolve_state(entry, on_disk_real):
+        """5-valued lifecycle state for one (entry, on-disk-real) pair.
+
+        Primary: classify_entry_state — keeps the four reclaim states identical to
+        collect_reclaimable (incl. its disk-truth gate). It returns None only for
+        a known leaf whose working-status file is already a dummy; for such a leaf
+        fall back to the status map so the row carries a definite state. entry is
+        never None here (callers pass a real leaf)."""
+        state = classify_entry_state(entry, on_disk_real)
+        if state is not None:
+            return state
+        return _LIFECYCLE_STATE_BY_STATUS.get(entry.get("status"))
+
+    def _add_leaf(norm_key, mid, entry, state, path, size):
+        if norm_key in seen:
+            return
+        seen.add(norm_key)
+        meta = entry.get("metadata") or {}
+        row = {
+            "id": mid,
+            "category": _items_category_of(mid),
+            "state": state,
+            "size_bytes": size,
+            "path": path,
+            "title": meta.get("title") or mid,
+            "year": meta.get("year"),
+            "tmdb_id": meta.get("tmdb_id"),
+            "poster_available": False,  # Phase-5 media-image route — wired, off.
+            "chunk_count": (entry.get("split_info") or {}).get("total_chunks") or 1,
+        }
+        if entry.get("parent_id"):
+            row["parent_id"] = entry["parent_id"]
+        items.append(row)
+
+    # ---- PASS 1: disk-first walk of the three category roots ----
+    # Mirrors collect_reclaimable PASS 1. Only KNOWN leaves become rows here:
+    # items_payload enumerates the *library*, so an unknown on-disk file (no
+    # library identity, hence no category/state/metadata) is not an item — it is
+    # collect_reclaimable's UNPREPPED concern, not this builder's.
+    categories = [
+        os.path.join(LOCAL_ROOT, "Movies"),
+        os.path.join(LOCAL_ROOT, "Series"),
+        os.path.join(LOCAL_ROOT, "Anime"),
+    ]
+    for folder_path in categories:
+        if not os.path.exists(folder_path):
+            continue  # absent root -> PASS 2 still catches its library leaves
+        for root, dirs, files in os.walk(folder_path):
+            dirs[:] = [d for d in dirs if d not in _RECLAIM_EXCLUDE_DIRS]
+            for f in files:
+                if not f.lower().endswith(VIDEO_EXTENSIONS):
+                    continue
+                if f.endswith(".temp_dummy"):
+                    continue
+                if ".chunk." in f:
+                    continue
+                full_path = os.path.join(root, f)
+                norm_key = os.path.normpath(full_path).lower()
+                found = known_paths.get(norm_key)
+                if found is None:
+                    continue  # not a library leaf -> not an item
+                try:
+                    size = os.path.getsize(full_path)
+                except OSError:
+                    continue
+                on_disk_real = size >= DUMMY_MAX_BYTES
+                mid, entry = found
+                state = _resolve_state(entry, on_disk_real)
+                if state is not None:
+                    _add_leaf(norm_key, mid, entry, state, full_path, size)
+
+    # ---- PASS 2: every physical library leaf the walk missed ----
+    # The key addition vs collect_reclaimable: ARCHIVED leaves (dummy on disk)
+    # belong here, plus any leaf whose root was absent above. De-duped via `seen`.
+    for mid, entry in library.items():
+        if entry.get("type") in ("season_map", "multi_ep_alias"):
+            continue
+        fp = entry.get("folder_path")
+        fn = entry.get("filename")
+        if not fp or not fn:
+            continue
+        full_path = os.path.join(fp, fn)
+        norm_key = os.path.normpath(full_path).lower()
+        if norm_key in seen:
+            continue
+        try:
+            size = os.path.getsize(full_path)
+        except OSError:
+            continue  # absent on disk -> no physical leaf to enumerate
+        on_disk_real = size >= DUMMY_MAX_BYTES
+        state = _resolve_state(entry, on_disk_real)
+        if state is not None:
+            _add_leaf(norm_key, mid, entry, state, full_path, size)
+
+    by_category = {"movies": 0, "series": 0, "anime": 0, "other": 0}
+    for it in items:
+        by_category[it["category"]] += 1
+
+    return {"items": items, "by_category": by_category}
 
 
 def cmd_web(host="127.0.0.1", port=8765, open_browser=True):

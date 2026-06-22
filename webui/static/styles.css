@@ -576,9 +576,176 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   cursor: default;
 }
 
+/* Archived "Fetch & Restore" — the real Phase-2 action button. Mint/cold-styled
+   to match the archived hue; turns into a satisfying primary while idle. */
+.action-btn.fetch {
+  background: linear-gradient(135deg, var(--b-archived), #2f9c74);
+  color: #04130f;
+  border-color: rgba(127, 224, 168, 0.5);
+}
+.action-btn.fetch:hover:not(:disabled) { filter: brightness(1.08); }
+.action-btn.fetch:disabled {
+  /* While its job runs the label reads "Fetching…"; keep it clearly inert. */
+  background: rgba(127, 224, 168, 0.10);
+  color: var(--b-archived);
+  border: 1px solid rgba(127, 224, 168, 0.30);
+}
+
 /* Archived card: poster-forward, taller placeholder so it reads as cold/cloud. */
 .card.archived .poster { height: 150px; }
 .card.archived .poster .initial { color: rgba(127, 224, 168, 0.16); }
+
+/* ============================================================================
+   FETCH PROGRESS — CANDIDATE A: CSS conic-gradient ring
+   ----------------------------------------------------------------------------
+   A single GPU-cheap overlay child (.fetch-ring) draws a growing border around
+   the whole card. The sweep is a conic-gradient driven by a registered custom
+   property --progress (0..1); a transition on --progress tweens the sweep
+   between discrete chunk ticks for a "buttery" feel. A ring (hollow centre) is
+   carved from the full conic fill with the padding-box + mask-exclude trick, so
+   only the outer band paints. At 100% a .complete class snaps to a closed loop
+   and adds a gently-settling glow. A numeric "k/N chunks"/"%" label sits in the
+   action zone so progress is legible without any motion.
+   ========================================================================== */
+
+/* Registered property -> --progress is interpolable, so transitions animate the
+   conic sweep smoothly. UNSUPPORTED-BROWSER FALLBACK: where @property is not
+   honoured, --progress is still read (set inline by JS each poll) and the ring
+   updates per tick (no tween) — the numeric label always shows exact progress,
+   so nothing is lost but the smoothing. */
+@property --progress {
+  syntax: "<number>";
+  inherits: false;
+  initial-value: 0;
+}
+
+/* Ring overlay variables (scoped to the card so the fallback path can read
+   --progress even without @property registration). */
+.card.archived {
+  --progress: 0;
+  --ring-w: 3px;                          /* ring thickness */
+  --ring-accent: var(--b-archived);      /* mint — cold/cloud-resident hue */
+  --ring-glow: rgba(127, 224, 168, 0.55);
+  --ring-track: rgba(127, 224, 168, 0.10);
+}
+
+/* The ring lives in a relative card; it overlays the full card frame. */
+.card.archived.fetching,
+.card.archived.fetch-complete { position: relative; }
+
+.fetch-ring {
+  position: absolute;
+  inset: 0;
+  z-index: 4;                            /* above poster/body, below the modal */
+  border-radius: var(--radius);
+  padding: var(--ring-w);                /* the band that becomes the ring */
+  pointer-events: none;                  /* never intercepts clicks */
+  opacity: 0;
+  /* Conic sweep: accent up to --progress of the turn, faint track for the rest.
+     turn units keep the math to a single multiply of the 0..1 fraction. */
+  background: conic-gradient(
+    from -90deg,
+    var(--ring-accent) calc(var(--progress) * 1turn),
+    var(--ring-track) 0
+  );
+  /* Carve the hollow centre: paint the full box, then exclude the content box,
+     leaving only the padding band = a rounded-rect ring. */
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+          mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+          mask-composite: exclude;
+  /* Buttery smoothing between chunk ticks + a soft fade when shown/hidden. */
+  transition: --progress 0.55s cubic-bezier(0.22, 0.61, 0.36, 1),
+              opacity 0.25s ease,
+              filter 0.4s ease;
+}
+
+/* Shown while a fetch is running (or in the demo). */
+.card.archived.fetching .fetch-ring,
+.card.archived.fetch-complete .fetch-ring { opacity: 1; }
+
+/* COMPLETE: the conic is replaced by a SOLID ring so the closed loop has no
+   seam at the 0deg/360deg join. */
+.card.archived.fetch-complete .fetch-ring {
+  background: var(--ring-accent);
+}
+
+/* The outer GLOW lives on the CARD (box-shadow), NOT on the ring child: the card
+   has overflow:hidden, which would clip a child's drop-shadow halo. A parent's
+   own box-shadow renders outside its overflow clip, so the halo shows. While
+   filling it is a soft steady halo; on complete a one-shot pulse settles down. */
+.card.archived.fetching {
+  box-shadow: 0 0 0 1px rgba(127, 224, 168, 0.25), 0 0 14px var(--ring-glow);
+}
+.card.archived.fetch-complete {
+  box-shadow: 0 0 0 1px rgba(127, 224, 168, 0.4), 0 0 18px var(--ring-glow);
+  animation: ring-finish 0.85s ease-out;
+}
+@keyframes ring-finish {
+  0%   { box-shadow: 0 0 0 1px rgba(127,224,168,.3), 0 0 10px var(--ring-glow); }
+  45%  { box-shadow: 0 0 0 2px rgba(127,224,168,.55), 0 0 28px var(--ring-glow); }
+  100% { box-shadow: 0 0 0 1px rgba(127,224,168,.4), 0 0 18px var(--ring-glow); }
+}
+
+/* Numeric progress label (legible without motion) — lives in the action zone. */
+.fetch-progress {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--b-archived);
+}
+.card.archived.fetching .fetch-progress,
+.card.archived.fetch-complete .fetch-progress { display: flex; }
+.fetch-progress .pct {
+  font-variant-numeric: tabular-nums;
+  background: rgba(127, 224, 168, 0.10);
+  border: 1px solid rgba(127, 224, 168, 0.28);
+  border-radius: 7px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+.fetch-progress .chunks { color: var(--text-faint); font-weight: 600; }
+.card.archived.fetch-complete .fetch-progress { color: var(--accent); }
+.card.archived.fetch-complete .fetch-progress .pct {
+  background: rgba(56, 224, 200, 0.12);
+  border-color: rgba(56, 224, 200, 0.3);
+}
+
+/* Small DEMO tag shown only in the ?demo live-preview. */
+.demo-tag {
+  position: absolute;
+  top: 10px;
+  left: 12px;
+  z-index: 5;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: #04130f;
+  background: var(--b-archived);
+  border-radius: 6px;
+  padding: 2px 7px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+
+/* REDUCED MOTION: drop the conic tween (no animated sweep) and the finish
+   pulse. The ring still fills proportionally — it just jumps per tick — and the
+   numeric label carries exact progress. focus-visible is untouched. */
+@media (prefers-reduced-motion: reduce) {
+  .fetch-ring {
+    transition: opacity 0.2s ease;      /* keep only a gentle show/hide fade */
+  }
+  .card.archived.fetch-complete .fetch-ring { animation: none; }
+}
 
 /* Job result panel */
 .job-panel {

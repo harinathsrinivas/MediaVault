@@ -33,7 +33,7 @@ import {
   STATE_ORDER,
   metaFor,
 } from "./data.js";
-import { buildCard, runAction, setRefreshHandler } from "./card.js";
+import { buildCard, runAction, setRefreshHandler, runDemo } from "./card.js";
 import { wireModal } from "./modal.js";
 
 function $(sel, root) {
@@ -451,6 +451,55 @@ function wireSort() {
 // Init
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// ?demo / #demo live-preview of the fetch progress border (no backend call).
+// Navigate to a category whose Archived sub-view has items, then drive the REAL
+// border code path with synthetic chunk progress on the first archived card.
+// ---------------------------------------------------------------------------
+
+function demoRequested() {
+  try {
+    var u = new URL(window.location.href);
+    return u.searchParams.has("demo") || u.hash.replace("#", "") === "demo";
+  } catch (e) {
+    // Fallback for any environment without URL (defensive only).
+    return /[?&]demo\b/.test(window.location.search) ||
+      window.location.hash === "#demo";
+  }
+}
+
+// Pick the first category that actually has an ARCHIVED item so the demo always
+// lands on a real archived card. Returns the category or null if none archived.
+function firstArchivedCategory() {
+  for (var i = 0; i < CATEGORY_ORDER.length; i += 1) {
+    if (countFor(CATEGORY_ORDER[i], "ARCHIVED") > 0) return CATEGORY_ORDER[i];
+  }
+  return null;
+}
+
+function startDemo() {
+  var cat = firstArchivedCategory();
+  if (!cat) {
+    setStatus(
+      "Demo: no archived items to preview the fetch border on. Archive an item, then reload with ?demo.",
+      false
+    );
+    return;
+  }
+  // Navigate to that category's Archived sub-view (no transition, paint now), so
+  // the first .card.archived is in the DOM, then drive the synthetic animation.
+  activeCategory = cat;
+  activeState = "ARCHIVED";
+  refreshTabSelection();
+  buildSubnav();
+  renderPanel(false);
+  setStatus("Demo — synthetic fetch progress (no real fetch). Watch the card border fill.", false);
+  // Defer one frame so the freshly-painted card is laid out before we animate.
+  requestAnimationFrame(function () {
+    runDemo();
+  });
+}
+
 function init() {
   wireModal();
   wireSort();
@@ -458,7 +507,23 @@ function init() {
   setRefreshHandler(function () {
     load(false);
   });
-  load(true);
+  var demo = demoRequested();
+  // On first load, paint normally; if ?demo is set, kick the live preview once
+  // the model is ready (load() resolves async, so chain off it).
+  if (demo) {
+    setStatus("Scanning library…");
+    loadModel()
+      .then(function (model) {
+        MODEL = model;
+        renderAll(true);
+        startDemo();
+      })
+      .catch(function (err) {
+        setStatus("Failed to load library — " + ((err && err.message) || err), true);
+      });
+  } else {
+    load(true);
+  }
 }
 
 if (document.readyState === "loading") {

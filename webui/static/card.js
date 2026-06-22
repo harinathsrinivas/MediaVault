@@ -11,6 +11,18 @@
  * posters land Phase 5) and, for the ARCHIVED sub-view, a disabled
  * "Fetch & Restore — coming next" affordance (the working button arrives in
  * Phase 2). The poster slot exists in the template now so Phase 2/5 can fill it.
+ *
+ * Phase 2 (IMP-E14, CANDIDATE A — CSS conic-gradient ring): the Archived card's
+ * stub is replaced by a WORKING "Fetch & Restore" button that POSTs to
+ * /api/action/fetch_restore and polls /api/job/{id}. Each poll reads the job's
+ * `progress {done,total}` (chunk units) and drives a GROWING conic-gradient RING
+ * around the card via a single CSS custom property --progress (0..1), smoothed
+ * between discrete chunk ticks by a CSS transition. On terminal `done` the ring
+ * snaps to a glowing closed loop and (after REFRESH_AFTER_JOB_MS) the model is
+ * re-fetched so the card flips out of Archived into "Fetched·not-archived". A
+ * numeric "k/N chunks · %" label rides alongside for legibility without motion.
+ * driveBorder() is the SINGLE faithful code path; the ?demo preview feeds it
+ * synthetic numbers (see runDemo()).
  */
 
 "use strict";
@@ -205,15 +217,11 @@ export function buildCard(item) {
   var jobPanel = $(".item-job", node);
 
   if (isArchived) {
-    // Phase 1: disabled "coming next" stub. Phase 2 replaces this with the real
-    // Fetch & Restore action against /api/action/fetch_restore.
-    var stub = document.createElement("button");
-    stub.type = "button";
-    stub.className = "action-btn coming-soon";
-    stub.disabled = true;
-    stub.textContent = "Fetch & Restore — coming next";
-    stub.title = "Cloud fetch + restore lands in Phase 2";
-    actions.appendChild(stub);
+    // Phase 2 (Candidate A): the WORKING Fetch & Restore action. Per the Open
+    // Decision we surface ONLY Fetch & Restore (no download-only button). The
+    // conic-gradient ring overlay + the numeric progress label are created here
+    // so the live ?demo can target the first archived card after render.
+    buildFetchAffordance(item, node, actions, jobPanel);
   } else if (m.action) {
     var btn = document.createElement("button");
     btn.type = "button";
@@ -229,6 +237,266 @@ export function buildCard(item) {
   }
 
   return node;
+}
+
+// ---------------------------------------------------------------------------
+// Fetch & Restore (ARCHIVED) — CANDIDATE A: CSS conic-gradient progress ring
+// ---------------------------------------------------------------------------
+
+// Build the Archived card's working action: the Fetch & Restore button, the
+// conic-gradient ring overlay element, and the numeric progress label. The ring
+// + label exist from build time (hidden until a fetch runs) so the ?demo
+// preview can drive the REAL code path on the first archived card.
+function buildFetchAffordance(item, node, actions, jobPanel) {
+  // Ring overlay: a single child the CSS paints as a hollow conic-gradient ring
+  // driven by --progress. pointer-events:none keeps it click-through.
+  var ring = document.createElement("div");
+  ring.className = "fetch-ring";
+  ring.setAttribute("aria-hidden", "true"); // numeric label is the a11y channel
+  node.appendChild(ring);
+
+  // Numeric progress label (legible without motion). Two spans: a % chip and a
+  // "k/N chunks" detail. aria-live=polite so a screen reader hears advances.
+  var prog = document.createElement("div");
+  prog.className = "fetch-progress";
+  prog.setAttribute("role", "status");
+  prog.setAttribute("aria-live", "polite");
+  var pct = document.createElement("span");
+  pct.className = "pct";
+  pct.textContent = "0%";
+  var chunks = document.createElement("span");
+  chunks.className = "chunks";
+  chunks.textContent = "starting…";
+  prog.appendChild(pct);
+  prog.appendChild(chunks);
+
+  // Button.
+  var btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "action-btn fetch";
+  btn.textContent = "Fetch & Restore";
+  btn.title = "Fetch from cloud and restore locally";
+  btn.addEventListener("click", function () {
+    runFetchRestore(item, btn, node, prog, jobPanel);
+  });
+
+  actions.appendChild(btn);
+  actions.appendChild(prog);
+
+  // Stash the handles the demo needs without a separate lookup.
+  node._fetchBtn = btn;
+  node._fetchProg = prog;
+  node._fetchJobPanel = jobPanel;
+}
+
+// Fraction in [0,1] from a job progress dict. total===0 is "indeterminate" — we
+// return 0 so the ring sits at its origin rather than reading a bogus value.
+function fractionOf(progress) {
+  if (!progress) return 0;
+  var total = Number(progress.total) || 0;
+  if (total <= 0) return 0;
+  var done = Number(progress.done) || 0;
+  var f = done / total;
+  if (f < 0) return 0;
+  if (f > 1) return 1; // server already clamps, but guard the UI regardless
+  return f;
+}
+
+// THE SINGLE FAITHFUL BORDER DRIVER. Sets --progress on the card (the conic
+// sweep follows it, tweened by the CSS transition) and updates the numeric
+// label. `phase` is "running" | "done". Called identically by real polls and by
+// the ?demo preview — only the numbers differ.
+//   node     : the .card element (carries --progress + state classes)
+//   prog     : the .fetch-progress label element
+//   progress : {done,total} (chunk units); total===0 -> indeterminate
+//   phase    : "running" snaps nothing; "done" closes the loop + glows
+function driveBorder(node, prog, progress, phase) {
+  var total = Number(progress && progress.total) || 0;
+  var done = Number(progress && progress.done) || 0;
+  // A "done" phase ALWAYS closes the loop to a full ring — even when the server
+  // degraded progress to a status-only {1,1} (push/replace style, no chunk
+  // markers) or to {0,0}: completion means the border is full, full stop.
+  var frac = phase === "done" ? 1 : fractionOf(progress);
+
+  // Drive the ring. Setting the custom property is all the conic needs; the CSS
+  // transition on --progress does the buttery smoothing between ticks.
+  node.style.setProperty("--progress", String(frac));
+
+  // State classes flip the ring's visibility + the complete glow.
+  if (phase === "done") {
+    node.classList.remove("fetching");
+    node.classList.add("fetch-complete");
+  } else {
+    node.classList.remove("fetch-complete");
+    node.classList.add("fetching");
+  }
+
+  // Numeric label. Percent is rounded for the chip; chunks show the raw count.
+  var pctEl = prog.querySelector(".pct");
+  var chunkEl = prog.querySelector(".chunks");
+  if (phase === "done") {
+    var dTotal = total > 0 ? total : done > 0 ? done : 1;
+    pctEl.textContent = "100%";
+    chunkEl.textContent = dTotal + "/" + dTotal + " chunks · done";
+  } else if (total > 0) {
+    pctEl.textContent = Math.round(frac * 100) + "%";
+    chunkEl.textContent = done + "/" + total + " chunks";
+  } else {
+    // Indeterminate: no chunk markers yet (e.g. before the first PROCESSING
+    // line, or a non-split single file). Be honest rather than fake a number.
+    pctEl.textContent = "…";
+    chunkEl.textContent = done > 0 ? done + " chunks" : "preparing…";
+  }
+}
+
+// Clear all ring/label state from a card (used on error so the card returns to
+// a clean Archived presentation before the button is re-enabled).
+function clearBorder(node) {
+  node.classList.remove("fetching", "fetch-complete");
+  node.style.removeProperty("--progress");
+}
+
+// POST /api/action/fetch_restore {id, options:{episodes}} and poll. Default =
+// whole entry (episodes omitted). Disables the button for the job's lifetime to
+// prevent a double-submit; the poll re-enables on terminal done OR error.
+export function runFetchRestore(item, btn, node, prog, jobPanel, episodes) {
+  if (btn.disabled) return; // guard against a double-click before disable lands
+  btn.disabled = true;
+  btn.textContent = "Fetching…";
+
+  // Show the ring immediately at 0 (indeterminate) so the user gets instant
+  // feedback before the first poll returns real chunk counts.
+  driveBorder(node, prog, { done: 0, total: 0 }, "running");
+  renderJob(jobPanel, { status: "running", name: "fetch_restore", output: "" }, true);
+
+  var body = { id: item.id, options: {} };
+  if (episodes) body.options.episodes = episodes; // omit => whole entry
+
+  fetch("/api/action/fetch_restore", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  })
+    .then(function (res) {
+      if (res.status === 202) return res.json();
+      return res.text().then(function (t) {
+        var detail = t;
+        try {
+          var parsed = JSON.parse(t);
+          if (parsed && parsed.detail) detail = parsed.detail;
+        } catch (e) {
+          /* non-JSON body — keep raw text */
+        }
+        throw new Error(actionHttpError(res.status, detail));
+      });
+    })
+    .then(function (data) {
+      pollFetchJob(data.job_id, node, prog, btn, jobPanel);
+    })
+    .catch(function (err) {
+      failFetch(node, prog, btn, jobPanel, String((err && err.message) || err));
+    });
+}
+
+// Poll a fetch job, driving the ring from job.progress each tick. On terminal
+// `done`: snap the ring to a glowing closed loop, show the final output, and
+// schedule the model refresh that flips the card to Fetched·not-archived. On
+// `error`: surface the captured output faithfully (it may carry a resume hint),
+// clear the ring, re-enable the button, leave the card in Archived.
+function pollFetchJob(jobId, node, prog, btn, jobPanel) {
+  function tick() {
+    fetch("/api/job/" + encodeURIComponent(jobId))
+      .then(function (res) {
+        if (!res.ok) {
+          return res.text().then(function (t) {
+            throw new Error("HTTP " + res.status + (t ? ": " + t : ""));
+          });
+        }
+        return res.json();
+      })
+      .then(function (job) {
+        var status = job.status;
+        if (status === "running") {
+          driveBorder(node, prog, job.progress, "running");
+          renderJob(jobPanel, job, true);
+          setTimeout(tick, POLL_MS);
+          return;
+        }
+        if (status === "done") {
+          driveBorder(node, prog, job.progress, "done");
+          renderJob(jobPanel, job, false);
+          btn.disabled = false;
+          btn.textContent = "Fetch & Restore";
+          // Auto-flip: after the usual delay the model reloads and the card
+          // leaves Archived for Fetched·not-archived (state RESTORED_REPLACE_-
+          // AGAIN). scheduleRefresh is debounced so concurrent fetches coalesce.
+          scheduleRefresh();
+          return;
+        }
+        // status === "error" (or any non-terminal-unknown -> treat as error).
+        failFetch(node, prog, btn, jobPanel, (job.output || "").toString(), job);
+      })
+      .catch(function (err) {
+        failFetch(node, prog, btn, jobPanel, String((err && err.message) || err));
+      });
+  }
+  tick();
+}
+
+// Common error landing for a fetch: faithful output, ring cleared, button back.
+// The card stays in Archived (NO refresh scheduled) so the user can retry.
+function failFetch(node, prog, btn, jobPanel, output, job) {
+  clearBorder(node);
+  renderJob(
+    jobPanel,
+    { status: "error", name: "fetch_restore", output: output, progress: job && job.progress },
+    false
+  );
+  btn.disabled = false;
+  btn.textContent = "Fetch & Restore";
+}
+
+// ?demo / #demo live preview (IDENTICAL contract in both candidates). Drives the
+// REAL driveBorder() code path with SYNTHETIC progress on the first archived
+// card — NO backend call, NO real fetch. total=8, done ticks 1->8 every ~600ms,
+// then status "done" -> the glow finish. A "DEMO" tag marks the card.
+export function runDemo() {
+  var card = document.querySelector(".card.archived");
+  if (!card || !card._fetchProg) return false;
+  var prog = card._fetchProg;
+  var btn = card._fetchBtn;
+
+  // Mark the card so it's obvious this is a synthetic preview, and lock the
+  // button (it would hit the backend for real).
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Demo…";
+  }
+  if (!card.querySelector(".demo-tag")) {
+    var tag = document.createElement("span");
+    tag.className = "demo-tag";
+    tag.textContent = "Demo";
+    card.appendChild(tag);
+  }
+
+  var TOTAL = 8;
+  var STEP_MS = 600;
+  var done = 0;
+  driveBorder(card, prog, { done: 0, total: TOTAL }, "running");
+
+  function step() {
+    done += 1;
+    if (done <= TOTAL) {
+      driveBorder(card, prog, { done: done, total: TOTAL }, "running");
+      setTimeout(step, STEP_MS);
+    } else {
+      // Finish: snap to the glowing closed loop.
+      driveBorder(card, prog, { done: TOTAL, total: TOTAL }, "done");
+      if (btn) btn.textContent = "Demo complete";
+    }
+  }
+  setTimeout(step, STEP_MS);
+  return true;
 }
 
 // ---------------------------------------------------------------------------

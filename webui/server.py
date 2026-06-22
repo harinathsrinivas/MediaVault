@@ -36,6 +36,7 @@ import contextlib
 import io
 import os
 import queue
+import re
 import threading
 import time
 
@@ -132,6 +133,148 @@ ACTION_TABLE = {
 _NONE_IS_SUCCESS = {"sort", "fetch_restore"}
 
 # ---------------------------------------------------------------------------
+# Progress parsing (IMP-E14 phase 2).
+#
+# The progress UNIT is fetch *chunks*: chunks-done / total_chunks. We derive it
+# by parsing mainfetch.py's stdout (mainfetch is NEVER modified) line by line:
+#
+#   * total  — sum over each "🔹 PROCESSING:" block. A block contributes the N
+#     from its "   > Detected Split File (N chunks)" line if it has one; a block
+#     with NO split line counts as 1 chunk (single-file entry). season_map runs
+#     emit several PROCESSING blocks, so we sum across all of them.
+#   * done   — count of "     ✅ MOVED: <filename>" lines.
+#
+# Non-fetch actions (push / replace / sort) print neither PROCESSING nor chunk
+# lines, so total stays 0 and progress is status-only {done:0,total:0} while
+# running. This function NEVER raises and NEVER reports done>total: when total is
+# 0 we report {0,0} regardless of any stray MOVED line, and otherwise done is
+# clamped to total. The trailing-period variant emitted by cmd_prep
+# ("(N chunks).") is matched too, but such a line outside a PROCESSING block does
+# not contribute (only chunk lines inside a PROCESSING block are summed).
+# ---------------------------------------------------------------------------
+
+# "🔹 PROCESSING:" — start of a per-entry fetch block (preceded by a newline in
+# mainfetch; we match the bare marker anywhere on a line).
+_PROC_MARKER = "🔹 PROCESSING:"
+# "✅ MOVED:" — one moved/verified chunk file.
+_MOVED_MARKER = "✅ MOVED:"
+# Capture N from "Detected Split File (N chunks)" with or without a trailing dot.
+_SPLIT_RE = re.compile(r"Detected Split File \((\d+) chunks\)")
+
+# Default progress on every job record from enqueue onward (always present).
+_DEFAULT_PROGRESS = {"done": 0, "total": 0}
+
+
+def _parse_progress(text):
+    """Parse {done,total} (chunk units) from captured mainfetch stdout.
+
+    Pure + total-tolerant: accepts a partial buffer mid-run and never raises.
+    Guarantees 0 <= done <= total. See the module comment above for the rules.
+    """
+    if not text:
+        return {"done": 0, "total": 0}
+
+    total = 0
+    in_block = False          # are we inside a "🔹 PROCESSING:" block yet?
+    block_has_split = False   # did the current block already declare its chunks?
+
+    for line in text.splitlines():
+        if _PROC_MARKER in line:
+            # New entry block. The PREVIOUS block, if it never declared a split,
+            # is a single-file entry worth 1 chunk.
+            if in_block and not block_has_split:
+                total += 1
+            in_block = True
+            block_has_split = False
+            continue
+        if in_block and not block_has_split:
+            m = _SPLIT_RE.search(line)
+            if m:
+                total += int(m.group(1))
+                block_has_split = True
+    # Close out the final block (single-file entries contribute 1).
+    if in_block and not block_has_split:
+        total += 1
+
+    if total == 0:
+        # No fetch blocks at all (push/replace/sort) -> status-only progress.
+        return {"done": 0, "total": 0}
+
+    done = text.count(_MOVED_MARKER)
+    if done > total:
+        done = total  # invariant: never done>total (defensive clamp)
+    return {"done": done, "total": total}
+
+
+def _flush_loop(job_id, buf, stop_event, interval=0.4):
+    """Background flusher: periodically snapshot ``buf`` and publish it (plus a
+    re-parsed progress) onto the job record under JOBS_LOCK.
+
+    Runs as a short-lived daemon thread for the duration of ONE job. It NEVER
+    holds JOBS_LOCK across the sleep/getvalue (only around the dict update), so
+    it cannot deadlock with request threads or the worker. ``stop_event`` is set
+    by the worker in its finally; we wait on the event (not a bare sleep) so
+    shutdown is prompt. We do NOT mutate ``status`` here — only the worker owns
+    terminal-state transitions.
+    """
+    while not stop_event.is_set():
+        # Snapshot OUTSIDE the lock (StringIO.getvalue is cheap; keep the
+        # critical section to the dict write only).
+        snapshot = buf.getvalue()
+        progress = _parse_progress(snapshot)
+        with JOBS_LOCK:
+            record = JOBS.get(job_id)
+            if record is not None:
+                record["output"] = snapshot
+                record["progress"] = progress
+        # Wait on the event so a stop is observed immediately; the timeout is
+        # the snapshot cadence. Never sleep while holding the lock.
+        stop_event.wait(interval)
+
+
+def _finalize_flusher(flusher, stop_event, buf):
+    """Stop + join the flusher and return ONE authoritative final snapshot.
+
+    Idempotent: safe to call from a terminal branch AND again from the outer
+    finally (the second call sees the event already set and the thread already
+    joined). ``buf`` may be None when called only to guarantee the thread is
+    stopped (outer-finally cleanup) — then we return None.
+
+    The join uses a bounded timeout so the worker can never hang on a wedged
+    flusher; since the flusher waits on ``stop_event`` (not a bare sleep), it
+    returns within one ``wait()`` wakeup, well under the timeout.
+    """
+    stop_event.set()
+    if flusher is not None and flusher.is_alive():
+        flusher.join(timeout=2.0)
+    if buf is None:
+        return None
+    return buf.getvalue()
+
+
+def _terminal_progress(final_output, ok):
+    """Compute the progress dict to publish at a terminal state.
+
+    On success: report completion. For a fetch (total>0) that is
+    {done:total,total:total} (every chunk MOVED); the parser already yields that
+    once all MOVED lines are present, but we re-clamp done=total defensively so a
+    missed tail line can never leave a "done" job at 99%. For a non-fetch success
+    (total==0, e.g. push/replace/sort) we report {done:1,total:1} so the UI shows
+    a clean 100% on completion.
+
+    On failure: keep the last truthful parse (do NOT fabricate completion) so an
+    errored fetch shows how far it actually got. Guaranteed done<=total.
+    """
+    prog = _parse_progress(final_output)
+    if not ok:
+        return prog
+    total = prog["total"]
+    if total > 0:
+        return {"done": total, "total": total}
+    return {"done": 1, "total": 1}
+
+
+# ---------------------------------------------------------------------------
 # Job registry + the single serialized worker.
 #
 # JOBS is the module-level job-record store, guarded by JOBS_LOCK. Every read or
@@ -180,9 +323,23 @@ def _worker_loop():
             # keep the worker alive and retry.
             continue
 
+        stop_event = threading.Event()
+        flusher = None
         try:
             _set_job(job_id, status="running")
             buf = io.StringIO()
+            # Start the background flusher: it snapshots `buf` every ~0.4s and
+            # publishes partial output + a re-parsed progress onto the job
+            # record. Capture itself (redirect_stdout below) is UNCHANGED — the
+            # flusher only reads the buffer. It is a transient PUBLISHER thread,
+            # not a second worker; the single-worker serialization is intact.
+            flusher = threading.Thread(
+                target=_flush_loop,
+                args=(job_id, buf, stop_event),
+                name=f"mediavault-web-flush-{job_id}",
+                daemon=True,
+            )
+            flusher.start()
             # SAFE BY CONSTRUCTION: only one action runs at a time, so
             # redirecting the process-global stdout here cannot race another
             # action's output. This is the headline advantage of the serialized
@@ -195,17 +352,24 @@ def _worker_loop():
                 # non-zero/None exit as an error; a clean exit(0) as success.
                 code = exc.code
                 ok = code in (0, None)
+                # Stop the flusher and take ONE authoritative final snapshot so
+                # terminal output is complete (no lost tail between the last tick
+                # and now) and progress is consistent with that final output.
+                final_output = _finalize_flusher(flusher, stop_event, buf)
                 _set_job(
                     job_id,
                     status="done" if ok else "error",
-                    output=buf.getvalue()
+                    output=final_output
                     + ("" if ok else f"\n[exited with code {code}]"),
+                    progress=_terminal_progress(final_output, ok),
                 )
             except BaseException as exc:  # RollbackHardFail + anything else
+                final_output = _finalize_flusher(flusher, stop_event, buf)
                 _set_job(
                     job_id,
                     status="error",
-                    output=buf.getvalue() + f"\n[{type(exc).__name__}] {exc}",
+                    output=final_output + f"\n[{type(exc).__name__}] {exc}",
+                    progress=_terminal_progress(final_output, False),
                 )
             else:
                 # No exception was raised — decide done vs error from the return
@@ -224,10 +388,12 @@ def _worker_loop():
                     ok = name in _NONE_IS_SUCCESS
                 else:
                     ok = True
+                final_output = _finalize_flusher(flusher, stop_event, buf)
                 _set_job(
                     job_id,
                     status="done" if ok else "error",
-                    output=buf.getvalue(),
+                    output=final_output,
+                    progress=_terminal_progress(final_output, ok),
                 )
         except BaseException as exc:
             # Last-resort guard: even a failure in our own bookkeeping must not
@@ -237,6 +403,15 @@ def _worker_loop():
             except Exception:
                 pass
         finally:
+            # Belt-and-suspenders: GUARANTEE the flusher is stopped + joined for
+            # this job, even if the body raised before its per-branch finalize
+            # (e.g. _set_job itself threw). _finalize_flusher is idempotent, so a
+            # second call after a normal terminal path is a cheap no-op. This is
+            # what prevents a leaked flusher thread bleeding into the next job.
+            try:
+                _finalize_flusher(flusher, stop_event, None)
+            except Exception:
+                pass
             try:
                 WORK_QUEUE.task_done()
             except Exception:
@@ -271,6 +446,12 @@ def _enqueue(name, runner, body):
             "name": name,
             "status": "running",
             "output": "",
+            # progress is ALWAYS present from enqueue (default 0/0); the flusher
+            # advances it while running and the terminal path finalizes it. Each
+            # record gets its OWN dict (never the shared default) so concurrent
+            # jobs can't alias each other's progress.
+            "progress": dict(_DEFAULT_PROGRESS),
+            "progress_unit": "chunks",
             "started_at": time.time(),
         }
     WORK_QUEUE.put((job_id, name, runner, body))

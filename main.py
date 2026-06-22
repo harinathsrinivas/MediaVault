@@ -3400,6 +3400,79 @@ def suggest_next_command(item):
     return ""
 
 
+def category_of_id(mid):
+    """Map a library id prefix to a media category (IMP-E14).
+
+    Mirrors webui/server.py:_category_of exactly so the SPA's media-type tabs
+    and the server's per-category summary agree on one bucketing rule:
+    mov->movies, tv->series, ani->anime, everything else->other.
+    """
+    if mid.startswith("mov"):
+        return "movies"
+    if mid.startswith("tv"):
+        return "series"
+    if mid.startswith("ani"):
+        return "anime"
+    return "other"
+
+
+def _classify_item(mid, entry):
+    """Single-source-of-truth per-leaf classifier shared by the reclaim scan and
+    the media-type inventory (IMP-E14). Strictly READ-ONLY.
+
+    Given one (id, library-entry) pair, returns the facts BOTH /api/reclaim
+    (collect_reclaimable) and /api/items (items_payload) need for a single
+    PHYSICAL library leaf, or None when the entry owns no physical leaf:
+
+      - None  -> a non-physical/virtual row (type season_map / multi_ep_alias)
+                 or an entry missing folder_path/filename. The CRASH-CLASS guard
+                 (IMP-C12 / PR #21): this skip happens BEFORE folder_path/filename
+                 are dereferenced, so virtual rows never raise and never emit.
+      - dict  -> {
+            "id":           mid,
+            "entry":        entry,          # passthrough for the caller's row builder
+            "path":         os.path.join(folder_path, filename),
+            "norm_key":     os.path.normpath(path).lower(),   # de-dupe key
+            "file_present": bool,           # False when os.stat raised (absent/unreadable)
+            "size_bytes":   int,            # 0 when file_present is False
+            "on_disk_real": bool,           # size >= DUMMY_MAX_BYTES (False if absent)
+            "state":        classify_entry_state(entry, on_disk_real),  # badge | "ARCHIVED" | None
+        }
+
+    The disk is the source of truth for state (classify_entry_state semantics):
+    a real file is reclaimable per its status; a dummy/absent file is not. The
+    caller decides inclusion policy — collect_reclaimable drops file_present=False
+    and ARCHIVED/None states; items_payload keeps every physical leaf including
+    ARCHIVED and absent-file rows.
+    """
+    if entry.get("type") in ("season_map", "multi_ep_alias"):
+        return None
+    fp = entry.get("folder_path")
+    fn = entry.get("filename")
+    if not fp or not fn:
+        return None
+
+    path = os.path.join(fp, fn)
+    norm_key = os.path.normpath(path).lower()
+    try:
+        size = os.path.getsize(path)
+        file_present = True
+    except OSError:
+        size = 0
+        file_present = False
+    on_disk_real = file_present and size >= DUMMY_MAX_BYTES
+    return {
+        "id": mid,
+        "entry": entry,
+        "path": path,
+        "norm_key": norm_key,
+        "file_present": file_present,
+        "size_bytes": size,
+        "on_disk_real": on_disk_real,
+        "state": classify_entry_state(entry, on_disk_real),
+    }
+
+
 def collect_reclaimable():
     """Read-only scan of what occupies reclaimable local disk (IMP-E12).
 
@@ -3503,26 +3576,20 @@ def collect_reclaimable():
     # LOCAL_NOT_PUSHED) not already emitted from the walk (e.g. a category root
     # absent above, or a path the walk skipped). De-duped via `seen`.
     for mid, entry in library.items():
-        if entry.get("type") in ("season_map", "multi_ep_alias"):
-            continue
+        # Fast early-out on non-reclaimable statuses (archived/unknown/virtual):
+        # cheaper than stat-ing, and keeps this pass focused on the three
+        # reclaimable statuses. _classify_item below re-derives the same skip for
+        # virtual types, so this is a pure optimisation, not a behaviour change.
         if entry.get("status") not in _RECLAIMABLE_STATUS_BADGE:
             continue
-        fp = entry.get("folder_path")
-        fn = entry.get("filename")
-        if not fp or not fn:
+        info = _classify_item(mid, entry)  # shared single-source-of-truth classifier
+        if info is None or not info["file_present"]:
+            continue  # virtual/no physical leaf, or absent on disk -> nothing to reclaim
+        if info["norm_key"] in seen:
             continue
-        full_path = os.path.join(fp, fn)
-        norm_key = os.path.normpath(full_path).lower()
-        if norm_key in seen:
-            continue
-        try:
-            size = os.path.getsize(full_path)
-        except OSError:
-            continue  # absent on disk -> nothing to reclaim
-        on_disk_real = size >= DUMMY_MAX_BYTES
-        badge = classify_entry_state(entry, on_disk_real)
+        badge = info["state"]
         if badge and badge != "ARCHIVED":
-            _add_item(norm_key, mid, entry, badge, full_path, size)
+            _add_item(info["norm_key"], mid, entry, badge, info["path"], info["size_bytes"])
 
     total_bytes = sum(it["size_bytes"] for it in items)
     return {
@@ -3530,6 +3597,83 @@ def collect_reclaimable():
         "total_reclaimable_bytes": total_bytes,
         "total_reclaimable_human": human_readable_size(total_bytes),
     }
+
+
+def items_payload():
+    """Read-only inventory of EVERY physical library leaf for the media-type UI
+    (IMP-E14). Strictly READ-ONLY — loads the library once via load_library() and
+    only os.stat()s files; never mutates, saves, or touches media.
+
+    Unlike collect_reclaimable (which is disk-anchored and deliberately drops
+    ARCHIVED rows), this is LIBRARY-anchored and INCLUDES archived items — the
+    media-type tabs must show the full picture, including what's already cold.
+
+    Built on the same _classify_item() core collect_reclaimable's library pass
+    uses, so the lifecycle `state` can never drift between /api/items and
+    /api/reclaim. Virtual rows (season_map / multi_ep_alias) are skipped by
+    _classify_item BEFORE folder_path/filename are dereferenced (PR #21 crash
+    class) and are never emitted. De-duped by normpath-lower so a leaf surfaces
+    exactly once even if two ids point at the same file.
+
+    Returns {
+        "items": [ {
+            "id", "category", "state", "size_bytes", "path",
+            "title", "year", "tmdb_id", "poster_available", "chunk_count",
+            "parent_id"  # only when the entry carries one
+        }, ... ],
+        "by_category": {"movies": N, "series": N, "anime": N, "other": N},
+    }
+
+    state is the shared classify_entry_state badge when one applies
+    (LOCAL_NOT_PUSHED / PUSHED_NOT_ARCHIVED / RESTORED_REPLACE_AGAIN / ARCHIVED);
+    for a physical leaf whose disk state matches no reclaim badge (e.g. a
+    local_ready entry whose on-disk file is already a dummy), it falls back to
+    the entry's library status upper-cased so every row carries a non-null,
+    meaningful lifecycle string. (UNPREPPED is reserved for unknown-to-library
+    files, which this library-anchored builder never produces.)
+    """
+    library = load_library()
+
+    items = []
+    seen = set()  # normpath-lower keys already emitted — single de-dupe source.
+    by_category = {"movies": 0, "series": 0, "anime": 0, "other": 0}
+
+    for mid, entry in library.items():
+        info = _classify_item(mid, entry)  # shared single-source-of-truth classifier
+        if info is None:
+            continue  # virtual row / no physical leaf — never emit a virtual row
+        if info["norm_key"] in seen:
+            continue
+        seen.add(info["norm_key"])
+
+        # state: shared badge if any, else the raw library status upper-cased so
+        # the SPA always has a meaningful lifecycle string (never null).
+        state = info["state"]
+        if state is None:
+            status = entry.get("status")
+            state = status.upper() if status else "UNKNOWN"
+
+        category = category_of_id(mid)
+        metadata = entry.get("metadata") or {}
+        row = {
+            "id": mid,
+            "category": category,
+            "state": state,
+            "size_bytes": info["size_bytes"],
+            "path": info["path"],
+            "title": metadata.get("title") or mid,
+            "year": metadata.get("year"),
+            "tmdb_id": metadata.get("tmdb_id"),
+            "poster_available": False,  # not yet wired — always False for now (IMP-E14 Phase 1)
+            "chunk_count": (entry.get("split_info") or {}).get("total_chunks") or 1,
+        }
+        if entry.get("parent_id") is not None:
+            row["parent_id"] = entry["parent_id"]
+
+        items.append(row)
+        by_category[category] += 1
+
+    return {"items": items, "by_category": by_category}
 
 
 def cmd_web(host="127.0.0.1", port=8765, open_browser=True):

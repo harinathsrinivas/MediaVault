@@ -317,6 +317,11 @@ def create_app():
         # Read-only: returns collect_reclaimable()'s contract dict verbatim.
         return main.collect_reclaimable()
 
+    @app.get("/api/items")
+    def api_items():
+        # Read-only: returns items_payload()'s contract dict verbatim.
+        return main.items_payload()
+
     @app.get("/api/library")
     def api_library():
         return _library_summary()

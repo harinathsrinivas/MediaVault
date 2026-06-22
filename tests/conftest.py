@@ -3,11 +3,14 @@ import hashlib
 import subprocess
 import sys, os, json
 import pytest
-import main      # repo root must be on sys.path
-import mvcommon  # authoritative home of LIBRARY_* + load_library/save_library
 
-# Ensure repo root is importable (for pytest invoked from any CWD)
+# Ensure repo root is importable BEFORE importing the app modules, so a bare
+# `pytest` (which, unlike `python -m pytest`, does NOT add the CWD to sys.path)
+# can import them from any CWD.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import main      # repo root ensured on sys.path above
+import mvcommon  # authoritative home of LIBRARY_* + load_library/save_library
 
 FAKE_ORIGINAL_BYTES = b"ORIGINAL-MASTER-BYTES"
 FAKE_DUMMY_BYTES    = b"DUMMY"

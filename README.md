@@ -225,7 +225,11 @@ file that still occupies reclaimable space, each tagged with a state badge —
 with a total-reclaimable-GB header, per-state filter chips, a deterministic
 suggested next command and a suggested target folder per item, and one-click
 `prep` / `push` / `replace` / `sort` actions (the destructive `replace` is gated
-by a confirm modal; long actions report via a polled job mechanism). It manages
+by a confirm modal; long actions report via a polled job mechanism). The console
+also has **media-type tabs** (Movies / TV series / Anime / Others) with a
+per-category disk-state sub-view rail (Unprepped / Local·not-pushed /
+Pushed·not-archived / Fetched·not-archived / Archived), powered by the new
+read-only `GET /api/items` library endpoint (IMP-E14 Phase 1). It manages
 files only — it never plays video (Jellyfin remains the viewing surface) and
 never moves or renames files (it shows you the command to copy). Install the
 deps first: `pip install -r requirements.txt` (adds `fastapi` + `uvicorn`).

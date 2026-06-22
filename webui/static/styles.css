@@ -48,11 +48,40 @@ html, body {
 
 button, input { font-family: inherit; }
 
+/* ---------------- DEMO / SAFE-mode banner ---------------- */
+/* Server-side demo mode (IMP-E14): a prominent amber bar pinned to the very top
+   so it stays visible while scrolling. Hidden until app.js confirms demo:true
+   (the [hidden] attribute is removed AND .show added). It sits ABOVE the sticky
+   header (higher z-index) and is the first sticky element, so the header pins
+   directly beneath it. Readable on mobile: full-width, wraps, bold. */
+.demo-banner {
+  position: sticky;
+  top: 0;
+  z-index: 30; /* above .app-header (20) and the modal-less chrome */
+  display: block;
+  text-align: center;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  color: #2a1a00;
+  background: linear-gradient(90deg, #f0b429, #f7c948 50%, #f0b429);
+  border-bottom: 2px solid #b08400;
+  box-shadow: 0 2px 14px rgba(240, 180, 41, 0.45);
+  padding: 10px clamp(12px, 4vw, 40px);
+  font-size: clamp(13px, 2.6vw, 15px);
+  line-height: 1.35;
+}
+/* The [hidden] attribute already removes it; .show is a hook for any later
+   transition and a redundant guard that it is visible once revealed. */
+.demo-banner.show { display: block; }
+
 /* ---------------- Header / hero ---------------- */
 
 .app-header {
   position: sticky;
-  top: 0;
+  /* In demo mode the sticky header pins directly BELOW the sticky banner by
+     consuming its measured height (--demo-offset, set by app.js). Defaults to 0
+     in the normal (no-banner) build, so default chrome is unchanged. */
+  top: var(--demo-offset, 0px);
   z-index: 20;
   backdrop-filter: blur(10px);
   background: rgba(11, 15, 23, 0.82);

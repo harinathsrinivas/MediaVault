@@ -7,6 +7,14 @@
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
+  <!-- Persistent server-side DEMO/SAFE-mode banner (IMP-E14). Hidden by default;
+       app.js fetches /api/mode on load and unhides this (adds .show) ONLY when the
+       server reports demo:true. Sticks above the header so it stays visible while
+       scrolling, on desktop and mobile. Static text only — no user data, XSS-safe. -->
+  <div class="demo-banner" id="demo-banner" role="status" aria-live="polite" hidden>
+    🟡 DEMO MODE — actions are simulated. Nothing real runs.
+  </div>
+
   <header class="app-header">
     <div class="hero">
       <div class="brand">

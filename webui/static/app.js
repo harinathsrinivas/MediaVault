@@ -537,7 +537,43 @@ function refreshSortbar() {
 // Init
 // ---------------------------------------------------------------------------
 
+// Server-side DEMO/SAFE mode probe (IMP-E14). On load, ask the backend whether
+// it is the simulated review build; if so, reveal the persistent banner. The
+// banner text is static markup, so this only flips visibility — no untrusted
+// data is interpolated (XSS-safe). A failed/absent probe leaves the banner
+// hidden (fail-safe toward the normal real UI; the SERVER still enforces demo).
+function checkDemoMode() {
+  fetch("/api/mode")
+    .then(function (res) {
+      return res.ok ? res.json() : null;
+    })
+    .then(function (data) {
+      if (data && data.demo === true) {
+        var banner = $("#demo-banner");
+        if (banner) {
+          banner.hidden = false;
+          banner.classList.add("show");
+          document.body.classList.add("demo-mode");
+          // Pin the sticky header directly below the banner by exposing the
+          // banner's MEASURED height as --demo-offset (handles the banner
+          // wrapping to two lines on narrow/mobile viewports). Re-measure on
+          // resize so the header stays flush if the banner reflows.
+          var applyOffset = function () {
+            var h = Math.ceil(banner.getBoundingClientRect().height);
+            document.documentElement.style.setProperty("--demo-offset", h + "px");
+          };
+          applyOffset();
+          window.addEventListener("resize", applyOffset);
+        }
+      }
+    })
+    .catch(function () {
+      /* probe failed — leave the banner hidden; server still enforces safety. */
+    });
+}
+
 function init() {
+  checkDemoMode();
   wireModal();
   wireSort();
   buildSortbar();

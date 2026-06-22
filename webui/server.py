@@ -93,6 +93,56 @@ ACTION_TABLE = {
     "fetch_restore": (_run_fetch_restore, False),
 }
 
+
+# ---------------------------------------------------------------------------
+# DEMO / SAFE-mode simulator (IMP-E14).
+#
+# When create_app(demo=True) is used (the `python main.py web --demo` review
+# build), the action path NEVER invokes a real ACTION_TABLE runner. Instead the
+# HTTP handler enqueues THIS simulator in place of the real runner. It is the
+# SAME callable for EVERY allow-listed action, so there is no action name —
+# known or otherwise — that can route to a real main.cmd_* in demo mode.
+#
+# SAFETY (provable by inspection of this function):
+#   * It references NO main.cmd_* — it cannot mutate the library.
+#   * It spawns NO subprocess and drives NO Selenium / browser.
+#   * It only prints synthetic lines and sleeps briefly.
+# The synthetic lines deliberately match the EXACT mainfetch markers the
+# server-side progress parser scans for (🔹 PROCESSING / Detected Split File /
+# ✅ MOVED) so the real progress dict + the UI border animate identically to a
+# real fetch — letting a reviewer exercise the whole flow with zero risk.
+#
+# Return value: True (truthy) so the worker's success convention marks the job
+# "done" for EVERY action name — including ones whose real return is None-on-
+# failure (replace / prep_push_rep). The real (non-demo) path and the per-action
+# _NONE_IS_SUCCESS convention are untouched; this just keeps a simulated job
+# from ever being mis-scored as "error".
+
+# Demo simulator pacing. A short per-chunk sleep so a polling client observes
+# progress.done advance 0 -> total across separate /api/job/{id} reads (rather
+# than seeing the job already complete on the first poll). 4 chunks * ~0.4s is
+# well under any test/poll timeout.
+_DEMO_CHUNK_DELAY_S = 0.4
+_DEMO_CHUNKS = 4
+
+
+def _run_demo_sim(body):
+    """SIMULATED action runner used for ALL actions in demo mode. Emits a clear
+    banner + mainfetch-style progress markers (so the live parser/border animate)
+    and returns True. Never touches the library, a subprocess, or Selenium."""
+    print("⚠️  DEMO MODE — no real command executed (simulated).")
+    # A synthetic id for the PROCESSING block; prefer the request's id so the
+    # output reads coherently, else a placeholder.
+    sim_id = (body or {}).get("id") or "demo-entry"
+    print(f"🔹 PROCESSING: {sim_id}")
+    print(f"   > Detected Split File ({_DEMO_CHUNKS} chunks)")
+    for n in range(1, _DEMO_CHUNKS + 1):
+        # Sleep BEFORE publishing each MOVED line so polls see done climb.
+        time.sleep(_DEMO_CHUNK_DELAY_S)
+        print(f"     ✅ MOVED: chunk{n:03d}")
+    print("   ✅ ENTRY COMPLETE.")
+    return True
+
 # Per-action success convention for the no-exception (else) branch of the worker.
 #
 # The five cmd_* functions do NOT share one return convention — verified by
@@ -488,13 +538,32 @@ def _library_summary():
 # App factory.
 # ---------------------------------------------------------------------------
 
-def create_app():
+def create_app(demo=False):
     """Build and return the FastAPI app. Import-safe and TestClient-friendly:
     no uvicorn, no network side effects. Starts the single serialized worker
-    (idempotently) so enqueued actions are drained."""
+    (idempotently) so enqueued actions are drained.
+
+    demo=True serves a SAFE review build (IMP-E14): the action path SIMULATES
+    every allow-listed action via _run_demo_sim instead of invoking the real
+    ACTION_TABLE runner, so no main.cmd_*/Selenium/library mutation can ever run.
+    All other behavior (the read-only routes, the 404 on unknown actions, the
+    confirm-gate that 409s a replace without confirm, the 202/{job_id}/poll
+    contract, and the serialized-worker invariants) is identical to the default.
+    The default (demo=False) path is byte-unchanged: real runners via
+    ACTION_TABLE."""
+    demo = bool(demo)
     _ensure_worker()
 
     app = FastAPI(title="MediaVault Console", docs_url="/api/docs", redoc_url=None)
+    # Expose the flag on app.state for introspection/testing; the closure var
+    # `demo` is what the routes below actually read.
+    app.state.demo = demo
+
+    @app.get("/api/mode")
+    def api_mode():
+        # Tiny capability probe the frontend reads on load to decide whether to
+        # show the persistent DEMO banner.
+        return {"demo": demo}
 
     @app.get("/api/reclaim")
     def api_reclaim():
@@ -514,17 +583,28 @@ def create_app():
     def api_action(name: str, body: dict = Body(default=None)):
         entry = ACTION_TABLE.get(name)
         if entry is None:
+            # Unknown action: 404 in BOTH modes. In demo this also means there is
+            # no name (allow-listed or not) that can reach a real runner — the
+            # name must be in ACTION_TABLE to get past here, and even then demo
+            # swaps in the simulator below.
             raise HTTPException(status_code=404, detail=f"Unknown action: {name}")
         runner, requires_confirm = entry
         body = body or {}
         if requires_confirm and body.get("confirm") is not True:
             # Destructive action (replace) requires explicit confirm. No
-            # execution, no job created.
+            # execution, no job created. This gate is IDENTICAL in demo: a
+            # `replace` without confirm still 409s (then, with confirm, only
+            # SIMULATES — it never deletes an original).
             raise HTTPException(
                 status_code=409,
                 detail=f"Action '{name}' is destructive; resend with confirm=true.",
             )
-        job_id = _enqueue(name, runner, body)
+        # SAFETY: in demo mode, DISCARD the real ACTION_TABLE runner and enqueue
+        # the simulator instead. The real runner never reaches the queue/worker,
+        # so no main.cmd_* can execute. The name/confirm gating above is
+        # unchanged, so the 404/409 contract is preserved.
+        effective_runner = _run_demo_sim if demo else runner
+        job_id = _enqueue(name, effective_runner, body)
         return JSONResponse(status_code=202, content={"job_id": job_id})
 
     @app.get("/api/job/{job_id}")

@@ -3820,8 +3820,12 @@ def items_payload():
     return {"items": items, "by_category": by_category}
 
 
-def cmd_web(host="127.0.0.1", port=8765, open_browser=True):
-    """Launch the local web operations console (IMP-E12)."""
+def cmd_web(host="127.0.0.1", port=8765, open_browser=True, demo=False):
+    """Launch the local web operations console (IMP-E12).
+
+    demo=True (the `--demo` flag) serves a SAFE review build where EVERY action
+    is SIMULATED server-side — no real cmd_*/Selenium/library mutation ever runs
+    (IMP-E14). The default (demo=False) is fully real and byte-unchanged."""
     try:
         import uvicorn
         from webui.server import create_app
@@ -3829,7 +3833,9 @@ def cmd_web(host="127.0.0.1", port=8765, open_browser=True):
         print("❌ web requires fastapi+uvicorn — pip install -r requirements.txt")
         sys.exit(1)
 
-    app = create_app()
+    app = create_app(demo=demo)
+    if demo:
+        print("🟡 DEMO MODE (actions simulated) — no real command will run.")
     print(f"🌐 MediaVault web UI: http://{host}:{port}")
     if open_browser:
         try:
@@ -3869,7 +3875,7 @@ if __name__ == "__main__":
         print("  sort")
         print("  fetch [id]")
         print("  recover [id|folder]  (or: recover --scan)")
-        print("  web [--port N] [--host H] [--no-browser]  — Launch the local web operations console (Disk Reclaim view)")
+        print("  web [--port N] [--host H] [--no-browser] [--demo]  — Launch the local web operations console (Disk Reclaim view); --demo = SAFE build, all actions simulated")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -4132,6 +4138,7 @@ if __name__ == "__main__":
         host = "127.0.0.1"
         port = 8765
         open_browser = True
+        demo = False
         i = 0
         while i < len(args):
             if args[i] == "--host" and i + 1 < len(args):
@@ -4147,6 +4154,9 @@ if __name__ == "__main__":
             elif args[i] == "--no-browser":
                 open_browser = False
                 i += 1
+            elif args[i] == "--demo":
+                demo = True
+                i += 1
             else:
                 i += 1
-        cmd_web(host=host, port=port, open_browser=open_browser)
+        cmd_web(host=host, port=port, open_browser=open_browser, demo=demo)

@@ -67,9 +67,19 @@
   </div>
 
   <!-- Hidden card template cloned per item. The .poster is the slot Phase 5
-       fills with a real image; for now it holds the gradient + initial. -->
+       fills with a real image; for now it holds the gradient + initial.
+       The .fetch-ring overlay (IMP-E14 Phase 2, Candidate B) is an inline SVG
+       rounded-rect whose stroke-dashoffset shrinks 0->100% as fetch chunks
+       complete. It sits above the poster but is pointer-events:none so the
+       Fetch & Restore button stays clickable. Hidden until a fetch starts. -->
   <template id="card-tpl">
     <article class="card">
+      <svg class="fetch-ring" aria-hidden="true" focusable="false"
+           preserveAspectRatio="none" hidden>
+        <path class="fetch-ring-track" fill="none" vector-effect="non-scaling-stroke" />
+        <path class="fetch-ring-fill" fill="none" vector-effect="non-scaling-stroke"
+              stroke-linecap="round" />
+      </svg>
       <div class="poster">
         <span class="initial"></span>
         <span class="badge"><span class="dot"></span><span class="badge-label"></span></span>

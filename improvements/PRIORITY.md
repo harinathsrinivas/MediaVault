@@ -9,7 +9,7 @@
 > Full task text lives in `improvements_tier*.md`; this file only orders them. Legend:
 > 🔴 critical · 🟠 high · 🟡 medium · ⚪ low · ✅ done · 🚦 needs a user decision (change-gate).
 >
-> **Last updated:** 2026-06-22 (IMP-A12 CI pipeline done — GitHub Actions runs the full + smoke suites on every PR into `main`, locking the suite green; earlier today IMP-E12 web ops console shipped + introduced IMP-D16 `scan_reclaimable`, and IMP-D1 advanced with the reclaimable-GB slice).
+> **Last updated:** 2026-06-22 (library integrity guard shipped: IMP-D4 slice — `verify_library` status-to-disk invariant + warn-only pipeline post-conditions — on branch fix/imp_d4_library_integrity_guard, after hand-reconciling 107 legacy text-dummy entries, all verified present in Google Photos; see `docs/feature-legacy-reconcile/REPORT.md`. Earlier today: IMP-A12 CI pipeline done; IMP-E12 web ops console shipped + IMP-D16 `scan_reclaimable` introduced; IMP-D1 advanced with reclaimable-GB slice).
 
 ---
 
@@ -31,6 +31,7 @@ A cheap zero-code parallel win is still available: **IMP-S1** — stand up Jelly
 |---|---|---|---|---|
 | 1 | 🚦 **IMP-R6** | failed restore-merge leaves NO file at the path → title disappears from every media server | medium | **decision** |
 | 2 | 🚦 **IMP-R7** | re-running a command after a crash silently destroys the leftover recovery journal → orphaned artifacts | medium | **decision** |
+| ✅ | ✅ **IMP-D4 (partial)** | 107 legacy text-dummy entries hand-reconciled (all verified in Google Photos); `verify_library` status-to-disk invariant + pipeline post-conditions now guard against recurrence — see `docs/feature-legacy-reconcile/REPORT.md` | low | done |
 
 ## 🟠 BAND 1 — SUGGESTED NEXT after Band 0 (cheap foundations + immediate value)
 
@@ -74,14 +75,15 @@ Perf: `B1`–`B10`. Utility commands: `D2`,`D3`,`D6`–`D15`. Integration long-t
 `E8`,`E10`,`E11`. Rollback hardening: `R1`,`R3`,`R4`,`R5`,`R8`,`R9` (R4/R8/R9 are 🚦 change-gated).
 Moonshots: `F1`–`F9`. Research-only: `G3`,`G5`,`H2`,`A6`.
 
-## ✅ DONE (24)
+## ✅ DONE (25)
 
 `A1` (mvcommon) · `A7` (pytest harness) · `C2` (retry) · `C4` (device pinning) · `C8` (post-push verify) ·
 `C9` (atomic replace) · `C11` (restore quarantine) · `C12` (alias crash: scan/local_status) ·
 `C13` (single-id alias handling) · `C14` (CLI parser papercuts) · `C15` (micro-robustness) · `C16` (anime fetch profile) · `C17` (fetch-session keep-alive + logged-out detector) · `C18` (anime sSSEE episode-range filter: shared episode_num_from_id + 0-match guard) · `C6` (session-expiry detect — via C17) · `E13` (multi-episode) · `G1` (chunker patterns) ·
 `H1` (Opus 4.8 effort tiers) · `H3` (smoke gate + consumer-impact guardrail + data-request protocol) ·
 `R2` (recover CLI) · `E12` (web ops console — Disk Reclaim view + suggested next-commands + integrated sort/replace) ·
-`A10` (requirements truth-up) · `D16` (scan_reclaimable — four-state reclaim scan behind `web`) · `A12` (CI pipeline — GitHub Actions full + smoke gate on every PR).
+`A10` (requirements truth-up) · `D16` (scan_reclaimable — four-state reclaim scan behind `web`) · `A12` (CI pipeline — GitHub Actions full + smoke gate on every PR) ·
+`D4` (partial: integrity guard — verify_library status-to-disk invariant + warn-only pipeline post-conditions; broader audits remain in_progress).
 
 ---
 

@@ -184,3 +184,52 @@ httpx  # test: required by fastapi.testclient.TestClient (tests/test_web_endpoin
 - `python -m pytest -q` (full suite) → **286 passed, 1 warning** (benign Starlette/httpx TestClient deprecation).
 - `python -m pytest tests/smoke -q` (LAST gate — main.py touched) → **58 passed in ~11s** (< 30 s).
 - All 9 steps done (3 multi-candidate bake-offs: step1=A disk-first, step3=C single-worker-queue, step6=B card-grid [user pick over judge's A]). ENTRY_TYPE_KEYS untouched; auto-rollback change-gate NOT tripped. Ready for PR to main (Checkpoint C1 — human-gated).
+
+## IMP-D4 — Complete integrity guard for `cmd_restore` — [status: done]
+- Executor: executor-haiku
+- Model: haiku
+- Files changed: `main.py` (split-restore success path only)
+- Outcome: Added the warn-only post-condition `_warn_if_entry_inconsistent()` call to `cmd_restore`'s split-restore success path (after `journal.commit()` at line 2552, before cleanup/return). The standard-restore path was NOT modified because it does not use a journal (it calls `save_library()` directly without a rollback journal, and the task spec is to add the warning AFTER `journal.commit()`). The split-restore path is where status mutation via a journal happens, matching the pattern from `cmd_push` (2 success paths) and `cmd_replace` (1 success path), both of which already have the guard. This completes IMP-D4 (post-commit observability of library↔disk status consistency via `_warn_if_entry_inconsistent`, warn-only, no control-flow impact).
+- Key decisions: Only the split-restore path (journal-based) gets the warning because the task explicitly states "AFTER `journal.commit()`". The standard-restore path does not have a journal and therefore does not qualify per the strict instruction. This aligns with the pattern in cmd_push and cmd_replace where every journal.commit() success path has the warning.
+- Verification:
+  - Exact inserted lines (2 lines after `journal.commit()` at line 2552):
+    ```
+    2553	            # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
+    2554	            _warn_if_entry_inconsistent(library[manual_id], manual_id)
+    ```
+  - Context (lines 2551-2555):
+    ```
+    2551	            journal.mark_point_of_no_return()
+    2552	            journal.commit()
+    2553	            # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
+    2554	            _warn_if_entry_inconsistent(library[manual_id], manual_id)
+    2555	            print("   > 🧹 Cleaning up chunks...")
+    ```
+  - Test results:
+    - `python -m pytest tests/test_verify_library.py tests/test_rehash.py tests/test_baseline_happy_path.py -q` → **31 passed in 19.19s**
+    - `python -m pytest tests/smoke -q` → **58 passed in 21.17s**
+
+## IMP-D4 follow-up — Add integrity guard to non-split restore path — [status: done]
+- Executor: executor-haiku
+- Model: haiku
+- Files changed: `main.py` (non-split-restore success path only)
+- Outcome: Added the warn-only post-condition `_warn_if_entry_inconsistent()` call to `cmd_restore`'s non-split (standard) success path. The hook was inserted after `save_library(library)` at line 2611 and before `return True` at line 2615, matching the indentation (8 spaces) of the surrounding code. The split-restore path already had this guard (from the earlier IMP-D4 work at line 2554). Now both success paths in `cmd_restore` include the warn hook, ensuring consistent post-commit observability of library↔disk status consistency across all restore scenarios.
+- Key decisions: Non-split path uses `save_library()` directly (no journal), so the hook is placed immediately after the save, before return. The two-line insertion matches the existing guard semantics and indentation. Split path was NOT re-touched (it already has the guard).
+- Verification:
+  - Exact inserted lines (lines 2612-2613, after `save_library(library)` at 2611):
+    ```
+    2612	        # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
+    2613	        _warn_if_entry_inconsistent(library[manual_id], manual_id)
+    ```
+  - Context (lines 2610-2615):
+    ```
+    2610	        library[manual_id]["status"] = "restored_local"
+    2611	        save_library(library)
+    2612	        # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
+    2613	        _warn_if_entry_inconsistent(library[manual_id], manual_id)
+    2614	        print(f"✅ SUCCESS: {filename} restored.")
+    2615	        return True
+    ```
+  - Test results:
+    - `python -m pytest tests/test_verify_library.py tests/test_rehash.py tests/test_baseline_happy_path.py -q` → **31 passed in 37.66s**
+    - `python -m pytest tests/smoke -q` → **58 passed in 27.95s**

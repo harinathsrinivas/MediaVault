@@ -1639,10 +1639,14 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             save_library(library)
             # [ROLLBACK C] Clean success — discard the journal.
             journal.commit()
+            # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
+            _warn_if_entry_inconsistent(library[manual_id], manual_id)
             print("✅ SUCCESS.\n")
             return True
         else:
             journal.commit()
+            # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
+            _warn_if_entry_inconsistent(library[manual_id], manual_id)
             print(f"✅ Partial Upload Complete (Chunks {chunk_range}).\n")
             return True
     else:
@@ -1981,6 +1985,8 @@ def cmd_replace(manual_id):
         save_library(library)
         # [ROLLBACK C] Clean success — discard the journal.
         journal.commit()
+        # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
+        _warn_if_entry_inconsistent(library[manual_id], manual_id)
         print(f"✅ Replaced/Archived: {manual_id}")
         return True
     except RollbackHardFail:
@@ -2028,6 +2034,230 @@ def cmd_replace_group(group_id):
     print(f"   > Auto-replacing {len(target_ids)} items...")
     for mid in target_ids:
         cmd_replace(mid)
+
+
+# ==========================================
+#   LIBRARY ↔ DISK INTEGRITY (IMP-D4 / IMP-D5)
+# ==========================================
+# Shared classification used by BOTH the read-only audit (cmd_verify_library)
+# and the warn-only pipeline post-condition (_warn_if_entry_inconsistent), so the
+# two can never drift. The invariant: a physical leaf's library `status` must be
+# consistent with the on-disk file's shape.
+#
+# Real-world bug this guards (the reason for IMP-D4): 107 entries whose status said
+# `local_ready` but whose on-disk file was a 126-byte legacy TEXT stub — the real
+# video had been lost to a stub, mislabeled, and was un-fetchable.
+
+# Statuses that own a REAL file on disk (master still present locally).
+_REAL_FILE_STATUSES = ("local_ready", "onboarded", "restored_local")
+# How many bytes of a small file we sniff to detect a legacy TEXT stub.
+_TEXT_DUMMY_SNIFF_BYTES = 220
+
+
+def _disk_shape(full_path):
+    """Classify the on-disk shape of a physical leaf's file. Pure read-only.
+
+    Returns one of:
+      "MISSING"     - no file at full_path.
+      "REAL"        - size >= DUMMY_MAX_BYTES (a genuine master / restored file).
+      "TEXT_DUMMY"  - a small file that is a LEGACY text stub: its first
+                      ~220 bytes start with b"Original Hash" OR contain
+                      b"Status: SPLIT" (the exact byte-signatures of the old
+                      text-stub format that the IMP-D4 bug left behind).
+      "VIDEO_DUMMY" - any other small (< DUMMY_MAX_BYTES) file — a valid
+                      ffmpeg-generated video dummy (or a small binary stand-in).
+
+    Size is checked first: a file at/above DUMMY_MAX_BYTES is REAL regardless of
+    its leading bytes (the dummy/stub formats only exist in the small regime).
+    """
+    if not os.path.exists(full_path):
+        return "MISSING"
+    try:
+        size = os.path.getsize(full_path)
+    except OSError:
+        return "MISSING"
+    if size >= DUMMY_MAX_BYTES:
+        return "REAL"
+    try:
+        with open(full_path, "rb") as fh:
+            head = fh.read(_TEXT_DUMMY_SNIFF_BYTES)
+    except OSError:
+        # Unreadable small file — treat as a (non-text) dummy rather than crash.
+        return "VIDEO_DUMMY"
+    if head.startswith(b"Original Hash") or b"Status: SPLIT" in head:
+        return "TEXT_DUMMY"
+    return "VIDEO_DUMMY"
+
+
+def _status_disk_violation(status, shape):
+    """Compare a leaf's status to its on-disk shape against the invariant.
+
+    Returns (is_violation: bool, category: str). `category` is a stable,
+    summary-friendly label (e.g. "archived_textdummy", "local_ready_missing",
+    "ok", "unchecked"). Only the four invariant statuses are checked; any other
+    status returns (False, "unchecked") — the audit reports it as not-applicable,
+    never as a violation.
+
+    Rules:
+      local_ready / onboarded / restored_local -> expect REAL on disk.
+      archived                                 -> expect VIDEO_DUMMY on disk
+                                                   (NOT TEXT_DUMMY, NOT REAL, NOT MISSING).
+    """
+    if status in _REAL_FILE_STATUSES:
+        if shape == "REAL":
+            return (False, "ok")
+        # e.g. local_ready_dummy / local_ready_missing / onboarded_textdummy
+        suffix = {
+            "VIDEO_DUMMY": "dummy",
+            "TEXT_DUMMY": "textdummy",
+            "MISSING": "missing",
+        }.get(shape, shape.lower())
+        return (True, f"{status}_{suffix}")
+    if status == "archived":
+        if shape == "VIDEO_DUMMY":
+            return (False, "ok")
+        suffix = {
+            "TEXT_DUMMY": "textdummy",
+            "REAL": "real",
+            "MISSING": "missing",
+        }.get(shape, shape.lower())
+        return (True, f"archived_{suffix}")
+    return (False, "unchecked")
+
+
+def _warn_if_entry_inconsistent(entry, manual_id):
+    """Warn-only pipeline post-condition (IMP-D4).
+
+    Classifies a physical leaf's on-disk shape vs its library status using the
+    SAME rules as cmd_verify_library and, on a violation, prints a single loud
+    WARNING line. This is a post-commit observability check ONLY:
+
+      * ALWAYS returns None.
+      * NEVER raises (any unexpected error is swallowed — an observability hook
+        must never be able to fail a command that already succeeded).
+      * NEVER calls save_library, NEVER touches the journal / rollback, NEVER
+        changes control flow.
+
+    Virtual entries (season_map / multi_ep_alias) own no file and are skipped.
+    """
+    try:
+        if not isinstance(entry, dict):
+            return None
+        if entry.get("type") in ("season_map", "multi_ep_alias"):
+            return None
+        folder_path = entry.get("folder_path")
+        filename = entry.get("filename")
+        if not folder_path or not filename:
+            return None
+        status = entry.get("status")
+        shape = _disk_shape(os.path.join(folder_path, filename))
+        is_violation, _category = _status_disk_violation(status, shape)
+        if is_violation:
+            print(
+                f"⚠️  INTEGRITY: {manual_id} status={status} but on-disk={shape} "
+                f"— run 'python main.py verify_library'"
+            )
+    except Exception:
+        # Observability must never break a committed command. Stay silent.
+        return None
+    return None
+
+
+def cmd_verify_library(fix_dummies=False):
+    """READ-ONLY audit of the library status ↔ on-disk shape invariant (IMP-D4).
+
+    Iterates every entry; skips virtual types (season_map / multi_ep_alias) BEFORE
+    dereferencing folder_path/filename (the PR #21 crash class). For each physical
+    leaf, classifies the on-disk shape via _disk_shape and flags any status/shape
+    mismatch (see _status_disk_violation for the rules).
+
+    Returns True if the library is clean (no violations), False if ANY violation
+    was found. Never calls sys.exit — the boolean is the contract for tests / the
+    pipeline / CI.
+
+    fix_dummies=True (the IMP-D5 slice): after reporting, regenerate the proper
+    video dummies for archived+TEXT_DUMMY entries by REUSING cmd_repair_dummies()
+    (it already only touches archived entries whose on-disk file is < DUMMY_MAX_BYTES
+    and rewrites via make_video_dummy + os.replace — we do NOT duplicate that logic).
+    fix_dummies does NOT change any status/uploaded field; status mismatches are
+    reported for a human to resolve.
+
+    # TODO IMP-D4: also add orphan-parent / stale-season-map checks
+    """
+    print("--- VERIFY LIBRARY (status ↔ disk integrity) ---")
+    library = load_library()
+
+    scanned = 0
+    ok = 0
+    violations = []          # list of (manual_id, status, shape, size, path, category)
+    category_counts = {}
+
+    for manual_id, entry in library.items():
+        # Skip virtual types BEFORE touching folder_path/filename (PR #21 crash class).
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("type") in ("season_map", "multi_ep_alias"):
+            continue
+        folder_path = entry.get("folder_path")
+        filename = entry.get("filename")
+        if not folder_path or not filename:
+            # A physical leaf with no file keys is itself malformed, but the
+            # orphan/structure checks are out of scope here (see TODO above).
+            continue
+
+        scanned += 1
+        full_path = os.path.join(folder_path, filename)
+        shape = _disk_shape(full_path)
+        status = entry.get("status")
+        try:
+            size = os.path.getsize(full_path)
+        except OSError:
+            size = -1
+
+        is_violation, category = _status_disk_violation(status, shape)
+        if is_violation:
+            violations.append((manual_id, status, shape, size, full_path, category))
+            category_counts[category] = category_counts.get(category, 0) + 1
+        else:
+            ok += 1
+
+    # ---- Per-violation report ----
+    if violations:
+        print(f"\n❌ {len(violations)} INTEGRITY MISMATCH(ES):")
+        for manual_id, status, shape, size, full_path, category in violations:
+            size_str = "missing" if size < 0 else human_readable_size(size)
+            print(f"   • {manual_id}")
+            print(f"       status={status}  on-disk={shape} ({size_str})  [{category}]")
+            print(f"       {full_path}")
+    else:
+        print("✅ No integrity mismatches found.")
+
+    # ---- Summary line (stable, parseable) ----
+    counts_str = ", ".join(f"{k}={v}" for k, v in sorted(category_counts.items()))
+    print(
+        f"verify_library: scanned {scanned}, OK {ok}, MISMATCH {len(violations)}"
+        + (f" ({counts_str})" if counts_str else "")
+    )
+
+    # ---- Optional fix (IMP-D5 slice): regenerate archived+TEXT_DUMMY dummies ----
+    # Reuse the EXISTING cmd_repair_dummies — it already targets exactly the
+    # archived + (< DUMMY_MAX_BYTES) class and rewrites via make_video_dummy +
+    # os.replace. Status mismatches are intentionally left for the human.
+    if fix_dummies:
+        archived_textdummy = sum(
+            1 for v in violations if v[5] == "archived_textdummy"
+        )
+        if archived_textdummy:
+            print(
+                f"\n🔧 fix_dummies: regenerating video dummies for "
+                f"{archived_textdummy} archived+TEXT_DUMMY entr(y/ies) "
+                f"via repair_dummies (status fields are NOT changed)..."
+            )
+            cmd_repair_dummies()
+        else:
+            print("\n🔧 fix_dummies: no archived+TEXT_DUMMY entries to regenerate.")
+
+    return len(violations) == 0
 
 
 def cmd_repair_dummies(prefix_filter=None):
@@ -2320,6 +2550,8 @@ def cmd_restore(manual_id):
             # is no longer rollback-eligible.
             journal.mark_point_of_no_return()
             journal.commit()
+            # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
+            _warn_if_entry_inconsistent(library[manual_id], manual_id)
             print("   > 🧹 Cleaning up chunks...")
             for p in chunk_paths_in_restore:
                 try:
@@ -2377,6 +2609,8 @@ def cmd_restore(manual_id):
 
         library[manual_id]["status"] = "restored_local"
         save_library(library)
+        # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
+        _warn_if_entry_inconsistent(library[manual_id], manual_id)
         print(f"✅ SUCCESS: {filename} restored.")
         return True
 
@@ -3484,6 +3718,7 @@ if __name__ == "__main__":
         print("  replace [id]")
         print("  replace_group [id]")
         print("  repair_dummies [optional: id_prefix]")
+        print("  verify_library [--fix-dummies]")
         print("  verify_restore [id]")
         print("  restore [id]")
         print("  restore_group [id]")
@@ -3640,6 +3875,10 @@ if __name__ == "__main__":
     elif cmd == "repair_dummies":
         prefix = sys.argv[2] if len(sys.argv) > 2 else None
         cmd_repair_dummies(prefix)
+
+    elif cmd == "verify_library":
+        fix = "--fix-dummies" in sys.argv[2:]
+        cmd_verify_library(fix_dummies=fix)
 
     elif cmd == "verify_restore":
         cmd_verify_restore(sys.argv[2])

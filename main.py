@@ -847,10 +847,23 @@ def cmd_prep(manual_id, filepath, parent_id=None):
             # entry here would clobber the alias and corrupt the alias chain.
             print(f"❌ {manual_id} is a combined-episode alias of {entry.get('alias_of')}; prep the primary instead.")
             return False
-        if entry.get("uploaded") == True or entry.get("status") == "archived":
+        if entry.get("uploaded") or entry.get("status") in ("onboarded", "archived", "restored_local"):
             # [ROLLBACK SPEC] Early-skip: returns True having created ZERO artifacts.
-            # The wrapper MUST treat this as success and NEVER roll back.
-            print(f"   ⏭️  Skipping Prep: {manual_id} (Already marked as uploaded/archived).")
+            # The wrapper MUST treat this as success and NEVER roll back. This is an
+            # early-skip EXPANSION (strictly more conservative) — it does not touch
+            # journal/rollback semantics (the journal never records uploaded/status).
+            #
+            # WHY skip ANY cloud-bearing state (uploaded truthy OR status in
+            # onboarded/archived/restored_local): cmd_prep's wholesale rebuild below
+            # writes status="local_ready"/uploaded=False. Re-prepping an entry that
+            # already asserts a cloud copy would clobber that status back to
+            # local_ready, stranding the cloud copy with nothing in the library
+            # pointing at it — the dangling-entry bug class (e.g. battlestar
+            # e11/e12/e13). cmd_prep_push_rep_season preps every episode before
+            # checking `uploaded`, so it can hit this; refuse the clobber here.
+            # A GENUINELY local entry (local_ready + falsy uploaded + a real file,
+            # not yet pushed) does NOT match this guard and STILL preps normally.
+            print(f"   ⏭️  Skipping Prep: {manual_id} (already pushed/archived — refusing to clobber cloud-bearing status to local_ready).")
             return True
 
     # Secondary Safety Net: Just in case the JSON is out of sync but the file is clearly a dummy
@@ -2163,6 +2176,75 @@ def _warn_if_entry_inconsistent(entry, manual_id):
     return None
 
 
+def _dangling_evidence(entry, manual_id):
+    """Heuristic: does this leaf look like an in-cloud entry mislabelled local?
+
+    A "possibly-dangling" entry is one whose library status asserts it is purely
+    local (status == "local_ready", or status missing) and whose `uploaded` flag
+    is falsy, YET there is on-disk / in-entry evidence that a cloud copy actually
+    exists (the regression FIX 1 closes: re-prepping a cloud-bearing entry could
+    have clobbered its status back to local_ready, orphaning the cloud copy).
+
+    READ-ONLY: never mutates the entry or the filesystem; any filesystem error is
+    swallowed (a heuristic audit must never crash on an unreadable folder).
+
+    Returns:
+      "high" — strong evidence a cloud copy exists:
+                 * entry has truthy `split_info` (it was split for upload), OR
+                 * a `checksums/` subfolder under folder_path holds a `*.sha256`
+                   whose name embeds THIS entry's short_id (the chunk parity
+                   sidecars cmd_push writes — matched by short_id so a shared
+                   season `checksums/` is attributed to the RIGHT episode), OR
+                 * a `*.mvmeta.json` in folder_path that references this id.
+      "low"  — only `search_term` is present. cmd_prep sets search_term on EVERY
+               prepped entry, so on its own it is weak (a prepped-but-never-pushed
+               local entry also has it) — reported separately, low-confidence.
+      None   — not a dangling candidate (no evidence, or status/uploaded do not
+               match the local-but-in-cloud shape; the caller pre-checks those).
+    """
+    try:
+        # --- HIGH: split_info on the entry ---
+        if entry.get("split_info"):
+            return "high"
+
+        folder_path = entry.get("folder_path")
+        short_id = entry.get("short_id")
+
+        if folder_path and os.path.isdir(folder_path):
+            # --- HIGH: a checksums/ chunk sidecar embedding this entry's short_id ---
+            if short_id:
+                checksum_dir = os.path.join(folder_path, CHECKSUM_DIR_NAME)
+                if os.path.isdir(checksum_dir):
+                    try:
+                        for name in os.listdir(checksum_dir):
+                            if name.endswith(".sha256") and short_id in name:
+                                return "high"
+                    except OSError:
+                        pass
+
+            # --- HIGH: a remote-recovery mvmeta sidecar referencing this id ---
+            # write_remote_mvmeta tags the sidecar `<base> [<short_id>].mvmeta.json`;
+            # it normally lands on the device, but if one ever sits locally next to
+            # the master it is hard proof a push happened. Match by short_id (or the
+            # manual_id) embedded in the filename.
+            try:
+                for name in os.listdir(folder_path):
+                    if name.endswith(MVMETA_SUFFIX) and (
+                        (short_id and short_id in name) or manual_id in name
+                    ):
+                        return "high"
+            except OSError:
+                pass
+
+        # --- LOW: search_term only (weak — cmd_prep sets it on every entry) ---
+        if entry.get("search_term"):
+            return "low"
+    except Exception:
+        # A read-only heuristic must never break the audit.
+        return None
+    return None
+
+
 def cmd_verify_library(fix_dummies=False):
     """READ-ONLY audit of the library status ↔ on-disk shape invariant (IMP-D4).
 
@@ -2182,7 +2264,19 @@ def cmd_verify_library(fix_dummies=False):
     fix_dummies does NOT change any status/uploaded field; status mismatches are
     reported for a human to resolve.
 
+    ADDITIVE possibly-dangling pass: over the SAME physical leaves, flag any entry
+    that looks local (status local_ready or missing, uploaded falsy) yet shows
+    evidence of a cloud copy (see _dangling_evidence: split_info / a checksums
+    sidecar embedding its short_id / an mvmeta sidecar = HIGH; search_term-only =
+    LOW). These are printed as ADVISORIES and counted in the summary, but — being a
+    heuristic that needs Google-Photos confirmation, not a hard status↔disk
+    mismatch — they DO NOT affect the True/False return (that stays driven solely
+    by _status_disk_violation). Read-only; alias/season_map-safe.
+
     # TODO IMP-D4: also add orphan-parent / stale-season-map checks
+    # TODO future --reconcile-dangling: after GP confirmation, set_uploaded the
+    #   HIGH-confidence possibly_dangling entries (flip uploaded→True so they stop
+    #   being re-preppable) — left manual here because it mutates and needs a human.
     """
     print("--- VERIFY LIBRARY (status ↔ disk integrity) ---")
     library = load_library()
@@ -2191,6 +2285,7 @@ def cmd_verify_library(fix_dummies=False):
     ok = 0
     violations = []          # list of (manual_id, status, shape, size, path, category)
     category_counts = {}
+    dangling = []            # list of (manual_id, tier, full_path) — ADVISORY ONLY
 
     for manual_id, entry in library.items():
         # Skip virtual types BEFORE touching folder_path/filename (PR #21 crash class).
@@ -2221,6 +2316,16 @@ def cmd_verify_library(fix_dummies=False):
         else:
             ok += 1
 
+        # ---- ADDITIVE: possibly-dangling detection (advisory, never affects return) ----
+        # Candidate shape: looks purely local (local_ready or status missing) AND
+        # not uploaded. Only then do we look for cloud evidence. archived/onboarded/
+        # restored_local entries already assert a cloud copy correctly and are NOT
+        # danglers (e.g. archived+uploaded=True is the intended end state).
+        if (status == "local_ready" or status is None) and not entry.get("uploaded"):
+            tier = _dangling_evidence(entry, manual_id)
+            if tier:
+                dangling.append((manual_id, tier, full_path))
+
     # ---- Per-violation report ----
     if violations:
         print(f"\n❌ {len(violations)} INTEGRITY MISMATCH(ES):")
@@ -2232,11 +2337,26 @@ def cmd_verify_library(fix_dummies=False):
     else:
         print("✅ No integrity mismatches found.")
 
+    # ---- Possibly-dangling advisory (heuristic — does NOT affect the return) ----
+    dangling_high = sum(1 for d in dangling if d[1] == "high")
+    dangling_low = sum(1 for d in dangling if d[1] == "low")
+    if dangling:
+        print(
+            f"\n⚠️  POSSIBLY DANGLING (in-cloud but marked local/not-uploaded) — "
+            f"{len(dangling)} (heuristic; confirm in Google Photos before reconciling):"
+        )
+        # HIGH first (strongest evidence), then LOW.
+        for manual_id, tier, full_path in sorted(dangling, key=lambda d: (d[1] != "high", d[0])):
+            print(f"   • {manual_id}  [{tier}]")
+            print(f"       {full_path}")
+
     # ---- Summary line (stable, parseable) ----
     counts_str = ", ".join(f"{k}={v}" for k, v in sorted(category_counts.items()))
     print(
         f"verify_library: scanned {scanned}, OK {ok}, MISMATCH {len(violations)}"
         + (f" ({counts_str})" if counts_str else "")
+        + (f" | possibly_dangling: {len(dangling)} (high={dangling_high}, low={dangling_low})"
+           if dangling else "")
     )
 
     # ---- Optional fix (IMP-D5 slice): regenerate archived+TEXT_DUMMY dummies ----

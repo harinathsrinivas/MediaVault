@@ -233,3 +233,29 @@ httpx  # test: required by fastapi.testclient.TestClient (tests/test_web_endpoin
   - Test results:
     - `python -m pytest tests/test_verify_library.py tests/test_rehash.py tests/test_baseline_happy_path.py -q` → **31 passed in 37.66s**
     - `python -m pytest tests/smoke -q` → **58 passed in 27.95s**
+
+## IMP-E14 (data-integrity hole) — close the cmd_prep clobber hole + add dangling detection — [status: done]
+- Executor: executor-opus
+- Model: opus
+- Mode: single-executor (standalone data-integrity directive on branch `feature/imp_e14_fetch_in_ui`; NOT an enumerated PLAN.md step, so no PLAN checkbox was ticked)
+- Files changed: `main.py`, `tests/test_verify_library.py`
+- Outcome: Enforced the invariant "an entry that asserts a cloud copy must never auto-revert to local_ready/uploaded=False." (1) Tightened the `cmd_prep` early-skip guard (main.py:850) so it ALSO refuses to re-prep an entry whose status is `onboarded`/`archived`/`restored_local` (any cloud-bearing state), not just `uploaded==True`/`archived`. This closes the regression where `cmd_prep_push_rep_season` preps every episode before checking `uploaded` and could rebuild a cloud-bearing leaf to `local_ready/uploaded=False`, stranding the cloud copy (the battlestar/dark dangling-bug class). A genuinely-local entry (`local_ready` + falsy `uploaded` + real file) still preps normally. (2) Added an additive, read-only possibly-dangling DETECTION pass to `cmd_verify_library` via a new `_dangling_evidence()` helper: flags a leaf that looks local (`status=="local_ready"` or missing, `uploaded` falsy) yet shows cloud evidence — HIGH (`split_info`, OR a `checksums/` `.sha256` sidecar embedding the entry's `short_id`, OR an mvmeta sidecar referencing the id), LOW (`search_term`-only). Printed as a separate advisory + summary suffix; does NOT affect the True/False return (still driven solely by the status↔disk invariant).
+- Key decisions:
+  - Guard semantics unchanged (still early-skip → returns True, ZERO artifacts, never rolls back); only the skip SET widened. The rollback journal never records `uploaded`/`status`, so this is strictly more conservative and is NOT a change-gate change (confirmed against the auto-rollback change-gate).
+  - Dangling detection folded into the EXISTING physical-leaf walk (single iteration) after the virtual-skip guards, so it is inherently alias/season_map-safe and adds no second pass.
+  - HIGH `checksums/` matching keys on the entry's OWN `short_id` in the sidecar name, NOT mere presence of a `checksums/` dir. This is load-bearing: a shared season `checksums/` folder holds sidecars for many episodes; matching by short_id attributes evidence to the RIGHT episode (verified on real data — battlestar s01e11's sidecar embeds its short_id `044cc3` → HIGH, while e12/e13 whose short_ids are absent fall to LOW).
+  - LOW (`search_term`-only) is intentionally noisy and low-confidence (cmd_prep sets `search_term` on every entry) — separated from HIGH per the task. A `# TODO future --reconcile-dangling` was added noting a future mutating command could `set_uploaded` the HIGH ones after Google-Photos confirmation.
+  - Summary suffix ` | possibly_dangling: N (high=a, low=b)` is appended ONLY when N>0, preserving every existing exact-substring assertion (`"scanned X, OK Y, MISMATCH Z"`).
+- Verification:
+  - Before/after of the cmd_prep guard condition (main.py:850):
+    ```
+    -        if entry.get("uploaded") == True or entry.get("status") == "archived":
+    +        if entry.get("uploaded") or entry.get("status") in ("onboarded", "archived", "restored_local"):
+    ```
+    Skip message changed to: `⏭️  Skipping Prep: {manual_id} (already pushed/archived — refusing to clobber cloud-bearing status to local_ready).`
+  - New tests in `tests/test_verify_library.py`: `test_cmd_prep_refuses_to_clobber_cloud_bearing_status`, `test_cmd_prep_still_preps_a_genuine_local_entry`, `test_verify_library_flags_possibly_dangling_without_failing`, `test_verify_library_no_dangling_section_when_clean`, `test_verify_library_dangling_skips_uploaded_and_virtual`.
+  - `python -m pytest tests/test_verify_library.py -q` → **12 passed**.
+  - `python -m pytest tests/test_rehash.py tests/test_baseline_happy_path.py tests/test_rollback.py -q` → **34 passed** (prep/push/rollback regression intact).
+  - `python -m pytest tests/smoke -q` → **58 passed** (main.py touched — smoke gate green).
+  - `python -m pytest tests/test_entry_schema_guard.py -q` → **2 passed**; full suite `pytest -q` → **305 passed** (1 pre-existing unrelated FastAPI/httpx deprecation warning).
+  - Real-library read-only `PYTHONUTF8=1 python main.py verify_library` → `scanned 657, OK 657, MISMATCH 0 | possibly_dangling: 6 (high=2, low=4)`. The 6 advisories are exactly the known danglers: `tv-en-2004-battlestargalactica-s01e11` [high], `tv-en-2017-dark-s01e10` [high], `mov-ta-2012-3` [low], `mov-ta-2013-soodhukavvum` [low], `tv-en-2004-battlestargalactica-s01e12` [low], `tv-en-2004-battlestargalactica-s01e13` [low]. (NOTE: the danglers are the 2004 SEASON 01 battlestar episodes — `local_ready/uploaded=False` with surviving cloud evidence — not the 2008 S04 ones, which are correctly `archived/uploaded=True`. The audit's "battlestar e11/e12/e13" referred to S01.) No mutation occurred (MISMATCH 0 → returns True; advisory is independent).

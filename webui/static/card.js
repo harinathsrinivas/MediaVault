@@ -26,6 +26,8 @@
 import { metaFor, humanSize } from "./data.js";
 import { openConfirmModal } from "./modal.js";
 import { createRing } from "./ring.js";
+import { displayTitle } from "./title.js";
+import { openTerminal, notifyJob } from "./terminal.js";
 
 var POLL_MS = 1000;
 
@@ -115,6 +117,37 @@ function wireCopy(btn, getText) {
   });
 }
 
+// The equivalent CLI command shown in the expanded terminal header. For
+// fetch_restore this is the documented invocation (plus ` episodes <range>` when
+// a range was used); other actions prefer the reclaim-provided suggested command
+// and fall back to a plain `python main.py <action> <id>`.
+function commandFor(action, item) {
+  if (action === "fetch_restore") {
+    var base = "python main.py fetch_restore " + (item && item.id ? item.id : "");
+    if (item && item.episodes) base += " episodes " + item.episodes;
+    return base.trim();
+  }
+  if (action === "sort") return "python main.py sort";
+  if (item && item.suggested_command) return item.suggested_command;
+  var id = item && item.id ? " " + item.id : "";
+  return "python main.py " + action + id;
+}
+
+// Dispose every fetch-ring under `container` before its cards are removed. app.js
+// calls this on the SINGLE grid-clear path (panel re-paint on tab/sub-view switch
+// and post-fetch refresh), so no ResizeObserver accumulates across re-renders.
+export function destroyRingsIn(container) {
+  if (!container) return;
+  var cards = container.querySelectorAll(".card");
+  for (var i = 0; i < cards.length; i += 1) {
+    var r = cards[i]._fetchRing;
+    if (r && typeof r.destroy === "function") {
+      r.destroy();
+      cards[i]._fetchRing = null;
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Card rendering
 // ---------------------------------------------------------------------------
@@ -141,28 +174,25 @@ export function buildCard(item) {
   badge.classList.add("b-" + m.cssKey);
   $(".badge-label", badge).textContent = m.label;
 
-  // Id + size.
-  var idEl = $(".item-id", node);
-  idEl.textContent = item.title && item.title !== item.id ? item.title : item.id;
+  // Prominent TITLE (real metadata.title once Phase 5/TMDB lands; humanized id
+  // until then — see title.js) + size. The raw id moves to the card foot.
+  var titleEl = $(".item-title", node);
+  titleEl.textContent = displayTitle(item);
   if (item.guessed) {
     var g = document.createElement("span");
     g.className = "guess-tag";
     g.title = "Editable guessed id for an unprepped file";
     g.textContent = "GUESS";
-    idEl.appendChild(g);
+    titleEl.appendChild(g);
   }
   $(".item-size", node).textContent = humanSize(item.size_bytes);
 
-  // Secondary id line (the canonical id, when the title differs from it).
-  var subId = $(".item-subid", node);
-  if (item.title && item.title !== item.id) {
-    subId.textContent = item.id;
-  } else {
-    subId.style.display = "none";
-  }
-
   // Path.
   $(".item-path", node).textContent = item.path || "";
+
+  // Raw canonical id at the foot — small/dim/monospace, visually subordinate to
+  // the title above. Always shown (it's the stable handle for the entry).
+  $(".item-rawid", node).textContent = item.id;
 
   // Suggested command (read-only) + Copy. Absent for ARCHIVED and any row the
   // reclaim feed didn't enrich.
@@ -226,6 +256,10 @@ export function buildCard(item) {
     // The SVG ring overlay + numeric chunk label live on this card. The label is
     // mounted into the action row so it sits beside the button.
     var ring = createRing(node, actions);
+    // Track the ring on the card so the single grid-clear path (app.js, before it
+    // empties #panel) can call ring.destroy() and disconnect its ResizeObserver —
+    // otherwise an observer leaks per archived card on every fetch/re-render.
+    node._fetchRing = ring;
 
     fetchBtn.addEventListener("click", function () {
       runFetchRestore(item, fetchBtn, jobPanel, ring);
@@ -289,6 +323,7 @@ function actionHttpError(status, detail) {
 
 export function runAction(action, item, btn, jobPanel) {
   if (btn) btn.disabled = true;
+  if (jobPanel) jobPanel._jobCommand = commandFor(action, item);
   renderJob(jobPanel, { status: "running", name: action, output: "" }, true);
 
   fetch("/api/action/" + action, {
@@ -375,6 +410,7 @@ function fetchRestoreBody(item) {
 function runFetchRestore(item, btn, jobPanel, ring) {
   if (btn.disabled) return; // guard against double-submit
   btn.disabled = true;
+  if (jobPanel) jobPanel._jobCommand = commandFor("fetch_restore", item);
   ring.setChunks(0, 0); // show the ring immediately at 0 (job not enqueued yet)
   renderJob(jobPanel, { status: "running", name: "fetch_restore", output: "" }, true);
 
@@ -509,6 +545,7 @@ function maybeStartDemo(node, btn, jobPanel, ring) {
   if (poster) poster.appendChild(tag);
 
   btn.disabled = true; // mirror a real run: no double-submit during the demo
+  jobPanel._jobCommand = "python main.py fetch_restore <id>  # demo (no real fetch)";
   renderJob(
     jobPanel,
     { status: "running", name: "fetch_restore (demo)", output: "Synthetic preview — no real fetch." },
@@ -558,9 +595,16 @@ function maybeStartDemo(node, btn, jobPanel, ring) {
 
 // Render a job record into a panel. Output goes through textContent (a <pre>),
 // never innerHTML. `error` status is shown faithfully — output is NOT hidden.
+//
+// Side effects that power the expandable terminal (change #3): the latest job is
+// stashed on the panel (panel._lastJob) so openTerminal() can paint immediately,
+// and notifyJob() is fired AFTER rendering so an already-open overlay bound to
+// this panel repaints from the SAME job object — the expanded view subscribes to
+// this single existing poll rather than starting a second one.
 function renderJob(panel, job, running) {
   panel.classList.add("show");
   panel.textContent = "";
+  panel._lastJob = job;
 
   var head = document.createElement("div");
   head.className = "job-head";
@@ -599,4 +643,23 @@ function renderJob(panel, job, running) {
     pre2.textContent = "Waiting for output…";
     panel.appendChild(pre2);
   }
+
+  // Expand affordance (change #3): a diagonal-arrow button pinned to the panel's
+  // bottom-right corner. Available in EVERY state (running / done / error) so the
+  // full log + equivalent command can be reviewed after the fact. Opening the
+  // overlay starts no new poll — it subscribes to this panel's renderJob stream.
+  var expand = document.createElement("button");
+  expand.type = "button";
+  expand.className = "job-expand";
+  expand.title = "Expand to full-screen terminal";
+  expand.setAttribute("aria-label", "Expand to full-screen terminal");
+  expand.textContent = "⤢"; // ⤢ diagonal arrows
+  expand.addEventListener("click", function () {
+    openTerminal(panel);
+  });
+  panel.appendChild(expand);
+
+  // Fan this same job out to an open, bound terminal overlay (single-poll live
+  // mirror). No-op when the overlay is closed or bound to a different panel.
+  notifyJob(panel, job, panel._jobCommand || "");
 }

@@ -39,6 +39,10 @@
     <div class="subnav" id="subnav" role="tablist"
          aria-label="Disk-state sub-view"></div>
 
+    <!-- Sort control: key (Size/Title/Year) + direction toggle. Client-side;
+         re-orders the loaded grid instantly. Built + wired in app.js. -->
+    <div class="sortbar" id="sortbar" aria-label="Sort items"></div>
+
     <p class="status-line" id="status-line" role="status" aria-live="polite"></p>
 
     <!-- The single grid for the selected (tab, sub-view). -->
@@ -86,10 +90,9 @@
       </div>
       <div class="card-body">
         <div class="id-row">
-          <span class="item-id"></span>
+          <span class="item-title"></span>
           <span class="item-size"></span>
         </div>
-        <div class="item-subid"></div>
         <div class="item-path"></div>
 
         <div class="field field-cmd">
@@ -112,6 +115,10 @@
         <div class="card-actions"></div>
 
         <div class="job-panel item-job"></div>
+
+        <!-- Raw canonical id, visually subordinate (small, dim, monospace) at the
+             card foot. The prominent title is .item-title at the top. -->
+        <div class="item-rawid"></div>
       </div>
     </article>
   </template>

@@ -36,6 +36,7 @@ import {
 import { buildCard, runAction, setRefreshHandler, destroyRingsIn } from "./card.js";
 import { wireModal } from "./modal.js";
 import { getSort, setSort, sortItems, SORT_KEYS } from "./sort.js";
+import { wireCardGlow } from "./glow.js";
 
 function $(sel, root) {
   return (root || document).querySelector(sel);
@@ -577,6 +578,10 @@ function init() {
   wireModal();
   wireSort();
   buildSortbar();
+  // Cursor-following glow on the cards. Delegated to the stable #panel (created
+  // once in index.html; only its children are cleared on re-render), so every
+  // freshly-rendered card is covered with no per-card listener to leak.
+  wireCardGlow($("#panel"));
   // After any terminal job, reload the model and repaint (preserving the view).
   setRefreshHandler(function () {
     load(false);

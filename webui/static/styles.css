@@ -428,6 +428,12 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 
 .card {
   position: relative; /* anchor for the absolute .fetch-ring SVG overlay */
+  /* Form a stacking context so the negative-z glow layer (.card::before) is
+     contained ABOVE the card's own background but BELOW its content, instead of
+     escaping behind the card. No visual/layout cost; the existing positive
+     z-indexed children (.fetch-ring 3, .demo-tag 4, .card-actions 5) keep their
+     relative order and stay on top. */
+  isolation: isolate;
   display: flex;
   flex-direction: column;
   background: linear-gradient(180deg, var(--bg-card), #121a28);
@@ -443,6 +449,50 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   border-color: var(--line);
 }
 .card[data-hidden="true"] { display: none; }
+
+/* Cursor-following glow (IMP-E14). A soft mint radial centred under the pointer,
+   on a dedicated layer painted ABOVE the card's gradient (step 1) but BELOW the
+   in-flow poster/body and every positive-z overlay (ring/badge/actions). It is
+   pointer-events:none, so it never blocks a click, tap, input focus, or the ⤢
+   expand arrow. Default opacity 0; glow.js writes --mx/--my (px, relative to the
+   card) one update per frame as the pointer moves; CSS handles the fade. The
+   --mx/--my fallbacks centre the glow before the first move / on un-tracked
+   cards so it never flashes at the 0,0 corner. */
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  background: radial-gradient(
+    circle at var(--mx, 50%) var(--my, 50%),
+    rgba(56, 224, 200, 0.16),
+    rgba(56, 224, 200, 0.06) 90px,
+    transparent 160px
+  );
+}
+/* Reveal only on devices with a true hovering pointer (desktop mouse / trackpad
+   / pen). On touch (hover:none) this rule never matches, so a tap can't light it
+   and nothing stays stuck after a finger lifts — graceful degradation. */
+@media (hover: hover) and (pointer: fine) {
+  .card:hover::before { opacity: 1; }
+}
+/* Reduced motion: no following + no fade. Fall back to a STATIC, centred, subtle
+   highlight on hover (no transition, fixed centre) so the affordance survives
+   without movement. glow.js also skips pointer tracking in this mode. */
+@media (prefers-reduced-motion: reduce) {
+  .card::before {
+    transition: none;
+    background: radial-gradient(
+      circle at 50% 50%,
+      rgba(56, 224, 200, 0.12),
+      transparent 70%
+    );
+  }
+  .card:hover::before { opacity: 1; }
+}
 
 /* Poster placeholder — gradient + big initial, NO external image. */
 .poster {

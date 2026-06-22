@@ -13,9 +13,10 @@ Two hard problems vanish *by construction* because nothing ever runs
 concurrently:
 
 1. **stdout capture is race-free.** Since only one action runs at a time, the
-   worker can wrap each ``main.cmd_*`` in a plain
-   ``contextlib.redirect_stdout(io.StringIO())`` to capture exactly that job's
-   output. There is no second concurrent thread to bleed into ``sys.stdout``.
+   worker can wrap each ``main.cmd_*`` in a single
+   ``contextlib.redirect_stdout(_JobTee(job_id))`` to capture exactly that job's
+   output (and republish it incrementally — IMP-E14 Phase 2). There is no second
+   concurrent thread to bleed into ``sys.stdout``.
 2. **device serialization is automatic.** ``push`` / ``replace`` can never run
    concurrently against the single shared ADB device, because the queue admits
    exactly one action at a time. The queue *is* the device lock.
@@ -33,9 +34,9 @@ calls (as in tests) never spawn duplicate workers.
 """
 
 import contextlib
-import io
 import os
 import queue
+import re
 import threading
 import time
 
@@ -132,6 +133,137 @@ ACTION_TABLE = {
 _NONE_IS_SUCCESS = {"sort", "fetch_restore"}
 
 # ---------------------------------------------------------------------------
+# Incremental progress parsing (IMP-E14 Phase 2).
+#
+# The progress UNIT is chunks-done / total_chunks, derived purely server-side by
+# regex-scanning the captured stdout — mainfetch.py is NOT modified. The exact
+# marker strings mainfetch emits (verified by reading mainfetch.py) are:
+#
+#   entry start : "🔹 PROCESSING: <filename> (<short_id>)"   (one per entry)
+#   total       : "   > Detected Split File (N chunks)"       (one per SPLIT entry)
+#   done        : "     ✅ MOVED: <filename>"                  (one per moved chunk)
+#   entry end   : "   ✅ ENTRY COMPLETE."                      (entry finished)
+#
+# TOTAL rule: a season_map fetch processes several entries, so we count per
+# PROCESSING block. A block that contains a "Detected Split File (N chunks)"
+# line contributes N; a block with no such line is a single non-split file and
+# contributes 1. DONE = the running count of "✅ MOVED:" lines.
+#
+# If no PROCESSING/MOVED markers appear at all (push / replace / sort), progress
+# stays {done:0,total:0} while running and the worker promotes it to {1,1} on a
+# clean terminal "done" (status-only degrade — never crash, never done>total).
+# ---------------------------------------------------------------------------
+
+# Anchored at line start (re.M). "🔹 PROCESSING:" tolerates the leading "\n"
+# mainfetch prints because that newline ends the previous line, leaving this
+# marker at the start of its own line. "Detected Split File (N chunks)" captures
+# N. "✅ MOVED:" is counted by occurrence.
+_RE_PROCESSING = re.compile(r"^🔹 PROCESSING:", re.M)
+_RE_SPLIT = re.compile(r"^\s*> Detected Split File \((\d+) chunks\)", re.M)
+_RE_MOVED = re.compile(r"^\s*✅ MOVED:", re.M)
+
+# Cheap pre-filter: only re-parse the accumulated buffer when a freshly written
+# chunk actually contains one of these literal substrings. This keeps writing
+# large non-marker output O(1) per write instead of O(n) (avoids O(n²) overall),
+# while guaranteeing every marker still triggers a recompute.
+_PROGRESS_SIGNALS = ("🔹 PROCESSING:", "Detected Split File", "✅ MOVED:")
+
+
+def _parse_progress(text):
+    """Return {'done': d, 'total': t} parsed from accumulated captured stdout.
+
+    Pure function over the full buffer (idempotent — re-running on the same text
+    yields the same result). ``total`` sums N per split entry plus 1 per
+    non-split PROCESSING block; ``done`` counts ✅ MOVED lines. ``done`` is
+    clamped to never exceed ``total`` so a UI bar can never read >100%.
+    """
+    # Split the buffer into per-entry segments on the PROCESSING marker. The
+    # text before the first marker is preamble (no entry) and is dropped.
+    segments = _RE_PROCESSING.split(text)
+    total = 0
+    if len(segments) > 1:
+        for seg in segments[1:]:
+            split_matches = _RE_SPLIT.findall(seg)
+            if split_matches:
+                # Sum in case (defensively) more than one split line appears in
+                # one entry block; normally there is exactly one.
+                total += sum(int(n) for n in split_matches)
+            else:
+                # A PROCESSING block with no "Detected Split File" line is a
+                # single non-split file -> 1 chunk.
+                total += 1
+
+    done = len(_RE_MOVED.findall(text))
+    if total and done > total:
+        done = total  # clamp: never let done exceed total
+    return {"done": done, "total": total}
+
+
+class _JobTee:
+    """Write-through stdout target for one running job.
+
+    Passed to ``contextlib.redirect_stdout`` in place of a plain ``StringIO``.
+    Every ``print`` in the running action calls ``.write()``, which (a) appends
+    to an internal buffer and (b) under ``JOBS_LOCK`` republishes the
+    accumulated text to ``JOBS[job_id]["output"]`` and recomputes
+    ``JOBS[job_id]["progress"]`` — so partial output and advancing progress are
+    visible to ``GET /api/job/{id}`` polls while the job is still running.
+
+    Thread-safety: the only writer is the single serialized worker thread; the
+    only readers are request threads (which hold ``JOBS_LOCK`` in api_job). This
+    tee therefore holds ``JOBS_LOCK`` solely for the in-memory dict mutation —
+    it does NO I/O under the lock and NEVER calls ``_set_job`` (which would
+    re-acquire the non-reentrant lock and deadlock); it updates the record
+    fields directly. ``getvalue()`` returns the full buffer for the terminal
+    capture so final output is never truncated.
+    """
+
+    def __init__(self, job_id):
+        self._job_id = job_id
+        self._parts = []          # accumulated chunks (joined lazily)
+        self._cache = ""          # memoized join of self._parts
+
+    # -- file-like protocol expected by redirect_stdout / print --------------
+
+    def write(self, s):
+        if not s:
+            return 0
+        # Coerce defensively; print() always passes str, but a stray bytes/obj
+        # write must not crash the worker (it would surface as a job "error").
+        if not isinstance(s, str):
+            s = str(s)
+        self._parts.append(s)
+        self._cache = ""  # invalidate memoized join
+        accumulated = self.getvalue()
+
+        # Only re-parse when this chunk carries a progress marker; otherwise we
+        # still publish the new output but skip the scan (keeps bulk output
+        # cheap). Re-affirm the publish under the lock regardless so partial
+        # output is always live.
+        reparse = any(sig in s for sig in _PROGRESS_SIGNALS)
+        progress = _parse_progress(accumulated) if reparse else None
+
+        with JOBS_LOCK:
+            record = JOBS.get(self._job_id)
+            if record is not None:
+                record["output"] = accumulated
+                if progress is not None:
+                    record["progress"] = progress
+        return len(s)
+
+    def flush(self):
+        # No-op: there is no buffering layer to drain (each write already
+        # publishes). Present because redirect_stdout targets are expected to be
+        # flushable and some callers call sys.stdout.flush().
+        return None
+
+    def getvalue(self):
+        if not self._cache:
+            self._cache = "".join(self._parts)
+        return self._cache
+
+
+# ---------------------------------------------------------------------------
 # Job registry + the single serialized worker.
 #
 # JOBS is the module-level job-record store, guarded by JOBS_LOCK. Every read or
@@ -165,6 +297,26 @@ def _set_job(job_id, **fields):
         JOBS[job_id].update(fields)
 
 
+def _terminal_progress(text, ok):
+    """Compute the FINAL progress dict for a job that has reached a terminal
+    state, given the full captured ``text`` and whether it succeeded (``ok``).
+
+    * Success with parsed chunks      -> {done: total, total: total} (fully done)
+    * Success with NO chunk markers   -> {done: 1, total: 1} (status-only degrade
+      so a UI bar reads 100% for push/replace/sort that print no chunk lines)
+    * Failure                         -> last parsed progress, unmodified (honest
+      "got this far"); ``done`` is still clamped so it can never exceed total.
+    """
+    progress = _parse_progress(text)
+    if ok:
+        total = progress["total"]
+        if total > 0:
+            return {"done": total, "total": total}
+        # No chunk/processing markers at all -> promote to a completed 1/1.
+        return {"done": 1, "total": 1}
+    return progress
+
+
 def _worker_loop():
     """The single worker. Pulls jobs FIFO and runs each main.cmd_* in-process,
     one at a time, capturing that job's stdout. It must NEVER die: every job is
@@ -182,11 +334,16 @@ def _worker_loop():
 
         try:
             _set_job(job_id, status="running")
-            buf = io.StringIO()
+            # Write-through tee: every print during the run publishes partial
+            # output + recomputed progress to the job record (incremental
+            # visibility). getvalue() still yields the COMPLETE buffer for the
+            # terminal capture, so final output is never truncated.
+            #
             # SAFE BY CONSTRUCTION: only one action runs at a time, so
             # redirecting the process-global stdout here cannot race another
             # action's output. This is the headline advantage of the serialized
             # single-worker model.
+            buf = _JobTee(job_id)
             try:
                 with contextlib.redirect_stdout(buf):
                     result = runner(body)
@@ -195,17 +352,20 @@ def _worker_loop():
                 # non-zero/None exit as an error; a clean exit(0) as success.
                 code = exc.code
                 ok = code in (0, None)
+                final = buf.getvalue()
                 _set_job(
                     job_id,
                     status="done" if ok else "error",
-                    output=buf.getvalue()
-                    + ("" if ok else f"\n[exited with code {code}]"),
+                    output=final + ("" if ok else f"\n[exited with code {code}]"),
+                    progress=_terminal_progress(final, ok),
                 )
             except BaseException as exc:  # RollbackHardFail + anything else
+                final = buf.getvalue()
                 _set_job(
                     job_id,
                     status="error",
-                    output=buf.getvalue() + f"\n[{type(exc).__name__}] {exc}",
+                    output=final + f"\n[{type(exc).__name__}] {exc}",
+                    progress=_terminal_progress(final, False),
                 )
             else:
                 # No exception was raised — decide done vs error from the return
@@ -224,10 +384,12 @@ def _worker_loop():
                     ok = name in _NONE_IS_SUCCESS
                 else:
                     ok = True
+                final = buf.getvalue()
                 _set_job(
                     job_id,
                     status="done" if ok else "error",
-                    output=buf.getvalue(),
+                    output=final,
+                    progress=_terminal_progress(final, ok),
                 )
         except BaseException as exc:
             # Last-resort guard: even a failure in our own bookkeeping must not
@@ -272,6 +434,12 @@ def _enqueue(name, runner, body):
             "status": "running",
             "output": "",
             "started_at": time.time(),
+            # ADDED (IMP-E14 Phase 2): always-present parsed progress, in chunk
+            # units. Default {0,0} at enqueue; the worker's tee advances it live
+            # and the terminal branch finalizes it. progress_unit documents the
+            # unit for the UI without changing the existing field contract.
+            "progress": {"done": 0, "total": 0},
+            "progress_unit": "chunks",
         }
     WORK_QUEUE.put((job_id, name, runner, body))
     return job_id

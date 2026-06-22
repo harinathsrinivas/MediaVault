@@ -3106,7 +3106,31 @@ def cmd_dispatch_fetch(manual_id, episode_range=None):
         print(f"   > 🚀 Dispatching Fetch...")
 
     try:
-        subprocess.run(cmd)
+        # Force the child's stdio to UTF-8 — a PIPEd child defaults to cp1252 on Windows and would crash printing mainfetch's emoji.
+        child_env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        # Stream the child's combined stdout/stderr line-by-line through the
+        # CURRENT sys.stdout. A blocking run would inherit the OS-level fd and
+        # bypass any in-process redirect_stdout (used by the web worker to tee
+        # progress), so we PIPE + re-print each line via print() instead. This
+        # keeps the live CLI terminal updated AND lets the worker's capture see
+        # real download progress (e.g. "Detected Split File", "✅ MOVED").
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+            env=child_env,
+        )
+        try:
+            for line in proc.stdout:
+                # line already carries its newline; flush so the worker's tee
+                # republishes promptly.
+                print(line, end="", flush=True)
+        finally:
+            proc.wait()
     except Exception as e:
         print(f"❌ Error running fetch script: {e}")
 

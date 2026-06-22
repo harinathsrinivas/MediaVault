@@ -77,6 +77,11 @@ def _run_prep_push_rep(body):
     return main.cmd_prep_push_rep(body.get("id"), body.get("filepath"))
 
 
+def _run_fetch_restore(body):
+    # episodes is an optional season range (e.g. "1-3"); None means the whole entry.
+    return main.cmd_fetch_restore(body.get("id"), (body.get("options") or {}).get("episodes"))
+
+
 # name -> (runner, requires_confirm). Only "replace" is destructive and gated.
 ACTION_TABLE = {
     "prep":          (_run_prep,          False),
@@ -84,6 +89,7 @@ ACTION_TABLE = {
     "replace":       (_run_replace,       True),
     "sort":          (_run_sort,          False),
     "prep_push_rep": (_run_prep_push_rep, False),
+    "fetch_restore": (_run_fetch_restore, False),
 }
 
 # Per-action success convention for the no-exception (else) branch of the worker.
@@ -105,15 +111,25 @@ ACTION_TABLE = {
 # False` is UNSAFE: it would mark a FAILED prep_push_rep (file pushed but NOT
 # archived, or an original lost past the PONR) as "done" — a safety regression.
 #
-# So None counts as success ONLY for actions listed here. We list ONLY "sort":
-# it is non-destructive and its single None-on-failure path is a read-only
-# "library empty" check that creates nothing, so a None->done there is benign.
+# So None counts as success ONLY for actions listed here. We list "sort" and
+# "fetch_restore":
+#   * "sort" is non-destructive and its single None-on-failure path is a
+#     read-only "library empty" check that creates nothing, so None->done is
+#     benign.
+#   * "fetch_restore" (cmd_fetch_restore) also returns None on every path: it
+#     prints ✅✅✅ / ⚠️ banners rather than returning a bool, so a no-exception
+#     completion IS the success signal and the captured banner tells the user the
+#     real outcome (full restore vs. a 0-item range vs. the only handled-failure
+#     path, "ID not found", which is a read-only library check that creates
+#     nothing — benign to mark done). It is also not destructive of local-only
+#     data (fetch downloads; restore verifies and only quarantines on mismatch),
+#     so requires_confirm=False above.
 # "prep_push_rep" is deliberately EXCLUDED: its None is ambiguous, and the safe
 # direction for a destructive autopilot is to NOT auto-mark it "done" — a
 # successful run still prints "AUTO-PILOT COMPLETE" in the captured output and
 # the subsequent reclaim refresh shows the archived state. (We do NOT change any
 # cmd_* return value — main.py is intentionally left untouched.)
-_NONE_IS_SUCCESS = {"sort"}
+_NONE_IS_SUCCESS = {"sort", "fetch_restore"}
 
 # ---------------------------------------------------------------------------
 # Job registry + the single serialized worker.

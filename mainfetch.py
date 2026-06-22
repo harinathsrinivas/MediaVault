@@ -28,6 +28,68 @@ except ImportError:
 # entries behavior is intentionally removed.
 from mvcommon import RESTORE_DIR_NAME, load_library, calculate_file_hash, fetch_session_lock, episode_num_from_id
 
+# ==========================================
+#      STRUCTURED PROGRESS HOOK (IMP-E14)
+# ==========================================
+# A single optional, module-level observer used ONLY by the web console worker
+# (webui/server.py) to surface live fetch progress as a structured
+# {done, total} pair on the job record — counts come from THIS code's exact
+# chunk bookkeeping, never from parsing stdout banners.
+#
+# CONTRACT — this MUST stay a pure no-op for the plain CLI:
+#   * PROGRESS_HOOK is None by default. `python mainfetch.py fetch ...` never
+#     sets it, so `_emit_progress` does nothing, prints nothing, and changes no
+#     control flow or filesystem state. CLI behavior is byte-for-byte unchanged.
+#   * Only the web worker sets PROGRESS_HOOK (around one job) and MUST reset it
+#     to None in a finally, so a stale hook can never leak across jobs.
+#   * A buggy hook must never break a fetch: _emit_progress swallows every
+#     exception the hook may raise.
+PROGRESS_HOOK = None
+
+
+def _emit_progress(done, total):
+    """Report absolute fetch progress (done/total chunks) to PROGRESS_HOOK.
+
+    No-op when no hook is installed (the CLI default). Hook exceptions are
+    swallowed so an observer can never disrupt the fetch itself.
+    """
+    hook = PROGRESS_HOOK
+    if hook is None:
+        return
+    try:
+        hook(done, total)
+    except Exception:
+        # An observer must never be able to break a fetch.
+        pass
+
+
+def _count_pending_chunks(entries):
+    """Read-only count of chunks `fetch_single_entry` will still download across
+    `entries` — i.e. the cumulative `total` for progress.
+
+    Mirrors `fetch_single_entry`'s own queue-building rule (split -> per chunk,
+    plain -> the single file) and skips any chunk whose target already exists in
+    the entry's restore folder, so the total matches what will actually be
+    fetched. Unlike `build_download_queue` this creates NO directories and has no
+    side effects, so computing it leaves CLI behavior unchanged. Never raises.
+    """
+    total = 0
+    for entry in entries:
+        try:
+            restore_folder = os.path.join(entry["folder_path"], RESTORE_DIR_NAME)
+            if entry.get("split_info") and entry["split_info"].get("is_split"):
+                for chunk in entry["split_info"]["chunks"]:
+                    if not os.path.exists(os.path.join(restore_folder, chunk["filename"])):
+                        total += 1
+            else:
+                if not os.path.exists(os.path.join(restore_folder, entry["filename"])):
+                    total += 1
+        except Exception:
+            # A malformed entry must not break progress accounting; just skip it.
+            continue
+    return total
+
+
 # --- AUTOMATION CONFIG ---
 CHROME_PROFILES = {
     "movies": r"C:\Media\Utils\ChromeProfile",
@@ -250,10 +312,16 @@ def automation_download_file(driver, search_queries, filename_expected, dest_fol
 #             CORE LOGIC
 # ==========================================
 
-def fetch_single_entry(driver, entry):
+def fetch_single_entry(driver, entry, on_chunk_done=None):
     """
     Handles the fetch logic for a single library entry (Movie or Episode).
     Refactored to use PARALLEL TRIGGER + HARVESTER for large files.
+
+    on_chunk_done: optional 0-arg callback invoked once per chunk that completes
+    (right after the ✅ MOVED line). Defaults to None so the CLI path is
+    unchanged; the web worker's driver passes one to advance live progress. The
+    callback is best-effort — its exceptions are swallowed so it can never break
+    a fetch.
     """
     print(f"\n🔹 PROCESSING: {entry['filename']} ({entry.get('short_id', 'N/A')})")
 
@@ -373,6 +441,12 @@ def fetch_single_entry(driver, entry):
                     print(f"     ✅ MOVED: {matched['filename']}")
                     matched["status"] = "done"
                     found_new = True
+                    if on_chunk_done is not None:
+                        try:
+                            on_chunk_done()
+                        except Exception:
+                            # A progress observer must never break the fetch.
+                            pass
                 else:
                     # Duplicate check
                     if any(i["hash"] == fhash for i in queue):
@@ -527,6 +601,19 @@ def cmd_fetch_route(manual_id, ep_range=None):
 
     print(f"   > 📋 Processing {len(targets)} items...")
 
+    # [IMP-E14] Structured progress: total = cumulative pending chunks across all
+    # targets (read-only; no side effects), accumulated across entries so a
+    # season_map reports cumulative done/total. _emit_progress is a NO-OP unless
+    # the web worker installed PROGRESS_HOOK, so this changes nothing for the CLI.
+    progress_total = _count_pending_chunks(targets)
+    progress_done = 0
+    _emit_progress(progress_done, progress_total)
+
+    def _advance_progress():
+        nonlocal progress_done
+        progress_done += 1
+        _emit_progress(progress_done, progress_total)
+
     # [IMP-C17] Single-flight: only one interactive fetch batch may drive the
     # browser at a time (blocking=True polls then reclaims a stale/contended
     # lock — it never hard-blocks). Placed AFTER the no-targets guard so an
@@ -540,7 +627,7 @@ def cmd_fetch_route(manual_id, ep_range=None):
             if not driver: return
 
             for entry in targets:
-                fetch_single_entry(driver, entry)
+                fetch_single_entry(driver, entry, on_chunk_done=_advance_progress)
 
         except SessionExpiredError:
             # [IMP-C6] One logged-out detection aborts the whole batch loudly.

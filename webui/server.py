@@ -44,6 +44,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import main
+import mainfetch
 
 # ---------------------------------------------------------------------------
 # Action allow-list (FIXED contract). Maps an action name to a callable that
@@ -165,6 +166,87 @@ def _set_job(job_id, **fields):
         JOBS[job_id].update(fields)
 
 
+def _publish_progress(job_id, done, total):
+    """Publish a sanitized {done, total} onto JOBS[job_id]["progress"].
+
+    Invariants enforced here so a misbehaving producer can never corrupt the
+    contract: both values are coerced to non-negative ints and ``done`` is
+    clamped to ``<= total`` (NEVER done > total). Held under JOBS_LOCK; tolerant
+    of a vanished record (best-effort, never raises into the caller — this runs
+    inside the fetch via the progress hook).
+    """
+    try:
+        total = max(0, int(total))
+        done = max(0, int(done))
+    except (TypeError, ValueError):
+        return
+    if done > total:
+        done = total
+    with JOBS_LOCK:
+        rec = JOBS.get(job_id)
+        if rec is not None:
+            rec["progress"] = {"done": done, "total": total}
+
+
+def _finalize_progress(job_id, ok):
+    """Reconcile ``progress`` at a terminal state, holding JOBS_LOCK.
+
+    Cases (the producer hook may or may not have fired):
+      * Hook fired (total > 0):
+          - success -> clamp to a clean {done: total, total: total} (covers a
+            success path that ended without a final per-chunk callback, e.g. all
+            files already present so 0 chunks were downloaded but total was 0 ->
+            stays {0,0}; or a partial-but-"done" fetch -> shown complete).
+          - failure -> leave the last-observed {done, total} as-is (it already
+            satisfies done <= total) so the user sees how far it got.
+      * Hook never fired (total == 0 — every non-fetch action: push/replace/
+        sort/prep): success -> {1, 1} (a single logical unit done); failure ->
+        leave {0, 0}. NEVER produces done > total.
+    """
+    with JOBS_LOCK:
+        rec = JOBS.get(job_id)
+        if rec is None:
+            return
+        prog = rec.get("progress") or {"done": 0, "total": 0}
+        total = prog.get("total", 0)
+        if total > 0:
+            if ok:
+                rec["progress"] = {"done": total, "total": total}
+            # failure: keep partial progress (already done <= total)
+        else:
+            # No structured total was ever reported (non-fetch action).
+            rec["progress"] = {"done": 1, "total": 1} if ok else {"done": 0, "total": 0}
+
+
+class _LiveBuffer(io.StringIO):
+    """A StringIO that mirrors everything written into JOBS[job_id]["output"]
+    so a RUNNING job's partial output is visible to GET /api/job/{id}.
+
+    Why this works race-free: the serialized single-worker model guarantees only
+    one action writes stdout at a time, so this buffer is the sole writer. Each
+    ``write`` publishes the full accumulated text under JOBS_LOCK. ``getvalue()``
+    still returns the complete output for the terminal record.
+    """
+
+    def __init__(self, job_id):
+        super().__init__()
+        self._job_id = job_id
+
+    def write(self, s):
+        n = super().write(s)
+        # Publish the running snapshot. Best-effort: a bookkeeping hiccup must
+        # never break the wrapped command's own print().
+        try:
+            snapshot = self.getvalue()
+            with JOBS_LOCK:
+                rec = JOBS.get(self._job_id)
+                if rec is not None:
+                    rec["output"] = snapshot
+        except Exception:
+            pass
+        return n
+
+
 def _worker_loop():
     """The single worker. Pulls jobs FIFO and runs each main.cmd_* in-process,
     one at a time, capturing that job's stdout. It must NEVER die: every job is
@@ -182,11 +264,22 @@ def _worker_loop():
 
         try:
             _set_job(job_id, status="running")
-            buf = io.StringIO()
-            # SAFE BY CONSTRUCTION: only one action runs at a time, so
-            # redirecting the process-global stdout here cannot race another
-            # action's output. This is the headline advantage of the serialized
-            # single-worker model.
+            # _LiveBuffer mirrors partial output into the job record on every
+            # write, so a RUNNING job's stdout is visible incrementally. SAFE BY
+            # CONSTRUCTION: only one action runs at a time, so redirecting the
+            # process-global stdout here cannot race another action's output.
+            buf = _LiveBuffer(job_id)
+
+            # Install the structured progress hook for the DURATION of this job
+            # only. fetch (via mainfetch) calls mainfetch._emit_progress with
+            # exact chunk counts; the hook publishes them as {done,total}. Non-
+            # fetch actions never call it, so progress stays {0,0} until the
+            # terminal clamp below. The hook is RESET to None in the finally so a
+            # stale hook can never leak into the next job.
+            def _hook(done, total, _jid=job_id):
+                _publish_progress(_jid, done, total)
+
+            mainfetch.PROGRESS_HOOK = _hook
             try:
                 with contextlib.redirect_stdout(buf):
                     result = runner(body)
@@ -201,12 +294,14 @@ def _worker_loop():
                     output=buf.getvalue()
                     + ("" if ok else f"\n[exited with code {code}]"),
                 )
+                _finalize_progress(job_id, ok)
             except BaseException as exc:  # RollbackHardFail + anything else
                 _set_job(
                     job_id,
                     status="error",
                     output=buf.getvalue() + f"\n[{type(exc).__name__}] {exc}",
                 )
+                _finalize_progress(job_id, False)
             else:
                 # No exception was raised — decide done vs error from the return
                 # value, using each action's success convention (see
@@ -229,6 +324,10 @@ def _worker_loop():
                     status="done" if ok else "error",
                     output=buf.getvalue(),
                 )
+                _finalize_progress(job_id, ok)
+            finally:
+                # ALWAYS clear the hook, even on exception, so no cross-job leak.
+                mainfetch.PROGRESS_HOOK = None
         except BaseException as exc:
             # Last-resort guard: even a failure in our own bookkeeping must not
             # kill the worker. Best-effort record, then keep serving.
@@ -271,6 +370,13 @@ def _enqueue(name, runner, body):
             "name": name,
             "status": "running",
             "output": "",
+            # Structured progress is ALWAYS present from enqueue. {done,total}
+            # advances live for fetch (via the mainfetch progress hook) and is
+            # reconciled at terminal by _finalize_progress; non-fetch actions
+            # leave it {0,0} until the terminal {1,1}/{0,0} clamp. progress_unit
+            # documents that the count is in fetch chunks.
+            "progress": {"done": 0, "total": 0},
+            "progress_unit": "chunks",
             "started_at": time.time(),
         }
     WORK_QUEUE.put((job_id, name, runner, body))

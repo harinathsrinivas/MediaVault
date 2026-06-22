@@ -115,7 +115,8 @@
 - Effort estimate: medium
 - Risk: low — strictly read-only.
 - If skipped: integrity drift keeps being discovered by accident (the orphan sat invisible for months); the daemon would happily automate fetch/archive cycles on top of silently inconsistent state, amplifying any drift.
-- Status: pending
+- Status: in_progress
+- Note (2026-06-22): Partially delivered on branch fix/imp_d4_library_integrity_guard: `cmd_verify_library` status-to-disk integrity invariant (every physical leaf's status must match its on-disk shape; archived=>video-dummy, local_ready/onboarded/restored_local=>real) + warn-only post-conditions wired into cmd_push/cmd_replace/cmd_restore happy paths (post-commit, no rollback/PONR impact). Remaining D4 scope: orphan-parent, stale-season-map, hash-format audits.
 
 ---
 
@@ -143,6 +144,7 @@
 - Risk: medium — mutates library state by design; dry-run default + journal + never-delete-leaves rule contain it. Reuses (not modifies) the rollback journal, so no change-gate trigger — but say so explicitly in the PR.
 - If skipped: every future integrity finding means another hand-edited-JSON session (the 2026-05-25 method) — error-prone exactly when the library is already inconsistent.
 - Status: pending
+- Note (2026-06-22): Slice delivered on branch fix/imp_d4_library_integrity_guard: `verify_library --fix-dummies` reuses `cmd_repair_dummies` to regenerate legacy text-stub dummies for archived entries. Broader opt-in repair_library (orphan cleanup etc.) still pending.
 
 ---
 

@@ -9,17 +9,17 @@
 > Full task text lives in `improvements_tier*.md`; this file only orders them. Legend:
 > 🔴 critical · 🟠 high · 🟡 medium · ⚪ low · ✅ done · 🚦 needs a user decision (change-gate).
 >
-> **Last updated:** 2026-06-22 (IMP-E12 web ops console done via the multi-agent pipeline — bundled IMP-A10 requirements truth-up + introduced IMP-D16 `scan_reclaimable`; IMP-D1 advanced: the reclaimable-GB slice is delivered, the full dashboard remains pending).
+> **Last updated:** 2026-06-22 (IMP-A12 CI pipeline done — GitHub Actions runs the full + smoke suites on every PR into `main`, locking the suite green; earlier today IMP-E12 web ops console shipped + introduced IMP-D16 `scan_reclaimable`, and IMP-D1 advanced with the reclaimable-GB slice).
 
 ---
 
-## 👉 SUGGESTED NEXT TASK: **IMP-A12** — CI pipeline (lock the test suite green)
+## 👉 SUGGESTED NEXT TASK: **IMP-E14** — web media-type UI (Movies/TV/Anime/Others tabs + `/api/items`)
 
-The `feature/web_console` work just added four web test modules + smoke wiring on top of the existing
-suite; IMP-A12 stands up CI so nothing merges red again — the natural protector of everything just
-built, 🟠 high and low-risk. (IMP-A10, the prior NEXT, shipped bundled into IMP-E12.) A cheap zero-code
-parallel win is still available: **IMP-S1** — stand up Jellyfin (immediate couch value). Full details in
-`improvements_tierA.md` (IMP-A12).
+IMP-A12 (the prior NEXT) just shipped — GitHub Actions now runs the full + smoke suites on every PR into
+`main`, locking the suite green. Next is the web-media-UI upgrade, now in progress: **IMP-E14** Phase 1 —
+a new `/api/items` library endpoint + media-type tabs, the foundation the fetch-in-UI, posters, and
+mobile/Tailscale phases build on (the tracked plan lands at `docs/feature-web-media-ui/PLAN.md` in Phase 1).
+A cheap zero-code parallel win is still available: **IMP-S1** — stand up Jellyfin (immediate couch value).
 
 > 🚦 **IMP-R6** and **IMP-R7** still await user decisions before any code — see Band 0 table.
 
@@ -38,7 +38,6 @@ parallel win is still available: **IMP-S1** — stand up Jellyfin (immediate cou
 |---|---|---|---|
 | 9 | 🟠 **IMP-S1** | stand up Jellyfin (the `JELLYFIN_SETUP_GUIDE.md` run) — **zero code, immediate couch value**, can run in parallel | low |
 | 10 | ⚪ **IMP-A11** | repo hygiene (gitignore stale root `STATUS.md`, drop stray files, clean leftover worktrees) | low |
-| 11 | 🟠 **IMP-A12** | CI pipeline — lock the 13-file suite so nothing merges red | low |
 
 ## 🟡 BAND 2 — FOUNDATIONS that unblock the daemon + new commands
 
@@ -75,14 +74,14 @@ Perf: `B1`–`B10`. Utility commands: `D2`,`D3`,`D6`–`D15`. Integration long-t
 `E8`,`E10`,`E11`. Rollback hardening: `R1`,`R3`,`R4`,`R5`,`R8`,`R9` (R4/R8/R9 are 🚦 change-gated).
 Moonshots: `F1`–`F9`. Research-only: `G3`,`G5`,`H2`,`A6`.
 
-## ✅ DONE (23)
+## ✅ DONE (24)
 
 `A1` (mvcommon) · `A7` (pytest harness) · `C2` (retry) · `C4` (device pinning) · `C8` (post-push verify) ·
 `C9` (atomic replace) · `C11` (restore quarantine) · `C12` (alias crash: scan/local_status) ·
 `C13` (single-id alias handling) · `C14` (CLI parser papercuts) · `C15` (micro-robustness) · `C16` (anime fetch profile) · `C17` (fetch-session keep-alive + logged-out detector) · `C18` (anime sSSEE episode-range filter: shared episode_num_from_id + 0-match guard) · `C6` (session-expiry detect — via C17) · `E13` (multi-episode) · `G1` (chunker patterns) ·
 `H1` (Opus 4.8 effort tiers) · `H3` (smoke gate + consumer-impact guardrail + data-request protocol) ·
 `R2` (recover CLI) · `E12` (web ops console — Disk Reclaim view + suggested next-commands + integrated sort/replace) ·
-`A10` (requirements truth-up) · `D16` (scan_reclaimable — four-state reclaim scan behind `web`).
+`A10` (requirements truth-up) · `D16` (scan_reclaimable — four-state reclaim scan behind `web`) · `A12` (CI pipeline — GitHub Actions full + smoke gate on every PR).
 
 ---
 

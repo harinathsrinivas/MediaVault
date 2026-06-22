@@ -1,0 +1,43 @@
+# CI workflow for MediaVault
+#
+# NOTE (a): Making this a REQUIRED status check on `main` is a one-time repo-settings
+#           action the human enables in GitHub → Settings → Branches → Branch protection rules.
+#           It is intentionally NOT automated here.
+#
+# NOTE (b): A real split-job using choco/MKVToolNix is a deliberate STRETCH follow-up
+#           and is intentionally NOT included here to keep CI minimal and fast.
+
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run full test suite
+        run: python -m pytest -q
+
+      - name: Run smoke tests
+        run: python -m pytest tests/smoke -q

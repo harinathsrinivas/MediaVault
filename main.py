@@ -3298,6 +3298,139 @@ def collect_reclaimable():
     }
 
 
+# Library-id prefix -> media category. Mirrors webui/server.py:_category_of and
+# save_library's prefix split (mvcommon.py:197-205). Kept here (not imported from
+# the web layer) so this main.py data builder has no dependency on webui.
+def _category_of_id(mid):
+    """Map a library id prefix to movies|series|anime|other."""
+    if mid.startswith("mov"):
+        return "movies"
+    if mid.startswith("tv"):
+        return "series"
+    if mid.startswith("ani"):
+        return "anime"
+    return "other"
+
+
+def items_payload():
+    """Read-only enumeration of every physical library leaf for the media-type UI.
+
+    This is the data layer for the new per-category (movies/series/anime/other)
+    SPA. Unlike collect_reclaimable() — which reports only what occupies
+    *reclaimable* local disk and deliberately EXCLUDES archived items — this
+    builder INCLUDES ARCHIVED rows (status "archived" with a dummy/absent file),
+    because the UI must show the full lifecycle of every leaf, not just the ones
+    with bytes to reclaim right now.
+
+    Approach (library-anchored, single pass): iterate load_library()'s leaves
+    directly, os.stat each leaf's on-disk file once to decide real-vs-dummy, and
+    feed that into the SAME classify_entry_state() the reclaim path uses. No disk
+    walk — every row corresponds to a library entry, so categories/metadata/
+    chunk_count are always available. A leaf is emitted iff classify_entry_state
+    returns a non-None state, i.e. one of the five documented lifecycle states.
+
+    TRADEOFF — UNPREPPED is NOT surfaced here. UNPREPPED means "an on-disk file
+    unknown to the library" (classify_entry_state(None, ...)); discovering it
+    requires a disk walk of the category roots, which collect_reclaimable()
+    already performs and /api/reclaim already exposes. A pure library pass cannot
+    see files the library does not know about, and such files have no id,
+    category, or metadata to populate a media-type row. So UNPREPPED discovery is
+    intentionally left to /api/reclaim; items_payload() is scoped to LIBRARY
+    leaves. "UNPREPPED" remains in the documented state vocabulary only because it
+    is part of classify_entry_state's contract — it is never produced by a
+    library-anchored pass (entry is never None here).
+
+    Returns:
+        {
+          "items": [ {id, category, state, size_bytes, path, title, year,
+                      tmdb_id, poster_available, chunk_count,
+                      [parent_id]}, ... ],
+          "by_category": {"movies": N, "series": N, "anime": N, "other": N},
+        }
+
+    Field notes:
+      - category   : from the id prefix (mov/tv/ani/other), via _category_of_id.
+      - state      : classify_entry_state(entry, on_disk_real) — one of
+                     LOCAL_NOT_PUSHED | PUSHED_NOT_ARCHIVED |
+                     RESTORED_REPLACE_AGAIN | ARCHIVED (UNPREPPED never here).
+      - tmdb_id    : metadata.tmdb_id if present else None (lands Phase 5 — always .get).
+      - poster_available : always False for now (media-image route lands Phase 5).
+      - chunk_count: split_info.total_chunks or 1.
+      - title/year : metadata.title (fallback id) / metadata.year.
+      - path       : os.path.join(folder_path, filename).
+      - parent_id  : included only when the entry carries one (season episodes).
+
+    Strictly READ-ONLY: load_library() only; never mutates, never save_library,
+    never touches media bytes.
+
+    CRASH-CLASS NOTE (IMP-C12 / PR #21): non-physical entry types ("season_map",
+    "multi_ep_alias") are skipped BEFORE folder_path/filename are dereferenced —
+    those keys do not exist on virtual rows. Never emits a virtual row.
+    """
+    library = load_library()
+
+    items = []
+    by_category = {"movies": 0, "series": 0, "anime": 0, "other": 0}
+    seen = set()  # normpath-lower of each physical leaf — one row per real file.
+
+    for mid, entry in library.items():
+        # Skip virtual rows up front: they own no physical file (PR #21 crash class).
+        if entry.get("type") in ("season_map", "multi_ep_alias"):
+            continue
+
+        fp = entry.get("folder_path")
+        fn = entry.get("filename")
+        if not fp or not fn:
+            # Defensive: a leaf missing its physical-file keys is not enumerable.
+            continue
+
+        full_path = os.path.join(fp, fn)
+        norm_key = os.path.normpath(full_path).lower()
+        if norm_key in seen:
+            continue  # de-dupe physical leaves by normpath-lower
+
+        try:
+            size = os.path.getsize(full_path)
+        except OSError:
+            # File deleted/moved/inaccessible: treat as absent (size 0, dummy).
+            # classify_entry_state still surfaces ARCHIVED for an archived leaf.
+            size = 0
+        on_disk_real = size >= DUMMY_MAX_BYTES
+
+        state = classify_entry_state(entry, on_disk_real)
+        if state is None:
+            # Disk-anomaly (e.g. onboarded status but file already a dummy, or a
+            # real file under an archived status) — not a clean lifecycle row.
+            # Consistent with collect_reclaimable, which also drops these.
+            continue
+
+        seen.add(norm_key)
+
+        metadata = entry.get("metadata") or {}
+        split_info = entry.get("split_info") or {}
+        category = _category_of_id(mid)
+        by_category[category] += 1
+
+        row = {
+            "id": mid,
+            "category": category,
+            "state": state,
+            "size_bytes": size,
+            "path": full_path,
+            "title": metadata.get("title") or mid,
+            "year": metadata.get("year"),
+            "tmdb_id": metadata.get("tmdb_id"),
+            "poster_available": False,  # media-image route lands Phase 5
+            "chunk_count": split_info.get("total_chunks") or 1,
+        }
+        if "parent_id" in entry:
+            row["parent_id"] = entry["parent_id"]
+
+        items.append(row)
+
+    return {"items": items, "by_category": by_category}
+
+
 def cmd_web(host="127.0.0.1", port=8765, open_browser=True):
     """Launch the local web operations console (IMP-E12)."""
     try:

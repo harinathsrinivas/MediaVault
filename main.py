@@ -3820,6 +3820,345 @@ def items_payload():
     return {"items": items, "by_category": by_category}
 
 
+# ---------------------------------------------------------------------------
+# Folder-tree payload for the web console grouped/folder view (IMP-E14 polish).
+#
+# build_tree() mirrors the on-disk folder hierarchy under each category root,
+# built FROM the already-safe items_payload() leaves (inheriting the
+# alias/season_map skip — PR #21 crash class — for free) PLUS the UNPREPPED disk
+# files collect_reclaimable() surfaces, so the tree spans every lifecycle state.
+# It is strictly READ-ONLY: it only os.scandir/os.stat()s directories
+# (metadata-only, never reads media bytes) to compute real recursive folder sizes
+# and detect a poster.jpg/fanart.jpg anywhere in a subtree.
+# ---------------------------------------------------------------------------
+
+# Folder-image filenames recognised for has_image / the folder-image route.
+# Lower-cased; comparisons casefold the on-disk name.
+_FOLDER_IMAGE_NAMES = ("poster.jpg", "fanart.jpg")
+
+# Map a category bucket to its on-disk root subfolder under LOCAL_ROOT.
+_CATEGORY_ROOT_SUBDIR = {"movies": "Movies", "series": "Series", "anime": "Anime"}
+
+
+def _scan_folder_meta(folder):
+    """Return (size_bytes, has_image) for ``folder`` computed by ONE recursive
+    os.scandir metadata walk of everything under it. size_bytes sums st_size of
+    every file in the subtree; has_image is True if a poster.jpg/fanart.jpg (any
+    case) exists in ``folder`` or any descendant. Metadata-only — never opens a
+    file. Every os.scandir / stat is OSError-guarded (an unreadable dir/entry
+    contributes 0 and is skipped rather than crashing the whole walk)."""
+    total = 0
+    has_image = False
+    try:
+        with os.scandir(folder) as it:
+            entries = list(it)
+    except OSError:
+        return 0, False
+    for entry in entries:
+        try:
+            is_dir = entry.is_dir(follow_symlinks=False)
+        except OSError:
+            continue
+        if is_dir:
+            sub_size, sub_img = _scan_folder_meta(entry.path)
+            total += sub_size
+            has_image = has_image or sub_img
+        else:
+            if entry.name.lower() in _FOLDER_IMAGE_NAMES:
+                has_image = True
+            try:
+                total += entry.stat(follow_symlinks=False).st_size
+            except OSError:
+                continue
+    return total, has_image
+
+
+def _node_sort_name(node):
+    """The case-insensitive name a tree node sorts by: a folder's ``name``, or a
+    leaf's display title (falling back to its filename then id)."""
+    if node["type"] == "folder":
+        return (node.get("name") or "").casefold()
+    return (node.get("title") or os.path.basename(node.get("path") or "")
+            or node.get("id") or "").casefold()
+
+
+def _sort_tree_children(children):
+    """Sort a folder's children: sub-folders first, then leaves, each group by
+    case-insensitive name. Mutates and returns the list."""
+    children.sort(key=lambda n: (0 if n["type"] == "folder" else 1, _node_sort_name(n)))
+    return children
+
+
+def build_tree():
+    """Return the folder HIERARCHY mirroring the on-disk structure under each
+    category root, spanning ALL five lifecycle states (READ-ONLY).
+
+    Shape::
+
+        {"roots": {"movies": [<node>...], "series": [...],
+                   "anime": [...], "other": [...]}}
+
+    A FOLDER node:  {type:"folder", name, path, size_bytes, has_image, children}
+      - size_bytes : REAL recursive folder size (os.scandir metadata walk) — it
+                     already counts every on-disk file, including the unprepped
+                     ones added as leaves below, so size logic is unchanged.
+      - has_image  : poster.jpg/fanart.jpg present in the folder or any descendant.
+      - children   : sub-folders first, then leaf nodes, each sorted by name.
+
+    LEAF nodes come from TWO sources, so the tree spans every state:
+      1. items_payload() physical library leaves — each row + {"type":"leaf"};
+         these carry the four library states (LOCAL_NOT_PUSHED /
+         PUSHED_NOT_ARCHIVED / RESTORED_REPLACE_AGAIN / ARCHIVED) in `state`.
+      2. collect_reclaimable() UNPREPPED rows — on-disk video files NOT in the
+         library (e.g. Sample.mkv, an Extras clip). Each becomes a leaf with
+         `state:"UNPREPPED"`, nested under its own on-disk folder so it shows
+         beside the library leaves it sits next to. EVERY leaf — from either
+         source — carries a non-null `state`, so the grouped web view can be
+         filtered by all five states.
+
+    Alias/season_map-safe: items_payload() already skips virtual rows, and the
+    UNPREPPED rows are plain disk files (no virtual concern). De-dup: a path that
+    is both a library leaf and (somehow) an UNPREPPED row appears once — the
+    library leaf wins (UNPREPPED rows are by definition not-in-library, so this
+    is just a guard). Intermediate path segments become folder nodes nested by
+    the leaf's REAL on-disk path relative to its category root.
+    """
+    payload = items_payload()
+    library_leaves = payload["items"]
+
+    # Build a single, ORDER-PRESERVING list of leaf specs — (category, leaf
+    # on-disk path, leaf node) — so library leaves and unprepped disk files run
+    # through ONE identical nesting pass below. Library leaves are added first so
+    # that on the (by-definition impossible-for-UNPREPPED, but guarded) chance of
+    # a path collision the library leaf wins.
+    leaf_specs = []
+    seen_leaf_keys = set()  # normpath-lower of every leaf path already added
+
+    for leaf in library_leaves:
+        leaf_node = dict(leaf)
+        leaf_node["type"] = "leaf"
+        key = os.path.normpath(leaf["path"]).lower()
+        seen_leaf_keys.add(key)
+        leaf_specs.append((leaf.get("category", "other"), leaf["path"], leaf_node))
+
+    # Add the UNPREPPED disk files (files on disk, not in the library) as leaves
+    # so the tree covers the fifth state. collect_reclaimable() is the same
+    # read-only disk walk /api/reclaim uses; we take only its badge=="UNPREPPED"
+    # rows. Each becomes a minimal leaf mirroring the items leaf fields the
+    # frontend reads, plus the reclaim row's `guessed`/`suggested_command`.
+    for row in collect_reclaimable()["items"]:
+        if row.get("badge") != "UNPREPPED":
+            continue
+        key = os.path.normpath(row["path"]).lower()
+        if key in seen_leaf_keys:
+            continue  # de-dup guard: a library leaf already owns this path
+        seen_leaf_keys.add(key)
+        category = category_of_id(row["id"])
+        leaf_node = {
+            "type": "leaf",
+            "id": row["id"],
+            "category": category,
+            "state": "UNPREPPED",
+            "size_bytes": row["size_bytes"],
+            "path": row["path"],
+            "title": row["id"],  # no library metadata yet; mirror items' id-as-title
+            "guessed": True,
+            "suggested_command": row.get("suggested_command"),
+            "poster_available": False,
+            "chunk_count": 1,
+        }
+        leaf_specs.append((category, row["path"], leaf_node))
+
+    roots = {"movies": [], "series": [], "anime": [], "other": []}
+    # Per-category index: tuple(segment, ...) -> folder node, so repeated leaves
+    # under the same folder reuse one node. The empty tuple is the category root
+    # itself (leaves that sit directly in the category root attach there).
+    folder_index = {cat: {} for cat in roots}
+    # Memoize the metadata walk per absolute folder path so a folder visited for
+    # several leaves is scanned once (single pass per real directory).
+    meta_cache = {}
+
+    def _meta(folder_path):
+        cached = meta_cache.get(folder_path)
+        if cached is None:
+            cached = _scan_folder_meta(folder_path)
+            meta_cache[folder_path] = cached
+        return cached
+
+    def _ensure_folder(cat, segments, abs_path):
+        """Return (creating if needed) the folder node for ``segments`` under
+        category ``cat``; ``abs_path`` is that folder's absolute on-disk path."""
+        key = tuple(segments)
+        existing = folder_index[cat].get(key)
+        if existing is not None:
+            return existing
+        size, has_image = _meta(abs_path)
+        node = {
+            "type": "folder",
+            "name": segments[-1],
+            "path": abs_path,
+            "size_bytes": size,
+            "has_image": has_image,
+            "children": [],
+        }
+        folder_index[cat][key] = node
+        # Attach to its parent folder (or the category root for a top-level folder).
+        parent_segments = segments[:-1]
+        parent_abs = os.path.dirname(abs_path)
+        if parent_segments:
+            parent = _ensure_folder(cat, parent_segments, parent_abs)
+            parent["children"].append(node)
+        else:
+            roots[cat].append(node)
+        return node
+
+    for cat, leaf_path, leaf_node in leaf_specs:
+        if cat not in roots:
+            cat = "other"
+        folder = os.path.dirname(leaf_path)
+        subdir = _CATEGORY_ROOT_SUBDIR.get(cat)
+        cat_root = os.path.join(LOCAL_ROOT, subdir) if subdir else LOCAL_ROOT
+
+        # Path segments of the leaf's FOLDER relative to the category root.
+        try:
+            rel = os.path.relpath(folder, cat_root)
+        except ValueError:
+            # Different drive (Windows) — cannot nest under the root; treat as flat.
+            rel = ""
+        if rel in ("", "."):
+            segments = []
+        elif rel.startswith(".."):
+            # Folder is OUTSIDE the category root (e.g. an "other" leaf elsewhere).
+            # Nest it directly under the category bucket as a single flat folder
+            # named after its own folder, keyed by its absolute path so it stays
+            # unique and never collides with in-root segments.
+            segments = None
+        else:
+            segments = [s for s in rel.split(os.sep) if s and s != "."]
+
+        if not segments:
+            if segments is None:
+                # Out-of-root: synthesise a single folder node for the leaf's own
+                # directory so its real size/has_image still surface.
+                key = ("\x00abs", folder)  # private key; never collides with seg tuples
+                node = folder_index[cat].get(key)
+                if node is None:
+                    size, has_image = _meta(folder)
+                    node = {
+                        "type": "folder",
+                        "name": os.path.basename(folder) or folder,
+                        "path": folder,
+                        "size_bytes": size,
+                        "has_image": has_image,
+                        "children": [],
+                    }
+                    folder_index[cat][key] = node
+                    roots[cat].append(node)
+                node["children"].append(leaf_node)
+            else:
+                # Leaf sits directly in the category root — attach at top level.
+                roots[cat].append(leaf_node)
+            continue
+
+        parent = _ensure_folder(cat, segments, folder)
+        parent["children"].append(leaf_node)
+
+    # Final ordering: folders-first then leaves, by name, at every level.
+    def _sort_recursive(node):
+        if node["type"] != "folder":
+            return
+        _sort_tree_children(node["children"])
+        for child in node["children"]:
+            _sort_recursive(child)
+
+    for cat, top in roots.items():
+        _sort_tree_children(top)
+        for child in top:
+            _sort_recursive(child)
+
+    return {"roots": roots}
+
+
+def _is_within_local_root(abs_path):
+    """True iff ``abs_path`` (a real path) resides under LOCAL_ROOT. Used by the
+    folder-image + open-folder routes' path-traversal guard. Case-insensitive
+    containment via os.path.commonpath on realpath-resolved paths."""
+    try:
+        root = os.path.realpath(LOCAL_ROOT)
+        target = os.path.realpath(abs_path)
+    except OSError:
+        return False
+    try:
+        common = os.path.commonpath([os.path.normcase(root), os.path.normcase(target)])
+    except ValueError:
+        # Different drives / mixed absolute+relative -> not contained.
+        return False
+    return common == os.path.normcase(root)
+
+
+def find_folder_image(folder):
+    """Return the absolute path of a poster.jpg/fanart.jpg to serve for ``folder``
+    (READ-ONLY), or None if none exists in the subtree.
+
+    Preference order: poster.jpg then fanart.jpg in ``folder`` ITSELF; failing
+    that, the FIRST poster.jpg/fanart.jpg found in any descendant folder (a
+    breadth-ish DFS). The returned file is guaranteed to be one of the two
+    recognised names AND under LOCAL_ROOT (callers still re-assert containment).
+    Every os.scandir is OSError-guarded.
+    """
+    if not _is_within_local_root(folder):
+        return None
+
+    def _named_image_in(dir_path):
+        """Return abs path of poster.jpg (preferred) or fanart.jpg directly in
+        dir_path, else None. Casefold the on-disk name."""
+        found = {}
+        try:
+            with os.scandir(dir_path) as it:
+                for entry in it:
+                    try:
+                        if entry.is_file(follow_symlinks=False):
+                            low = entry.name.lower()
+                            if low in _FOLDER_IMAGE_NAMES:
+                                found[low] = entry.path
+                    except OSError:
+                        continue
+        except OSError:
+            return None
+        for name in _FOLDER_IMAGE_NAMES:  # poster.jpg before fanart.jpg
+            if name in found:
+                return found[name]
+        return None
+
+    # 1) The folder itself.
+    direct = _named_image_in(folder)
+    if direct:
+        return direct
+
+    # 2) First image found in any descendant (BFS, deterministic by sorted name).
+    from collections import deque
+    queue_dirs = deque([folder])
+    while queue_dirs:
+        current = queue_dirs.popleft()
+        subdirs = []
+        try:
+            with os.scandir(current) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            subdirs.append(entry.path)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+        for sub in sorted(subdirs, key=str.casefold):
+            hit = _named_image_in(sub)
+            if hit:
+                return hit
+            queue_dirs.append(sub)
+    return None
+
+
 def cmd_web(host="127.0.0.1", port=8765, open_browser=True, demo=False):
     """Launch the local web operations console (IMP-E12).
 

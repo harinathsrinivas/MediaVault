@@ -23,7 +23,7 @@
 
 "use strict";
 
-import { metaFor, humanSize } from "./data.js";
+import { metaFor, humanSize, openFolder } from "./data.js";
 import { openConfirmModal } from "./modal.js";
 import { createRing } from "./ring.js";
 import { displayTitle } from "./title.js";
@@ -68,6 +68,36 @@ function initialFor(id) {
   var seg = parts.length > 3 ? parts[3] : parts[parts.length - 1] || s;
   var ch = (seg || s).replace(/[^A-Za-z0-9]/g, "").charAt(0);
   return (ch || "?").toUpperCase();
+}
+
+// The folder that contains a leaf = the directory part of its joined path. The
+// item `path` is folder_path joined with the filename, so drop the final segment.
+// Tolerates both Windows backslashes (the real case here) and forward slashes.
+function folderOfPath(p) {
+  var s = String(p || "");
+  if (!s) return "";
+  var idx = Math.max(s.lastIndexOf("\\"), s.lastIndexOf("/"));
+  return idx > 0 ? s.slice(0, idx) : s;
+}
+
+// Add the small top-right open-folder button to a card's poster. XSS-safe (inline
+// glyph + textContent only). Click is isolated (preventDefault/stopPropagation) so
+// it never toggles a grouped-view disclosure or trips another card control.
+function addOpenFolderButton(poster, item) {
+  var folder = folderOfPath(item && item.path);
+  if (!poster || !folder) return;
+  var btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "open-folder-btn on-poster";
+  btn.title = "Open this folder in Explorer (local PC only)";
+  btn.setAttribute("aria-label", "Open folder in Explorer");
+  btn.textContent = "⤢"; // inline "open / external" glyph, no external asset
+  btn.addEventListener("click", function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    openFolder(folder);
+  });
+  poster.appendChild(btn);
 }
 
 // Clipboard with execCommand fallback (localhost is a non-secure context where
@@ -173,6 +203,14 @@ export function buildCard(item) {
   var badge = $(".badge", poster);
   badge.classList.add("b-" + m.cssKey);
   $(".badge-label", badge).textContent = m.label;
+
+  // Open-folder affordance: a small top-right icon button on EVERY card (flat AND
+  // grouped views). It POSTs /api/open-folder for the leaf's containing folder
+  // (dirname of its path). Mounted on the poster (position:relative) at the same
+  // z-layer as .card-actions so it stays clickable above the hover ring / glow and
+  // never intercepts the badge or the Fetch & Restore button. The server enforces
+  // localhost-only + path safety + demo simulation; data.js handles the toasts.
+  addOpenFolderButton(poster, item);
 
   // Prominent TITLE (real metadata.title once Phase 5/TMDB lands; humanized id
   // until then — see title.js) + size. The raw id moves to the card foot.

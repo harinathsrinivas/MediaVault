@@ -289,11 +289,43 @@
 - Phased scope:
   - **Phase 1 ✓ done** (branch `feature/imp_e14_web_media_tabs`): new read-only `GET /api/items` endpoint returning `main.items_payload()` = `{"items":[...], "by_category":{movies,series,anime,other}}`; every PHYSICAL leaf (skips `season_map`/`multi_ep_alias`) with `id, category, state, size_bytes, path, title, year, tmdb_id, poster_available, chunk_count` (+ `parent_id`); includes ALL states incl. `archived` (divergence from `/api/reclaim` which excludes archived). `items_payload` and `collect_reclaimable` share a `_classify_item` helper so the two endpoints can't drift on state semantics. Frontend: media-type tab rail (Movies / TV series / Anime / Others, keyed by id-prefix via `_category_of`) + sub-view rail (Unprepped / Local·not-pushed / Pushed·not-archived / Fetched·not-archived / Archived); UNPREPPED rows still sourced from `/api/reclaim`. No build step — vanilla ES modules. Tests added.
   - **Phase 2 ✓ done** (branch `feature/imp_e14_fetch_in_ui`): `fetch_restore` added to the web action allow-list (`ACTION_TABLE` + `_NONE_IS_SUCCESS`), wrapping `main.cmd_fetch_restore`. Worker publishes incremental `output` + `progress {done, total}` (chunk units) via a stdout tee; job record gained `progress` and `progress_unit` fields. Transport is **polling `GET /api/job/{id}`**, NOT SSE/WebSocket (future streaming upgrade tracked as IMP-F10; this is the down-payment on IMP-S2 — the serialized web worker is the daemon's seed and now performs `fetch_restore` with live progress). `cmd_dispatch_fetch` now streams `python mainfetch.py` subprocess stdout via `subprocess.Popen` line-by-line with `PYTHONIOENCODING=utf-8` in the child env (was `subprocess.run`, which bypassed capture). SPA additions: Fetch & Restore button on Archived cards; SVG `stroke-dashoffset` growing chunk-% progress border that snaps to a glowing loop on done; auto-flip of the card from Archived → Fetched·not-archived via an `/api/items` refresh on job completion; default size-descending sort + a Size/Title/Year sort bar; readable titles (humanized id now; real `metadata.title` when Phase-5 TMDB lands) with the raw id at the card foot; expandable full-screen terminal (⤢) showing the equivalent CLI command + live progress + full output; cursor-following card glow (disabled on touch + reduced-motion). Demo/safe mode: `python main.py web --demo` simulates EVERY action with no real `cmd_*`, no library mutation, no Selenium — exposed via `GET /api/mode`; default `python main.py web` unchanged.
-  - **Phase 3** (polish + PWA): visual polish, PWA manifest, keyboard nav, accessibility.
-  - **Phase 4** (mobile + Tailscale + auth): responsive layout, Tailscale-safe binding, optional basic-auth (IMP-A5).
-  - **Phase 5** (TMDB posters + rename): real poster artwork (IMP-E3/D17), proper title display (IMP-U3).
+  - **Phase 3 ✓ done** (branch `feature/imp_e14_polish_pwa`): **continuous hover border** — a
+    rotating conic-gradient accent arc (`.card::after`, `@property --ring-angle`) on each card;
+    `@supports`-gated mask clip with a box-shadow fallback for iOS Safari; `prefers-reduced-motion`
+    static variant; touch-gated. **PWA / Add-to-Home-Screen**: `webui/static/manifest.webmanifest`
+    (`display:standalone`, `theme_color:#0b0f17`) + self-generated branded PNG icons (192/512/apple-
+    touch-icon 180) + iOS meta tags (`apple-mobile-web-app-*`, `theme-color`, `viewport-fit=cover`).
+    **Global `web-ui-polish` Claude skill** installed at `~/.claude/skills/web-ui-polish/SKILL.md`
+    (outside repo) — reusable buttery-motion recipes + iOS-Safari mask-render safety rules +
+    `prefers-reduced-motion` discipline.
+    Additional enhancements shipped on this branch (scope grew beyond original Phase 3):
+    - **Grouped (hierarchical) folder view + Grouped/Decluttered toggle**: each media-type tab can
+      render the on-disk folder hierarchy (show→season→episode, collection→movie). The state rail
+      gains an **"All" segment** (default) alongside the 5 lifecycle states; in grouped mode a
+      state selection prunes the folder tree to folders with at least one matching descendant leaf
+      (folder size = aggregate of visible leaves; "All" = real Windows folder size). Recursive sort
+      at every tree level.
+    - **`GET /api/tree`**: new backend endpoint returning the per-category folder hierarchy across
+      all lifecycle states including un-prepped on-disk files; real Windows folder sizes via
+      `os.scandir`; `has_image` flag per folder. Read-only; alias-safe.
+    - **`GET /api/folder-image?path=`**: serves a folder's `poster.jpg` / `fanart.jpg` (or first
+      found in a descendant); realpath-contained to `C:\Media`; only those two filenames served.
+    - **`POST /api/open-folder`**: opens a folder in Windows Explorer; **localhost-only** (403
+      over Tailscale); realpath-contained to `C:\Media`; simulated in demo mode.
+    - **Open-in-Explorer button** on every folder and item card (fires `POST /api/open-folder`).
+    - **Procedural animated space/galaxy background** (`background.js`): Canvas starfield + nebula,
+      perf-capped (30 fps cap, pauses when tab hidden), `prefers-reduced-motion` aware, no external
+      assets.
+    - **Static no-cache policy** (`_NoCacheStaticFiles` subclass): `Cache-Control: no-cache` on
+      all static responses (ETag kept) — **fixes the iOS Safari stale-ES-module blank-page bug**.
+      Plus a `/favicon.ico` handler and a global JS error banner (`window.onerror` +
+      `unhandledrejection`) so the SPA can never silently blank.
+  - **Phase 4** (mobile + Tailscale + auth — tracked as **IMP-E15**): responsive layout,
+    Tailscale-safe binding, optional basic-auth (IMP-A5).
+  - **Phase 5** (TMDB posters + rename — tracked as **IMP-E3 / IMP-U3 / IMP-D17**): real poster
+    artwork, NFO emission, proper title display.
 - Rationale: The ops console was the disk-reclaim foundation; the media-type UI is the step toward a usable library browser that surfaces what you have by type, not just by disk pressure. The phased approach ships each phase as a PR while the fuller phases follow.
-- Effort estimate: large overall (phased — Phase 1 was medium; Phase 2 was medium; Phases 3-5 each small-to-medium)
-- Risk: low (Phases 1-2 call existing `cmd_*` unchanged via the existing job queue — no rollback-contract change)
+- Effort estimate: large overall (phased — Phase 1 was medium; Phase 2 was medium; Phase 3 was small; Phases 4-5 each small-to-medium)
+- Risk: low (Phases 1-3 call existing `cmd_*` unchanged via the existing job queue — no rollback-contract change; Phase 3 is CSS/manifest only, no backend change)
 - If skipped: the console stays disk-reclaim-only; there's no browsable media-type view, and fetch-in-UI/mobile access stay future-only.
-- Status: in_progress (Phases 1+2 done; Phases 3–5 pending)
+- Status: in_progress — **Phases 1-3 done** (web-UI core: media-type tabs + fetch-in-UI + aesthetic motion + PWA + grouped folder view + /api/tree + /api/folder-image + /api/open-folder + space background + open-folder button + iOS no-cache fix; on `feature/imp_e14_polish_pwa`); remote/mobile (Phase 4 = IMP-E15) and TMDB posters/rename (Phase 5 = IMP-E3/U3/D17) continue under their own tasks

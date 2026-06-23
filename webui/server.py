@@ -40,11 +40,56 @@ import re
 import threading
 import time
 
-from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 import main
+
+
+# ---------------------------------------------------------------------------
+# Static file serving with revalidate-always caching (the blank-page fix).
+#
+# THE BUG (verified): the default StaticFiles emits only etag + last-modified and
+# NO Cache-Control. A standalone-mode browser (notably iOS Safari "Add to Home
+# Screen") may then serve a freely-cached, possibly STALE copy of a static file
+# without revalidating. Because the UI is a no-build ES-module graph, serving one
+# stale module against newer siblings makes an `import` resolve a symbol that no
+# longer exists -> the whole module graph fails to evaluate -> the page renders
+# blank (only background.js, an independent module, survives).
+#
+# THE FIX: stamp `Cache-Control: no-cache` on EVERY static response. "no-cache"
+# does NOT mean "don't cache" — it means "you may store it, but you MUST
+# revalidate with the origin before reuse". Starlette's FileResponse already sends
+# a strong etag + last-modified, so an unchanged file still returns 304 Not
+# Modified (cheap), while a CHANGED file is always re-fetched. A mismatched/stale
+# module set can therefore never be served again.
+#
+# WHY a StaticFiles subclass (not an app-wide middleware): this is the surgical
+# option. It touches ONLY responses produced by the static mount; every /api/*
+# route is provably unaffected because they never flow through StaticFiles. The
+# mount stays LAST (after all /api/* routes), so route ordering is unchanged.
+# `file_response` is the single funnel StaticFiles uses to build a file response
+# (200 and 304 alike), so adding the header there covers html/js/css/manifest/
+# icons in one place.
+# ---------------------------------------------------------------------------
+
+class _NoCacheStaticFiles(StaticFiles):
+    """StaticFiles that forces revalidation on every served file.
+
+    Overrides ``file_response`` (Starlette's single construction point for both
+    200 and 304 static responses) to set ``Cache-Control: no-cache`` while
+    leaving the etag/last-modified validators intact, so unchanged files still
+    304 but a changed/stale file is never served from a blind cache.
+    """
+
+    def file_response(self, *args, **kwargs):
+        resp = super().file_response(*args, **kwargs)
+        # Revalidate-always: keep the file cacheable but require an etag/
+        # last-modified check before reuse. Set (not setdefault) so we win over
+        # any default Starlette may add in future versions.
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
 
 # ---------------------------------------------------------------------------
 # Action allow-list (FIXED contract). Maps an action name to a callable that
@@ -607,6 +652,71 @@ def create_app(demo=False):
         job_id = _enqueue(name, effective_runner, body)
         return JSONResponse(status_code=202, content={"job_id": job_id})
 
+    # -- Folder/tree routes (IMP-E14 polish) --------------------------------
+    # Read-only structure mirroring on-disk folders, a folder-image streamer,
+    # and a localhost-only Explorer opener. Registered BEFORE the StaticFiles
+    # mount below so "/" cannot shadow them.
+
+    _LOCALHOST_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+    @app.get("/api/tree")
+    def api_tree():
+        # Read-only: returns build_tree()'s contract dict verbatim
+        # ({"roots": {movies, series, anime, other}}). Real folder sizes +
+        # has_image come from a metadata-only os.scandir walk in main.build_tree.
+        return main.build_tree()
+
+    @app.get("/api/folder-image")
+    def api_folder_image(path: str):
+        # Stream poster.jpg (preferred) or fanart.jpg from the folder or first
+        # descendant. SECURITY: the resolved file MUST be under LOCAL_ROOT and
+        # its basename MUST be exactly poster.jpg/fanart.jpg (case-insensitive).
+        if not path:
+            raise HTTPException(status_code=400, detail="Missing path")
+        # The requested folder must itself be under LOCAL_ROOT (reject traversal
+        # before even scanning).
+        if not main._is_within_local_root(path):
+            raise HTTPException(status_code=403, detail="Path is outside the media root")
+        image_path = main.find_folder_image(path)
+        if not image_path:
+            raise HTTPException(status_code=404, detail="No folder image found")
+        # Re-assert the FINAL resolved file: under LOCAL_ROOT and an allowed name.
+        real = os.path.realpath(image_path)
+        if not main._is_within_local_root(real):
+            raise HTTPException(status_code=403, detail="Resolved image outside the media root")
+        if os.path.basename(real).lower() not in ("poster.jpg", "fanart.jpg"):
+            raise HTTPException(status_code=403, detail="Not an allowed image filename")
+        return FileResponse(real, media_type="image/jpeg")
+
+    @app.post("/api/open-folder")
+    def api_open_folder(request: Request, body: dict = Body(default=None)):
+        # Open a folder in Windows Explorer — LOCALHOST ONLY. Over Tailscale/any
+        # remote peer this would open Explorer on the SERVER, so it is rejected.
+        client = request.client
+        host = client.host if client else None
+        if host not in _LOCALHOST_HOSTS:
+            raise HTTPException(
+                status_code=403,
+                detail="Folder open is only allowed from the local browser.",
+            )
+        body = body or {}
+        path = body.get("path")
+        if not path or not isinstance(path, str):
+            raise HTTPException(status_code=400, detail="Missing path")
+        if not main._is_within_local_root(path):
+            raise HTTPException(status_code=403, detail="Path is outside the media root")
+        folder = os.path.realpath(path)
+        if not os.path.isdir(folder):
+            raise HTTPException(status_code=400, detail="Not an existing directory")
+        # DEMO mode: simulate — never touch the host shell.
+        if demo:
+            return JSONResponse(content={"opened": False, "demo": True})
+        try:
+            os.startfile(folder)  # noqa: S606 — Windows Explorer open of a vetted dir
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Could not open folder: {exc}")
+        return JSONResponse(content={"opened": True})
+
     @app.get("/api/job/{job_id}")
     def api_job(job_id: str):
         with JOBS_LOCK:
@@ -617,10 +727,32 @@ def create_app(demo=False):
             # observes a torn record mid-update.
             return dict(record)
 
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+    # Explicit /favicon.ico handler, registered BEFORE the static mount so the
+    # "/" mount cannot shadow it. Browsers auto-request /favicon.ico, which would
+    # otherwise 404 (the app uses ./icons/* via the manifest/apple-touch link, not
+    # a root favicon). Serve an existing PWA icon so the tab gets an icon and the
+    # console 404 is gone. Carries the same no-cache header as the rest (see
+    # _NoCacheStaticFiles) so a swapped icon is picked up on the next load.
+    _favicon = os.path.join(static_dir, "icons", "icon-192.png")
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon():
+        if os.path.isfile(_favicon):
+            return FileResponse(
+                _favicon,
+                media_type="image/png",
+                headers={"Cache-Control": "no-cache"},
+            )
+        # No icon on disk -> 204 (still kills the 404) rather than a hard error.
+        return Response(status_code=204)
+
     # Mount static LAST so it can never shadow /api/*. Resolve the directory
     # relative to THIS file so it works regardless of CWD. html=True serves
-    # index.html at "/". (Step 6 overwrites the placeholder index.html.)
-    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-    app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
+    # index.html at "/". _NoCacheStaticFiles stamps Cache-Control: no-cache on
+    # every static response (html/js/css/manifest/icons) — see its docstring for
+    # why this is the primary fix for the stale-ES-module blank-page bug.
+    app.mount("/", _NoCacheStaticFiles(directory=static_dir, html=True), name="static")
 
     return app

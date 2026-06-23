@@ -28,11 +28,27 @@ export var STATE_ORDER = [
   "ARCHIVED",
 ];
 
+// The "All" pseudo-state. It is NOT a lifecycle state (no leaf ever carries it);
+// it is a sentinel for the leading "All" rail segment that shows EVERYTHING of a
+// category. The rail prepends it before STATE_ORDER and it is the DEFAULT sub-view
+// in both view modes: decluttered → a flat list of all the category's items;
+// grouped → the whole folder tree (no state prune). Kept out of STATE_ORDER so the
+// per-state buckets / counts / prune logic never treat it as a real state.
+export var ALL_STATE = "ALL";
+
 // Presentation + action metadata per lifecycle state. `cssKey` reuses the
 // existing BADGE_META palette (amber/blue/violet/orange) plus a cold key for
 // ARCHIVED. `action` is the POST /api/action/{name}; `confirm` gates the modal.
 // ARCHIVED is read-only in Phase 1 (the fetch button lands in Phase 2).
 export var STATE_META = {
+  ALL: {
+    label: "ALL",
+    short: "All",
+    cssKey: "all",
+    action: null,
+    verb: "—",
+    confirm: false,
+  },
   UNPREPPED: {
     label: "UNPREPPED",
     short: "Unprepped",
@@ -244,6 +260,98 @@ function fetchJson(url) {
     if (!res.ok) throw new Error(url + " -> HTTP " + res.status);
     return res.json();
   });
+}
+
+// ---------------------------------------------------------------------------
+// Grouped (folder-tree) view support — GET /api/tree, cached once per session.
+// ---------------------------------------------------------------------------
+//
+// The grouped view (tree.js) renders the on-disk folder HIERARCHY for the active
+// media-type tab. /api/tree is a (potentially heavy) backend walk, so we fetch it
+// AT MOST once and reuse the cached payload across every grouped toggle + tab
+// switch; the post-fetch model refresh repaints from this same cache. The cache is
+// a Promise so concurrent callers (e.g. a fast double-toggle) share one request.
+var _treePromise = null;
+
+export function loadTree() {
+  if (!_treePromise) {
+    _treePromise = fetchJson("/api/tree").catch(function (err) {
+      // Clear the cache on failure so a later toggle can retry the fetch.
+      _treePromise = null;
+      throw err;
+    });
+  }
+  return _treePromise;
+}
+
+// ---------------------------------------------------------------------------
+// Open-folder action + lightweight toast (runtime-only DOM helpers).
+// ---------------------------------------------------------------------------
+//
+// These touch the DOM only when CALLED (never at module load), so data.js stays
+// free of DOM coupling at import time while giving card.js AND tree.js one shared,
+// non-circular home for the open-folder affordance. POST /api/open-folder asks the
+// SERVER to open the folder in Explorer; the server enforces localhost-only + path
+// safety + demo simulation, so the client just reports the outcome via a toast.
+export function openFolder(path) {
+  if (!path) return;
+  fetch("/api/open-folder", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: path }),
+  })
+    .then(function (res) {
+      if (res.status === 403) {
+        // Reached over Tailscale / a non-local host: the server refuses to open
+        // Explorer on the remote PC. Explain where it DOES work.
+        showToast("Opens only on the local (Alienware) browser.");
+        return null;
+      }
+      if (!res.ok) {
+        showToast("Could not open folder (HTTP " + res.status + ").");
+        return null;
+      }
+      return res.json().catch(function () {
+        return null;
+      });
+    })
+    .then(function (data) {
+      if (data && data.demo === true) {
+        showToast("Demo mode — folder open simulated.");
+      }
+      // Real success ({opened:true}) is intentionally silent: Explorer opens on
+      // the PC, so an on-screen toast would be noise.
+    })
+    .catch(function () {
+      showToast("Could not reach the server to open the folder.");
+    });
+}
+
+// A small, auto-dismissing toast pinned bottom-centre. Created on demand and
+// reused; text via textContent (XSS-safe). Honors reduced motion (CSS gates the
+// slide-in transition). Independent of any view so it works in flat OR grouped mode.
+var _toastTimer = null;
+export function showToast(msg) {
+  var el = document.getElementById("mv-toast");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "mv-toast";
+    el.className = "mv-toast";
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", "polite");
+    document.body.appendChild(el);
+  }
+  el.textContent = String(msg || "");
+  // Re-trigger the show transition even if a previous toast is still visible.
+  el.classList.remove("show");
+  // Force a reflow so removing+adding .show restarts the transition.
+  void el.offsetWidth;
+  el.classList.add("show");
+  if (_toastTimer) clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(function () {
+    _toastTimer = null;
+    el.classList.remove("show");
+  }, 3200);
 }
 
 // Human-readable bytes (binary units), mirrors human_readable_size on the server.

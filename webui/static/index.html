@@ -2,9 +2,72 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- viewport-fit=cover enables edge-to-edge safe-area layout in standalone mode on iOS -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>MediaVault Console</title>
+  <!-- PWA manifest. iOS/iPadOS Safari only supports display:standalone (pre-resolved). -->
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <!-- "Add to Home Screen" meta tags. The vendor-neutral mobile-web-app-capable
+       is the modern standard (Chrome warns the apple- one is deprecated); the
+       apple- one is kept alongside it for back-compat with older iOS Safari. -->
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="MediaVault" />
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
+  <!-- Android / Chrome theme colour (matches --bg #0b0f17) -->
+  <meta name="theme-color" content="#0b0f17" />
   <link rel="stylesheet" href="./styles.css" />
+
+  <!-- Fail-loud guard (runs BEFORE the module scripts below). This is a plain,
+       dependency-free, NON-module inline script so it always executes even if the
+       ES-module graph fails to evaluate. If a top-level module/script error or an
+       unhandled promise rejection fires, it reveals a fixed diagnostic banner
+       instead of leaving the user on a silent blank page (the failure mode the
+       no-cache header now prevents, but this is the visible safety net if a
+       module ever fails to load again). XSS-safe: the message is set via
+       textContent only. -->
+  <script>
+    (function () {
+      var shown = false;
+      function showFailBanner(detail) {
+        if (shown) return; // first error wins; don't stack banners
+        shown = true;
+        try {
+          var bar = document.createElement("div");
+          bar.id = "mv-load-error";
+          bar.setAttribute("role", "alert");
+          // Inline styles so the banner shows even if styles.css was the file
+          // that failed to load. High z-index, fixed to the top, readable.
+          bar.style.cssText =
+            "position:fixed;top:0;left:0;right:0;z-index:99999;" +
+            "background:#7f1d1d;color:#fff;font:14px/1.4 system-ui,sans-serif;" +
+            "padding:10px 14px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.4)";
+          bar.textContent =
+            "⚠️ UI failed to load (try a hard refresh / pull-to-refresh). " +
+            (detail || "");
+          // Body may not exist yet if the error fires very early; fall back to
+          // documentElement so the banner still attaches.
+          (document.body || document.documentElement).appendChild(bar);
+        } catch (e) {
+          /* never let the error handler throw */
+        }
+      }
+      window.addEventListener("error", function (e) {
+        // Only treat genuine script/module load+eval errors as fatal here. A
+        // failed <img>/<link> resource also fires 'error' (no e.message) — ignore
+        // those so a missing poster never trips the banner.
+        if (e && (e.message || e.error)) {
+          showFailBanner(String(e.message || (e.error && e.error.message) || ""));
+        }
+      });
+      window.addEventListener("unhandledrejection", function (e) {
+        var reason = e && e.reason;
+        var msg = reason && (reason.message || reason);
+        showFailBanner(msg ? String(msg) : "");
+      });
+    })();
+  </script>
 </head>
 <body>
   <!-- Persistent server-side DEMO/SAFE-mode banner (IMP-E14). Hidden by default;
@@ -43,6 +106,11 @@
   </header>
 
   <main>
+    <!-- View toggle: Grouped (on-disk folder hierarchy) vs Decluttered (the flat
+         by-state grid). Mirrors the #sortbar pattern; built + wired in app.js. The
+         choice persists in sessionStorage and applies within each media-type tab. -->
+    <div class="viewbar" id="viewbar" aria-label="View mode"></div>
+
     <!-- Secondary segmented sub-view rail (one sub-view shown at a time). -->
     <div class="subnav" id="subnav" role="tablist"
          aria-label="Disk-state sub-view"></div>
@@ -132,5 +200,9 @@
   </template>
 
   <script type="module" src="./app.js"></script>
+  <!-- Ambient animated background canvas (self-injecting module, built separately).
+       Loaded once here; it self-injects its own <canvas> + <style> and honors
+       prefers-reduced-motion. This is the single load hook for that module. -->
+  <script type="module" src="./background.js"></script>
 </body>
 </html>

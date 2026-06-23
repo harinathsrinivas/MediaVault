@@ -230,6 +230,14 @@ button, input { font-family: inherit; }
   border: 1px solid var(--line-soft);
   border-radius: 12px;
 }
+/* Defensive: the `.subnav` rule's explicit `display:flex` would override the UA
+   `[hidden]{display:none}` default, so this restores it — any code that sets
+   `subnav.hidden = true` (or adds `.is-hidden`) actually hides the rail. In normal
+   flow the rail is now shown in BOTH view modes (decluttered picks the flat grid's
+   state; grouped FILTERS the folder tree), so `hidden` is never set; this rule is
+   kept purely as a guard. Mirrors `.viewbar[hidden]` below. */
+.subnav[hidden],
+.subnav.is-hidden { display: none; }
 
 .seg {
   display: inline-flex;
@@ -276,7 +284,9 @@ button, input { font-family: inherit; }
 }
 .seg.active .seg-count { color: var(--text); background: rgba(255, 255, 255, 0.09); }
 
-/* Per-state dot hue (reuses the badge palette). */
+/* Per-state dot hue (reuses the badge palette). The "All" segment is neutral
+   (slate) — it represents no single state, just "everything". */
+.seg.s-all .seg-dot       { color: var(--text-dim);   background: var(--text-dim); }
 .seg.s-unprepped .seg-dot { color: var(--b-unprepped); background: var(--b-unprepped); }
 .seg.s-local .seg-dot     { color: var(--b-local);     background: var(--b-local); }
 .seg.s-pushed .seg-dot    { color: var(--b-pushed);    background: var(--b-pushed); }
@@ -285,6 +295,7 @@ button, input { font-family: inherit; }
 .seg.s-unknown .seg-dot   { color: var(--b-unknown);   background: var(--b-unknown); }
 
 /* The active segment gets a tinted underline matching its state hue. */
+.seg.active.s-all       { box-shadow: 0 2px 10px rgba(0,0,0,.3), inset 0 -2px 0 var(--text-dim); }
 .seg.active.s-unprepped { box-shadow: 0 2px 10px rgba(0,0,0,.3), inset 0 -2px 0 var(--b-unprepped); }
 .seg.active.s-local     { box-shadow: 0 2px 10px rgba(0,0,0,.3), inset 0 -2px 0 var(--b-local); }
 .seg.active.s-pushed    { box-shadow: 0 2px 10px rgba(0,0,0,.3), inset 0 -2px 0 var(--b-pushed); }
@@ -375,6 +386,57 @@ button, input { font-family: inherit; }
 }
 .sort-dir:hover { background: var(--bg-card-hover); border-color: var(--accent-deep); color: var(--accent); }
 
+/* ---------------- View toggle (Grouped <-> Decluttered) ---------------- */
+/* Mirrors the sort bar's segmented-pill pattern. Two buttons; the active one is
+   filled with the accent gradient + aria-pressed=true. Built/wired in app.js. */
+.viewbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0 0 16px;
+}
+.viewbar[hidden] { display: none; }
+.viewbar-label {
+  font-size: 11px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 700;
+}
+.view-modes {
+  display: inline-flex;
+  gap: 4px;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 4px;
+}
+.view-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 38px;            /* tap-friendly on mobile */
+  padding: 7px 16px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.14s, color 0.14s, border-color 0.14s;
+}
+.view-mode-glyph { font-size: 14px; line-height: 1; }
+.view-mode:hover { color: var(--text); background: var(--bg-card-hover); }
+.view-mode.active {
+  color: #06121a;
+  background: linear-gradient(135deg, var(--accent), var(--focus));
+  box-shadow: 0 3px 12px rgba(56, 224, 200, 0.26);
+}
+
 /* ---------------- Layout ---------------- */
 
 main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
@@ -388,8 +450,11 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 .status-line.err { color: var(--danger); }
 
 /* The single sub-view panel. One grid shown at a time; switching fades + slides
-   the panel so segment changes feel smooth rather than a hard cut. */
+   the panel so segment changes feel smooth rather than a hard cut.
+   position:relative scopes the grouped-view loading overlay (.tree-loading) to
+   the panel without affecting layout. */
 .panel {
+  position: relative;
   opacity: 1;
   transform: translateY(0);
   transition: opacity 0.18s ease, transform 0.18s ease;
@@ -402,6 +467,41 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 @media (prefers-reduced-motion: reduce) {
   .panel { transition: none; }
   .panel.swapping { opacity: 1; transform: none; }
+}
+
+/* Grouped-view loading overlay. Shown ONLY when the async /api/tree is slow to
+   resolve (first, uncached switch). It is pinned over the panel and does NOT
+   clear the current content — the existing grid/tree stays visible underneath so
+   switching to Grouped never flashes blank. A short grace delay (app.js) means a
+   fast cached switch never shows this at all. pointer-events:none so it never
+   blocks interaction with the content beneath. */
+.tree-loading {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 5;
+  pointer-events: none;
+}
+.tree-loading-chip {
+  display: inline-block;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text, #e6edf6);
+  background: rgba(20, 27, 40, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(6px);
+  animation: tree-loading-pulse 1.1s ease-in-out infinite;
+}
+@keyframes tree-loading-pulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tree-loading-chip { animation: none; opacity: 0.92; }
 }
 
 /* Responsive auto-fitting card grid. Reflows to 1-up on narrow screens. */
@@ -441,7 +541,12 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   border-radius: var(--radius);
   overflow: hidden;
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02) inset;
-  transition: transform 0.14s ease, box-shadow 0.14s ease, border-color 0.14s ease;
+  /* Buttery hover lift: a gentle ease-out curve on the compositor-friendly
+     transform/box-shadow/border so the rise settles softly rather than linearly. */
+  transition:
+    transform 0.22s cubic-bezier(0.22, 0.61, 0.36, 1),
+    box-shadow 0.22s cubic-bezier(0.22, 0.61, 0.36, 1),
+    border-color 0.18s ease;
 }
 .card:hover {
   transform: translateY(-3px);
@@ -492,6 +597,136 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
     );
   }
   .card:hover::before { opacity: 1; }
+}
+
+/* ============================================================================
+   HOVER BORDER — CANDIDATE A: rotating conic-gradient ring (IMP-E14 Phase 3).
+   ----------------------------------------------------------------------------
+   On hover, a bright accent arc TRAVELS continuously around the card's edge
+   (an "aesthetic flicker that keeps moving"), painted on a dedicated `.card::after`
+   layer. It COMPLEMENTS the two existing edge effects without fighting them:
+     • .card::before cursor glow   z-index:-1  (soft fill UNDER content)
+     • .card::after  hover ring    z-index:2   (thin FRAME on the edge — this)
+     • .fetch-ring SVG progress    z-index:3   (only during a fetch; see below)
+     • .demo-tag 4 / .card-actions 5            (always on top, untouched)
+   The ring is a HOLLOW frame (only ~1.6px of border is painted; the whole centre
+   is masked away), so even at z-index:2 it never covers the poster/title/buttons,
+   and `pointer-events:none` means it never intercepts a click, tap, or focus.
+
+   HOW IT MOVES: the conic-gradient's start angle is a registered custom property
+   `--ring-angle`; a keyframe sweeps it 0deg→360deg, rotating the bright arc around
+   the perimeter. Only `--ring-angle` (the gradient angle) and `opacity` animate —
+   never a layout/paint-heavy box property — so it stays compositor-cheap and 60fps.
+   It runs ONLY while hovered, so idle cards do zero animation work.
+
+   iOS-SAFARI SAFETY (the user's primary device — a blank page is an auto-loss):
+   A PRIOR conic ring blanked iOS by combining the LEGACY `-webkit-mask-composite:
+   xor` keyword with an `@property`-animated conic (step-2.3 decision). This
+   implementation NEVER uses `-webkit-mask-composite` or the `xor` keyword at all.
+   The hollow is cut with the MODERN standard `mask-composite: exclude` (shipped in
+   Safari 15.4, March 2022 — well before the user's 2026 device) and is wrapped in
+   `@supports (mask-composite: exclude)`, so the masked path is only ever parsed on
+   engines that actually implement it. Engines that don't (ancient WebKit/Firefox)
+   fall through to the composite-free `.card:hover` box-shadow floor below and get a
+   tasteful static accent edge — never a blank. There is therefore no syntactic or
+   capability path to the documented blank-render. */
+
+/* SAFE FLOOR — composite-free, works on every engine incl. pre-2022 WebKit. A
+   gentle accent edge on hover via box-shadow (no mask, no conic, no @property). On
+   capable engines the rotating ring below paints OVER this; on incapable ones this
+   is the whole (still pretty, never-blank) effect. */
+@media (hover: hover) and (pointer: fine) {
+  .card:hover {
+    box-shadow: var(--shadow), 0 0 0 1px rgba(56, 224, 200, 0.28);
+  }
+}
+
+/* The registered angle that the conic sweep rotates. `inherits:false` keeps it
+   local to each card; the 0deg default means a non-@property engine (Safari
+   15.4–16.3) still renders a clean STATIC arc rather than an invalid value. */
+@property --ring-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+/* The hollow rotating ring. Only defined where the modern, composite-free
+   `mask-composite: exclude` is supported — so iOS/legacy engines that lack it
+   never parse a mask at all and simply keep the box-shadow floor above. */
+@supports (mask-composite: exclude) {
+  .card::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 2;                 /* above poster, below .fetch-ring(3)/tag(4)/actions(5) */
+    pointer-events: none;        /* never blocks a click / tap / focus */
+    border-radius: inherit;      /* ride the card's rounded edge */
+    padding: 1.6px;              /* == painted ring thickness (the rest is masked off) */
+    /* A bright accent→focus arc over a transparent remainder; rotating --ring-angle
+       sweeps it around the perimeter. The transparent tail makes it read as one
+       travelling highlight, not a full outline. */
+    background: conic-gradient(
+      from var(--ring-angle),
+      transparent 0deg,
+      rgba(56, 224, 200, 0.95) 42deg,   /* --accent core of the arc */
+      rgba(90, 160, 255, 0.85) 88deg,   /* --focus trailing edge */
+      transparent 150deg,
+      transparent 360deg
+    );
+    /* Hollow it WITHOUT any composite=xor: paint the full box, subtract the
+       content-box, leaving only the `padding`-wide frame. `mask-composite:exclude`
+       is the modern (Safari 15.4+) keyword; `-webkit-mask`/`mask` carry the image
+       pair. No `-webkit-mask-composite`, no `xor` — the iOS-blank trigger is absent. */
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask-composite: exclude;
+    opacity: 0;                  /* idle = OFF (no work, no static line) */
+    transition: opacity 0.28s ease;
+  }
+
+  /* Reveal + start the continuous rotation ONLY on a true hovering pointer. On
+     touch (hover:none) this never matches → the arc can't show or get stuck after
+     a finger lifts; touch users keep the plain card. */
+  @media (hover: hover) and (pointer: fine) {
+    .card:hover::after {
+      opacity: 1;
+      animation: cardRingSpin 4.2s linear infinite;
+    }
+    /* While a fetch is running on this card, the SVG progress ring (z-index:3)
+       owns the edge; HIDE the hover arc so the two don't fight on the same border.
+       `.fetching` is toggled by ring.show()/reset() (ring.js). It restores the
+       moment the fetch ends. */
+    .card.fetching:hover::after { opacity: 0; animation: none; }
+  }
+}
+
+@keyframes cardRingSpin {
+  to { --ring-angle: 360deg; }
+}
+
+/* Reduced motion: NO rotation, NO spin animation. Fall back to a STATIC, subtle
+   accent frame so the hover affordance survives without any movement. The arc
+   becomes a calm, evenly-tinted full ring at a fixed angle. The box-shadow floor
+   above is already static (no animation), so it needs no override here. The card
+   lift transition is also dropped so the hover state applies instantly (the
+   springy ease-out above is the only motion this view would otherwise add). */
+@media (prefers-reduced-motion: reduce) {
+  .card { transition: border-color 0.18s ease; }
+  @supports (mask-composite: exclude) {
+    .card:hover::after {
+      animation: none;
+      background: conic-gradient(
+        from 0deg,
+        rgba(56, 224, 200, 0.45),
+        rgba(90, 160, 255, 0.40),
+        rgba(56, 224, 200, 0.45)
+      );
+    }
+  }
 }
 
 /* Poster placeholder — gradient + big initial, NO external image. */
@@ -821,6 +1056,187 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   padding: 2px 7px;
   box-shadow: 0 2px 8px rgba(56, 224, 200, 0.4);
   user-select: none;
+}
+
+/* ---------------- Open-folder button ---------------- */
+/* A compact icon button that opens the entry's folder in Explorer (local PC only;
+   the server enforces localhost + path safety + demo simulation). Present on every
+   leaf card AND every grouped-view folder header. Always a 40px tap target. */
+.open-folder-btn {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: rgba(10, 16, 24, 0.72);
+  color: var(--text-dim);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.open-folder-btn:hover {
+  background: var(--bg-card-hover);
+  color: var(--accent);
+  border-color: var(--accent-deep);
+}
+.open-folder-btn:active { transform: translateY(1px); }
+/* The leaf-card variant sits on the poster, pinned top-LEFT so it never collides
+   with the top-right badge (poster z-index:2) or the ?demo tag (z-index:4). At
+   z-index:5 it matches .card-actions, staying clickable above the hover ring and
+   never intercepting the badge or the Fetch & Restore button. Backdrop blur keeps
+   it legible over any poster gradient/image. */
+.open-folder-btn.on-poster {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 5;
+  width: 36px;
+  height: 36px;
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+/* ---------------- Grouped (folder-tree) view ---------------- */
+/* The hierarchy renders INSIDE #panel (so the delegated cursor glow covers leaf
+   cards). Folders are disclosure rows; their children indent and reveal on expand.
+   Leaf nodes are the SAME .card elements as the flat grid, laid out in a .grid. */
+.tree { display: flex; flex-direction: column; gap: 10px; }
+
+.folder-node {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgba(22, 31, 46, 0.6), rgba(18, 26, 40, 0.6));
+  overflow: hidden;
+}
+.folder-node.open { border-color: var(--line); }
+
+/* Disclosure header — a full-width button. Poster thumb · name+size · open btn. */
+.folder-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  min-height: 60px;            /* comfortable tap target */
+  background: transparent;
+  border: 0;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.folder-head:hover { background: var(--bg-card-hover); }
+
+.folder-caret {
+  flex: none;
+  width: 18px;
+  font-size: 13px;
+  color: var(--text-faint);
+  transition: transform 0.16s ease;
+}
+.folder-node.open > .folder-head .folder-caret { transform: rotate(90deg); color: var(--accent); }
+
+/* Poster thumbnail. Real <img> from /api/folder-image when has_image; otherwise (or
+   on img error) the .fallback gradient tile + a folder glyph shows through. */
+.folder-thumb {
+  flex: none;
+  width: 56px;
+  height: 56px;
+  border-radius: 9px;
+  overflow: hidden;
+  position: relative;
+  background: linear-gradient(135deg, #1b2638, #0e1622);
+  border: 1px solid var(--line-soft);
+}
+.folder-thumb-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.folder-thumb.fallback::after {
+  content: "🗀";                /* unicode folder — no external asset */
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 24px;
+  color: rgba(56, 224, 200, 0.5);
+}
+
+.folder-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.folder-name {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.2px;
+  overflow-wrap: anywhere;
+}
+.folder-sub {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The header's open-folder button is right-aligned via the meta's flex-grow. */
+.folder-head > .open-folder-btn { margin-left: auto; }
+
+/* Children region: indented from the folder edge. Leaf cards reflow as an auto-
+   fitting grid; nested sub-folders (full width) span all columns so the hierarchy
+   stays legible. Hidden when the folder is collapsed. */
+.folder-children {
+  padding: 6px 12px 12px 30px;
+  gap: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  align-items: start;
+}
+.folder-children[hidden] { display: none; }
+.folder-children > .folder-node { grid-column: 1 / -1; }
+@media (max-width: 460px) {
+  .folder-children { grid-template-columns: 1fr; padding-left: 18px; }
+}
+
+/* ---------------- Toast (open-folder outcomes) ---------------- */
+/* Bottom-centre, auto-dismissing. Created on demand by data.js showToast(). Text
+   via textContent (XSS-safe). Above the cards but below the modal/terminal. */
+.mv-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  transform: translate(-50%, 16px);
+  z-index: 40;
+  max-width: min(92vw, 420px);
+  padding: 11px 16px;
+  border-radius: 12px;
+  background: rgba(19, 26, 38, 0.96);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  box-shadow: var(--shadow);
+  opacity: 0;
+  pointer-events: none;
+  text-align: center;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.mv-toast.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+@media (prefers-reduced-motion: reduce) {
+  .mv-toast { transition: opacity 0.2s ease; transform: translate(-50%, 0); }
+  .folder-caret { transition: none; }
 }
 
 /* Reduced motion: no smoothing transition, no glow animation. The outline still

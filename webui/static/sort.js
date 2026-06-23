@@ -83,3 +83,106 @@ function collate(x, y) {
 export function sortItems(rows) {
   return (rows || []).slice().sort(compareItems);
 }
+
+// ---------------------------------------------------------------------------
+// Grouped (tree) comparator — mixed folder + leaf nodes, sorted by the ACTIVE
+// key+dir, used at EVERY nesting level by tree.js. Pure (no DOM/fetch) so
+// `node --check sort.js` covers it.
+//
+// Node shapes:
+//   folder = { type:"folder", name, path, size_bytes, has_image, children:[...] }
+//   leaf   = an items_payload row { type:"leaf", id, title, state, size_bytes, year }
+//
+// Value extraction per key:
+//   size  : node.size_bytes for both (folders carry a recursive size; missing
+//           sinks via sizeValue's -1).
+//   title : folder -> node.name; leaf -> displayTitle(node). Compared via collate
+//           (case-insensitive, numeric so "Season 2" < "Season 10").
+//   year  : leaf -> its own year (yearValue). folder -> DIRECTIONAL: ascending
+//           uses the folder's MIN descendant-leaf year, descending uses its MAX,
+//           so a folder's effective year tracks the sort direction. Folders with
+//           no descendant year sink (0), exactly like an unknown-year leaf.
+// Tiebreak (AFTER direction, independent of dir): folder -> name, leaf -> id,
+// ascending — mirrors compareItems' stable-tiebreak discipline.
+// ---------------------------------------------------------------------------
+
+function isLeafNode(node) {
+  return !!(node && node.type === "leaf");
+}
+
+// The string compared/tiebroken on for the Title key.
+function nodeTitle(node) {
+  return isLeafNode(node) ? displayTitle(node) : (node && node.name) || "";
+}
+
+// Walk a folder's descendant LEAF nodes and memoize its min & max leaf year on
+// the node (_minYear/_maxYear) so repeated comparisons in one sort are cheap.
+// Leaves contribute their own yearValue; a leaf/folder with no real year (0) is
+// skipped so it never drags the folder's effective year to 0 spuriously. A
+// folder with NO dated descendant gets {min:0, max:0} (sinks like an unknown).
+function folderYearBounds(node) {
+  if (node._minYear !== undefined && node._maxYear !== undefined) {
+    return { min: node._minYear, max: node._maxYear };
+  }
+  var min = 0;
+  var max = 0;
+  var seen = false;
+  var stack = (node && node.children) ? node.children.slice() : [];
+  while (stack.length) {
+    var n = stack.pop();
+    if (!n) continue;
+    if (isLeafNode(n)) {
+      var y = yearValue(n);
+      if (y > 0) {
+        if (!seen) {
+          min = y;
+          max = y;
+          seen = true;
+        } else {
+          if (y < min) min = y;
+          if (y > max) max = y;
+        }
+      }
+    } else if (n.children) {
+      for (var i = 0; i < n.children.length; i += 1) stack.push(n.children[i]);
+    }
+  }
+  node._minYear = min;
+  node._maxYear = max;
+  return { min: min, max: max };
+}
+
+// A node's effective year for the CURRENT direction: leaves use their own year;
+// folders use MIN descendant year ascending, MAX descending.
+function nodeYear(node, asc) {
+  if (isLeafNode(node)) return yearValue(node);
+  var b = folderYearBounds(node);
+  return asc ? b.min : b.max;
+}
+
+// Compare two tree nodes (folder or leaf, fully mixed) by the active key+dir.
+export function compareNodes(a, b) {
+  var asc = current.dir === "asc";
+  var dir = asc ? 1 : -1;
+  var primary = 0;
+
+  if (current.key === "title") {
+    primary = collate(nodeTitle(a), nodeTitle(b));
+  } else if (current.key === "year") {
+    primary = nodeYear(a, asc) - nodeYear(b, asc);
+  } else {
+    primary = sizeValue(a) - sizeValue(b);
+  }
+
+  if (primary !== 0) return primary * dir;
+  // Stable tiebreak: name (folder) / id (leaf) ascending, INDEPENDENT of `dir`.
+  var ak = isLeafNode(a) ? String(a && a.id) : (a && a.name) || "";
+  var bk = isLeafNode(b) ? String(b && b.id) : (b && b.name) || "";
+  return collate(ak, bk);
+}
+
+// Return a NEW sorted array of mixed folder+leaf nodes. Never mutates the input
+// (tree.js holds the canonical backend child order and must not corrupt it).
+export function sortNodes(nodes) {
+  return (nodes || []).slice().sort(compareNodes);
+}

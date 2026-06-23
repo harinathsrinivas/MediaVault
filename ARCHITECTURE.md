@@ -389,7 +389,60 @@ It binds **localhost only**.
   (⤢) showing the equivalent CLI command + live progress + full captured output;
   and a **cursor-following card glow** (mouse/trackpad; disabled on touch +
   `prefers-reduced-motion`). Posters and mobile/Tailscale/auth are tracked in
-  later phases (E14 Phases 3–5 and IMP-E3/U3).
+  later phases (E14 Phases 4–5 and IMP-E3/U3).
+- **CSS motion layer — no build step (IMP-E14 Phase 3):** the SPA gained a
+  **continuous hover border**: a rotating conic-gradient accent arc (`.card::after`,
+  `@property --ring-angle`) travels around each card on hover, complementing the
+  existing cursor-follow glow and yielding to the SVG fetch-progress ring.
+  An `@supports`-gated `mask` clip gives a clean arc on supporting browsers; iOS
+  Safari (which mis-renders mask+conic) falls back to a box-shadow ring instead.
+  A `prefers-reduced-motion` static fallback and touch-device guard are applied
+  throughout — all pure CSS, no JS, no build pipeline change.
+- **PWA / installable console (IMP-E14 Phase 3):** `webui/static/manifest.webmanifest`
+  (`display:standalone`, `theme_color:#0b0f17`) + self-generated branded PNG icons
+  (192×192 / 512×512 / apple-touch-icon 180×180) + iOS meta tags
+  (`apple-mobile-web-app-capable`, `apple-mobile-web-app-status-bar-style`,
+  `theme-color`, `viewport-fit=cover`). The console can be "Added to Home Screen"
+  on iPhone/iPad and runs as a standalone app without the browser chrome.
+- **Grouped (hierarchical) folder view + Grouped/Decluttered toggle (IMP-E14
+  Phase 3+):** within each media-type tab the SPA can render the **on-disk folder
+  hierarchy** — show → season → episode for series/anime, collection → movie for
+  movies. The state rail has an **"All" segment** (default, shows every item
+  regardless of lifecycle state) plus the 5 per-state filters. In grouped mode,
+  selecting a state **prunes** the folder tree so a folder only appears when at
+  least one descendant leaf matches that state; the folder's shown size is the
+  aggregate of visible matching leaves ("All" uses the real Windows folder size).
+  Recursive sort (size/title/year) applies at every tree level. The toggle switches
+  between the flat Decluttered card-grid and the hierarchical Grouped tree view.
+- **New backend endpoints (IMP-E14 Phase 3+):**
+  - `GET /api/tree` — returns the per-category folder hierarchy spanning **all
+    lifecycle states** including un-prepped on-disk files; folder sizes are real
+    Windows sizes obtained via `os.scandir`; each folder node carries `has_image`.
+    Read-only; alias-safe (skips `season_map` / `multi_ep_alias` before dereferencing
+    `folder_path`).
+  - `GET /api/folder-image?path=<folder>` — serves a folder's `poster.jpg` or
+    `fanart.jpg`, or the first match found in any descendant. The requested path is
+    **realpath-contained to `C:\Media`**; only `poster.jpg` / `fanart.jpg` are
+    served (no arbitrary file access).
+  - `POST /api/open-folder` — opens the specified folder in Windows Explorer via
+    `subprocess`. **Localhost-only** (non-loopback callers receive **403**; path is
+    realpath-contained to `C:\Media`). Simulated in demo mode without spawning
+    Explorer.
+- **Open-in-Explorer button:** every folder card and item card in the SPA has a
+  button that fires `POST /api/open-folder`. The button is visible but shows a
+  tooltip (and the request returns 403) when accessed over Tailscale or any
+  non-localhost connection.
+- **Procedural animated space/galaxy background (`background.js`):** a self-contained
+  Canvas-based starfield + nebula rendered procedurally at startup. Perf-capped
+  (targets 30 fps, halts when the tab is hidden), respects `prefers-reduced-motion`
+  (static starfield only), and requires no external assets.
+- **Static no-cache policy + global JS error banner:** a `_NoCacheStaticFiles`
+  subclass of `StaticFiles` sets `Cache-Control: no-cache` on every static response
+  (ETag kept for revalidation) — this fixes the **iOS Safari stale-ES-module blank-
+  page bug** where Safari served cached modules after a server restart. A
+  `/favicon.ico` handler is also registered. A global `window.onerror` +
+  `unhandledrejection` listener surfaces any uncaught JS error as a visible banner
+  so the SPA can never silently blank.
 - **The web tier calls the existing `cmd_*` UNCHANGED** — no copy of their
   logic. `replace` reuses `cmd_replace` verbatim, so the **auto-rollback
   change-gate is NOT tripped** (journal/PONR/`RollbackHardFail` contract

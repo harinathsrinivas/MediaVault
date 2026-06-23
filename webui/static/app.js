@@ -31,12 +31,14 @@ import {
   CATEGORY_ORDER,
   CATEGORY_META,
   STATE_ORDER,
+  ALL_STATE,
   metaFor,
 } from "./data.js";
 import { buildCard, runAction, setRefreshHandler, destroyRingsIn } from "./card.js";
 import { wireModal } from "./modal.js";
 import { getSort, setSort, sortItems, SORT_KEYS } from "./sort.js";
 import { wireCardGlow } from "./glow.js";
+import { buildTreeFragment, treeRootsFor, pruneTreeByState } from "./tree.js";
 
 function $(sel, root) {
   return (root || document).querySelector(sel);
@@ -51,12 +53,45 @@ var MODEL = null;
 var activeCategory = CATEGORY_ORDER[0];
 var activeState = null; // chosen sub-view within the active category
 
-// Sub-view order = the 5 known states, PLUS any unexpected state that actually
-// appears (appended after ARCHIVED) so an odd out-of-sync row is still reachable
-// rather than silently dropped. Computed per render from the live model.
+// id -> enriched MODEL row, for the grouped (tree) view to JOIN raw /api/tree
+// leaves back onto their reclaim-enriched card payload. Rebuilt on every load().
+var MODEL_BY_ID = {};
+
+// View mode: "decluttered" = the existing flat by-state grid; "grouped" = the
+// on-disk folder hierarchy (tree.js). Persisted in sessionStorage so it survives a
+// reload within the session. Applies WITHIN whichever media-type tab is active.
+var VIEW_KEY = "mv.viewMode";
+var viewMode = readViewMode();
+
+function readViewMode() {
+  try {
+    var v = window.sessionStorage.getItem(VIEW_KEY);
+    return v === "grouped" ? "grouped" : "decluttered";
+  } catch (e) {
+    return "decluttered";
+  }
+}
+
+function writeViewMode(mode) {
+  viewMode = mode === "grouped" ? "grouped" : "decluttered";
+  try {
+    window.sessionStorage.setItem(VIEW_KEY, viewMode);
+  } catch (e) {
+    /* sessionStorage unavailable (private mode quota) — keep the in-memory mode. */
+  }
+}
+
+function isGrouped() {
+  return viewMode === "grouped";
+}
+
+// Sub-view order = the leading "All" segment, THEN the 5 known states, PLUS any
+// unexpected state that actually appears (appended after ARCHIVED) so an odd
+// out-of-sync row is still reachable rather than silently dropped. "All" leads in
+// BOTH view modes and is the default. Computed per render from the live model.
 function subViewStatesFor(category) {
   var counts = (MODEL && MODEL.counts.byCatState[category]) || {};
-  var order = STATE_ORDER.slice();
+  var order = [ALL_STATE].concat(STATE_ORDER);
   // Append any present-but-unknown states in first-seen order.
   Object.keys(counts).forEach(function (s) {
     if (order.indexOf(s) === -1) order.push(s);
@@ -64,7 +99,10 @@ function subViewStatesFor(category) {
   return order;
 }
 
+// Count shown on a rail segment. "All" shows the category total; every real state
+// shows its per-(category,state) bucket count.
 function countFor(category, state) {
+  if (state === ALL_STATE) return categoryCount(category);
   var byCat = (MODEL && MODEL.counts.byCatState[category]) || {};
   return byCat[state] || 0;
 }
@@ -74,7 +112,9 @@ function categoryCount(category) {
 }
 
 // First sub-view of a category that has at least one item; null if the category
-// is entirely empty.
+// is entirely empty. "All" leads the order and counts the whole category, so a
+// non-empty category resolves to "All" here — making it the natural default on
+// first load and the post-job fallback.
 function firstNonEmptyState(category) {
   var states = subViewStatesFor(category);
   for (var i = 0; i < states.length; i += 1) {
@@ -260,8 +300,9 @@ function handleBarKeydown(e, order, current, onSelect, isEnabled) {
 function selectCategory(cat, opts) {
   if (CATEGORY_ORDER.indexOf(cat) === -1) return;
   activeCategory = cat;
-  // Reset the sub-view to the first non-empty one for the new category.
-  activeState = firstNonEmptyState(cat) || subViewStatesFor(cat)[0];
+  // Reset the sub-view to "All" (the first non-empty sub-view for any non-empty
+  // category; falls back to "All" for an entirely empty category too).
+  activeState = firstNonEmptyState(cat) || ALL_STATE;
   refreshTabSelection();
   buildSubnav();
   renderPanel(true);
@@ -289,40 +330,66 @@ function selectState(state, opts) {
   }
 }
 
-// Render the single grid for (activeCategory, activeState). When `animate` is
-// true, fade/slide the panel: hide -> swap on the next frame -> show.
+// Sync the chrome around the panel to the active view mode. The state sub-view
+// rail (#subnav) now shows in BOTH modes: in decluttered it picks the flat grid's
+// state; in grouped it FILTERS the folder tree (All → whole tree; a state → the
+// tree pruned to that state — see paintTree). The Size/Title/Year sort bar
+// (#sortbar) also stays visible in both modes: the grouped tree applies the active
+// sort RECURSIVELY at every nesting level (tree.js sorts each level via
+// compareNodes), and its key/dir handlers call renderPanel(false), which in
+// grouped mode does a full renderTree re-render — so changing the sort (or the
+// state filter) instantly re-renders the tree (the EXPANDED map preserves which
+// folders are open).
+//
+// We force `subnav.hidden = false` here so the rail is never left hidden by a
+// prior build. The defensive `.subnav[hidden]{display:none}` rule in styles.css
+// stays (so any future code that DOES set `hidden` still hides it), but in normal
+// flow #subnav is simply always shown now.
+function syncViewChrome() {
+  var grouped = isGrouped();
+  var subnav = $("#subnav");
+  var sortbar = $("#sortbar");
+  if (subnav) {
+    subnav.hidden = false;
+    subnav.classList.remove("is-hidden");
+  }
+  if (sortbar) sortbar.hidden = false;
+  document.body.classList.toggle("grouped-view", grouped);
+}
+
+// Render the panel for the active media-type tab. In DECLUTTERED mode this is the
+// single flat grid for (activeCategory, activeState). In GROUPED mode it is the
+// on-disk folder hierarchy for activeCategory (all states), rendered by tree.js.
+//
+// Two transition strategies, by mode:
+//   * DECLUTTERED is synchronous (renders from the already-loaded MODEL), so the
+//     classic fade-out -> swap -> fade-in (`animate`) is smooth and instant.
+//   * GROUPED is ASYNC (it awaits /api/tree, a heavy scandir on first use). The
+//     old code faded the panel to empty and only rebuilt on resolve, which on the
+//     first switch left a blank/faded panel then a jarring reload-flash. So
+//     grouped now does an ATOMIC swap (paintTree): it keeps the current content
+//     fully visible, builds the whole tree off-DOM, and replaces #panel's children
+//     in ONE operation when ready (preserving scroll) — never clearing first.
 function renderPanel(animate) {
   var panel = $("#panel");
+  syncViewChrome();
+  if (isGrouped()) {
+    panel.setAttribute("aria-label", CATEGORY_META[activeCategory].label + " folders");
+    panel.removeAttribute("aria-labelledby");
+    // Atomic, flash-free swap owns its own transition; do NOT add `.swapping`
+    // (which would fade the panel to empty while the async tree resolves).
+    paintTree(panel);
+    return;
+  }
+
   panel.setAttribute("aria-labelledby", "seg-" + activeState);
 
   function paint() {
     // Dispose any active fetch-rings BEFORE emptying the panel so their
     // ResizeObservers are disconnected (teardown graft, change #4). This is the
-    // single grid-clear path — every tab/sub-view switch and post-fetch refresh
+    // flat grid-clear path — every flat tab/sub-view switch and post-fetch refresh
     // routes through here.
-    destroyRingsIn(panel);
-    panel.textContent = "";
-
-    var rows = (MODEL ? MODEL.items : []).filter(function (it) {
-      return it.category === activeCategory && it.state === activeState;
-    });
-    // Client-side sort (change #1): re-order the already-loaded rows by the
-    // persisted key+direction (default size-desc). No refetch.
-    rows = sortItems(rows);
-
-    if (rows.length === 0) {
-      panel.appendChild(buildEmptyState());
-    } else {
-      var grid = document.createElement("div");
-      grid.className = "grid";
-      var frag = document.createDocumentFragment();
-      rows.forEach(function (it) {
-        frag.appendChild(buildCard(it));
-      });
-      grid.appendChild(frag);
-      panel.appendChild(grid);
-    }
-
+    paintFlat(panel);
     // Reveal (next frame so the transition runs).
     requestAnimationFrame(function () {
       panel.classList.remove("swapping");
@@ -338,6 +405,150 @@ function renderPanel(animate) {
   } else {
     paint();
   }
+}
+
+// Flat (decluttered) grid for the active (category, state) — the original path.
+function paintFlat(panel) {
+  destroyRingsIn(panel);
+  panel.textContent = "";
+
+  // "All" → every item of the category (all states); a specific state → just that
+  // state's items. Sorted below by the persisted key+direction.
+  var rows = (MODEL ? MODEL.items : []).filter(function (it) {
+    if (it.category !== activeCategory) return false;
+    return activeState === ALL_STATE || it.state === activeState;
+  });
+  // Client-side sort (change #1): re-order the already-loaded rows by the
+  // persisted key+direction (default size-desc). No refetch.
+  rows = sortItems(rows);
+
+  if (rows.length === 0) {
+    panel.appendChild(buildEmptyState());
+  } else {
+    var grid = document.createElement("div");
+    grid.className = "grid";
+    var frag = document.createDocumentFragment();
+    rows.forEach(function (it) {
+      frag.appendChild(buildCard(it));
+    });
+    grid.appendChild(frag);
+    panel.appendChild(grid);
+  }
+}
+
+// Grouped (folder-tree) view for the active category — ATOMIC, flash-free swap.
+//
+// The tree comes from the cached /api/tree (loadTree in data.js); leaf cards are
+// joined back onto the enriched MODEL rows (MODEL_BY_ID) so their Copy command/
+// folder survive. Because /api/tree is async (a heavy scandir on first use), we
+// must NOT clear #panel to an empty/loading state while it resolves — that is the
+// "reload flash" the old code produced. Instead:
+//
+//   1. Keep the CURRENT panel content fully visible (no fade-to-empty).
+//   2. If the resolve is slow (first, uncached fetch), reveal a SUBTLE inline
+//      loading overlay ON TOP of the existing content after a short grace delay
+//      (so a fast cached switch never even shows it — it feels instant).
+//   3. Build the ENTIRE tree off-DOM into a DocumentFragment (buildTreeFragment).
+//   4. Swap it into #panel in ONE atomic operation (dispose outgoing rings, clear,
+//      append the prebuilt fragment), preserving scrollTop across the swap.
+//
+// A stale resolution (the user switched tab/state filter before /api/tree
+// returned) is dropped. A failure shows a status line and leaves the existing
+// content in place (no destructive clear), so the user can retry.
+//
+// The atomic swap is intentionally instant (no fade) because there is no empty
+// intermediate state to hide — the content simply changes in place.
+function paintTree(panel) {
+  // Capture the category AND state filter this paint is for; if the user switches
+  // tabs or the state filter before the tree resolves, a stale resolution must NOT
+  // overwrite the newer view.
+  var forCategory = activeCategory;
+  var forState = activeState;
+
+  // Subtle, non-destructive loading overlay shown only if the fetch is slow. It
+  // self-suppresses if the user leaves grouped mode before the grace delay fires.
+  var overlay = showTreeLoading(panel);
+
+  treeRootsFor(forCategory)
+    .then(function (roots) {
+      hideTreeLoading(overlay);
+      if (!isGrouped() || activeCategory !== forCategory || activeState !== forState) {
+        return; // superseded by a tab / state-filter change
+      }
+      // "All" → the whole category tree (every leaf, all states). A specific
+      // state → the tree PRUNED to that state: keep matching leaves, keep a folder
+      // only if some descendant leaf matches, and show each kept folder's size as
+      // the aggregate of its visible leaves (pruneTreeByState, pure + DOM-free).
+      var view =
+        forState === ALL_STATE
+          ? roots
+          : pruneTreeByState(roots, forState, MODEL_BY_ID);
+
+      // Build the whole tree OFF-DOM, then swap atomically so the panel never
+      // flashes empty. Preserve scroll position across the swap.
+      var fragment = buildTreeFragment(view, MODEL_BY_ID);
+      var prevScroll = panel.scrollTop;
+      // Teardown invariant: dispose the OUTGOING content's fetch-ring
+      // ResizeObservers right before replacing it (buildTreeFragment built only
+      // new DOM and did not touch these).
+      destroyRingsIn(panel);
+      panel.replaceChildren(fragment);
+      panel.scrollTop = prevScroll;
+    })
+    .catch(function (err) {
+      hideTreeLoading(overlay);
+      if (!isGrouped() || activeCategory !== forCategory) return;
+      // Non-destructive on failure: keep whatever is currently shown and surface
+      // the error on the status line so the user can retry (re-toggle the tab).
+      setStatus(
+        "Failed to load the folder tree — " + ((err && err.message) || err),
+        true
+      );
+    });
+}
+
+// --- Subtle tree-loading overlay (no content clear) ------------------------
+// Reveals a small "Loading folders…" chip pinned over #panel ONLY if the async
+// /api/tree is slow to resolve. A grace delay means a fast (cached) switch never
+// shows it, so subsequent Grouped<->Decluttered toggles feel instant. The overlay
+// sits ABOVE the existing content (which stays visible) rather than clearing it.
+var TREE_LOADING_GRACE_MS = 180;
+
+function showTreeLoading(panel) {
+  var state = { el: null, timer: null, cancelled: false };
+  state.timer = window.setTimeout(function () {
+    state.timer = null;
+    // Suppress if cancelled (resolve/reject arrived) OR the user has already left
+    // grouped mode during the grace window — never inject the chip into a flat
+    // panel that has since been repainted.
+    if (state.cancelled || !isGrouped()) return;
+    var el = document.createElement("div");
+    el.className = "tree-loading";
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", "polite");
+    var chip = document.createElement("span");
+    chip.className = "tree-loading-chip";
+    chip.textContent = "Loading folders…";
+    el.appendChild(chip);
+    // Ensure the panel is a positioning context so the absolutely-positioned
+    // overlay is scoped to it (styles.css also sets .panel{position:relative}).
+    panel.appendChild(el);
+    state.el = el;
+  }, TREE_LOADING_GRACE_MS);
+  return state;
+}
+
+function hideTreeLoading(state) {
+  if (!state) return;
+  state.cancelled = true;
+  if (state.timer) {
+    window.clearTimeout(state.timer);
+    state.timer = null;
+  }
+  if (state.el && state.el.parentNode) {
+    state.el.parentNode.removeChild(state.el);
+  }
+  state.el = null;
 }
 
 function buildEmptyState() {
@@ -401,11 +612,13 @@ function renderAll(isFirst) {
       })[0];
       if (firstCat) activeCategory = firstCat;
     }
-    activeState = firstNonEmptyState(activeCategory) || STATE_ORDER[0];
+    // Default sub-view = "All" (firstNonEmptyState resolves to ALL_STATE for any
+    // non-empty category; fall back to ALL_STATE for an empty library too).
+    activeState = firstNonEmptyState(activeCategory) || ALL_STATE;
   } else {
     // Re-render after a job. Keep the active sub-view if it still has items;
-    // else drop to the first non-empty sub-view of the same category; else the
-    // first category that has anything.
+    // else drop to the first non-empty sub-view of the same category (= "All"
+    // for any non-empty category); else the first category that has anything.
     if (countFor(activeCategory, activeState) === 0) {
       var fallback = firstNonEmptyState(activeCategory);
       if (fallback) {
@@ -416,9 +629,9 @@ function renderAll(isFirst) {
         })[0];
         if (nextCat) {
           activeCategory = nextCat;
-          activeState = firstNonEmptyState(nextCat) || STATE_ORDER[0];
+          activeState = firstNonEmptyState(nextCat) || ALL_STATE;
         } else {
-          activeState = STATE_ORDER[0];
+          activeState = ALL_STATE;
         }
       }
     }
@@ -435,6 +648,12 @@ function load(isFirst) {
   loadModel()
     .then(function (model) {
       MODEL = model;
+      // Index the enriched rows by id so the grouped (tree) view can JOIN raw
+      // /api/tree leaves back onto their reclaim-enriched card payload.
+      MODEL_BY_ID = {};
+      (model.items || []).forEach(function (row) {
+        if (row && row.id != null) MODEL_BY_ID[row.id] = row;
+      });
       renderAll(isFirst);
     })
     .catch(function (err) {
@@ -535,6 +754,82 @@ function refreshSortbar() {
 }
 
 // ---------------------------------------------------------------------------
+// View toggle (Grouped <-> Decluttered)
+// ---------------------------------------------------------------------------
+
+// A small segmented control mirroring the sort bar: two buttons that flip the
+// module view mode and instantly re-render the panel (no refetch — the flat view
+// renders from the loaded MODEL and the tree from the cached /api/tree). The
+// active mode is reflected via aria-pressed. Persisted in sessionStorage.
+var VIEW_MODES = [
+  { mode: "grouped", label: "Grouped", glyph: "▤", hint: "On-disk folder hierarchy" },
+  { mode: "decluttered", label: "Decluttered", glyph: "▦", hint: "Flat, grouped by disk state" },
+];
+
+function buildViewbar() {
+  var bar = $("#viewbar");
+  if (!bar) return;
+  bar.textContent = "";
+
+  var label = document.createElement("span");
+  label.className = "viewbar-label";
+  label.textContent = "View";
+  bar.appendChild(label);
+
+  var group = document.createElement("div");
+  group.className = "view-modes";
+  group.setAttribute("role", "group");
+  group.setAttribute("aria-label", "View mode");
+
+  VIEW_MODES.forEach(function (def) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "view-mode";
+    b.dataset.mode = def.mode;
+    b.title = def.hint;
+
+    var g = document.createElement("span");
+    g.className = "view-mode-glyph";
+    g.setAttribute("aria-hidden", "true");
+    g.textContent = def.glyph;
+    b.appendChild(g);
+
+    var t = document.createElement("span");
+    t.className = "view-mode-text";
+    t.textContent = def.label;
+    b.appendChild(t);
+
+    b.addEventListener("click", function () {
+      selectViewMode(def.mode);
+    });
+    group.appendChild(b);
+  });
+  bar.appendChild(group);
+
+  refreshViewbar();
+}
+
+// Reflect the active mode (pressed state) on the toggle.
+function refreshViewbar() {
+  var bar = $("#viewbar");
+  if (!bar) return;
+  var btns = bar.querySelectorAll(".view-mode");
+  for (var i = 0; i < btns.length; i += 1) {
+    var on = btns[i].dataset.mode === viewMode;
+    btns[i].classList.toggle("active", on);
+    btns[i].setAttribute("aria-pressed", on ? "true" : "false");
+  }
+}
+
+function selectViewMode(mode) {
+  if (mode === viewMode) return;
+  writeViewMode(mode);
+  refreshViewbar();
+  setStatus(""); // clear any stale tree-load error from a prior attempt
+  renderPanel(true); // animated swap; flat from MODEL, tree from cached /api/tree
+}
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
@@ -578,6 +873,7 @@ function init() {
   wireModal();
   wireSort();
   buildSortbar();
+  buildViewbar();
   // Cursor-following glow on the cards. Delegated to the stable #panel (created
   // once in index.html; only its children are cleared on re-render), so every
   // freshly-rendered card is covered with no per-card listener to leak.

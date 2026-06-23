@@ -38,7 +38,7 @@ import { buildCard, runAction, setRefreshHandler, destroyRingsIn } from "./card.
 import { wireModal } from "./modal.js";
 import { getSort, setSort, sortItems, SORT_KEYS } from "./sort.js";
 import { wireCardGlow } from "./glow.js";
-import { renderTree, treeRootsFor, pruneTreeByState } from "./tree.js";
+import { buildTreeFragment, treeRootsFor, pruneTreeByState } from "./tree.js";
 
 function $(sel, root) {
   return (root || document).querySelector(sel);
@@ -360,29 +360,36 @@ function syncViewChrome() {
 // Render the panel for the active media-type tab. In DECLUTTERED mode this is the
 // single flat grid for (activeCategory, activeState). In GROUPED mode it is the
 // on-disk folder hierarchy for activeCategory (all states), rendered by tree.js.
-// When `animate` is true, fade/slide the panel: hide -> swap -> show.
+//
+// Two transition strategies, by mode:
+//   * DECLUTTERED is synchronous (renders from the already-loaded MODEL), so the
+//     classic fade-out -> swap -> fade-in (`animate`) is smooth and instant.
+//   * GROUPED is ASYNC (it awaits /api/tree, a heavy scandir on first use). The
+//     old code faded the panel to empty and only rebuilt on resolve, which on the
+//     first switch left a blank/faded panel then a jarring reload-flash. So
+//     grouped now does an ATOMIC swap (paintTree): it keeps the current content
+//     fully visible, builds the whole tree off-DOM, and replaces #panel's children
+//     in ONE operation when ready (preserving scroll) — never clearing first.
 function renderPanel(animate) {
   var panel = $("#panel");
   syncViewChrome();
   if (isGrouped()) {
     panel.setAttribute("aria-label", CATEGORY_META[activeCategory].label + " folders");
     panel.removeAttribute("aria-labelledby");
-  } else {
-    panel.setAttribute("aria-labelledby", "seg-" + activeState);
+    // Atomic, flash-free swap owns its own transition; do NOT add `.swapping`
+    // (which would fade the panel to empty while the async tree resolves).
+    paintTree(panel);
+    return;
   }
+
+  panel.setAttribute("aria-labelledby", "seg-" + activeState);
 
   function paint() {
     // Dispose any active fetch-rings BEFORE emptying the panel so their
     // ResizeObservers are disconnected (teardown graft, change #4). This is the
-    // single grid-clear path — every tab/sub-view switch and post-fetch refresh
-    // routes through here. (The tree's own clear ALSO calls destroyRingsIn, so the
-    // invariant holds whichever branch paints.)
-    if (isGrouped()) {
-      paintTree(panel);
-    } else {
-      paintFlat(panel);
-    }
-
+    // flat grid-clear path — every flat tab/sub-view switch and post-fetch refresh
+    // routes through here.
+    paintFlat(panel);
     // Reveal (next frame so the transition runs).
     requestAnimationFrame(function () {
       panel.classList.remove("swapping");
@@ -429,21 +436,42 @@ function paintFlat(panel) {
   }
 }
 
-// Grouped (folder-tree) view for the active category. The tree comes from the
-// cached /api/tree (loadTree in data.js); leaf cards are joined back onto the
-// enriched MODEL rows (MODEL_BY_ID) so their Copy command/folder survive. The
-// fetch is async; while it resolves we leave the current panel contents in place
-// (the fade is already running) rather than flashing an empty grid. A failure
-// shows a status line and clears the panel (the toggle stays on Grouped so the
-// user can retry by re-selecting the tab).
+// Grouped (folder-tree) view for the active category — ATOMIC, flash-free swap.
+//
+// The tree comes from the cached /api/tree (loadTree in data.js); leaf cards are
+// joined back onto the enriched MODEL rows (MODEL_BY_ID) so their Copy command/
+// folder survive. Because /api/tree is async (a heavy scandir on first use), we
+// must NOT clear #panel to an empty/loading state while it resolves — that is the
+// "reload flash" the old code produced. Instead:
+//
+//   1. Keep the CURRENT panel content fully visible (no fade-to-empty).
+//   2. If the resolve is slow (first, uncached fetch), reveal a SUBTLE inline
+//      loading overlay ON TOP of the existing content after a short grace delay
+//      (so a fast cached switch never even shows it — it feels instant).
+//   3. Build the ENTIRE tree off-DOM into a DocumentFragment (buildTreeFragment).
+//   4. Swap it into #panel in ONE atomic operation (dispose outgoing rings, clear,
+//      append the prebuilt fragment), preserving scrollTop across the swap.
+//
+// A stale resolution (the user switched tab/state filter before /api/tree
+// returned) is dropped. A failure shows a status line and leaves the existing
+// content in place (no destructive clear), so the user can retry.
+//
+// The atomic swap is intentionally instant (no fade) because there is no empty
+// intermediate state to hide — the content simply changes in place.
 function paintTree(panel) {
   // Capture the category AND state filter this paint is for; if the user switches
   // tabs or the state filter before the tree resolves, a stale resolution must NOT
   // overwrite the newer view.
   var forCategory = activeCategory;
   var forState = activeState;
+
+  // Subtle, non-destructive loading overlay shown only if the fetch is slow. It
+  // self-suppresses if the user leaves grouped mode before the grace delay fires.
+  var overlay = showTreeLoading(panel);
+
   treeRootsFor(forCategory)
     .then(function (roots) {
+      hideTreeLoading(overlay);
       if (!isGrouped() || activeCategory !== forCategory || activeState !== forState) {
         return; // superseded by a tab / state-filter change
       }
@@ -455,17 +483,72 @@ function paintTree(panel) {
         forState === ALL_STATE
           ? roots
           : pruneTreeByState(roots, forState, MODEL_BY_ID);
-      renderTree(panel, view, MODEL_BY_ID);
+
+      // Build the whole tree OFF-DOM, then swap atomically so the panel never
+      // flashes empty. Preserve scroll position across the swap.
+      var fragment = buildTreeFragment(view, MODEL_BY_ID);
+      var prevScroll = panel.scrollTop;
+      // Teardown invariant: dispose the OUTGOING content's fetch-ring
+      // ResizeObservers right before replacing it (buildTreeFragment built only
+      // new DOM and did not touch these).
+      destroyRingsIn(panel);
+      panel.replaceChildren(fragment);
+      panel.scrollTop = prevScroll;
     })
     .catch(function (err) {
+      hideTreeLoading(overlay);
       if (!isGrouped() || activeCategory !== forCategory) return;
-      destroyRingsIn(panel);
-      panel.textContent = "";
+      // Non-destructive on failure: keep whatever is currently shown and surface
+      // the error on the status line so the user can retry (re-toggle the tab).
       setStatus(
         "Failed to load the folder tree — " + ((err && err.message) || err),
         true
       );
     });
+}
+
+// --- Subtle tree-loading overlay (no content clear) ------------------------
+// Reveals a small "Loading folders…" chip pinned over #panel ONLY if the async
+// /api/tree is slow to resolve. A grace delay means a fast (cached) switch never
+// shows it, so subsequent Grouped<->Decluttered toggles feel instant. The overlay
+// sits ABOVE the existing content (which stays visible) rather than clearing it.
+var TREE_LOADING_GRACE_MS = 180;
+
+function showTreeLoading(panel) {
+  var state = { el: null, timer: null, cancelled: false };
+  state.timer = window.setTimeout(function () {
+    state.timer = null;
+    // Suppress if cancelled (resolve/reject arrived) OR the user has already left
+    // grouped mode during the grace window — never inject the chip into a flat
+    // panel that has since been repainted.
+    if (state.cancelled || !isGrouped()) return;
+    var el = document.createElement("div");
+    el.className = "tree-loading";
+    el.setAttribute("role", "status");
+    el.setAttribute("aria-live", "polite");
+    var chip = document.createElement("span");
+    chip.className = "tree-loading-chip";
+    chip.textContent = "Loading folders…";
+    el.appendChild(chip);
+    // Ensure the panel is a positioning context so the absolutely-positioned
+    // overlay is scoped to it (styles.css also sets .panel{position:relative}).
+    panel.appendChild(el);
+    state.el = el;
+  }, TREE_LOADING_GRACE_MS);
+  return state;
+}
+
+function hideTreeLoading(state) {
+  if (!state) return;
+  state.cancelled = true;
+  if (state.timer) {
+    window.clearTimeout(state.timer);
+    state.timer = null;
+  }
+  if (state.el && state.el.parentNode) {
+    state.el.parentNode.removeChild(state.el);
+  }
+  state.el = null;
 }
 
 function buildEmptyState() {

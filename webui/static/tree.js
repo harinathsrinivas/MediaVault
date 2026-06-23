@@ -161,11 +161,27 @@ export function renderTree(container, roots, modelById) {
   // re-renders of the grouped view.
   destroyRingsIn(container);
   container.textContent = "";
+  container.appendChild(buildTreeFragment(roots, modelById));
+}
 
+// Build the tree as a detached DocumentFragment WITHOUT touching any container.
+// This lets the caller (app.js paintTree) assemble the whole tree off-DOM and
+// swap it into #panel in ONE atomic operation — so switching to Grouped never
+// flashes an empty/loading panel while the async /api/tree resolves. The returned
+// fragment holds either the .tree element or the empty-state node. renderTree()
+// above is the in-place wrapper (clear container, then append this) used by the
+// post-fetch refresh, so its behavior is unchanged.
+//
+// NOTE: this does NOT dispose fetch-rings — it only constructs new DOM. Ring
+// teardown for the OUTGOING content is the swapping caller's responsibility
+// (app.js destroys rings in #panel immediately before the atomic replace), which
+// keeps the no-flash swap path and the teardown invariant both intact.
+export function buildTreeFragment(roots, modelById) {
+  var frag = document.createDocumentFragment();
   var list = roots || [];
   if (list.length === 0) {
-    container.appendChild(emptyTree());
-    return;
+    frag.appendChild(emptyTree());
+    return frag;
   }
 
   // Order the TOP level by the active sort (size/title/year). Sort a COPY so the
@@ -176,12 +192,13 @@ export function renderTree(container, roots, modelById) {
 
   var tree = document.createElement("div");
   tree.className = "tree";
-  var frag = document.createDocumentFragment();
+  var inner = document.createDocumentFragment();
   ordered.forEach(function (node) {
-    frag.appendChild(renderNode(node, 0, modelById || {}));
+    inner.appendChild(renderNode(node, 0, modelById || {}));
   });
-  tree.appendChild(frag);
-  container.appendChild(tree);
+  tree.appendChild(inner);
+  frag.appendChild(tree);
+  return frag;
 }
 
 function emptyTree() {

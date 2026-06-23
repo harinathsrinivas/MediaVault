@@ -450,8 +450,11 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 .status-line.err { color: var(--danger); }
 
 /* The single sub-view panel. One grid shown at a time; switching fades + slides
-   the panel so segment changes feel smooth rather than a hard cut. */
+   the panel so segment changes feel smooth rather than a hard cut.
+   position:relative scopes the grouped-view loading overlay (.tree-loading) to
+   the panel without affecting layout. */
 .panel {
+  position: relative;
   opacity: 1;
   transform: translateY(0);
   transition: opacity 0.18s ease, transform 0.18s ease;
@@ -464,6 +467,41 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 @media (prefers-reduced-motion: reduce) {
   .panel { transition: none; }
   .panel.swapping { opacity: 1; transform: none; }
+}
+
+/* Grouped-view loading overlay. Shown ONLY when the async /api/tree is slow to
+   resolve (first, uncached switch). It is pinned over the panel and does NOT
+   clear the current content — the existing grid/tree stays visible underneath so
+   switching to Grouped never flashes blank. A short grace delay (app.js) means a
+   fast cached switch never shows this at all. pointer-events:none so it never
+   blocks interaction with the content beneath. */
+.tree-loading {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 5;
+  pointer-events: none;
+}
+.tree-loading-chip {
+  display: inline-block;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text, #e6edf6);
+  background: rgba(20, 27, 40, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(6px);
+  animation: tree-loading-pulse 1.1s ease-in-out infinite;
+}
+@keyframes tree-loading-pulse {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tree-loading-chip { animation: none; opacity: 0.92; }
 }
 
 /* Responsive auto-fitting card grid. Reflows to 1-up on narrow screens. */

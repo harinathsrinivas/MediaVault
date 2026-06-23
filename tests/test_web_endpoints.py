@@ -224,3 +224,48 @@ def test_sort_enqueues_and_finishes(sandbox, make_video):
         f"sort job ended with status={job['status']!r}. "
         f"Output:\n{job.get('output', '')}"
     )
+
+
+# ---------------------------------------------------------------------------
+# (f) Static files carry Cache-Control: no-cache (the stale-ES-module fix), the
+#     etag/304 revalidation still works, /api/* is unaffected, and /favicon.ico
+#     no longer 404s.
+# ---------------------------------------------------------------------------
+
+def test_static_no_cache_and_favicon():
+    """Every static response must set ``Cache-Control: no-cache`` so a browser
+    revalidates each load (preventing the stale-module blank-page bug), while the
+    strong etag still yields a cheap 304 for unchanged files. /api/* responses are
+    NOT given the header (only the static mount), and /favicon.ico returns an icon
+    (200) or 204 instead of 404.
+    """
+    from webui.server import create_app
+
+    client = TestClient(create_app())
+
+    # Each served static asset (html / js / css) gets the revalidate-always header.
+    for path in ("/", "/index.html", "/app.js", "/styles.css"):
+        r = client.get(path)
+        assert r.status_code == 200, f"{path} -> {r.status_code}"
+        cc = (r.headers.get("cache-control") or "").lower()
+        assert "no-cache" in cc, f"{path} Cache-Control={cc!r}, expected no-cache"
+
+    # Etag is still emitted, and a conditional request 304s AND still carries
+    # no-cache (so unchanged files stay cheap but are always revalidated).
+    r = client.get("/app.js")
+    etag = r.headers.get("etag")
+    assert etag, "static FileResponse must still emit an etag for 304 revalidation"
+    r304 = client.get("/app.js", headers={"If-None-Match": etag})
+    assert r304.status_code == 304, f"conditional GET -> {r304.status_code}, expected 304"
+    assert "no-cache" in (r304.headers.get("cache-control") or "").lower()
+
+    # /api/* must be UNAFFECTED — the header belongs only to the static mount.
+    api = client.get("/api/mode")
+    assert api.status_code == 200
+    assert api.headers.get("cache-control") is None, (
+        "API responses must not be given the static no-cache header"
+    )
+
+    # /favicon.ico must no longer 404 (real icon -> 200, else 204).
+    fav = client.get("/favicon.ico")
+    assert fav.status_code in (200, 204), f"/favicon.ico -> {fav.status_code}"

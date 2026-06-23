@@ -2,8 +2,18 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- viewport-fit=cover enables edge-to-edge safe-area layout in standalone mode on iOS -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>MediaVault Console</title>
+  <!-- PWA manifest. iOS/iPadOS Safari only supports display:standalone (pre-resolved). -->
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <!-- iOS Safari "Add to Home Screen" meta tags -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="MediaVault" />
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
+  <!-- Android / Chrome theme colour (matches --bg #0b0f17) -->
+  <meta name="theme-color" content="#0b0f17" />
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>

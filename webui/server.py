@@ -34,6 +34,7 @@ calls (as in tests) never spawn duplicate workers.
 """
 
 import contextlib
+import hmac
 import os
 import queue
 import re
@@ -45,6 +46,43 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 import main
+import mvcommon
+
+
+# ---------------------------------------------------------------------------
+# Shared-token auth acceptance (IMP-E15).
+#
+# When a web.token is configured, a request authenticates by presenting that
+# EXACT token via ANY ONE of three carriers (checked in this order):
+#   1. the `mv_token` cookie          (set once by the SPA, sent automatically)
+#   2. the `X-MediaVault-Token` header (fetch/XHR from the SPA)
+#   3. the `?token=` query parameter   (the frictionless auto-open URL + a
+#      shareable link; also lets a fresh browser bootstrap the cookie)
+# This carrier set is the FIXED contract the frontend implements against.
+# Compared via hmac.compare_digest (constant-time) to avoid leaking the token
+# length/prefix through response timing.
+# ---------------------------------------------------------------------------
+
+_COOKIE_NAME = "mv_token"
+_HEADER_NAME = "X-MediaVault-Token"
+_QUERY_NAME = "token"
+
+
+def _request_has_valid_token(request: Request, expected: str) -> bool:
+    """True iff `request` presents `expected` via cookie, header, or query.
+
+    `expected` is assumed non-empty (the caller only invokes this when a token
+    is configured). Each candidate is compared in constant time; a missing
+    carrier contributes nothing."""
+    candidates = (
+        request.cookies.get(_COOKIE_NAME),
+        request.headers.get(_HEADER_NAME),
+        request.query_params.get(_QUERY_NAME),
+    )
+    for presented in candidates:
+        if presented and hmac.compare_digest(presented, expected):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +641,38 @@ def create_app(demo=False):
     # Expose the flag on app.state for introspection/testing; the closure var
     # `demo` is what the routes below actually read.
     app.state.demo = demo
+
+    # -- Shared-token auth for ALL /api/* (IMP-E15) --------------------------
+    # The console is destructive, so when a token is configured it gates every
+    # /api/* request (reads AND actions). Implemented as path-based HTTP
+    # middleware rather than per-route dependencies for two reasons:
+    #   1. It provably covers EVERY current and future /api/* route (including
+    #      /api/docs) without having to remember to decorate each one.
+    #   2. STATIC files (the SPA shell: index.html, *.js, *.css, manifest,
+    #      icons, favicon) are NOT under /api/, so they are served WITHOUT auth
+    #      even when a token is set — otherwise the page could never load to let
+    #      the user enter the token. Only the /api/ prefix is gated here.
+    #
+    # The token is read at REQUEST time via mvcommon.web_token() (binding-safe:
+    # a monkeypatch of mvcommon.web_token is honoured). Empty token -> auth OFF
+    # (today's behaviour; local dev + the whole test suite stay frictionless).
+    #
+    # TAILSCALE-SERVE GOTCHA (deliberate): `tailscale serve` proxies remote
+    # tailnet peers to 127.0.0.1, so request.client.host is 127.0.0.1 even for
+    # REMOTE users. So there is intentionally NO "localhost -> skip token"
+    # exemption here — that would let every tailnet visitor bypass the token.
+    # When a token is set it is required for ALL /api/* regardless of client
+    # host. (/api/open-folder additionally RESTRICTS to localhost in its own
+    # handler — that only ever narrows access, never widens it.)
+    @app.middleware("http")
+    async def _api_token_guard(request: Request, call_next):
+        if request.url.path.startswith("/api/"):
+            token = mvcommon.web_token()
+            if token and not _request_has_valid_token(request, token):
+                return JSONResponse(
+                    status_code=401, content={"detail": "Token required"}
+                )
+        return await call_next(request)
 
     @app.get("/api/mode")
     def api_mode():

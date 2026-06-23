@@ -1,0 +1,15 @@
+{
+  "_comment": "Copy this file to mvconfig.json (gitignored) and edit. Any absent file/section/key falls back to the documented default; a malformed file warns to stderr and is ignored. JSON has no comments, so the _comment fields below document each key.",
+  "web": {
+    "_comment_host": "Bind address for `python main.py web`. Default 127.0.0.1 (local only). Use 0.0.0.0 to reach the console from your LAN IP and your Tailscale IP. SECURITY: binding to anything other than 127.0.0.1/localhost/::1 REQUIRES a non-empty token below, or the server refuses to start.",
+    "host": "127.0.0.1",
+    "_comment_port": "Port for the web console. Default 8765.",
+    "port": 8765,
+    "_comment_token": "Shared secret that protects EVERY /api/* request (all reads AND all destructive actions). null/empty = NO auth (local dev default). When set, clients must present it via the mv_token cookie, the X-MediaVault-Token header, or a ?token= query param; the local browser is auto-opened with the token in the URL. Set a long random string before exposing the console on a network.",
+    "token": null
+  },
+  "tmdb": {
+    "_comment_api_key": "Optional TMDB API key for metadata lookups. null/empty = unset.",
+    "api_key": null
+  }
+}

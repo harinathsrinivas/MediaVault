@@ -1555,3 +1555,97 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 .tab:focus-visible,
 .seg:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 9px; }
 .panel:focus-visible { outline: none; }
+
+/* ---------------- Access-token prompt overlay (IMP-E15) ---------------- */
+/* Shown by auth.js when a /api/* request returns 401 (the remote first-run UX:
+   open the URL, paste the token, Connect — remembered for the session). Mirrors
+   the confirm modal's backdrop/card structure but in the accent (teal) palette
+   since connecting is a normal, non-destructive action. Mobile-friendly: the card
+   is full-width on narrow screens and the Connect button is a comfortable tap
+   target. XSS-safe content (auth.js builds it with textContent only). */
+.auth-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 200; /* above the confirm modal (100) and terminal (120) */
+  background: rgba(4, 7, 12, 0.82);
+  backdrop-filter: blur(4px);
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  /* Respect the iOS safe-area so the card never tucks under a notch/home bar. */
+  padding: max(20px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right))
+    max(20px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+}
+.auth-backdrop.show { display: flex; }
+
+.auth-modal {
+  width: min(460px, 100%);
+  background: var(--bg-card);
+  border: 1px solid var(--accent-deep);
+  border-radius: var(--radius);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(56, 224, 200, 0.15);
+  overflow: hidden;
+  animation: pop 0.14s ease-out;
+}
+
+.auth-head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 17px 20px 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.auth-head .auth-icon {
+  width: 34px; height: 34px;
+  flex: none;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  background: rgba(56, 224, 200, 0.16);
+  font-size: 17px;
+}
+.auth-head h2 { margin: 0; font-size: 17px; font-weight: 800; }
+
+.auth-body { padding: 16px 20px 4px; }
+.auth-body .auth-line {
+  color: var(--text-dim);
+  font-size: 13.5px;
+  line-height: 1.45;
+  margin: 0 0 12px;
+}
+.auth-body .auth-note {
+  color: var(--danger);
+  font-size: 12.5px;
+  margin: 0 0 10px;
+  font-weight: 600;
+}
+.auth-input {
+  width: 100%;
+  /* Inherit the dark monospace field look from .provider-input; widen it and use
+     a 16px font so iOS Safari does not zoom the viewport when the field focuses. */
+  font-size: 16px;
+  padding: 11px 12px;
+}
+
+.auth-actions {
+  display: flex;
+  gap: 11px;
+  padding: 16px 20px 20px;
+}
+.auth-actions .auth-connect {
+  flex: 1;
+  min-height: 48px;
+  border-radius: var(--radius-sm);
+  font-weight: 700;
+  font-size: 15px;
+  cursor: pointer;
+  border: 1px solid var(--accent-deep);
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #04201c;
+}
+.auth-actions .auth-connect:hover { filter: brightness(1.08); }
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-modal { animation: none; }
+}

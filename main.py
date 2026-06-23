@@ -30,6 +30,11 @@ from mvcommon import (
     load_library, save_library, generate_short_id, calculate_file_hash,
     human_readable_size, parse_size_str, retry, episode_num_from_id,
 )
+# Imported as a MODULE (not via `from ... import web_token`) on purpose: the web
+# config getters must be called module-qualified (mvcommon.web_token()) so a test
+# that monkeypatches mvcommon.web_token is honoured here — see the binding-hazard
+# note in mvcommon's RUNTIME CONFIG section.
+import mvcommon
 
 REMOTE_ROOT = "/sdcard/Media"  # Your Pixel Root
 FFMPEG_PATH = r"C:\Users\harin\AppData\Roaming\Emby-Server\system\ffmpeg.exe"
@@ -4159,12 +4164,42 @@ def find_folder_image(folder):
     return None
 
 
-def cmd_web(host="127.0.0.1", port=8765, open_browser=True, demo=False):
+def cmd_web(host=None, port=None, open_browser=True, demo=False):
     """Launch the local web operations console (IMP-E12).
+
+    host/port: when None, taken from mvconfig.json (mvcommon.web_host()/
+    web_port()); an explicit --host/--port flag passes a value through and wins.
+
+    SECURITY (IMP-E15): the console drives destructive commands. When bound to a
+    NON-localhost address (LAN / Tailscale) a shared web.token MUST be set in
+    mvconfig.json, else this refuses to start. When a token IS set, the local
+    browser is auto-opened WITH the token in the URL so local use stays
+    frictionless (the token is required for every /api/* request — see
+    webui.server).
 
     demo=True (the `--demo` flag) serves a SAFE review build where EVERY action
     is SIMULATED server-side — no real cmd_*/Selenium/library mutation ever runs
     (IMP-E14). The default (demo=False) is fully real and byte-unchanged."""
+    # Resolve host/port: an explicit flag (non-None) overrides; else config.
+    if host is None:
+        host = mvcommon.web_host()
+    if port is None:
+        port = mvcommon.web_port()
+
+    token = mvcommon.web_token()
+
+    # STARTUP GUARD: refuse to expose the destructive console on the network
+    # without a token. A tailscale-serve front end proxies remote peers to
+    # 127.0.0.1, so the only safe gate is the token — hence binding non-local
+    # without one is refused outright (return, do NOT start uvicorn).
+    _LOCAL_BIND_HOSTS = {"127.0.0.1", "localhost", "::1"}
+    if host not in _LOCAL_BIND_HOSTS and not token:
+        print(
+            f"❌ Refusing to start: binding to {host} exposes the console on your "
+            f"network, but no web.token is set in mvconfig.json. Set a token first."
+        )
+        return
+
     try:
         import uvicorn
         from webui.server import create_app
@@ -4176,9 +4211,17 @@ def cmd_web(host="127.0.0.1", port=8765, open_browser=True, demo=False):
     if demo:
         print("🟡 DEMO MODE (actions simulated) — no real command will run.")
     print(f"🌐 MediaVault web UI: http://{host}:{port}")
+    if token:
+        print("🔒 Token auth is ON (set web.token in mvconfig.json).")
     if open_browser:
+        # Auto-open the LOCAL browser. When a token is set, embed it in the URL
+        # (?token=...) so the local session is authenticated without manual
+        # entry; always open 127.0.0.1 locally even when bound to 0.0.0.0.
+        local_url = f"http://127.0.0.1:{port}/"
+        if token:
+            local_url += f"?token={token}"
         try:
-            webbrowser.open(f"http://{host}:{port}")
+            webbrowser.open(local_url)
         except Exception:
             pass
     uvicorn.run(app, host=host, port=port, log_level="warning")
@@ -4474,8 +4517,10 @@ if __name__ == "__main__":
 
     elif cmd == "web":
         args = sys.argv[2:]
-        host = "127.0.0.1"
-        port = 8765
+        # Default to None so cmd_web falls back to mvconfig.json; an explicit
+        # --host/--port flag below overrides the config value.
+        host = None
+        port = None
         open_browser = True
         demo = False
         i = 0

@@ -38,6 +38,129 @@ FETCH_SESSION_LOCK = os.path.join(MV_LOCK_DIR, "fetch_session.lock")
 
 
 # ==========================================
+#         RUNTIME CONFIG (mvconfig.json)
+# ==========================================
+# Optional, gitignored ``mvconfig.json`` at the repo root carries deploy-time
+# settings the source tree must not hard-code (the web bind host/port, the
+# shared web auth token, the TMDB API key). It is read ONCE and cached.
+#
+# Contract (see mvconfig.example.json):
+#   {"web": {"host": "127.0.0.1", "port": 8765, "token": null},
+#    "tmdb": {"api_key": null}}
+#
+# Resolution rules:
+#   * An ABSENT file, or an absent key, falls back to the documented default
+#     (host 127.0.0.1, port 8765, NO token -> no auth) — today's behaviour, so
+#     local dev and the test suite stay frictionless with no config file.
+#   * A MALFORMED file (bad JSON / wrong top-level type) warns to STDERR and
+#     falls back to defaults — it NEVER crashes the app.
+#
+# BINDING HAZARD: callers MUST use the getter functions below at RUNTIME. Do
+# NOT bind these values into module-level constants at import time — a test (or
+# a future caller) may monkeypatch a getter, and import-time binding would
+# capture a stale value. The getters read the cached dict each call.
+MVCONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mvconfig.json")
+
+# Cache sentinel: None means "not yet loaded". After the first load this holds
+# the parsed dict (or {} on absent/malformed) so the file is read at most once.
+_CONFIG_CACHE = None
+
+_WEB_DEFAULT_HOST = "127.0.0.1"
+_WEB_DEFAULT_PORT = 8765
+
+
+def _load_config():
+    """Read and cache ``mvconfig.json`` once. Returns a dict (possibly empty).
+
+    Absent file -> {} (defaults apply). Malformed JSON or a non-object top
+    level -> warn to stderr + {} (never raises). The result is cached so the
+    file is read at most once per process; clear ``_CONFIG_CACHE`` to force a
+    reload (used by tests)."""
+    global _CONFIG_CACHE
+    if _CONFIG_CACHE is not None:
+        return _CONFIG_CACHE
+    cache = {}
+    if os.path.exists(MVCONFIG_PATH):
+        try:
+            with open(MVCONFIG_PATH, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                cache = loaded
+            else:
+                print(
+                    f"⚠️  mvconfig.json: expected a JSON object at the top level, "
+                    f"got {type(loaded).__name__}; ignoring it (using defaults).",
+                    file=sys.stderr,
+                )
+        except (json.JSONDecodeError, OSError) as e:
+            print(
+                f"⚠️  mvconfig.json is malformed and will be ignored "
+                f"(using defaults). Error: {e}",
+                file=sys.stderr,
+            )
+    _CONFIG_CACHE = cache
+    return _CONFIG_CACHE
+
+
+def _config_section(name):
+    """Return the named top-level section as a dict, or {} if missing/not a dict.
+
+    A section present but of the wrong type (e.g. ``"web": 5``) is tolerated as
+    {} so a single bad section never poisons the others."""
+    section = _load_config().get(name)
+    return section if isinstance(section, dict) else {}
+
+
+def web_host():
+    """Configured web bind host, or the default 127.0.0.1.
+
+    An empty/blank or non-string value falls back to the default so a bad entry
+    can never produce an unusable bind address."""
+    host = _config_section("web").get("host")
+    if isinstance(host, str) and host.strip():
+        return host
+    return _WEB_DEFAULT_HOST
+
+
+def web_port():
+    """Configured web port, or the default 8765.
+
+    Accepts an int or an all-digits string; anything else falls back to the
+    default."""
+    port = _config_section("web").get("port")
+    if isinstance(port, bool):
+        # bool is an int subclass — reject it explicitly so `true` isn't port 1.
+        return _WEB_DEFAULT_PORT
+    if isinstance(port, int):
+        return port
+    if isinstance(port, str) and port.strip().isdigit():
+        return int(port)
+    return _WEB_DEFAULT_PORT
+
+
+def web_token():
+    """Configured shared web auth token, or "" when no token is set.
+
+    Returns "" (falsy) for absent / null / blank / non-string so callers can
+    test ``if web_token():`` to decide whether auth is enabled. A non-empty
+    string is returned stripped of surrounding whitespace."""
+    token = _config_section("web").get("token")
+    if isinstance(token, str) and token.strip():
+        return token.strip()
+    return ""
+
+
+def tmdb_api_key():
+    """Configured TMDB API key, or "" when none is set.
+
+    Returns "" (falsy) for absent / null / blank / non-string."""
+    key = _config_section("tmdb").get("api_key")
+    if isinstance(key, str) and key.strip():
+        return key.strip()
+    return ""
+
+
+# ==========================================
 #               UTILITIES
 # ==========================================
 def retry(fn, attempts=3, backoff=(1, 4, 16), jitter=1.0,

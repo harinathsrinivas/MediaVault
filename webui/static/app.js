@@ -39,6 +39,7 @@ import { wireModal } from "./modal.js";
 import { getSort, setSort, sortItems, SORT_KEYS } from "./sort.js";
 import { wireCardGlow } from "./glow.js";
 import { buildTreeFragment, treeRootsFor, pruneTreeByState } from "./tree.js";
+import { authFetch, bootstrapToken } from "./auth.js";
 
 function $(sel, root) {
   return (root || document).querySelector(sel);
@@ -839,7 +840,7 @@ function selectViewMode(mode) {
 // data is interpolated (XSS-safe). A failed/absent probe leaves the banner
 // hidden (fail-safe toward the normal real UI; the SERVER still enforces demo).
 function checkDemoMode() {
-  fetch("/api/mode")
+  authFetch("/api/mode")
     .then(function (res) {
       return res.ok ? res.json() : null;
     })
@@ -869,6 +870,11 @@ function checkDemoMode() {
 }
 
 function init() {
+  // Capture/restore the access token (and set the cookie that lets <img> requests
+  // carry it) BEFORE any /api/ fetch. Idempotent — auth.js also runs this at
+  // module load; this explicit call documents the dependency and guards against
+  // any future re-ordering of the module graph.
+  bootstrapToken();
   checkDemoMode();
   wireModal();
   wireSort();

@@ -2,6 +2,11 @@
 a.json
 .gitignore
 
+# Local runtime config (web bind/token + TMDB key) — never commit the real one;
+# the checked-in template mvconfig.example.json IS tracked.
+/mvconfig.json
+!mvconfig.example.json
+
 .git*
 # ...but DO track the line-ending policy (overrides core.autocrlf; stops CRLF phantom diffs)
 !.gitattributes

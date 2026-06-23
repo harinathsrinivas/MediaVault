@@ -18,6 +18,8 @@
 
 "use strict";
 
+import { authFetch } from "./auth.js";
+
 // Lifecycle states, in the fixed display order used by the sub-view rail.
 // (UNPREPPED first, ARCHIVED last — matches the reclaim-then-cold flow.)
 export var STATE_ORDER = [
@@ -256,7 +258,10 @@ function countBy(rows) {
 }
 
 function fetchJson(url) {
-  return fetch(url).then(function (res) {
+  // authFetch carries the access token (header + cookie) and transparently shows
+  // the token prompt + retries on a 401, so /api/items + /api/reclaim + /api/tree
+  // all recover after a remote first-run paste with no per-call 401 logic here.
+  return authFetch(url).then(function (res) {
     if (!res.ok) throw new Error(url + " -> HTTP " + res.status);
     return res.json();
   });
@@ -295,7 +300,7 @@ export function loadTree() {
 // safety + demo simulation, so the client just reports the outcome via a toast.
 export function openFolder(path) {
   if (!path) return;
-  fetch("/api/open-folder", {
+  authFetch("/api/open-folder", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ path: path }),

@@ -48,11 +48,40 @@ html, body {
 
 button, input { font-family: inherit; }
 
+/* ---------------- DEMO / SAFE-mode banner ---------------- */
+/* Server-side demo mode (IMP-E14): a prominent amber bar pinned to the very top
+   so it stays visible while scrolling. Hidden until app.js confirms demo:true
+   (the [hidden] attribute is removed AND .show added). It sits ABOVE the sticky
+   header (higher z-index) and is the first sticky element, so the header pins
+   directly beneath it. Readable on mobile: full-width, wraps, bold. */
+.demo-banner {
+  position: sticky;
+  top: 0;
+  z-index: 30; /* above .app-header (20) and the modal-less chrome */
+  display: block;
+  text-align: center;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  color: #2a1a00;
+  background: linear-gradient(90deg, #f0b429, #f7c948 50%, #f0b429);
+  border-bottom: 2px solid #b08400;
+  box-shadow: 0 2px 14px rgba(240, 180, 41, 0.45);
+  padding: 10px clamp(12px, 4vw, 40px);
+  font-size: clamp(13px, 2.6vw, 15px);
+  line-height: 1.35;
+}
+/* The [hidden] attribute already removes it; .show is a hook for any later
+   transition and a redundant guard that it is visible once revealed. */
+.demo-banner.show { display: block; }
+
 /* ---------------- Header / hero ---------------- */
 
 .app-header {
   position: sticky;
-  top: 0;
+  /* In demo mode the sticky header pins directly BELOW the sticky banner by
+     consuming its measured height (--demo-offset, set by app.js). Defaults to 0
+     in the normal (no-banner) build, so default chrome is unchanged. */
+  top: var(--demo-offset, 0px);
   z-index: 20;
   backdrop-filter: blur(10px);
   background: rgba(11, 15, 23, 0.82);
@@ -280,6 +309,72 @@ button, input { font-family: inherit; }
 .btn-sort:hover { background: var(--bg-card-hover); border-color: var(--accent-deep); }
 .btn-sort:disabled { opacity: 0.5; cursor: default; }
 
+/* ---------------- Sort control (client-side grid ordering) ---------------- */
+
+.sortbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0 0 16px;
+}
+.sortbar-label {
+  font-size: 11px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 700;
+}
+/* Segmented key buttons (Size / Title / Year) in a single pill group. */
+.sort-keys {
+  display: inline-flex;
+  gap: 4px;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 4px;
+}
+.sort-key {
+  min-height: 38px;            /* tap-friendly on mobile */
+  padding: 7px 16px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.14s, color 0.14s, border-color 0.14s;
+}
+.sort-key:hover { color: var(--text); background: var(--bg-card-hover); }
+.sort-key.active {
+  color: #06121a;
+  background: linear-gradient(135deg, var(--accent), var(--focus));
+  box-shadow: 0 3px 12px rgba(56, 224, 200, 0.26);
+}
+/* Direction toggle. */
+.sort-dir {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 38px;
+  padding: 7px 15px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  cursor: pointer;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.sort-dir:hover { background: var(--bg-card-hover); border-color: var(--accent-deep); color: var(--accent); }
+
 /* ---------------- Layout ---------------- */
 
 main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
@@ -332,6 +427,13 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 /* ---------------- Card ---------------- */
 
 .card {
+  position: relative; /* anchor for the absolute .fetch-ring SVG overlay */
+  /* Form a stacking context so the negative-z glow layer (.card::before) is
+     contained ABOVE the card's own background but BELOW its content, instead of
+     escaping behind the card. No visual/layout cost; the existing positive
+     z-indexed children (.fetch-ring 3, .demo-tag 4, .card-actions 5) keep their
+     relative order and stay on top. */
+  isolation: isolate;
   display: flex;
   flex-direction: column;
   background: linear-gradient(180deg, var(--bg-card), #121a28);
@@ -347,6 +449,50 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   border-color: var(--line);
 }
 .card[data-hidden="true"] { display: none; }
+
+/* Cursor-following glow (IMP-E14). A soft mint radial centred under the pointer,
+   on a dedicated layer painted ABOVE the card's gradient (step 1) but BELOW the
+   in-flow poster/body and every positive-z overlay (ring/badge/actions). It is
+   pointer-events:none, so it never blocks a click, tap, input focus, or the ⤢
+   expand arrow. Default opacity 0; glow.js writes --mx/--my (px, relative to the
+   card) one update per frame as the pointer moves; CSS handles the fade. The
+   --mx/--my fallbacks centre the glow before the first move / on un-tracked
+   cards so it never flashes at the 0,0 corner. */
+.card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  background: radial-gradient(
+    circle at var(--mx, 50%) var(--my, 50%),
+    rgba(56, 224, 200, 0.16),
+    rgba(56, 224, 200, 0.06) 90px,
+    transparent 160px
+  );
+}
+/* Reveal only on devices with a true hovering pointer (desktop mouse / trackpad
+   / pen). On touch (hover:none) this rule never matches, so a tap can't light it
+   and nothing stays stuck after a finger lifts — graceful degradation. */
+@media (hover: hover) and (pointer: fine) {
+  .card:hover::before { opacity: 1; }
+}
+/* Reduced motion: no following + no fade. Fall back to a STATIC, centred, subtle
+   highlight on hover (no transition, fixed centre) so the affordance survives
+   without movement. glow.js also skips pointer tracking in this mode. */
+@media (prefers-reduced-motion: reduce) {
+  .card::before {
+    transition: none;
+    background: radial-gradient(
+      circle at 50% 50%,
+      rgba(56, 224, 200, 0.12),
+      transparent 70%
+    );
+  }
+  .card:hover::before { opacity: 1; }
+}
 
 /* Poster placeholder — gradient + big initial, NO external image. */
 .poster {
@@ -418,11 +564,15 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 }
 
 .id-row { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-.item-id {
+/* Prominent, human-readable title (humanized id today; real TMDB title Phase 5).
+   Wraps gracefully on long titles instead of breaking mid-word. */
+.item-title {
   font-weight: 700;
-  font-size: 15px;
-  word-break: break-all;
-  font-variant-numeric: tabular-nums;
+  font-size: 16px;
+  line-height: 1.25;
+  letter-spacing: 0.2px;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 .item-size {
   flex: none;
@@ -448,14 +598,18 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   vertical-align: middle;
 }
 
-/* Secondary canonical id, shown under the title when a human title exists. */
-.item-subid {
-  font-size: 11.5px;
+/* Raw canonical id at the card foot — small, dim, monospace; subordinate to the
+   title at the top. Sits below the job panel with a hairline separator. */
+.item-rawid {
+  padding-top: 9px;
+  border-top: 1px solid var(--line-soft);
+  font-size: 11px;
   color: var(--text-faint);
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
   font-variant-numeric: tabular-nums;
-  word-break: break-all;
-  margin-top: -6px;
   letter-spacing: 0.2px;
+  word-break: break-all;
+  opacity: 0.85;
 }
 
 .item-path {
@@ -536,6 +690,8 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 
 /* Action zone */
 .card-actions {
+  position: relative; /* sit above the fetch-ring SVG (z-index:3) so the */
+  z-index: 5;         /* button + chunk label stay interactive and on top */
   margin-top: auto;
   display: flex;
   flex-wrap: wrap;
@@ -568,12 +724,111 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 }
 .action-btn.destructive:hover:not(:disabled) { background: linear-gradient(135deg, #4d1c2a, #34121c); }
 
-/* Archived "Fetch & Restore — coming next" stub (Phase 2 wires the real one). */
-.action-btn.coming-soon {
-  background: rgba(127, 224, 168, 0.08);
+/* Archived "Fetch & Restore" — working button (IMP-E14 Phase 2). Mint-tinted to
+   match the cold/cloud ARCHIVED hue, distinct from the primary/destructive
+   actions on the warmer states. */
+.action-btn.fetch-restore {
+  background: linear-gradient(135deg, rgba(127, 224, 168, 0.18), rgba(56, 224, 200, 0.10));
   color: var(--b-archived);
-  border: 1px dashed rgba(127, 224, 168, 0.4);
-  cursor: default;
+  border: 1px solid rgba(127, 224, 168, 0.42);
+}
+.action-btn.fetch-restore:hover:not(:disabled) {
+  filter: brightness(1.1);
+  background: linear-gradient(135deg, rgba(127, 224, 168, 0.26), rgba(56, 224, 200, 0.14));
+}
+
+/* ----- Fetch progress ring (CANDIDATE B: inline SVG, animated dashoffset) ----
+   An <svg> overlay sized to the card's pixel box (see ring.js). Two coincident
+   rounded-rect <path>s: a faint full-perimeter TRACK and the growing FILL whose
+   stroke-dashoffset shrinks from `perimeter` (0%) to 0 (100%). pointer-events is
+   none so the button underneath stays clickable; z-index keeps it above the
+   poster but the card-actions (z-index:1 below) stay interactive. */
+.fetch-ring {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  pointer-events: none;
+  overflow: visible;
+}
+.fetch-ring[hidden] { display: none; }
+
+.fetch-ring-track {
+  stroke: rgba(127, 224, 168, 0.14);
+  stroke-width: 3;
+}
+.fetch-ring-fill {
+  stroke: var(--b-archived);
+  stroke-width: 3;
+  /* Smooth the discrete chunk ticks into a buttery grow. The cubic-bezier eases
+     each jump; ~0.55s comfortably covers the 1s poll cadence without lagging. */
+  transition: stroke-dashoffset 0.55s cubic-bezier(0.22, 0.61, 0.36, 1);
+  filter: drop-shadow(0 0 3px rgba(127, 224, 168, 0.5));
+}
+/* Resize / reset must NOT look like progress moving — snap with no transition. */
+.fetch-ring-fill.no-anim { transition: none; }
+
+/* Closed-loop complete state: stronger, gently breathing glow. The dashoffset is
+   already 0 (full outline) by the time this class lands. */
+.fetch-ring.complete .fetch-ring-fill {
+  stroke: var(--accent);
+  filter: drop-shadow(0 0 7px rgba(56, 224, 200, 0.85));
+  animation: ringGlow 1.8s ease-in-out infinite;
+}
+@keyframes ringGlow {
+  0%, 100% { filter: drop-shadow(0 0 5px rgba(56, 224, 200, 0.55)); }
+  50%      { filter: drop-shadow(0 0 11px rgba(56, 224, 200, 0.95)); }
+}
+
+/* While a fetch runs, lift the card edge a touch so the ring reads as "active". */
+.card.fetching { border-color: rgba(127, 224, 168, 0.35); }
+
+/* Numeric "k/N chunks" / "%" label beside the button — the accessible, always-on
+   readout of progress (carries the full state under reduced motion). */
+.fetch-ring-label {
+  flex: none;
+  align-self: center;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.3px;
+  color: var(--b-archived);
+  background: rgba(127, 224, 168, 0.10);
+  border: 1px solid rgba(127, 224, 168, 0.28);
+  border-radius: 7px;
+  padding: 4px 9px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  min-width: 64px;
+  text-align: center;
+}
+.fetch-ring-label[hidden] { display: none; }
+/* When the ring reaches its glowing complete state, the label tints to the same
+   accent so the readout and the outline agree. (.fetch-ring is a sibling of
+   .card-body, which contains the label inside .card-actions.) */
+.fetch-ring.complete ~ .card-body .fetch-ring-label { color: var(--accent); }
+
+/* Small DEMO tag for the ?demo live preview (sits on the poster). */
+.demo-tag {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 4;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 1.2px;
+  color: #06121a;
+  background: linear-gradient(135deg, var(--accent), var(--focus));
+  border-radius: 6px;
+  padding: 2px 7px;
+  box-shadow: 0 2px 8px rgba(56, 224, 200, 0.4);
+  user-select: none;
+}
+
+/* Reduced motion: no smoothing transition, no glow animation. The outline still
+   FILLS to the exact fraction (set instantly) and the numeric label carries the
+   live state, so progress is fully conveyed without movement. */
+@media (prefers-reduced-motion: reduce) {
+  .fetch-ring-fill { transition: none; }
+  .fetch-ring.complete .fetch-ring-fill { animation: none; }
 }
 
 /* Archived card: poster-forward, taller placeholder so it reads as cold/cloud. */
@@ -583,6 +838,7 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 /* Job result panel */
 .job-panel {
   display: none;
+  position: relative; /* anchor the absolute .job-expand button (bottom-right) */
   margin-top: 12px;
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-sm);
@@ -590,6 +846,29 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   overflow: hidden;
 }
 .job-panel.show { display: block; }
+
+/* Diagonal-arrow expand affordance pinned to the panel's bottom-right corner.
+   Opens the full-screen terminal overlay (terminal.js). Available in every job
+   state; subtle until hovered so it doesn't fight the output. */
+.job-expand {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  z-index: 2;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(19, 26, 38, 0.92);
+  color: var(--text-dim);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.job-expand:hover { background: var(--bg-card-hover); color: var(--accent); border-color: var(--accent-deep); }
 .job-head {
   display: flex;
   align-items: center;
@@ -623,7 +902,8 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 
 .job-output {
   margin: 0;
-  padding: 10px 11px;
+  /* Extra bottom padding so the last line clears the .job-expand corner button. */
+  padding: 10px 11px 40px;
   font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
   font-size: 11.5px;
   line-height: 1.5;
@@ -724,6 +1004,134 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   border-color: var(--danger-deep);
 }
 .modal-actions .confirm:hover { filter: brightness(1.08); }
+
+/* ---------------- Full-screen terminal overlay ---------------- */
+/* Mirrors the confirm modal's backdrop + close affordances (X / Esc / backdrop
+   click). Shows the COMPLETE job terminal for a card: equivalent command, live
+   progress, and the full scrollable output. Built/owned by terminal.js. */
+.term-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  background: rgba(4, 7, 12, 0.86);
+  backdrop-filter: blur(4px);
+  align-items: stretch;
+  justify-content: center;
+  padding: clamp(10px, 3vw, 36px);
+}
+.term-backdrop.show { display: flex; }
+
+.term-window {
+  width: min(1100px, 100%);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #0a0f17;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.7);
+  overflow: hidden;
+  animation: pop 0.14s ease-out;
+}
+
+.term-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-elev);
+}
+.term-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.term-state.running { color: var(--focus); }
+.term-state.done    { color: var(--accent); }
+.term-state.error   { color: var(--danger); }
+
+.term-progress {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  padding: 3px 11px;
+  white-space: nowrap;
+}
+.term-progress[hidden] { display: none; }
+
+/* The equivalent command — takes the remaining width; mono + user-selectable. */
+.term-cmd-wrap {
+  flex: 1 1 320px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.term-cmd-label {
+  font-size: 9.5px;
+  letter-spacing: 1px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 700;
+}
+.term-cmd {
+  display: block;
+  background: #050a11;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 12.5px;
+  color: #cfe3ff;
+  overflow-x: auto;
+  white-space: nowrap;
+  user-select: all;
+}
+.term-close {
+  flex: none;
+  margin-left: auto;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-card);
+  color: var(--text-dim);
+  font-size: 16px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.term-close:hover { background: var(--bg-card-hover); color: var(--text); border-color: var(--accent-deep); }
+
+.term-output {
+  flex: 1;
+  margin: 0;
+  padding: 16px 18px;
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  color: #d7e6ff;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .term-window { animation: none; }
+}
 
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 /* Tabs/segments sit on tinted backgrounds — give their focus ring a clear,

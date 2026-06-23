@@ -9,16 +9,17 @@
 > Full task text lives in `improvements_tier*.md`; this file only orders them. Legend:
 > 🔴 critical · 🟠 high · 🟡 medium · ⚪ low · ✅ done · 🚦 needs a user decision (change-gate).
 >
-> **Last updated:** 2026-06-23 (IMP-E14 Phase 1 landed on branch `feature/imp_e14_web_media_tabs`: web media-type tabs (Movies/TV series/Anime/Others) + `GET /api/items` library endpoint + tests; web-UI upgrade in progress. Earlier 2026-06-22: library integrity guard shipped (IMP-D4 slice — `verify_library` status-to-disk invariant + warn-only pipeline post-conditions — after hand-reconciling 107 legacy text-dummy entries; see `docs/feature-legacy-reconcile/REPORT.md`); IMP-A12 CI pipeline done; IMP-E12 web ops console shipped + IMP-D16 `scan_reclaimable` introduced; IMP-D1 advanced with reclaimable-GB slice).
+> **Last updated:** 2026-06-23 (IMP-E14 Phase 2 fetch-in-UI + upload-integrity guard landed on branch `feature/imp_e14_fetch_in_ui`: `fetch_restore` web action, worker incremental progress polling, `cmd_dispatch_fetch` subprocess streaming, demo/safe mode, cmd_prep cloud-bearing-status clobber guard, verify_library `possibly_dangling` detection. IMP-E14 Phase 1 earlier: web media-type tabs (Movies/TV series/Anime/Others) + `GET /api/items` library endpoint + tests; 2026-06-22: library integrity guard shipped (IMP-D4 slice — `verify_library` status-to-disk invariant + warn-only pipeline post-conditions — after hand-reconciling 107 legacy text-dummy entries; see `docs/feature-legacy-reconcile/REPORT.md`); IMP-A12 CI pipeline done; IMP-E12 web ops console shipped + IMP-D16 `scan_reclaimable` introduced; IMP-D1 advanced with reclaimable-GB slice).
 
 ---
 
-## 👉 SUGGESTED NEXT TASK: **IMP-E14** — web media-type UI (Phase 2: fetch-in-UI)
+## 👉 SUGGESTED NEXT TASK: **IMP-E14** — web media-type UI (Phase 3: polish + PWA)
 
-**IMP-E14 Phase 1 is done** (branch `feature/imp_e14_web_media_tabs`): `GET /api/items` + media-type
-tabs (Movies / TV series / Anime / Others) + disk-state sub-view rail + tests. **Phase 2 is next**:
-fetch-in-UI — surface the fetch action per item inside the media-type tabs, with progress polling via
-the existing job mechanism. Full tracked plan at `docs/feature-web-media-ui/PLAN.md`.
+**IMP-E14 Phases 1+2 are done** (Phase 1 on `feature/imp_e14_web_media_tabs`: `GET /api/items` +
+media-type tabs + tests; Phase 2 on `feature/imp_e14_fetch_in_ui`: fetch_restore web action + worker
+incremental progress + Archived fetch flow + UX enhancements + demo mode). **Phase 3 is next**:
+visual polish, PWA manifest, keyboard nav, accessibility. Full tracked plan at
+`docs/feature-web-media-ui/PLAN.md`.
 A cheap zero-code parallel win is still available: **IMP-S1** — stand up Jellyfin (immediate couch value).
 
 > 🚦 **IMP-R6** and **IMP-R7** still await user decisions before any code — see Band 0 table.

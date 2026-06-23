@@ -8,15 +8,26 @@
  * textContent-only rendering of captured stdout.
  *
  * New for IMP-E14: a poster SLOT element (gradient + initial placeholder; real
- * posters land Phase 5) and, for the ARCHIVED sub-view, a disabled
- * "Fetch & Restore — coming next" affordance (the working button arrives in
- * Phase 2). The poster slot exists in the template now so Phase 2/5 can fill it.
+ * posters land Phase 5).
+ *
+ * Phase 2 (Candidate B): the ARCHIVED card's disabled "coming next" stub is
+ * replaced by a WORKING "Fetch & Restore" button. It POSTs
+ * /api/action/fetch_restore {id, options:{episodes}} (default = whole entry,
+ * episodes omitted), then polls the job and drives a GROWING SVG ring around the
+ * card (see ring.js) from job.progress {done,total}. On terminal "done" the ring
+ * snaps to a glowing closed loop and, after REFRESH_AFTER_JOB_MS, the model is
+ * re-fetched so the card leaves Archived and reappears under Fetched·not-
+ * archived. On "error" the captured output is shown faithfully and the button
+ * re-enables. A ?demo / #demo URL drives the SAME ring with synthetic progress.
  */
 
 "use strict";
 
 import { metaFor, humanSize } from "./data.js";
 import { openConfirmModal } from "./modal.js";
+import { createRing } from "./ring.js";
+import { displayTitle } from "./title.js";
+import { openTerminal, notifyJob } from "./terminal.js";
 
 var POLL_MS = 1000;
 
@@ -106,6 +117,37 @@ function wireCopy(btn, getText) {
   });
 }
 
+// The equivalent CLI command shown in the expanded terminal header. For
+// fetch_restore this is the documented invocation (plus ` episodes <range>` when
+// a range was used); other actions prefer the reclaim-provided suggested command
+// and fall back to a plain `python main.py <action> <id>`.
+function commandFor(action, item) {
+  if (action === "fetch_restore") {
+    var base = "python main.py fetch_restore " + (item && item.id ? item.id : "");
+    if (item && item.episodes) base += " episodes " + item.episodes;
+    return base.trim();
+  }
+  if (action === "sort") return "python main.py sort";
+  if (item && item.suggested_command) return item.suggested_command;
+  var id = item && item.id ? " " + item.id : "";
+  return "python main.py " + action + id;
+}
+
+// Dispose every fetch-ring under `container` before its cards are removed. app.js
+// calls this on the SINGLE grid-clear path (panel re-paint on tab/sub-view switch
+// and post-fetch refresh), so no ResizeObserver accumulates across re-renders.
+export function destroyRingsIn(container) {
+  if (!container) return;
+  var cards = container.querySelectorAll(".card");
+  for (var i = 0; i < cards.length; i += 1) {
+    var r = cards[i]._fetchRing;
+    if (r && typeof r.destroy === "function") {
+      r.destroy();
+      cards[i]._fetchRing = null;
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Card rendering
 // ---------------------------------------------------------------------------
@@ -132,28 +174,25 @@ export function buildCard(item) {
   badge.classList.add("b-" + m.cssKey);
   $(".badge-label", badge).textContent = m.label;
 
-  // Id + size.
-  var idEl = $(".item-id", node);
-  idEl.textContent = item.title && item.title !== item.id ? item.title : item.id;
+  // Prominent TITLE (real metadata.title once Phase 5/TMDB lands; humanized id
+  // until then — see title.js) + size. The raw id moves to the card foot.
+  var titleEl = $(".item-title", node);
+  titleEl.textContent = displayTitle(item);
   if (item.guessed) {
     var g = document.createElement("span");
     g.className = "guess-tag";
     g.title = "Editable guessed id for an unprepped file";
     g.textContent = "GUESS";
-    idEl.appendChild(g);
+    titleEl.appendChild(g);
   }
   $(".item-size", node).textContent = humanSize(item.size_bytes);
 
-  // Secondary id line (the canonical id, when the title differs from it).
-  var subId = $(".item-subid", node);
-  if (item.title && item.title !== item.id) {
-    subId.textContent = item.id;
-  } else {
-    subId.style.display = "none";
-  }
-
   // Path.
   $(".item-path", node).textContent = item.path || "";
+
+  // Raw canonical id at the foot — small/dim/monospace, visually subordinate to
+  // the title above. Always shown (it's the stable handle for the entry).
+  $(".item-rawid", node).textContent = item.id;
 
   // Suggested command (read-only) + Copy. Absent for ARCHIVED and any row the
   // reclaim feed didn't enrich.
@@ -205,15 +244,32 @@ export function buildCard(item) {
   var jobPanel = $(".item-job", node);
 
   if (isArchived) {
-    // Phase 1: disabled "coming next" stub. Phase 2 replaces this with the real
-    // Fetch & Restore action against /api/action/fetch_restore.
-    var stub = document.createElement("button");
-    stub.type = "button";
-    stub.className = "action-btn coming-soon";
-    stub.disabled = true;
-    stub.textContent = "Fetch & Restore — coming next";
-    stub.title = "Cloud fetch + restore lands in Phase 2";
-    actions.appendChild(stub);
+    // Phase 2: WORKING Fetch & Restore. Surfaces ONLY this action (no plain
+    // download). Default fetches the whole entry (episodes omitted). The button
+    // is disabled while its job runs and re-enabled on terminal done OR error.
+    var fetchBtn = document.createElement("button");
+    fetchBtn.type = "button";
+    fetchBtn.className = "action-btn fetch-restore";
+    fetchBtn.textContent = m.verb; // "Fetch & Restore"
+    fetchBtn.title = "Fetch this entry from cloud storage and restore it locally";
+
+    // The SVG ring overlay + numeric chunk label live on this card. The label is
+    // mounted into the action row so it sits beside the button.
+    var ring = createRing(node, actions);
+    // Track the ring on the card so the single grid-clear path (app.js, before it
+    // empties #panel) can call ring.destroy() and disconnect its ResizeObserver —
+    // otherwise an observer leaks per archived card on every fetch/re-render.
+    node._fetchRing = ring;
+
+    fetchBtn.addEventListener("click", function () {
+      runFetchRestore(item, fetchBtn, jobPanel, ring);
+    });
+    actions.appendChild(fetchBtn);
+
+    // ?demo / #demo: claim the FIRST archived card and run a safe, backend-free
+    // synthetic animation through the real ring code path (faithful path, fake
+    // numbers). Marked with a small DEMO tag.
+    maybeStartDemo(node, fetchBtn, jobPanel, ring);
   } else if (m.action) {
     var btn = document.createElement("button");
     btn.type = "button";
@@ -267,6 +323,7 @@ function actionHttpError(status, detail) {
 
 export function runAction(action, item, btn, jobPanel) {
   if (btn) btn.disabled = true;
+  if (jobPanel) jobPanel._jobCommand = commandFor(action, item);
   renderJob(jobPanel, { status: "running", name: action, output: "" }, true);
 
   fetch("/api/action/" + action, {
@@ -335,11 +392,219 @@ function pollJob(jobId, jobPanel, btn, action) {
   tick();
 }
 
+// ---------------------------------------------------------------------------
+// Fetch & Restore (ARCHIVED) — working button + SVG progress ring (Phase 2).
+// ---------------------------------------------------------------------------
+
+// Read the optional episode range from the item, if a future UI adds one. Today
+// there is no range input on the card, so we always fetch the WHOLE entry and
+// OMIT episodes (matching the server contract: episodes=None => whole entry).
+function fetchRestoreBody(item) {
+  var options = {};
+  // item.episodes would be a "1-3"-style string if a range control existed; it
+  // does not yet, so options.episodes stays omitted (whole-entry fetch).
+  if (item.episodes) options.episodes = item.episodes;
+  return { id: item.id, options: options };
+}
+
+function runFetchRestore(item, btn, jobPanel, ring) {
+  if (btn.disabled) return; // guard against double-submit
+  btn.disabled = true;
+  if (jobPanel) jobPanel._jobCommand = commandFor("fetch_restore", item);
+  ring.setChunks(0, 0); // show the ring immediately at 0 (job not enqueued yet)
+  renderJob(jobPanel, { status: "running", name: "fetch_restore", output: "" }, true);
+
+  fetch("/api/action/fetch_restore", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fetchRestoreBody(item)),
+  })
+    .then(function (res) {
+      if (res.status === 202) return res.json();
+      return res.text().then(function (t) {
+        var detail = t;
+        try {
+          var parsed = JSON.parse(t);
+          if (parsed && parsed.detail) detail = parsed.detail;
+        } catch (e) {
+          /* non-JSON body — keep raw text */
+        }
+        throw new Error(actionHttpError(res.status, detail));
+      });
+    })
+    .then(function (data) {
+      pollFetchRestore(data.job_id, jobPanel, btn, ring);
+    })
+    .catch(function (err) {
+      // Network / non-202 failure before a job exists: faithful error, re-enable,
+      // hide the ring (nothing actually ran).
+      renderJob(
+        jobPanel,
+        {
+          status: "error",
+          name: "fetch_restore",
+          output: String((err && err.message) || err),
+        },
+        false
+      );
+      ring.reset();
+      btn.disabled = false;
+    });
+}
+
+// Poll variant that ALSO drives the progress ring from job.progress each tick.
+// Terminal done -> ring.complete() glow + scheduleRefresh() (auto-flip). Terminal
+// error -> faithful output, re-enable, leave the ring at its last fraction
+// (honest "got this far"), no glow.
+function pollFetchRestore(jobId, jobPanel, btn, ring) {
+  function tick() {
+    fetch("/api/job/" + encodeURIComponent(jobId))
+      .then(function (res) {
+        if (!res.ok) {
+          return res.text().then(function (t) {
+            throw new Error("HTTP " + res.status + (t ? ": " + t : ""));
+          });
+        }
+        return res.json();
+      })
+      .then(function (job) {
+        var p = job.progress || { done: 0, total: 0 };
+        var running = job.status === "running";
+
+        if (job.status === "done") {
+          ring.complete(); // snap to a full, glowing closed outline
+        } else {
+          ring.setChunks(p.done, p.total); // grow toward done/total (guards 0)
+        }
+
+        renderJob(jobPanel, job, running);
+
+        if (running) {
+          setTimeout(tick, POLL_MS);
+        } else {
+          btn.disabled = false; // re-enable on done OR error
+          if (job.status === "done") {
+            // Auto-flip: after the visible-result delay, reload the model so the
+            // card leaves Archived and appears under Fetched·not-archived.
+            scheduleRefresh();
+          }
+          // On error we deliberately do NOT scheduleRefresh: the card stays in
+          // Archived for an obvious retry, ring frozen at its last fraction.
+        }
+      })
+      .catch(function (err) {
+        renderJob(
+          jobPanel,
+          {
+            status: "error",
+            name: "fetch_restore",
+            output: String((err && err.message) || err),
+          },
+          false
+        );
+        btn.disabled = false;
+        // Leave the ring as-is: the failure is a polling error, not necessarily a
+        // fetch rollback, so we keep the last honest fraction visible.
+      });
+  }
+  tick();
+}
+
+// ---------------------------------------------------------------------------
+// ?demo / #demo live preview — IDENTICAL contract in both candidates.
+//
+// When the URL carries ?demo (or #demo), the FIRST archived card built runs a
+// safe, client-side-only animation that drives the SAME ring code path with
+// SYNTHETIC progress: total=8, done 1..8 every ~600ms, then "done" -> glow. NO
+// backend call, NO real fetch. A small DEMO tag marks the card. Faithful path
+// (real ring.setChunks/complete), fake numbers.
+// ---------------------------------------------------------------------------
+
+function demoRequested() {
+  try {
+    var s = window.location.search || "";
+    var h = window.location.hash || "";
+    return /(?:^|[?&])demo(?:=|&|$)/.test(s) || /(?:^|#)demo$/.test(h);
+  } catch (e) {
+    return false;
+  }
+}
+
+var _demoClaimed = false; // only the FIRST archived card runs the demo
+
+function maybeStartDemo(node, btn, jobPanel, ring) {
+  if (_demoClaimed || !demoRequested()) return;
+  _demoClaimed = true;
+
+  // Small DEMO tag on the card so it's obviously a preview, not a real fetch.
+  var tag = document.createElement("span");
+  tag.className = "demo-tag";
+  tag.textContent = "DEMO";
+  tag.title = "Synthetic progress preview — no backend fetch is running";
+  var poster = $(".poster", node);
+  if (poster) poster.appendChild(tag);
+
+  btn.disabled = true; // mirror a real run: no double-submit during the demo
+  jobPanel._jobCommand = "python main.py fetch_restore <id>  # demo (no real fetch)";
+  renderJob(
+    jobPanel,
+    { status: "running", name: "fetch_restore (demo)", output: "Synthetic preview — no real fetch." },
+    true
+  );
+
+  var TOTAL = 8;
+  var doneN = 0;
+
+  // The card is built into a detached fragment, so its box has no size yet. Wait
+  // two frames for it to be attached + laid out before sizing the ring; otherwise
+  // getBoundingClientRect() is 0x0 and the outline can't be measured. (A real
+  // fetch starts from a click, when the card is already attached, so only the
+  // demo needs this.)
+  requestAnimationFrame(function () {
+    requestAnimationFrame(startDemoAnimation);
+  });
+
+  function startDemoAnimation() {
+    ring.setChunks(0, TOTAL);
+    var timer = setInterval(function () {
+      doneN += 1;
+      if (doneN >= TOTAL) {
+        clearInterval(timer);
+        ring.setChunks(TOTAL, TOTAL);
+        // Brief beat, then snap to the glowing complete state (same as real done).
+        setTimeout(function () {
+          ring.complete();
+          renderJob(
+            jobPanel,
+            {
+              status: "done",
+              name: "fetch_restore (demo)",
+              output:
+                "Synthetic preview complete — this is what a finished fetch looks like.",
+            },
+            false
+          );
+          btn.disabled = false; // demo never auto-flips (no model change)
+        }, 500);
+        return;
+      }
+      ring.setChunks(doneN, TOTAL);
+    }, 600);
+  }
+}
+
 // Render a job record into a panel. Output goes through textContent (a <pre>),
 // never innerHTML. `error` status is shown faithfully — output is NOT hidden.
+//
+// Side effects that power the expandable terminal (change #3): the latest job is
+// stashed on the panel (panel._lastJob) so openTerminal() can paint immediately,
+// and notifyJob() is fired AFTER rendering so an already-open overlay bound to
+// this panel repaints from the SAME job object — the expanded view subscribes to
+// this single existing poll rather than starting a second one.
 function renderJob(panel, job, running) {
   panel.classList.add("show");
   panel.textContent = "";
+  panel._lastJob = job;
 
   var head = document.createElement("div");
   head.className = "job-head";
@@ -378,4 +643,23 @@ function renderJob(panel, job, running) {
     pre2.textContent = "Waiting for output…";
     panel.appendChild(pre2);
   }
+
+  // Expand affordance (change #3): a diagonal-arrow button pinned to the panel's
+  // bottom-right corner. Available in EVERY state (running / done / error) so the
+  // full log + equivalent command can be reviewed after the fact. Opening the
+  // overlay starts no new poll — it subscribes to this panel's renderJob stream.
+  var expand = document.createElement("button");
+  expand.type = "button";
+  expand.className = "job-expand";
+  expand.title = "Expand to full-screen terminal";
+  expand.setAttribute("aria-label", "Expand to full-screen terminal");
+  expand.textContent = "⤢"; // ⤢ diagonal arrows
+  expand.addEventListener("click", function () {
+    openTerminal(panel);
+  });
+  panel.appendChild(expand);
+
+  // Fan this same job out to an open, bound terminal overlay (single-poll live
+  // mirror). No-op when the overlay is closed or bound to a different panel.
+  notifyJob(panel, job, panel._jobCommand || "");
 }

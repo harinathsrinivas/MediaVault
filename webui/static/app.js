@@ -33,8 +33,10 @@ import {
   STATE_ORDER,
   metaFor,
 } from "./data.js";
-import { buildCard, runAction, setRefreshHandler } from "./card.js";
+import { buildCard, runAction, setRefreshHandler, destroyRingsIn } from "./card.js";
 import { wireModal } from "./modal.js";
+import { getSort, setSort, sortItems, SORT_KEYS } from "./sort.js";
+import { wireCardGlow } from "./glow.js";
 
 function $(sel, root) {
   return (root || document).querySelector(sel);
@@ -294,11 +296,19 @@ function renderPanel(animate) {
   panel.setAttribute("aria-labelledby", "seg-" + activeState);
 
   function paint() {
+    // Dispose any active fetch-rings BEFORE emptying the panel so their
+    // ResizeObservers are disconnected (teardown graft, change #4). This is the
+    // single grid-clear path — every tab/sub-view switch and post-fetch refresh
+    // routes through here.
+    destroyRingsIn(panel);
     panel.textContent = "";
 
     var rows = (MODEL ? MODEL.items : []).filter(function (it) {
       return it.category === activeCategory && it.state === activeState;
     });
+    // Client-side sort (change #1): re-order the already-loaded rows by the
+    // persisted key+direction (default size-desc). No refetch.
+    rows = sortItems(rows);
 
     if (rows.length === 0) {
       panel.appendChild(buildEmptyState());
@@ -448,12 +458,130 @@ function wireSort() {
 }
 
 // ---------------------------------------------------------------------------
+// Sort control (client-side ordering of the current grid)
+// ---------------------------------------------------------------------------
+
+// Human labels for the sort keys (sort.js owns the key list + comparator).
+var SORT_KEY_LABELS = { size: "Size", title: "Title", year: "Year" };
+
+// Build the segmented key buttons + a direction toggle. Re-orders the visible
+// grid instantly on change; the chosen key/direction persist in sort.js state so
+// they survive tab/sub-view switches and the post-fetch refresh.
+function buildSortbar() {
+  var bar = $("#sortbar");
+  bar.textContent = "";
+
+  var label = document.createElement("span");
+  label.className = "sortbar-label";
+  label.textContent = "Sort";
+  bar.appendChild(label);
+
+  var group = document.createElement("div");
+  group.className = "sort-keys";
+  group.setAttribute("role", "group");
+  group.setAttribute("aria-label", "Sort key");
+
+  SORT_KEYS.forEach(function (key) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.className = "sort-key";
+    b.dataset.key = key;
+    b.textContent = SORT_KEY_LABELS[key] || key;
+    b.addEventListener("click", function () {
+      setSort(key, null);
+      refreshSortbar();
+      renderPanel(false); // instant reorder, no view swap
+    });
+    group.appendChild(b);
+  });
+  bar.appendChild(group);
+
+  var dir = document.createElement("button");
+  dir.type = "button";
+  dir.className = "sort-dir";
+  dir.id = "sort-dir";
+  dir.addEventListener("click", function () {
+    var cur = getSort();
+    setSort(null, cur.dir === "asc" ? "desc" : "asc");
+    refreshSortbar();
+    renderPanel(false);
+  });
+  bar.appendChild(dir);
+
+  refreshSortbar();
+}
+
+// Reflect the active key (pressed state) + direction (arrow + label) on the bar.
+function refreshSortbar() {
+  var s = getSort();
+  var bar = $("#sortbar");
+  var keys = bar.querySelectorAll(".sort-key");
+  for (var i = 0; i < keys.length; i += 1) {
+    var on = keys[i].dataset.key === s.key;
+    keys[i].classList.toggle("active", on);
+    keys[i].setAttribute("aria-pressed", on ? "true" : "false");
+  }
+  var dir = $("#sort-dir");
+  if (dir) {
+    var asc = s.dir === "asc";
+    // Arrow points the way the values run; label spells it out for clarity.
+    dir.textContent = (asc ? "↑" : "↓") + " " + (asc ? "Asc" : "Desc");
+    dir.setAttribute(
+      "aria-label",
+      "Sort direction: " + (asc ? "ascending" : "descending") + " (toggle)"
+    );
+    dir.setAttribute("aria-pressed", asc ? "false" : "true");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
+// Server-side DEMO/SAFE mode probe (IMP-E14). On load, ask the backend whether
+// it is the simulated review build; if so, reveal the persistent banner. The
+// banner text is static markup, so this only flips visibility — no untrusted
+// data is interpolated (XSS-safe). A failed/absent probe leaves the banner
+// hidden (fail-safe toward the normal real UI; the SERVER still enforces demo).
+function checkDemoMode() {
+  fetch("/api/mode")
+    .then(function (res) {
+      return res.ok ? res.json() : null;
+    })
+    .then(function (data) {
+      if (data && data.demo === true) {
+        var banner = $("#demo-banner");
+        if (banner) {
+          banner.hidden = false;
+          banner.classList.add("show");
+          document.body.classList.add("demo-mode");
+          // Pin the sticky header directly below the banner by exposing the
+          // banner's MEASURED height as --demo-offset (handles the banner
+          // wrapping to two lines on narrow/mobile viewports). Re-measure on
+          // resize so the header stays flush if the banner reflows.
+          var applyOffset = function () {
+            var h = Math.ceil(banner.getBoundingClientRect().height);
+            document.documentElement.style.setProperty("--demo-offset", h + "px");
+          };
+          applyOffset();
+          window.addEventListener("resize", applyOffset);
+        }
+      }
+    })
+    .catch(function () {
+      /* probe failed — leave the banner hidden; server still enforces safety. */
+    });
+}
+
 function init() {
+  checkDemoMode();
   wireModal();
   wireSort();
+  buildSortbar();
+  // Cursor-following glow on the cards. Delegated to the stable #panel (created
+  // once in index.html; only its children are cleared on re-render), so every
+  // freshly-rendered card is covered with no per-card listener to leak.
+  wireCardGlow($("#panel"));
   // After any terminal job, reload the model and repaint (preserving the view).
   setRefreshHandler(function () {
     load(false);

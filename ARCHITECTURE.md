@@ -321,10 +321,31 @@ It binds **localhost only**.
   library makes `load_library` call `sys.exit(1)`) so it can never wedge.
   Routes: `GET /api/reclaim` (the reclaim scan), `GET /api/library` (status
   counts by category), `POST /api/action/{name}` (allow-list
-  `{prep,push,replace,sort,prep_push_rep}`; `replace` requires `confirm:true`
-  or returns **409**; returns **202** + a `job_id`), `GET /api/job/{id}`
-  (polling), `GET /api/items` (see below). `webui/static/` is a no-build
-  card-grid SPA mounted via `StaticFiles`.
+  `{prep,push,replace,sort,prep_push_rep,fetch_restore}`; `replace` requires
+  `confirm:true` or returns **409**; returns **202** + a `job_id`),
+  `GET /api/job/{id}` (polling), `GET /api/items` (see below),
+  `GET /api/mode` (returns `{"demo":true|false}`). `webui/static/` is a
+  no-build card-grid SPA mounted via `StaticFiles`.
+  - **Worker incremental progress (IMP-E14 Phase 2):** the job worker publishes
+    a running job's partial `output` (stdout captured via a stdout-tee on the
+    running function) and a parsed `progress {done, total}` (chunk units) inside
+    the job record. Clients learn these by **polling `GET /api/job/{id}`** — NOT
+    via SSE or WebSocket (the future streaming upgrade is tracked as IMP-F10;
+    this polling mechanism is the down-payment on IMP-S2's serialized worker
+    performing `fetch_restore` with live progress). The job schema gained two
+    new fields: `progress` (object `{done, total}`) and `progress_unit`
+    (string, e.g. `"chunks"`).
+  - **`cmd_dispatch_fetch` subprocess streaming:** `cmd_dispatch_fetch` now
+    spawns `python mainfetch.py fetch …` via `subprocess.Popen` (line-by-line
+    stdout stream) with `PYTHONIOENCODING=utf-8` in the child environment, so
+    the worker captures real download progress lines as they arrive. The prior
+    `subprocess.run` call collected output only after the subprocess returned,
+    bypassing capture.
+  - **Demo / safe mode (`--demo`):** `python main.py web --demo` sets a
+    process-level flag that makes EVERY web action simulated — no real `cmd_*`
+    calls, no library mutations, no Selenium. The flag is exposed via
+    `GET /api/mode` so the SPA can show a sticky "DEMO MODE" banner. Default
+    `python main.py web` is unchanged and fires real actions.
 - **Pure read-only data layer in `main.py`** (near `cmd_scan_unprepped`):
   `collect_reclaimable`, `classify_entry_state`, `guess_manual_id`,
   `suggest_target_folder`, `suggest_next_command`. They only READ existing
@@ -350,15 +371,25 @@ It binds **localhost only**.
   media-type UI. `items_payload` and `collect_reclaimable` share a `_classify_item`
   helper so the two endpoints can't drift on state semantics; `/api/reclaim` output
   is unchanged.
-- **Media-type SPA (IMP-E14 Phase 1):** the front end gained a **media-type tab
+- **Media-type SPA (IMP-E14 Phases 1+2):** the front end gained a **media-type tab
   rail** (Movies / TV series / Anime / Others) — category derived from the entry's
   id prefix via `_category_of`. Within each tab a **sub-view rail** offers the
   disk-state groups: Unprepped / Local·not-pushed / Pushed·not-archived /
   Fetched·not-archived / Archived. Data source: `/api/items` (library entries by
   state) unioned with `/api/reclaim` (the only source of UNPREPPED rows, which have
   no library entry). No build step — vanilla ES modules, same no-build constraint
-  as the existing SPA. Fetch-in-UI, posters, and mobile/Tailscale/auth are tracked
-  in later phases (E14 Phases 2–5 and IMP-E15/E3/U3/D17).
+  as the existing SPA. Phase 2 adds: a **Fetch & Restore button** on Archived cards
+  (fires `fetch_restore` via `POST /api/action/fetch_restore`); an SVG
+  `stroke-dashoffset` **chunk-% progress border** that grows as chunks complete and
+  snaps to a glowing loop on done; **auto-flip** of the card from Archived →
+  Fetched·not-archived via an `/api/items` refresh on job completion; a
+  **default size-descending sort** with a **Size / Title / Year sort bar**;
+  **readable titles** (humanized id now; real `metadata.title` once Phase-5 TMDB
+  lands) with the raw id at the card foot; an **expandable full-screen terminal**
+  (⤢) showing the equivalent CLI command + live progress + full captured output;
+  and a **cursor-following card glow** (mouse/trackpad; disabled on touch +
+  `prefers-reduced-motion`). Posters and mobile/Tailscale/auth are tracked in
+  later phases (E14 Phases 3–5 and IMP-E3/U3).
 - **The web tier calls the existing `cmd_*` UNCHANGED** — no copy of their
   logic. `replace` reuses `cmd_replace` verbatim, so the **auto-rollback
   change-gate is NOT tripped** (journal/PONR/`RollbackHardFail` contract
@@ -643,6 +674,16 @@ Important quirks:
 - `cmd_prep` short-circuits if the entry exists and is already
   `uploaded`/`archived`, OR if the file on disk is < 1 KB (dummy detected)
   — `main.py:303-312`.
+- **Upload-state integrity guard (IMP-D4, 2026-06-23):** `cmd_prep`'s guard
+  was widened to refuse re-prepping ANY entry that is cloud-bearing: it now
+  checks `uploaded` truthy OR status in `{onboarded, archived, restored_local}`.
+  This closes the re-prep clobber path that stranded entries (the 107-entry +
+  battlestar danglers were produced by re-running prep after upload). Separately,
+  `cmd_verify_library` now flags `possibly_dangling` leaves — entries whose
+  status is `local_ready` or whose `uploaded` flag is false, yet whose folder
+  contains on-disk evidence of cloud chunks (e.g. a `checksums/` dir or a
+  `_parts/` remnant). See `improvements/improvements_tierD.md` IMP-D4 and
+  `docs/feature-legacy-reconcile/REPORT.md` for the full integrity audit story.
 
 ### 6.4a Split-file canonical hash (deterministic re-merge)
 

@@ -225,3 +225,273 @@ def test_verify_library_fix_dummies_regenerates_text_stub(sandbox, fake_dummy, c
     lib = mvcommon.load_library()
     assert lib[_BAD_ARCHIVED_TEXT]["status"] == "archived"
     assert lib[_BAD_ARCHIVED_TEXT]["uploaded"] is True
+
+
+# ===========================================================================
+# IMP-E14 — close the cmd_prep "clobber a cloud-bearing entry to local_ready"
+# regression hole, and detect already-dangling entries in verify_library.
+# ===========================================================================
+
+# Ids for the guard-regression test (mov- -> library_movies.json).
+_DANGER_ONBOARDED = "mov-en-2024-onbd-noupload"     # onboarded + uploaded=False -> must be REFUSED
+_DANGER_RESTORED = "mov-en-2024-restored-noupload"  # restored_local + uploaded missing -> must be REFUSED
+_GENUINE_LOCAL = "mov-en-2024-genuine-local"        # local_ready + uploaded=False + real file -> MUST still prep
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 — guard regression: cmd_prep refuses to clobber a cloud-bearing entry
+# (status onboarded / restored_local) back to local_ready, but STILL preps a
+# genuinely-local entry. Reproduces the battlestar/dark dangling-bug class.
+# ---------------------------------------------------------------------------
+def test_cmd_prep_refuses_to_clobber_cloud_bearing_status(sandbox, make_video, capsys):
+    media = sandbox["media_dir"]
+
+    # An onboarded entry (pushed; master still local) whose `uploaded` was somehow
+    # left False — exactly the shape cmd_prep_push_rep_season can re-prep. A REAL
+    # file is on disk (so the dummy secondary-skip is NOT what saves it — the new
+    # status guard is). short_id/hash are present so we can prove no rebuild.
+    onbd_path, _ = make_video(media / "onbd.mkv")
+    onbd_entry = {
+        "short_id": "aaaa1111",
+        "filename": "onbd.mkv",
+        "folder_path": str(media),
+        "status": "onboarded",
+        "uploaded": False,                  # the dangerous shape: cloud-bearing yet uploaded falsy
+        "search_term": "onbd [aaaa1111].mkv",
+        "hash": "DEADBEEF_ORIGINAL_HASH",
+        "metadata": {},
+        "tech_spec": {"sentinel": "UNTOUCHED"},
+        "type": "movie",
+    }
+
+    # A restored_local entry with `uploaded` entirely MISSING (older schema) — also
+    # cloud-bearing, also must be refused.
+    rest_path, _ = make_video(media / "rest.mkv")
+    rest_entry = {
+        "short_id": "bbbb2222",
+        "filename": "rest.mkv",
+        "folder_path": str(media),
+        "status": "restored_local",         # uploaded key omitted on purpose
+        "search_term": "rest [bbbb2222].mkv",
+        "hash": "FEEDFACE_ORIGINAL_HASH",
+        "metadata": {},
+        "tech_spec": {"sentinel": "UNTOUCHED"},
+        "type": "movie",
+    }
+
+    library = {_DANGER_ONBOARDED: onbd_entry, _DANGER_RESTORED: rest_entry}
+    _write_movies_lib(sandbox, library)
+
+    # Re-prepping either must RETURN True (early-skip success) and create ZERO
+    # changes to the entry — the clobber to local_ready/uploaded=False is refused.
+    assert main.cmd_prep(_DANGER_ONBOARDED, str(onbd_path)) is True
+    assert main.cmd_prep(_DANGER_RESTORED, str(rest_path)) is True
+
+    out = capsys.readouterr().out
+    assert "refusing to clobber cloud-bearing status" in out
+
+    lib = mvcommon.load_library()
+
+    # The onboarded entry is byte-for-byte unchanged: status NOT flipped to
+    # local_ready, uploaded NOT toggled, hash/tech_spec NOT rebuilt.
+    e1 = lib[_DANGER_ONBOARDED]
+    assert e1["status"] == "onboarded"
+    assert e1["uploaded"] is False
+    assert e1["hash"] == "DEADBEEF_ORIGINAL_HASH"
+    assert e1["tech_spec"] == {"sentinel": "UNTOUCHED"}
+
+    # The restored_local entry is likewise untouched — and `uploaded` was NOT
+    # silently introduced as False by a rebuild (the rebuild never ran).
+    e2 = lib[_DANGER_RESTORED]
+    assert e2["status"] == "restored_local"
+    assert "uploaded" not in e2
+    assert e2["hash"] == "FEEDFACE_ORIGINAL_HASH"
+    assert e2["tech_spec"] == {"sentinel": "UNTOUCHED"}
+
+
+def test_cmd_prep_still_preps_a_genuine_local_entry(sandbox, make_video, stub_tech_specs, capsys):
+    # The fix must NOT over-block: a genuinely-local entry (local_ready, uploaded
+    # falsy, a REAL file, never pushed) must STILL prep normally — not be skipped.
+    media = sandbox["media_dir"]
+    local_path, real_hash = make_video(media / "genuine.mkv")
+
+    library = {
+        _GENUINE_LOCAL: {
+            "short_id": "cccc3333",
+            "filename": "genuine.mkv",
+            "folder_path": str(media),
+            "status": "local_ready",
+            "uploaded": False,
+            "type": "movie",
+        }
+    }
+    _write_movies_lib(sandbox, library)
+
+    result = main.cmd_prep(_GENUINE_LOCAL, str(local_path))
+    out = capsys.readouterr().out
+
+    assert result is True
+    # It went down the PREP path (not the skip path).
+    assert "PREPPING" in out
+    assert "refusing to clobber" not in out
+    assert "Library Entry Created" in out
+
+    # The entry was (re)built normally: stays local_ready, gains the freshly
+    # computed real hash (proves the rebuild ran, unlike the refused cases above).
+    lib = mvcommon.load_library()
+    e = lib[_GENUINE_LOCAL]
+    assert e["status"] == "local_ready"
+    assert e["uploaded"] is False
+    assert e["hash"] == real_hash
+
+
+# ---------------------------------------------------------------------------
+# FIX 2 — verify_library detects possibly-dangling leaves (in-cloud but marked
+# local/not-uploaded) as a SEPARATE advisory that does NOT change the True/False
+# return (that stays driven solely by the status↔disk invariant).
+# ---------------------------------------------------------------------------
+_DANGLING_SPLIT = "mov-en-2024-dangling-split"      # local_ready + split_info -> HIGH
+_DANGLING_SIDECAR = "mov-en-2024-dangling-sidecar"  # local_ready + checksums sidecar -> HIGH
+_DANGLING_LOW = "mov-en-2024-dangling-searchonly"   # local_ready + search_term only -> LOW
+_CLEAN_LOCAL = "mov-en-2024-clean-local"            # local_ready + no cloud evidence -> NOT flagged
+
+
+def test_verify_library_flags_possibly_dangling_without_failing(sandbox, make_video, capsys):
+    media = sandbox["media_dir"]
+
+    # All four leaves have a REAL on-disk file so the status↔disk invariant is
+    # SATISFIED for every one — the library is "clean" by the hard check, which
+    # lets us prove the dangling advisory is independent of the True/False return.
+    make_video(media / "dsplit.mkv")
+    make_video(media / "dsidecar.mkv")
+    make_video(media / "dlow.mkv")
+    make_video(media / "dclean.mkv")
+
+    # HIGH via split_info on the entry.
+    split_entry = _leaf(media, "dsplit.mkv", "local_ready")
+    split_entry["short_id"] = "5151aaaa"
+    split_entry["split_info"] = {
+        "is_split": True,
+        "total_chunks": 2,
+        "chunks": [{"filename": "x.chunk.001.mkv", "hash": "h1"}],
+    }
+
+    # HIGH via a checksums/ sidecar embedding THIS entry's short_id (the chunk
+    # parity sidecars cmd_push writes). Matched by short_id so a shared season
+    # checksums dir is attributed to the right episode.
+    sidecar_sid = "7272bbbb"
+    sidecar_entry = _leaf(media, "dsidecar.mkv", "local_ready")
+    sidecar_entry["short_id"] = sidecar_sid
+    sidecar_entry["search_term"] = f"dsidecar [{sidecar_sid}].mkv"  # also present, but HIGH wins
+    checksum_dir = media / "checksums"
+    checksum_dir.mkdir(exist_ok=True)
+    # A sidecar whose name embeds the short_id (mirrors cmd_push's "<name> [sid].chunk.NNN.mkv.sha256").
+    (checksum_dir / f"dsidecar [{sidecar_sid}].chunk.001.mkv.sha256").write_text(
+        "deadbeef *dsidecar [{}].chunk.001.mkv".format(sidecar_sid), encoding="utf-8"
+    )
+
+    # LOW via search_term only (cmd_prep sets it on every entry -> weak evidence).
+    low_entry = _leaf(media, "dlow.mkv", "local_ready")
+    low_entry["short_id"] = "9393cccc"
+    low_entry["search_term"] = "dlow [9393cccc].mkv"
+
+    # CLEAN: a genuine local entry with NO cloud evidence at all — must NOT flag.
+    # (No split_info, no checksums sidecar for its short_id, no search_term.)
+    clean_entry = _leaf(media, "dclean.mkv", "local_ready")
+    clean_entry["short_id"] = "0404dddd"
+
+    library = {
+        _DANGLING_SPLIT: split_entry,
+        _DANGLING_SIDECAR: sidecar_entry,
+        _DANGLING_LOW: low_entry,
+        _CLEAN_LOCAL: clean_entry,
+    }
+    _write_movies_lib(sandbox, library)
+
+    result = main.cmd_verify_library()
+    out = capsys.readouterr().out
+
+    # The hard status↔disk invariant is satisfied for all 4 (real files) -> True,
+    # PROVING possibly_dangling does NOT, by itself, fail the audit.
+    assert result is True
+    assert "scanned 4, OK 4, MISMATCH 0" in out
+
+    # The advisory section is printed and names the three flagged ids with tiers.
+    assert "POSSIBLY DANGLING (in-cloud but marked local/not-uploaded)" in out
+    assert f"{_DANGLING_SPLIT}  [high]" in out
+    assert f"{_DANGLING_SIDECAR}  [high]" in out
+    assert f"{_DANGLING_LOW}  [low]" in out
+
+    # The clean local entry is NOT flagged as dangling.
+    assert _CLEAN_LOCAL not in out.split("POSSIBLY DANGLING", 1)[1]
+
+    # Summary tallies: 2 high + 1 low = 3.
+    assert "possibly_dangling: 3 (high=2, low=1)" in out
+
+
+def test_verify_library_no_dangling_section_when_clean(sandbox, make_video, capsys):
+    # A purely-clean local library (real files, no cloud evidence anywhere) prints
+    # NEITHER the advisory header NOR a possibly_dangling summary suffix.
+    media = sandbox["media_dir"]
+    make_video(media / "okreal_local.mkv")
+
+    library = {_CLEAN_LOCAL: _leaf(media, "okreal_local.mkv", "local_ready")}
+    _write_movies_lib(sandbox, library)
+
+    result = main.cmd_verify_library()
+    out = capsys.readouterr().out
+
+    assert result is True
+    assert "scanned 1, OK 1, MISMATCH 0" in out
+    assert "POSSIBLY DANGLING" not in out
+    assert "possibly_dangling" not in out
+
+
+def test_verify_library_dangling_skips_uploaded_and_virtual(sandbox_alias, capsys):
+    # Two guarantees in one alias-bearing library:
+    #   (1) an archived/uploaded=True entry is the CORRECT in-cloud end state — it
+    #       must NOT be reported as dangling (it's not local_ready + not-uploaded).
+    #   (2) the alias/season_map VIRTUAL entries must be skipped by the dangling
+    #       pass (no crash, never flagged — they own no file).
+    media = sandbox_alias["media_dir"]
+
+    # Add an archived+uploaded movie alongside the alias chain. archived+VIDEO_DUMMY
+    # keeps the status↔disk invariant happy (so the return stays True) while proving
+    # the dangling pass ignores a correctly cloud-bearing entry — even though it has
+    # split_info (which WOULD be HIGH if it were a local/not-uploaded candidate).
+    (media / "arch.mkv").write_bytes(b"\x00\x01\x02BINARY-DUMMY" * 8)  # small video dummy
+    lib = mvcommon.load_library()
+    lib["mov-en-2024-archived-correct"] = {
+        "short_id": "eeee5555",
+        "filename": "arch.mkv",
+        "folder_path": str(media),
+        "status": "archived",
+        "uploaded": True,
+        "split_info": {"is_split": True, "total_chunks": 1, "chunks": []},
+        "type": "movie",
+    }
+    mvcommon.save_library(lib)
+
+    result = main.cmd_verify_library()
+    out = capsys.readouterr().out
+
+    # All on-disk shapes are consistent -> the hard invariant passes -> True.
+    assert result is True
+
+    # The archived/uploaded entry is the correct end state -> NOT a dangler, even
+    # though it carries split_info. The two virtual entries never appear either.
+    # (Match the exact dangler-line shape `<id>  [tier]` so the season_id check
+    # does not collide with the primary id, of which it is a prefix.)
+    danger_section = out.split("POSSIBLY DANGLING", 1)
+    if len(danger_section) > 1:  # a dangling section exists (see below) — scope to it
+        assert "mov-en-2024-archived-correct  [" not in danger_section[1]
+        assert f"{sandbox_alias['alias_id']}  [" not in danger_section[1]
+        assert f"{sandbox_alias['season_id']}  [" not in danger_section[1]
+
+    # The sandbox_alias PRIMARY is local_ready + uploaded=False and carries a
+    # search_term (cmd_prep sets one on every entry) but no stronger evidence, so it
+    # IS flagged — as LOW. This is the expected weak-signal behavior, and it proves
+    # uploaded/virtual exclusion above is what filters the others (not a blanket
+    # "no danglers"). Exactly one LOW dangler: the primary.
+    assert f"{sandbox_alias['primary_id']}  [low]" in out
+    assert "possibly_dangling: 1 (high=0, low=1)" in out

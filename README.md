@@ -229,10 +229,20 @@ by a confirm modal; long actions report via a polled job mechanism). The console
 also has **media-type tabs** (Movies / TV series / Anime / Others) with a
 per-category disk-state sub-view rail (Unprepped / Local·not-pushed /
 Pushed·not-archived / Fetched·not-archived / Archived), powered by the new
-read-only `GET /api/items` library endpoint (IMP-E14 Phase 1). It manages
-files only — it never plays video (Jellyfin remains the viewing surface) and
-never moves or renames files (it shows you the command to copy). Install the
-deps first: `pip install -r requirements.txt` (adds `fastapi` + `uvicorn`).
+read-only `GET /api/items` library endpoint (IMP-E14 Phase 1). Phase 2 adds
+**Fetch & Restore in the UI**: Archived cards get a working "Fetch & Restore"
+button with a live **chunk-% progress border** (SVG stroke animation) that glows
+on completion and auto-flips the card into the Fetched·not-archived sub-view. An
+**expandable full-screen terminal** (⤢ icon) shows the equivalent CLI command
+alongside live captured output. Cards also feature a **sort bar** (Size / Title /
+Year, default size-descending), **readable titles** (humanized id; real titles
+pending Phase-5 TMDB), and a **cursor-following card glow**. Run
+`python main.py web --demo` to explore every action safely: demo mode simulates
+all operations (no library mutations, no Selenium) and shows a sticky
+"DEMO MODE" banner. It manages files only — it never plays video (Jellyfin
+remains the viewing surface) and never moves or renames files (it shows you the
+command to copy). Install the deps first:
+`pip install -r requirements.txt` (adds `fastapi` + `uvicorn`).
 
 > **Malformed invocations fail fast.** A `push_group` (or `replace`) call
 > that ends with a value-taking keyword and no value (e.g.

@@ -7,6 +7,14 @@
   <link rel="stylesheet" href="./styles.css" />
 </head>
 <body>
+  <!-- Persistent server-side DEMO/SAFE-mode banner (IMP-E14). Hidden by default;
+       app.js fetches /api/mode on load and unhides this (adds .show) ONLY when the
+       server reports demo:true. Sticks above the header so it stays visible while
+       scrolling, on desktop and mobile. Static text only — no user data, XSS-safe. -->
+  <div class="demo-banner" id="demo-banner" role="status" aria-live="polite" hidden>
+    🟡 DEMO MODE — actions are simulated. Nothing real runs.
+  </div>
+
   <header class="app-header">
     <div class="hero">
       <div class="brand">
@@ -39,6 +47,10 @@
     <div class="subnav" id="subnav" role="tablist"
          aria-label="Disk-state sub-view"></div>
 
+    <!-- Sort control: key (Size/Title/Year) + direction toggle. Client-side;
+         re-orders the loaded grid instantly. Built + wired in app.js. -->
+    <div class="sortbar" id="sortbar" aria-label="Sort items"></div>
+
     <p class="status-line" id="status-line" role="status" aria-live="polite"></p>
 
     <!-- The single grid for the selected (tab, sub-view). -->
@@ -67,19 +79,28 @@
   </div>
 
   <!-- Hidden card template cloned per item. The .poster is the slot Phase 5
-       fills with a real image; for now it holds the gradient + initial. -->
+       fills with a real image; for now it holds the gradient + initial.
+       The .fetch-ring overlay (IMP-E14 Phase 2, Candidate B) is an inline SVG
+       rounded-rect whose stroke-dashoffset shrinks 0->100% as fetch chunks
+       complete. It sits above the poster but is pointer-events:none so the
+       Fetch & Restore button stays clickable. Hidden until a fetch starts. -->
   <template id="card-tpl">
     <article class="card">
+      <svg class="fetch-ring" aria-hidden="true" focusable="false"
+           preserveAspectRatio="none" hidden>
+        <path class="fetch-ring-track" fill="none" vector-effect="non-scaling-stroke" />
+        <path class="fetch-ring-fill" fill="none" vector-effect="non-scaling-stroke"
+              stroke-linecap="round" />
+      </svg>
       <div class="poster">
         <span class="initial"></span>
         <span class="badge"><span class="dot"></span><span class="badge-label"></span></span>
       </div>
       <div class="card-body">
         <div class="id-row">
-          <span class="item-id"></span>
+          <span class="item-title"></span>
           <span class="item-size"></span>
         </div>
-        <div class="item-subid"></div>
         <div class="item-path"></div>
 
         <div class="field field-cmd">
@@ -102,6 +123,10 @@
         <div class="card-actions"></div>
 
         <div class="job-panel item-job"></div>
+
+        <!-- Raw canonical id, visually subordinate (small, dim, monospace) at the
+             card foot. The prominent title is .item-title at the top. -->
+        <div class="item-rawid"></div>
       </div>
     </article>
   </template>

@@ -327,7 +327,34 @@ def mock_device(tmp_path, monkeypatch):
 
         return res
 
+    class _FakeProc:
+        """Minimal stand-in for subprocess.Popen's return value, sufficient for
+        the cmd_dispatch_fetch streaming loop. That loop touches ONLY two members:
+        `for line in proc.stdout:` (iteration) and `proc.wait()` in a finally.
+        `.stdout` is a list of already-newline-terminated mainfetch-style lines,
+        so the loop reads a few lines, hits EOF, and exits without blocking; no
+        real child / Selenium is spawned. `.wait()` returns 0."""
+
+        def __init__(self):
+            self.stdout = [
+                "🔹 PROCESSING: <id>\n",
+                "   > Detected Split File (1 chunks)\n",
+                "     ✅ MOVED: dummy\n",
+                "✅ ENTRY COMPLETE.\n",
+            ]
+
+        def wait(self):
+            return 0
+
+    def fake_popen(cmd, **kwargs):
+        # Neutralizes `python mainfetch.py fetch ...` (the only subprocess.Popen
+        # call in main.py — see cmd_dispatch_fetch). Accepts the real call's
+        # kwargs (stdout/stderr/text/bufsize/encoding/errors/env) via **kwargs and
+        # ignores them. Returns a fake process that yields a few lines then EOFs.
+        return _FakeProc()
+
     monkeypatch.setattr(main.subprocess, "run", fake_run)
+    monkeypatch.setattr(main.subprocess, "Popen", fake_popen)
     yield device_dir
 
 

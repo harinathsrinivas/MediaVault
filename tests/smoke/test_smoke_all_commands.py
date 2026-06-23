@@ -292,6 +292,105 @@ class TestEachCommand:
         from webui.server import create_app
         assert create_app() is not None
 
+    # ---- web / fetch_restore via the HTTP action path ------------------------
+    def test_web_fetch_restore_action(self, sandbox, make_video, mock_device, capsys):
+        """Drive fetch_restore through the real HTTP action path (POST /api/action/
+        fetch_restore -> poll GET /api/job/{id}) without spawning a real subprocess.
+
+        mock_device neutralizes both subprocess.run (ADB) and subprocess.Popen
+        (the mainfetch worker subprocess that cmd_dispatch_fetch spawns), so no
+        browser or real process is started. The seeded entry is onboarded+uploaded
+        so cmd_fetch_restore runs the single-item branch, which prints
+        "FETCH & RESTORE COMPLETE" and returns None — a _NONE_IS_SUCCESS action
+        the server marks "done". The test polls GET /api/job/{id} with a short
+        deadline (well within the smoke budget) and asserts the terminal status is
+        "done" (not "error" / not wedged).
+
+        Constraints honoured: never touches real C:\\Media / real library_*.json;
+        all I/O is in sandbox tmp_path. Skipped cleanly where fastapi is absent.
+        """
+        pytest.importorskip("fastapi")
+        import time as _time
+        from starlette.testclient import TestClient
+        from webui.server import create_app
+
+        _seed_single(sandbox, make_video, uploaded=True, status="onboarded")
+
+        client = TestClient(create_app())
+        r = client.post("/api/action/fetch_restore", json={"id": EP1_ID})
+        assert r.status_code == 202, f"expected 202, got {r.status_code}: {r.text}"
+        job_id = r.json()["job_id"]
+
+        # Poll until the job leaves "running" state. The fake subprocess completes
+        # immediately; deadline is generous (10s) but still well inside smoke budget.
+        deadline = _time.monotonic() + 10
+        job = None
+        while _time.monotonic() < deadline:
+            jr = client.get(f"/api/job/{job_id}")
+            assert jr.status_code == 200, f"job poll {jr.status_code}: {jr.text}"
+            job = jr.json()
+            if job["status"] in ("done", "error"):
+                break
+            _time.sleep(0.05)
+        else:
+            raise TimeoutError(
+                f"fetch_restore job {job_id!r} did not finish within 10s; last: {job!r}"
+            )
+
+        assert job["status"] == "done", (
+            f"fetch_restore via web action should finish as 'done', got: {job!r}"
+        )
+        # progress dict is always present (IMP-E14 Phase 2 contract).
+        assert "progress" in job, "job record must carry a 'progress' key"
+        assert "done" in job["progress"] and "total" in job["progress"], (
+            f"progress must have {{done, total}}, got: {job['progress']!r}"
+        )
+
+    # ---- web / GET /api/items import-safety + contract -----------------------
+    def test_web_items_plain(self, sandbox, make_video, capsys):
+        """GET /api/items returns 200 with {items, by_category} over a plain
+        sandbox library — import-safety and contract shape check.
+
+        Two levels of coverage:
+        1. Direct: main.items_payload() must not raise and must return the
+           contract dict with the expected top-level keys.
+        2. HTTP: GET /api/items via TestClient must return 200 and the same
+           contract keys in the JSON body.
+
+        Both levels are light (no deep content assertion) — Group 1 unit tests
+        own correctness; this smoke asserts "the endpoint is wired and the
+        payload builder does not crash on a normal library". Skipped cleanly
+        where fastapi is absent.
+        """
+        _seed_single(sandbox, make_video, uploaded=False)
+
+        # Level 1: in-process call.
+        result = main.items_payload()   # must not raise
+        assert set(result) >= {"items", "by_category"}, (
+            f"items_payload contract keys missing; got: {set(result)!r}"
+        )
+        assert isinstance(result["items"], list)
+        assert isinstance(result["by_category"], dict)
+
+        # At least one item for our seeded leaf (the season_map is skipped).
+        assert any(it["id"] == EP1_ID for it in result["items"]), (
+            f"seeded leaf {EP1_ID!r} not found in items_payload; "
+            f"items: {[it['id'] for it in result['items']]!r}"
+        )
+
+        # Level 2: HTTP via TestClient. Skipped cleanly where fastapi is absent.
+        pytest.importorskip("fastapi")
+        from starlette.testclient import TestClient
+        from webui.server import create_app
+
+        client = TestClient(create_app())
+        r = client.get("/api/items")
+        assert r.status_code == 200, f"GET /api/items returned {r.status_code}: {r.text}"
+        body = r.json()
+        assert set(body) >= {"items", "by_category"}, (
+            f"/api/items response missing contract keys; got: {set(body)!r}"
+        )
+
     # ---- local_status (+ size limit) -----------------------------------------
     def test_local_status_plain(self, sandbox, make_video, capsys):
         _seed_single(sandbox, make_video, uploaded=False)
@@ -791,6 +890,37 @@ class TestAliasSweep:
         folder_path/filename). Asserts it does not raise and honours the contract."""
         result = main.collect_reclaimable()
         assert set(result) >= {"items", "total_reclaimable_bytes", "total_reclaimable_human"}
+
+    def test_web_items_alias(self, sandbox_alias, smoke_local_root):
+        """Anti-PR#21 guard for items_payload: the whole-library walker in
+        items_payload() must skip season_map + multi_ep_alias rows without
+        crashing and without emitting virtual rows in the output.
+
+        The sandbox_alias library has three entries: one season_map, one real
+        leaf (primary_id), and one multi_ep_alias. items_payload must emit
+        exactly ONE item (the primary leaf) — not the season_map or the alias.
+        This mirrors test_web_reclaim_alias's PR#21 regression guard, extended
+        to the items_payload code path introduced in IMP-E14.
+        """
+        result = main.items_payload()   # must not raise
+        assert set(result) >= {"items", "by_category"}, (
+            f"items_payload contract keys missing on alias library; got: {set(result)!r}"
+        )
+        # Only the primary leaf should appear; virtual rows (season_map /
+        # multi_ep_alias) must NOT be emitted.
+        emitted_ids = [it["id"] for it in result["items"]]
+        assert sandbox_alias["primary_id"] in emitted_ids, (
+            f"primary leaf {sandbox_alias['primary_id']!r} missing from items; "
+            f"got: {emitted_ids!r}"
+        )
+        assert sandbox_alias["alias_id"] not in emitted_ids, (
+            f"multi_ep_alias {sandbox_alias['alias_id']!r} leaked into items output — "
+            f"PR#21 regression (virtual rows must be skipped). emitted: {emitted_ids!r}"
+        )
+        assert sandbox_alias["season_id"] not in emitted_ids, (
+            f"season_map {sandbox_alias['season_id']!r} leaked into items output — "
+            f"virtual rows must be skipped. emitted: {emitted_ids!r}"
+        )
 
     def test_local_status_alias(self, sandbox_alias):
         main.cmd_local_status()

@@ -55,6 +55,7 @@
 - Risk: medium — new component, but strictly a CALLER of existing commands (no core-path edits). Real risks: concurrent daemon jobs vs manual CLI invocations on the same entry (mitigate with a per-entry lockfile honored by the daemon; manual CLI keeps priority), and Selenium fetch jobs needing an interactive-ish session (run the service as the logged-in user, not LocalSystem — same constraint mainfetch already has).
 - If skipped: the end goal simply does not exist — every couch action keeps requiring a walk to the PC.
 - Status: pending
+- Note (IMP-E14 cross-ref, 2026-06-23): the serialized web worker (`webui/server.py`) is the seed of this daemon and now performs `fetch_restore` end-to-end with live chunk-% progress (IMP-E14 Phase 2, `feature/imp_e14_fetch_in_ui`).
 
 ## IMP-S3: In-client fetch request + "ready" notify flow
 

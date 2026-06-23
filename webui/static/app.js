@@ -334,7 +334,18 @@ function syncViewChrome() {
   var grouped = isGrouped();
   var subnav = $("#subnav");
   var sortbar = $("#sortbar");
-  if (subnav) subnav.hidden = grouped;
+  // Hide the per-state rail in grouped mode. We set BOTH the `hidden` attribute
+  // (semantics) and an explicit `.is-hidden` class (belt-and-suspenders): the
+  // `.subnav` rule has an explicit `display:flex`, which would override the UA
+  // `[hidden]{display:none}` default unless a `.subnav[hidden]` rule restores it.
+  // styles.css carries that rule AND `.subnav.is-hidden`, so the rail is hidden
+  // regardless of UA `[hidden]` handling. Without this, grouped mode showed every
+  // state segment over a whole-category tree, making one ARCHIVED title appear
+  // under multiple state "blocks" while each leaf badge still read "Archived".
+  if (subnav) {
+    subnav.hidden = grouped;
+    subnav.classList.toggle("is-hidden", grouped);
+  }
   if (sortbar) sortbar.hidden = false;
   document.body.classList.toggle("grouped-view", grouped);
 }

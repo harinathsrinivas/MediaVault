@@ -230,6 +230,13 @@ button, input { font-family: inherit; }
   border: 1px solid var(--line-soft);
   border-radius: 12px;
 }
+/* Defensive: a class with an explicit `display` overrides the UA `[hidden]`
+   default, so the state rail would still render when app.js's syncViewChrome()
+   sets `subnav.hidden = true` in GROUPED mode (the tree spans all states — a
+   per-state rail over it is meaningless and made one ARCHIVED title appear under
+   several state segments). Mirrors `.viewbar[hidden]` below; makes `hidden` win. */
+.subnav[hidden],
+.subnav.is-hidden { display: none; }
 
 .seg {
   display: inline-flex;

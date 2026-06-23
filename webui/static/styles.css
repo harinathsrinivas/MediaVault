@@ -230,11 +230,12 @@ button, input { font-family: inherit; }
   border: 1px solid var(--line-soft);
   border-radius: 12px;
 }
-/* Defensive: a class with an explicit `display` overrides the UA `[hidden]`
-   default, so the state rail would still render when app.js's syncViewChrome()
-   sets `subnav.hidden = true` in GROUPED mode (the tree spans all states — a
-   per-state rail over it is meaningless and made one ARCHIVED title appear under
-   several state segments). Mirrors `.viewbar[hidden]` below; makes `hidden` win. */
+/* Defensive: the `.subnav` rule's explicit `display:flex` would override the UA
+   `[hidden]{display:none}` default, so this restores it — any code that sets
+   `subnav.hidden = true` (or adds `.is-hidden`) actually hides the rail. In normal
+   flow the rail is now shown in BOTH view modes (decluttered picks the flat grid's
+   state; grouped FILTERS the folder tree), so `hidden` is never set; this rule is
+   kept purely as a guard. Mirrors `.viewbar[hidden]` below. */
 .subnav[hidden],
 .subnav.is-hidden { display: none; }
 
@@ -283,7 +284,9 @@ button, input { font-family: inherit; }
 }
 .seg.active .seg-count { color: var(--text); background: rgba(255, 255, 255, 0.09); }
 
-/* Per-state dot hue (reuses the badge palette). */
+/* Per-state dot hue (reuses the badge palette). The "All" segment is neutral
+   (slate) — it represents no single state, just "everything". */
+.seg.s-all .seg-dot       { color: var(--text-dim);   background: var(--text-dim); }
 .seg.s-unprepped .seg-dot { color: var(--b-unprepped); background: var(--b-unprepped); }
 .seg.s-local .seg-dot     { color: var(--b-local);     background: var(--b-local); }
 .seg.s-pushed .seg-dot    { color: var(--b-pushed);    background: var(--b-pushed); }
@@ -292,6 +295,7 @@ button, input { font-family: inherit; }
 .seg.s-unknown .seg-dot   { color: var(--b-unknown);   background: var(--b-unknown); }
 
 /* The active segment gets a tinted underline matching its state hue. */
+.seg.active.s-all       { box-shadow: 0 2px 10px rgba(0,0,0,.3), inset 0 -2px 0 var(--text-dim); }
 .seg.active.s-unprepped { box-shadow: 0 2px 10px rgba(0,0,0,.3), inset 0 -2px 0 var(--b-unprepped); }
 .seg.active.s-local     { box-shadow: 0 2px 10px rgba(0,0,0,.3), inset 0 -2px 0 var(--b-local); }
 .seg.active.s-pushed    { box-shadow: 0 2px 10px rgba(0,0,0,.3), inset 0 -2px 0 var(--b-pushed); }

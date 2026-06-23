@@ -56,6 +56,99 @@ function isOpen(node, depth) {
 }
 
 // ---------------------------------------------------------------------------
+// State prune (PURE, DOM-free — importable by the node guard like compareNodes).
+//
+// The grouped view's rail can filter the folder tree to ONE lifecycle state. The
+// rule (user-explicit): keep a LEAF only if its effective state === `state`, and
+// keep a FOLDER only if it has at least one descendant leaf (nested at ANY depth)
+// matching `state` — folders with no matching descendant are DROPPED. "English"
+// shows under "Unprepped" iff some leaf under English is actually unprepped.
+//
+// effectiveLeafState mirrors renderLeaf's JOIN so the prune filters on the SAME
+// state the badge shows: prefer the enriched MODEL row's state (modelById[id]),
+// fall back to the raw tree leaf's own `state`. (The backend now stamps `state` on
+// every leaf; the model row is authoritative when present, and the two agree.)
+//
+// Returns a NEW array of pruned node COPIES — the cached /api/tree (data.js
+// loadTree) is NEVER mutated, so toggling the filter back to All (or to another
+// state) re-prunes the pristine tree every time. Folder copies carry NO sort memo
+// (_minYear/_maxYear) so renderTree's compareNodes recomputes year bounds against
+// the PRUNED children, not the full tree.
+//
+// Folder size while filtered: the AGGREGATE size of the VISIBLE (matching)
+// descendant leaves, summed bottom-up from the kept children (a kept leaf
+// contributes its own size_bytes; a kept sub-folder contributes its already-
+// aggregated size). So the displayed folder size reflects exactly what is shown.
+// ---------------------------------------------------------------------------
+
+export function effectiveLeafState(leaf, modelById) {
+  if (leaf && leaf.id != null && modelById && modelById[leaf.id]) {
+    var row = modelById[leaf.id];
+    if (row.state != null) return row.state;
+  }
+  return leaf && leaf.state;
+}
+
+function sizeOf(node) {
+  var n = Number(node && node.size_bytes);
+  return isFinite(n) && n > 0 ? n : 0;
+}
+
+// Prune ONE node; returns the pruned copy, or null if it (and all descendants)
+// fail the filter. Leaves are kept iff their effective state matches; folders are
+// kept iff at least one descendant leaf matches.
+function pruneNode(node, state, modelById) {
+  if (node && node.type === "leaf") {
+    return effectiveLeafState(node, modelById) === state ? shallowLeafCopy(node) : null;
+  }
+  // Folder: recurse, keep only surviving children.
+  var kids = (node && node.children) || [];
+  var kept = [];
+  var aggBytes = 0;
+  for (var i = 0; i < kids.length; i += 1) {
+    var pk = pruneNode(kids[i], state, modelById);
+    if (pk) {
+      kept.push(pk);
+      aggBytes += sizeOf(pk);
+    }
+  }
+  if (kept.length === 0) return null; // no matching descendant → drop the folder
+  return {
+    type: "folder",
+    name: node && node.name,
+    path: node && node.path,
+    has_image: !!(node && node.has_image),
+    // Size reflects the visible (matching) descendants, not the real folder size.
+    size_bytes: aggBytes,
+    children: kept,
+  };
+}
+
+// A leaf is rendered through buildCard from modelById, so the copy only needs to
+// carry the fields the tree itself reads (id for the join, type/state for prune &
+// sort, size_bytes/year for compareNodes). Shallow-copying the whole leaf is
+// simplest and keeps any extra backend fields intact for buildCard's fallback.
+function shallowLeafCopy(leaf) {
+  var out = {};
+  for (var k in leaf) {
+    if (Object.prototype.hasOwnProperty.call(leaf, k)) out[k] = leaf[k];
+  }
+  return out;
+}
+
+// Prune a category's root nodes to `state`. Pure: returns a fresh array, never
+// mutating `roots`. Used by app.js when a state filter (not "All") is active.
+export function pruneTreeByState(roots, state, modelById) {
+  var out = [];
+  var list = roots || [];
+  for (var i = 0; i < list.length; i += 1) {
+    var p = pruneNode(list[i], state, modelById || {});
+    if (p) out.push(p);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Public entry — render the category's roots into `container` (#panel).
 // `roots` is the array of top-level nodes for the active category (may be []).
 // `modelById` maps leaf id -> the enriched MODEL row for buildCard reuse.

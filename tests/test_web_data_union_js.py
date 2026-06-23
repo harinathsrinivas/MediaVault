@@ -1,10 +1,14 @@
-"""Pytest wrapper that runs the node data-bucket regression test (IMP-E14 polish).
+"""Pytest wrapper that runs the node data-bucket + tree-prune guard (IMP-E14 polish).
 
-The pure web-console merge lives in webui/static/data.js (a DOM-free ES module).
-Its one-state-per-id invariant is exercised by tests/js/test_data_buckets.mjs,
-which stubs the global `fetch`, imports the REAL data.js, and exits non-zero on a
-failed assertion. This wrapper shells to node so the JS guard participates in the
-normal `pytest -q` run (CI has no separate JS harness yet).
+The pure web-console logic lives in webui/static/{data,tree}.js (DOM-free ES
+modules). tests/js/test_data_buckets.mjs exercises TWO scenarios against the REAL
+shipped modules and exits non-zero on the first failed assertion:
+  (1) data.js loadModel()/countBy — the one-state-per-id merge invariant; and
+  (2) tree.js pruneTreeByState() — the grouped-view state prune (keep a folder iff
+      a descendant leaf matches; folder size = aggregate of visible leaves; "All"
+      keeps everything; the input tree is never mutated).
+This wrapper shells to node so both JS guards participate in the normal `pytest -q`
+run (CI has no separate JS harness yet).
 
 Skips cleanly when node is not on PATH — mirrors the real-binary skip pattern used
 for ffmpeg / mkvmerge fixtures in conftest.py, so the suite stays green on a box

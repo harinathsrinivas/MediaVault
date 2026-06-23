@@ -24,10 +24,11 @@
 import { fileURLToPath } from "node:url";
 import * as path from "node:path";
 
-// Resolve webui/static/data.js relative to THIS file (tests/js/ -> ../../webui).
+// Resolve webui/static/{data,tree}.js relative to THIS file (tests/js/ -> ../../webui).
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const DATA_JS = path.resolve(__dirname, "..", "..", "webui", "static", "data.js");
+const TREE_JS = path.resolve(__dirname, "..", "..", "webui", "static", "tree.js");
 
 // ---- tiny assert helpers (exit non-zero on failure) -----------------------
 let failures = 0;
@@ -139,8 +140,204 @@ globalThis.fetch = function (url) {
 
 // ---- run the assertions ----------------------------------------------------
 // import() needs a file:// URL for an absolute path on Windows; build it from the
-// resolved data.js path so we load the REAL shipped module (not a copy).
+// resolved paths so we load the REAL shipped modules (not copies). tree.js is
+// DOM-free at module load (all DOM access is deferred into functions), so the pure
+// prune logic imports cleanly under node — same discipline as data.js.
 const DATA_JS_URL = new URL("file:///" + DATA_JS.replace(/\\/g, "/"));
+const TREE_JS_URL = new URL("file:///" + TREE_JS.replace(/\\/g, "/"));
+
+// ---------------------------------------------------------------------------
+// Scenario 2 — the GROUPED-view state PRUNE (pruneTreeByState in tree.js).
+//
+// THE BEHAVIOR THIS PINS: in grouped mode, selecting a state filters the folder
+// tree. The rule (user-explicit): keep a LEAF only if its effective state matches;
+// keep a FOLDER only if some descendant leaf (at ANY depth) matches — folders with
+// no matching descendant are DROPPED. "English" shows under "Unprepped" iff some
+// leaf under English is actually unprepped. "All" keeps everything untouched, and
+// the prune must NOT mutate the input tree (the cached /api/tree is reused).
+//
+// Fake tree (mirrors /api/tree's roots[category] shape):
+//   Mixed/        (folder)
+//     ├─ Sub/     (folder, nested — proves the "any depth" rule)
+//     │    └─ leaf u1  UNPREPPED (size 100)
+//     └─ leaf a1       ARCHIVED  (size 9000)   ← model row overrides leaf.state
+//   AllArchived/  (folder)
+//     ├─ leaf a2       ARCHIVED  (size 8000)
+//     └─ leaf a3       ARCHIVED  (size 7000)
+// The model row for a1 (id "x-a1") carries state ARCHIVED, exercising the JOIN in
+// effectiveLeafState (model row wins over a deliberately WRONG leaf.state).
+function fakeTree() {
+  return [
+    {
+      type: "folder",
+      name: "Mixed",
+      path: "/m/Mixed",
+      has_image: false,
+      size_bytes: 9100,
+      children: [
+        {
+          type: "folder",
+          name: "Sub",
+          path: "/m/Mixed/Sub",
+          has_image: false,
+          size_bytes: 100,
+          children: [
+            { type: "leaf", id: "x-u1", state: "UNPREPPED", size_bytes: 100, title: "U1" },
+          ],
+        },
+        // NOTE: leaf.state is deliberately WRONG ("UNPREPPED") to prove the model
+        // row (ARCHIVED) wins in effectiveLeafState — the prune must agree with the
+        // badge, which reads the model row.
+        { type: "leaf", id: "x-a1", state: "UNPREPPED", size_bytes: 9000, title: "A1" },
+      ],
+    },
+    {
+      type: "folder",
+      name: "AllArchived",
+      path: "/m/AllArchived",
+      has_image: false,
+      size_bytes: 15000,
+      children: [
+        { type: "leaf", id: "x-a2", state: "ARCHIVED", size_bytes: 8000, title: "A2" },
+        { type: "leaf", id: "x-a3", state: "ARCHIVED", size_bytes: 7000, title: "A3" },
+      ],
+    },
+  ];
+}
+
+const PRUNE_MODEL_BY_ID = {
+  // a1's authoritative state is ARCHIVED (overrides the wrong leaf.state above).
+  "x-a1": { id: "x-a1", state: "ARCHIVED" },
+  // a2/a3/u1 omitted on purpose → effectiveLeafState falls back to leaf.state.
+};
+
+function leafIds(nodes) {
+  var out = [];
+  (nodes || []).forEach(function walk(n) {
+    if (n && n.type === "leaf") out.push(n.id);
+    else if (n && n.children) n.children.forEach(walk);
+  });
+  return out;
+}
+
+function findFolder(nodes, name) {
+  var hit = null;
+  (nodes || []).forEach(function walk(n) {
+    if (!n || hit) return;
+    if (n.type === "folder" && n.name === name) hit = n;
+    if (n.children) n.children.forEach(walk);
+  });
+  return hit;
+}
+
+async function runPruneScenario(tree) {
+  const mod = await import(TREE_JS_URL);
+  const { pruneTreeByState, effectiveLeafState } = mod;
+
+  console.log("\nScenario 2: grouped-view state PRUNE (pruneTreeByState)");
+
+  // effectiveLeafState: the model row wins over a wrong leaf.state (badge parity).
+  eq(
+    effectiveLeafState({ id: "x-a1", state: "UNPREPPED" }, PRUNE_MODEL_BY_ID),
+    "ARCHIVED",
+    "effectiveLeafState prefers the model row's state (ARCHIVED) over leaf.state"
+  );
+  eq(
+    effectiveLeafState({ id: "x-u1", state: "UNPREPPED" }, PRUNE_MODEL_BY_ID),
+    "UNPREPPED",
+    "effectiveLeafState falls back to leaf.state when no model row"
+  );
+
+  // --- prune to UNPREPPED ---------------------------------------------------
+  const unprepped = pruneTreeByState(tree, "UNPREPPED", PRUNE_MODEL_BY_ID);
+
+  // The Mixed folder is KEPT (its nested Sub/u1 leaf is unprepped)…
+  const mixed = findFolder(unprepped, "Mixed");
+  ok(!!mixed, "UNPREPPED prune KEEPS the Mixed folder (has a nested unprepped leaf)");
+  // …and the all-archived sibling is DROPPED entirely.
+  ok(
+    findFolder(unprepped, "AllArchived") === null,
+    "UNPREPPED prune DROPS the AllArchived sibling (no unprepped descendant)"
+  );
+
+  // Only the unprepped leaf survives under Mixed; the archived a1 leaf is gone.
+  const keptUnpreppedIds = leafIds(unprepped).sort();
+  eq(
+    JSON.stringify(keptUnpreppedIds),
+    JSON.stringify(["x-u1"]),
+    "UNPREPPED prune keeps EXACTLY the unprepped leaf (x-u1), drops archived x-a1"
+  );
+
+  // The nested Sub folder is kept (it holds the matching leaf); the empty-after-
+  // prune nothing else remains. Folder size while filtered = aggregate of VISIBLE
+  // leaves: Mixed shows 100 (only u1), Sub shows 100.
+  if (mixed) {
+    eq(mixed.size_bytes, 100, "Mixed folder size = aggregate of visible (unprepped) leaves = 100");
+    const sub = findFolder([mixed], "Sub");
+    ok(!!sub, "the nested Sub folder is kept (it contains the matching leaf)");
+    if (sub) eq(sub.size_bytes, 100, "Sub folder size = its single visible leaf = 100");
+  }
+
+  // --- prune to ARCHIVED ----------------------------------------------------
+  const archived = pruneTreeByState(tree, "ARCHIVED", PRUNE_MODEL_BY_ID);
+  const archIds = leafIds(archived).sort();
+  eq(
+    JSON.stringify(archIds),
+    JSON.stringify(["x-a1", "x-a2", "x-a3"]),
+    "ARCHIVED prune keeps EXACTLY the three archived leaves (incl. model-overridden x-a1)"
+  );
+  // Both folders survive under ARCHIVED (each has an archived descendant); the
+  // Mixed folder now shows ONLY a1 (9000) — the Sub folder (only-unprepped) drops.
+  const mixedArch = findFolder(archived, "Mixed");
+  ok(!!mixedArch, "ARCHIVED prune KEEPS Mixed (a1 is archived)");
+  ok(
+    findFolder(archived, "AllArchived") !== null,
+    "ARCHIVED prune KEEPS AllArchived (all its leaves are archived)"
+  );
+  if (mixedArch) {
+    ok(
+      findFolder([mixedArch], "Sub") === null,
+      "ARCHIVED prune DROPS the Sub folder under Mixed (its only leaf is unprepped)"
+    );
+    eq(mixedArch.size_bytes, 9000, "Mixed folder size under ARCHIVED = a1 only = 9000");
+  }
+  const allArch = findFolder(archived, "AllArchived");
+  if (allArch) {
+    eq(allArch.size_bytes, 15000, "AllArchived folder size = a2 + a3 = 15000");
+  }
+
+  // --- EACH leaf appears under EXACTLY its own state filter ------------------
+  // Build state -> kept leaf ids for every real state; assert the partition.
+  const expectByState = {
+    UNPREPPED: ["x-u1"],
+    ARCHIVED: ["x-a1", "x-a2", "x-a3"],
+    LOCAL_NOT_PUSHED: [],
+    PUSHED_NOT_ARCHIVED: [],
+    RESTORED_REPLACE_AGAIN: [],
+  };
+  Object.keys(expectByState).forEach(function (st) {
+    const got = leafIds(pruneTreeByState(tree, st, PRUNE_MODEL_BY_ID)).sort();
+    eq(
+      JSON.stringify(got),
+      JSON.stringify(expectByState[st].slice().sort()),
+      "state filter " + st + " yields exactly its own leaves"
+    );
+  });
+
+  // --- "All" keeps EVERYTHING (caller skips the prune for ALL); the prune must
+  //     ALSO never mutate the input tree, so the cached /api/tree stays pristine.
+  const allIds = leafIds(tree).sort();
+  eq(
+    JSON.stringify(allIds),
+    JSON.stringify(["x-a1", "x-a2", "x-a3", "x-u1"]),
+    "All = the whole tree keeps every leaf (4 total)"
+  );
+
+  // Mutation guard: re-run a prune and confirm the source tree is byte-identical.
+  const before = JSON.stringify(tree);
+  pruneTreeByState(tree, "UNPREPPED", PRUNE_MODEL_BY_ID);
+  eq(JSON.stringify(tree), before, "pruneTreeByState does NOT mutate the input tree");
+}
 
 async function main() {
   const mod = await import(DATA_JS_URL);
@@ -198,11 +395,15 @@ async function main() {
     eq(sampleRows[0].state, "UNPREPPED", "real sample row state === UNPREPPED");
   }
 
+  // Scenario 2: the grouped-view state prune (folder kept iff a descendant leaf
+  // matches; folder size = aggregate of visible leaves; All keeps everything).
+  await runPruneScenario(fakeTree());
+
   if (failures > 0) {
     console.error("\n" + failures + " assertion(s) FAILED");
     process.exit(1);
   }
-  console.log("\nAll data-bucket assertions passed.");
+  console.log("\nAll data-bucket + prune assertions passed.");
 }
 
 main().catch((err) => {

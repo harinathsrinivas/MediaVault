@@ -31,13 +31,14 @@ import {
   CATEGORY_ORDER,
   CATEGORY_META,
   STATE_ORDER,
+  ALL_STATE,
   metaFor,
 } from "./data.js";
 import { buildCard, runAction, setRefreshHandler, destroyRingsIn } from "./card.js";
 import { wireModal } from "./modal.js";
 import { getSort, setSort, sortItems, SORT_KEYS } from "./sort.js";
 import { wireCardGlow } from "./glow.js";
-import { renderTree, treeRootsFor } from "./tree.js";
+import { renderTree, treeRootsFor, pruneTreeByState } from "./tree.js";
 
 function $(sel, root) {
   return (root || document).querySelector(sel);
@@ -84,12 +85,13 @@ function isGrouped() {
   return viewMode === "grouped";
 }
 
-// Sub-view order = the 5 known states, PLUS any unexpected state that actually
-// appears (appended after ARCHIVED) so an odd out-of-sync row is still reachable
-// rather than silently dropped. Computed per render from the live model.
+// Sub-view order = the leading "All" segment, THEN the 5 known states, PLUS any
+// unexpected state that actually appears (appended after ARCHIVED) so an odd
+// out-of-sync row is still reachable rather than silently dropped. "All" leads in
+// BOTH view modes and is the default. Computed per render from the live model.
 function subViewStatesFor(category) {
   var counts = (MODEL && MODEL.counts.byCatState[category]) || {};
-  var order = STATE_ORDER.slice();
+  var order = [ALL_STATE].concat(STATE_ORDER);
   // Append any present-but-unknown states in first-seen order.
   Object.keys(counts).forEach(function (s) {
     if (order.indexOf(s) === -1) order.push(s);
@@ -97,7 +99,10 @@ function subViewStatesFor(category) {
   return order;
 }
 
+// Count shown on a rail segment. "All" shows the category total; every real state
+// shows its per-(category,state) bucket count.
 function countFor(category, state) {
+  if (state === ALL_STATE) return categoryCount(category);
   var byCat = (MODEL && MODEL.counts.byCatState[category]) || {};
   return byCat[state] || 0;
 }
@@ -107,7 +112,9 @@ function categoryCount(category) {
 }
 
 // First sub-view of a category that has at least one item; null if the category
-// is entirely empty.
+// is entirely empty. "All" leads the order and counts the whole category, so a
+// non-empty category resolves to "All" here — making it the natural default on
+// first load and the post-job fallback.
 function firstNonEmptyState(category) {
   var states = subViewStatesFor(category);
   for (var i = 0; i < states.length; i += 1) {
@@ -293,8 +300,9 @@ function handleBarKeydown(e, order, current, onSelect, isEnabled) {
 function selectCategory(cat, opts) {
   if (CATEGORY_ORDER.indexOf(cat) === -1) return;
   activeCategory = cat;
-  // Reset the sub-view to the first non-empty one for the new category.
-  activeState = firstNonEmptyState(cat) || subViewStatesFor(cat)[0];
+  // Reset the sub-view to "All" (the first non-empty sub-view for any non-empty
+  // category; falls back to "All" for an entirely empty category too).
+  activeState = firstNonEmptyState(cat) || ALL_STATE;
   refreshTabSelection();
   buildSubnav();
   renderPanel(true);
@@ -322,29 +330,28 @@ function selectState(state, opts) {
   }
 }
 
-// Show/hide the controls that only make sense in the flat (decluttered) view. In
-// grouped mode the tree spans ALL states of a category, so the state sub-view rail
-// (#subnav) is hidden (it would imply a filter the tree can't honor). The
-// Size/Title/Year sort bar (#sortbar) STAYS VISIBLE: the grouped tree applies the
-// active sort RECURSIVELY at every nesting level (tree.js sorts each level via
+// Sync the chrome around the panel to the active view mode. The state sub-view
+// rail (#subnav) now shows in BOTH modes: in decluttered it picks the flat grid's
+// state; in grouped it FILTERS the folder tree (All → whole tree; a state → the
+// tree pruned to that state — see paintTree). The Size/Title/Year sort bar
+// (#sortbar) also stays visible in both modes: the grouped tree applies the active
+// sort RECURSIVELY at every nesting level (tree.js sorts each level via
 // compareNodes), and its key/dir handlers call renderPanel(false), which in
-// grouped mode does a full renderTree re-render — so changing the sort instantly
-// re-orders the whole tree (the EXPANDED map preserves which folders are open).
+// grouped mode does a full renderTree re-render — so changing the sort (or the
+// state filter) instantly re-renders the tree (the EXPANDED map preserves which
+// folders are open).
+//
+// We force `subnav.hidden = false` here so the rail is never left hidden by a
+// prior build. The defensive `.subnav[hidden]{display:none}` rule in styles.css
+// stays (so any future code that DOES set `hidden` still hides it), but in normal
+// flow #subnav is simply always shown now.
 function syncViewChrome() {
   var grouped = isGrouped();
   var subnav = $("#subnav");
   var sortbar = $("#sortbar");
-  // Hide the per-state rail in grouped mode. We set BOTH the `hidden` attribute
-  // (semantics) and an explicit `.is-hidden` class (belt-and-suspenders): the
-  // `.subnav` rule has an explicit `display:flex`, which would override the UA
-  // `[hidden]{display:none}` default unless a `.subnav[hidden]` rule restores it.
-  // styles.css carries that rule AND `.subnav.is-hidden`, so the rail is hidden
-  // regardless of UA `[hidden]` handling. Without this, grouped mode showed every
-  // state segment over a whole-category tree, making one ARCHIVED title appear
-  // under multiple state "blocks" while each leaf badge still read "Archived".
   if (subnav) {
-    subnav.hidden = grouped;
-    subnav.classList.toggle("is-hidden", grouped);
+    subnav.hidden = false;
+    subnav.classList.remove("is-hidden");
   }
   if (sortbar) sortbar.hidden = false;
   document.body.classList.toggle("grouped-view", grouped);
@@ -398,8 +405,11 @@ function paintFlat(panel) {
   destroyRingsIn(panel);
   panel.textContent = "";
 
+  // "All" → every item of the category (all states); a specific state → just that
+  // state's items. Sorted below by the persisted key+direction.
   var rows = (MODEL ? MODEL.items : []).filter(function (it) {
-    return it.category === activeCategory && it.state === activeState;
+    if (it.category !== activeCategory) return false;
+    return activeState === ALL_STATE || it.state === activeState;
   });
   // Client-side sort (change #1): re-order the already-loaded rows by the
   // persisted key+direction (default size-desc). No refetch.
@@ -427,13 +437,25 @@ function paintFlat(panel) {
 // shows a status line and clears the panel (the toggle stays on Grouped so the
 // user can retry by re-selecting the tab).
 function paintTree(panel) {
-  // Capture the category this paint is for; if the user switches tabs before the
-  // tree resolves, a stale resolution must NOT overwrite the newer view.
+  // Capture the category AND state filter this paint is for; if the user switches
+  // tabs or the state filter before the tree resolves, a stale resolution must NOT
+  // overwrite the newer view.
   var forCategory = activeCategory;
+  var forState = activeState;
   treeRootsFor(forCategory)
     .then(function (roots) {
-      if (!isGrouped() || activeCategory !== forCategory) return; // superseded
-      renderTree(panel, roots, MODEL_BY_ID);
+      if (!isGrouped() || activeCategory !== forCategory || activeState !== forState) {
+        return; // superseded by a tab / state-filter change
+      }
+      // "All" → the whole category tree (every leaf, all states). A specific
+      // state → the tree PRUNED to that state: keep matching leaves, keep a folder
+      // only if some descendant leaf matches, and show each kept folder's size as
+      // the aggregate of its visible leaves (pruneTreeByState, pure + DOM-free).
+      var view =
+        forState === ALL_STATE
+          ? roots
+          : pruneTreeByState(roots, forState, MODEL_BY_ID);
+      renderTree(panel, view, MODEL_BY_ID);
     })
     .catch(function (err) {
       if (!isGrouped() || activeCategory !== forCategory) return;
@@ -507,11 +529,13 @@ function renderAll(isFirst) {
       })[0];
       if (firstCat) activeCategory = firstCat;
     }
-    activeState = firstNonEmptyState(activeCategory) || STATE_ORDER[0];
+    // Default sub-view = "All" (firstNonEmptyState resolves to ALL_STATE for any
+    // non-empty category; fall back to ALL_STATE for an empty library too).
+    activeState = firstNonEmptyState(activeCategory) || ALL_STATE;
   } else {
     // Re-render after a job. Keep the active sub-view if it still has items;
-    // else drop to the first non-empty sub-view of the same category; else the
-    // first category that has anything.
+    // else drop to the first non-empty sub-view of the same category (= "All"
+    // for any non-empty category); else the first category that has anything.
     if (countFor(activeCategory, activeState) === 0) {
       var fallback = firstNonEmptyState(activeCategory);
       if (fallback) {
@@ -522,9 +546,9 @@ function renderAll(isFirst) {
         })[0];
         if (nextCat) {
           activeCategory = nextCat;
-          activeState = firstNonEmptyState(nextCat) || STATE_ORDER[0];
+          activeState = firstNonEmptyState(nextCat) || ALL_STATE;
         } else {
-          activeState = STATE_ORDER[0];
+          activeState = ALL_STATE;
         }
       }
     }

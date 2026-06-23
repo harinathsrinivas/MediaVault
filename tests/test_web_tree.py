@@ -111,11 +111,56 @@ def _seed_tree(sandbox, make_video):
     }
 
 
+def _seed_unprepped(sandbox, make_video, seeded):
+    """On top of an already-seeded library tree, drop UNPREPPED disk files — real
+    videos NOT present in any library — so collect_reclaimable() surfaces them
+    with badge=="UNPREPPED" and build_tree() must add them as leaves:
+
+      * a Sample.mkv INSIDE the existing Dr No movie folder (so it nests beside
+        the library leaf under James Bond -> Dr No);
+      * an Extras clip in a NEW Series/Documentaries folder (its own subtree).
+
+    Returns {"sample": {path}, "extra": {path, dir}}.
+    """
+    # An unprepped sample sitting next to the library movie leaf.
+    sample_path, _ = make_video(seeded["bond"]["dir"] / "Sample.mkv", marker=b"X")
+
+    # An unprepped clip in a brand-new Series subfolder (not in the library).
+    extras_dir = sandbox["local_root"] / "Series" / "Documentaries"
+    extras_dir.mkdir(parents=True, exist_ok=True)
+    extra_path, _ = make_video(extras_dir / "BehindTheScenes.mkv", marker=b"E")
+
+    return {
+        "sample": {"path": str(sample_path)},
+        "extra": {"path": str(extra_path), "dir": extras_dir},
+    }
+
+
 def _find_folder(nodes, name):
     """Return the first folder child named ``name`` in ``nodes``, else None."""
     for n in nodes:
         if n["type"] == "folder" and n["name"] == name:
             return n
+    return None
+
+
+def _all_leaves(nodes):
+    """Collect every leaf NODE (full dict) reachable from ``nodes`` (recursive)."""
+    out = []
+    for n in nodes:
+        if n["type"] == "leaf":
+            out.append(n)
+        elif n["type"] == "folder":
+            out.extend(_all_leaves(n["children"]))
+    return out
+
+
+def _leaf_by_path(nodes, path):
+    """Return the leaf whose normpath-lower matches ``path``, else None."""
+    want = os.path.normpath(path).lower()
+    for leaf in _all_leaves(nodes):
+        if os.path.normpath(leaf["path"]).lower() == want:
+            return leaf
     return None
 
 
@@ -266,6 +311,150 @@ def test_tree_json_serializable_via_endpoint(sandbox, make_video):
     r = client.get("/api/tree")
     assert r.status_code == 200
     json.dumps(r.json())  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# UNPREPPED disk files are added to the tree (the fifth state) — IMP-E14 polish
+# ---------------------------------------------------------------------------
+
+def test_tree_includes_unprepped_disk_file_nested(sandbox, make_video):
+    """An UNPREPPED disk file (a real video NOT in the library) appears in
+    /api/tree as a leaf with state=="UNPREPPED", nested under its own on-disk
+    folder — the Sample.mkv shows beside the library leaf under James Bond ->
+    Dr No, and the Extras clip under Series -> Documentaries."""
+    seeded = _seed_tree(sandbox, make_video)
+    extra = _seed_unprepped(sandbox, make_video, seeded)
+
+    tree = main.build_tree()["roots"]
+
+    # Sample.mkv nests beside the library leaf inside the Dr No folder.
+    bond = _find_folder(tree["movies"], "James Bond")
+    assert bond is not None
+    drno = _find_folder(bond["children"], "Dr No")
+    assert drno is not None
+    drno_leaves = {os.path.normpath(c["path"]).lower(): c
+                   for c in drno["children"] if c["type"] == "leaf"}
+    sample_key = os.path.normpath(extra["sample"]["path"]).lower()
+    bond_key = os.path.normpath(seeded["bond"]["path"]).lower()
+    assert sample_key in drno_leaves, (
+        f"Sample.mkv missing under Dr No; leaves={list(drno_leaves)}"
+    )
+    assert bond_key in drno_leaves, "library movie leaf no longer under Dr No"
+    sample_leaf = drno_leaves[sample_key]
+    assert sample_leaf["state"] == "UNPREPPED"
+    assert sample_leaf["category"] == "movies"
+    assert sample_leaf["guessed"] is True
+    assert sample_leaf["poster_available"] is False
+    assert sample_leaf["chunk_count"] == 1
+    assert sample_leaf["size_bytes"] == os.path.getsize(extra["sample"]["path"])
+
+    # The Extras clip lives under its own new Series subtree.
+    docs = _find_folder(tree["series"], "Documentaries")
+    assert docs is not None, (
+        f"Documentaries folder missing; series={[n['name'] for n in tree['series'] if n['type']=='folder']}"
+    )
+    extra_leaf = _leaf_by_path(docs["children"], extra["extra"]["path"])
+    assert extra_leaf is not None, "Extras clip missing under Documentaries"
+    assert extra_leaf["state"] == "UNPREPPED"
+    assert extra_leaf["category"] == "series"
+
+
+def test_tree_spans_all_states_with_unprepped(sandbox, make_video):
+    """With both library leaves and an unprepped file seeded, the tree carries a
+    non-null `state` on EVERY leaf, library leaves keep their correct state, and
+    the unprepped file's UNPREPPED state is present — so the grouped view can be
+    filtered by all five states."""
+    seeded = _seed_tree(sandbox, make_video)
+    extra = _seed_unprepped(sandbox, make_video, seeded)
+
+    tree = main.build_tree()["roots"]
+    all_leaves = []
+    for cat in ("movies", "series", "anime", "other"):
+        all_leaves.extend(_all_leaves(tree[cat]))
+
+    # Every leaf has a non-null, non-empty state string.
+    for leaf in all_leaves:
+        assert leaf.get("state"), f"leaf {leaf.get('id')} has no state: {leaf}"
+
+    state_by_path = {os.path.normpath(l["path"]).lower(): l["state"] for l in all_leaves}
+    # Library leaves keep their items_payload state (local_ready -> LOCAL_NOT_PUSHED,
+    # onboarded -> PUSHED_NOT_ARCHIVED).
+    assert state_by_path[os.path.normpath(seeded["bond"]["path"]).lower()] == "LOCAL_NOT_PUSHED"
+    assert state_by_path[os.path.normpath(seeded["standalone"]["path"]).lower()] == "LOCAL_NOT_PUSHED"
+    assert state_by_path[os.path.normpath(seeded["tv"]["path"]).lower()] == "PUSHED_NOT_ARCHIVED"
+    # The unprepped disk file is UNPREPPED.
+    assert state_by_path[os.path.normpath(extra["sample"]["path"]).lower()] == "UNPREPPED"
+
+    # All five-state coverage requires UNPREPPED to be present alongside the
+    # library states this fixture produces.
+    assert "UNPREPPED" in set(state_by_path.values())
+
+
+def test_tree_folder_size_counts_unprepped_file(sandbox, make_video):
+    """Folder size logic is unchanged: the Dr No folder's REAL size already counts
+    the unprepped Sample.mkv sitting in it (size walk is independent of which
+    files are library leaves)."""
+    seeded = _seed_tree(sandbox, make_video)
+    extra = _seed_unprepped(sandbox, make_video, seeded)
+
+    tree = main.build_tree()["roots"]
+    bond = _find_folder(tree["movies"], "James Bond")
+    drno = _find_folder(bond["children"], "Dr No")
+
+    # Independent ground truth: every file under Dr No (library movie + sample).
+    expected = 0
+    for dirpath, _dirs, files in os.walk(seeded["bond"]["dir"]):
+        for f in files:
+            expected += os.path.getsize(os.path.join(dirpath, f))
+    assert drno["size_bytes"] == expected
+    # Sanity: the sample's bytes are part of that sum.
+    assert drno["size_bytes"] >= os.path.getsize(extra["sample"]["path"])
+
+
+def test_tree_unprepped_is_read_only(sandbox, make_video):
+    """Adding unprepped leaves to the tree must not mutate any library file (the
+    unprepped scan is the same read-only collect_reclaimable disk walk)."""
+    seeded = _seed_tree(sandbox, make_video)
+    _seed_unprepped(sandbox, make_video, seeded)
+
+    lib_paths = [sandbox["lib_movies"], sandbox["lib_series"], sandbox["lib_anime"]]
+    before_bytes = {p: p.read_bytes() for p in lib_paths}
+    before_lib = mvcommon.load_library()
+
+    main.build_tree()
+    main.build_tree()
+
+    for p in lib_paths:
+        assert p.read_bytes() == before_bytes[p], f"{p.name} changed — not read-only"
+    assert mvcommon.load_library() == before_lib
+
+
+def test_tree_alias_safe_with_unprepped(sandbox_alias, make_video):
+    """With a season_map/multi_ep_alias library AND an unprepped disk file under
+    Anime, build_tree() must NOT raise, must NOT leak the virtual ids, and MUST
+    still surface the unprepped file as a leaf with state=="UNPREPPED"."""
+    primary_id = sandbox_alias["primary_id"]
+    season_id = sandbox_alias["season_id"]
+    alias_id = sandbox_alias["alias_id"]
+
+    # An unprepped clip in a fresh Anime folder (unknown to the library).
+    ani_dir = sandbox_alias["sandbox"]["local_root"] / "Anime" / "RandomClip"
+    ani_dir.mkdir(parents=True, exist_ok=True)
+    clip_path, _ = make_video(ani_dir / "Clip.mkv", marker=b"A")
+
+    tree = main.build_tree()["roots"]  # must not raise
+    all_leaves = []
+    for cat in tree.values():
+        all_leaves.extend(_all_leaves(cat))
+    all_ids = [l["id"] for l in all_leaves]
+
+    assert season_id not in all_ids, "season_map leaked into the tree"
+    assert alias_id not in all_ids, "multi_ep_alias leaked into the tree"
+    assert primary_id in all_ids, f"primary physical leaf missing; got {all_ids}"
+
+    clip_leaf = _leaf_by_path(tree["anime"], str(clip_path))
+    assert clip_leaf is not None, "unprepped Anime clip missing from the tree"
+    assert clip_leaf["state"] == "UNPREPPED"
 
 
 # ---------------------------------------------------------------------------

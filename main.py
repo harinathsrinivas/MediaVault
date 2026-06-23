@@ -3824,11 +3824,12 @@ def items_payload():
 # Folder-tree payload for the web console grouped/folder view (IMP-E14 polish).
 #
 # build_tree() mirrors the on-disk folder hierarchy under each category root,
-# built FROM the already-safe items_payload() leaves (so it inherits the
-# alias/season_map skip — PR #21 crash class — for free). It is strictly
-# READ-ONLY: it only os.scandir/os.stat()s directories (metadata-only, never
-# reads media bytes) to compute real recursive folder sizes and detect a
-# poster.jpg/fanart.jpg anywhere in a subtree.
+# built FROM the already-safe items_payload() leaves (inheriting the
+# alias/season_map skip — PR #21 crash class — for free) PLUS the UNPREPPED disk
+# files collect_reclaimable() surfaces, so the tree spans every lifecycle state.
+# It is strictly READ-ONLY: it only os.scandir/os.stat()s directories
+# (metadata-only, never reads media bytes) to compute real recursive folder sizes
+# and detect a poster.jpg/fanart.jpg anywhere in a subtree.
 # ---------------------------------------------------------------------------
 
 # Folder-image filenames recognised for has_image / the folder-image route.
@@ -3890,7 +3891,7 @@ def _sort_tree_children(children):
 
 def build_tree():
     """Return the folder HIERARCHY mirroring the on-disk structure under each
-    category root, built from items_payload()'s physical leaves (READ-ONLY).
+    category root, spanning ALL five lifecycle states (READ-ONLY).
 
     Shape::
 
@@ -3898,17 +3899,75 @@ def build_tree():
                    "anime": [...], "other": [...]}}
 
     A FOLDER node:  {type:"folder", name, path, size_bytes, has_image, children}
-      - size_bytes : REAL recursive folder size (os.scandir metadata walk).
+      - size_bytes : REAL recursive folder size (os.scandir metadata walk) — it
+                     already counts every on-disk file, including the unprepped
+                     ones added as leaves below, so size logic is unchanged.
       - has_image  : poster.jpg/fanart.jpg present in the folder or any descendant.
       - children   : sub-folders first, then leaf nodes, each sorted by name.
-    A LEAF node = the items_payload() row for that leaf + {"type":"leaf"}.
 
-    Alias/season_map-safe: items_payload() already skips virtual rows, so no
-    virtual leaf can reach the tree. Intermediate path segments become folder
-    nodes nested by the leaf's REAL on-disk path relative to its category root.
+    LEAF nodes come from TWO sources, so the tree spans every state:
+      1. items_payload() physical library leaves — each row + {"type":"leaf"};
+         these carry the four library states (LOCAL_NOT_PUSHED /
+         PUSHED_NOT_ARCHIVED / RESTORED_REPLACE_AGAIN / ARCHIVED) in `state`.
+      2. collect_reclaimable() UNPREPPED rows — on-disk video files NOT in the
+         library (e.g. Sample.mkv, an Extras clip). Each becomes a leaf with
+         `state:"UNPREPPED"`, nested under its own on-disk folder so it shows
+         beside the library leaves it sits next to. EVERY leaf — from either
+         source — carries a non-null `state`, so the grouped web view can be
+         filtered by all five states.
+
+    Alias/season_map-safe: items_payload() already skips virtual rows, and the
+    UNPREPPED rows are plain disk files (no virtual concern). De-dup: a path that
+    is both a library leaf and (somehow) an UNPREPPED row appears once — the
+    library leaf wins (UNPREPPED rows are by definition not-in-library, so this
+    is just a guard). Intermediate path segments become folder nodes nested by
+    the leaf's REAL on-disk path relative to its category root.
     """
     payload = items_payload()
-    leaves = payload["items"]
+    library_leaves = payload["items"]
+
+    # Build a single, ORDER-PRESERVING list of leaf specs — (category, leaf
+    # on-disk path, leaf node) — so library leaves and unprepped disk files run
+    # through ONE identical nesting pass below. Library leaves are added first so
+    # that on the (by-definition impossible-for-UNPREPPED, but guarded) chance of
+    # a path collision the library leaf wins.
+    leaf_specs = []
+    seen_leaf_keys = set()  # normpath-lower of every leaf path already added
+
+    for leaf in library_leaves:
+        leaf_node = dict(leaf)
+        leaf_node["type"] = "leaf"
+        key = os.path.normpath(leaf["path"]).lower()
+        seen_leaf_keys.add(key)
+        leaf_specs.append((leaf.get("category", "other"), leaf["path"], leaf_node))
+
+    # Add the UNPREPPED disk files (files on disk, not in the library) as leaves
+    # so the tree covers the fifth state. collect_reclaimable() is the same
+    # read-only disk walk /api/reclaim uses; we take only its badge=="UNPREPPED"
+    # rows. Each becomes a minimal leaf mirroring the items leaf fields the
+    # frontend reads, plus the reclaim row's `guessed`/`suggested_command`.
+    for row in collect_reclaimable()["items"]:
+        if row.get("badge") != "UNPREPPED":
+            continue
+        key = os.path.normpath(row["path"]).lower()
+        if key in seen_leaf_keys:
+            continue  # de-dup guard: a library leaf already owns this path
+        seen_leaf_keys.add(key)
+        category = category_of_id(row["id"])
+        leaf_node = {
+            "type": "leaf",
+            "id": row["id"],
+            "category": category,
+            "state": "UNPREPPED",
+            "size_bytes": row["size_bytes"],
+            "path": row["path"],
+            "title": row["id"],  # no library metadata yet; mirror items' id-as-title
+            "guessed": True,
+            "suggested_command": row.get("suggested_command"),
+            "poster_available": False,
+            "chunk_count": 1,
+        }
+        leaf_specs.append((category, row["path"], leaf_node))
 
     roots = {"movies": [], "series": [], "anime": [], "other": []}
     # Per-category index: tuple(segment, ...) -> folder node, so repeated leaves
@@ -3953,11 +4012,10 @@ def build_tree():
             roots[cat].append(node)
         return node
 
-    for leaf in leaves:
-        cat = leaf.get("category", "other")
+    for cat, leaf_path, leaf_node in leaf_specs:
         if cat not in roots:
             cat = "other"
-        folder = os.path.dirname(leaf["path"])
+        folder = os.path.dirname(leaf_path)
         subdir = _CATEGORY_ROOT_SUBDIR.get(cat)
         cat_root = os.path.join(LOCAL_ROOT, subdir) if subdir else LOCAL_ROOT
 
@@ -3977,9 +4035,6 @@ def build_tree():
             segments = None
         else:
             segments = [s for s in rel.split(os.sep) if s and s != "."]
-
-        leaf_node = dict(leaf)
-        leaf_node["type"] = "leaf"
 
         if not segments:
             if segments is None:

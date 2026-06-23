@@ -28,11 +28,27 @@ export var STATE_ORDER = [
   "ARCHIVED",
 ];
 
+// The "All" pseudo-state. It is NOT a lifecycle state (no leaf ever carries it);
+// it is a sentinel for the leading "All" rail segment that shows EVERYTHING of a
+// category. The rail prepends it before STATE_ORDER and it is the DEFAULT sub-view
+// in both view modes: decluttered → a flat list of all the category's items;
+// grouped → the whole folder tree (no state prune). Kept out of STATE_ORDER so the
+// per-state buckets / counts / prune logic never treat it as a real state.
+export var ALL_STATE = "ALL";
+
 // Presentation + action metadata per lifecycle state. `cssKey` reuses the
 // existing BADGE_META palette (amber/blue/violet/orange) plus a cold key for
 // ARCHIVED. `action` is the POST /api/action/{name}; `confirm` gates the modal.
 // ARCHIVED is read-only in Phase 1 (the fetch button lands in Phase 2).
 export var STATE_META = {
+  ALL: {
+    label: "ALL",
+    short: "All",
+    cssKey: "all",
+    action: null,
+    verb: "—",
+    confirm: false,
+  },
   UNPREPPED: {
     label: "UNPREPPED",
     short: "Unprepped",

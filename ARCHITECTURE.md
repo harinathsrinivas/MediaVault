@@ -389,7 +389,21 @@ It binds **localhost only**.
   (⤢) showing the equivalent CLI command + live progress + full captured output;
   and a **cursor-following card glow** (mouse/trackpad; disabled on touch +
   `prefers-reduced-motion`). Posters and mobile/Tailscale/auth are tracked in
-  later phases (E14 Phases 3–5 and IMP-E3/U3).
+  later phases (E14 Phases 4–5 and IMP-E3/U3).
+- **CSS motion layer — no build step (IMP-E14 Phase 3):** the SPA gained a
+  **continuous hover border**: a rotating conic-gradient accent arc (`.card::after`,
+  `@property --ring-angle`) travels around each card on hover, complementing the
+  existing cursor-follow glow and yielding to the SVG fetch-progress ring.
+  An `@supports`-gated `mask` clip gives a clean arc on supporting browsers; iOS
+  Safari (which mis-renders mask+conic) falls back to a box-shadow ring instead.
+  A `prefers-reduced-motion` static fallback and touch-device guard are applied
+  throughout — all pure CSS, no JS, no build pipeline change.
+- **PWA / installable console (IMP-E14 Phase 3):** `webui/static/manifest.webmanifest`
+  (`display:standalone`, `theme_color:#0b0f17`) + self-generated branded PNG icons
+  (192×192 / 512×512 / apple-touch-icon 180×180) + iOS meta tags
+  (`apple-mobile-web-app-capable`, `apple-mobile-web-app-status-bar-style`,
+  `theme-color`, `viewport-fit=cover`). The console can be "Added to Home Screen"
+  on iPhone/iPad and runs as a standalone app without the browser chrome.
 - **The web tier calls the existing `cmd_*` UNCHANGED** — no copy of their
   logic. `replace` reuses `cmd_replace` verbatim, so the **auto-rollback
   change-gate is NOT tripped** (journal/PONR/`RollbackHardFail` contract

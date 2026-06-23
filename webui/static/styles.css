@@ -441,7 +441,12 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   border-radius: var(--radius);
   overflow: hidden;
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02) inset;
-  transition: transform 0.14s ease, box-shadow 0.14s ease, border-color 0.14s ease;
+  /* Buttery hover lift: a gentle ease-out curve on the compositor-friendly
+     transform/box-shadow/border so the rise settles softly rather than linearly. */
+  transition:
+    transform 0.22s cubic-bezier(0.22, 0.61, 0.36, 1),
+    box-shadow 0.22s cubic-bezier(0.22, 0.61, 0.36, 1),
+    border-color 0.18s ease;
 }
 .card:hover {
   transform: translateY(-3px);
@@ -492,6 +497,136 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
     );
   }
   .card:hover::before { opacity: 1; }
+}
+
+/* ============================================================================
+   HOVER BORDER — CANDIDATE A: rotating conic-gradient ring (IMP-E14 Phase 3).
+   ----------------------------------------------------------------------------
+   On hover, a bright accent arc TRAVELS continuously around the card's edge
+   (an "aesthetic flicker that keeps moving"), painted on a dedicated `.card::after`
+   layer. It COMPLEMENTS the two existing edge effects without fighting them:
+     • .card::before cursor glow   z-index:-1  (soft fill UNDER content)
+     • .card::after  hover ring    z-index:2   (thin FRAME on the edge — this)
+     • .fetch-ring SVG progress    z-index:3   (only during a fetch; see below)
+     • .demo-tag 4 / .card-actions 5            (always on top, untouched)
+   The ring is a HOLLOW frame (only ~1.6px of border is painted; the whole centre
+   is masked away), so even at z-index:2 it never covers the poster/title/buttons,
+   and `pointer-events:none` means it never intercepts a click, tap, or focus.
+
+   HOW IT MOVES: the conic-gradient's start angle is a registered custom property
+   `--ring-angle`; a keyframe sweeps it 0deg→360deg, rotating the bright arc around
+   the perimeter. Only `--ring-angle` (the gradient angle) and `opacity` animate —
+   never a layout/paint-heavy box property — so it stays compositor-cheap and 60fps.
+   It runs ONLY while hovered, so idle cards do zero animation work.
+
+   iOS-SAFARI SAFETY (the user's primary device — a blank page is an auto-loss):
+   A PRIOR conic ring blanked iOS by combining the LEGACY `-webkit-mask-composite:
+   xor` keyword with an `@property`-animated conic (step-2.3 decision). This
+   implementation NEVER uses `-webkit-mask-composite` or the `xor` keyword at all.
+   The hollow is cut with the MODERN standard `mask-composite: exclude` (shipped in
+   Safari 15.4, March 2022 — well before the user's 2026 device) and is wrapped in
+   `@supports (mask-composite: exclude)`, so the masked path is only ever parsed on
+   engines that actually implement it. Engines that don't (ancient WebKit/Firefox)
+   fall through to the composite-free `.card:hover` box-shadow floor below and get a
+   tasteful static accent edge — never a blank. There is therefore no syntactic or
+   capability path to the documented blank-render. */
+
+/* SAFE FLOOR — composite-free, works on every engine incl. pre-2022 WebKit. A
+   gentle accent edge on hover via box-shadow (no mask, no conic, no @property). On
+   capable engines the rotating ring below paints OVER this; on incapable ones this
+   is the whole (still pretty, never-blank) effect. */
+@media (hover: hover) and (pointer: fine) {
+  .card:hover {
+    box-shadow: var(--shadow), 0 0 0 1px rgba(56, 224, 200, 0.28);
+  }
+}
+
+/* The registered angle that the conic sweep rotates. `inherits:false` keeps it
+   local to each card; the 0deg default means a non-@property engine (Safari
+   15.4–16.3) still renders a clean STATIC arc rather than an invalid value. */
+@property --ring-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+/* The hollow rotating ring. Only defined where the modern, composite-free
+   `mask-composite: exclude` is supported — so iOS/legacy engines that lack it
+   never parse a mask at all and simply keep the box-shadow floor above. */
+@supports (mask-composite: exclude) {
+  .card::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 2;                 /* above poster, below .fetch-ring(3)/tag(4)/actions(5) */
+    pointer-events: none;        /* never blocks a click / tap / focus */
+    border-radius: inherit;      /* ride the card's rounded edge */
+    padding: 1.6px;              /* == painted ring thickness (the rest is masked off) */
+    /* A bright accent→focus arc over a transparent remainder; rotating --ring-angle
+       sweeps it around the perimeter. The transparent tail makes it read as one
+       travelling highlight, not a full outline. */
+    background: conic-gradient(
+      from var(--ring-angle),
+      transparent 0deg,
+      rgba(56, 224, 200, 0.95) 42deg,   /* --accent core of the arc */
+      rgba(90, 160, 255, 0.85) 88deg,   /* --focus trailing edge */
+      transparent 150deg,
+      transparent 360deg
+    );
+    /* Hollow it WITHOUT any composite=xor: paint the full box, subtract the
+       content-box, leaving only the `padding`-wide frame. `mask-composite:exclude`
+       is the modern (Safari 15.4+) keyword; `-webkit-mask`/`mask` carry the image
+       pair. No `-webkit-mask-composite`, no `xor` — the iOS-blank trigger is absent. */
+    -webkit-mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask:
+      linear-gradient(#000 0 0) content-box,
+      linear-gradient(#000 0 0);
+    mask-composite: exclude;
+    opacity: 0;                  /* idle = OFF (no work, no static line) */
+    transition: opacity 0.28s ease;
+  }
+
+  /* Reveal + start the continuous rotation ONLY on a true hovering pointer. On
+     touch (hover:none) this never matches → the arc can't show or get stuck after
+     a finger lifts; touch users keep the plain card. */
+  @media (hover: hover) and (pointer: fine) {
+    .card:hover::after {
+      opacity: 1;
+      animation: cardRingSpin 4.2s linear infinite;
+    }
+    /* While a fetch is running on this card, the SVG progress ring (z-index:3)
+       owns the edge; HIDE the hover arc so the two don't fight on the same border.
+       `.fetching` is toggled by ring.show()/reset() (ring.js). It restores the
+       moment the fetch ends. */
+    .card.fetching:hover::after { opacity: 0; animation: none; }
+  }
+}
+
+@keyframes cardRingSpin {
+  to { --ring-angle: 360deg; }
+}
+
+/* Reduced motion: NO rotation, NO spin animation. Fall back to a STATIC, subtle
+   accent frame so the hover affordance survives without any movement. The arc
+   becomes a calm, evenly-tinted full ring at a fixed angle. The box-shadow floor
+   above is already static (no animation), so it needs no override here. The card
+   lift transition is also dropped so the hover state applies instantly (the
+   springy ease-out above is the only motion this view would otherwise add). */
+@media (prefers-reduced-motion: reduce) {
+  .card { transition: border-color 0.18s ease; }
+  @supports (mask-composite: exclude) {
+    .card:hover::after {
+      animation: none;
+      background: conic-gradient(
+        from 0deg,
+        rgba(56, 224, 200, 0.45),
+        rgba(90, 160, 255, 0.40),
+        rgba(56, 224, 200, 0.45)
+      );
+    }
+  }
 }
 
 /* Poster placeholder — gradient + big initial, NO external image. */

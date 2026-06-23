@@ -441,10 +441,17 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   border-radius: var(--radius);
   overflow: hidden;
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.02) inset;
-  transition: transform 0.14s ease, box-shadow 0.14s ease, border-color 0.14s ease;
+  /* Buttery hover lift (IMP-E14 Phase 3 micro-polish): a slightly longer,
+     ease-out transform so the card glides up rather than snapping. box-shadow /
+     border-color stay quick; on hover the cardBreathe animation takes the
+     box-shadow over for the breathing glow. */
+  transition:
+    transform 0.22s cubic-bezier(0.22, 0.61, 0.36, 1),
+    box-shadow 0.16s ease,
+    border-color 0.16s ease;
 }
 .card:hover {
-  transform: translateY(-3px);
+  transform: translateY(-4px);
   box-shadow: var(--shadow);
   border-color: var(--line);
 }
@@ -492,6 +499,157 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
     );
   }
   .card:hover::before { opacity: 1; }
+}
+
+/* ============================================================================
+   HOVER AESTHETIC MOTION — CANDIDATE C: dual-layer glow + border-trace
+   (IMP-E14 Phase 3). Two coordinated layers come alive on hover and animate
+   CONTINUOUSLY in an aesthetic (non-jarring) way:
+
+     LAYER 1 — a soft OUTER glow that gently PULSES/breathes. It lives on the
+       CARD's own box-shadow (which escapes the card's overflow:hidden, unlike a
+       child layer), so the halo blooms OUTSIDE the card edge. The keyframe
+       carries BOTH the existing depth shadow (var(--shadow)) AND a mint accent
+       ring whose spread + alpha breathe, so the card looks "lit from within"
+       and alive. GPU-wise box-shadow is a paint, but it is cheap here (a couple
+       of shadows, no layout) and only runs while a card is hovered.
+
+     LAYER 2 — a thin BORDER whose bright highlight POINT traces the perimeter
+       continuously (the .hover-trace SVG in the template). A short dash is
+       chased around a normalized (pathLength=100) rounded <rect> by a CSS
+       stroke-dashoffset keyframe — one travelling accent dot riding a faint
+       full-perimeter rail (the track <rect>). This is the SAME stroke-dashoffset
+       technique as the proven P2 fetch ring, so it renders on iOS Safari; it
+       uses NO mask / mask-composite / @property / conic (the combo that blanked
+       iOS WebKit in step 2.3).
+
+   Idle = both layers OFF/subtle; hover (true pointer only) = both alive. They
+   COEXIST with: the cursor-follow radial glow (.card::before, z-index:-1) which
+   keeps working; and the fetch progress ring (.fetch-ring, z:3) — the trace is
+   layered BELOW it and is SUPPRESSED while .card.fetching so the two perimeter
+   effects never overlap confusingly. Buttons/poster/badge stay on top + clickable.
+   ============================================================================ */
+
+/* LAYER 2 base: the perimeter trace SVG. Stretched to the card box by a fixed
+   viewBox + preserveAspectRatio:none; non-scaling-stroke keeps the line crisp.
+   Sits above the poster but BELOW the fetch ring (z:3), demo tag (z:4) and the
+   action row (z:5). pointer-events:none — never blocks a click/tap/focus. Hidden
+   (opacity:0) until a true-hover :hover reveals it, so touch can't light it and
+   nothing sticks after a finger lifts. */
+.hover-trace {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 2;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.22s ease;
+  overflow: visible;
+}
+/* The dim full-perimeter rail the highlight dot travels along. Barely-there at
+   idle; it only becomes visible together with the moving dot on hover. */
+.hover-trace-track {
+  stroke: rgba(56, 224, 200, 0.16);
+  stroke-width: 1.5;
+}
+/* The bright travelling segment. stroke-dasharray = a short visible "on" dash
+   (18) followed by the rest of the normalized 100-unit perimeter as a gap (82),
+   so exactly ONE highlight point exists at a time; the trace keyframe sweeps its
+   stroke-dashoffset 100 -> 0 to walk that point all the way around, forever. */
+.hover-trace-run {
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-dasharray: 18 82;
+  stroke-dashoffset: 100;
+  filter: drop-shadow(0 0 4px rgba(56, 224, 200, 0.7));
+}
+
+/* Reveal both perimeter layers only on a genuine hovering, fine pointer (desktop
+   mouse / trackpad / pen). On touch (hover:none) this never matches — a tap can't
+   light the trace and nothing gets stuck after the finger lifts. */
+@media (hover: hover) and (pointer: fine) {
+  .card:hover .hover-trace { opacity: 1; }
+  /* LAYER 2 motion: chase the highlight dot around the edge continuously. */
+  .card:hover .hover-trace-run {
+    animation: traceTravel 2.6s linear infinite;
+  }
+  /* LAYER 1 motion: the card's outer glow breathes while hovered. The lift
+     (transform) still eases in via the .card transition; this animation owns the
+     breathing box-shadow. Slightly out of phase with the trace (2.6s vs 3.2s) so
+     the two layers shimmer rather than pulse in lockstep — more "alive". */
+  .card:hover {
+    animation: cardBreathe 3.2s ease-in-out infinite;
+  }
+}
+
+/* The travelling dot: walk the dash all the way around the normalized perimeter.
+   100 -> 0 moves it one full loop; `linear` keeps the speed even (aesthetic, not
+   easing in/out which would look like it pauses at the corners). */
+@keyframes traceTravel {
+  from { stroke-dashoffset: 100; }
+  to   { stroke-dashoffset: 0; }
+}
+
+/* The breathing outer glow. Each keyframe carries the depth shadow (so the hover
+   lift's shadow is preserved) PLUS a mint halo whose blur/spread/alpha swell and
+   ebb. The card keeps its hover border-color (set on .card:hover) — only the
+   shadow animates here. */
+@keyframes cardBreathe {
+  0%, 100% {
+    box-shadow:
+      var(--shadow),
+      0 0 0 1px rgba(56, 224, 200, 0.18),
+      0 0 16px 0 rgba(56, 224, 200, 0.18);
+  }
+  50% {
+    box-shadow:
+      var(--shadow),
+      0 0 0 1px rgba(56, 224, 200, 0.34),
+      0 0 26px 4px rgba(56, 224, 200, 0.34);
+  }
+}
+
+/* COEXIST with the fetch ring: while a fetch is running the P2 progress ring owns
+   the perimeter, so HIDE the hover trace entirely (no competing dot on the same
+   edge) and stop the breathing glow — the ring has its OWN complete-glow. This
+   wins over the :hover rules above (more specific + later) for a fetching card. */
+.card.fetching .hover-trace { opacity: 0; }
+@media (hover: hover) and (pointer: fine) {
+  .card.fetching:hover .hover-trace { opacity: 0; }
+  .card.fetching:hover .hover-trace-run { animation: none; }
+  .card.fetching:hover { animation: none; }
+}
+
+/* Reduced motion: STOP both the pulse and the trace. Replace with a STATIC,
+   subtle highlight so the hover affordance survives without any movement — a
+   gentle fixed glow on the card plus a faint, evenly-lit full-perimeter outline
+   (the dash collapses to a continuous line; no travel). :focus-visible outlines
+   are untouched (defined globally below). Kept as FLAT @media blocks (no nesting)
+   to match the file's style and avoid any nested-at-rule parser risk on iOS. */
+@media (prefers-reduced-motion: reduce) {
+  .hover-trace { transition: none; }
+  .hover-trace-run {
+    /* Solid, static outline (no dash, no travel) at a calm fixed intensity. */
+    stroke-dasharray: none;
+    stroke-dashoffset: 0;
+    stroke: rgba(56, 224, 200, 0.5);
+    filter: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) and (hover: hover) and (pointer: fine) {
+  .card:hover .hover-trace { opacity: 1; }
+  .card:hover .hover-trace-run { animation: none; }
+  .card:hover {
+    animation: none;
+    /* Static (non-breathing) accent glow so the hover still reads as "lit". */
+    box-shadow:
+      var(--shadow),
+      0 0 0 1px rgba(56, 224, 200, 0.22),
+      0 0 18px 0 rgba(56, 224, 200, 0.20);
+  }
+  /* A fetching card under reduced motion: still no competing perimeter dot. */
+  .card.fetching:hover .hover-trace { opacity: 0; }
 }
 
 /* Poster placeholder — gradient + big initial, NO external image. */

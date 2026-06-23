@@ -19,7 +19,7 @@
  *   • prefers-reduced-motion: tracking is NOT wired at all — the glow falls back
  *     to a static, centred, non-animated highlight (handled entirely in CSS).
  *   • Touch: only `mouse`/`pen` pointers update the centre; `touch` is ignored,
- *     and the CSS hover rule is gated to `(hover: hover) and (pointer: fine)`, so
+ *     and the CSS hover rule is gated to `(any-hover: hover) and (any-pointer: fine)`, so
  *     a tap never lights the glow and nothing can get stuck on after a finger
  *     lifts. No layout shift, no interference with scrolling or tapping.
  *
@@ -28,13 +28,15 @@
 
 "use strict";
 
-// A true hovering, fine pointer (desktop mouse / trackpad / pen). On touch this
-// is false, the CSS hover rule does not apply, and we skip tracking entirely.
+// A fine hovering pointer is AVAILABLE (desktop mouse / trackpad / pen) — using
+// any-hover/any-pointer so a mouse on a touch-capable Windows box (where the
+// PRIMARY pointer is reported coarse) still counts. On a pure-touch phone both are
+// false, the CSS hover rule does not apply, and we skip tracking entirely.
 function hasHoverPointer() {
   try {
     return (
       typeof window.matchMedia === "function" &&
-      window.matchMedia("(hover: hover) and (pointer: fine)").matches
+      window.matchMedia("(any-hover: hover) and (any-pointer: fine)").matches
     );
   } catch (e) {
     return false;

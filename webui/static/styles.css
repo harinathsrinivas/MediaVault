@@ -581,7 +581,7 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 /* Reveal only on devices with a true hovering pointer (desktop mouse / trackpad
    / pen). On touch (hover:none) this rule never matches, so a tap can't light it
    and nothing stays stuck after a finger lifts — graceful degradation. */
-@media (hover: hover) and (pointer: fine) {
+@media (any-hover: hover) and (any-pointer: fine) {
   .card:hover::before { opacity: 1; }
 }
 /* Reduced motion: no following + no fade. Fall back to a STATIC, centred, subtle
@@ -635,7 +635,7 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
    gentle accent edge on hover via box-shadow (no mask, no conic, no @property). On
    capable engines the rotating ring below paints OVER this; on incapable ones this
    is the whole (still pretty, never-blank) effect. */
-@media (hover: hover) and (pointer: fine) {
+@media (any-hover: hover) and (any-pointer: fine) {
   .card:hover {
     box-shadow: var(--shadow), 0 0 0 1px rgba(56, 224, 200, 0.28);
   }
@@ -691,7 +691,7 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   /* Reveal + start the continuous rotation ONLY on a true hovering pointer. On
      touch (hover:none) this never matches → the arc can't show or get stuck after
      a finger lifts; touch users keep the plain card. */
-  @media (hover: hover) and (pointer: fine) {
+  @media (any-hover: hover) and (any-pointer: fine) {
     .card:hover::after {
       opacity: 1;
       animation: cardRingSpin 4.2s linear infinite;

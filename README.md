@@ -240,7 +240,15 @@ pending Phase-5 TMDB), a **cursor-following card glow**, and a **buttery hover
 border** — a rotating conic-gradient accent arc that travels around each card on
 hover (iOS-safe fallback; `prefers-reduced-motion` static variant; touch-gated).
 The console is a **PWA**: tap "Add to Home Screen" on iPhone or iPad to install
-it as a standalone app without the browser chrome. Run
+it as a standalone app without the browser chrome. Each tab also has a
+**Grouped/Decluttered toggle** that switches between the flat card-grid and a
+**hierarchical folder view** mirroring the on-disk layout (show → season → episode;
+collection → movie). In grouped mode the state rail's **"All" filter** (default)
+shows real Windows folder sizes; selecting a lifecycle state prunes the tree to
+folders that have at least one matching leaf. Every folder and item card has an
+**Open in Explorer** button (localhost-only; returns 403 over Tailscale). A
+**procedural space/galaxy background** (Canvas, perf-capped, `prefers-reduced-motion`
+aware) replaces the static dark backdrop. Run
 `python main.py web --demo` to explore every action safely: demo mode simulates
 all operations (no library mutations, no Selenium) and shows a sticky
 "DEMO MODE" banner. It manages files only — it never plays video (Jellyfin

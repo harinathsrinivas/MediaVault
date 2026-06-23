@@ -9,7 +9,7 @@
 > Full task text lives in `improvements_tier*.md`; this file only orders them. Legend:
 > 🔴 critical · 🟠 high · 🟡 medium · ⚪ low · ✅ done · 🚦 needs a user decision (change-gate).
 >
-> **Last updated:** 2026-06-23 (IMP-E14 Phase 3 — hover motion + global web-ui-polish skill + PWA — landed on `feature/imp_e14_polish_pwa`: continuous conic-gradient hover border with iOS-safe fallback + `prefers-reduced-motion` discipline; PWA manifest + branded icons + iOS meta tags (Add-to-Home-Screen standalone); `web-ui-polish` Claude skill at `~/.claude/skills/web-ui-polish/SKILL.md`. Earlier: IMP-E14 Phase 2 fetch-in-UI + upload-integrity guard on `feature/imp_e14_fetch_in_ui`; IMP-E14 Phase 1: web media-type tabs + `GET /api/items`; 2026-06-22: IMP-D4 integrity guard; IMP-A12 CI pipeline; IMP-E12 web ops console + IMP-D16).
+> **Last updated:** 2026-06-23 (IMP-E14: grouped folder view + space background + open-in-Explorer + iOS no-cache fix landed on `feature/imp_e14_polish_pwa` — hierarchical folder tree with All/per-state pruning; `GET /api/tree` + `GET /api/folder-image` + `POST /api/open-folder` (localhost-only); procedural Canvas space background; `_NoCacheStaticFiles` iOS Safari stale-module fix; global JS error banner. Earlier: hover motion + global web-ui-polish skill + PWA; IMP-E14 Phase 2 fetch-in-UI; IMP-E14 Phase 1: `GET /api/items` + media-type tabs; 2026-06-22: IMP-D4 integrity guard; IMP-A12 CI pipeline; IMP-E12 web ops console + IMP-D16).
 
 ---
 

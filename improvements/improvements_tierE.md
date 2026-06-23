@@ -298,6 +298,28 @@
     **Global `web-ui-polish` Claude skill** installed at `~/.claude/skills/web-ui-polish/SKILL.md`
     (outside repo) — reusable buttery-motion recipes + iOS-Safari mask-render safety rules +
     `prefers-reduced-motion` discipline.
+    Additional enhancements shipped on this branch (scope grew beyond original Phase 3):
+    - **Grouped (hierarchical) folder view + Grouped/Decluttered toggle**: each media-type tab can
+      render the on-disk folder hierarchy (show→season→episode, collection→movie). The state rail
+      gains an **"All" segment** (default) alongside the 5 lifecycle states; in grouped mode a
+      state selection prunes the folder tree to folders with at least one matching descendant leaf
+      (folder size = aggregate of visible leaves; "All" = real Windows folder size). Recursive sort
+      at every tree level.
+    - **`GET /api/tree`**: new backend endpoint returning the per-category folder hierarchy across
+      all lifecycle states including un-prepped on-disk files; real Windows folder sizes via
+      `os.scandir`; `has_image` flag per folder. Read-only; alias-safe.
+    - **`GET /api/folder-image?path=`**: serves a folder's `poster.jpg` / `fanart.jpg` (or first
+      found in a descendant); realpath-contained to `C:\Media`; only those two filenames served.
+    - **`POST /api/open-folder`**: opens a folder in Windows Explorer; **localhost-only** (403
+      over Tailscale); realpath-contained to `C:\Media`; simulated in demo mode.
+    - **Open-in-Explorer button** on every folder and item card (fires `POST /api/open-folder`).
+    - **Procedural animated space/galaxy background** (`background.js`): Canvas starfield + nebula,
+      perf-capped (30 fps cap, pauses when tab hidden), `prefers-reduced-motion` aware, no external
+      assets.
+    - **Static no-cache policy** (`_NoCacheStaticFiles` subclass): `Cache-Control: no-cache` on
+      all static responses (ETag kept) — **fixes the iOS Safari stale-ES-module blank-page bug**.
+      Plus a `/favicon.ico` handler and a global JS error banner (`window.onerror` +
+      `unhandledrejection`) so the SPA can never silently blank.
   - **Phase 4** (mobile + Tailscale + auth — tracked as **IMP-E15**): responsive layout,
     Tailscale-safe binding, optional basic-auth (IMP-A5).
   - **Phase 5** (TMDB posters + rename — tracked as **IMP-E3 / IMP-U3 / IMP-D17**): real poster
@@ -306,4 +328,4 @@
 - Effort estimate: large overall (phased — Phase 1 was medium; Phase 2 was medium; Phase 3 was small; Phases 4-5 each small-to-medium)
 - Risk: low (Phases 1-3 call existing `cmd_*` unchanged via the existing job queue — no rollback-contract change; Phase 3 is CSS/manifest only, no backend change)
 - If skipped: the console stays disk-reclaim-only; there's no browsable media-type view, and fetch-in-UI/mobile access stay future-only.
-- Status: in_progress — **Phases 1-3 done** (web-UI core: media-type tabs + fetch-in-UI + aesthetic motion + PWA; on `feature/imp_e14_polish_pwa`); remote/mobile (Phase 4 = IMP-E15) and TMDB posters/rename (Phase 5 = IMP-E3/U3/D17) continue under their own tasks
+- Status: in_progress — **Phases 1-3 done** (web-UI core: media-type tabs + fetch-in-UI + aesthetic motion + PWA + grouped folder view + /api/tree + /api/folder-image + /api/open-folder + space background + open-folder button + iOS no-cache fix; on `feature/imp_e14_polish_pwa`); remote/mobile (Phase 4 = IMP-E15) and TMDB posters/rename (Phase 5 = IMP-E3/U3/D17) continue under their own tasks

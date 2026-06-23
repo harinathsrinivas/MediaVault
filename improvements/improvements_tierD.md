@@ -117,6 +117,7 @@
 - If skipped: integrity drift keeps being discovered by accident (the orphan sat invisible for months); the daemon would happily automate fetch/archive cycles on top of silently inconsistent state, amplifying any drift.
 - Status: in_progress
 - Note (2026-06-22): Partially delivered on branch fix/imp_d4_library_integrity_guard: `cmd_verify_library` status-to-disk integrity invariant (every physical leaf's status must match its on-disk shape; archived=>video-dummy, local_ready/onboarded/restored_local=>real) + warn-only post-conditions wired into cmd_push/cmd_replace/cmd_restore happy paths (post-commit, no rollback/PONR impact). Remaining D4 scope: orphan-parent, stale-season-map, hash-format audits.
+- Note (2026-06-23, IMP-D4 upload-integrity additions on `feature/imp_e14_fetch_in_ui`): `cmd_prep`'s short-circuit guard was widened to refuse re-prepping ANY cloud-bearing entry (`uploaded` truthy OR status in `{onboarded, archived, restored_local}`), closing the re-prep clobber path that produced the 107-entry + battlestar danglers. `cmd_verify_library` now additionally flags `possibly_dangling` leaves (entries with status `local_ready` or `uploaded=false` that nonetheless have on-disk cloud evidence such as a `checksums/` dir or a `_parts/` remnant).
 
 ---
 

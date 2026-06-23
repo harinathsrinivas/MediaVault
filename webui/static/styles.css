@@ -375,6 +375,57 @@ button, input { font-family: inherit; }
 }
 .sort-dir:hover { background: var(--bg-card-hover); border-color: var(--accent-deep); color: var(--accent); }
 
+/* ---------------- View toggle (Grouped <-> Decluttered) ---------------- */
+/* Mirrors the sort bar's segmented-pill pattern. Two buttons; the active one is
+   filled with the accent gradient + aria-pressed=true. Built/wired in app.js. */
+.viewbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 0 0 16px;
+}
+.viewbar[hidden] { display: none; }
+.viewbar-label {
+  font-size: 11px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 700;
+}
+.view-modes {
+  display: inline-flex;
+  gap: 4px;
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 4px;
+}
+.view-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 38px;            /* tap-friendly on mobile */
+  padding: 7px 16px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.14s, color 0.14s, border-color 0.14s;
+}
+.view-mode-glyph { font-size: 14px; line-height: 1; }
+.view-mode:hover { color: var(--text); background: var(--bg-card-hover); }
+.view-mode.active {
+  color: #06121a;
+  background: linear-gradient(135deg, var(--accent), var(--focus));
+  box-shadow: 0 3px 12px rgba(56, 224, 200, 0.26);
+}
+
 /* ---------------- Layout ---------------- */
 
 main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
@@ -956,6 +1007,187 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   padding: 2px 7px;
   box-shadow: 0 2px 8px rgba(56, 224, 200, 0.4);
   user-select: none;
+}
+
+/* ---------------- Open-folder button ---------------- */
+/* A compact icon button that opens the entry's folder in Explorer (local PC only;
+   the server enforces localhost + path safety + demo simulation). Present on every
+   leaf card AND every grouped-view folder header. Always a 40px tap target. */
+.open-folder-btn {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: rgba(10, 16, 24, 0.72);
+  color: var(--text-dim);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.open-folder-btn:hover {
+  background: var(--bg-card-hover);
+  color: var(--accent);
+  border-color: var(--accent-deep);
+}
+.open-folder-btn:active { transform: translateY(1px); }
+/* The leaf-card variant sits on the poster, pinned top-LEFT so it never collides
+   with the top-right badge (poster z-index:2) or the ?demo tag (z-index:4). At
+   z-index:5 it matches .card-actions, staying clickable above the hover ring and
+   never intercepting the badge or the Fetch & Restore button. Backdrop blur keeps
+   it legible over any poster gradient/image. */
+.open-folder-btn.on-poster {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 5;
+  width: 36px;
+  height: 36px;
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+/* ---------------- Grouped (folder-tree) view ---------------- */
+/* The hierarchy renders INSIDE #panel (so the delegated cursor glow covers leaf
+   cards). Folders are disclosure rows; their children indent and reveal on expand.
+   Leaf nodes are the SAME .card elements as the flat grid, laid out in a .grid. */
+.tree { display: flex; flex-direction: column; gap: 10px; }
+
+.folder-node {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, rgba(22, 31, 46, 0.6), rgba(18, 26, 40, 0.6));
+  overflow: hidden;
+}
+.folder-node.open { border-color: var(--line); }
+
+/* Disclosure header — a full-width button. Poster thumb · name+size · open btn. */
+.folder-head {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  min-height: 60px;            /* comfortable tap target */
+  background: transparent;
+  border: 0;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.folder-head:hover { background: var(--bg-card-hover); }
+
+.folder-caret {
+  flex: none;
+  width: 18px;
+  font-size: 13px;
+  color: var(--text-faint);
+  transition: transform 0.16s ease;
+}
+.folder-node.open > .folder-head .folder-caret { transform: rotate(90deg); color: var(--accent); }
+
+/* Poster thumbnail. Real <img> from /api/folder-image when has_image; otherwise (or
+   on img error) the .fallback gradient tile + a folder glyph shows through. */
+.folder-thumb {
+  flex: none;
+  width: 56px;
+  height: 56px;
+  border-radius: 9px;
+  overflow: hidden;
+  position: relative;
+  background: linear-gradient(135deg, #1b2638, #0e1622);
+  border: 1px solid var(--line-soft);
+}
+.folder-thumb-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.folder-thumb.fallback::after {
+  content: "🗀";                /* unicode folder — no external asset */
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 24px;
+  color: rgba(56, 224, 200, 0.5);
+}
+
+.folder-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.folder-name {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.2px;
+  overflow-wrap: anywhere;
+}
+.folder-sub {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The header's open-folder button is right-aligned via the meta's flex-grow. */
+.folder-head > .open-folder-btn { margin-left: auto; }
+
+/* Children region: indented from the folder edge. Leaf cards reflow as an auto-
+   fitting grid; nested sub-folders (full width) span all columns so the hierarchy
+   stays legible. Hidden when the folder is collapsed. */
+.folder-children {
+  padding: 6px 12px 12px 30px;
+  gap: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  align-items: start;
+}
+.folder-children[hidden] { display: none; }
+.folder-children > .folder-node { grid-column: 1 / -1; }
+@media (max-width: 460px) {
+  .folder-children { grid-template-columns: 1fr; padding-left: 18px; }
+}
+
+/* ---------------- Toast (open-folder outcomes) ---------------- */
+/* Bottom-centre, auto-dismissing. Created on demand by data.js showToast(). Text
+   via textContent (XSS-safe). Above the cards but below the modal/terminal. */
+.mv-toast {
+  position: fixed;
+  left: 50%;
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  transform: translate(-50%, 16px);
+  z-index: 40;
+  max-width: min(92vw, 420px);
+  padding: 11px 16px;
+  border-radius: 12px;
+  background: rgba(19, 26, 38, 0.96);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  box-shadow: var(--shadow);
+  opacity: 0;
+  pointer-events: none;
+  text-align: center;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.mv-toast.show {
+  opacity: 1;
+  transform: translate(-50%, 0);
+}
+@media (prefers-reduced-motion: reduce) {
+  .mv-toast { transition: opacity 0.2s ease; transform: translate(-50%, 0); }
+  .folder-caret { transition: none; }
 }
 
 /* Reduced motion: no smoothing transition, no glow animation. The outline still

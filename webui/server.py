@@ -40,8 +40,8 @@ import re
 import threading
 import time
 
-from fastapi import Body, FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import main
@@ -606,6 +606,71 @@ def create_app(demo=False):
         effective_runner = _run_demo_sim if demo else runner
         job_id = _enqueue(name, effective_runner, body)
         return JSONResponse(status_code=202, content={"job_id": job_id})
+
+    # -- Folder/tree routes (IMP-E14 polish) --------------------------------
+    # Read-only structure mirroring on-disk folders, a folder-image streamer,
+    # and a localhost-only Explorer opener. Registered BEFORE the StaticFiles
+    # mount below so "/" cannot shadow them.
+
+    _LOCALHOST_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+    @app.get("/api/tree")
+    def api_tree():
+        # Read-only: returns build_tree()'s contract dict verbatim
+        # ({"roots": {movies, series, anime, other}}). Real folder sizes +
+        # has_image come from a metadata-only os.scandir walk in main.build_tree.
+        return main.build_tree()
+
+    @app.get("/api/folder-image")
+    def api_folder_image(path: str):
+        # Stream poster.jpg (preferred) or fanart.jpg from the folder or first
+        # descendant. SECURITY: the resolved file MUST be under LOCAL_ROOT and
+        # its basename MUST be exactly poster.jpg/fanart.jpg (case-insensitive).
+        if not path:
+            raise HTTPException(status_code=400, detail="Missing path")
+        # The requested folder must itself be under LOCAL_ROOT (reject traversal
+        # before even scanning).
+        if not main._is_within_local_root(path):
+            raise HTTPException(status_code=403, detail="Path is outside the media root")
+        image_path = main.find_folder_image(path)
+        if not image_path:
+            raise HTTPException(status_code=404, detail="No folder image found")
+        # Re-assert the FINAL resolved file: under LOCAL_ROOT and an allowed name.
+        real = os.path.realpath(image_path)
+        if not main._is_within_local_root(real):
+            raise HTTPException(status_code=403, detail="Resolved image outside the media root")
+        if os.path.basename(real).lower() not in ("poster.jpg", "fanart.jpg"):
+            raise HTTPException(status_code=403, detail="Not an allowed image filename")
+        return FileResponse(real, media_type="image/jpeg")
+
+    @app.post("/api/open-folder")
+    def api_open_folder(request: Request, body: dict = Body(default=None)):
+        # Open a folder in Windows Explorer — LOCALHOST ONLY. Over Tailscale/any
+        # remote peer this would open Explorer on the SERVER, so it is rejected.
+        client = request.client
+        host = client.host if client else None
+        if host not in _LOCALHOST_HOSTS:
+            raise HTTPException(
+                status_code=403,
+                detail="Folder open is only allowed from the local browser.",
+            )
+        body = body or {}
+        path = body.get("path")
+        if not path or not isinstance(path, str):
+            raise HTTPException(status_code=400, detail="Missing path")
+        if not main._is_within_local_root(path):
+            raise HTTPException(status_code=403, detail="Path is outside the media root")
+        folder = os.path.realpath(path)
+        if not os.path.isdir(folder):
+            raise HTTPException(status_code=400, detail="Not an existing directory")
+        # DEMO mode: simulate — never touch the host shell.
+        if demo:
+            return JSONResponse(content={"opened": False, "demo": True})
+        try:
+            os.startfile(folder)  # noqa: S606 — Windows Explorer open of a vetted dir
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail=f"Could not open folder: {exc}")
+        return JSONResponse(content={"opened": True})
 
     @app.get("/api/job/{job_id}")
     def api_job(job_id: str):

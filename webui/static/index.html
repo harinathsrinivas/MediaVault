@@ -53,6 +53,11 @@
   </header>
 
   <main>
+    <!-- View toggle: Grouped (on-disk folder hierarchy) vs Decluttered (the flat
+         by-state grid). Mirrors the #sortbar pattern; built + wired in app.js. The
+         choice persists in sessionStorage and applies within each media-type tab. -->
+    <div class="viewbar" id="viewbar" aria-label="View mode"></div>
+
     <!-- Secondary segmented sub-view rail (one sub-view shown at a time). -->
     <div class="subnav" id="subnav" role="tablist"
          aria-label="Disk-state sub-view"></div>
@@ -142,5 +147,9 @@
   </template>
 
   <script type="module" src="./app.js"></script>
+  <!-- Ambient animated background canvas (self-injecting module, built separately).
+       Loaded once here; it self-injects its own <canvas> + <style> and honors
+       prefers-reduced-motion. This is the single load hook for that module. -->
+  <script type="module" src="./background.js"></script>
 </body>
 </html>

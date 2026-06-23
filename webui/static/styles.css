@@ -494,6 +494,104 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   .card:hover::before { opacity: 1; }
 }
 
+/* ---------------- Hover sheen border — traveling perimeter comet (Cand. B) ----
+   The user's ask: "hovering a box should show a flickering highlight that keeps
+   moving constantly, in an aesthetic way." This is a continuously-CIRCULATING
+   light that flows around the card EDGE on hover — a moving border highlight, not
+   a blink and not a flashlight over the whole card.
+
+   TECHNIQUE — animated gradient sheen sweep, MASK-FREE on purpose:
+   `.card::after` is a full-card overlay whose paint is confined to FOUR thin
+   (2px) edge strips via four `background` layers (top/right/bottom/left), each a
+   `linear-gradient` "comet" tiled along its edge. One `@keyframes` animates the
+   4-value `background-position` so the comet train flows clockwise — right along
+   the top, down the right, left along the bottom, up the left — looping forever
+   while hovered. The card INTERIOR is fully transparent (strips only touch the
+   rim), so the sheen never covers the poster, badge, title, or buttons.
+
+   Why no `mask`/`mask-composite`: a rectangular RING built from a mask needs a
+   carving composite (`xor`/`exclude`), and that exact recipe (mask-composite:xor
+   + conic + @property) BLANKED the page on iOS Safari (repo step-2.3 decision).
+   Four real edge strips need NO mask, NO composite, NO @property — so it renders
+   on iOS WebKit (the user's primary device). GPU-friendly: only background-
+   position + opacity animate (no layout, no geometry, no JS).
+
+   LAYER: z-index 2 — ABOVE the card gradient/poster-rim, BELOW the fetch-ring
+   (z:3), demo-tag (z:4) and card-actions (z:5), and a different layer from the
+   cursor-follow glow (.card::before, z:-1) so the two effects COEXIST (a soft
+   glow filling under the content + a bright light tracing the rim above it).
+   pointer-events:none so it never blocks a click / tap / focus / the ⤢ arrow. */
+.card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  border-radius: inherit;
+  opacity: 0;
+  transition: opacity 0.22s ease;
+  /* Faint ambient rim glow so the edge reads as "lit" between comets. */
+  box-shadow: inset 0 0 11px -6px var(--accent);
+  /* Four edge strips. Each comet is a soft lead-in to a bright point, tiled every
+     46px so a steady stream of light flows along the edge. The accent→focus tint
+     matches the brand (logo) gradient. */
+  background-image:
+    linear-gradient(90deg, transparent 0 52%, rgba(90, 160, 255, 0.55) 72%, rgba(56, 224, 200, 0.95) 80%, transparent 92%),
+    linear-gradient(180deg, transparent 0 52%, rgba(90, 160, 255, 0.55) 72%, rgba(56, 224, 200, 0.95) 80%, transparent 92%),
+    linear-gradient(270deg, transparent 0 52%, rgba(90, 160, 255, 0.55) 72%, rgba(56, 224, 200, 0.95) 80%, transparent 92%),
+    linear-gradient(0deg,   transparent 0 52%, rgba(90, 160, 255, 0.55) 72%, rgba(56, 224, 200, 0.95) 80%, transparent 92%);
+  background-size: 46px 2px, 2px 46px, 46px 2px, 2px 46px;
+  /* Bases sit at the 0-end of each strip's MOVING axis so the keyframe can shift
+     it by exactly one 46px tile (seamless under repeat); the PINNED axis (0 or
+     100%) is held constant in both base + keyframe so it never interpolates. */
+  background-position: 0 0, 100% 0, 0 100%, 0 0;
+  background-repeat: repeat-x, repeat-y, repeat-x, repeat-y;
+}
+/* Reveal + run ONLY on a true hovering, fine pointer (desktop mouse/trackpad/pen)
+   — mirrors the .card::before gate so a touch tap can't light it and nothing can
+   stay stuck after a finger lifts. */
+@media (hover: hover) and (pointer: fine) {
+  .card:hover::after {
+    opacity: 1;
+    animation: cardSheen 2.6s linear infinite;
+  }
+}
+/* Clockwise circulation: shift each strip by exactly one 46px tile per loop so the
+   comet train flows seamlessly (top →, right ↓, bottom ←, left ↑). Only the
+   moving axis changes per strip; the cross-axis stays pinned to its edge. */
+@keyframes cardSheen {
+  to {
+    background-position:
+      46px 0,        /* top   — travels right */
+      100% 46px,     /* right — travels down  */
+      -46px 100%,    /* bottom— travels left  */
+      0 -46px;       /* left  — travels up    */
+  }
+}
+/* While a fetch runs on this card, the SVG progress ring (z:3) owns the edge — so
+   stand the sheen down (no second border competing). The numeric ring label and
+   the ring itself stay fully visible/active. */
+.card.fetching::after {
+  opacity: 0;
+  animation: none;
+}
+/* Reduced motion: STOP the circulation. Fall back to a STATIC, evenly-lit subtle
+   rim highlight on hover (no movement) so the hover affordance survives. Built
+   from a single still inset rim glow + a faint full-perimeter outline; no comets,
+   no keyframes. :focus-visible outlines (defined globally) are untouched. */
+@media (prefers-reduced-motion: reduce) {
+  .card::after {
+    transition: none;
+    background-image: none; /* drop the comet strips entirely */
+    box-shadow:
+      inset 0 0 0 1px rgba(56, 224, 200, 0.22),
+      inset 0 0 14px -8px var(--accent);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    .card:hover::after { opacity: 1; animation: none; }
+  }
+}
+
 /* Poster placeholder — gradient + big initial, NO external image. */
 .poster {
   position: relative;

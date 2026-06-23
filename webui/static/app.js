@@ -323,15 +323,19 @@ function selectState(state, opts) {
 }
 
 // Show/hide the controls that only make sense in the flat (decluttered) view. In
-// grouped mode the tree spans ALL states of a category and sorts by folder name,
-// so the state sub-view rail (#subnav) and the Size/Title/Year sort bar (#sortbar)
-// are hidden — leaving them visible would imply a filter/order the tree can't honor.
+// grouped mode the tree spans ALL states of a category, so the state sub-view rail
+// (#subnav) is hidden (it would imply a filter the tree can't honor). The
+// Size/Title/Year sort bar (#sortbar) STAYS VISIBLE: the grouped tree applies the
+// active sort RECURSIVELY at every nesting level (tree.js sorts each level via
+// compareNodes), and its key/dir handlers call renderPanel(false), which in
+// grouped mode does a full renderTree re-render — so changing the sort instantly
+// re-orders the whole tree (the EXPANDED map preserves which folders are open).
 function syncViewChrome() {
   var grouped = isGrouped();
   var subnav = $("#subnav");
   var sortbar = $("#sortbar");
   if (subnav) subnav.hidden = grouped;
-  if (sortbar) sortbar.hidden = grouped;
+  if (sortbar) sortbar.hidden = false;
   document.body.classList.toggle("grouped-view", grouped);
 }
 

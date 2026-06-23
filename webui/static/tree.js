@@ -34,6 +34,7 @@
 
 import { humanSize, loadTree, openFolder } from "./data.js";
 import { buildCard, destroyRingsIn } from "./card.js";
+import { compareNodes } from "./sort.js";
 
 // Per-folder expand/collapse state, keyed by the folder's absolute path, kept for
 // the life of the session so re-rendering the tree (e.g. after a post-fetch model
@@ -74,10 +75,16 @@ export function renderTree(container, roots, modelById) {
     return;
   }
 
+  // Order the TOP level by the active sort (size/title/year). Sort a COPY so the
+  // cached /api/tree roots array is never mutated — toggling sort back and forth
+  // (and re-sorting after a model refresh) must stay correct and leave the model
+  // untouched. Every deeper level is sorted the same way in renderFolder below.
+  var ordered = list.slice().sort(compareNodes);
+
   var tree = document.createElement("div");
   tree.className = "tree";
   var frag = document.createDocumentFragment();
-  list.forEach(function (node) {
+  ordered.forEach(function (node) {
     frag.appendChild(renderNode(node, 0, modelById || {}));
   });
   tree.appendChild(frag);
@@ -182,7 +189,13 @@ function renderFolder(node, depth, modelById) {
   function buildChildren() {
     if (built) return;
     built = true;
-    var kids = node.children || [];
+    // Order THIS level by the active sort, recursively at every depth (English
+    // -> movie folders, show -> seasons -> episodes, …). Sort a COPY so the
+    // backend node.children stays in its original order — re-sorting on a sort
+    // toggle (full renderTree re-render) and after a model refresh must not
+    // corrupt the cached tree. Built at render time, so a collapsed folder
+    // expanded later picks up whatever sort is active then.
+    var kids = (node.children || []).slice().sort(compareNodes);
     var cfrag = document.createDocumentFragment();
     kids.forEach(function (child) {
       cfrag.appendChild(renderNode(child, depth + 1, modelById));

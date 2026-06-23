@@ -3,11 +3,13 @@ import json
 import sys
 import hashlib
 import re
+import secrets
 import tempfile
 import time
 import random
 import contextlib
 import errno
+from datetime import datetime, timezone
 from subprocess import SubprocessError
 
 # ==========================================
@@ -41,17 +43,22 @@ FETCH_SESSION_LOCK = os.path.join(MV_LOCK_DIR, "fetch_session.lock")
 #         RUNTIME CONFIG (mvconfig.json)
 # ==========================================
 # Optional, gitignored ``mvconfig.json`` at the repo root carries deploy-time
-# settings the source tree must not hard-code (the web bind host/port, the
-# shared web auth token, the TMDB API key). It is read ONCE and cached.
+# settings the source tree must not hard-code (the web bind host/port, the TMDB
+# API key). It is read ONCE and cached.
 #
 # Contract (see mvconfig.example.json):
-#   {"web": {"host": "127.0.0.1", "port": 8765, "token": null},
+#   {"web": {"host": "127.0.0.1", "port": 8765},
 #    "tmdb": {"api_key": null}}
+#
+# NOTE (IMP-E15): web access tokens are NO LONGER a static config key. They are
+# admin-minted, expiring, revocable tokens stored separately in ``mvtokens.json``
+# (see the WEB ACCESS TOKENS section below). mvconfig.json no longer carries a
+# ``web.token``.
 #
 # Resolution rules:
 #   * An ABSENT file, or an absent key, falls back to the documented default
-#     (host 127.0.0.1, port 8765, NO token -> no auth) — today's behaviour, so
-#     local dev and the test suite stay frictionless with no config file.
+#     (host 127.0.0.1, port 8765) — today's behaviour, so local dev and the test
+#     suite stay frictionless with no config file.
 #   * A MALFORMED file (bad JSON / wrong top-level type) warns to STDERR and
 #     falls back to defaults — it NEVER crashes the app.
 #
@@ -138,18 +145,6 @@ def web_port():
     return _WEB_DEFAULT_PORT
 
 
-def web_token():
-    """Configured shared web auth token, or "" when no token is set.
-
-    Returns "" (falsy) for absent / null / blank / non-string so callers can
-    test ``if web_token():`` to decide whether auth is enabled. A non-empty
-    string is returned stripped of surrounding whitespace."""
-    token = _config_section("web").get("token")
-    if isinstance(token, str) and token.strip():
-        return token.strip()
-    return ""
-
-
 def tmdb_api_key():
     """Configured TMDB API key, or "" when none is set.
 
@@ -158,6 +153,204 @@ def tmdb_api_key():
     if isinstance(key, str) and key.strip():
         return key.strip()
     return ""
+
+
+# ==========================================
+#         WEB ACCESS TOKENS (mvtokens.json)
+# ==========================================
+# IMP-E15: web access is gated by ADMIN-MINTED, EXPIRING, REVOCABLE tokens — NOT
+# a static config secret. The owner mints tokens from the genuine-local browser
+# (the web Access panel) or the CLI (`python main.py token create`); each token
+# can be shared with one device/person and individually revoked or left to
+# expire. The store is a gitignored ``mvtokens.json`` at the repo root, SEPARATE
+# from mvconfig.json.
+#
+# Store schema (atomic write: tempfile + os.replace):
+#   {"tokens": [
+#       {"id": "<8-hex>", "label": "<str>",
+#        "hash": "<sha256 hex of the raw token>",
+#        "created_at": "<iso8601 UTC>",
+#        "expires_at": "<iso8601 UTC or null = never>"},
+#       ...
+#   ]}
+#
+# SECURITY: the RAW token is shown to the owner exactly ONCE (at mint time) and
+# is NEVER persisted — only its sha256 is stored, so a leaked mvtokens.json does
+# not reveal any usable token. Validation re-hashes the presented raw token and
+# constant-time-irrelevant compares the hex digests (a sha256 of an attacker
+# guess reveals nothing about timing of the real secret).
+#
+# BINDING HAZARD: callers MUST go through these functions at RUNTIME. The store
+# path is the module-level ``MVTOKENS_PATH``; tests monkeypatch it to a temp file
+# so a real mvtokens.json is never written. The store is read fresh on every call
+# (it is tiny) — there is intentionally NO cache, so a mint/revoke is immediately
+# visible to the next validate/list without a cache-clear dance.
+MVTOKENS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mvtokens.json")
+
+
+def _now_utc():
+    """Current time as a timezone-aware UTC datetime (seam for monotonic tests)."""
+    return datetime.now(timezone.utc)
+
+
+def _parse_iso(ts):
+    """Parse an iso8601 timestamp produced by ``.isoformat()`` back to an aware
+    datetime, or None if it is null/blank/unparseable. A naive timestamp is
+    coerced to UTC so comparisons never raise on tz-mismatch."""
+    if not ts or not isinstance(ts, str):
+        return None
+    try:
+        dt = datetime.fromisoformat(ts)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _load_tokens():
+    """Read the token store and return its list of token records.
+
+    An ABSENT file -> [] (no tokens minted yet -> the console is in
+    unconfigured/local-only mode). A MALFORMED file (bad JSON / wrong shape)
+    warns to stderr and is treated as [] so a corrupt store never crashes the
+    app or silently locks the owner out (genuine-local admin still works with an
+    empty token set). Always returns a list of dicts."""
+    if not os.path.exists(MVTOKENS_PATH):
+        return []
+    try:
+        with open(MVTOKENS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(
+            f"⚠️  mvtokens.json is malformed and will be ignored "
+            f"(no minted tokens recognized). Error: {e}",
+            file=sys.stderr,
+        )
+        return []
+    tokens = data.get("tokens") if isinstance(data, dict) else None
+    if not isinstance(tokens, list):
+        return []
+    return [t for t in tokens if isinstance(t, dict)]
+
+
+def _save_tokens(tokens):
+    """Atomically persist the token list to MVTOKENS_PATH (tempfile + os.replace).
+
+    Mirrors save_library's durability idiom so a crash mid-write can never leave
+    a half-written store. The parent dir is created if missing."""
+    path = MVTOKENS_PATH
+    dir_name = os.path.dirname(path) or "."
+    os.makedirs(dir_name, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tf:
+            json.dump({"tokens": tokens}, tf, indent=2)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _hash_token(raw):
+    """sha256 hex digest of a raw token string (the only form ever stored)."""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def mint_token(label, ttl_seconds):
+    """Create a new access token and persist it.
+
+    label: free-text human label (e.g. "iPhone", "Mum"). Coerced to str/stripped.
+    ttl_seconds: lifetime in seconds, or None for a never-expiring token.
+
+    Returns (id, raw_token, expires_at_iso_or_None). The RAW token is returned
+    here and ONLY here — it is shown to the owner once and never stored (only its
+    sha256 is). The id is an 8-hex handle for revoke/list.
+    """
+    raw = secrets.token_urlsafe(32)
+    token_id = secrets.token_hex(4)  # 8 hex chars
+    created = _now_utc()
+    if ttl_seconds is None:
+        expires_at = None
+    else:
+        # timedelta via fromtimestamp keeps it dependency-free; negative ttl
+        # yields a past expiry (an already-expired token), which is a valid,
+        # testable state.
+        expires_at = datetime.fromtimestamp(
+            created.timestamp() + ttl_seconds, tz=timezone.utc
+        )
+    record = {
+        "id": token_id,
+        "label": str(label or "").strip(),
+        "hash": _hash_token(raw),
+        "created_at": created.isoformat(),
+        "expires_at": expires_at.isoformat() if expires_at is not None else None,
+    }
+    tokens = _load_tokens()
+    tokens.append(record)
+    _save_tokens(tokens)
+    return token_id, raw, record["expires_at"]
+
+
+def _is_expired(record, now=None):
+    """True iff this record has an expires_at in the past. null/never -> False."""
+    exp = _parse_iso(record.get("expires_at"))
+    if exp is None:
+        return False
+    return exp <= (now or _now_utc())
+
+
+def list_tokens():
+    """Return a sanitized view of all stored tokens for display.
+
+    Each item is {id, label, created_at, expires_at, expired} — the ``hash`` and
+    the raw token are NEVER included (the raw is not even stored). ``expired`` is
+    computed against the current time so a UI/CLI can flag stale tokens without
+    re-deriving the rule."""
+    now = _now_utc()
+    out = []
+    for t in _load_tokens():
+        out.append({
+            "id": t.get("id"),
+            "label": t.get("label", ""),
+            "created_at": t.get("created_at"),
+            "expires_at": t.get("expires_at"),
+            "expired": _is_expired(t, now),
+        })
+    return out
+
+
+def revoke_token(token_id):
+    """Remove the token with this id from the store. Idempotent.
+
+    Returns True if a token was removed, False if no token had that id (so the
+    caller can report "unknown id" while a DELETE endpoint can still treat the
+    end state — token gone — as success)."""
+    tokens = _load_tokens()
+    kept = [t for t in tokens if t.get("id") != token_id]
+    if len(kept) == len(tokens):
+        return False
+    _save_tokens(kept)
+    return True
+
+
+def validate_token(raw):
+    """True iff ``raw`` matches a stored token that has not expired.
+
+    sha256s the presented raw token and looks for a stored record with the same
+    hash whose expires_at is null (never) or in the future. An expired match, an
+    unknown token, or a blank/None input all return False."""
+    if not raw or not isinstance(raw, str):
+        return False
+    presented = _hash_token(raw)
+    now = _now_utc()
+    for t in _load_tokens():
+        if t.get("hash") == presented and not _is_expired(t, now):
+            return True
+    return False
 
 
 # ==========================================

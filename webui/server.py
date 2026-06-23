@@ -34,7 +34,6 @@ calls (as in tests) never spawn duplicate workers.
 """
 
 import contextlib
-import hmac
 import os
 import queue
 import re
@@ -50,39 +49,110 @@ import mvcommon
 
 
 # ---------------------------------------------------------------------------
-# Shared-token auth acceptance (IMP-E15).
+# Minted-token auth + genuine-local-admin detection (IMP-E15).
 #
-# When a web.token is configured, a request authenticates by presenting that
-# EXACT token via ANY ONE of three carriers (checked in this order):
-#   1. the `mv_token` cookie          (set once by the SPA, sent automatically)
-#   2. the `X-MediaVault-Token` header (fetch/XHR from the SPA)
-#   3. the `?token=` query parameter   (the frictionless auto-open URL + a
-#      shareable link; also lets a fresh browser bootstrap the cookie)
-# This carrier set is the FIXED contract the frontend implements against.
-# Compared via hmac.compare_digest (constant-time) to avoid leaking the token
-# length/prefix through response timing.
+# Access is NO LONGER a static shared secret. Two independent notions:
+#
+# 1. A request presents a VALID MINTED TOKEN via ANY ONE of three carriers
+#    (the FIXED contract the device-side auth.js implements against):
+#      a. the `mv_token` cookie          (set once by the SPA, sent automatically)
+#      b. the `X-MediaVault-Token` header (fetch/XHR from the SPA)
+#      c. the `?token=` query parameter   (a shareable link; also lets a fresh
+#         browser bootstrap the cookie)
+#    Each candidate is checked against the token store via
+#    mvcommon.validate_token (sha256 + expiry); the first that validates wins.
+#
+# 2. The request is from the GENUINE LOCAL ADMIN (the owner's own Alienware
+#    browser) — see _is_genuine_local_admin. This is the security hinge: it lets
+#    the owner manage tokens and use the console with NO token, while a remote
+#    tailnet peer proxied to 127.0.0.1 can NEVER be mistaken for it.
 # ---------------------------------------------------------------------------
 
 _COOKIE_NAME = "mv_token"
 _HEADER_NAME = "X-MediaVault-Token"
 _QUERY_NAME = "token"
 
+# Loopback hosts that COULD be the local admin (necessary, not sufficient — see
+# _is_genuine_local_admin, which additionally requires NO forwarding/identity
+# headers). Reused by /api/open-folder so its localhost rule == the admin check.
+_LOCALHOST_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
-def _request_has_valid_token(request: Request, expected: str) -> bool:
-    """True iff `request` presents `expected` via cookie, header, or query.
+# Headers that betray a PROXIED request. `tailscale serve` proxies remote tailnet
+# peers to 127.0.0.1 but injects forwarding/identity headers; an upstream reverse
+# proxy adds X-Forwarded-*. The presence of ANY of these means the request is NOT
+# the genuine local admin, even if request.client.host reads as loopback. Matched
+# case-insensitively against the request's header keys.
+_PROXY_HEADER_NAMES = (
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-forwarded-proto",
+    "forwarded",
+    "tailscale-user-login",
+    "tailscale-user-name",
+)
 
-    `expected` is assumed non-empty (the caller only invokes this when a token
-    is configured). Each candidate is compared in constant time; a missing
-    carrier contributes nothing."""
+
+def _is_genuine_local_admin(request: Request) -> bool:
+    """True iff this request is the owner's OWN local browser (the admin).
+
+    THE security hinge. ADMIN iff BOTH:
+      * request.client.host is loopback (127.0.0.1 / ::1 / localhost), AND
+      * NONE of the proxy/identity headers in _PROXY_HEADER_NAMES are present.
+
+    Rationale: `tailscale serve` proxies REMOTE tailnet peers to 127.0.0.1 but
+    adds forwarding/identity headers, so requiring loopback AND no-such-headers
+    means a proxied remote request can never masquerade as the local admin. Any
+    of those headers, OR a non-loopback host, => NOT admin (conservative)."""
+    client = request.client
+    host = client.host if client else None
+    if host not in _LOCALHOST_HOSTS:
+        return False
+    # Reject if ANY proxy/identity header is present (case-insensitive).
+    for name in _PROXY_HEADER_NAMES:
+        if name in request.headers:  # Starlette Headers lookup is case-insensitive
+            return False
+    return True
+
+
+def _request_token_is_valid(request: Request) -> bool:
+    """True iff `request` carries a VALID minted token via cookie, header, or
+    query. Each presented candidate is validated against the token store
+    (mvcommon.validate_token: sha256 match + not expired); the first that
+    validates wins. A missing carrier contributes nothing."""
     candidates = (
         request.cookies.get(_COOKIE_NAME),
         request.headers.get(_HEADER_NAME),
         request.query_params.get(_QUERY_NAME),
     )
     for presented in candidates:
-        if presented and hmac.compare_digest(presented, expected):
+        if presented and mvcommon.validate_token(presented):
             return True
     return False
+
+
+def _is_authed(request: Request) -> bool:
+    """True iff the request may use normal /api/* endpoints: it is the genuine
+    local admin OR it presents a valid minted token."""
+    return _is_genuine_local_admin(request) or _request_token_is_valid(request)
+
+
+def _ttl_seconds_from_body(value):
+    """Coerce a JSON `ttl_seconds` body value to int-seconds or None (never).
+
+    Accepts None (-> never), an int, or an all-digits string. A non-positive /
+    unparseable value is treated as None (never) so a malformed ttl never
+    accidentally mints an already-dead token via this endpoint (the CLI path,
+    which has explicit named windows, is the place to mint short-lived tokens)."""
+    if value is None:
+        return None
+    if isinstance(value, bool):  # bool is an int subclass — reject explicitly
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.strip().isdigit():
+        n = int(value.strip())
+        return n if n > 0 else None
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -642,37 +712,95 @@ def create_app(demo=False):
     # `demo` is what the routes below actually read.
     app.state.demo = demo
 
-    # -- Shared-token auth for ALL /api/* (IMP-E15) --------------------------
-    # The console is destructive, so when a token is configured it gates every
-    # /api/* request (reads AND actions). Implemented as path-based HTTP
-    # middleware rather than per-route dependencies for two reasons:
-    #   1. It provably covers EVERY current and future /api/* route (including
-    #      /api/docs) without having to remember to decorate each one.
-    #   2. STATIC files (the SPA shell: index.html, *.js, *.css, manifest,
-    #      icons, favicon) are NOT under /api/, so they are served WITHOUT auth
-    #      even when a token is set — otherwise the page could never load to let
-    #      the user enter the token. Only the /api/ prefix is gated here.
+    # -- Minted-token auth for normal /api/* (IMP-E15) -----------------------
+    # The console is destructive, so non-read-only AND read-only /api/* alike are
+    # gated. Implemented as path-based HTTP middleware (not per-route deps) so it
+    # provably covers EVERY current and future /api/* route without decorating
+    # each one, while STATIC files (the SPA shell) — not under /api/ — are always
+    # served so the page can load to prompt for a token.
     #
-    # The token is read at REQUEST time via mvcommon.web_token() (binding-safe:
-    # a monkeypatch of mvcommon.web_token is honoured). Empty token -> auth OFF
-    # (today's behaviour; local dev + the whole test suite stay frictionless).
+    # AUTH-ENABLEMENT RULE (the deliberate, documented decision):
+    #   * When the token store is EMPTY, the console is in "unconfigured /
+    #     local-only" mode and behaves like the original localhost tool: every
+    #     /api/* request is allowed. (No tokens minted == the owner has not set up
+    #     sharing.) This keeps the 90+ existing web tests — which create_app()
+    #     with no store — green WITHOUT weakening anything: with no tokens a
+    #     REMOTE request cannot present a valid token anyway, so the moment the
+    #     owner mints the first token, remote is locked to that token.
+    #   * Once ANY token exists, auth is ENFORCED for non-admin requests: they
+    #     must present a valid minted token (cookie / X-MediaVault-Token / ?token=)
+    #     or get 401. The GENUINE-LOCAL ADMIN (_is_genuine_local_admin) is ALWAYS
+    #     allowed — it never needs a token.
     #
-    # TAILSCALE-SERVE GOTCHA (deliberate): `tailscale serve` proxies remote
-    # tailnet peers to 127.0.0.1, so request.client.host is 127.0.0.1 even for
-    # REMOTE users. So there is intentionally NO "localhost -> skip token"
-    # exemption here — that would let every tailnet visitor bypass the token.
-    # When a token is set it is required for ALL /api/* regardless of client
-    # host. (/api/open-folder additionally RESTRICTS to localhost in its own
-    # handler — that only ever narrows access, never widens it.)
+    # The store is read at REQUEST time via mvcommon (binding-safe: a monkeypatch
+    # of mvcommon.list_tokens / validate_token / MVTOKENS_PATH is honoured).
+    #
+    # Two endpoints are EXEMPT from this guard (handled before the gate):
+    #   * GET /api/whoami — must be reachable with no auth so the SPA can learn
+    #     whether to show the admin panel / prompt for a token.
+    #   * the admin-only token-management endpoints (/api/token*) enforce their
+    #     OWN stricter genuine-local-admin check (403, not 401) in their handlers.
     @app.middleware("http")
-    async def _api_token_guard(request: Request, call_next):
-        if request.url.path.startswith("/api/"):
-            token = mvcommon.web_token()
-            if token and not _request_has_valid_token(request, token):
-                return JSONResponse(
-                    status_code=401, content={"detail": "Token required"}
-                )
+    async def _api_auth_guard(request: Request, call_next):
+        path = request.url.path
+        if path.startswith("/api/") and path != "/api/whoami":
+            # Admin-only token endpoints do their own 403 gate; don't double-gate
+            # them with a 401 here (a non-admin with a valid token must still get
+            # 403 from those handlers, not slip through this 401 layer).
+            if not path.startswith("/api/token"):
+                auth_required = len(mvcommon.list_tokens()) > 0
+                if auth_required and not _is_authed(request):
+                    return JSONResponse(
+                        status_code=401,
+                        content={"detail": "Access token required or expired"},
+                    )
         return await call_next(request)
+
+    # -- /api/whoami (NO auth — always reachable) ----------------------------
+    # The SPA reads this on load to decide whether to render the admin Access
+    # panel (is_admin) and whether it already has access (authed). Never gated.
+    @app.get("/api/whoami")
+    def api_whoami(request: Request):
+        return {
+            "is_admin": _is_genuine_local_admin(request),
+            "authed": _is_authed(request),
+        }
+
+    # -- Token management (ADMIN-only: genuine-local browser) ----------------
+    # Mint / list / revoke. Each requires the genuine-local admin (mirrors the
+    # /api/open-folder localhost rule) -> 403 otherwise. NEVER returns a stored
+    # hash; the raw token is returned ONLY by POST (mint), shown once.
+    def _require_admin(request: Request):
+        if not _is_genuine_local_admin(request):
+            raise HTTPException(
+                status_code=403,
+                detail="Token management is only allowed from the local (Alienware) browser.",
+            )
+
+    @app.post("/api/token")
+    def api_token_create(request: Request, body: dict = Body(default=None)):
+        _require_admin(request)
+        body = body or {}
+        label = body.get("label") or ""
+        ttl = _ttl_seconds_from_body(body.get("ttl_seconds"))
+        token_id, raw, expires_at = mvcommon.mint_token(label, ttl)
+        return {
+            "id": token_id,
+            "label": str(label).strip(),
+            "token": raw,  # raw shown ONCE — never stored, never returned again
+            "expires_at": expires_at,
+        }
+
+    @app.get("/api/token")
+    def api_token_list(request: Request):
+        _require_admin(request)
+        return {"tokens": mvcommon.list_tokens()}
+
+    @app.delete("/api/token/{token_id}")
+    def api_token_revoke(request: Request, token_id: str):
+        _require_admin(request)
+        mvcommon.revoke_token(token_id)  # idempotent: ok regardless of prior state
+        return {"ok": True}
 
     @app.get("/api/mode")
     def api_mode():
@@ -727,8 +855,6 @@ def create_app(demo=False):
     # and a localhost-only Explorer opener. Registered BEFORE the StaticFiles
     # mount below so "/" cannot shadow them.
 
-    _LOCALHOST_HOSTS = {"127.0.0.1", "::1", "localhost"}
-
     @app.get("/api/tree")
     def api_tree():
         # Read-only: returns build_tree()'s contract dict verbatim
@@ -760,11 +886,12 @@ def create_app(demo=False):
 
     @app.post("/api/open-folder")
     def api_open_folder(request: Request, body: dict = Body(default=None)):
-        # Open a folder in Windows Explorer — LOCALHOST ONLY. Over Tailscale/any
-        # remote peer this would open Explorer on the SERVER, so it is rejected.
-        client = request.client
-        host = client.host if client else None
-        if host not in _LOCALHOST_HOSTS:
+        # Open a folder in Windows Explorer — GENUINE-LOCAL ADMIN ONLY. Over
+        # Tailscale/any remote peer this would open Explorer on the SERVER, so it
+        # is rejected. Reuses the SAME genuine-local-admin check as token
+        # management (loopback host AND no proxy/identity headers), so a valid
+        # minted token can never widen this to a remote peer.
+        if not _is_genuine_local_admin(request):
             raise HTTPException(
                 status_code=403,
                 detail="Folder open is only allowed from the local browser.",

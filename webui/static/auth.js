@@ -319,7 +319,7 @@ function ensurePromptEl() {
   var p = document.createElement("p");
   p.className = "auth-line";
   p.textContent =
-    "This MediaVault console requires an access token (set in mvconfig.json on the Alienware).";
+    "This MediaVault console requires an access token. Ask the owner to create one on the Alienware (the Access panel, or `python main.py token create`) and share the link or token with you.";
   body.appendChild(p);
 
   // The error note (hidden until a wrong token is submitted). textContent only.

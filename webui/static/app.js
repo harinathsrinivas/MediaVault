@@ -40,6 +40,7 @@ import { getSort, setSort, sortItems, SORT_KEYS } from "./sort.js";
 import { wireCardGlow } from "./glow.js";
 import { buildTreeFragment, treeRootsFor, pruneTreeByState } from "./tree.js";
 import { authFetch, bootstrapToken } from "./auth.js";
+import { initAdmin } from "./admin.js";
 
 function $(sel, root) {
   return (root || document).querySelector(sel);
@@ -876,6 +877,10 @@ function init() {
   // any future re-ordering of the module graph.
   bootstrapToken();
   checkDemoMode();
+  // Owner-only "Access" panel (IMP-E15): probes /api/whoami and, only for the
+  // genuine local browser, mounts the token mint/list/revoke console. A remote
+  // device gets nothing here and keeps the existing 401 token-prompt flow.
+  initAdmin();
   wireModal();
   wireSort();
   buildSortbar();

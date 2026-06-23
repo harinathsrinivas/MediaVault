@@ -329,3 +329,24 @@
 - Risk: low (Phases 1-3 call existing `cmd_*` unchanged via the existing job queue — no rollback-contract change; Phase 3 is CSS/manifest only, no backend change)
 - If skipped: the console stays disk-reclaim-only; there's no browsable media-type view, and fetch-in-UI/mobile access stay future-only.
 - Status: in_progress — **Phases 1-3 done** (web-UI core: media-type tabs + fetch-in-UI + aesthetic motion + PWA + grouped folder view + /api/tree + /api/folder-image + /api/open-folder + space background + open-folder button + iOS no-cache fix; on `feature/imp_e14_polish_pwa`); remote/mobile (Phase 4 = IMP-E15) and TMDB posters/rename (Phase 5 = IMP-E3/U3/D17) continue under their own tasks
+
+---
+
+## IMP-E15: Mobile + Tailscale remote access + shared-token auth
+
+- Category: integration / security
+- Priority: high
+- Parent / prerequisite: IMP-E14 (built on its FastAPI console + PWA substrate)
+- Files: `mvcommon.py` (mvconfig.json loader), `webui/server.py` (token-auth middleware, non-localhost startup guard, `/api/*` enforcement), `webui/static/auth.js` (client-side token capture + cookie + header injection), `tools/tailscale_serve_setup.ps1` (one-time Tailscale HTTPS setup), `docs/feature-web-media-ui/REMOTE_ACCESS.md` (full remote-access guide), `mvconfig.json` (gitignored), `mvconfig.example.json` (checked in)
+- What shipped (branch `feature/imp_e15_mobile_tailscale_auth`):
+  - **mvconfig.json minimal config (IMP-A5 first slice):** `mvcommon.py` loads `mvconfig.json` at startup. Schema: `web.host`, `web.port`, `web.token`, `tmdb.api_key`. Absent / malformed → defaults (`127.0.0.1:8765`, no token, no auth). `mvconfig.json` gitignored; `mvconfig.example.json` checked in.
+  - **Shared-token auth on all `/api/*`:** when `web.token` is set, every `/api/*` route requires the token via `mv_token` cookie, `X-MediaVault-Token` header, or `?token=` query param. Constant-time compare (`hmac.compare_digest`); returns **401** on mismatch. No token configured → auth off. Static SPA shell always unauthenticated so the page loads to let the user enter the token. No localhost-exemption — `tailscale serve` proxies tailnet peers as `127.0.0.1`, so a host-exemption would defeat the token; instead the local browser is auto-opened with `?token=` appended by `cmd_web`. `POST /api/open-folder` retains its own separate localhost-only guard (403 for non-loopback) layered on top of token auth.
+  - **Non-localhost startup guard:** `cmd_web` refuses to bind to a non-localhost address when no token is configured (prints an error and exits).
+  - **Remote access model:** app binds `0.0.0.0` → reachable on LAN IP + Tailscale IP over HTTP; `tailscale serve` provides an HTTPS tailnet URL (one-time: enable MagicDNS + HTTPS in Tailscale admin). `tools/tailscale_serve_setup.ps1` automates the `tailscale serve` setup. Full guide: `docs/feature-web-media-ui/REMOTE_ACCESS.md`.
+  - **Client token UX (`auth.js`):** on page load, captures `?token=` → stores in `mv_token` cookie + `sessionStorage` → strips it from the URL. Sends `X-MediaVault-Token` header on every `fetch`. On 401 → shows a token-entry prompt. iPhone/iPad flow: open HTTPS URL, enter token once, "Add to Home Screen" to install PWA.
+- Rationale: The PWA (IMP-E14 Phase 3) installs beautifully on iPhone/iPad; without a safe remote-access model and auth layer, it is only usable on localhost. Tailscale gives a production-grade HTTPS tunnel with zero infra; the token keeps the API private without an identity provider.
+- Effort estimate: medium
+- Risk: low-medium — auth middleware is additive (no cmd_* change, no rollback-contract change, no ENTRY_TYPE_KEYS change); the non-localhost guard is additive; the mvconfig.json loader is additive (fallback to defaults if absent).
+- If skipped: the console stays localhost-only; phone access requires either an SSH tunnel or an insecure LAN URL; the PWA can't be used from the couch.
+- Cross-references: IMP-E14 (Phase 4 of the web media-UI plan); IMP-A5 (full config migration — E15 delivers the minimal slice only); IMP-E3/U3/D17 (Phase 5, next).
+- Status: in_progress — shipped on `feature/imp_e15_mobile_tailscale_auth`; done on merge to main

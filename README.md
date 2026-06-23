@@ -256,6 +256,45 @@ remains the viewing surface) and never moves or renames files (it shows you the
 command to copy). Install the deps first:
 `pip install -r requirements.txt` (adds `fastapi` + `uvicorn`).
 
+### Remote access (LAN / Tailscale)
+
+The console can be accessed from an iPhone, iPad, or any device on the same
+network or tailnet with a few one-time steps.
+
+**1. Set a token.** Add to `mvconfig.json` (copy `mvconfig.example.json` to start):
+```json
+{
+  "web": {
+    "host": "0.0.0.0",
+    "port": 8765,
+    "token": "your-secret-token-here"
+  }
+}
+```
+`mvconfig.json` is gitignored. When a token is configured every `/api/*`
+request must supply it (cookie, `X-MediaVault-Token` header, or `?token=`
+query). The local browser gets it automatically via the auto-opened URL.
+
+**2. Bind to the network.** `--host 0.0.0.0` makes the app reachable on your
+LAN IP and your Tailscale IP over plain HTTP. The app **refuses to start** bound
+non-localhost with no token set (safety guard).
+
+**3. HTTPS via Tailscale (recommended).** For an encrypted HTTPS tailnet URL:
+```
+# One-time Tailscale admin: enable MagicDNS + HTTPS at https://login.tailscale.com/admin
+# Then on the PC:
+tools\tailscale_serve_setup.ps1   # sets up `tailscale serve` → https://<machine>.ts.net
+```
+See `tools/tailscale_serve_setup.ps1` and
+`docs/feature-web-media-ui/REMOTE_ACCESS.md` for the full setup guide.
+
+**4. iPhone / iPad flow.** Open the HTTPS tailnet URL in Safari → enter the
+token once (stored in a cookie) → tap Share → "Add to Home Screen" to install
+as a standalone PWA. The token is sent automatically on every request.
+
+The `POST /api/open-folder` ("Open in Explorer") button remains localhost-only
+and returns 403 over Tailscale regardless of the token — by design.
+
 > **Reusable Claude skill:** the web-UI motion work was codified as a
 > `web-ui-polish` Claude skill at `~/.claude/skills/web-ui-polish/SKILL.md`
 > (outside the repo) — buttery-motion recipes (conic hover border, cursor glow,

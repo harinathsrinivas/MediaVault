@@ -449,6 +449,41 @@ It binds **localhost only**.
   untouched) and **`ENTRY_TYPE_KEYS` is unchanged** (no new entry type, no
   shared-field change). The console suggests folders/commands but never moves
   or renames files (move = IMP-D8).
+- **mvconfig.json minimal config (IMP-E15 / IMP-A5 first slice):** `mvcommon.py`
+  loads `mvconfig.json` at startup (gitignored; `mvconfig.example.json` is
+  checked in). The minimal schema is `web.host`, `web.port`, `web.token`, and
+  `tmdb.api_key`. An absent or malformed file silently falls back to today's
+  defaults (`127.0.0.1:8765`, no token, no auth). Full config migration of all
+  constants remains in IMP-A5 (pending).
+- **Shared-token auth on `/api/*` (IMP-E15):** when `web.token` is set in
+  `mvconfig.json`, **every** `/api/*` request must supply the token via one of
+  three mechanisms: the `mv_token` cookie, the `X-MediaVault-Token` HTTP header,
+  or the `?token=` query parameter. Comparison uses `hmac.compare_digest`
+  (constant-time) and returns **401** on mismatch. When no token is configured,
+  auth is off (local dev / tests). The static SPA shell (`/`) is always served
+  unauthenticated so the page loads even before a token is presented.
+  - **Why no host-exemption:** `tailscale serve` proxies remote tailnet peers as
+    `127.0.0.1` to the FastAPI process. A localhost-exemption rule would bypass
+    the token for all tailnet peers — so there is intentionally no such exemption.
+    Instead, `cmd_web` auto-opens the local browser with `?token=<token>` appended
+    so the local session is frictionless without any exemption.
+  - **`POST /api/open-folder` keeps its own localhost-only layer** on top of
+    token auth (non-loopback → 403 regardless of token). That check uses
+    `request.client.host`, not a cookie-based bypass.
+- **Non-localhost startup guard (IMP-E15):** `cmd_web` refuses to start if the
+  effective bind host is non-localhost (e.g. `0.0.0.0` or a LAN IP) with no
+  `web.token` configured. It prints an error and exits. This prevents accidentally
+  exposing an unauthenticated API on the network.
+- **Remote access model (IMP-E15):** the app can bind `0.0.0.0` to be reachable
+  on the LAN IP and the Tailscale IP over plain HTTP. For an encrypted HTTPS
+  tailnet URL, run `tailscale serve` in front (see
+  `tools/tailscale_serve_setup.ps1` and `docs/feature-web-media-ui/REMOTE_ACCESS.md`).
+  The iPhone/iPad flow: install the PWA ("Add to Home Screen"), open the HTTPS
+  tailnet URL, enter the token once — it is captured by `auth.js` from `?token=`,
+  stored in a cookie + `sessionStorage`, stripped from the URL, and sent as
+  `X-MediaVault-Token` on every subsequent fetch. A 401 response triggers a
+  token prompt. One-time Tailscale admin setup: enable MagicDNS and HTTPS in the
+  Tailscale admin console.
 
 ---
 

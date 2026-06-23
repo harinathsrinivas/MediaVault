@@ -81,7 +81,7 @@
 
 <header>
   <div class="brand">Media<span>Vault</span> · Priority Graph</div>
-  <div class="next">⚡ Next: <b>IMP-E15</b>&nbsp;<span style="color:#9fb0d6">Phase 4: mobile + Tailscale + auth (E14 Phases 1-3 done)</span>&nbsp;·&nbsp;<a href="../../improvements/PRIORITY.md">full list →</a></div>
+  <div class="next">⚡ Next: <b>IMP-E3/U3/D17</b>&nbsp;<span style="color:#9fb0d6">Phase 5: TMDB posters + real titles + rename_folder (E15 done)</span>&nbsp;·&nbsp;<a href="../../improvements/PRIORITY.md">full list →</a></div>
   <div class="grow"></div>
   <input id="search" placeholder="search tasks…  (Enter to focus)">
 </header>
@@ -111,7 +111,7 @@
   <a class="open" id="p-open" href="#" target="_blank" rel="noopener">Open task in tier file →</a>
 </div>
 
-<div class="footer">Generated 2026-06-23 · keep in sync with <code>PRIORITY.md</code> (see its maintenance protocol) · ~111 tasks</div>
+<div class="footer">Generated 2026-06-23 · keep in sync with <code>PRIORITY.md</code> (see its maintenance protocol) · ~112 tasks</div>
 
 <script>
 /* ───────────────────────── TASK DATA — keep in sync with PRIORITY.md + improvements_tier*.md ─────────────────────────
@@ -192,6 +192,7 @@ const TASKS = [
  ["E12","web ops UI","E","done","done","Done (feature/web_console): FastAPI Disk Reclaim console + card-grid SPA; bundled A10, introduced D16"],
  ["E13","multi-episode support","E","done","done","Shipped PR #21 (follow-ups → C12/C13)"],
  ["E14","web media-type UI","E","high","todo","Phases 1-3 done (tabs + fetch/progress + motion/PWA + grouped folder view + /api/tree + /api/folder-image + /api/open-folder localhost-only + space background + iOS no-cache fix); phases 4-5 = E15 remote + E3/U3/D17 posters — E14 feeds S2 daemon (web worker is its seed)"],
+ ["E15","mobile + Tailscale + token auth","E","high","todo","Shipped: mvconfig + token auth on all /api/* + non-localhost startup guard + tailscale serve HTTPS + token UX (IMP-A5 slice)"],
  // F — moonshots
  ["F1","encrypt-at-rest","F","med","todo","Privacy — see X3 (container constraint)"],
  ["F2","CDC dedup","F","low","todo","Blocked by container constraint; small real win"],
@@ -253,7 +254,7 @@ const EDGES = [
  ["C6","S3"],["S4","U1"],["E4","S4"],["E4","S5"],["E5","S5"],["C1","S2"],
  ["R6","S3"],["G4","S2"],["G4","U5"],["G2","S7"],["S6","S8"],
  ["E7","X1"],["F3","X1"],["X1","X2"],["X1","X4"],["X1","X5"],["X3","F1"],
- ["C12","B7"],["E1","F7"],["U3","U2"],["C16","X1"],["C16","S3"],["C17","C6"],["C16","C17"],
+ ["C12","B7"],["E1","F7"],["U3","U2"],["C16","X1"],["C16","S3"],["C17","C6"],["C16","C17"],["E14","E15"],["A5","E15"],
 ];
 
 const PRI={crit:{c:"#ff2d55",r:140,size:30,lbl:"Critical / decision"},high:{c:"#ff9f0a",r:300,size:22,lbl:"High"},

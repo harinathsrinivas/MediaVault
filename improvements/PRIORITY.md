@@ -9,19 +9,18 @@
 > Full task text lives in `improvements_tier*.md`; this file only orders them. Legend:
 > 🔴 critical · 🟠 high · 🟡 medium · ⚪ low · ✅ done · 🚦 needs a user decision (change-gate).
 >
-> **Last updated:** 2026-06-23 (IMP-E14: grouped folder view + space background + open-in-Explorer + iOS no-cache fix landed on `feature/imp_e14_polish_pwa` — hierarchical folder tree with All/per-state pruning; `GET /api/tree` + `GET /api/folder-image` + `POST /api/open-folder` (localhost-only); procedural Canvas space background; `_NoCacheStaticFiles` iOS Safari stale-module fix; global JS error banner. Earlier: hover motion + global web-ui-polish skill + PWA; IMP-E14 Phase 2 fetch-in-UI; IMP-E14 Phase 1: `GET /api/items` + media-type tabs; 2026-06-22: IMP-D4 integrity guard; IMP-A12 CI pipeline; IMP-E12 web ops console + IMP-D16).
+> **Last updated:** 2026-06-23 (IMP-E15 — mobile + Tailscale serve + shared-token auth + mvconfig.json minimal slice — on `feature/imp_e15_mobile_tailscale_auth`: mvconfig.json loader in mvcommon (web.host/port/token + tmdb.api_key); shared-token auth middleware on all /api/* (cookie/header/query, constant-time compare, 401); non-localhost startup guard; tailscale serve HTTPS setup (tools/tailscale_serve_setup.ps1 + REMOTE_ACCESS.md); auth.js token capture → cookie/header on every fetch → 401 prompt; IMP-A5 minimal slice. Earlier: IMP-E14 grouped folder view + space background + open-in-Explorer + iOS no-cache fix; hover motion + PWA; fetch-in-UI; media-type tabs; IMP-D4 integrity guard; IMP-A12 CI pipeline; IMP-E12 web ops console + IMP-D16).
 
 ---
 
-## 👉 SUGGESTED NEXT TASK: **IMP-E15** — Phase 4: mobile + Tailscale serve + token auth
+## 👉 SUGGESTED NEXT TASK: **IMP-E3 / IMP-U3 / IMP-D17** — Phase 5: TMDB posters + real titles + rename_folder
 
-**IMP-E14 Phases 1-3 are done** (Phase 1 on `feature/imp_e14_web_media_tabs`: `GET /api/items` +
-media-type tabs + tests; Phase 2 on `feature/imp_e14_fetch_in_ui`: fetch_restore web action + worker
-incremental progress + Archived fetch flow + UX enhancements + demo mode; Phase 3 on
-`feature/imp_e14_polish_pwa`: conic hover border + iOS-safe fallback + PWA manifest + Add-to-Home-Screen).
-**Phase 4 (IMP-E15) is next**: responsive mobile layout, Tailscale-safe binding, optional token auth
-(IMP-A5). Phase 5 (TMDB posters + rename) continues under IMP-E3/U3/D17. Full tracked plan at
-`docs/feature-web-media-ui/PLAN.md`.
+**IMP-E15 is done** (Phase 4 of the web media-UI plan on `feature/imp_e15_mobile_tailscale_auth`:
+mvconfig.json minimal config; shared-token auth on all `/api/*`; non-localhost startup guard; Tailscale
+HTTPS serve setup script; auth.js client token UX; IMP-A5 minimal slice).
+**Phase 5 is next**: TMDB metadata enrichment (real titles + posters + NFO for Jellyfin), rename_folder
+command, and NFO/artwork pipeline. Tracked as **IMP-E3** (metadata enrichment), **IMP-U3** (NFO + artwork
+pipeline), **IMP-D17** (rename_folder command). Full tracked plan at `docs/feature-web-media-ui/PLAN.md`.
 A cheap zero-code parallel win is still available: **IMP-S1** — stand up Jellyfin (immediate couch value).
 
 > 🚦 **IMP-R6** and **IMP-R7** still await user decisions before any code — see Band 0 table.

@@ -719,21 +719,28 @@ def create_app(demo=False):
     # each one, while STATIC files (the SPA shell) — not under /api/ — are always
     # served so the page can load to prompt for a token.
     #
-    # AUTH-ENABLEMENT RULE (the deliberate, documented decision):
-    #   * When the token store is EMPTY, the console is in "unconfigured /
-    #     local-only" mode and behaves like the original localhost tool: every
-    #     /api/* request is allowed. (No tokens minted == the owner has not set up
-    #     sharing.) This keeps the 90+ existing web tests — which create_app()
-    #     with no store — green WITHOUT weakening anything: with no tokens a
-    #     REMOTE request cannot present a valid token anyway, so the moment the
-    #     owner mints the first token, remote is locked to that token.
-    #   * Once ANY token exists, auth is ENFORCED for non-admin requests: they
-    #     must present a valid minted token (cookie / X-MediaVault-Token / ?token=)
-    #     or get 401. The GENUINE-LOCAL ADMIN (_is_genuine_local_admin) is ALWAYS
-    #     allowed — it never needs a token.
+    # AUTH RULE (secure-by-default — ALWAYS enforced, NO empty-store escape):
+    #   A normal /api/* request is allowed IFF it is the GENUINE-LOCAL ADMIN
+    #   (_is_genuine_local_admin: loopback host AND no proxy/identity headers) OR
+    #   it presents a VALID, non-expired minted token (cookie / X-MediaVault-Token
+    #   / ?token=). Anything else -> 401. This is _is_authed, evaluated on EVERY
+    #   request regardless of how many tokens exist.
     #
-    # The store is read at REQUEST time via mvcommon (binding-safe: a monkeypatch
-    # of mvcommon.list_tokens / validate_token / MVTOKENS_PATH is honoured).
+    #   Why no "empty store -> auth off" escape (the security fix): binding
+    #   0.0.0.0 with an EMPTY store must NOT leave the destructive console open to
+    #   the whole LAN/tailnet until the first token is minted. Under the
+    #   always-enforce rule an empty store means:
+    #     * the genuine-local ADMIN still has full, token-free access (frictionless
+    #       local/dev — the owner's own browser is always allowed), but
+    #     * ANY remote (non-admin) request gets 401 — no valid token can exist yet,
+    #       so remote is LOCKED until the owner mints + shares a token.
+    #   That matches the model ("remote devices must always present a token") and
+    #   closes the unauthenticated-exposure window.
+    #
+    # The token store is read at REQUEST time via mvcommon (binding-safe: a
+    # monkeypatch of mvcommon.validate_token / MVTOKENS_PATH is honoured); when the
+    # request is the genuine-local admin, _is_authed short-circuits and the store
+    # is never consulted.
     #
     # Two endpoints are EXEMPT from this guard (handled before the gate):
     #   * GET /api/whoami — must be reachable with no auth so the SPA can learn
@@ -748,8 +755,7 @@ def create_app(demo=False):
             # them with a 401 here (a non-admin with a valid token must still get
             # 403 from those handlers, not slip through this 401 layer).
             if not path.startswith("/api/token"):
-                auth_required = len(mvcommon.list_tokens()) > 0
-                if auth_required and not _is_authed(request):
+                if not _is_authed(request):
                     return JSONResponse(
                         status_code=401,
                         content={"detail": "Access token required or expired"},

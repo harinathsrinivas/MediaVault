@@ -293,6 +293,10 @@ class TestEachCommand:
         assert create_app() is not None
 
     # ---- web / fetch_restore via the HTTP action path ------------------------
+    # Secure-by-default auth (IMP-E15) is always enforced on /api/*; drive the API
+    # as the LOCAL OWNER (TestClient host "testclient" is non-loopback => would 401)
+    # via the web_as_local_admin fixture so the smoke exercises the endpoint, not auth.
+    @pytest.mark.usefixtures("web_as_local_admin")
     def test_web_fetch_restore_action(self, sandbox, make_video, mock_device, capsys):
         """Drive fetch_restore through the real HTTP action path (POST /api/action/
         fetch_restore -> poll GET /api/job/{id}) without spawning a real subprocess.
@@ -380,11 +384,18 @@ class TestEachCommand:
 
         # Level 2: HTTP via TestClient. Skipped cleanly where fastapi is absent.
         pytest.importorskip("fastapi")
+        from unittest.mock import patch as _patch
         from starlette.testclient import TestClient
+        import webui.server as _web_server
         from webui.server import create_app
 
-        client = TestClient(create_app())
-        r = client.get("/api/items")
+        # Secure-by-default auth (IMP-E15) is always enforced on /api/*. TestClient's
+        # host is "testclient" (non-loopback => non-admin) and would 401, so behave
+        # as the genuine-local admin for this endpoint check. Patched inline (not via
+        # the web_as_local_admin fixture) so Level 1 above still runs without fastapi.
+        with _patch.object(_web_server, "_is_genuine_local_admin", lambda request: True):
+            client = TestClient(create_app())
+            r = client.get("/api/items")
         assert r.status_code == 200, f"GET /api/items returned {r.status_code}: {r.text}"
         body = r.json()
         assert set(body) >= {"items", "by_category"}, (

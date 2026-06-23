@@ -12,11 +12,13 @@ system that REPLACED the old static ``web.token``:
     admin; loopback + a forwarded/identity header => NOT admin; non-loopback =>
     NOT admin.
 
-  * webui.server auth ENFORCEMENT rule — with an EMPTY store every /api/* request
-    is allowed (today's behaviour; the 90+ existing web tests stay green WITHOUT a
-    token). Once ANY token exists, a non-admin request needs a valid minted token
-    (cookie / X-MediaVault-Token / ?token=) or gets 401; the genuine-local admin
-    is always allowed.
+  * webui.server auth ENFORCEMENT rule — SECURE-BY-DEFAULT, always enforced on
+    /api/* (NO "empty store -> auth off" escape; that escape would expose a
+    0.0.0.0 bind to the whole LAN/tailnet). A non-admin request always needs a
+    valid minted token (cookie / X-MediaVault-Token / ?token=) or gets 401 — even
+    with an EMPTY store, where no valid token can exist, so a remote peer is LOCKED
+    until the owner mints + shares one. The genuine-local admin is ALWAYS allowed
+    token-free (frictionless local/dev), empty store or not.
 
   * /api/whoami (no auth) reports is_admin / authed correctly.
 
@@ -220,17 +222,41 @@ def test_genuine_local_admin_rejected_non_loopback():
 
 
 # ===========================================================================
-# (3) Auth enforcement rule — empty store open; non-empty store enforced.
+# (3) Auth enforcement rule — SECURE-BY-DEFAULT: ALWAYS enforced. A non-admin
+#     remote request needs a valid token even with an EMPTY store (-> 401); the
+#     genuine-local admin is always allowed token-free.
 # ===========================================================================
 
-def test_empty_store_allows_remote(token_store, sandbox_entry):
-    """With NO tokens, /api/items is 200 even for a NON-admin remote client
-    (today's behaviour preserved -> the existing web tests stay green)."""
+def test_empty_store_locks_remote(token_store, sandbox_entry):
+    """With NO tokens, /api/items from a NON-admin remote client is 401 — the
+    secure-by-default rule. No token has been minted, so no valid token can exist
+    and the remote is locked; an empty store must never expose the destructive
+    console to the LAN/tailnet."""
     from webui.server import create_app
 
     client = _remote_client(create_app())
     r = client.get("/api/items")
-    assert r.status_code == 200, f"empty-store remote read -> {r.status_code}: {r.text}"
+    assert r.status_code == 401, (
+        f"empty-store remote read must be 401 (locked), got {r.status_code}: {r.text}"
+    )
+    assert r.json() == {"detail": "Access token required or expired"}, (
+        f"401 body must be the fixed contract, got {r.text!r}"
+    )
+
+
+def test_empty_store_admin_still_allowed(token_store, sandbox_entry):
+    """With NO tokens, the GENUINE-LOCAL admin (loopback, no headers) still reaches
+    /api/items token-free -> 200. This is the frictionless local/dev half of the
+    secure-by-default rule: the owner's own browser is always allowed; only remote
+    peers are locked when no token exists."""
+    from webui.server import create_app
+
+    client = _admin_client(create_app())
+    r = client.get("/api/items")  # no token, empty store
+    assert r.status_code == 200, (
+        f"empty-store admin read must be 200 (frictionless local), got "
+        f"{r.status_code}: {r.text}"
+    )
 
 
 def test_nonempty_store_blocks_remote_without_token(token_store, sandbox_entry):

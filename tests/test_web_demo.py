@@ -22,6 +22,12 @@ from fastapi.testclient import TestClient  # noqa: E402 (after importorskip guar
 
 import main  # noqa: E402
 
+# Secure-by-default auth (IMP-E15) is always enforced on /api/*; these demo-mode
+# endpoint tests drive the API as the LOCAL OWNER (TestClient host "testclient"
+# is non-loopback => would 401), so run the module as the genuine-local admin.
+# Demo mode itself is unaffected by auth. See the web_as_local_admin fixture.
+pytestmark = pytest.mark.usefixtures("web_as_local_admin")
+
 
 # ---------------------------------------------------------------------------
 # Shared poll helper (mirrors tests/test_web_endpoints.py)

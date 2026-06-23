@@ -11,9 +11,13 @@ endpoints, and /api/whoami — lives in ``tests/test_web_tokens.py``.
 This module keeps the focused HTTP-layer AUTH-CONTRACT checks that were this
 file's historical job:
 
-  * The "no tokens minted -> auth OFF" guarantee the rest of the web suite relies
-    on (a request with no credentials still reaches /api/* when the store is
-    empty — the unconfigured/local-only mode).
+  * SECURE-BY-DEFAULT: auth is ALWAYS enforced on /api/* (there is NO "empty store
+    -> auth off" escape — that escape left a 0.0.0.0 bind unauthenticated to the
+    whole LAN/tailnet). A remote (non-admin) request therefore needs a valid
+    token EVEN WHEN THE STORE IS EMPTY: with no token minted no valid token can
+    exist, so an empty-store remote request -> 401 (remote is LOCKED until the
+    owner mints + shares a token). The genuine-local admin is always allowed
+    token-free, so local/dev stays frictionless.
   * Once a token exists, a NON-admin request must present that token via the
     FIXED carrier set — the ``mv_token`` cookie OR the ``X-MediaVault-Token``
     header OR a ``?token=`` query param — else 401, and a WRONG token is 401.
@@ -54,18 +58,26 @@ def _remote_client(app):
 
 
 # ---------------------------------------------------------------------------
-# (1) No tokens minted -> auth is OFF (the frictionless default the suite relies
-#     on). Even a remote peer reaches /api/* when the store is empty.
+# (1) Secure-by-default: with an EMPTY store a remote (non-admin) request is still
+#     gated -> 401 (no valid token can exist yet, so remote is LOCKED). This is
+#     THE security fix: an empty store must never expose /api/* to the LAN/tailnet.
 # ---------------------------------------------------------------------------
 
-def test_empty_store_means_auth_off(token_store, sandbox_entry):
-    """With an empty token store, GET /api/items is 200 with no credentials —
-    today's behaviour, which the rest of the web suite depends on."""
+def test_empty_store_locks_remote(token_store, sandbox_entry):
+    """With an EMPTY token store, GET /api/items from a remote peer with no
+    credentials is 401 — secure-by-default. No token has been minted, so no valid
+    token can exist; the remote is locked until the owner mints + shares one. (The
+    genuine-local admin is still allowed token-free — see test_web_tokens.py.)"""
     from webui.server import create_app
 
     client = _remote_client(create_app())
     r = client.get("/api/items")
-    assert r.status_code == 200, f"empty-store read must be 200, got {r.status_code}: {r.text}"
+    assert r.status_code == 401, (
+        f"empty-store remote read must be 401 (locked), got {r.status_code}: {r.text}"
+    )
+    assert r.json() == {"detail": "Access token required or expired"}, (
+        f"401 body must be the fixed contract, got {r.text!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

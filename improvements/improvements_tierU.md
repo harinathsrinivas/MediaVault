@@ -52,7 +52,7 @@
 - Effort estimate: medium (after E3's API layer exists)
 - Risk: low-medium — writes new files into media folders (NFO/JPG are inert to MediaVault's scanners — non-video extensions); ID-mismatch risk (wrong TMDB match → wrong poster) mitigated by the curated manual-id → lookup mapping + a review-diff mode.
 - If skipped: Jellyfin's own scrapers carry the load — fine for English movies, visibly wrong for anime/regional content; the "browse all the movies, series, anime" half of the end goal looks broken for exactly the harder thirds.
-- Status: pending
+- Status: in_progress — **NFO/artwork down-payment delivered** on `feature/imp_e3_u3_d17_tmdb_posters_rename` (2026-06-24): `enrich_metadata --nfo` writes `movie.nfo`/`tvshow.nfo` (title/year/plot/rating/`<uniqueid type="tmdb">`); `poster.jpg`/`fanart.jpg` auto-downloaded per show/season (never overwrites locals); `/api/media-image/{id}` + `resolve_artwork_path` serve artwork to the web UI SPA. **Remaining:** per-episode NFOs; combined-episode NFOs (naming both episodes); AniDB/AniList ids in anime NFOs; full backfill pipeline with review-diff mode; `set_poster`/`set_fanart` bulk mode.
 
 ## IMP-U4: Reference-quality playback paths (Ugoos DV-FEL + Apple TV guidance, recorded)
 

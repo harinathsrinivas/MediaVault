@@ -79,9 +79,10 @@ Write-Host "=== BEFORE CONTINUING — CHECK THESE ===" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "  [ ] Admin console: DNS -> MagicDNS -> Enabled" -ForegroundColor Yellow
 Write-Host "  [ ] Admin console: DNS -> HTTPS Certificates -> Enabled" -ForegroundColor Yellow
-Write-Host "  [ ] mvconfig.json: web.token set to a strong random string" -ForegroundColor Yellow
+Write-Host "  [ ] Mint an access token: python main.py token create --label 'iPhone' --ttl 30d" -ForegroundColor Yellow
+Write-Host "      (or use the web Access panel at http://127.0.0.1:8765 after starting the app)" -ForegroundColor Yellow
 Write-Host ""
-Write-Host "  (The app will refuse to bind non-localhost without a token.)" -ForegroundColor DarkYellow
+Write-Host "  Remote is locked until you mint a token; the Alienware browser always has access." -ForegroundColor DarkYellow
 Write-Host ""
 
 $confirm = Read-Host "Have you completed the above? Type 'yes' to continue, anything else to abort"
@@ -126,8 +127,8 @@ try {
         Write-Host "    https://$dnsName" -ForegroundColor Green
         Write-Host ""
         Write-Host "  Open that URL in Safari/Chrome on your iPad/iPhone (or any tailnet device)."
-        Write-Host "  Enter the token from mvconfig.json web.token when prompted."
-        Write-Host "  (Or append ?token=<yourtoken> to the URL for a one-click open.)"
+        Write-Host "  Use a minted ?token= share URL for one-tap access (python main.py token create)."
+        Write-Host "  The token is stored in a cookie — no re-entry until it expires or is revoked."
     }
 } catch {
     Write-Warning "Could not parse tailscale JSON status to extract DNS name: $_"

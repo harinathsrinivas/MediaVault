@@ -387,17 +387,20 @@ It binds **localhost only**.
   **readable titles** (humanized id now; real `metadata.title` once Phase-5 TMDB
   lands) with the raw id at the card foot; an **expandable full-screen terminal**
   (⤢) showing the equivalent CLI command + live progress + full captured output;
-  and a **cursor-following card glow** (mouse/trackpad; disabled on touch +
-  `prefers-reduced-motion`). Posters and mobile/Tailscale/auth are tracked in
-  later phases (E14 Phases 4–5 and IMP-E3/U3).
+  and a **cursor-following card glow** (mouse/trackpad; enabled whenever
+  `any-pointer: fine` is available; animates regardless of `prefers-reduced-motion`
+  — a deliberate user-requested effect). Posters and mobile/Tailscale/auth are
+  tracked in later phases (E14 Phases 4–5 and IMP-E3/U3).
 - **CSS motion layer — no build step (IMP-E14 Phase 3):** the SPA gained a
   **continuous hover border**: a rotating conic-gradient accent arc (`.card::after`,
   `@property --ring-angle`) travels around each card on hover, complementing the
   existing cursor-follow glow and yielding to the SVG fetch-progress ring.
   An `@supports`-gated `mask` clip gives a clean arc on supporting browsers; iOS
   Safari (which mis-renders mask+conic) falls back to a box-shadow ring instead.
-  A `prefers-reduced-motion` static fallback and touch-device guard are applied
-  throughout — all pure CSS, no JS, no build pipeline change.
+  Both the glow and the rotating border gate on `(any-hover: hover) and (any-pointer: fine)`
+  and animate regardless of `prefers-reduced-motion` (other components — modals,
+  the space background — retain their reduced-motion fallbacks) — all pure CSS, no
+  JS, no build pipeline change.
 - **PWA / installable console (IMP-E14 Phase 3):** `webui/static/manifest.webmanifest`
   (`display:standalone`, `theme_color:#0b0f17`) + self-generated branded PNG icons
   (192×192 / 512×512 / apple-touch-icon 180×180) + iOS meta tags
@@ -451,38 +454,57 @@ It binds **localhost only**.
   or renames files (move = IMP-D8).
 - **mvconfig.json minimal config (IMP-E15 / IMP-A5 first slice):** `mvcommon.py`
   loads `mvconfig.json` at startup (gitignored; `mvconfig.example.json` is
-  checked in). The minimal schema is `web.host`, `web.port`, `web.token`, and
-  `tmdb.api_key`. An absent or malformed file silently falls back to today's
-  defaults (`127.0.0.1:8765`, no token, no auth). Full config migration of all
-  constants remains in IMP-A5 (pending).
-- **Shared-token auth on `/api/*` (IMP-E15):** when `web.token` is set in
-  `mvconfig.json`, **every** `/api/*` request must supply the token via one of
-  three mechanisms: the `mv_token` cookie, the `X-MediaVault-Token` HTTP header,
-  or the `?token=` query parameter. Comparison uses `hmac.compare_digest`
-  (constant-time) and returns **401** on mismatch. When no token is configured,
-  auth is off (local dev / tests). The static SPA shell (`/`) is always served
-  unauthenticated so the page loads even before a token is presented.
-  - **Why no host-exemption:** `tailscale serve` proxies remote tailnet peers as
-    `127.0.0.1` to the FastAPI process. A localhost-exemption rule would bypass
-    the token for all tailnet peers — so there is intentionally no such exemption.
-    Instead, `cmd_web` auto-opens the local browser with `?token=<token>` appended
-    so the local session is frictionless without any exemption.
-  - **`POST /api/open-folder` keeps its own localhost-only layer** on top of
-    token auth (non-loopback → 403 regardless of token). That check uses
-    `request.client.host`, not a cookie-based bypass.
-- **Non-localhost startup guard (IMP-E15):** `cmd_web` refuses to start if the
-  effective bind host is non-localhost (e.g. `0.0.0.0` or a LAN IP) with no
-  `web.token` configured. It prints an error and exits. This prevents accidentally
-  exposing an unauthenticated API on the network.
+  checked in). The schema is `web.host`, `web.port`, and `tmdb.api_key`. There is
+  **no `web.token`** — auth is no longer a static config key (see below). An
+  absent or malformed file silently falls back to defaults (`127.0.0.1:8765`).
+  Full config migration of all constants remains in IMP-A5 (pending).
+- **Admin-minted, expiring, revocable token auth on `/api/*` (IMP-E15):** access
+  tokens are NOT a static config value. They live in a gitignored `mvtokens.json`
+  (separate from `mvconfig.json`), stored as sha256 hashes — the raw token is
+  shown to the owner exactly once at mint time and never persisted. Each record:
+  `{id, label, hash, created_at, expires_at}` (null expires = never). The store is
+  read fresh per request (no cache). Minting/listing/revoking is owner-only, two
+  ways: the CLI (`python main.py token create [--label X]
+  [--ttl 1h|8h|12h|1d|3d|7d|30d|never]`, `token list`, `token revoke <id>`) and
+  the localhost-only **"Access" panel** in the web UI (mint with label + TTL,
+  see live tokens with countdowns, copy a share link, revoke). Every `/api/*`
+  request (except `GET /api/whoami`) is allowed iff **either** the request is the
+  **genuine local admin** OR it presents a **valid non-expired minted token** via
+  `mv_token` cookie, `X-MediaVault-Token` header, or `?token=` query.
+  - **Genuine-local-admin detection — the security hinge:** a request is admin iff
+    `request.client.host` is loopback (127.0.0.1 / ::1 / localhost) AND none of
+    the proxy/identity headers (`x-forwarded-*`, `tailscale-user-*`, `forwarded`)
+    are present. `tailscale serve` proxies remote tailnet peers to 127.0.0.1 but
+    injects those headers, so a proxied peer is never mistaken for the owner.
+    `GET /api/whoami` (unauthenticated) returns `{is_admin, authed}` so the SPA
+    shows the Access panel only to the owner and a token prompt to remote devices.
+  - **Secure-by-default — empty store locks remote:** auth is ALWAYS enforced.
+    With no tokens minted, the genuine-local admin still has full, token-free
+    access (frictionless local/dev), but every remote request gets 401 — remote is
+    locked until the owner mints and shares a token.
+  - **`POST /api/open-folder` keeps its own genuine-local-admin guard** (403 for
+    non-admin) — a valid minted token can never widen this to a remote peer.
+  - **No startup guard removed:** `cmd_web` no longer refuses to start when bound
+    non-localhost with no token; the always-enforce rule makes that guard
+    unnecessary — remote is simply locked until a token is minted.
+- **Card cursor-glow + rotating hover border (IMP-E14 Phase 3):** the glow
+  (`glow.js`) and rotating conic hover border (`.card::after`) gate on
+  `(any-hover: hover) and (any-pointer: fine)` — the `any-*` variants so a mouse
+  on a touch-capable Windows desktop works (a pure-touch phone still gets no
+  effect). Both animate **regardless of `prefers-reduced-motion`** (a deliberate
+  user-requested effect; reduced-motion fallbacks for other components — modals,
+  the space background — are kept). Pinned by `tests/test_web_glow_motion_guard.py`.
 - **Remote access model (IMP-E15):** the app can bind `0.0.0.0` to be reachable
   on the LAN IP and the Tailscale IP over plain HTTP. For an encrypted HTTPS
   tailnet URL, run `tailscale serve` in front (see
   `tools/tailscale_serve_setup.ps1` and `docs/feature-web-media-ui/REMOTE_ACCESS.md`).
-  The iPhone/iPad flow: install the PWA ("Add to Home Screen"), open the HTTPS
-  tailnet URL, enter the token once — it is captured by `auth.js` from `?token=`,
-  stored in a cookie + `sessionStorage`, stripped from the URL, and sent as
-  `X-MediaVault-Token` on every subsequent fetch. A 401 response triggers a
-  token prompt. One-time Tailscale admin setup: enable MagicDNS and HTTPS in the
+  The owner mints a token (Access panel or `python main.py token create`) and
+  shares the `?token=<raw>` link; the device opens it once — `auth.js` captures
+  the raw token from `?token=`, stores it in a `mv_token` cookie + `sessionStorage`,
+  strips it from the URL, and sends it as `X-MediaVault-Token` on every subsequent
+  fetch. A 401 response re-prompts. The local browser is auto-opened at the plain
+  `127.0.0.1` URL (no `?token=` needed — the genuine-local admin never needs a
+  token). One-time Tailscale admin setup: enable MagicDNS and HTTPS in the
   Tailscale admin console.
 
 ---

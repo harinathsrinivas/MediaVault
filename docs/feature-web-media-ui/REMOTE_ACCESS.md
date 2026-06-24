@@ -18,7 +18,7 @@ The app binds `0.0.0.0:<port>` (default **8765**), so any device that can reach 
 
 **Note:** HTTP on a raw IP is plaintext on your LAN/tailnet. For sensitive use, prefer Mode 2.
 
-All `/api/*` routes require the shared token (see [Token requirement](#token-requirement)) regardless of which access mode you use.
+All `/api/*` routes require a valid minted token (see [Token requirement](#token-requirement)) regardless of which access mode you use. The genuine-local (Alienware) browser is always allowed without a token.
 
 ---
 
@@ -52,24 +52,25 @@ Without both of these, `tailscale serve` cannot provision a TLS certificate for 
 
 ## Token Requirement
 
-MediaVault uses a shared token to protect all `/api/*` routes. The token is stored in `mvconfig.json`:
+MediaVault uses **admin-minted, expiring, revocable tokens** to protect all `/api/*` routes. Tokens are NOT stored in `mvconfig.json` — they live in the gitignored `mvtokens.json` (sha256-hashed; the raw token is shown once at mint and never persisted).
 
-```json
-{
-  "web": {
-    "token": "your-long-random-secret-here"
-  }
-}
+**Mint a token** from the Alienware (the owner's machine) — two ways:
+
+**Option A — web Access panel (recommended):** open `http://127.0.0.1:8765` in the Alienware browser, click the **Access (🔑)** button in the header, fill in a label and TTL, click "Create token". The raw token and a ready-to-share URL are shown once — copy the URL and send it to the device.
+
+**Option B — CLI:**
+```
+python main.py token create --label "iPhone" --ttl 30d
+```
+The command prints the raw token and the `?token=<raw>` share URL. Manage tokens:
+```
+python main.py token list           # see all tokens with expiry info
+python main.py token revoke <id>    # revoke by id
 ```
 
-**The app refuses to start bound to non-localhost addresses without a token.** Set a strong random value before exposing the console over the network.
+**Secure by default:** with no tokens minted, the genuine-local (Alienware) browser always has full admin access — no token needed. Every remote request gets 401 until the owner mints and shares a token. The app no longer refuses to start when bound non-localhost without a token; remote is simply locked.
 
-Generate a suitable token (run in PowerShell):
-```powershell
-[System.Web.Security.Membership]::GeneratePassword(32, 4)
-# or simpler:
--join ((65..90) + (97..122) + (48..57) | Get-Random -Count 32 | % {[char]$_})
-```
+Available TTL options: `1h`, `8h`, `12h`, `1d`, `3d`, `7d` (default), `30d`, `never`.
 
 ---
 
@@ -86,7 +87,7 @@ Run the provided script on the Alienware (the machine running the MediaVault app
 The script:
 1. Checks `tailscale` is on PATH.
 2. Prints the machine's current tailnet status.
-3. Reminds you to complete the admin console prerequisites and set the token.
+3. Reminds you to complete the admin console prerequisites and mint a token.
 4. Runs `tailscale serve --bg --https=443 127.0.0.1:8765` (background + persistent across reboots).
 5. Prints the resulting `https://` URL and management commands.
 
@@ -109,9 +110,10 @@ The `--bg` flag makes the serve config persistent — it survives Tailscale rest
 ## Using the Console on iPad / iPhone
 
 1. Make sure your iPhone/iPad is connected to Tailscale (the Tailscale app must be active and logged into the same tailnet).
-2. Open Safari (or any browser) and navigate to `https://<machine>.<tailnet>.ts.net`.
-3. When prompted, enter the token from `mvconfig.json → web.token`. It is remembered for the browser session.
-4. Alternatively, bookmark `https://<machine>.<tailnet>.ts.net?token=<yourtoken>` for one-tap access (keep this bookmark private).
+2. On the Alienware, mint a token: `python main.py token create --label "iPhone" --ttl 30d` (or use the web Access panel). Copy the printed `?token=<raw>` share URL.
+3. Open Safari on the iPhone/iPad and navigate to that share URL. The token is captured automatically, stored in a cookie, and stripped from the URL — you will not be prompted again until it expires or is revoked.
+4. Tap Share → "Add to Home Screen" to install the console as a standalone PWA.
+5. On future visits, open the PWA directly. If the token has expired or been revoked, a prompt appears — mint a new token and enter it, or open a fresh `?token=` share link.
 
 ---
 
@@ -120,8 +122,10 @@ The `--bg` flag makes the serve config persistent — it survives Tailscale rest
 | Topic | Detail |
 |-------|--------|
 | **`serve` vs `funnel`** | `serve` is tailnet-only. `funnel` would expose to the public internet — we deliberately do NOT use funnel. |
-| **Token guards all API routes** | Every `/api/*` request requires the `Authorization: Bearer <token>` header or `?token=` query param. |
-| **Open-folder is localhost-only** | The "open in Finder" / "open folder" action only works when the request comes from `127.0.0.1` (enforced server-side), even if the API token is valid. |
+| **Minted tokens guard all API routes** | Every `/api/*` request requires a valid, non-expired minted token (via `mv_token` cookie, `X-MediaVault-Token` header, or `?token=` query). Tokens are sha256-hashed in `mvtokens.json`; the raw token is shown once at mint and never stored. |
+| **Genuine-local admin always allowed** | The Alienware browser (loopback host + no proxy/forwarding headers) always has full access without any token. `tailscale serve` proxies inject forwarding headers, so a proxied tailnet peer can never bypass this check. |
+| **Secure by default** | With no tokens minted, remote requests get 401 immediately — the destructive console is never open to the network before the owner has set up access. |
+| **Open-folder is genuine-local-admin-only** | The "open in Explorer" action only works for the genuine-local admin (loopback + no proxy headers), even if a valid token is presented. |
 | **HTTP on raw IP** | HTTP on the raw LAN or Tailscale IP is plaintext. Use the `https://<machine>.<tailnet>.ts.net` URL for sensitive sessions. |
 | **TLS cert management** | Tailscale provisions and auto-renews the TLS cert. No manual certificate management is needed. |
 | **Tailnet membership** | Only devices authenticated to your tailnet can reach the `ts.net` URL. Guests cannot access it. |

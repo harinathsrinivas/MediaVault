@@ -447,3 +447,187 @@ def test_resolver_is_read_only(sandbox, make_video):
     for p in lib_paths:
         assert p.read_bytes() == before[p], f"{p.name} changed — not read-only"
     assert mvcommon.load_library() == before_lib
+
+
+# ===========================================================================
+# Per-episode still waterfall (IMP-E3/U3/D17 — episode-thumbnail resolution).
+#
+# For an EPISODE leaf + kind=poster the resolver tries, in order:
+#   (i-still) <own folder>/<basename>-thumb.jpg  (the per-episode still)
+#   (i/ii)    <own/season folder>/poster.jpg     (season poster)
+#   (iii)     nearest {tmdb-…} show folder poster.jpg
+# LOCAL ALWAYS WINS at every rung. The still basename comes from the entry's own
+# `filename` (Dark.S01E01.mkv -> Dark.S01E01-thumb.jpg), never client input.
+# ===========================================================================
+
+def _ep_thumb_path(seeded):
+    """The episode still path the resolver should prefer for the seeded show."""
+    fname = "Dark.S01E01.mkv"  # _seed_show's episode filename
+    return seeded["season_dir"] / (os.path.splitext(fname)[0] + "-thumb.jpg")
+
+
+def test_episode_still_wins_when_present(sandbox, make_video):
+    """Rung (i-still): an episode WITH a local `<basename>-thumb.jpg` serves THAT
+    still — even though a season poster AND a show poster also exist."""
+    seeded = _seed_show(sandbox, make_video)
+    # Season + show posters BOTH present...
+    (seeded["show_dir"] / "poster.jpg").write_bytes(_jpeg(b"SHOW"))
+    (seeded["season_dir"] / "poster.jpg").write_bytes(_jpeg(b"SEASON"))
+    # ...and the per-episode still present (must win for kind=poster).
+    still = _jpeg(b"STILL")
+    _ep_thumb_path(seeded).write_bytes(still)
+
+    library = mvcommon.load_library()
+    got = main.resolve_artwork_path(library, seeded["ep_id"], kind="poster")
+    assert os.path.realpath(got) == os.path.realpath(str(_ep_thumb_path(seeded))), (
+        f"per-episode still must win over season/show poster, got {got}"
+    )
+
+    client = TestClient(create_app())
+    r = client.get(f"/api/media-image/{seeded['ep_id']}")
+    assert r.status_code == 200, f"-> {r.status_code}: {r.text}"
+    assert r.content == still
+
+
+def test_episode_still_absent_falls_back_to_season_poster(sandbox, make_video):
+    """Remove the still -> the resolver falls back to the season `poster.jpg`."""
+    seeded = _seed_show(sandbox, make_video)
+    (seeded["show_dir"] / "poster.jpg").write_bytes(_jpeg(b"SHOW"))
+    season_poster = _jpeg(b"SEASON")
+    (seeded["season_dir"] / "poster.jpg").write_bytes(season_poster)
+    # No -thumb.jpg present.
+
+    library = mvcommon.load_library()
+    got = main.resolve_artwork_path(library, seeded["ep_id"], kind="poster")
+    assert os.path.realpath(got) == os.path.realpath(str(seeded["season_dir"] / "poster.jpg"))
+
+    client = TestClient(create_app())
+    r = client.get(f"/api/media-image/{seeded['ep_id']}")
+    assert r.status_code == 200
+    assert r.content == season_poster
+
+
+def test_episode_still_and_season_absent_walks_to_show_poster(sandbox, make_video):
+    """Remove the still AND the season poster -> walk UP to the {tmdb-…} show poster."""
+    seeded = _seed_show(sandbox, make_video)
+    show_poster = _jpeg(b"SHOW")
+    (seeded["show_dir"] / "poster.jpg").write_bytes(show_poster)
+    # No -thumb.jpg, no season poster.
+
+    library = mvcommon.load_library()
+    got = main.resolve_artwork_path(library, seeded["ep_id"], kind="poster")
+    assert os.path.realpath(got) == os.path.realpath(str(seeded["show_dir"] / "poster.jpg"))
+
+    client = TestClient(create_app())
+    r = client.get(f"/api/media-image/{seeded['ep_id']}")
+    assert r.status_code == 200
+    assert r.content == show_poster
+
+
+def test_episode_still_local_wins_at_each_rung(sandbox, make_video):
+    """Local-always-wins, rung by rung: with still+season+show all present the
+    still wins; delete it and the season wins; delete that and the show wins."""
+    seeded = _seed_show(sandbox, make_video)
+    (seeded["show_dir"] / "poster.jpg").write_bytes(_jpeg(b"SHOW"))
+    (seeded["season_dir"] / "poster.jpg").write_bytes(_jpeg(b"SEASON"))
+    thumb = _ep_thumb_path(seeded)
+    thumb.write_bytes(_jpeg(b"STILL"))
+
+    library = mvcommon.load_library()
+    # 1) still wins
+    got = main.resolve_artwork_path(library, seeded["ep_id"], kind="poster")
+    assert os.path.realpath(got) == os.path.realpath(str(thumb))
+    # 2) remove still -> season wins
+    thumb.unlink()
+    got = main.resolve_artwork_path(library, seeded["ep_id"], kind="poster")
+    assert os.path.realpath(got) == os.path.realpath(str(seeded["season_dir"] / "poster.jpg"))
+    # 3) remove season -> show wins
+    (seeded["season_dir"] / "poster.jpg").unlink()
+    got = main.resolve_artwork_path(library, seeded["ep_id"], kind="poster")
+    assert os.path.realpath(got) == os.path.realpath(str(seeded["show_dir"] / "poster.jpg"))
+
+
+def test_episode_still_only_serves_poster_kind_not_fanart(sandbox, make_video):
+    """The still is a POSTER-kind candidate only: kind=fanart never returns the
+    `-thumb.jpg` (episode fanart is unchanged — it walks to the show fanart)."""
+    seeded = _seed_show(sandbox, make_video)
+    _ep_thumb_path(seeded).write_bytes(_jpeg(b"STILL"))   # a still is present...
+    show_fanart = _jpeg(b"SHOWFAN")
+    (seeded["show_dir"] / "fanart.jpg").write_bytes(show_fanart)  # ...and a show fanart
+
+    library = mvcommon.load_library()
+    got = main.resolve_artwork_path(library, seeded["ep_id"], kind="fanart")
+    # fanart must NOT be the still; it inherits the show fanart instead.
+    assert os.path.basename(got).lower() == "fanart.jpg"
+    assert os.path.realpath(got) == os.path.realpath(str(seeded["show_dir"] / "fanart.jpg"))
+
+
+def test_episode_still_basename_is_derived_from_filename_not_client(sandbox, make_video):
+    """A sibling `-thumb.jpg` for a DIFFERENT episode basename is NEVER served — the
+    expected name is computed from the entry's own `filename`, so only the matching
+    `Dark.S01E01-thumb.jpg` is eligible (a `Other.S09E09-thumb.jpg` next to it is
+    ignored, falling back to the season poster)."""
+    seeded = _seed_show(sandbox, make_video)
+    season_poster = _jpeg(b"SEASON")
+    (seeded["season_dir"] / "poster.jpg").write_bytes(season_poster)
+    # A mismatched-basename thumb sitting in the same folder.
+    (seeded["season_dir"] / "Other.S09E09-thumb.jpg").write_bytes(_jpeg(b"WRONG"))
+    # The matching still is ABSENT.
+
+    library = mvcommon.load_library()
+    got = main.resolve_artwork_path(library, seeded["ep_id"], kind="poster")
+    # Falls back to the season poster (the mismatched -thumb.jpg is not eligible).
+    assert os.path.realpath(got) == os.path.realpath(str(seeded["season_dir"] / "poster.jpg"))
+
+    client = TestClient(create_app())
+    r = client.get(f"/api/media-image/{seeded['ep_id']}")
+    assert r.status_code == 200
+    assert r.content == season_poster  # never the WRONG thumb
+
+
+def test_episode_still_served_over_endpoint_allows_thumb_basename(sandbox, make_video):
+    """The route's filename allow-list accepts a `<basename>-thumb.jpg` (the
+    resolver returns it for an episode poster) and streams it as image/jpeg."""
+    seeded = _seed_show(sandbox, make_video)
+    still = _jpeg(b"STILL-ROUTE")
+    _ep_thumb_path(seeded).write_bytes(still)
+
+    client = TestClient(create_app())
+    r = client.get(f"/api/media-image/{seeded['ep_id']}", params={"kind": "poster"})
+    assert r.status_code == 200, f"-> {r.status_code}: {r.text}"
+    assert r.headers["content-type"].startswith("image/")
+    assert r.content == still
+
+
+def test_movie_poster_unaffected_by_still_rung(sandbox, make_video):
+    """A MOVIE (no episode id shape, no parent) is unaffected: its own poster.jpg
+    resolves exactly as before (the still rung is episode-only)."""
+    seeded = _seed_flat_movie(sandbox, make_video)
+    pos = _jpeg(b"MOVPOS")
+    (seeded["dir"] / "poster.jpg").write_bytes(pos)
+    # Even a stray -thumb.jpg in the movie folder must be ignored (movie has no
+    # episode shape, so the still rung never fires for it).
+    (seeded["dir"] / "Standalone.2020-thumb.jpg").write_bytes(_jpeg(b"STRAY"))
+
+    library = mvcommon.load_library()
+    got = main.resolve_artwork_path(library, seeded["id"], kind="poster")
+    assert os.path.basename(got).lower() == "poster.jpg"
+    assert os.path.realpath(got) == os.path.realpath(str(seeded["dir"] / "poster.jpg"))
+
+
+def test_episode_still_realpath_stays_under_root(sandbox, make_video, tmp_path):
+    """Security: the resolved still must realpath-resolve UNDER LOCAL_ROOT. We plant
+    a `<basename>-thumb.jpg` OUTSIDE the root and confirm it can never be reached
+    (the resolver only looks in the entry's own vetted folder_path)."""
+    seeded = _seed_show(sandbox, make_video)
+    outside = tmp_path / "outside_still"
+    outside.mkdir()
+    secret = _jpeg(b"OUTSIDE-STILL")
+    (outside / "Dark.S01E01-thumb.jpg").write_bytes(secret)
+    # No still inside the real season folder, no posters anywhere.
+
+    library = mvcommon.load_library()
+    got = main.resolve_artwork_path(library, seeded["ep_id"], kind="poster")
+    # Nothing eligible under the root -> None (the outside still is unreachable).
+    assert got is None or os.path.realpath(got) != os.path.realpath(str(outside / "Dark.S01E01-thumb.jpg"))
+    assert main._is_within_local_root(got) if got else True

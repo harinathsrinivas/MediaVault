@@ -58,13 +58,19 @@ class FakeTMDB:
     """Records every GET and returns canned search/image JSON + fake JPG bytes.
 
     The `search` dict maps a lowercased query string -> a TMDB results list. The
-    `season_images` dict maps (series_id, season_number) -> a posters list. Image
-    URLs (anything starting with the image base) return FAKE_JPG. A query whose
-    title is in `network_error_titles` raises to simulate a transient API failure.
+    `season_images` dict maps (series_id, season_number) -> a posters list. The
+    `episode_images` dict maps (series_id, season_number, episode_number) -> a
+    stills list. An (series_id, season, episode) key in `episode_error` raises to
+    simulate a transient episode-images failure. Image URLs (anything starting with
+    the image base) return FAKE_JPG. A query whose title is in
+    `network_error_titles` raises to simulate a transient search failure.
     """
-    def __init__(self, search, season_images=None, network_error_titles=()):
+    def __init__(self, search, season_images=None, episode_images=None,
+                 network_error_titles=(), episode_error=()):
         self.search = {k.lower(): v for k, v in search.items()}
         self.season_images = season_images or {}
+        self.episode_images = episode_images or {}
+        self.episode_error = set(episode_error)
         self.network_error_titles = {t.lower() for t in network_error_titles}
         self.calls = []            # list of (url, params) for assertions
         self.image_urls = []       # image URLs actually requested
@@ -88,6 +94,17 @@ class FakeTMDB:
             if q in self.network_error_titles:
                 raise ConnectionError("simulated TMDB network failure")
             return _Resp(200, json_data={"results": self.search.get(q, [])})
+
+        if "/episode/" in url and url.endswith("/images"):
+            # /tv/{id}/season/{s}/episode/{e}/images — parse id + s + e. Checked
+            # BEFORE the season branch (this URL also contains /season/).
+            parts = url.rstrip("/").split("/")
+            e = int(parts[-2])
+            s = int(parts[-4])
+            series_id = int(parts[-6])
+            if (series_id, s, e) in self.episode_error:
+                raise ConnectionError("simulated episode-images failure")
+            return _Resp(200, json_data={"stills": self.episode_images.get((series_id, s, e), [])})
 
         if "/season/" in url and url.endswith("/images"):
             # /tv/{id}/season/{n}/images — parse id + n from the path.
@@ -811,3 +828,212 @@ def test_nfo_write_failure_warns_but_enrich_still_completes(sandbox, patch_tmdb,
     # Note: the folder may be renamed; search by key (it's stable).
     entry = lib.get("mov-en-2025-f1")
     assert entry is not None and entry.get("metadata", {}).get("tmdb_id") == 1003159
+
+
+# ===========================================================================
+# Per-episode TMDB stills (IMP-E3/U3/D17, Phase 5 — episode-thumbnail waterfall).
+#
+# On a confident show --apply, enrich downloads each episode's best still as
+# `<episode_video_basename>-thumb.jpg` next to the episode file via the
+# /tv/{id}/season/{s}/episode/{e}/images endpoint — LOCAL ALWAYS WINS, NEVER a
+# media fetch, and a per-episode failure falls back silently to the season poster.
+# ===========================================================================
+
+def _thumb_name(fname):
+    """The `<basename>-thumb.jpg` enrich writes for an episode video file."""
+    return os.path.splitext(fname)[0] + "-thumb.jpg"
+
+
+def test_apply_show_downloads_per_episode_stills(sandbox, patch_tmdb, capsys):
+    """A confident show --apply downloads `<basename>-thumb.jpg` for EACH episode,
+    using the episode-images endpoint and the still size (w300). Both episodes get
+    their still; the season poster + show poster are still downloaded too."""
+    _empty_libs(sandbox)
+    show = _seed_two_season_show(sandbox)
+    fake = patch_tmdb(FakeTMDB(
+        search={"the office": [_tv_result(2316, "The Office", 2005)]},
+        season_images={(2316, 1): [{"file_path": "/s1.jpg"}],
+                       (2316, 2): [{"file_path": "/s2.jpg"}]},
+        episode_images={(2316, 1, 1): [{"file_path": "/still-s1e1.jpg", "vote_average": 8.0}],
+                        (2316, 2, 1): [{"file_path": "/still-s2e1.jpg", "vote_average": 6.0}]},
+    ))
+
+    main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply")
+
+    lib = mvcommon.load_library()
+    stamped = show["show_root"].parent / "The Office {tmdb-2316}"
+
+    # Each episode's still landed next to its (moved) video file as <basename>-thumb.jpg.
+    for ep_id, season_dir_name in ((show["ep1"], "Season 01"), (show["ep2"], "Season 02")):
+        fname = lib[ep_id]["filename"]
+        thumb = stamped / season_dir_name / _thumb_name(fname)
+        assert thumb.read_bytes() == FAKE_JPG, f"missing per-episode still for {ep_id}"
+
+    # The episode-images endpoint was hit for BOTH episodes (and is the episode,
+    # not the season, endpoint — it contains /episode/).
+    ep_calls = [c for c in fake.calls if "/episode/" in c[0] and c[0].endswith("/images")]
+    assert len(ep_calls) == 2, f"expected 2 episode-images calls, got {len(ep_calls)}"
+
+    # The still was fetched at the w300 still size against the live image base.
+    assert any(u == "https://image.tmdb.org/t/p/w300/still-s1e1.jpg" for u in fake.image_urls)
+    assert any(u == "https://image.tmdb.org/t/p/w300/still-s2e1.jpg" for u in fake.image_urls)
+
+    # Season + show posters still present (the existing art path is intact).
+    assert (stamped / "Season 01" / "poster.jpg").read_bytes() == FAKE_JPG
+    assert (stamped / "poster.jpg").read_bytes() == FAKE_JPG
+
+    out = capsys.readouterr().out
+    assert "-thumb.jpg" in out
+
+
+def test_apply_picks_highest_vote_still(sandbox, patch_tmdb):
+    """When an episode has several stills, the HIGHEST vote_average one is chosen
+    (not the first listed). Asserted via the requested image URL (bytes are
+    identical FAKE_JPG, so the chosen file_path is what distinguishes them)."""
+    _empty_libs(sandbox)
+    show = _seed_two_season_show(sandbox)
+    fake = patch_tmdb(FakeTMDB(
+        search={"the office": [_tv_result(2316, "The Office", 2005)]},
+        season_images={(2316, 1): [], (2316, 2): []},
+        episode_images={
+            (2316, 1, 1): [
+                {"file_path": "/low.jpg", "vote_average": 2.0},
+                {"file_path": "/best.jpg", "vote_average": 9.5},   # must be chosen
+                {"file_path": "/mid.jpg", "vote_average": 5.0},
+            ],
+            (2316, 2, 1): [],
+        },
+    ))
+
+    main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply")
+
+    # The highest-vote still (best.jpg) was the one fetched; the others were not.
+    assert any(u == "https://image.tmdb.org/t/p/w300/best.jpg" for u in fake.image_urls)
+    assert not any(u.endswith("/low.jpg") or u.endswith("/mid.jpg") for u in fake.image_urls)
+
+
+def test_apply_never_overwrites_existing_episode_still(sandbox, patch_tmdb, capsys):
+    """LOCAL ALWAYS WINS: a pre-existing `<basename>-thumb.jpg` is NEVER overwritten
+    (seed one episode's still; the OTHER episode without a local still IS downloaded)."""
+    _empty_libs(sandbox)
+    show = _seed_two_season_show(sandbox)
+
+    # Seed a hand-picked still for episode 1 (in its current season folder).
+    lib = mvcommon.load_library()
+    ep1_fname = lib[show["ep1"]]["filename"]
+    seeded_bytes = b"USER-HAND-PICKED-STILL"
+    (show["s1_dir"] / _thumb_name(ep1_fname)).write_bytes(seeded_bytes)
+
+    patch_tmdb(FakeTMDB(
+        search={"the office": [_tv_result(2316, "The Office", 2005)]},
+        season_images={(2316, 1): [], (2316, 2): []},
+        episode_images={(2316, 1, 1): [{"file_path": "/still-s1e1.jpg", "vote_average": 8.0}],
+                        (2316, 2, 1): [{"file_path": "/still-s2e1.jpg", "vote_average": 6.0}]},
+    ))
+
+    main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply")
+
+    lib = mvcommon.load_library()
+    stamped = show["show_root"].parent / "The Office {tmdb-2316}"
+
+    # Episode 1's hand-picked still moved with the folder and is byte-for-byte preserved.
+    ep1_thumb = stamped / "Season 01" / _thumb_name(ep1_fname)
+    assert ep1_thumb.read_bytes() == seeded_bytes, "local episode still must NOT be overwritten"
+
+    # Episode 2 had no local still -> it WAS downloaded.
+    ep2_fname = lib[show["ep2"]]["filename"]
+    ep2_thumb = stamped / "Season 02" / _thumb_name(ep2_fname)
+    assert ep2_thumb.read_bytes() == FAKE_JPG
+
+    out = capsys.readouterr().out
+    assert "local episode still present — kept" in out
+
+
+def test_apply_episode_still_failure_falls_back_silently(sandbox, patch_tmdb, capsys):
+    """A failed/empty episode-images call for ONE episode must NOT crash and must
+    NOT block the rest: that still is skipped (it falls back to the season poster at
+    view time) while the healthy episode's still still downloads."""
+    _empty_libs(sandbox)
+    show = _seed_two_season_show(sandbox)
+    fake = patch_tmdb(FakeTMDB(
+        search={"the office": [_tv_result(2316, "The Office", 2005)]},
+        season_images={(2316, 1): [{"file_path": "/s1.jpg"}],
+                       (2316, 2): [{"file_path": "/s2.jpg"}]},
+        # Episode 1: a healthy still. Episode 2: the call raises (transient failure).
+        episode_images={(2316, 1, 1): [{"file_path": "/still-s1e1.jpg", "vote_average": 8.0}]},
+        episode_error={(2316, 2, 1)},
+    ))
+
+    main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply")  # must NOT crash
+
+    lib = mvcommon.load_library()
+    stamped = show["show_root"].parent / "The Office {tmdb-2316}"
+
+    # Episode 1's still downloaded; episode 2's still is ABSENT (failed -> skipped).
+    ep1_fname = lib[show["ep1"]]["filename"]
+    ep2_fname = lib[show["ep2"]]["filename"]
+    assert (stamped / "Season 01" / _thumb_name(ep1_fname)).read_bytes() == FAKE_JPG
+    assert not (stamped / "Season 02" / _thumb_name(ep2_fname)).exists()
+
+    # The season 2 poster IS present (the documented fall-back at view time).
+    assert (stamped / "Season 02" / "poster.jpg").read_bytes() == FAKE_JPG
+
+
+def test_apply_episode_empty_stills_falls_back_silently(sandbox, patch_tmdb, capsys):
+    """An episode-images call that returns an EMPTY stills list (not an error) also
+    falls back silently — the thumb is simply not written, no crash."""
+    _empty_libs(sandbox)
+    show = _seed_two_season_show(sandbox)
+    patch_tmdb(FakeTMDB(
+        search={"the office": [_tv_result(2316, "The Office", 2005)]},
+        season_images={(2316, 1): [], (2316, 2): []},
+        episode_images={(2316, 1, 1): [], (2316, 2, 1): []},  # no stills for either
+    ))
+
+    main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply")  # must NOT crash
+
+    lib = mvcommon.load_library()
+    stamped = show["show_root"].parent / "The Office {tmdb-2316}"
+    for ep_id, season_dir_name in ((show["ep1"], "Season 01"), (show["ep2"], "Season 02")):
+        fname = lib[ep_id]["filename"]
+        assert not (stamped / season_dir_name / _thumb_name(fname)).exists()
+
+    out = capsys.readouterr().out
+    assert "no episode still" in out.lower()
+
+
+def test_movies_get_no_episode_stills(sandbox, patch_tmdb):
+    """A movie --apply downloads poster/fanart but NEVER calls the episode-images
+    endpoint (movies have no episodes/stills)."""
+    _empty_libs(sandbox)
+    _seed_movie(sandbox, "mov-en-2025-f1", "F1")
+    fake = patch_tmdb(FakeTMDB(search={"f1": [_movie_result(1003159, "F1", 2025)]}))
+
+    main.cmd_enrich_metadata("mov-en-2025-f1", "--apply")
+
+    ep_calls = [c for c in fake.calls if "/episode/" in c[0]]
+    assert ep_calls == [], "movies must never hit the episode-images endpoint"
+
+
+def test_apply_stills_no_media_fetch(sandbox, patch_tmdb, monkeypatch):
+    """Hard guarantee carried to the stills path: downloading episode stills NEVER
+    invokes adb (subprocess.run) nor spawns mainfetch (subprocess.Popen)."""
+    _empty_libs(sandbox)
+    show = _seed_two_season_show(sandbox)
+    patch_tmdb(FakeTMDB(
+        search={"the office": [_tv_result(2316, "The Office", 2005)]},
+        season_images={(2316, 1): [], (2316, 2): []},
+        episode_images={(2316, 1, 1): [{"file_path": "/still-s1e1.jpg", "vote_average": 8.0}],
+                        (2316, 2, 1): [{"file_path": "/still-s2e1.jpg", "vote_average": 6.0}]},
+    ))
+
+    def _boom_run(*a, **k):
+        raise AssertionError("enrich stills must NOT call subprocess.run (no adb/media)")
+
+    def _boom_popen(*a, **k):
+        raise AssertionError("enrich stills must NOT call subprocess.Popen (no fetch)")
+
+    monkeypatch.setattr(main.subprocess, "run", _boom_run)
+    monkeypatch.setattr(main.subprocess, "Popen", _boom_popen)
+
+    main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply")  # must not trip guards

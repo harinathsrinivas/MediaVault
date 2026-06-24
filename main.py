@@ -1124,6 +1124,7 @@ TMDB_API_ROOT = "https://api.themoviedb.org/3"
 TMDB_IMAGE_BASE_FALLBACK = "https://image.tmdb.org/t/p/"
 TMDB_POSTER_SIZE = "w342"    # card-grid poster size (PRE-RESOLVED above)
 TMDB_BACKDROP_SIZE = "w780"  # fanart/backdrop size (PRE-RESOLVED above)
+TMDB_STILL_SIZE = "w300"     # per-episode still size (16:9 landscape, PRE-RESOLVED)
 
 # Idempotent on-disk cache of TMDB JSON responses, keyed by URL+params, so a
 # re-run does not re-hit the API. Module-level (derived from mvcommon.MV_STATE_DIR)
@@ -1257,6 +1258,72 @@ def _season_number_of(season_id):
     Drives the per-season TMDB images call (/tv/{id}/season/{n}/images)."""
     m = _SEASON_ID_RE.search(season_id)
     return int(m.group(1)) if m else None
+
+
+# A leaf id encodes its season+episode as a glued `-sNNeMM` marker (the TV/series
+# canonical shape, e.g. `tv-en-2005-the-office-s01e01`). Anime leaves instead glue
+# the episode onto the slug (`ani-en-2009-bsg19`) and carry the season on their
+# parent_id, so the episode is recovered from the bare trailing digits.
+_EPISODE_SE_RE = re.compile(r"-s(\d+)e(\d+)$", re.IGNORECASE)
+_ANIME_EP_TAIL_RE = re.compile(r"(\d{1,4})$")
+
+
+def _episode_se_of(leaf_id, entry):
+    """(season_number, episode_number) for an EPISODE leaf, or None.
+
+    Drives the per-episode stills call (/tv/{id}/season/{s}/episode/{e}/images).
+    Two id shapes are understood (see ARCHITECTURE §6.2):
+      * TV/series — the glued `-sNNeMM` marker on the id itself (primary path).
+      * Anime — the season comes from the leaf's parent_id (`…-sNN`) and the
+        episode from the bare trailing digits of the id (`ani-…-bsg19` -> 19).
+    Returns None when neither shape yields BOTH numbers, so the caller warns-once
+    and skips that one still (it falls back to the season poster at view time)."""
+    if not leaf_id:
+        return None
+    m = _EPISODE_SE_RE.search(leaf_id)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    # Anime fallback: season off the parent_id, episode off the trailing digits.
+    parent = (entry or {}).get("parent_id")
+    season = _season_number_of(parent) if parent else None
+    if season is None:
+        return None
+    em = _ANIME_EP_TAIL_RE.search(leaf_id)
+    if not em:
+        return None
+    return season, int(em.group(1))
+
+
+def _pick_still_path(images):
+    """file_path of the best still from a /episode/{e}/images payload, or None.
+
+    Picks the highest vote_average still (the most-voted artwork), falling back to
+    the FIRST still when no votes separate them. Guarded against a missing/empty
+    `stills` list and non-dict members so a malformed payload yields None (skip)."""
+    stills = (images or {}).get("stills") or []
+    best = None
+    best_vote = None
+    for s in stills:
+        if not isinstance(s, dict) or not s.get("file_path"):
+            continue
+        if best is None:  # first usable still = the fallback
+            best = s
+            best_vote = s.get("vote_average") or 0
+            continue
+        vote = s.get("vote_average") or 0
+        if vote > best_vote:
+            best, best_vote = s, vote
+    return best.get("file_path") if best else None
+
+
+def _episode_thumb_name(filename):
+    """The Jellyfin/Kodi/Plex local episode-thumbnail name for an episode VIDEO
+    file: `<basename>-thumb.jpg` (e.g. `Dark.S01E01.mkv` -> `Dark.S01E01-thumb.jpg`).
+    Derived ONLY from the library entry's own stored `filename` — never client
+    input. Returns None for a falsy filename."""
+    if not filename:
+        return None
+    return os.path.splitext(filename)[0] + "-thumb.jpg"
 
 
 def _show_folder_of(season_folders):
@@ -1759,8 +1826,12 @@ def cmd_enrich_metadata(arg=None, *flags):
         tmdb_id = res["tmdb_id"]
         n_matched += 1
         n_imgs_unit = (1 if res.get("poster_path") else 0) + (1 if res.get("backdrop_path") else 0)
-        # per-season posters (shows only) add one potential image each
+        # per-season posters + per-episode stills (shows only) each add one
+        # potential image. An episode leaf is a unit id that carries a filename.
         season_imgs = len(unit.get("seasons", {})) if unit["kind"] == "show" else 0
+        episode_stills = (
+            sum(1 for i in unit.get("ids", []) if (library.get(i) or {}).get("filename"))
+            if unit["kind"] == "show" else 0)
         print(f"✅ {label}{yr}: matched '{res['title']}'"
               f"{(' (' + str(res['year']) + ')') if res['year'] else ''} -> tmdb_id={tmdb_id}")
 
@@ -1775,8 +1846,9 @@ def cmd_enrich_metadata(arg=None, *flags):
         print(f"     {'would write' if not apply else 'writing'} metadata.tmdb_id on "
               f"{len(unit['ids'])} entr(y/ies).")
         print(f"     {'would download' if not apply else 'downloading'} up to "
-              f"{n_imgs_unit + season_imgs} image(s) (poster/fanart"
-              f"{'/season posters' if season_imgs else ''}, local always wins).")
+              f"{n_imgs_unit + season_imgs + episode_stills} image(s) (poster/fanart"
+              f"{'/season posters' if season_imgs else ''}"
+              f"{'/episode stills' if episode_stills else ''}, local always wins).")
 
         if not apply:
             continue
@@ -1917,6 +1989,47 @@ def _download_unit_images(unit, res, image_base, folder):
         fp = posters[0].get("file_path") if posters else None
         if fp and _download_to(f"{image_base}{TMDB_POSTER_SIZE}{fp}", dest):
             print(f"     ⬇️  season {n} poster.jpg ({os.path.basename(sfolder)})")
+            written += 1
+
+    # Per-episode stills: /tv/{id}/season/{s}/episode/{e}/images -> best still,
+    # written as `<episode_video_basename>-thumb.jpg` next to the episode file.
+    # LOCAL ALWAYS WINS (skip if the -thumb.jpg already exists). A failed/empty
+    # call for one episode warns-once and is skipped (it falls back to the season
+    # poster at view time) — it never crashes nor blocks the rest. Reads the LIVE
+    # library so each leaf's folder_path reflects any rename done above.
+    live = load_library()
+    for eid in unit.get("ids", []):
+        ent = live.get(eid)
+        if ent is None:
+            continue
+        try:
+            real_id, leaf = _resolve_alias(live, eid)
+        except KeyError:
+            continue
+        if not isinstance(leaf, dict):
+            continue
+        fname = leaf.get("filename")
+        efolder = leaf.get("folder_path")
+        if not fname or not efolder:
+            continue  # season_map / alias-without-primary — not an episode file
+        se = _episode_se_of(real_id, leaf)
+        if se is None:
+            continue  # id shape gave no season+episode — skip (season poster covers it)
+        s_no, e_no = se
+        thumb = _episode_thumb_name(fname)
+        dest = os.path.join(efolder, thumb)
+        if os.path.exists(dest):
+            print(f"     ⏭️  local episode still present — kept ({thumb}).")
+            continue
+        eimg = _tmdb_get(
+            f"{TMDB_API_ROOT}/tv/{series_id}/season/{s_no}/episode/{e_no}/images",
+            {}, api_key)
+        fp = _pick_still_path(eimg)
+        if not fp:
+            print(f"     ⚠️  no episode still for S{s_no:02d}E{e_no:02d} — falls back to season poster.")
+            continue
+        if _download_to(f"{image_base}{TMDB_STILL_SIZE}{fp}", dest):
+            print(f"     ⬇️  {thumb}")
             written += 1
     return written
 
@@ -5291,6 +5404,37 @@ def _kind_image_under_root(folder, kind):
     return real
 
 
+def _episode_still_under_root(folder, filename):
+    """Return the absolute path of the per-episode still `<basename>-thumb.jpg`
+    sitting DIRECTLY in ``folder`` — but ONLY if it exists on disk AND the
+    realpath-resolved file is under LOCAL_ROOT with EXACTLY the basename derived
+    from the episode's own stored ``filename`` (never client input). Otherwise
+    None. The still-equivalent of ``_kind_image_under_root`` — the security funnel
+    every per-episode candidate flows through.
+
+    The expected basename is computed from ``filename`` via ``_episode_thumb_name``
+    (``os.path.splitext(filename)[0] + "-thumb.jpg"``); the on-disk file is then
+    matched case-insensitively against THAT exact name, so a sibling that merely
+    ends in `-thumb.jpg` for a DIFFERENT episode is never served here."""
+    if not folder or not filename:
+        return None
+    want = _episode_thumb_name(filename)
+    if not want:
+        return None
+    candidate = os.path.join(folder, want)
+    try:
+        if not os.path.isfile(candidate):
+            return None
+        real = os.path.realpath(candidate)
+    except OSError:
+        return None
+    if os.path.basename(real).lower() != want.lower():
+        return None
+    if not _is_within_local_root(real):
+        return None
+    return real
+
+
 def _ancestor_show_folder_image(start_folder, kind):
     """Walk UP ``start_folder``'s real on-disk ancestors to the NEAREST ancestor
     whose basename carries a ``{tmdb-…}`` token (the show folder) and return that
@@ -5332,6 +5476,11 @@ def resolve_artwork_path(library, mid, kind="poster"):
 
     RESOLUTION ORDER — LOCAL ALWAYS WINS at each level (locked decision #8, "Dark"
     requirement). The first existing file wins:
+      (i-still, poster ONLY) for an EPISODE leaf (owns a ``filename`` AND a
+            season+episode id shape), the per-episode still
+            ``<own folder>/<splitext(filename)[0]>-thumb.jpg`` — the
+            Jellyfin/Kodi/Plex local episode-thumbnail name. fanart skips this rung
+            (episodes have no per-episode fanart).
       (i)   the resolved entry's OWN ``folder_path`` ``<kind>.jpg``. For a season
             episode this folder IS the season folder, so a season-specific local
             poster naturally wins here. For a season_map it is the season folder.
@@ -5341,6 +5490,8 @@ def resolve_artwork_path(library, mid, kind="poster"):
             ``folder_path``) whose name carries a ``{tmdb-…}`` token — the show
             folder — and its ``<kind>.jpg`` (so every episode inherits the show
             poster when nothing more specific exists).
+    So an episode WITHOUT its own still falls back to the season poster, then the
+    show poster — the per-episode waterfall the task pins.
 
     ALIAS / season_map SAFE (PR #21 crash class): ``mid`` is resolved one hop via
     ``_resolve_alias`` so a ``multi_ep_alias`` dereferences to its PRIMARY leaf's
@@ -5351,10 +5502,12 @@ def resolve_artwork_path(library, mid, kind="poster"):
     SECURITY: every candidate is derived from the LIBRARY entry's stored paths
     (and their real ancestors), NEVER from client input beyond ``mid`` (which only
     indexes the dict) + ``kind`` (allow-listed). Each candidate passes through
-    ``_kind_image_under_root`` / the ancestor walk, both of which return ONLY a
-    file named exactly poster.jpg/fanart.jpg that realpath-resolves UNDER
-    LOCAL_ROOT. A crafted ``mid`` (``..``, an absolute path, etc.) cannot escape:
-    it is just a missing dict key -> None.
+    ``_kind_image_under_root`` / ``_episode_still_under_root`` / the ancestor walk,
+    each of which returns ONLY a file named exactly poster.jpg/fanart.jpg OR the
+    episode's own ``<basename>-thumb.jpg`` (basename taken from the entry's stored
+    ``filename``), and only when it realpath-resolves UNDER LOCAL_ROOT. A crafted
+    ``mid`` (``..``, an absolute path, etc.) cannot escape: it is just a missing
+    dict key -> None.
     """
     if kind not in _FOLDER_IMAGE_NAMES_KINDS:
         kind = "poster"
@@ -5369,7 +5522,7 @@ def resolve_artwork_path(library, mid, kind="poster"):
     # real folder). _resolve_alias raises only on a missing key, which we've ruled
     # out above; guard anyway so a malformed library never propagates.
     try:
-        _real_id, entry = _resolve_alias(library, mid)
+        real_id, entry = _resolve_alias(library, mid)
     except KeyError:
         return None
     if not isinstance(entry, dict):
@@ -5378,6 +5531,21 @@ def resolve_artwork_path(library, mid, kind="poster"):
     # If resolution landed on a still-virtual row (an alias whose primary is
     # missing), it owns no folder of its own — fall back to its season below.
     own_folder = entry.get("folder_path") if entry.get("type") != "multi_ep_alias" else None
+
+    # (i-still, poster ONLY) An EPISODE leaf — one that owns a `filename` AND whose
+    # (post-alias) id parses to a season+episode — gets its per-episode still as the
+    # FIRST candidate: `<own folder>/<splitext(filename)[0]>-thumb.jpg`. LOCAL wins
+    # here exactly like the season-specific poster below; if the still is absent we
+    # fall straight through to the season/show poster waterfall. fanart is unchanged
+    # (episodes have no per-episode fanart). The candidate basename is derived from
+    # the entry's OWN stored filename (never client input) and is vetted under
+    # LOCAL_ROOT by _episode_still_under_root.
+    if kind == "poster":
+        filename = entry.get("filename")
+        if filename and own_folder and _episode_se_of(real_id, entry) is not None:
+            hit = _episode_still_under_root(own_folder, filename)
+            if hit:
+                return hit
 
     # (i) The entry's OWN folder — a season-specific local poster wins here.
     hit = _kind_image_under_root(own_folder, kind)

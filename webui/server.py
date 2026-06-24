@@ -914,11 +914,15 @@ def create_app(demo=False):
             raise HTTPException(status_code=404, detail="No artwork for this id")
         # Defence-in-depth: re-assert the resolved file is under LOCAL_ROOT with an
         # allowed basename before streaming (resolve_artwork_path already enforces
-        # this; mirror /api/folder-image's final re-check).
+        # this; mirror /api/folder-image's final re-check). The allow-list is
+        # poster.jpg / fanart.jpg PLUS a per-episode still `<basename>-thumb.jpg`
+        # (resolve_artwork_path returns the episode still as the poster for an
+        # episode leaf; the basename is derived from the entry's own filename).
         real = os.path.realpath(path)
         if not main._is_within_local_root(real):
             raise HTTPException(status_code=404, detail="Resolved image outside the media root")
-        if os.path.basename(real).lower() not in ("poster.jpg", "fanart.jpg"):
+        base_lower = os.path.basename(real).lower()
+        if base_lower not in ("poster.jpg", "fanart.jpg") and not base_lower.endswith("-thumb.jpg"):
             raise HTTPException(status_code=404, detail="Not an allowed image filename")
         return FileResponse(real, media_type="image/jpeg")
 

@@ -816,15 +816,20 @@ class MockTMDB:
 
     The `search` dict maps lowercased query strings to TMDB results lists.
     The `season_images` dict maps (series_id, season_number) to posters lists.
+    The `episode_images` dict maps (series_id, season_number, episode_number) to
+    stills lists (drives the per-episode-still enrich path; default empty -> the
+    still is silently skipped, the documented season-poster fall-back).
     Any image URL (starting with the TMDB image base) returns _FAKE_JPG bytes.
     A query whose title is in `network_error_titles` raises ConnectionError to
     simulate a transient API failure. Minimal and sufficient — a single confident
     movie result and a single confident show result cover all smoke paths.
     """
 
-    def __init__(self, search=None, season_images=None, network_error_titles=()):
+    def __init__(self, search=None, season_images=None, episode_images=None,
+                 network_error_titles=()):
         self.search = {k.lower(): v for k, v in (search or {}).items()}
         self.season_images = season_images or {}
+        self.episode_images = episode_images or {}
         self.network_error_titles = {t.lower() for t in network_error_titles}
         self.calls = []        # list of (url, params) for post-hoc assertions
         self.image_urls = []   # image URLs actually requested
@@ -833,7 +838,7 @@ class MockTMDB:
         params = params or {}
         self.calls.append((url, dict(params)))
 
-        # Image download (poster / fanart / season poster) — returns fake JPG bytes.
+        # Image download (poster / fanart / season poster / episode still) -> JPG bytes.
         if url.startswith("https://image.tmdb.org/t/p/"):
             self.image_urls.append(url)
             return _MockTMDBResp(200, content=_FAKE_JPG)
@@ -848,6 +853,19 @@ class MockTMDB:
             if q in self.network_error_titles:
                 raise ConnectionError("simulated TMDB network failure")
             return _MockTMDBResp(200, json_data={"results": self.search.get(q, [])})
+
+        # NOTE: the episode-images URL (/tv/{id}/season/{s}/episode/{e}/images) ALSO
+        # contains "/season/" and ends with "/images", so this branch MUST be tested
+        # BEFORE the season branch below or an episode call is mis-parsed as a season
+        # call (returns {"posters":…} instead of {"stills":…}).
+        if "/episode/" in url and url.endswith("/images"):
+            parts = url.rstrip("/").split("/")
+            e = int(parts[-2])
+            s = int(parts[-4])
+            series_id = int(parts[-6])
+            return _MockTMDBResp(200, json_data={
+                "stills": self.episode_images.get((series_id, s, e), [])
+            })
 
         if "/season/" in url and url.endswith("/images"):
             parts = url.rstrip("/").split("/")

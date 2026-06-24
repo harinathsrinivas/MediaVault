@@ -24,6 +24,7 @@
 "use strict";
 
 import { metaFor, humanSize, openFolder } from "./data.js";
+import { authFetch } from "./auth.js";
 import { openConfirmModal } from "./modal.js";
 import { createRing } from "./ring.js";
 import { displayTitle } from "./title.js";
@@ -364,7 +365,7 @@ export function runAction(action, item, btn, jobPanel) {
   if (jobPanel) jobPanel._jobCommand = commandFor(action, item);
   renderJob(jobPanel, { status: "running", name: action, output: "" }, true);
 
-  fetch("/api/action/" + action, {
+  authFetch("/api/action/" + action, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(bodyForAction(action, item)),
@@ -399,7 +400,7 @@ export function runAction(action, item, btn, jobPanel) {
 
 function pollJob(jobId, jobPanel, btn, action) {
   function tick() {
-    fetch("/api/job/" + encodeURIComponent(jobId))
+    authFetch("/api/job/" + encodeURIComponent(jobId))
       .then(function (res) {
         if (!res.ok) {
           return res.text().then(function (t) {
@@ -452,7 +453,7 @@ function runFetchRestore(item, btn, jobPanel, ring) {
   ring.setChunks(0, 0); // show the ring immediately at 0 (job not enqueued yet)
   renderJob(jobPanel, { status: "running", name: "fetch_restore", output: "" }, true);
 
-  fetch("/api/action/fetch_restore", {
+  authFetch("/api/action/fetch_restore", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(fetchRestoreBody(item)),
@@ -496,7 +497,7 @@ function runFetchRestore(item, btn, jobPanel, ring) {
 // (honest "got this far"), no glow.
 function pollFetchRestore(jobId, jobPanel, btn, ring) {
   function tick() {
-    fetch("/api/job/" + encodeURIComponent(jobId))
+    authFetch("/api/job/" + encodeURIComponent(jobId))
       .then(function (res) {
         if (!res.ok) {
           return res.text().then(function (t) {

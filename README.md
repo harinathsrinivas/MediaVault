@@ -256,6 +256,51 @@ remains the viewing surface) and never moves or renames files (it shows you the
 command to copy). Install the deps first:
 `pip install -r requirements.txt` (adds `fastapi` + `uvicorn`).
 
+### Remote access (LAN / Tailscale)
+
+The console can be accessed from an iPhone, iPad, or any device on the same
+network or tailnet with a few one-time steps.
+
+**1. Mint a token.** From the Alienware browser (the "Access" panel — the key
+icon in the header) **or** the CLI:
+```
+python main.py token create --label "iPhone" --ttl 30d
+```
+The raw token is printed once and never stored (only its sha256 is kept in the
+gitignored `mvtokens.json`). Share the printed `?token=` link to the device —
+the device captures it once (stored in a cookie) and sends it automatically on
+every request. Re-prompt appears on expiry or 401. Manage tokens:
+```
+python main.py token list           # see all tokens with expiry countdowns
+python main.py token revoke <id>    # revoke by id
+```
+**Secure by default:** with no tokens minted, the genuine-local browser
+(Alienware) always has full admin access — no token needed. Remote devices get
+401 until the owner mints and shares a token.
+
+**2. Bind to the network.** `--host 0.0.0.0` makes the app reachable on your
+LAN IP and your Tailscale IP over plain HTTP:
+```
+python main.py web --host 0.0.0.0
+```
+
+**3. HTTPS via Tailscale (recommended).** For an encrypted HTTPS tailnet URL:
+```
+# One-time Tailscale admin: enable MagicDNS + HTTPS at https://login.tailscale.com/admin
+# Then on the PC:
+tools\tailscale_serve_setup.ps1   # sets up `tailscale serve` → https://<machine>.ts.net
+```
+See `tools/tailscale_serve_setup.ps1` and
+`docs/feature-web-media-ui/REMOTE_ACCESS.md` for the full setup guide.
+
+**4. iPhone / iPad flow.** Open the `?token=` share link in Safari → token is
+captured and stored in a cookie → tap Share → "Add to Home Screen" to install
+as a standalone PWA. The token is sent automatically on every request; a 401
+re-prompts.
+
+The `POST /api/open-folder` ("Open in Explorer") button remains localhost-only
+and returns 403 over Tailscale regardless of the token — by design.
+
 > **Reusable Claude skill:** the web-UI motion work was codified as a
 > `web-ui-polish` Claude skill at `~/.claude/skills/web-ui-polish/SKILL.md`
 > (outside the repo) — buttery-motion recipes (conic hover border, cursor glow,

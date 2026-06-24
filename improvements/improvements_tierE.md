@@ -329,3 +329,25 @@
 - Risk: low (Phases 1-3 call existing `cmd_*` unchanged via the existing job queue — no rollback-contract change; Phase 3 is CSS/manifest only, no backend change)
 - If skipped: the console stays disk-reclaim-only; there's no browsable media-type view, and fetch-in-UI/mobile access stay future-only.
 - Status: in_progress — **Phases 1-3 done** (web-UI core: media-type tabs + fetch-in-UI + aesthetic motion + PWA + grouped folder view + /api/tree + /api/folder-image + /api/open-folder + space background + open-folder button + iOS no-cache fix; on `feature/imp_e14_polish_pwa`); remote/mobile (Phase 4 = IMP-E15) and TMDB posters/rename (Phase 5 = IMP-E3/U3/D17) continue under their own tasks
+
+---
+
+## IMP-E15: Mobile + Tailscale remote access + shared-token auth
+
+- Category: integration / security
+- Priority: high
+- Parent / prerequisite: IMP-E14 (built on its FastAPI console + PWA substrate)
+- Files: `mvcommon.py` (mvconfig.json loader + `mvtokens.json` store: `mint_token`/`list_tokens`/`revoke_token`/`validate_token`), `main.py` (`cmd_token_create`/`cmd_token_list`/`cmd_token_revoke`, updated `cmd_web`), `webui/server.py` (`_is_genuine_local_admin`, `_request_token_is_valid`, `_is_authed`, `/api/whoami`, `/api/token` CRUD, `/api/*` auth middleware), `webui/static/admin.js` (owner Access panel: mint + list + revoke), `webui/static/auth.js` (device-side token capture + cookie + header injection), `tools/tailscale_serve_setup.ps1` (one-time Tailscale HTTPS setup), `docs/feature-web-media-ui/REMOTE_ACCESS.md` (full remote-access guide), `mvconfig.example.json` (checked in; no `web.token`)
+- What shipped (branch `feature/imp_e15_mobile_tailscale_auth`):
+  - **mvconfig.json minimal config (IMP-A5 first slice):** `mvcommon.py` loads `mvconfig.json` at startup. Schema: `web.host`, `web.port`, `tmdb.api_key`. **No `web.token`** — auth is no longer a static config key (superseded by minted tokens). Absent / malformed → defaults (`127.0.0.1:8765`). `mvconfig.json` gitignored; `mvconfig.example.json` checked in.
+  - **Admin-minted, expiring, revocable token auth — SUPERSEDES the initial static-token slice:** tokens are NOT a static config value. The gitignored `mvtokens.json` stores only sha256 hashes (raw token shown once at mint, never persisted). Each record: `{id, label, hash, created_at, expires_at}`. The store is read fresh per request. Minting/listing/revoking: CLI (`python main.py token create [--label X] [--ttl 1h|8h|12h|1d|3d|7d|30d|never]`, `token list`, `token revoke <id>`) and the localhost-only **Access panel** in the web UI.
+  - **Genuine-local-admin detection (the security hinge):** `_is_genuine_local_admin` = loopback host AND none of the proxy/identity headers (`x-forwarded-*`, `tailscale-user-*`, `forwarded`). `tailscale serve` proxies remote tailnet peers to `127.0.0.1` but injects those headers, so a proxied peer is never mistaken for the owner. `GET /api/whoami` (unauthenticated) returns `{is_admin, authed}` so the SPA shows the Access panel only to the owner.
+  - **Always-enforce auth — secure-by-default:** auth is enforced on every `/api/*` request (except `/api/whoami`). With no tokens minted, the genuine-local admin still has full, token-free access; every remote request gets 401 — remote is locked until the owner mints and shares a token. There is no startup guard: the always-enforce rule makes it unnecessary.
+  - **Remote access model:** app binds `0.0.0.0` → reachable on LAN IP + Tailscale IP over HTTP; `tailscale serve` provides an HTTPS tailnet URL (one-time: enable MagicDNS + HTTPS in Tailscale admin). `tools/tailscale_serve_setup.ps1` automates the `tailscale serve` setup. Full guide: `docs/feature-web-media-ui/REMOTE_ACCESS.md`.
+  - **Client token UX (`auth.js` + `admin.js`):** owner mints a token (Access panel or CLI) and shares the `?token=` link; device captures it → stores in `mv_token` cookie + `sessionStorage` → strips from URL → sends as `X-MediaVault-Token` header on every fetch. On 401 → re-prompts. The local browser is auto-opened at `127.0.0.1` (no `?token=` needed — genuine-local admin). iPhone/iPad flow: open share link once, "Add to Home Screen" to install PWA.
+- Rationale: The PWA (IMP-E14 Phase 3) installs beautifully on iPhone/iPad; without a safe remote-access model and auth layer, it is only usable on localhost. Tailscale gives a production-grade HTTPS tunnel with zero infra; the token keeps the API private without an identity provider.
+- Effort estimate: medium
+- Risk: low-medium — auth middleware is additive (no cmd_* change, no rollback-contract change, no ENTRY_TYPE_KEYS change); the non-localhost guard is additive; the mvconfig.json loader is additive (fallback to defaults if absent).
+- If skipped: the console stays localhost-only; phone access requires either an SSH tunnel or an insecure LAN URL; the PWA can't be used from the couch.
+- Cross-references: IMP-E14 (Phase 4 of the web media-UI plan); IMP-A5 (full config migration — E15 delivers the minimal slice only); IMP-E3/U3/D17 (Phase 5, next).
+- Status: in_progress — shipped on `feature/imp_e15_mobile_tailscale_auth`; done on merge to main

@@ -185,6 +185,7 @@ _LEAF_BASE_KEYS = {
 }
 
 
+@pytest.mark.usefixtures("web_as_local_admin")
 def test_tree_shape_and_roots(sandbox, make_video):
     """/api/tree returns {"roots": {movies, series, anime, other}} with each
     value a list."""
@@ -304,6 +305,7 @@ def test_tree_has_image_detects_descendant_poster(sandbox, make_video):
     assert standalone["has_image"] is False
 
 
+@pytest.mark.usefixtures("web_as_local_admin")
 def test_tree_json_serializable_via_endpoint(sandbox, make_video):
     """The whole /api/tree payload is JSON-serializable (no stray non-JSON)."""
     _seed_tree(sandbox, make_video)
@@ -505,6 +507,7 @@ def test_build_tree_is_read_only(sandbox, make_video):
 _JPEG_BYTES = b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 32 + b"\xff\xd9"
 
 
+@pytest.mark.usefixtures("web_as_local_admin")
 def test_folder_image_serves_poster_in_folder(sandbox, make_video):
     """A poster.jpg in the requested folder is streamed (200, image/jpeg)."""
     seeded = _seed_tree(sandbox, make_video)
@@ -518,6 +521,7 @@ def test_folder_image_serves_poster_in_folder(sandbox, make_video):
     assert r.content == _JPEG_BYTES
 
 
+@pytest.mark.usefixtures("web_as_local_admin")
 def test_folder_image_serves_descendant_when_folder_has_none(sandbox, make_video):
     """When the requested folder has no image but a descendant does, the
     descendant's poster.jpg is served."""
@@ -532,6 +536,7 @@ def test_folder_image_serves_descendant_when_folder_has_none(sandbox, make_video
     assert r.content == _JPEG_BYTES
 
 
+@pytest.mark.usefixtures("web_as_local_admin")
 def test_folder_image_404_when_absent(sandbox, make_video):
     """No poster/fanart anywhere in the subtree -> 404."""
     seeded = _seed_tree(sandbox, make_video)
@@ -540,6 +545,7 @@ def test_folder_image_404_when_absent(sandbox, make_video):
     assert r.status_code == 404, f"-> {r.status_code}: {r.text}"
 
 
+@pytest.mark.usefixtures("web_as_local_admin")
 def test_folder_image_rejects_path_outside_root(sandbox, make_video, tmp_path):
     """A path OUTSIDE LOCAL_ROOT (traversal) is rejected with 403."""
     _seed_tree(sandbox, make_video)
@@ -552,6 +558,7 @@ def test_folder_image_rejects_path_outside_root(sandbox, make_video, tmp_path):
     assert r.status_code == 403, f"expected 403 for out-of-root, got {r.status_code}"
 
 
+@pytest.mark.usefixtures("web_as_local_admin")
 def test_folder_image_traversal_via_dotdot_rejected(sandbox, make_video, tmp_path):
     """A ..-based traversal that escapes LOCAL_ROOT is rejected (403), even
     though the literal prefix starts under the root."""
@@ -569,15 +576,32 @@ def test_folder_image_traversal_via_dotdot_rejected(sandbox, make_video, tmp_pat
 
 # ---------------------------------------------------------------------------
 # POST /api/open-folder
+#
+# These tests intentionally do NOT use the `web_as_local_admin` fixture: they
+# exercise the genuine-local-admin gate ON open-folder itself, so the REAL admin
+# predicate must govern. The localhost cases below pass a loopback client host
+# (127.0.0.1) so they ARE the genuine-local admin — they sail through the
+# always-on /api/* auth middleware (IMP-E15) and reach the handler's own logic.
 # ---------------------------------------------------------------------------
 
 def test_open_folder_rejects_non_localhost(sandbox, make_video):
-    """A non-localhost client (the default TestClient host 'testclient') is
-    rejected with 403 — never open Explorer for a remote/Tailscale peer."""
+    """A non-localhost client (the default TestClient host 'testclient') with no
+    credentials is rejected — never open Explorer for a remote/Tailscale peer.
+
+    Under the secure-by-default auth rule (IMP-E15), a non-admin request with no
+    valid token is caught by the always-on /api/* middleware (401) BEFORE it can
+    reach the open-folder handler's own genuine-local-admin 403. Either status is
+    a rejection; here the middleware's 401 fires first (no token presented). The
+    LAYERED property "a remote peer WITH a valid token still gets the handler's
+    403" is owned by tests/test_web_auth.py::test_open_folder_admin_rule_survives_auth.
+    """
     seeded = _seed_tree(sandbox, make_video)
-    client = TestClient(create_app())  # default client host is 'testclient'
+    client = TestClient(create_app())  # default client host 'testclient' (non-admin)
     r = client.post("/api/open-folder", json={"path": str(seeded["standalone"]["dir"])})
-    assert r.status_code == 403, f"non-localhost must be 403, got {r.status_code}: {r.text}"
+    assert r.status_code == 401, (
+        f"a non-localhost, no-token peer must be rejected by the auth gate (401), "
+        f"got {r.status_code}: {r.text}"
+    )
 
 
 def test_open_folder_demo_simulates(sandbox, make_video):

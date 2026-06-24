@@ -22,6 +22,12 @@ from fastapi.testclient import TestClient  # noqa: E402 (after importorskip guar
 import main  # noqa: E402
 import mvcommon  # noqa: E402
 
+# Secure-by-default auth (IMP-E15) is now ALWAYS enforced on /api/*. These tests
+# drive the endpoints as the LOCAL OWNER (TestClient's host is "testclient", a
+# NON-loopback => non-admin, which would otherwise 401), so run the whole module
+# as the genuine-local admin. See the web_as_local_admin fixture docstring.
+pytestmark = pytest.mark.usefixtures("web_as_local_admin")
+
 # Bytes we write as the "original" file for the replace test.  Anything over
 # DUMMY_MAX_BYTES (200_000) so collect_reclaimable counts it as real.
 _REAL_FILE_BYTES = b"REAL-MEDIA-CONTENT\n" * 11000  # ~209 KB

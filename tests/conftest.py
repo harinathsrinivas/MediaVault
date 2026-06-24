@@ -409,6 +409,51 @@ def fake_dummy(monkeypatch):
 
 
 @pytest.fixture()
+def web_as_local_admin(monkeypatch):
+    """Make every /api/* request behave as the GENUINE-LOCAL ADMIN (IMP-E15).
+
+    WHY THIS EXISTS — the secure-by-default auth rule:
+      webui.server now ALWAYS enforces auth on /api/* (the old "empty token store
+      -> auth off" escape was removed because it left a 0.0.0.0 bind with an empty
+      store unauthenticated to the whole LAN/tailnet). Under the new rule a request
+      is allowed IFF it is the genuine-local admin OR carries a valid minted token.
+
+      The ENDPOINT/BEHAVIOR web tests drive the API as the LOCAL OWNER — they
+      exercise the endpoints (reclaim/items/tree/actions/jobs/demo/progress), NOT
+      the auth gate — and FastAPI ``TestClient`` reports ``request.client.host`` as
+      ``"testclient"`` (NON-loopback), so without this they would be treated as a
+      remote non-admin and 401 on every /api/* call. Patching the admin predicate
+      to True makes those requests the owner, so auth never interferes with what
+      they actually test. ``_is_authed`` short-circuits on the admin branch, so the
+      token store is never consulted for these tests.
+
+    SCOPING (deliberate — NOT a global blanket): this fixture is OPT-IN. It is
+    applied per-module via ``pytestmark = pytest.mark.usefixtures("web_as_local_admin")``
+    in exactly the endpoint/behavior modules (test_web_endpoints, test_web_items,
+    test_web_tree, test_web_demo, test_web_progress) and the web smoke cases. The
+    AUTH-SPECIFIC modules (test_web_tokens, test_web_auth) MUST NOT pull this in —
+    they test admin-vs-remote gating directly and simulate the client host
+    themselves via ``TestClient(app, client=(host, port))``.
+
+    Patches the module attribute ``webui.server._is_genuine_local_admin`` (read at
+    request time by the auth middleware, /api/whoami, the token endpoints, and
+    /api/open-folder). The patch is undone automatically at fixture teardown.
+
+    NOTE on /api/open-folder: this DOES make a TestClient request look like the
+    local admin, so the admin-gated open-folder/token endpoints would be reachable
+    here too. That is fine for the endpoint modules — the open-folder tests in
+    test_web_tree.py that assert the 403/localhost rule set their OWN client host
+    explicitly (127.0.0.1 / non-localhost) and do not rely on this predicate, and
+    the dedicated admin-vs-remote gating is owned by the auth modules that exclude
+    this fixture.
+    """
+    pytest.importorskip("fastapi")  # webui.server imports fastapi at module load
+    import webui.server as _web_server
+
+    monkeypatch.setattr(_web_server, "_is_genuine_local_admin", lambda request: True)
+
+
+@pytest.fixture()
 def make_video():
     """Factory: write a tiny (~264 KB) .mkv that clears DUMMY_MAX_BYTES.
 

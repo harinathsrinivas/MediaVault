@@ -50,6 +50,12 @@ import mvcommon  # noqa: E402 (kept for parity / future use)
 
 from webui import server as web_server  # noqa: E402
 
+# Secure-by-default auth (IMP-E15) is always enforced on /api/*; these progress/
+# job/action endpoint tests drive the API as the LOCAL OWNER (TestClient host
+# "testclient" is non-loopback => would 401), so run the module as the
+# genuine-local admin. See the web_as_local_admin fixture docstring.
+pytestmark = pytest.mark.usefixtures("web_as_local_admin")
+
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers

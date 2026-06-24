@@ -581,23 +581,14 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 /* Reveal only on devices with a true hovering pointer (desktop mouse / trackpad
    / pen). On touch (hover:none) this rule never matches, so a tap can't light it
    and nothing stays stuck after a finger lifts — graceful degradation. */
-@media (hover: hover) and (pointer: fine) {
+@media (any-hover: hover) and (any-pointer: fine) {
   .card:hover::before { opacity: 1; }
 }
-/* Reduced motion: no following + no fade. Fall back to a STATIC, centred, subtle
-   highlight on hover (no transition, fixed centre) so the affordance survives
-   without movement. glow.js also skips pointer tracking in this mode. */
-@media (prefers-reduced-motion: reduce) {
-  .card::before {
-    transition: none;
-    background: radial-gradient(
-      circle at 50% 50%,
-      rgba(56, 224, 200, 0.12),
-      transparent 70%
-    );
-  }
-  .card:hover::before { opacity: 1; }
-}
+/* NOTE: the cursor-follow glow intentionally KEEPS following the pointer under
+   prefers-reduced-motion — it's a small, non-vestibular, explicitly user-requested
+   effect, and "best performance" Windows rigs report reduced-motion as a mere perf
+   tweak. No static-fallback override here; the following radial above applies
+   always, and glow.js tracks the pointer regardless of the reduced-motion setting. */
 
 /* ============================================================================
    HOVER BORDER — CANDIDATE A: rotating conic-gradient ring (IMP-E14 Phase 3).
@@ -635,7 +626,7 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
    gentle accent edge on hover via box-shadow (no mask, no conic, no @property). On
    capable engines the rotating ring below paints OVER this; on incapable ones this
    is the whole (still pretty, never-blank) effect. */
-@media (hover: hover) and (pointer: fine) {
+@media (any-hover: hover) and (any-pointer: fine) {
   .card:hover {
     box-shadow: var(--shadow), 0 0 0 1px rgba(56, 224, 200, 0.28);
   }
@@ -691,7 +682,7 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   /* Reveal + start the continuous rotation ONLY on a true hovering pointer. On
      touch (hover:none) this never matches → the arc can't show or get stuck after
      a finger lifts; touch users keep the plain card. */
-  @media (hover: hover) and (pointer: fine) {
+  @media (any-hover: hover) and (any-pointer: fine) {
     .card:hover::after {
       opacity: 1;
       animation: cardRingSpin 4.2s linear infinite;
@@ -708,26 +699,11 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   to { --ring-angle: 360deg; }
 }
 
-/* Reduced motion: NO rotation, NO spin animation. Fall back to a STATIC, subtle
-   accent frame so the hover affordance survives without any movement. The arc
-   becomes a calm, evenly-tinted full ring at a fixed angle. The box-shadow floor
-   above is already static (no animation), so it needs no override here. The card
-   lift transition is also dropped so the hover state applies instantly (the
-   springy ease-out above is the only motion this view would otherwise add). */
-@media (prefers-reduced-motion: reduce) {
-  .card { transition: border-color 0.18s ease; }
-  @supports (mask-composite: exclude) {
-    .card:hover::after {
-      animation: none;
-      background: conic-gradient(
-        from 0deg,
-        rgba(56, 224, 200, 0.45),
-        rgba(90, 160, 255, 0.40),
-        rgba(56, 224, 200, 0.45)
-      );
-    }
-  }
-}
+/* NOTE: the rotating ring + the card lift intentionally KEEP animating under
+   prefers-reduced-motion (same rationale as the cursor glow above) — this
+   continuous "wave around the box" is a deliberate, explicitly user-requested
+   effect. The reduced-motion fallbacks for OTHER components (modals, tree-loading,
+   the space background) are unchanged and still respect the setting. */
 
 /* Poster placeholder — gradient + big initial, NO external image. */
 .poster {
@@ -1555,3 +1531,358 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 .tab:focus-visible,
 .seg:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 9px; }
 .panel:focus-visible { outline: none; }
+
+/* ---------------- Access-token prompt overlay (IMP-E15) ---------------- */
+/* Shown by auth.js when a /api/* request returns 401 (the remote first-run UX:
+   open the URL, paste the token, Connect — remembered for the session). Mirrors
+   the confirm modal's backdrop/card structure but in the accent (teal) palette
+   since connecting is a normal, non-destructive action. Mobile-friendly: the card
+   is full-width on narrow screens and the Connect button is a comfortable tap
+   target. XSS-safe content (auth.js builds it with textContent only). */
+.auth-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 200; /* above the confirm modal (100) and terminal (120) */
+  background: rgba(4, 7, 12, 0.82);
+  backdrop-filter: blur(4px);
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  /* Respect the iOS safe-area so the card never tucks under a notch/home bar. */
+  padding: max(20px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right))
+    max(20px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+}
+.auth-backdrop.show { display: flex; }
+
+.auth-modal {
+  width: min(460px, 100%);
+  background: var(--bg-card);
+  border: 1px solid var(--accent-deep);
+  border-radius: var(--radius);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(56, 224, 200, 0.15);
+  overflow: hidden;
+  animation: pop 0.14s ease-out;
+}
+
+.auth-head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 17px 20px 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.auth-head .auth-icon {
+  width: 34px; height: 34px;
+  flex: none;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  background: rgba(56, 224, 200, 0.16);
+  font-size: 17px;
+}
+.auth-head h2 { margin: 0; font-size: 17px; font-weight: 800; }
+
+.auth-body { padding: 16px 20px 4px; }
+.auth-body .auth-line {
+  color: var(--text-dim);
+  font-size: 13.5px;
+  line-height: 1.45;
+  margin: 0 0 12px;
+}
+.auth-body .auth-note {
+  color: var(--danger);
+  font-size: 12.5px;
+  margin: 0 0 10px;
+  font-weight: 600;
+}
+.auth-input {
+  width: 100%;
+  /* Inherit the dark monospace field look from .provider-input; widen it and use
+     a 16px font so iOS Safari does not zoom the viewport when the field focuses. */
+  font-size: 16px;
+  padding: 11px 12px;
+}
+
+.auth-actions {
+  display: flex;
+  gap: 11px;
+  padding: 16px 20px 20px;
+}
+.auth-actions .auth-connect {
+  flex: 1;
+  min-height: 48px;
+  border-radius: var(--radius-sm);
+  font-weight: 700;
+  font-size: 15px;
+  cursor: pointer;
+  border: 1px solid var(--accent-deep);
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #04201c;
+}
+.auth-actions .auth-connect:hover { filter: brightness(1.08); }
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-modal { animation: none; }
+}
+
+/* ---------------- Admin "Access" panel (IMP-E15) ---------------- */
+/* OWNER-ONLY surface (gated on /api/whoami.is_admin in admin.js). A header button
+   (.btn-access, styled like .btn-sort) opens a modal that mirrors the auth/confirm
+   modal structure in the accent (teal) palette: mint a device token, see/share the
+   raw token ONCE, list active tokens with a human countdown, and revoke. Never
+   shown to a remote device. Dark, mobile-friendly, XSS-safe (admin.js builds it
+   with textContent / input.value only). */
+
+/* Header button — matches .btn-sort exactly so the header chrome stays coherent. */
+.btn-access {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+  color: var(--text);
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.btn-access:hover { background: var(--bg-card-hover); border-color: var(--accent-deep); }
+.btn-access:disabled { opacity: 0.5; cursor: default; }
+
+.access-backdrop {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 210; /* above the device token prompt (200) so the owner panel wins */
+  background: rgba(4, 7, 12, 0.82);
+  backdrop-filter: blur(4px);
+  align-items: center;
+  justify-content: center;
+  /* Respect the iOS safe-area so the card never tucks under a notch/home bar. */
+  padding: max(20px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right))
+    max(20px, env(safe-area-inset-bottom)) max(20px, env(safe-area-inset-left));
+}
+.access-backdrop.show { display: flex; }
+
+.access-modal {
+  width: min(520px, 100%);
+  /* Cap the height and scroll the body so a long token list never overflows the
+     viewport (especially on a phone in landscape). */
+  max-height: min(88vh, 760px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--accent-deep);
+  border-radius: var(--radius);
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(56, 224, 200, 0.15);
+  overflow: hidden;
+  animation: pop 0.14s ease-out;
+}
+
+.access-head {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 16px 18px 13px;
+  border-bottom: 1px solid var(--line-soft);
+  flex: none;
+}
+.access-head .access-icon {
+  width: 34px; height: 34px;
+  flex: none;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  background: rgba(56, 224, 200, 0.16);
+  font-size: 17px;
+}
+.access-head h2 { margin: 0; font-size: 17px; font-weight: 800; flex: 1; }
+.access-close {
+  flex: none;
+  width: 34px; height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.access-close:hover { background: var(--bg-card-hover); color: var(--text); border-color: var(--accent-deep); }
+
+/* Scrollable body so the mint form + result + list never overflow the modal. */
+.access-body {
+  padding: 4px 18px 18px;
+  overflow-y: auto;
+}
+
+.access-section { padding-top: 16px; }
+.access-section-title {
+  margin: 0 0 4px;
+  font-size: 11px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 700;
+}
+.access-section-title.ok { color: var(--accent); }
+.access-hint {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.45;
+}
+
+/* Mint form fields (label + TTL) stack vertically; full-width inputs. */
+.access-field {
+  display: block;
+  margin-bottom: 12px;
+}
+.access-field-label {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  font-weight: 700;
+}
+/* The inputs reuse .provider-input; bump font to 16px so iOS Safari does not zoom
+   the viewport on focus, and give selects a comfortable tap height. */
+.access-label-input,
+.access-ttl-select,
+.access-custom-num,
+.access-custom-unit {
+  width: 100%;
+  font-size: 16px;
+  padding: 10px 12px;
+}
+.access-ttl-select,
+.access-custom-unit {
+  /* Native select on a dark field: keep the dark fill + light text. */
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.access-custom-row {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.access-custom-row[hidden] { display: none; }
+.access-custom-num { flex: 1 1 0; }
+.access-custom-unit { flex: 1 1 0; }
+
+.access-error {
+  margin: 2px 0 10px;
+  color: var(--danger);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.access-error[hidden] { display: none; }
+
+.access-create {
+  width: 100%;
+  min-height: 48px;
+  border-radius: var(--radius-sm);
+  font-weight: 700;
+  font-size: 15px;
+  cursor: pointer;
+  border: 1px solid var(--accent-deep);
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #04201c;
+  transition: filter 0.12s;
+}
+.access-create:hover { filter: brightness(1.08); }
+.access-create:disabled { opacity: 0.6; cursor: default; filter: none; }
+
+/* Minted-token result — high-visibility "copy it now" block. */
+.access-minted {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid var(--accent-deep);
+  border-radius: var(--radius-sm);
+  background: rgba(56, 224, 200, 0.06);
+}
+.access-minted[hidden] { display: none; }
+.access-once-warn {
+  margin: 0 0 12px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--b-unprepped); /* amber — a deliberate "act now" cue */
+}
+.access-copy-field { margin-bottom: 12px; }
+.access-copy-field:last-of-type { margin-bottom: 0; }
+.access-copy-row {
+  display: flex;
+  gap: 8px;
+}
+/* The share URL + raw token are readonly mono fields; 16px to avoid iOS zoom. */
+.access-copy-row .provider-input {
+  font-size: 13px;
+  padding: 10px 11px;
+}
+.access-minted-meta {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* Active tokens list. */
+.access-list { margin-top: 4px; }
+.access-list-empty {
+  margin: 0;
+  padding: 12px 0;
+  font-size: 13px;
+  color: var(--text-faint);
+}
+.access-list-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 0;
+  border-top: 1px solid var(--line-soft);
+}
+.access-list-row:first-child { border-top: none; }
+.access-list-info { flex: 1; min-width: 0; }
+.access-list-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  word-break: break-word;
+}
+.access-list-sub {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+.access-list-sub.expired { color: var(--danger); font-weight: 600; }
+.access-revoke {
+  flex: none;
+  padding: 8px 14px;
+  min-height: 38px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.access-revoke:hover {
+  background: rgba(255, 92, 114, 0.12);
+  color: var(--danger);
+  border-color: var(--danger-deep);
+}
+.access-revoke:disabled { opacity: 0.6; cursor: default; }
+
+@media (prefers-reduced-motion: reduce) {
+  .access-modal { animation: none; }
+}

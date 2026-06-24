@@ -256,6 +256,7 @@ pytest.importorskip("httpx")
 from fastapi.testclient import TestClient  # noqa: E402 (after importorskip guard)
 
 
+@pytest.mark.usefixtures("web_as_local_admin")
 def test_api_items_and_reclaim_endpoints(sandbox, make_video):
     """GET /api/items returns 200 with exactly {by_category, items}; GET
     /api/reclaim still returns 200 with its existing three keys AND content that

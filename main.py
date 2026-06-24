@@ -30,6 +30,12 @@ from mvcommon import (
     load_library, save_library, generate_short_id, calculate_file_hash,
     human_readable_size, parse_size_str, retry, episode_num_from_id,
 )
+# Imported as a MODULE (not via `from ... import web_host`) on purpose: the web
+# config getters + the token-store helpers must be called module-qualified
+# (mvcommon.web_host(), mvcommon.list_tokens(), ...) so a test that monkeypatches
+# them (or mvcommon.MVTOKENS_PATH) is honoured here — see the binding-hazard note
+# in mvcommon's RUNTIME CONFIG section.
+import mvcommon
 
 REMOTE_ROOT = "/sdcard/Media"  # Your Pixel Root
 FFMPEG_PATH = r"C:\Users\harin\AppData\Roaming\Emby-Server\system\ffmpeg.exe"
@@ -4159,12 +4165,31 @@ def find_folder_image(folder):
     return None
 
 
-def cmd_web(host="127.0.0.1", port=8765, open_browser=True, demo=False):
+def cmd_web(host=None, port=None, open_browser=True, demo=False):
     """Launch the local web operations console (IMP-E12).
+
+    host/port: when None, taken from mvconfig.json (mvcommon.web_host()/
+    web_port()); an explicit --host/--port flag passes a value through and wins.
+
+    SECURITY (IMP-E15): the console is gated by ADMIN-MINTED, EXPIRING tokens
+    (see mvcommon's WEB ACCESS TOKENS section + webui.server), NOT a static
+    secret. Binding 0.0.0.0 is SAFE by default: a remote peer needs a valid
+    minted token, and the genuine-local admin (the owner's own browser) is always
+    allowed with no token. So there is NO refuse-to-start guard — if no token is
+    minted, remote simply cannot get in (locked), while the owner keeps working
+    locally. The local browser is auto-opened at the plain 127.0.0.1 URL (no
+    ?token= needed: genuine-local == admin). Mint share tokens with
+    `python main.py token create` or the web Access panel.
 
     demo=True (the `--demo` flag) serves a SAFE review build where EVERY action
     is SIMULATED server-side — no real cmd_*/Selenium/library mutation ever runs
     (IMP-E14). The default (demo=False) is fully real and byte-unchanged."""
+    # Resolve host/port: an explicit flag (non-None) overrides; else config.
+    if host is None:
+        host = mvcommon.web_host()
+    if port is None:
+        port = mvcommon.web_port()
+
     try:
         import uvicorn
         from webui.server import create_app
@@ -4176,12 +4201,96 @@ def cmd_web(host="127.0.0.1", port=8765, open_browser=True, demo=False):
     if demo:
         print("🟡 DEMO MODE (actions simulated) — no real command will run.")
     print(f"🌐 MediaVault web UI: http://{host}:{port}")
+    token_count = len(mvcommon.list_tokens())
+    if token_count:
+        print(f"🔒 Access tokens: {token_count} minted — remote peers need a valid token.")
+    else:
+        print("🔓 No access tokens minted yet — remote is locked; mint one with "
+              "`python main.py token create` or the web Access panel.")
     if open_browser:
+        # Auto-open the LOCAL browser at the plain URL. The genuine-local admin
+        # (the owner's own browser) is allowed with no token, so no ?token= is
+        # embedded here; always open 127.0.0.1 even when bound to 0.0.0.0.
+        local_url = f"http://127.0.0.1:{port}/"
         try:
-            webbrowser.open(f"http://{host}:{port}")
+            webbrowser.open(local_url)
         except Exception:
             pass
     uvicorn.run(app, host=host, port=port, log_level="warning")
+
+
+# TTL keyword -> seconds. The CLI `--ttl` accepts these named windows; `never`
+# means a non-expiring token (mint_token receives None).
+_TOKEN_TTL_CHOICES = {
+    "1h": 3600,
+    "8h": 8 * 3600,
+    "12h": 12 * 3600,
+    "1d": 24 * 3600,
+    "3d": 3 * 24 * 3600,
+    "7d": 7 * 24 * 3600,
+    "30d": 30 * 24 * 3600,
+    "never": None,
+}
+_TOKEN_TTL_DEFAULT = "7d"
+
+
+def _format_expiry(expires_at_iso):
+    """Human label for an iso expiry string (or None -> 'never')."""
+    return expires_at_iso if expires_at_iso else "never"
+
+
+def cmd_token_create(label="", ttl=_TOKEN_TTL_DEFAULT):
+    """Mint a new web access token and print it + a ready-to-share URL.
+
+    label: free-text device/person label. ttl: one of _TOKEN_TTL_CHOICES keys
+    (default 7d; 'never' = no expiry). The RAW token is printed ONCE here and is
+    never stored or recoverable — only its sha256 is persisted."""
+    if ttl not in _TOKEN_TTL_CHOICES:
+        choices = ", ".join(_TOKEN_TTL_CHOICES)
+        print(f"❌ Unknown --ttl {ttl!r}. Choose one of: {choices}")
+        sys.exit(1)
+    ttl_seconds = _TOKEN_TTL_CHOICES[ttl]
+    token_id, raw, expires_at = mvcommon.mint_token(label, ttl_seconds)
+
+    host = mvcommon.web_host()
+    port = mvcommon.web_port()
+    share_url = f"http://{host}:{port}/?token={raw}"
+
+    print("✅ Minted web access token (copy it now — it is shown ONLY once):")
+    print(f"   id:      {token_id}")
+    if label:
+        print(f"   label:   {label}")
+    print(f"   expires: {_format_expiry(expires_at)}")
+    print(f"   token:   {raw}")
+    print(f"   share:   {share_url}")
+    if host in ("0.0.0.0", "::"):
+        print("   NOTE: host is 0.0.0.0 — replace it in the URL with your LAN or "
+              "Tailscale IP for the device.")
+
+
+def cmd_token_list():
+    """Print all minted tokens (id, label, created, expires, EXPIRED?). Never
+    prints any hash or raw token (none is stored)."""
+    tokens = mvcommon.list_tokens()
+    if not tokens:
+        print("No web access tokens minted. Create one with: token create --label \"<name>\"")
+        return
+    print(f"{'ID':<10} {'LABEL':<18} {'CREATED':<22} {'EXPIRES':<22} EXPIRED?")
+    for t in tokens:
+        created = t.get("created_at") or "-"
+        expires = _format_expiry(t.get("expires_at"))
+        flag = "YES" if t.get("expired") else ""
+        print(f"{(t.get('id') or '-'):<10} {(t.get('label') or ''):<18} "
+              f"{created:<22} {expires:<22} {flag}")
+
+
+def cmd_token_revoke(token_id):
+    """Revoke (remove) a token by id. Idempotent: reports whether one existed."""
+    removed = mvcommon.revoke_token(token_id)
+    if removed:
+        print(f"✅ Revoked token {token_id}.")
+    else:
+        print(f"⚠️  No token with id {token_id} (nothing to revoke).")
 
 
 # ==========================================
@@ -4215,6 +4324,9 @@ if __name__ == "__main__":
         print("  fetch [id]")
         print("  recover [id|folder]  (or: recover --scan)")
         print("  web [--port N] [--host H] [--no-browser] [--demo]  — Launch the local web operations console (Disk Reclaim view); --demo = SAFE build, all actions simulated")
+        print("  token create [--label \"X\"] [--ttl 1h|8h|12h|1d|3d|7d|30d|never]  — Mint a web access token (default --ttl 7d)")
+        print("  token list                                          — List minted web access tokens")
+        print("  token revoke [id]                                   — Revoke a web access token by id")
         sys.exit(1)
 
     cmd = sys.argv[1]
@@ -4472,10 +4584,41 @@ if __name__ == "__main__":
 
         cmd_fetch_restore(mid, epr)
 
+    elif cmd == "token":
+        # Web access token management (IMP-E15): create / list / revoke.
+        sub = sys.argv[2] if len(sys.argv) >= 3 else None
+        if sub == "create":
+            rest = sys.argv[3:]
+            label = ""
+            ttl = _TOKEN_TTL_DEFAULT
+            i = 0
+            while i < len(rest):
+                if rest[i] == "--label" and i + 1 < len(rest):
+                    label = rest[i + 1]
+                    i += 2
+                elif rest[i] == "--ttl" and i + 1 < len(rest):
+                    ttl = rest[i + 1]
+                    i += 2
+                else:
+                    i += 1
+            cmd_token_create(label=label, ttl=ttl)
+        elif sub == "list":
+            cmd_token_list()
+        elif sub == "revoke":
+            if len(sys.argv) < 4:
+                print("❌ Usage: token revoke [id]")
+                sys.exit(1)
+            cmd_token_revoke(sys.argv[3])
+        else:
+            print("❌ Usage: token create [--label \"X\"] [--ttl 1h|8h|12h|1d|3d|7d|30d|never] | token list | token revoke [id]")
+            sys.exit(1)
+
     elif cmd == "web":
         args = sys.argv[2:]
-        host = "127.0.0.1"
-        port = 8765
+        # Default to None so cmd_web falls back to mvconfig.json; an explicit
+        # --host/--port flag below overrides the config value.
+        host = None
+        port = None
         open_browser = True
         demo = False
         i = 0

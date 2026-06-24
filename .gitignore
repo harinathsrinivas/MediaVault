@@ -2,6 +2,15 @@
 a.json
 .gitignore
 
+# Local runtime config (web bind + TMDB key) — never commit the real one;
+# the checked-in template mvconfig.example.json IS tracked.
+/mvconfig.json
+!mvconfig.example.json
+
+# Web access token store (IMP-E15) — admin-minted, expiring tokens; only the
+# sha256 of each token is stored, but never commit it.
+/mvtokens.json
+
 .git*
 # ...but DO track the line-ending policy (overrides core.autocrlf; stops CRLF phantom diffs)
 !.gitattributes

@@ -1056,6 +1056,29 @@ def cmd_set_fanart(manual_id, url):
         print(f"❌ Error downloading fanart: {e}")
 
 
+def cmd_set_tmdb(manual_id, tmdb_id):
+    # [IMP-E3/U3/D17] Manual override for the optional metadata.tmdb_id leaf field.
+    # Pure zero-byte JSON edit (like set_search): no media touch, NO rehash.
+    # Targets a LEAF entry — resolve a multi_ep_alias to its primary leaf so the
+    # alias's 3-key shape is never mutated; a season_map is a virtual container, so
+    # refuse it (tmdb_id lives on the leaf, not the container).
+    print(f"--- SETTING TMDB ID: {manual_id} ---")
+    library = load_library()
+    if manual_id not in library: print("❌ ID not found."); return
+
+    real_id, entry = _resolve_alias(library, manual_id)
+    if entry.get("type") == "season_map":
+        print("❌ set_tmdb targets a leaf entry, not a season_map container.")
+        return
+
+    # TMDB ids are integers; be lenient — store as int when all-digits, else as-is.
+    value = int(tmdb_id) if str(tmdb_id).isdigit() else tmdb_id
+    entry.setdefault("metadata", {})["tmdb_id"] = value
+    save_library(library)
+    target = f" (resolved to {real_id})" if real_id != manual_id else ""
+    print(f"✅ Set metadata.tmdb_id = {value!r}{target}\n")
+
+
 def cmd_set_uploaded(manual_id):
     # [NEW] Helper to force 'uploaded' status for multi-part pushes
     print(f"--- FORCING UPLOAD STATUS: {manual_id} ---")
@@ -4306,6 +4329,7 @@ if __name__ == "__main__":
         print("  set_search [id] [term]")
         print("  set_poster [id] [url]")
         print("  set_fanart [id] [url]")
+        print("  set_tmdb [id] [tmdb_id]")
         print("  set_uploaded [id]")
         print("  prep_season [base_id] [folder]")
         print("  scan_unprepped")
@@ -4447,6 +4471,12 @@ if __name__ == "__main__":
             cmd_set_fanart(sys.argv[2], sys.argv[3])
         else:
             print("❌ Usage: set_fanart [id] [url]")
+
+    elif cmd == "set_tmdb":
+        if len(sys.argv) >= 4:
+            cmd_set_tmdb(sys.argv[2], sys.argv[3])
+        else:
+            print("❌ Usage: set_tmdb [id] [tmdb_id]")
 
     elif cmd == "set_uploaded":
         cmd_set_uploaded(sys.argv[2])

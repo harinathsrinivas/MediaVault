@@ -784,3 +784,123 @@ def mkvmerge_split_chunks(ffmpeg_multichunk_mkv, tmp_path):
         assert "C:\\Media" not in str(rp), f"path must never touch real C:\\Media: {p}"
 
     yield {"chunks": chunks, "out_dir": out_dir}
+
+
+# ===========================================================================
+# mock_tmdb — shared canned TMDB backend (IMP-E3/U3/D17, Phase 5 step 5.6)
+#
+# Promoted from the inline FakeTMDB/patch_tmdb in tests/test_enrich_metadata.py
+# so the smoke suite (and future tests) can reuse it without duplication.
+# GUARANTEE: with this fixture active, main.requests.get is NEVER called for
+# a real network endpoint — the fake intercepts ALL URLs.
+# ===========================================================================
+
+_FAKE_JPG = b"\xff\xd8\xff\xe0FAKE-JPEG-BYTES\xff\xd9"  # tiny non-empty image body
+
+
+class _MockTMDBResp:
+    """Minimal requests.Response stand-in: .status_code, .json(), .content."""
+    def __init__(self, status_code=200, json_data=None, content=b""):
+        self.status_code = status_code
+        self._json = json_data
+        self.content = content
+
+    def json(self):
+        if self._json is None:
+            raise ValueError("no json")
+        return self._json
+
+
+class MockTMDB:
+    """Canned TMDB backend for tests.  URL-dispatches to pre-seeded data.
+
+    The `search` dict maps lowercased query strings to TMDB results lists.
+    The `season_images` dict maps (series_id, season_number) to posters lists.
+    Any image URL (starting with the TMDB image base) returns _FAKE_JPG bytes.
+    A query whose title is in `network_error_titles` raises ConnectionError to
+    simulate a transient API failure. Minimal and sufficient — a single confident
+    movie result and a single confident show result cover all smoke paths.
+    """
+
+    def __init__(self, search=None, season_images=None, network_error_titles=()):
+        self.search = {k.lower(): v for k, v in (search or {}).items()}
+        self.season_images = season_images or {}
+        self.network_error_titles = {t.lower() for t in network_error_titles}
+        self.calls = []        # list of (url, params) for post-hoc assertions
+        self.image_urls = []   # image URLs actually requested
+
+    def get(self, url, params=None, headers=None, timeout=None, **kwargs):
+        params = params or {}
+        self.calls.append((url, dict(params)))
+
+        # Image download (poster / fanart / season poster) — returns fake JPG bytes.
+        if url.startswith("https://image.tmdb.org/t/p/"):
+            self.image_urls.append(url)
+            return _MockTMDBResp(200, content=_FAKE_JPG)
+
+        if url.endswith("/configuration"):
+            return _MockTMDBResp(200, json_data={
+                "images": {"secure_base_url": "https://image.tmdb.org/t/p/"}
+            })
+
+        if "/search/movie" in url or "/search/tv" in url:
+            q = (params.get("query") or "").lower()
+            if q in self.network_error_titles:
+                raise ConnectionError("simulated TMDB network failure")
+            return _MockTMDBResp(200, json_data={"results": self.search.get(q, [])})
+
+        if "/season/" in url and url.endswith("/images"):
+            parts = url.rstrip("/").split("/")
+            n = int(parts[-2])
+            series_id = int(parts[-4])
+            return _MockTMDBResp(200, json_data={
+                "posters": self.season_images.get((series_id, n), [])
+            })
+
+        # Any other TMDB endpoint -> empty JSON (safe fallback).
+        return _MockTMDBResp(200, json_data={})
+
+
+# Canned minimal data — enough for all smoke paths.
+# ALL show results use TV format: "name" (not "title") + "first_air_date" (not "release_date")
+# because _resolve_unit passes title_key="name" / year_key="first_air_date" for TV/anime.
+# "smk" is the slug for the smoke library's TV episode id (tv-en-2020-smk-s01e01).
+_SMOKE_TMDB_SEARCH = {
+    # TV show: "SMK" — used by the enrich_metadata per-command smoke (sandbox, TV episode).
+    "smk": [{"id": 99901, "name": "SMK", "first_air_date": "2020-01-01",
+             "popularity": 50.0, "poster_path": "/smoke_poster.jpg",
+             "backdrop_path": "/smoke_backdrop.jpg"}],
+    # TV show: "The Office" — used by sandbox_alias / other show-centric tests.
+    "the office": [{"id": 2316, "name": "The Office", "first_air_date": "2005-01-01",
+                    "popularity": 50.0, "poster_path": "/tvposter.jpg",
+                    "backdrop_path": "/tvbackdrop.jpg"}],
+    # TV show: "BSG" — used by sandbox_alias (season "tv-en-2009-bsg-s04").
+    "bsg": [{"id": 1984, "name": "BSG", "first_air_date": "2009-01-01",
+             "popularity": 45.0, "poster_path": "/bsg_poster.jpg",
+             "backdrop_path": "/bsg_backdrop.jpg"}],
+}
+
+
+@pytest.fixture()
+def mock_tmdb(monkeypatch, tmp_path):
+    """Canned TMDB backend: patches main.requests.get + redirects main.TMDB_CACHE_DIR.
+
+    GUARANTEES:
+      - No real network call can escape (requests.get is fully replaced).
+      - The real ~/.mediavault metadata cache is never touched (TMDB_CACHE_DIR
+        points at a fresh temp dir under tmp_path).
+      - mvcommon.tmdb_api_key() returns a fake test key so cmd_enrich_metadata
+        does not bail out early with "No TMDB API key configured."
+
+    Yields the installed MockTMDB instance so tests can inspect `.calls` /
+    `.image_urls` if needed. The canned search dict covers the smoke library's
+    movie (title "SMK", year 2020) and the alias library's show ("BSG", 2009).
+    """
+    cache_dir = tmp_path / "tmdb_cache"
+    cache_dir.mkdir(exist_ok=True)
+    monkeypatch.setattr(main, "TMDB_CACHE_DIR", str(cache_dir))
+    monkeypatch.setattr(mvcommon, "tmdb_api_key", lambda: "SMOKE-TEST-KEY")
+
+    fake = MockTMDB(search=_SMOKE_TMDB_SEARCH)
+    monkeypatch.setattr(main.requests, "get", fake.get)
+    yield fake

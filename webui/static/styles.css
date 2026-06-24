@@ -750,16 +750,15 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   image-rendering: auto;
   -webkit-user-select: none;
   user-select: none;
-  /* Gentle fade-in on load (card.js flips [hidden]->shown). Purely opacity, so it
-     never shifts layout; the gradient underneath covers the brief transition. */
-  animation: poster-fade-in 220ms ease-out;
+  /* Start invisible but KEEP a layout box (opacity, NOT display:none) so a
+     loading="lazy" <img> is still observed + fetched by the browser. card.js adds
+     .is-loaded on the load event to fade it in. Using display:none here (the old
+     `[hidden]` approach) deadlocked lazy loading: no box -> never near viewport ->
+     never fetched -> load never fires -> poster never shows. */
+  opacity: 0;
+  transition: opacity 220ms ease-out;
 }
-.poster .poster-img[hidden] { display: none; }
-
-@keyframes poster-fade-in {
-  from { opacity: 0; }
-  to   { opacity: 1; }
-}
+.poster .poster-img.is-loaded { opacity: 1; }
 
 /* Bottom scrim ONLY when a real poster has loaded — card.js adds .has-poster to
    the .poster once the <img> fires `load` (and removes it on error). Keeps the
@@ -777,9 +776,10 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 }
 
 /* Reduced-motion: drop the poster fade (respect the OS setting; the swap is then
-   instant, still shift-free). */
+   instant, still shift-free). .is-loaded still flips opacity to 1, just without the
+   transition. */
 @media (prefers-reduced-motion: reduce) {
-  .poster .poster-img { animation: none; }
+  .poster .poster-img { transition: none; }
 }
 
 /* Badge-tinted poster gradients, one per state. */

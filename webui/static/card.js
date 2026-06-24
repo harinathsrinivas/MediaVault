@@ -127,15 +127,18 @@ function addPosterImage(poster, item) {
   img.loading = "lazy";
   img.decoding = "async";
   img.draggable = false;
-  // Hidden until it actually loads, so the gradient shows through during the
-  // request and stays put on error (no broken-image flash, no layout shift).
-  img.hidden = true;
+  // Start invisible via CSS opacity (NOT `hidden`/display:none). A loading="lazy"
+  // img with display:none has NO layout box, so the browser never sees it near the
+  // viewport and NEVER fetches it -> the `load` event never fires -> the poster
+  // stays invisible forever (the deadlock this replaces). opacity:0 keeps a layout
+  // box so lazy still fetches it; .is-loaded fades it in on load. On error we drop
+  // the <img> so the gradient placeholder + initial show through (no broken icon).
   img.addEventListener("load", function () {
-    img.hidden = false;
+    img.classList.add("is-loaded");
     poster.classList.add("has-poster"); // enables the bottom scrim (styles.css)
   });
   img.addEventListener("error", function () {
-    img.hidden = true;                  // keep the gradient + initial placeholder
+    img.remove();
     poster.classList.remove("has-poster");
   });
   img.src = "/api/media-image/" + encodeURIComponent(id) + "?kind=poster";

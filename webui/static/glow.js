@@ -43,27 +43,17 @@ function hasHoverPointer() {
   }
 }
 
-function prefersReducedMotion() {
-  try {
-    return (
-      typeof window.matchMedia === "function" &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches
-    );
-  } catch (e) {
-    return false;
-  }
-}
-
 // Wire the cursor-following glow on a STABLE container (call once with #panel).
 // Delegated so freshly-rendered cards are covered automatically and no listener
 // outlives the card it was attached to.
 export function wireCardGlow(container) {
   if (!container) return;
 
-  // Reduced motion → no following glow (CSS provides a static highlight). Touch /
-  // no-hover devices → the CSS hover gate keeps opacity at 0, so tracking would
-  // be wasted work. In both cases we simply don't observe pointer movement.
-  if (prefersReducedMotion() || !hasHoverPointer()) return;
+  // No-hover devices → the CSS hover gate keeps opacity at 0, so tracking would be
+  // wasted work; skip it. Pointer-follow runs EVEN under prefers-reduced-motion:
+  // this constantly-moving glow is a deliberate, user-requested feature, and many
+  // "best performance" Windows rigs report reduced-motion purely as a perf tweak.
+  if (!hasHoverPointer()) return;
 
   // One coalesced update per frame: remember the latest pointer + its card, then
   // write the CSS vars on the next animation frame.

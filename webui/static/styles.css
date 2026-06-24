@@ -584,20 +584,11 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 @media (any-hover: hover) and (any-pointer: fine) {
   .card:hover::before { opacity: 1; }
 }
-/* Reduced motion: no following + no fade. Fall back to a STATIC, centred, subtle
-   highlight on hover (no transition, fixed centre) so the affordance survives
-   without movement. glow.js also skips pointer tracking in this mode. */
-@media (prefers-reduced-motion: reduce) {
-  .card::before {
-    transition: none;
-    background: radial-gradient(
-      circle at 50% 50%,
-      rgba(56, 224, 200, 0.12),
-      transparent 70%
-    );
-  }
-  .card:hover::before { opacity: 1; }
-}
+/* NOTE: the cursor-follow glow intentionally KEEPS following the pointer under
+   prefers-reduced-motion — it's a small, non-vestibular, explicitly user-requested
+   effect, and "best performance" Windows rigs report reduced-motion as a mere perf
+   tweak. No static-fallback override here; the following radial above applies
+   always, and glow.js tracks the pointer regardless of the reduced-motion setting. */
 
 /* ============================================================================
    HOVER BORDER — CANDIDATE A: rotating conic-gradient ring (IMP-E14 Phase 3).
@@ -708,26 +699,11 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   to { --ring-angle: 360deg; }
 }
 
-/* Reduced motion: NO rotation, NO spin animation. Fall back to a STATIC, subtle
-   accent frame so the hover affordance survives without any movement. The arc
-   becomes a calm, evenly-tinted full ring at a fixed angle. The box-shadow floor
-   above is already static (no animation), so it needs no override here. The card
-   lift transition is also dropped so the hover state applies instantly (the
-   springy ease-out above is the only motion this view would otherwise add). */
-@media (prefers-reduced-motion: reduce) {
-  .card { transition: border-color 0.18s ease; }
-  @supports (mask-composite: exclude) {
-    .card:hover::after {
-      animation: none;
-      background: conic-gradient(
-        from 0deg,
-        rgba(56, 224, 200, 0.45),
-        rgba(90, 160, 255, 0.40),
-        rgba(56, 224, 200, 0.45)
-      );
-    }
-  }
-}
+/* NOTE: the rotating ring + the card lift intentionally KEEP animating under
+   prefers-reduced-motion (same rationale as the cursor glow above) — this
+   continuous "wave around the box" is a deliberate, explicitly user-requested
+   effect. The reduced-motion fallbacks for OTHER components (modals, tree-loading,
+   the space background) are unchanged and still respect the setting. */
 
 /* Poster placeholder — gradient + big initial, NO external image. */
 .poster {

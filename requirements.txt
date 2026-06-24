@@ -6,3 +6,4 @@ webdriver-manager
 fastapi
 uvicorn[standard]
 httpx  # test: required by fastapi.testclient.TestClient (tests/test_web_endpoints.py)
+wordninja  # enrich_metadata: splits concatenated id slugs (gameofthrones->"game of thrones") for TMDB search; optional at runtime (try/except fallback)

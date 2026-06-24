@@ -255,8 +255,15 @@ def split_video_file(input_path, output_dir, method, value_str, file_id=""):
     else:
         return []
 
-    # Command Execution
-    cmd = [MKVMERGE_PATH, "-o", output_pattern, "--split", f"size:{split_arg}", input_path]
+    # Command Execution.
+    # mkvmerge v97 formats the --split output name via libfmt, so any literal `{`/`}`
+    # in the path (e.g. a `{tmdb-12345}` Plex/Emby/Jellyfin folder token) is read as a
+    # format field and mkvmerge dies with `fmt::format_error: argument not found`
+    # (exit 3). Escape them as `{{`/`}}` for the -o arg ONLY — mkvmerge renders them
+    # back to single braces and writes to the real folder. (A plain merge -o is taken
+    # literally and must NOT be escaped — see merge_video_files; verified mkvmerge v97.)
+    mkv_out = output_pattern.replace("{", "{{").replace("}", "}}")
+    cmd = [MKVMERGE_PATH, "-o", mkv_out, "--split", f"size:{split_arg}", input_path]
     try:
         # Added stderr capture to output real error messages
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)

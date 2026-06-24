@@ -268,9 +268,12 @@ def test_apply_movie_writes_tmdb_id_stamps_token_and_downloads(sandbox, patch_tm
     out = capsys.readouterr().out
     assert "APPLIED" in out
 
-    # 1) tmdb_id written.
+    # 1) tmdb_id + real TITLE/YEAR written (the placeholder id-shaped title is
+    #    replaced by the TMDB title so the web cards show "F1", not the raw id).
     lib = mvcommon.load_library()
     assert lib["mov-en-2025-f1"]["metadata"]["tmdb_id"] == 1003159
+    assert lib["mov-en-2025-f1"]["metadata"]["title"] == "F1"
+    assert lib["mov-en-2025-f1"]["metadata"]["year"] == 2025
 
     # 2) folder renamed exactly once to carry the token; file carried along.
     new_folder = folder.parent / "F1 {tmdb-1003159}"
@@ -289,6 +292,34 @@ def test_apply_movie_writes_tmdb_id_stamps_token_and_downloads(sandbox, patch_tm
     moved_file = new_folder / "movie.mkv"
     assert hashlib.sha256(moved_file.read_bytes()).hexdigest() == orig_hash
     assert lib["mov-en-2025-f1"]["hash"] == orig_hash
+
+
+def test_apply_preserves_human_curated_title(sandbox, patch_tmdb, capsys):
+    """A human-curated metadata.title that differs from BOTH the id AND the TMDB
+    title is PRESERVED on --apply (only id-shaped/placeholder titles are replaced).
+    tmdb_id still writes, and year is refreshed from the confident TMDB match.
+
+    The curated title is what enrich SEARCHES by (_enrich_title_year prefers a
+    curated title). It is chosen to NORMALIZE-match the TMDB title ('F1!' vs 'F1',
+    punctuation-only difference) so the match is CONFIDENT, yet it is not byte-equal
+    to the TMDB title — proving the curated value (not 'F1') survives the write."""
+    _empty_libs(sandbox)
+    folder, fp, h = _seed_movie(sandbox, "mov-en-2025-f1", "F1")
+    # Curate a display title that differs from the id AND the TMDB title, but
+    # normalizes the same as the TMDB title so the match stays confident.
+    curated = "F1!"
+    lib = mvcommon.load_library()
+    lib["mov-en-2025-f1"].setdefault("metadata", {})["title"] = curated
+    mvcommon.save_library(lib)
+    # Backend answers the CURATED query, returning the TMDB title "F1" (differs).
+    patch_tmdb(FakeTMDB(search={curated.lower(): [_movie_result(1003159, "F1", 2025)]}))
+
+    main.cmd_enrich_metadata("mov-en-2025-f1", "--apply")
+
+    meta = mvcommon.load_library()["mov-en-2025-f1"]["metadata"]
+    assert meta["title"] == curated, "curated title must NOT be overwritten by the TMDB title"
+    assert meta["tmdb_id"] == 1003159  # tmdb_id is still applied (additive)
+    assert meta["year"] == 2025         # year refreshed from the confident match
 
 
 def test_apply_never_overwrites_local_poster(sandbox, patch_tmdb, capsys):

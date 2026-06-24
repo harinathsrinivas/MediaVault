@@ -361,3 +361,126 @@ def test_alias_library_payload_json_serializable(sandbox_alias):
     (defence-in-depth for the crash class — serialisation must not choke)."""
     payload = main.items_payload()
     json.dumps(payload, default=str)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# (g) poster_available / tmdb_id / title truthful reporting (IMP-E3/U3/D17 5.7)
+#
+# items_payload() reports, per row: poster_available (a real on-disk check via
+# resolve_artwork_path — the SAME resolver /api/media-image uses), tmdb_id (from
+# metadata.tmdb_id), and the real metadata.title when set. The SPA gates the
+# poster <img> on poster_available and shows metadata.title, so these three fields
+# must be truthful. All over the LOCAL_ROOT-hermetic sandbox (never real C:\Media).
+# ---------------------------------------------------------------------------
+
+def _seed_two_movies_one_with_poster(sandbox, make_video):
+    """Seed two movie leaves under LOCAL_ROOT:
+      * mov-en-2010-withposter : has poster.jpg in its folder + metadata
+        {title:"Inception", year:2010, tmdb_id:27205}
+      * mov-en-2011-noposter   : NO poster.jpg, NO metadata (placeholder title)
+    Returns the two ids."""
+    root = sandbox["local_root"]
+
+    with_dir = root / "Movies" / "Inception {tmdb-27205}"
+    with_dir.mkdir(parents=True, exist_ok=True)
+    make_video(with_dir / "Inception.2010.mkv", marker=b"P")
+    # A real poster.jpg directly in the folder (resolve_artwork_path level i wins).
+    (with_dir / "poster.jpg").write_bytes(b"\xff\xd8\xff\xe0FAKE-JPEG\xff\xd9")
+    with_id = "mov-en-2010-withposter"
+
+    no_dir = root / "Movies" / "NoPoster"
+    no_dir.mkdir(parents=True, exist_ok=True)
+    make_video(no_dir / "NoPoster.2011.mkv", marker=b"Q")
+    no_id = "mov-en-2011-noposter"
+
+    movies = {
+        with_id: {
+            "status": "local_ready",
+            "uploaded": False,
+            "folder_path": str(with_dir),
+            "filename": "Inception.2010.mkv",
+            "type": "movie",
+            "metadata": {"title": "Inception", "year": 2010, "tmdb_id": 27205},
+        },
+        no_id: {
+            "status": "local_ready",
+            "uploaded": False,
+            "folder_path": str(no_dir),
+            "filename": "NoPoster.2011.mkv",
+            "type": "movie",
+            # No metadata at all -> placeholder title (the id) + null tmdb_id.
+        },
+    }
+    _write_libs(sandbox, movies=movies)
+    return with_id, no_id
+
+
+def test_poster_available_tmdb_id_and_title_reported(sandbox, make_video):
+    """items_payload() reports poster_available truthfully (True only when a
+    poster.jpg exists on disk), tmdb_id == metadata.tmdb_id (else None), and the
+    real metadata.title when set (else the id placeholder)."""
+    with_id, no_id = _seed_two_movies_one_with_poster(sandbox, make_video)
+
+    rows = {it["id"]: it for it in main.items_payload()["items"]}
+    assert with_id in rows and no_id in rows, f"got ids={list(rows)}"
+
+    with_row = rows[with_id]
+    no_row = rows[no_id]
+
+    # poster_available reflects a REAL on-disk poster.jpg.
+    assert with_row["poster_available"] is True, (
+        "the entry with a poster.jpg on disk must report poster_available=True"
+    )
+    assert no_row["poster_available"] is False, (
+        "the entry with no poster.jpg must report poster_available=False"
+    )
+
+    # tmdb_id reflects metadata.tmdb_id (an int) / None when absent.
+    assert with_row["tmdb_id"] == 27205
+    assert no_row["tmdb_id"] is None
+
+    # The real metadata.title is carried; the bare entry falls back to its id so
+    # title.js humanizes it (it never equals a real, non-id title).
+    assert with_row["title"] == "Inception"
+    assert with_row["year"] == 2010
+    assert no_row["title"] == no_id  # placeholder -> title.js humanizes the id
+
+    # poster_available is a real bool (JSON-friendly), never a truthy path/object.
+    for r in (with_row, no_row):
+        assert isinstance(r["poster_available"], bool)
+
+
+def test_poster_available_false_when_poster_removed(sandbox, make_video):
+    """poster_available is a LIVE disk check, not a cached flag: deleting the
+    poster.jpg flips a previously-True row to False on the next call."""
+    with_id, _ = _seed_two_movies_one_with_poster(sandbox, make_video)
+
+    first = {it["id"]: it for it in main.items_payload()["items"]}
+    assert first[with_id]["poster_available"] is True
+
+    # Remove the poster on disk; the next payload must report False (no caching).
+    poster = sandbox["local_root"] / "Movies" / "Inception {tmdb-27205}" / "poster.jpg"
+    poster.unlink()
+
+    second = {it["id"]: it for it in main.items_payload()["items"]}
+    assert second[with_id]["poster_available"] is False
+
+
+@pytest.mark.usefixtures("web_as_local_admin")
+def test_api_items_reports_poster_available_and_tmdb_id(sandbox, make_video):
+    """The HTTP surface carries the truthful fields end-to-end: GET /api/items
+    mirrors items_payload(), so a seeded poster/tmdb_id is visible to the SPA."""
+    from webui.server import create_app
+
+    with_id, no_id = _seed_two_movies_one_with_poster(sandbox, make_video)
+
+    client = TestClient(create_app())
+    r = client.get("/api/items")
+    assert r.status_code == 200, f"/api/items -> {r.status_code}: {r.text}"
+    rows = {it["id"]: it for it in r.json()["items"]}
+
+    assert rows[with_id]["poster_available"] is True
+    assert rows[with_id]["tmdb_id"] == 27205
+    assert rows[with_id]["title"] == "Inception"
+    assert rows[no_id]["poster_available"] is False
+    assert rows[no_id]["tmdb_id"] is None

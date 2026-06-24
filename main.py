@@ -1382,6 +1382,25 @@ def _enrich_title_year(any_id, entry):
     return title, year
 
 
+def _title_is_id_shaped(title, entry_id):
+    """True iff ``title`` is a placeholder/id-shaped title that enrich may safely
+    REPLACE with a real TMDB title — i.e. NOT a human-curated one.
+
+    parse_metadata_from_id seeds ``metadata.title`` to the RAW id, so the common
+    placeholder cases are: missing/blank, the entry's own id, or any id-shaped
+    string carrying a ``mov-/tv-/ani-`` category prefix (a leaf id stored on a
+    season_map, etc.). Any OTHER non-empty string is treated as deliberately
+    curated and is left untouched.
+
+    (A title that already EQUALS the incoming TMDB title is handled by the caller
+    as an idempotent no-op, so it is intentionally NOT classified here.)"""
+    if not title:
+        return True
+    if entry_id is not None and title == entry_id:
+        return True
+    return str(title).startswith(("mov-", "tv-", "ani-"))
+
+
 def _humanize_id_title(any_id):
     """Turn an id slug into a rough search title.
 
@@ -1719,15 +1738,31 @@ def cmd_enrich_metadata(arg=None, *flags):
         if not apply:
             continue
 
-        # ---- APPLY: write tmdb_id (additive), stamp token, download art ----
-        # 1) tmdb_id on every leaf + season_map of the unit (setdefault metadata).
+        # ---- APPLY: write tmdb_id + real title/year (additive), stamp, download ----
+        # 1) tmdb_id + real TITLE/YEAR on every leaf + season_map of the unit. The
+        #    cards read metadata.title (title.js: a non-id title auto-shows), so the
+        #    real TMDB title is filled here. ADDITIVE + IDEMPOTENT: title is replaced
+        #    only when it is still id-shaped/blank (placeholder) — a human-curated
+        #    title that differs from both the id AND the TMDB title is left intact.
+        #    Re-running just rewrites the same TMDB title (no-op). year is filled when
+        #    absent and refreshed when the TMDB year is known (the id year is often a
+        #    season's air year, so the matched show year is preferred).
+        tmdb_title = res.get("title")
+        tmdb_year = res.get("year")
         live = load_library()
         for eid in unit["ids"]:
             ent = live.get(eid)
             if ent is None:
                 continue
             real_id, target = _resolve_alias(live, eid)
-            target.setdefault("metadata", {})["tmdb_id"] = tmdb_id
+            meta = target.setdefault("metadata", {})
+            meta["tmdb_id"] = tmdb_id
+            if tmdb_title:
+                cur = meta.get("title")
+                if _title_is_id_shaped(cur, real_id) or cur == tmdb_title:
+                    meta["title"] = tmdb_title
+            if tmdb_year is not None:
+                meta["year"] = tmdb_year
         save_library(live)
 
         # 2) stamp the {tmdb-…} token ONCE on the show/movie folder (paths only —
@@ -4793,6 +4828,17 @@ def items_payload():
 
         category = category_of_id(mid)
         metadata = entry.get("metadata") or {}
+        # poster_available: a cheap truthy existence check via resolve_artwork_path
+        # (Phase 5.7) — the SAME resolver /api/media-image uses, so the SPA only
+        # requests a poster <img> when one will actually be served (no speculative
+        # 404 per card). It is a few os.path checks per row (own folder -> season
+        # folder -> {tmdb-…} ancestor, first existing wins); short-circuit to False
+        # when the entry has neither a folder_path nor a parent to inherit from, so
+        # a folderless leaf never even enters the resolver on a large grid.
+        has_anchor = bool(entry.get("folder_path")) or bool(entry.get("parent_id"))
+        poster_available = bool(
+            has_anchor and resolve_artwork_path(library, mid, kind="poster")
+        )
         row = {
             "id": mid,
             "category": category,
@@ -4802,7 +4848,7 @@ def items_payload():
             "title": metadata.get("title") or mid,
             "year": metadata.get("year"),
             "tmdb_id": metadata.get("tmdb_id"),
-            "poster_available": False,  # not yet wired — always False for now (IMP-E14 Phase 1)
+            "poster_available": poster_available,
             "chunk_count": (entry.get("split_info") or {}).get("total_chunks") or 1,
         }
         if entry.get("parent_id") is not None:

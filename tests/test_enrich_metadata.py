@@ -65,13 +65,19 @@ class FakeTMDB:
     the image base) return FAKE_JPG. A query whose title is in
     `network_error_titles` raises to simulate a transient search failure.
     """
-    def __init__(self, search, season_images=None, episode_images=None,
-                 network_error_titles=(), episode_error=()):
-        self.search = {k.lower(): v for k, v in search.items()}
+    def __init__(self, search=None, season_images=None, episode_images=None,
+                 network_error_titles=(), episode_error=(),
+                 movie_by_id=None, tv_by_id=None, by_id_error=()):
+        self.search = {k.lower(): v for k, v in (search or {}).items()}
         self.season_images = season_images or {}
         self.episode_images = episode_images or {}
         self.episode_error = set(episode_error)
         self.network_error_titles = {t.lower() for t in network_error_titles}
+        # By-id details (enrich-by-known-id): {tmdb_id: details_dict}. An id in
+        # by_id_error raises to simulate a transient/404 by-id details failure.
+        self.movie_by_id = {int(k): v for k, v in (movie_by_id or {}).items()}
+        self.tv_by_id = {int(k): v for k, v in (tv_by_id or {}).items()}
+        self.by_id_error = {int(i) for i in by_id_error}
         self.calls = []            # list of (url, params) for assertions
         self.image_urls = []       # image URLs actually requested
         self.configuration_hits = 0
@@ -112,6 +118,21 @@ class FakeTMDB:
             n = int(parts[-2])
             series_id = int(parts[-4])
             return _Resp(200, json_data={"posters": self.season_images.get((series_id, n), [])})
+
+        # By-id DETAILS (enrich-by-known-id): /3/movie/{id} or /3/tv/{id} with a
+        # bare numeric id and nothing after it. Checked AFTER /search and /images
+        # so those distinct shapes win first. Returns the canned details dict, or
+        # raises for an id in by_id_error (transient/404), or 404 if unknown.
+        parts = url.rstrip("/").split("/")
+        if len(parts) >= 2 and parts[-1].isdigit() and parts[-2] in ("movie", "tv"):
+            kind = parts[-2]
+            tid = int(parts[-1])
+            if tid in self.by_id_error:
+                raise ConnectionError("simulated TMDB by-id details failure")
+            table = self.movie_by_id if kind == "movie" else self.tv_by_id
+            if tid in table:
+                return _Resp(200, json_data=table[tid])
+            return _Resp(404, json_data=None)
 
         # Any other TMDB images endpoint -> empty (we use search paths directly).
         return _Resp(200, json_data={})
@@ -459,10 +480,19 @@ def test_tmdb_error_on_one_unit_is_skipped_without_corruption(sandbox, patch_tmd
 
 def test_idempotent_rerun_does_not_double_stamp(sandbox, patch_tmdb, capsys):
     """A second --apply over an already-stamped show is a no-op for the folder
-    token (the {tmdb-…} token is detected and the rename is skipped)."""
+    token (the {tmdb-…} token is detected and the rename is skipped).
+
+    The FIRST run has no preset id, so it SEARCHES and writes metadata.tmdb_id.
+    The SECOND run now finds that id preset on the leaf, so it resolves BY ID
+    (the enrich-by-known-id path) — the backend therefore serves BOTH the search
+    (run 1) and the by-id details (run 2). The idempotency guarantee (no second
+    stamp) is what is asserted, regardless of which resolve path the rerun takes."""
     _empty_libs(sandbox)
     folder, fp, h = _seed_movie(sandbox, "mov-en-2025-f1", "F1")
-    patch_tmdb(FakeTMDB(search={"f1": [_movie_result(1003159, "F1", 2025)]}))
+    patch_tmdb(FakeTMDB(
+        search={"f1": [_movie_result(1003159, "F1", 2025)]},
+        movie_by_id={1003159: _movie_details(1003159, "F1", 2025)},
+    ))
 
     main.cmd_enrich_metadata("mov-en-2025-f1", "--apply")
     capsys.readouterr()  # drain first-run output
@@ -643,6 +673,203 @@ def test_pick_match_prefers_full_title_over_obscure_substring():
     status, payload = main._pick_tmdb_match(results, "the conjuring", 2013, "title", "release_date")
     assert status == "confident"
     assert payload["id"] == 138843
+
+
+# ===========================================================================
+# Enrich-by-known-id: a manually-set metadata.tmdb_id is honoured DIRECTLY
+# (fetch the details by id, NO title search) so a user-pasted id gets the full
+# stamp + download treatment. This is the `set_tmdb <id> <tmdbid>` then
+# `enrich_metadata <id> --apply` flow. (IMP-E3/U3/D17.)
+# ===========================================================================
+
+def _movie_details(tmdb_id, title, year, overview="A great film.", vote_average=7.5):
+    """A /3/movie/{id} DETAILS object (carries title/release_date/poster/backdrop
+    just like a search result — the by-id resolver reads the same fields)."""
+    return {"id": tmdb_id, "title": title, "release_date": f"{year}-01-01",
+            "poster_path": "/byid-poster.jpg", "backdrop_path": "/byid-backdrop.jpg",
+            "overview": overview, "vote_average": vote_average}
+
+
+def _tv_details(tmdb_id, name, year, overview="A great show.", vote_average=8.2):
+    """A /3/tv/{id} DETAILS object (carries name/first_air_date/poster/backdrop)."""
+    return {"id": tmdb_id, "name": name, "first_air_date": f"{year}-01-01",
+            "poster_path": "/byid-tvposter.jpg", "backdrop_path": "/byid-tvbackdrop.jpg",
+            "overview": overview, "vote_average": vote_average}
+
+
+def test_apply_movie_with_preset_id_fetches_by_id_not_search(sandbox, patch_tmdb, capsys):
+    """A movie whose metadata.tmdb_id is already set (via set_tmdb) is resolved BY
+    THAT ID on --apply: enrich GETs /3/movie/{id} (NOT /search/movie), writes the
+    by-id title/year, stamps the {tmdb-…} token, and downloads art — with NO search
+    call at all (the user explicitly chose this id)."""
+    _empty_libs(sandbox)
+    folder, fp, orig_hash = _seed_movie(sandbox, "mov-en-2099-f1", "F1")
+    # Manually set the id (as `set_tmdb` would) — note the id YEAR (2099) is wrong,
+    # proving the by-id details year (2025) is what gets written, not a search.
+    lib = mvcommon.load_library()
+    lib["mov-en-2099-f1"].setdefault("metadata", {})["tmdb_id"] = 1003159
+    mvcommon.save_library(lib)
+    # Backend ONLY answers the by-id details — there is NO search entry, so any
+    # search attempt would resolve to nothing (and the test would fail downstream).
+    fake = patch_tmdb(FakeTMDB(movie_by_id={1003159: _movie_details(1003159, "F1", 2025)}))
+
+    main.cmd_enrich_metadata("mov-en-2099-f1", "--apply")
+
+    out = capsys.readouterr().out
+    assert "using preset tmdb_id=1003159 (manual)" in out
+    assert "APPLIED" in out
+
+    # Resolved BY ID: the /3/movie/{id} details URL was hit, and NO /search call.
+    assert any(u.endswith("/movie/1003159") for u, _ in fake.calls), \
+        "expected a by-id /movie/{id} details call"
+    assert not any("/search/" in u for u, _ in fake.calls), \
+        "enrich-by-known-id must NOT issue any /search call"
+
+    # Title/year written FROM THE BY-ID DETAILS (year 2025, not the id's 2099).
+    lib = mvcommon.load_library()
+    meta = lib["mov-en-2099-f1"]["metadata"]
+    assert meta["tmdb_id"] == 1003159
+    assert meta["title"] == "F1"
+    assert meta["year"] == 2025
+
+    # Token stamped + art downloaded into the renamed folder (full treatment).
+    new_folder = folder.parent / "F1 {tmdb-1003159}"
+    assert new_folder.is_dir() and not folder.exists()
+    assert (new_folder / "poster.jpg").read_bytes() == FAKE_JPG
+    assert (new_folder / "fanart.jpg").read_bytes() == FAKE_JPG
+    assert any(u == "https://image.tmdb.org/t/p/w342/byid-poster.jpg" for u in fake.image_urls)
+    assert any(u == "https://image.tmdb.org/t/p/w780/byid-backdrop.jpg" for u in fake.image_urls)
+
+    # No media fetch / no rehash.
+    assert hashlib.sha256((new_folder / "movie.mkv").read_bytes()).hexdigest() == orig_hash
+    assert lib["mov-en-2099-f1"]["hash"] == orig_hash
+
+
+def test_apply_show_with_preset_id_fetches_by_id_not_search(sandbox, patch_tmdb, capsys):
+    """A SHOW whose preset id sits on an episode leaf (set_tmdb refuses season_maps)
+    is resolved by /3/tv/{id} on --apply — NO /search/tv — and gets the full
+    show-centric treatment: id on both season_maps + episodes, ONE stamp on the show
+    folder, per-season posters, per-episode stills."""
+    _empty_libs(sandbox)
+    show = _seed_two_season_show(sandbox)
+    # Set the preset id on ONE episode leaf only (mirrors `set_tmdb <ep_id> 2316`).
+    lib = mvcommon.load_library()
+    lib[show["ep1"]].setdefault("metadata", {})["tmdb_id"] = 2316
+    mvcommon.save_library(lib)
+    fake = patch_tmdb(FakeTMDB(
+        tv_by_id={2316: _tv_details(2316, "The Office", 2005)},
+        season_images={(2316, 1): [{"file_path": "/s1.jpg"}],
+                       (2316, 2): [{"file_path": "/s2.jpg"}]},
+        episode_images={(2316, 1, 1): [{"file_path": "/still-s1e1.jpg", "vote_average": 8.0}],
+                        (2316, 2, 1): [{"file_path": "/still-s2e1.jpg", "vote_average": 6.0}]},
+    ))
+
+    main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply")
+
+    out = capsys.readouterr().out
+    assert "using preset tmdb_id=2316 (manual)" in out
+
+    # By-id details hit; NO /search/tv at all.
+    assert any(u.endswith("/tv/2316") for u, _ in fake.calls), "expected a /tv/{id} details call"
+    assert not any("/search/" in u for u, _ in fake.calls), "must NOT search when an id is preset"
+
+    lib = mvcommon.load_library()
+    # tmdb_id on BOTH season_maps and BOTH episode leaves.
+    for eid in (show["season1"], show["season2"], show["ep1"], show["ep2"]):
+        assert lib[eid].get("metadata", {}).get("tmdb_id") == 2316, eid
+
+    # ONE stamp on the show folder; season subfolders intact underneath.
+    stamped = show["show_root"].parent / "The Office {tmdb-2316}"
+    assert stamped.is_dir() and not show["show_root"].exists()
+    assert (stamped / "Season 01").is_dir() and (stamped / "Season 02").is_dir()
+
+    # Show poster/fanart + per-season posters + per-episode stills all landed.
+    assert (stamped / "poster.jpg").read_bytes() == FAKE_JPG
+    assert (stamped / "fanart.jpg").read_bytes() == FAKE_JPG
+    assert (stamped / "Season 01" / "poster.jpg").read_bytes() == FAKE_JPG
+    assert (stamped / "Season 02" / "poster.jpg").read_bytes() == FAKE_JPG
+    for ep_id, sdir in ((show["ep1"], "Season 01"), (show["ep2"], "Season 02")):
+        thumb = stamped / sdir / _thumb_name(lib[ep_id]["filename"])
+        assert thumb.read_bytes() == FAKE_JPG
+
+
+def test_dry_run_with_preset_id_prints_by_id_intent_writes_nothing(sandbox, patch_tmdb, capsys):
+    """DRY-RUN (no --apply) with a preset id: prints the by-id intent + WOULD-write
+    lines but writes NOTHING — no extra tmdb_id key churn, no rename, no poster."""
+    _empty_libs(sandbox)
+    folder, fp, h = _seed_movie(sandbox, "mov-en-2099-f1", "F1")
+    lib = mvcommon.load_library()
+    lib["mov-en-2099-f1"].setdefault("metadata", {})["tmdb_id"] = 1003159
+    mvcommon.save_library(lib)
+    before = mvcommon.load_library()
+    fake = patch_tmdb(FakeTMDB(movie_by_id={1003159: _movie_details(1003159, "F1", 2025)}))
+
+    main.cmd_enrich_metadata("mov-en-2099-f1")  # no --apply -> dry run
+
+    out = capsys.readouterr().out
+    assert "DRY-RUN" in out
+    assert "using preset tmdb_id=1003159 (manual)" in out
+    assert "would write" in out
+    # Resolved by id even in dry-run (so the printed title/year are accurate),
+    # but still NO search call.
+    assert any(u.endswith("/movie/1003159") for u, _ in fake.calls)
+    assert not any("/search/" in u for u, _ in fake.calls)
+
+    # Nothing changed on disk.
+    assert mvcommon.load_library() == before
+    assert folder.exists()
+    assert not (folder.parent / "F1 {tmdb-1003159}").exists()
+    assert not (folder / "poster.jpg").exists()
+
+
+def test_preset_id_by_id_fetch_failure_is_skipped_no_search_fallback(sandbox, patch_tmdb, capsys):
+    """A by-id details fetch that FAILS (network/404) -> the unit is SKIPPED (no
+    crash, library untouched) and there is NO fall-back title search (the user
+    explicitly chose this id; re-searching would just re-miss)."""
+    _empty_libs(sandbox)
+    folder, fp, h = _seed_movie(sandbox, "mov-en-2025-f1", "F1")
+    lib = mvcommon.load_library()
+    lib["mov-en-2025-f1"].setdefault("metadata", {})["tmdb_id"] = 1003159
+    mvcommon.save_library(lib)
+    before = mvcommon.load_library()
+    # The by-id details call raises; a search entry EXISTS but must never be used.
+    fake = patch_tmdb(FakeTMDB(
+        search={"f1": [_movie_result(1003159, "F1", 2025)]},
+        by_id_error={1003159},
+    ))
+
+    main.cmd_enrich_metadata("mov-en-2025-f1", "--apply")  # must NOT crash
+
+    out = capsys.readouterr().out
+    assert "skipping" in out.lower()
+    # The by-id call was attempted; NO search fallback happened.
+    assert any(u.endswith("/movie/1003159") for u, _ in fake.calls)
+    assert not any("/search/" in u for u, _ in fake.calls), \
+        "a by-id failure must NOT fall back to a title search"
+
+    # Library untouched: no rename, original folder + hash intact.
+    assert mvcommon.load_library() == before
+    assert folder.exists()
+    assert not (folder.parent / "F1 {tmdb-1003159}").exists()
+
+
+def test_no_preset_id_still_searches(sandbox, patch_tmdb, capsys):
+    """Guard: with NO preset id the existing title-SEARCH path is unchanged — enrich
+    issues a /search/movie and does NOT attempt any by-id details call."""
+    _empty_libs(sandbox)
+    folder, fp, h = _seed_movie(sandbox, "mov-en-2025-f1", "F1")
+    fake = patch_tmdb(FakeTMDB(search={"f1": [_movie_result(1003159, "F1", 2025)]}))
+
+    main.cmd_enrich_metadata("mov-en-2025-f1", "--apply")
+
+    assert any("/search/movie" in u for u, _ in fake.calls), "no preset id -> must search"
+    # No by-id details call (a bare /movie/{digits} with nothing after).
+    assert not any(
+        u.rstrip("/").split("/")[-1].isdigit() and u.rstrip("/").split("/")[-2] == "movie"
+        for u, _ in fake.calls), "no preset id -> must NOT fetch by id"
+    assert "using preset tmdb_id" not in capsys.readouterr().out
+    # Sanity: the search path still applied normally.
+    assert mvcommon.load_library()["mov-en-2025-f1"]["metadata"]["tmdb_id"] == 1003159
 
 
 # ===========================================================================

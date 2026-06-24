@@ -1709,6 +1709,82 @@ def _resolve_unit(unit, api_key):
     return {"status": "none", "candidates": []}
 
 
+def _unit_preset_tmdb_id(unit, library):
+    """The manually-set ``metadata.tmdb_id`` for an enrich unit, or None.
+
+    A user runs `set_tmdb <id> <tmdb_id>` to paste a known id when the title
+    search missed; that command writes ``metadata.tmdb_id`` onto a LEAF entry
+    (it refuses a season_map container — see cmd_set_tmdb). So for a movie the
+    preset lives on the movie leaf, and for a show on (one of) its episode
+    leaves, never on the season_map. The unit dict does not carry the entries'
+    metadata, so this looks the value up from the live library by the unit's
+    ids — alias-resolving each so a multi_ep_alias reads its primary leaf.
+
+    Returns the FIRST truthy tmdb_id found (preserving its stored type — int
+    when set_tmdb saw all-digits, else the raw string), or None when no leaf of
+    the unit carries one (the un-enriched case, which falls through to search)."""
+    for eid in unit.get("ids", []):
+        if library.get(eid) is None:
+            continue
+        try:
+            _real_id, target = _resolve_alias(library, eid)
+        except KeyError:
+            continue
+        if not isinstance(target, dict):
+            continue
+        preset = (target.get("metadata") or {}).get("tmdb_id")
+        if preset:
+            return preset
+    return None
+
+
+def _resolve_unit_by_id(unit, tmdb_id, api_key):
+    """Resolve ONE enrich unit by a KNOWN tmdb_id — fetch the details directly,
+    NO title search. Returns the SAME dict shape as _resolve_unit's confident
+    branch (status/tmdb_id/poster_path/backdrop_path/title/year/overview/
+    vote_average/candidates) so the confident-apply path treats it identically.
+
+    The user explicitly chose this id (via set_tmdb), so we honour it: GET the
+    movie or tv details (per unit["kind"]) and read the canonical fields off the
+    details object —
+      * movie  GET /3/movie/{id}: title, release_date, poster_path, backdrop_path
+      * tv     GET /3/tv/{id}:     name,  first_air_date, poster_path, backdrop_path
+    (the details object's poster_path/backdrop_path is enough, matching how
+    _resolve_unit uses the search result's paths).
+
+    On ANY fetch failure (network/404 -> _tmdb_get returns None) this returns
+    status "error" so the caller SKIPS the unit and continues — it deliberately
+    does NOT fall back to a title search (that would re-miss the very id the user
+    pasted). NEVER raises."""
+    if unit["kind"] == "movie":
+        url = f"{TMDB_API_ROOT}/movie/{tmdb_id}"
+        title_key, year_key = "title", "release_date"
+    else:
+        url = f"{TMDB_API_ROOT}/tv/{tmdb_id}"
+        title_key, year_key = "name", "first_air_date"
+
+    data = _tmdb_get(url, {}, api_key)
+    if not isinstance(data, dict) or data.get("id") is None:
+        # 404 / network / malformed payload -> skip (no search fallback).
+        return {"status": "error", "candidates": []}
+
+    yr = None
+    m = re.match(r"(\d{4})", str(data.get(year_key) or ""))
+    if m:
+        yr = int(m.group(1))
+    return {
+        "status": "confident",
+        "tmdb_id": data.get("id"),
+        "poster_path": data.get("poster_path"),
+        "backdrop_path": data.get("backdrop_path"),
+        "title": data.get(title_key),
+        "year": yr,
+        "overview": data.get("overview") or "",
+        "vote_average": data.get("vote_average"),
+        "candidates": [],
+    }
+
+
 def _write_nfo(folder, kind, title, year, tmdb_id, overview="", vote_average=None):
     """Write a Kodi/Jellyfin-compatible NFO file into *folder*.
 
@@ -1800,9 +1876,18 @@ def cmd_enrich_metadata(arg=None, *flags):
     for unit in units:
         label = f"{unit['kind'].upper()} {unit['key']}"
         yr = f" ({unit['year']})" if unit["year"] else ""
+        # ENRICH-BY-KNOWN-ID: if a leaf of this unit already carries a manually
+        # set metadata.tmdb_id (via `set_tmdb`), honour it directly — fetch the
+        # details BY THAT ID (no title search), so a user-pasted id gets the full
+        # stamp + download treatment instead of being re-searched (and re-missed).
+        preset_id = _unit_preset_tmdb_id(unit, library)
         try:
-            res = _resolve_unit(unit, api_key)
-        except Exception as e:  # defensive — _resolve_unit already swallows, but never crash the run
+            if preset_id:
+                print(f"   ↳ {label}: using preset tmdb_id={preset_id} (manual) — fetching by id, no search.")
+                res = _resolve_unit_by_id(unit, preset_id, api_key)
+            else:
+                res = _resolve_unit(unit, api_key)
+        except Exception as e:  # defensive — resolvers already swallow, but never crash the run
             print(f"⏭️  {label}: TMDB error, skipping ({e}).")
             n_skipped += 1
             continue

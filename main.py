@@ -1095,6 +1095,219 @@ def cmd_set_uploaded(manual_id):
     print(f"   You can now run: python main.py replace {manual_id}")
 
 
+def _norm_path(p):
+    """Normalised, case-folded absolute path for prefix comparison on Windows.
+
+    Used by rename_folder's descendant scan so `C:\\Media\\Series\\Dark` and a
+    child `c:/media/series/dark/Season 01` compare equal regardless of separators
+    or case. Returns "" for a falsy input so missing folder_paths never match.
+    """
+    if not p:
+        return ""
+    return os.path.normcase(os.path.normpath(os.path.abspath(p)))
+
+
+def _is_under(child_norm, parent_norm):
+    """True if child_norm == parent_norm OR is nested strictly under it.
+
+    Both args must already be _norm_path()'d. The trailing-os.sep guard prevents a
+    sibling like `…\\Dark2` from matching the prefix `…\\Dark` (a plain startswith
+    would wrongly match it)."""
+    if not child_norm or not parent_norm:
+        return False
+    if child_norm == parent_norm:
+        return True
+    return child_norm.startswith(parent_norm + os.sep)
+
+
+def _collect_folder_descendants(library, old_folder):
+    """Whole-library iterator (PR#21 crash class): return the list of (id, entry)
+    whose `folder_path` IS `old_folder` or lives UNDER it.
+
+    Alias/season_map-safe by the SAME rule every whole-library loop must follow:
+      - `multi_ep_alias` entries have NO `folder_path` (their 3-key schema is
+        {type, alias_of, parent_id}) — verify the key is absent and SKIP them.
+      - `season_map` entries DO carry a `folder_path` (= their first episode's
+        folder) — include them so the container pointer is rewritten too.
+      - `leaf` entries carry folder_path — include them.
+    Entries with no `folder_path` key (incl. aliases) are skipped. Read-only — does
+    not mutate the library."""
+    old_norm = _norm_path(old_folder)
+    out = []
+    for mid, entry in library.items():
+        if entry.get("type") == "multi_ep_alias":
+            # No folder_path on an alias by construction — nothing to rewrite.
+            continue
+        fp = entry.get("folder_path")
+        if not fp:
+            continue
+        if _is_under(_norm_path(fp), old_norm):
+            out.append((mid, entry))
+    return out
+
+
+def cmd_rename_folder(old_folder_or_id, new_folder_name_or_token):
+    """Crash-safe cascading folder rename (IMP-D17).
+
+    Rename an on-disk SHOW/season folder (e.g. stamp a `{tmdb-12345}` token onto it)
+    and rewrite `folder_path` for EVERY library entry under that folder — all
+    seasons/episodes leaves AND the show's season_map container — atomically.
+
+    HASH-SAFE: this only moves a directory + rewrites JSON `folder_path` strings. It
+    NEVER re-hashes, re-splits, or re-uploads (the entry `hash` is over file bytes,
+    not the path — ARCHITECTURE §7.4). The on-disk `uid` / `<short_id>.sha256`
+    sidecars live inside the folder and MOVE with it (no content change), so it works
+    identically on ARCHIVED folders (the files are tiny dummies — a directory rename
+    moves dummies like any file; no special-casing).
+
+    CRASH-SAFETY — mirrors cmd_replace's journal pattern WITHOUT changing the
+    rollback contract (CLAUDE.md auto-rollback change-gate). It ADDS a new journaled
+    operation; it does NOT alter the journal format/durability, the PONR semantics,
+    `recover_journal()`, or the `RollbackHardFail` contract.
+
+      - The journal is opened in the PARENT directory of the target folder. The
+        parent does NOT move during the rename, so every existing journal method
+        (`_flush`/`mark_point_of_no_return`/`commit`/`rollback`) and a later
+        `recover_journal(<parent>)` stay valid across the directory rename. (A
+        journal placed INSIDE the renamed folder would be carried to the new path,
+        leaving `commit()`'s delete — which targets the old path — unable to clean
+        it up.) The journal format/durability/API are untouched; only WHICH folder
+        holds this command's journal differs (a per-command choice cmd_replace and
+        cmd_restore already make independently).
+      - Each descendant's folder_path rewrite is recorded as a standard `set_field`
+        record (existed=True, prior=<old folder_path>) BEFORE the rewrite — exactly
+        the vocabulary cmd_prep uses for `split_info`. Its inverse restores the prior
+        path. NO new record `op` is invented.
+      - PONR = the on-disk `os.rename(old → new)`, with `mark_point_of_no_return()`
+        fired immediately after it (same semantics as cmd_replace's commit rename).
+        A failure BEFORE the rename rolls back (the set_field inverses restore the
+        old paths; the folder never moved). A failure AT/AFTER the rename leaves the
+        crossed journal on disk; `recover_journal` correctly declines to auto-undo a
+        crossed journal, and a RE-RUN self-heals the torn window (folder already at
+        new, library still at old) — mirroring cmd_replace's C9 stale-sweep.
+    """
+    old_folder_or_id = old_folder_or_id.strip('"').strip("'")
+    new_folder_name_or_token = new_folder_name_or_token.strip('"').strip("'")
+
+    library = load_library()
+
+    # --- Resolve the target folder: accept an id (-> its folder_path) or a path. ---
+    if old_folder_or_id in library and library[old_folder_or_id].get("folder_path"):
+        old_folder = os.path.abspath(library[old_folder_or_id]["folder_path"])
+        print(f"> Resolved id '{old_folder_or_id}' -> {old_folder}")
+    else:
+        old_folder = os.path.abspath(old_folder_or_id)
+
+    # The new name is a LEAF name (e.g. "Dark {tmdb-70523}"), not a full path:
+    # keep the same parent dir, swap the leaf. Reject a name carrying a separator
+    # (that would move the folder elsewhere — out of scope and a footgun).
+    if os.sep in new_folder_name_or_token or (os.altsep and os.altsep in new_folder_name_or_token):
+        print(f"❌ new name must be a bare folder name, not a path: {new_folder_name_or_token!r}")
+        return False
+
+    parent_dir = os.path.dirname(old_folder)
+    new_folder = os.path.join(parent_dir, new_folder_name_or_token)
+
+    print(f"=== RENAME FOLDER ===")
+    print(f"   > FROM: {old_folder}")
+    print(f"   > TO:   {new_folder}")
+
+    # --- Find descendants up-front (used by both the happy path and the self-heal). ---
+    descendants = _collect_folder_descendants(library, old_folder)
+
+    # --- Forward self-heal for a prior torn run (rename committed, save did not). ---
+    # If the OLD folder is gone but the NEW folder exists AND some entry still points
+    # under OLD, the on-disk rename already happened in a previous (interrupted) run;
+    # finish the JSON rewrite. Mirrors cmd_replace's C9 stale-sweep (forward repair of
+    # a crossed-PONR torn window — recover_journal deliberately won't auto-undo it).
+    if (not os.path.isdir(old_folder)) and os.path.isdir(new_folder) and descendants:
+        print("   > ⚠️ Detected an interrupted prior rename (folder already moved). "
+              "Completing the library pointer rewrite...")
+        for mid, entry in descendants:
+            entry["folder_path"] = _rewrite_folder_path(entry["folder_path"], old_folder, new_folder)
+        save_library(library)
+        # Clean up a crossed journal left by the interrupted run, if present.
+        _jpath = os.path.join(parent_dir, TXN_JOURNAL_NAME)
+        if os.path.exists(_jpath):
+            try:
+                os.remove(_jpath)
+            except Exception:
+                pass
+        print(f"✅ Recovered interrupted rename — {len(descendants)} folder_path(s) rewritten to the new folder.")
+        return True
+
+    # --- Guards (clear refusals; no journal opened yet). ---
+    if not os.path.isdir(old_folder):
+        print(f"❌ No such folder (or unknown id): {old_folder_or_id}")
+        return False
+    if os.path.exists(new_folder):
+        print(f"❌ Target already exists, refusing to overwrite: {new_folder}")
+        return False
+    if not descendants:
+        print(f"❌ No library entries reference {old_folder} — nothing to rename.")
+        return False
+
+    print(f"   > {len(descendants)} library entr(y/ies) will be re-pointed:")
+    for mid, _ in descendants:
+        print(f"       - {mid}")
+
+    # --- Crash-safe sequence (journal in the STABLE parent dir). ---
+    journal = RollbackJournal(parent_dir, old_folder_or_id)
+    # Record every folder_path rewrite BEFORE acting (journal-before-act). The
+    # inverse (restore prior folder_path) is what recover replays on a pre-PONR crash.
+    for mid, entry in descendants:
+        journal.record_set_field(mid, "folder_path", existed=True, prior=entry.get("folder_path"))
+
+    try:
+        # PONR: the on-disk directory rename. BEFORE this line a failure rolls back
+        # (no folder moved). AT/AFTER it the journal is crossed and not auto-undone.
+        os.rename(old_folder, new_folder)  # ROLLBACK SEAM: directory moved here (atomic on one volume / point-of-no-return)
+        journal.mark_point_of_no_return()
+
+        # Post-PONR: rewrite the in-memory pointers + persist atomically (fsync +
+        # os.replace via save_library). On a crash here, a re-run self-heals (above).
+        for mid, entry in descendants:
+            entry["folder_path"] = _rewrite_folder_path(entry["folder_path"], old_folder, new_folder)
+        save_library(library)
+        journal.commit()
+        print(f"✅ Renamed folder + rewrote {len(descendants)} folder_path(s). No rehash (paths only).")
+        return True
+    except Exception as e:
+        if journal.crossed_ponr:
+            # At/after PONR — the directory already moved. Do NOT auto-undo (mirrors
+            # cmd_replace). The crossed journal is left on disk; a re-run self-heals.
+            print(f"❌ IRREVERSIBLE: folder renamed but the library rewrite failed: {e}")
+            print(f"   > The folder is now at: {new_folder}")
+            print(f"   > Re-run to finish the pointer rewrite: rename_folder \"{new_folder}\" \"{new_folder_name_or_token}\"")
+            raise RollbackHardFail(
+                state=f"{old_folder_or_id}: folder moved to {new_folder}",
+                reason=f"folder_path rewrite failed past the rename point-of-no-return: {e}",
+                resume_cmd=f'rename_folder "{new_folder}" "{new_folder_name_or_token}"',
+            )
+        print(f"❌ rename_folder failed (pre-rename): {e}")
+        journal.rollback(library)
+        return False
+
+
+def _rewrite_folder_path(folder_path, old_folder, new_folder):
+    """Replace the old-folder prefix of a single folder_path with the new-folder
+    prefix, PRESERVING the original casing of any nested suffix.
+
+    `old_folder`/`new_folder` are absolute. The entry's stored `folder_path` may be
+    EXACTLY old_folder (the show/season folder itself) or nested under it (e.g. a
+    `Season 01` subfolder). Matching is case/separator-insensitive (via _norm_path)
+    so it works on Windows, but the SUFFIX is taken from the original abspath string
+    so a subfolder's real casing (`Season 01`, not `season 01`) is retained."""
+    abs_fp = os.path.abspath(folder_path)
+    if _norm_path(folder_path) == _norm_path(old_folder):
+        return new_folder
+    # Nested: os.path.relpath matches the common prefix case-insensitively on Windows
+    # but returns the tail with its ORIGINAL casing (verified: `Season 01`, not
+    # `season 01`), so the subfolder's real name is preserved when joined onto new.
+    tail = os.path.relpath(abs_fp, old_folder)
+    return os.path.normpath(os.path.join(new_folder, tail))
+
+
 def cmd_prep_season(base_id, folder_path):
     print(f"=== BATCH PREP: {base_id} ===")
     folder_path = folder_path.strip('"').strip("'")
@@ -4347,6 +4560,7 @@ if __name__ == "__main__":
         print("  sort")
         print("  fetch [id]")
         print("  recover [id|folder]  (or: recover --scan)")
+        print("  rename_folder [id|folder] \"<NewName {tmdb-12345}>\"  — rename a show/season folder + rewrite every descendant folder_path (crash-safe, no rehash)")
         print("  web [--port N] [--host H] [--no-browser] [--demo]  — Launch the local web operations console (Disk Reclaim view); --demo = SAFE build, all actions simulated")
         print("  token create [--label \"X\"] [--ttl 1h|8h|12h|1d|3d|7d|30d|never]  — Mint a web access token (default --ttl 7d)")
         print("  token list                                          — List minted web access tokens")
@@ -4588,6 +4802,13 @@ if __name__ == "__main__":
             cmd_recover(" ".join(args))
         else:
             print("❌ Usage: recover [id|folder]   (or: recover --scan)")
+
+    elif cmd == "rename_folder":
+        # rename_folder <old_folder_or_id> "<NewName {tmdb-12345}>"
+        if len(sys.argv) >= 4:
+            cmd_rename_folder(sys.argv[2], sys.argv[3])
+        else:
+            print("❌ Usage: rename_folder [id|folder] \"<NewName {tmdb-12345}>\"")
 
     elif cmd == "fetch":
         if len(sys.argv) < 3:

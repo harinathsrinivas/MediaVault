@@ -890,6 +890,38 @@ def create_app(demo=False):
             raise HTTPException(status_code=403, detail="Not an allowed image filename")
         return FileResponse(real, media_type="image/jpeg")
 
+    @app.get("/api/media-image/{id}")
+    def api_media_image(id: str, kind: str = "poster"):
+        # Resolve+stream a library ENTRY's artwork (poster/fanart) by id, applying
+        # the season-inheritance walk (own folder -> season_map folder -> nearest
+        # {tmdb-…} show folder). READ-ONLY, path-only.
+        #
+        # SECURITY: this route is under /api/*, so the always-on auth middleware
+        # (IMP-E15) already gates it exactly like every other /api route — the SPA
+        # <img> sends the mv_token cookie; the genuine-local admin is exempt. No
+        # second auth mechanism is added here.
+        #
+        # The id only INDEXES the library dict (a crafted id is just a missing key
+        # -> None -> 404); resolve_artwork_path derives every candidate from the
+        # entry's stored folder_path (+ real ancestors), never from client input,
+        # and returns ONLY a poster.jpg/fanart.jpg that realpath-resolves under
+        # LOCAL_ROOT. A not-found / out-of-library / no-artwork id -> 404 so the
+        # SPA falls back to its gradient placeholder.
+        kind = kind if kind in ("poster", "fanart") else "poster"
+        library = main.load_library()
+        path = main.resolve_artwork_path(library, id, kind=kind)
+        if not path:
+            raise HTTPException(status_code=404, detail="No artwork for this id")
+        # Defence-in-depth: re-assert the resolved file is under LOCAL_ROOT with an
+        # allowed basename before streaming (resolve_artwork_path already enforces
+        # this; mirror /api/folder-image's final re-check).
+        real = os.path.realpath(path)
+        if not main._is_within_local_root(real):
+            raise HTTPException(status_code=404, detail="Resolved image outside the media root")
+        if os.path.basename(real).lower() not in ("poster.jpg", "fanart.jpg"):
+            raise HTTPException(status_code=404, detail="Not an allowed image filename")
+        return FileResponse(real, media_type="image/jpeg")
+
     @app.post("/api/open-folder")
     def api_open_folder(request: Request, body: dict = Body(default=None)):
         # Open a folder in Windows Explorer — GENUINE-LOCAL ADMIN ONLY. Over

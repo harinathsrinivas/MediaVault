@@ -101,6 +101,37 @@ function addOpenFolderButton(poster, item) {
   poster.appendChild(btn);
 }
 
+// Point a card's poster slot at its real artwork: GET /api/media-image/<id>?kind=
+// poster (the server applies season-inheritance + serves the local jpg as-is). On
+// the image's `error` (404 = no artwork, or a load failure) we HIDE the <img> and
+// leave the existing gradient + initial placeholder visible — so a missing poster
+// never flashes a broken-image icon. XSS-safe: the id is the library's own
+// canonical id, URL-encoded into the path; no markup is ever interpolated. Basic
+// wiring only (Phase 5.2) — the full poster-grid polish lands in 5.7.
+function addPosterImage(poster, item) {
+  var id = item && item.id;
+  if (!poster || !id) return;
+  var img = document.createElement("img");
+  img.className = "poster-img";
+  img.alt = "";              // decorative; the title is the accessible label
+  img.loading = "lazy";
+  img.decoding = "async";
+  img.draggable = false;
+  // Hidden until it actually loads, so the gradient shows through during the
+  // request and stays put on error (no broken-image flash).
+  img.hidden = true;
+  img.addEventListener("load", function () {
+    img.hidden = false;
+  });
+  img.addEventListener("error", function () {
+    img.hidden = true;       // keep the gradient + initial placeholder
+  });
+  img.src = "/api/media-image/" + encodeURIComponent(id) + "?kind=poster";
+  // Prepend so it sits beneath the badge/open-folder button (which are appended
+  // after) and over the gradient background. The CSS gives it z-index:1.
+  poster.insertBefore(img, poster.firstChild);
+}
+
 // Clipboard with execCommand fallback (localhost is a non-secure context where
 // navigator.clipboard may be undefined).
 function copyText(text) {
@@ -194,11 +225,13 @@ export function buildCard(item) {
   node.dataset.state = item.state;
   if (isArchived) node.classList.add("archived");
 
-  // Poster slot (gradient + big initial placeholder). Phase 5 fills a real
-  // image; the slot must exist now so later phases have a mount point.
+  // Poster slot (gradient + big initial placeholder). Phase 5.2 wires a real
+  // image on top: addPosterImage points an <img> at /api/media-image/<id> and
+  // hides it on error, so a missing poster falls back to this gradient.
   var poster = $(".poster", node);
   poster.classList.add("p-" + m.cssKey);
   $(".initial", poster).textContent = initialFor(item.id);
+  addPosterImage(poster, item);
 
   // Badge (color-coded by state).
   var badge = $(".badge", poster);

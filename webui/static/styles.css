@@ -727,6 +727,25 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 }
 .poster .badge { position: relative; z-index: 2; }
 
+/* Real artwork (Phase 5.2): an <img> pointed at /api/media-image/<id>. It fills
+   the poster slot and sits ABOVE the gradient + initial but BELOW the badge /
+   open-folder button (z-index 2), so those stay legible over a real poster. It
+   starts [hidden] (card.js) and is only revealed on a successful load — a 404 /
+   load error keeps it hidden so the gradient placeholder shows with no
+   broken-image flash. object-fit:cover keeps any aspect ratio crisp/retina. */
+.poster .poster-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  z-index: 1;
+  display: block;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.poster .poster-img[hidden] { display: none; }
+
 /* Badge-tinted poster gradients, one per state. */
 .poster.p-unprepped { background: linear-gradient(135deg, #4a3a10, #1a1408); }
 .poster.p-local     { background: linear-gradient(135deg, #16335e, #0a1424); }

@@ -4085,6 +4085,9 @@ def items_payload():
 # Lower-cased; comparisons casefold the on-disk name.
 _FOLDER_IMAGE_NAMES = ("poster.jpg", "fanart.jpg")
 
+# The artwork "kinds" resolve_artwork_path accepts, each mapping to "<kind>.jpg".
+_FOLDER_IMAGE_NAMES_KINDS = ("poster", "fanart")
+
 # Map a category bucket to its on-disk root subfolder under LOCAL_ROOT.
 _CATEGORY_ROOT_SUBDIR = {"movies": "Movies", "series": "Series", "anime": "Anime"}
 
@@ -4405,6 +4408,157 @@ def find_folder_image(folder):
             if hit:
                 return hit
             queue_dirs.append(sub)
+    return None
+
+
+# A folder name carries a provider token like `{tmdb-70523}` / `{tvdb-12345}`
+# (the Plex/Emby/Jellyfin convention rename_folder stamps on a SHOW folder). The
+# season-inheritance resolver walks UP to the nearest ancestor whose basename
+# matches this — i.e. the show folder — and uses ITS poster as the fallback.
+_PROVIDER_TOKEN_RE = re.compile(r"\{tmdb-[^}]+\}", re.IGNORECASE)
+
+
+def _kind_image_under_root(folder, kind):
+    """Return the absolute path of ``<kind>.jpg`` (poster.jpg / fanart.jpg)
+    sitting DIRECTLY in ``folder`` — but ONLY if it exists on disk AND the
+    realpath-resolved file is under LOCAL_ROOT with the exact allowed basename.
+    Otherwise None. The single security funnel every candidate flows through, so
+    a returned path is ALWAYS a vetted poster/fanart inside the media root.
+
+    ``folder`` is derived from a LIBRARY entry's stored ``folder_path`` (or its
+    real on-disk ancestors), never from raw client input, so this re-assertion is
+    defence-in-depth against a stored path that somehow escaped the root."""
+    if not folder:
+        return None
+    candidate = os.path.join(folder, f"{kind}.jpg")
+    try:
+        if not os.path.isfile(candidate):
+            return None
+        real = os.path.realpath(candidate)
+    except OSError:
+        return None
+    # Exact-name allow-list (case-insensitive on-disk name) AND under LOCAL_ROOT.
+    if os.path.basename(real).lower() != f"{kind}.jpg":
+        return None
+    if not _is_within_local_root(real):
+        return None
+    return real
+
+
+def _ancestor_show_folder_image(start_folder, kind):
+    """Walk UP ``start_folder``'s real on-disk ancestors to the NEAREST ancestor
+    whose basename carries a ``{tmdb-…}`` token (the show folder) and return that
+    folder's vetted ``<kind>.jpg`` (or None). Stops at / never escapes LOCAL_ROOT
+    (the walk halts once it climbs above the media root). READ-ONLY."""
+    if not start_folder or not _is_within_local_root(start_folder):
+        return None
+    try:
+        current = os.path.realpath(start_folder)
+        root = os.path.realpath(LOCAL_ROOT)
+    except OSError:
+        return None
+    # Climb until we exit the media root or hit the filesystem ceiling.
+    while _is_within_local_root(current):
+        name = os.path.basename(current)
+        if _PROVIDER_TOKEN_RE.search(name or ""):
+            hit = _kind_image_under_root(current, kind)
+            if hit:
+                return hit
+            # The show folder was found but has no <kind>.jpg — there is no
+            # higher show folder for this leaf, so stop (don't keep climbing past
+            # the show into collection roots).
+            return None
+        parent = os.path.dirname(current)
+        if parent == current:  # reached a drive/root — cannot climb further
+            break
+        current = parent
+        if current == root or not _is_within_local_root(current):
+            break
+    return None
+
+
+def resolve_artwork_path(library, mid, kind="poster"):
+    """Resolve the absolute path of a leaf/season's artwork file (READ-ONLY,
+    path-only — never opens or copies anything), or None (IMP-E3/U3/D17, Phase 5).
+
+    ``kind`` selects which artwork (``"poster"`` -> poster.jpg, ``"fanart"`` ->
+    fanart.jpg); any other value falls back to "poster".
+
+    RESOLUTION ORDER — LOCAL ALWAYS WINS at each level (locked decision #8, "Dark"
+    requirement). The first existing file wins:
+      (i)   the resolved entry's OWN ``folder_path`` ``<kind>.jpg``. For a season
+            episode this folder IS the season folder, so a season-specific local
+            poster naturally wins here. For a season_map it is the season folder.
+      (ii)  else the entry's season container's folder ``<kind>.jpg`` — found via
+            the leaf's ``parent_id`` -> the ``season_map`` entry's ``folder_path``.
+      (iii) else the NEAREST ancestor folder (walking UP the entry's real
+            ``folder_path``) whose name carries a ``{tmdb-…}`` token — the show
+            folder — and its ``<kind>.jpg`` (so every episode inherits the show
+            poster when nothing more specific exists).
+
+    ALIAS / season_map SAFE (PR #21 crash class): ``mid`` is resolved one hop via
+    ``_resolve_alias`` so a ``multi_ep_alias`` dereferences to its PRIMARY leaf's
+    real folder; ``folder_path`` is NEVER read off a raw virtual entry. A
+    ``season_map`` keeps its own ``folder_path`` (level i). Every ``.get`` /
+    ``os.path`` call is guarded.
+
+    SECURITY: every candidate is derived from the LIBRARY entry's stored paths
+    (and their real ancestors), NEVER from client input beyond ``mid`` (which only
+    indexes the dict) + ``kind`` (allow-listed). Each candidate passes through
+    ``_kind_image_under_root`` / the ancestor walk, both of which return ONLY a
+    file named exactly poster.jpg/fanart.jpg that realpath-resolves UNDER
+    LOCAL_ROOT. A crafted ``mid`` (``..``, an absolute path, etc.) cannot escape:
+    it is just a missing dict key -> None.
+    """
+    if kind not in _FOLDER_IMAGE_NAMES_KINDS:
+        kind = "poster"
+    if not isinstance(library, dict):
+        return None
+
+    entry = library.get(mid)
+    if entry is None:
+        return None
+
+    # One-hop alias resolve: a multi_ep_alias -> its primary leaf (which owns the
+    # real folder). _resolve_alias raises only on a missing key, which we've ruled
+    # out above; guard anyway so a malformed library never propagates.
+    try:
+        _real_id, entry = _resolve_alias(library, mid)
+    except KeyError:
+        return None
+    if not isinstance(entry, dict):
+        return None
+
+    # If resolution landed on a still-virtual row (an alias whose primary is
+    # missing), it owns no folder of its own — fall back to its season below.
+    own_folder = entry.get("folder_path") if entry.get("type") != "multi_ep_alias" else None
+
+    # (i) The entry's OWN folder — a season-specific local poster wins here.
+    hit = _kind_image_under_root(own_folder, kind)
+    if hit:
+        return hit
+
+    # (ii) The season container's folder. Find the parent season_map via parent_id
+    # (leaf) and use ITS folder_path. Guard the lookup + the parent's shape.
+    parent_id = entry.get("parent_id")
+    if parent_id:
+        parent = library.get(parent_id)
+        if isinstance(parent, dict) and parent.get("type") == "season_map":
+            hit = _kind_image_under_root(parent.get("folder_path"), kind)
+            if hit:
+                return hit
+
+    # (iii) Walk UP to the nearest {tmdb-…} show folder and use its <kind>.jpg.
+    # Anchor the walk at the most-specific folder we have for this entry.
+    anchor = own_folder
+    if not anchor and parent_id:
+        parent = library.get(parent_id)
+        if isinstance(parent, dict):
+            anchor = parent.get("folder_path")
+    hit = _ancestor_show_folder_image(anchor, kind)
+    if hit:
+        return hit
+
     return None
 
 

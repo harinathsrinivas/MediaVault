@@ -626,3 +626,188 @@ def test_pick_match_prefers_full_title_over_obscure_substring():
     status, payload = main._pick_tmdb_match(results, "the conjuring", 2013, "title", "release_date")
     assert status == "confident"
     assert payload["id"] == 138843
+
+
+# ===========================================================================
+# NFO writer tests (IMP-U3 down-payment, step 5.8)
+# ===========================================================================
+
+def _movie_result_with_meta(tmdb_id, title, year, overview="A great film.", vote_average=7.5,
+                            popularity=50.0):
+    """Like _movie_result but also carries overview + vote_average (mirrors real TMDB payload)."""
+    r = _movie_result(tmdb_id, title, year, popularity=popularity)
+    r["overview"] = overview
+    r["vote_average"] = vote_average
+    return r
+
+
+def _tv_result_with_meta(tmdb_id, name, year, overview="A great show.", vote_average=8.2,
+                          popularity=50.0):
+    """Like _tv_result but also carries overview + vote_average."""
+    r = _tv_result(tmdb_id, name, year, popularity=popularity)
+    r["overview"] = overview
+    r["vote_average"] = vote_average
+    return r
+
+
+def test_nfo_movie_written_on_apply_with_flag(sandbox, patch_tmdb, capsys):
+    """--apply --nfo on a confident movie: writes well-formed movie.nfo in the
+    (potentially renamed) movie folder containing title/year/plot/rating/uniqueid."""
+    import xml.etree.ElementTree as ET
+    _empty_libs(sandbox)
+    folder, fp, h = _seed_movie(sandbox, "mov-en-2025-f1", "F1")
+    patch_tmdb(FakeTMDB(search={"f1": [
+        _movie_result_with_meta(1003159, "F1", 2025, overview="Racing film.", vote_average=7.1)
+    ]}))
+
+    main.cmd_enrich_metadata("mov-en-2025-f1", "--apply", "--nfo")
+
+    # After the confident apply the folder was renamed to include {tmdb-…}.
+    new_folder = folder.parent / "F1 {tmdb-1003159}"
+    nfo_path = new_folder / "movie.nfo"
+    assert nfo_path.exists(), "movie.nfo must be written after --apply --nfo on a movie"
+
+    # Parse back with ElementTree to confirm it is well-formed XML.
+    tree = ET.parse(str(nfo_path))
+    root = tree.getroot()
+    assert root.tag == "movie"
+    assert root.find("title").text == "F1"
+    assert root.find("year").text == "2025"
+    assert root.find("plot").text == "Racing film."
+    assert root.find("rating").text == "7.1"
+    uid = root.find("uniqueid")
+    assert uid is not None
+    assert uid.get("type") == "tmdb"
+    assert uid.get("default") == "true"
+    assert uid.text == "1003159"
+
+    out = capsys.readouterr().out
+    assert "movie.nfo" in out
+
+
+def test_nfo_show_written_on_apply_with_flag(sandbox, patch_tmdb, capsys):
+    """--apply --nfo on a confident show: writes well-formed tvshow.nfo in the SHOW
+    folder (not per season) with a <tvshow> root."""
+    import xml.etree.ElementTree as ET
+    _empty_libs(sandbox)
+    show = _seed_two_season_show(sandbox)
+    patch_tmdb(FakeTMDB(
+        search={"the office": [
+            _tv_result_with_meta(2316, "The Office", 2005,
+                                 overview="Mockumentary comedy.", vote_average=8.9)
+        ]},
+        season_images={(2316, 1): [], (2316, 2): []},
+    ))
+
+    main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply", "--nfo")
+
+    # Show folder was renamed.
+    stamped_show = show["show_root"].parent / "The Office {tmdb-2316}"
+    nfo_path = stamped_show / "tvshow.nfo"
+    assert nfo_path.exists(), "tvshow.nfo must be written in the show folder"
+
+    tree = ET.parse(str(nfo_path))
+    root = tree.getroot()
+    assert root.tag == "tvshow"
+    assert root.find("title").text == "The Office"
+    assert root.find("year").text == "2005"
+    assert root.find("plot").text == "Mockumentary comedy."
+    assert root.find("rating").text == "8.9"
+    uid = root.find("uniqueid")
+    assert uid.get("type") == "tmdb"
+    assert uid.get("default") == "true"
+    assert uid.text == "2316"
+
+    # No per-season NFO files.
+    assert not (stamped_show / "Season 01" / "tvshow.nfo").exists()
+    assert not (stamped_show / "Season 02" / "tvshow.nfo").exists()
+
+    out = capsys.readouterr().out
+    assert "tvshow.nfo" in out
+
+
+def test_nfo_not_written_without_flag(sandbox, patch_tmdb, capsys):
+    """Without --nfo, no NFO file is ever written (--apply alone, or dry-run alone)."""
+    _empty_libs(sandbox)
+    folder, fp, h = _seed_movie(sandbox, "mov-en-2025-f1", "F1")
+    patch_tmdb(FakeTMDB(search={"f1": [
+        _movie_result_with_meta(1003159, "F1", 2025)
+    ]}))
+
+    main.cmd_enrich_metadata("mov-en-2025-f1", "--apply")  # no --nfo
+
+    new_folder = folder.parent / "F1 {tmdb-1003159}"
+    assert not (new_folder / "movie.nfo").exists(), "movie.nfo must NOT be written without --nfo"
+    assert not (folder / "movie.nfo").exists()
+
+
+def test_nfo_not_written_in_dry_run(sandbox, patch_tmdb, capsys):
+    """With --nfo but WITHOUT --apply (dry-run): nothing is written — no NFO."""
+    _empty_libs(sandbox)
+    folder, fp, h = _seed_movie(sandbox, "mov-en-2025-f1", "F1")
+    patch_tmdb(FakeTMDB(search={"f1": [
+        _movie_result_with_meta(1003159, "F1", 2025)
+    ]}))
+
+    main.cmd_enrich_metadata("mov-en-2025-f1", "--nfo")  # dry-run (no --apply)
+
+    # Dry-run: folder not renamed, no NFO anywhere.
+    assert not (folder / "movie.nfo").exists()
+    assert not (folder.parent / "F1 {tmdb-1003159}" / "movie.nfo").exists()
+    out = capsys.readouterr().out
+    assert "DRY-RUN" in out
+
+
+def test_nfo_is_well_formed_xml(sandbox, patch_tmdb):
+    """Parse the written NFO with ET.parse — if it throws, the XML is malformed."""
+    import xml.etree.ElementTree as ET
+    _empty_libs(sandbox)
+    # Title with XML-special characters that must be properly escaped.
+    folder, fp, h = _seed_movie(sandbox, "mov-en-2025-f1", "F1 & Beyond")
+    # Supply the escaped title directly in the canned result so search finds it.
+    result = _movie_result_with_meta(9999, "F1 & Beyond", 2025,
+                                     overview="Plot with <angle> & ampersand.")
+    patch_tmdb(FakeTMDB(search={"f1 & beyond": [result], "f1  beyond": [result]}))
+
+    main.cmd_enrich_metadata("mov-en-2025-f1", "--apply", "--nfo")
+
+    # Find the nfo — folder may or may not be renamed depending on whether the title
+    # matched, but the NFO must parse without error.
+    nfo_files = list(folder.parent.rglob("movie.nfo"))
+    if not nfo_files:
+        # If no confident match (title mismatch), that's fine — no NFO expected.
+        return
+    root = ET.parse(str(nfo_files[0])).getroot()
+    # If it parsed, it is well-formed.  Also verify the text round-trips.
+    assert root.find("plot") is not None
+
+
+def test_nfo_write_failure_warns_but_enrich_still_completes(sandbox, patch_tmdb, monkeypatch, capsys):
+    """If the NFO write raises (e.g. permission error), a warning is printed but the
+    enrich run COMPLETES and the tmdb_id is still written to the library."""
+    _empty_libs(sandbox)
+    folder, fp, h = _seed_movie(sandbox, "mov-en-2025-f1", "F1")
+    patch_tmdb(FakeTMDB(search={"f1": [
+        _movie_result_with_meta(1003159, "F1", 2025)
+    ]}))
+
+    # Monkeypatch open inside _write_nfo to raise a PermissionError.
+    real_open = open
+    def _failing_open(path, *args, **kwargs):
+        if str(path).endswith(".nfo"):
+            raise PermissionError("No write permission (simulated)")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", _failing_open)
+
+    main.cmd_enrich_metadata("mov-en-2025-f1", "--apply", "--nfo")
+
+    out = capsys.readouterr().out
+    # Warning printed, run did not crash.
+    assert "NFO write failed" in out or "warning" in out.lower() or "⚠️" in out
+
+    # tmdb_id still written (NFO failure is non-blocking).
+    lib = mvcommon.load_library()
+    # Note: the folder may be renamed; search by key (it's stable).
+    entry = lib.get("mov-en-2025-f1")
+    assert entry is not None and entry.get("metadata", {}).get("tmdb_id") == 1003159

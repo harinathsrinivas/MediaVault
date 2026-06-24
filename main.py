@@ -1633,6 +1633,8 @@ def _resolve_unit(unit, api_key):
             "backdrop_path": res.get("backdrop_path"),
             "title": res.get(title_key),
             "year": yr,
+            "overview": res.get("overview") or "",
+            "vote_average": res.get("vote_average"),
             "candidates": [],
         }
     if status == "ambiguous":
@@ -1640,14 +1642,54 @@ def _resolve_unit(unit, api_key):
     return {"status": "none", "candidates": []}
 
 
+def _write_nfo(folder, kind, title, year, tmdb_id, overview="", vote_average=None):
+    """Write a Kodi/Jellyfin-compatible NFO file into *folder*.
+
+    For a movie (kind="movie") writes ``movie.nfo`` with a ``<movie>`` root.
+    For a show (kind="show") writes ``tvshow.nfo`` with a ``<tvshow>`` root.
+    Uses stdlib xml.etree.ElementTree so all text is properly XML-escaped.
+
+    NEVER raises — any IO/permission failure is printed as a warning so the
+    caller's enrich run is never blocked by an NFO write error.  Overwrites an
+    existing file (NFOs are regenerable metadata).
+    """
+    import xml.etree.ElementTree as ET
+
+    tag = "movie" if kind == "movie" else "tvshow"
+    nfo_name = "movie.nfo" if kind == "movie" else "tvshow.nfo"
+
+    root = ET.Element(tag)
+    ET.SubElement(root, "title").text = title or ""
+    ET.SubElement(root, "year").text = str(year) if year is not None else ""
+    ET.SubElement(root, "plot").text = overview or ""
+    if vote_average is not None:
+        ET.SubElement(root, "rating").text = str(vote_average)
+    uid_el = ET.SubElement(root, "uniqueid")
+    uid_el.set("type", "tmdb")
+    uid_el.set("default", "true")
+    uid_el.text = str(tmdb_id)
+
+    tree = ET.ElementTree(root)
+    ET.indent(tree, space="  ")  # pretty-print (Python 3.9+)
+    nfo_path = os.path.join(folder, nfo_name)
+    try:
+        with open(nfo_path, "w", encoding="utf-8") as fh:
+            fh.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+            tree.write(fh, encoding="unicode", xml_declaration=False)
+        print(f"     📄 wrote {nfo_name}")
+    except Exception as exc:
+        print(f"     ⚠️  NFO write failed ({nfo_path}): {exc} — enrich continues.")
+
+
 def cmd_enrich_metadata(arg=None, *flags):
     """Local-first TMDB backfill (SHOW-CENTRIC, IMP-E3/U3/D17 — Phase 5 step 5.4).
 
     Usage: enrich_metadata [id_or_prefix] [--apply] [--library movies|series|anime]
+            [--nfo]
     DRY-RUN by default (prints what WOULD happen, writes nothing). --apply performs
-    it. See the module block above for the locked behaviours and the PRE-RESOLVED
-    TMDB endpoint facts. `--nfo` is accepted but a no-op here (NFO writing is step
-    5.8); any other flag is ignored.
+    it. --nfo (only honoured when combined with --apply) writes a Kodi/Jellyfin-
+    compatible movie.nfo / tvshow.nfo alongside the poster on a confident match
+    (IMP-U3 down-payment, step 5.8). Any other flag is ignored.
     """
     # Fold a flag-shaped positional (e.g. a direct `cmd_enrich_metadata("--apply")`
     # with no id) into the flags list so --apply/--library are honoured no matter
@@ -1660,6 +1702,7 @@ def cmd_enrich_metadata(arg=None, *flags):
         id_or_prefix = arg or None
 
     apply = "--apply" in flist
+    write_nfo = "--nfo" in flist
     library_filter = None
     if "--library" in flist:
         i = flist.index("--library")
@@ -1781,6 +1824,18 @@ def cmd_enrich_metadata(arg=None, *flags):
         if image_base is None:
             image_base = _tmdb_image_base(api_key)
         n_images += _download_unit_images(unit, res, image_base, folder)
+
+        # 4) NFO write — only when --nfo flag is set (IMP-U3 down-payment, step 5.8).
+        if write_nfo and folder:
+            _write_nfo(
+                folder,
+                kind=unit["kind"],
+                title=res.get("title"),
+                year=res.get("year"),
+                tmdb_id=tmdb_id,
+                overview=res.get("overview", ""),
+                vote_average=res.get("vote_average"),
+            )
 
     # --- ambiguous report (always printed; the user resolves via set_tmdb) ---
     if ambiguous:

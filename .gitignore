@@ -67,3 +67,5 @@ dummy_size_test_mp4/
 # Local command-caveat transcript dumps written at the repo root by interactive runs
 *local-command-caveat*.txt
 
+# Interruption-recovery session file — never commit
+SESSION_STATE.md

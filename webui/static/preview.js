@@ -1,10 +1,34 @@
 /* MediaVault Console — cinematic hover detail-window (IMP-E16).
  *
  * THE SIGNATURE "aweee" MOMENT. Resting the pointer on any card — movie, series,
- * episode, or anime — for a short dwell auto-opens a large, translucent glass
- * "dossier": the show's backdrop as a dimmed cover, its real title + year, the
- * episode line when it's an episode, the synopsis, and a tight meta row (state ·
- * size · category). A personal film vault, so it reads like a now-showing card.
+ * episode, or anime — for a short dwell auto-opens a LARGE, translucent glass
+ * "dossier": a wide hero backdrop band with the title overlaid on a scrim, the
+ * real title + year, the episode line when it's an episode, the synopsis, and a
+ * tight meta row (state · size · category). A personal film vault, so it reads
+ * like a now-showing card — but cinematic in scale (it is deliberately allowed to
+ * rise UP over the header / tabs chrome while a leaf is hovered).
+ *
+ * TWO-PHASE PAINT (IMP-E16 enrichment):
+ *   1. INSTANT — on open we render everything already in the items_payload row
+ *      (backdrop + title + year + episode + the short synopsis + state/size/
+ *      category) so the dossier appears with zero latency.
+ *   2. RICH — the same instant we ALSO lazy-fetch GET /api/detail/{id} (the
+ *      authFetch wrapper carries the access token). When it resolves AND the
+ *      preview is still showing the SAME open (open-token guard, exactly like the
+ *      backdrop image), we enrich the panel with ★ rating + vote count, genre
+ *      chips, runtime, the tagline, the FULL overview (replacing the clamped
+ *      short one), top cast, director(s)/creator(s), show seasons·episodes·
+ *      networks / episode air-date·S·E, and a clickable IMDb / TMDB link row.
+ *      A 404 ("no tmdb_id"), a fetch error, or a stale open → we simply keep the
+ *      basic dossier (no error flash). Per-id detail is cached in memory so
+ *      re-hovering the same card never refetches.
+ *
+ * LINK ROW (the one interactive exception): the panel is pointer-events:none so
+ * it can never block a click / tap / the ⤢ expand arrow. The IMDb / TMDB row is
+ * the SOLE element re-enabled to pointer-events:auto, so the user can click
+ * through to the external page; everything else stays inert. The hrefs are
+ * validated (must start with https://www.imdb.com or https://www.themoviedb.org)
+ * before being set, and open in a new tab with rel=noopener.
  *
  * DELEGATION (mirrors glow.js): ONE set of listeners on the stable #panel
  * (created once in index.html; only child-cleared on re-render), so every
@@ -17,28 +41,30 @@
  * only `mouse`/`pen` pointers ever arm it (the SAME gate the cursor glow uses).
  * On touch nothing wires, so a tap still navigates the card and the panel never
  * appears or gets stuck. The panel is `position:fixed; pointer-events:none`, so it
- * is purely informational and can never block a click, tap, focus, or the ⤢
- * expand arrow.
+ * is purely informational (bar the one link row) and can never block a click.
  *
  * PERF: exactly ONE reusable panel element is built (lazily, on the first open),
- * its contents + backdrop src are swapped per open, and the fanart request only
- * fires when a preview actually opens — never speculatively on render. A
- * per-open token ignores late load/error events from a superseded card so a slow
- * image can't paint into the wrong dossier.
+ * its contents + backdrop src are swapped per open, and the fanart + the
+ * /api/detail request only fire when a preview actually opens — never
+ * speculatively on render. A per-open token ignores late image-load AND late
+ * detail-fetch results from a superseded card so neither can paint into the wrong
+ * dossier.
  *
  * A11y: keyboard focus on a card ALSO opens it (focusin) and blur closes it, so
  * the dossier isn't mouse-only. prefers-reduced-motion → instant open, no
  * transform, no Ken-Burns drift (handled in CSS; this module just toggles state).
  *
- * XSS-safe: every text node is set via textContent; the only interpolated value
- * is the library's own canonical id, URL-encoded into the image path (identical
- * to card.js's poster request). ES module; `node --check preview.js` covers it.
+ * XSS-safe: every text node is set via textContent; the only interpolated values
+ * are the library's own canonical id (URL-encoded into the image + detail paths)
+ * and the IMDb/TMDB hrefs, which are validated against an exact https:// origin
+ * allow-list before assignment. ES module; `node --check preview.js` covers it.
  */
 
 "use strict";
 
 import { metaFor, humanSize, CATEGORY_META } from "./data.js";
 import { displayTitle } from "./title.js";
+import { authFetch } from "./auth.js";
 
 // Rest-this-long over a card before the dossier opens. Long enough that sweeping
 // the pointer ACROSS the grid to reach something never flashes a dozen panels;
@@ -82,6 +108,80 @@ function categoryWord(category) {
   return label; // "Anime"
 }
 
+// "148" -> "2h 28m"; "47" -> "47m"; missing/0 -> "". Pure formatting.
+function formatRuntime(minutes) {
+  var n = Number(minutes);
+  if (!isFinite(n) || n <= 0) return "";
+  var h = Math.floor(n / 60);
+  var m = Math.round(n % 60);
+  if (h <= 0) return m + "m";
+  if (m <= 0) return h + "h";
+  return h + "h " + m + "m";
+}
+
+// "1,284" — thousands-separated vote count for the faint ★ suffix. Defensive.
+function formatVotes(n) {
+  var v = Number(n);
+  if (!isFinite(v) || v <= 0) return "";
+  try {
+    return v.toLocaleString("en-US");
+  } catch (e) {
+    return String(Math.round(v));
+  }
+}
+
+// "2026-06-25" -> "Jun 25, 2026"; passes through anything it can't parse so a
+// non-ISO air_date never throws or shows "Invalid Date".
+function formatDate(value) {
+  var s = String(value || "").trim();
+  if (!s) return "";
+  var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+  if (!m) return s;
+  var months = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ];
+  var mi = Number(m[2]) - 1;
+  if (mi < 0 || mi > 11) return s;
+  return months[mi] + " " + Number(m[3]) + ", " + m[1];
+}
+
+// "S03E07" from season/episode numbers (defensive: omits a missing half).
+function formatSxxEyy(season, episode) {
+  function pad(n) {
+    var x = String(n);
+    return x.length < 2 ? "0" + x : x;
+  }
+  var out = "";
+  if (season != null && season !== "") out += "S" + pad(season);
+  if (episode != null && episode !== "") out += "E" + pad(episode);
+  return out;
+}
+
+// The link row is the ONE interactive part of an otherwise inert panel, so we are
+// strict about what we will turn into a real href: an exact-origin allow-list.
+function safeExternalUrl(url) {
+  var s = String(url || "").trim();
+  if (
+    s.indexOf("https://www.imdb.com/") === 0 ||
+    s.indexOf("https://www.themoviedb.org/") === 0
+  ) {
+    return s;
+  }
+  return "";
+}
+
+// ---------------------------------------------------------------------------
+// In-memory per-id detail cache.
+// ---------------------------------------------------------------------------
+//
+// Keyed by item id. A successful payload is stored as-is; a 404 / "no tmdb_id"
+// is stored as the NO_DETAIL sentinel so re-hovering a tmdb-less card never
+// refetches. A transient network/parse error is NOT cached (we leave the id
+// absent so a later hover can retry). The cache lives for the page lifetime.
+var _detailCache = Object.create(null);
+var NO_DETAIL = { __none: true };
+
 // ---------------------------------------------------------------------------
 // The single reusable panel.
 // ---------------------------------------------------------------------------
@@ -102,6 +202,7 @@ function buildPanel() {
 
   // Backdrop layer (dimmed cover image + scrim). The <img> is lazily pointed at
   // the fanart on each open; the scrim is a CSS gradient over it for legibility.
+  // The hero band also carries the title overlay so the name reads OVER the art.
   var media = document.createElement("div");
   media.className = "hp-media";
   var img = document.createElement("img");
@@ -113,28 +214,46 @@ function buildPanel() {
   var scrim = document.createElement("div");
   scrim.className = "hp-scrim";
   media.appendChild(scrim);
+
+  // Title overlay, anchored to the bottom of the hero band (over the scrim).
+  var hero = document.createElement("div");
+  hero.className = "hp-hero";
+  var kicker = document.createElement("div");
+  kicker.className = "hp-kicker";
+  kicker.textContent = "Now showing";
+  hero.appendChild(kicker);
+  var title = document.createElement("h3");
+  title.className = "hp-title";
+  hero.appendChild(title);
+  var ep = document.createElement("div");
+  ep.className = "hp-episode";
+  hero.appendChild(ep);
+  media.appendChild(hero);
   root.appendChild(media);
 
   // Foreground content.
   var body = document.createElement("div");
   body.className = "hp-body";
 
-  var kicker = document.createElement("div");
-  kicker.className = "hp-kicker";
-  kicker.textContent = "Now showing";
-  body.appendChild(kicker);
+  // Rich strip (★ rating · runtime · genres). Populated only once detail loads;
+  // hidden (empty) until then so the instant paint has no blank gap.
+  var rich = document.createElement("div");
+  rich.className = "hp-rich";
+  body.appendChild(rich);
 
-  var title = document.createElement("h3");
-  title.className = "hp-title";
-  body.appendChild(title);
-
-  var ep = document.createElement("div");
-  ep.className = "hp-episode";
-  body.appendChild(ep);
+  // Tagline — italic, sits above the synopsis. Detail-only.
+  var tagline = document.createElement("p");
+  tagline.className = "hp-tagline";
+  body.appendChild(tagline);
 
   var synopsis = document.createElement("p");
   synopsis.className = "hp-synopsis";
   body.appendChild(synopsis);
+
+  // Credits block (cast / directors / show or episode facts). Detail-only.
+  var credits = document.createElement("div");
+  credits.className = "hp-credits";
+  body.appendChild(credits);
 
   var meta = document.createElement("div");
   meta.className = "hp-meta";
@@ -157,6 +276,24 @@ function buildPanel() {
   meta.appendChild(catPill);
   body.appendChild(meta);
 
+  // External link row — the SOLE pointer-events:auto element. Built empty; the
+  // anchors are revealed only when detail carries a valid imdb_url / tmdb_url.
+  var links = document.createElement("div");
+  links.className = "hp-links";
+  var imdb = document.createElement("a");
+  imdb.className = "hp-link hp-link-imdb";
+  imdb.target = "_blank";
+  imdb.rel = "noopener noreferrer";
+  imdb.hidden = true;
+  links.appendChild(imdb);
+  var tmdb = document.createElement("a");
+  tmdb.className = "hp-link hp-link-tmdb";
+  tmdb.target = "_blank";
+  tmdb.rel = "noopener noreferrer";
+  tmdb.hidden = true;
+  links.appendChild(tmdb);
+  body.appendChild(links);
+
   root.appendChild(body);
   document.body.appendChild(root);
 
@@ -167,12 +304,18 @@ function buildPanel() {
     kicker: kicker,
     title: title,
     ep: ep,
+    rich: rich,
+    tagline: tagline,
     synopsis: synopsis,
+    credits: credits,
     stateChip: stateChip,
     stateDot: stateDot,
     stateLabel: stateLabel,
     sizePill: sizePill,
     catPill: catPill,
+    links: links,
+    imdb: imdb,
+    tmdb: tmdb,
   };
   return _panel;
 }
@@ -236,12 +379,272 @@ function loadBackdrop(p, item, openToken) {
 }
 
 // ---------------------------------------------------------------------------
+// Rich detail — lazy GET /api/detail/{id}, painted into the panel once it
+// resolves IF the same open is still showing (open-token guard).
+// ---------------------------------------------------------------------------
+
+// Clear every detail-only region so a re-open starts from the basic dossier with
+// no stale rich content bleeding through from the previously hovered item.
+function clearRich(p) {
+  p.rich.textContent = "";
+  p.rich.classList.remove("show");
+  p.tagline.textContent = "";
+  p.tagline.classList.remove("show");
+  p.credits.textContent = "";
+  p.credits.classList.remove("show");
+  p.imdb.hidden = true;
+  p.imdb.removeAttribute("href");
+  p.imdb.textContent = "";
+  p.tmdb.hidden = true;
+  p.tmdb.removeAttribute("href");
+  p.tmdb.textContent = "";
+  p.links.classList.remove("show");
+  p.root.classList.remove("has-rich");
+}
+
+// Small helper: a labelled chip (genre / fact) appended to a row.
+function appendChip(row, text, extraClass) {
+  if (!text) return;
+  var chip = document.createElement("span");
+  chip.className = "hp-chip" + (extraClass ? " " + extraClass : "");
+  chip.textContent = text;
+  row.appendChild(chip);
+}
+
+// Paint the resolved /api/detail payload. `item` is the card's row (for the
+// id/episode context); `d` is the server detail object.
+function renderRich(p, item, d) {
+  if (!d || d.__none) return; // 404 / no-tmdb_id → keep the basic dossier
+
+  // ---- Rich strip: ★ rating (+ faint votes) · runtime · genre chips. --------
+  p.rich.textContent = "";
+  var hasStrip = false;
+
+  var rating = Number(d.rating);
+  if (isFinite(rating) && rating > 0) {
+    var ratingEl = document.createElement("span");
+    ratingEl.className = "hp-rating";
+    var star = document.createElement("span");
+    star.className = "hp-star";
+    star.textContent = "★"; // ★
+    ratingEl.appendChild(star);
+    var score = document.createElement("span");
+    score.className = "hp-score";
+    score.textContent = rating.toFixed(1);
+    ratingEl.appendChild(score);
+    var votes = formatVotes(d.vote_count);
+    if (votes) {
+      var voteEl = document.createElement("span");
+      voteEl.className = "hp-votes";
+      voteEl.textContent = votes;
+      ratingEl.appendChild(voteEl);
+    }
+    p.rich.appendChild(ratingEl);
+    hasStrip = true;
+  }
+
+  var runtime = formatRuntime(d.runtime);
+  if (runtime) {
+    appendChip(p.rich, runtime, "hp-runtime");
+    hasStrip = true;
+  }
+
+  var genres = Array.isArray(d.genres) ? d.genres : [];
+  for (var gi = 0; gi < genres.length && gi < 4; gi += 1) {
+    var g = String(genres[gi] || "").trim();
+    if (g) {
+      appendChip(p.rich, g, "hp-genre");
+      hasStrip = true;
+    }
+  }
+  if (hasStrip) p.rich.classList.add("show");
+
+  // ---- Tagline (italic, above the synopsis). --------------------------------
+  var tagline = String(d.tagline || "").trim();
+  if (tagline) {
+    p.tagline.textContent = tagline;
+    p.tagline.classList.add("show");
+  }
+
+  // ---- Full overview replaces the clamped short one (CSS relaxes the clamp). -
+  var fullOverview = String(d.overview || "").trim();
+  if (fullOverview) {
+    p.synopsis.textContent = fullOverview;
+    p.synopsis.classList.remove("empty");
+    p.synopsis.classList.add("hp-synopsis-full");
+  }
+
+  // ---- Credits: cast · directors/creators · show/episode facts. -------------
+  p.credits.textContent = "";
+  var hasCredits = false;
+
+  // Top cast — "Name, Name, …" (the character is offered as a title tooltip).
+  var cast = Array.isArray(d.cast) ? d.cast : [];
+  var castNames = [];
+  for (var ci = 0; ci < cast.length && ci < 6; ci += 1) {
+    var c = cast[ci];
+    if (c && c.name) castNames.push(String(c.name));
+  }
+  if (castNames.length) {
+    var castRow = document.createElement("div");
+    castRow.className = "hp-cred-row";
+    var castLab = document.createElement("span");
+    castLab.className = "hp-cred-label";
+    castLab.textContent = "Cast";
+    castRow.appendChild(castLab);
+    var castVal = document.createElement("span");
+    castVal.className = "hp-cred-value";
+    castVal.textContent = castNames.join(", ");
+    castRow.appendChild(castVal);
+    p.credits.appendChild(castRow);
+    hasCredits = true;
+  }
+
+  // Director(s) / creator(s). For a TV show TMDB returns creators in `directors`
+  // upstream-side too (the backend maps created_by → directors), so one label
+  // adapts: "Director" for a movie/episode, "Creator" for a show.
+  var directors = Array.isArray(d.directors) ? d.directors : [];
+  var dirNames = [];
+  for (var di = 0; di < directors.length && di < 4; di += 1) {
+    if (directors[di]) dirNames.push(String(directors[di]));
+  }
+  if (dirNames.length) {
+    var isShow = d.kind === "tv";
+    var dirRow = document.createElement("div");
+    dirRow.className = "hp-cred-row";
+    var dirLab = document.createElement("span");
+    dirLab.className = "hp-cred-label";
+    dirLab.textContent =
+      (isShow ? "Creator" : "Director") + (dirNames.length > 1 ? "s" : "");
+    dirRow.appendChild(dirLab);
+    var dirVal = document.createElement("span");
+    dirVal.className = "hp-cred-value";
+    dirVal.textContent = dirNames.join(", ");
+    dirRow.appendChild(dirVal);
+    p.credits.appendChild(dirRow);
+    hasCredits = true;
+  }
+
+  // Kind-specific facts row (small chips).
+  if (d.kind === "tv") {
+    var showRow = document.createElement("div");
+    showRow.className = "hp-cred-row hp-facts";
+    var seasons = Number(d.number_of_seasons);
+    if (isFinite(seasons) && seasons > 0) {
+      appendChip(showRow, seasons + (seasons === 1 ? " season" : " seasons"), "hp-fact");
+    }
+    var episodes = Number(d.number_of_episodes);
+    if (isFinite(episodes) && episodes > 0) {
+      appendChip(showRow, episodes + (episodes === 1 ? " episode" : " episodes"), "hp-fact");
+    }
+    var networks = Array.isArray(d.networks) ? d.networks : [];
+    for (var ni = 0; ni < networks.length && ni < 2; ni += 1) {
+      var net = String(networks[ni] || "").trim();
+      if (net) appendChip(showRow, net, "hp-fact hp-network");
+    }
+    if (d.status) appendChip(showRow, String(d.status), "hp-fact hp-status");
+    if (showRow.childNodes.length) {
+      p.credits.appendChild(showRow);
+      hasCredits = true;
+    }
+  } else if (d.kind === "episode") {
+    var epRow = document.createElement("div");
+    epRow.className = "hp-cred-row hp-facts";
+    var sxe = formatSxxEyy(d.season_number, d.episode_number);
+    if (sxe) appendChip(epRow, sxe, "hp-fact");
+    var air = formatDate(d.air_date);
+    if (air) appendChip(epRow, "Aired " + air, "hp-fact");
+    if (epRow.childNodes.length) {
+      p.credits.appendChild(epRow);
+      hasCredits = true;
+    }
+  }
+
+  if (hasCredits) p.credits.classList.add("show");
+
+  // ---- External link row (the one clickable region). ------------------------
+  var imdbUrl = safeExternalUrl(d.imdb_url);
+  var tmdbUrl = safeExternalUrl(d.tmdb_url);
+  var anyLink = false;
+  if (imdbUrl) {
+    p.imdb.href = imdbUrl;
+    p.imdb.textContent = "IMDb ↗"; // ↗
+    p.imdb.hidden = false;
+    anyLink = true;
+  }
+  if (tmdbUrl) {
+    p.tmdb.href = tmdbUrl;
+    p.tmdb.textContent = "TMDB ↗";
+    p.tmdb.hidden = false;
+    anyLink = true;
+  }
+  if (anyLink) p.links.classList.add("show");
+
+  // Flag the panel as enriched (CSS can grow/relax now there's real content, and
+  // the verify harness keys off .has-rich).
+  p.root.classList.add("has-rich");
+}
+
+// Kick the lazy fetch for `item`, painting into the panel if this open survives.
+// Re-anchors after a successful paint because the panel may have grown taller.
+function fetchRich(p, item, openToken) {
+  var id = item.id;
+  if (id == null) return;
+
+  // Cache hit (success payload OR a NO_DETAIL sentinel) → paint synchronously,
+  // no network. The sentinel renders nothing (renderRich early-returns).
+  var cached = _detailCache[id];
+  if (cached !== undefined) {
+    renderRich(p, item, cached);
+    if (openToken === _openToken && _openCard) reanchor(p);
+    return;
+  }
+
+  authFetch("/api/detail/" + encodeURIComponent(id))
+    .then(function (res) {
+      if (res.status === 404) {
+        _detailCache[id] = NO_DETAIL; // remember: this id has no tmdb detail
+        return null;
+      }
+      if (!res.ok) return null; // other error → do NOT cache; allow a retry
+      return res.json().catch(function () {
+        return null;
+      });
+    })
+    .then(function (data) {
+      if (data) _detailCache[id] = data;
+      // Open-token guard: only paint if THIS open is still the current one (the
+      // same id the user is still hovering). A stale resolve is dropped silently.
+      if (openToken !== _openToken) return;
+      if (!data) return; // 404 / error → keep the basic dossier, no flash
+      renderRich(p, item, data);
+      if (_openCard) reanchor(p);
+    })
+    .catch(function () {
+      // Network failure → keep the basic dossier (no error flash), no cache.
+    });
+}
+
+// Re-position after the panel changes height (rich content can make it taller),
+// guarded so a close that raced the fetch doesn't move a hidden panel.
+function reanchor(p) {
+  if (_openCard && _openCard.isConnected) position(p, _openCard);
+}
+
+// ---------------------------------------------------------------------------
 // Smart positioning: anchor to the CARD's rect (never the raw cursor, so it
 // can't jitter), prefer the side with the most room, and clamp to the viewport
-// so it never runs off-screen.
+// so it never runs off-screen. The panel is z-indexed ABOVE the header/banner
+// chrome and is allowed to rise up over it — when the card sits low or right, the
+// bottom-clamp pushes the panel's top up INTO the header band (that overlap is
+// the intended cinematic effect), still kept a small margin from the very edge so
+// nothing is clipped.
 // ---------------------------------------------------------------------------
-var VIEWPORT_MARGIN = 12; // keep this far from every screen edge
-var CARD_GAP = 14; // breathing room between the card and the panel
+var VIEWPORT_MARGIN = 10; // keep this far from every screen edge
+// A touch tighter at the TOP so the panel may ride a little further up over the
+// header chrome before clamping (the deliberate overlap), without ever clipping.
+var TOP_MARGIN = 6;
+var CARD_GAP = 16; // breathing room between the card and the panel
 
 function position(p, card) {
   var root = p.root;
@@ -268,10 +671,21 @@ function position(p, card) {
     Math.min(left, vw - pw - VIEWPORT_MARGIN)
   );
 
-  // Vertical: align the panel's top to the card's top, then clamp so the whole
-  // panel stays within the viewport (tall panels near the bottom ride up).
-  var top = cardRect.top;
-  top = Math.max(VIEWPORT_MARGIN, Math.min(top, vh - ph - VIEWPORT_MARGIN));
+  // Vertical: try to centre the (now tall) panel on the card so a big dossier
+  // doesn't shoot far below a top-row card, then clamp into the viewport. The
+  // top clamp uses the tighter TOP_MARGIN so the panel may overlap UP into the
+  // header chrome (intended); the bottom clamp keeps it fully on-screen, which
+  // for a low/right card naturally raises its top over the header.
+  var cardMid = cardRect.top + cardRect.height / 2;
+  var top = cardMid - ph / 2;
+  // Don't float far above a card that has plenty of room below it — bias the top
+  // toward the card's own top when the panel comfortably fits beneath it.
+  if (cardRect.top + ph + VIEWPORT_MARGIN <= vh) {
+    top = Math.min(top, cardRect.top);
+  }
+  var maxTop = vh - ph - VIEWPORT_MARGIN;
+  top = Math.min(top, maxTop);
+  top = Math.max(TOP_MARGIN, top);
 
   root.style.left = Math.round(left) + "px";
   root.style.top = Math.round(top) + "px";
@@ -280,7 +694,7 @@ function position(p, card) {
 // ---------------------------------------------------------------------------
 // Open / close.
 // ---------------------------------------------------------------------------
-var _openToken = 0; // bumped on every open; stale image/dwell callbacks bail
+var _openToken = 0; // bumped on every open; stale image/detail callbacks bail
 var _openCard = null; // the card the dossier is currently bound to (or null)
 
 function openFor(card) {
@@ -290,6 +704,10 @@ function openFor(card) {
   var p = buildPanel();
   var token = ++_openToken;
   _openCard = card;
+
+  // Reset every detail-only region so this open starts as the basic dossier with
+  // nothing stale from the previously hovered card.
+  clearRich(p);
 
   // Heading: real TMDB title via displayTitle ("Inception" / "Dark — S01E01"),
   // with the year appended when present.
@@ -307,8 +725,8 @@ function openFor(card) {
     p.ep.classList.remove("show");
   }
 
-  // Synopsis (clamped to a few lines in CSS). Interface voice when absent — a
-  // statement, not an apology.
+  // Synopsis (clamped to a few lines in CSS until the full overview arrives).
+  // Interface voice when absent — a statement, not an apology.
   var overview = (item.overview || "").trim();
   if (overview) {
     p.synopsis.textContent = overview;
@@ -328,6 +746,10 @@ function openFor(card) {
   // Backdrop (lazy; only fires the request here, on open).
   loadBackdrop(p, item, token);
 
+  // Rich detail (lazy GET /api/detail/{id}; enriches in place when it resolves
+  // AND this same open is still showing — guarded by `token`).
+  fetchRich(p, item, token);
+
   // Make it measurable (block) but still hidden (opacity), position against the
   // card's rect, THEN reveal so the entrance animation runs from the final spot
   // — never a jump from a stale position.
@@ -344,7 +766,7 @@ function openFor(card) {
 
 function close() {
   _openCard = null;
-  _openToken += 1; // invalidate any in-flight image/dwell callbacks
+  _openToken += 1; // invalidate any in-flight image/detail/dwell callbacks
   if (!_panel) return;
   _panel.root.classList.remove("is-open");
   // Clear the measuring guard too, in case close() landed between openFor()'s

@@ -5243,6 +5243,322 @@ def items_payload():
 
 
 # ---------------------------------------------------------------------------
+# Rich TMDB dossier for the hover-preview detail window (IMP-E16).
+#
+# tmdb_detail(library, mid) returns the RICH TMDB fields the SPA's hover dossier
+# renders (rating, genres, runtime, tagline, cast, director/creators, IMDb link,
+# …) for ONE library entry, or None when the entry has no metadata.tmdb_id.
+#
+# Design contract (the parallel frontend agent renders this exact dict):
+#   * READ-ONLY + alias-safe + NEVER raises. The id ONLY indexes the library; the
+#     tmdb_id comes from the STORED entry (metadata.tmdb_id), never the client, so
+#     a crafted id is just a missing key -> None. _resolve_alias dereferences a
+#     multi_ep_alias to its primary leaf. No library mutation, no media touch.
+#   * Kind is derived from the id: `movie` (mov-…), `episode` (a tv-/ani- leaf
+#     whose id parses to a season+episode via _episode_se_of), else `tv`
+#     (show/season). The SAME tmdb_id is the SHOW id for an episode leaf (enrich
+#     stamps the show id on every leaf, including episodes), and season/episode
+#     come from the leaf id.
+#   * GRACEFUL DEGRADATION: every TMDB call goes through _tmdb_get (on-disk cached
+#     under TMDB_CACHE_DIR; returns None on network/non-200/bad-JSON — never
+#     raises). The dict is built incrementally from what is computable with NO
+#     network (tmdb_id / kind / tmdb_url), then enriched from each call that
+#     succeeds. A failed sub-call (credits, external_ids, episode details) simply
+#     contributes nothing — the caller still gets a partial dict, never a 500.
+#     Because the cache is reused, repeat opens of the same entry are instant.
+# ---------------------------------------------------------------------------
+
+# Cast / director list caps (the contract truncates cast to 8, directors to 3).
+_TMDB_DETAIL_CAST_MAX = 8
+_TMDB_DETAIL_DIRECTORS_MAX = 3
+
+
+def _tmdb_detail_kind(real_id, entry):
+    """The detail `kind` for a (post-alias) library leaf: 'movie' | 'tv' | 'episode'.
+
+    mov-… -> 'movie'. A tv-/ani- leaf whose id parses to a season+episode (via the
+    canonical _episode_se_of parser, which understands both the glued `-sNNeMM`
+    TV form and the anime parent_id+tail form) -> 'episode'. Anything else (a
+    season_map / show-level id, or a leaf with no parseable episode) -> 'tv'."""
+    if category_of_id(real_id) == "movies":
+        return "movie"
+    if _episode_se_of(real_id, entry) is not None:
+        return "episode"
+    return "tv"
+
+
+def _tmdb_genre_names(genres):
+    """List of genre `name` strings from a TMDB `genres` array, dropping any
+    malformed member. [] for a missing/empty/non-list value."""
+    out = []
+    for g in genres or []:
+        if isinstance(g, dict):
+            name = g.get("name")
+            if name:
+                out.append(name)
+    return out
+
+
+def _tmdb_cast_names(credits, limit=_TMDB_DETAIL_CAST_MAX):
+    """Top-`limit` cast entries as [{"name","character"}, …] from a TMDB credits
+    payload's `cast` (already TMDB-ordered by billing). Skips members with no
+    name; tolerates a missing `character`. [] for a missing/empty `cast`."""
+    out = []
+    for c in (credits or {}).get("cast") or []:
+        if not isinstance(c, dict):
+            continue
+        name = c.get("name")
+        if not name:
+            continue
+        out.append({"name": name, "character": c.get("character") or ""})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _tmdb_directors_from_crew(credits, limit=_TMDB_DETAIL_DIRECTORS_MAX):
+    """Up-to-`limit` director names from a MOVIE credits payload's `crew`
+    (job == 'Director'). Order-preserving, de-duped. [] when none."""
+    out = []
+    seen = set()
+    for c in (credits or {}).get("crew") or []:
+        if not isinstance(c, dict):
+            continue
+        if c.get("job") != "Director":
+            continue
+        name = c.get("name")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _tmdb_created_by_names(detail, limit=_TMDB_DETAIL_DIRECTORS_MAX):
+    """Up-to-`limit` creator names from a TV detail payload's `created_by`
+    ([{name,…}]). Order-preserving, de-duped. [] when none."""
+    out = []
+    seen = set()
+    for c in detail.get("created_by") or []:
+        if not isinstance(c, dict):
+            continue
+        name = c.get("name")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _tmdb_network_names(networks):
+    """List of network `name` strings from a TV detail `networks` array. [] when
+    missing/empty/malformed."""
+    out = []
+    for n in networks or []:
+        if isinstance(n, dict):
+            name = n.get("name")
+            if name:
+                out.append(name)
+    return out
+
+
+def _tmdb_detail_movie(out, tmdb_id, api_key):
+    """Fill `out` (in place) with MOVIE detail. GET /3/movie/{id} for the core
+    fields + /3/movie/{id}/credits for cast + crew Director(s). Each call is
+    optional — a None response just leaves those fields unset."""
+    detail = _tmdb_get(f"{TMDB_API_ROOT}/movie/{tmdb_id}", {}, api_key)
+    if isinstance(detail, dict):
+        _set_if(out, "title", detail.get("title"))
+        _set_if(out, "year", _tmdb_year_of(detail.get("release_date")))
+        _set_if(out, "tagline", detail.get("tagline"))
+        _set_if(out, "overview", detail.get("overview"))
+        _set_if(out, "rating", detail.get("vote_average"))
+        _set_if(out, "vote_count", detail.get("vote_count"))
+        _set_if(out, "runtime", detail.get("runtime"))
+        _set_if(out, "release_date", detail.get("release_date"))
+        _set_if(out, "status", detail.get("status"))
+        _set_if(out, "homepage", detail.get("homepage"))
+        genres = _tmdb_genre_names(detail.get("genres"))
+        if genres:
+            out["genres"] = genres
+        _set_imdb(out, detail.get("imdb_id"))
+
+    credits = _tmdb_get(f"{TMDB_API_ROOT}/movie/{tmdb_id}/credits", {}, api_key)
+    if isinstance(credits, dict):
+        cast = _tmdb_cast_names(credits)
+        if cast:
+            out["cast"] = cast
+        directors = _tmdb_directors_from_crew(credits)
+        if directors:
+            out["directors"] = directors
+
+
+def _tmdb_detail_tv(out, tmdb_id, api_key):
+    """Fill `out` (in place) with TV-SHOW detail. GET /3/tv/{id} (core + show
+    extras: seasons/episodes/networks/created_by) + /3/tv/{id}/external_ids (imdb)
+    + /3/tv/{id}/credits (cast). Each call is optional."""
+    detail = _tmdb_get(f"{TMDB_API_ROOT}/tv/{tmdb_id}", {}, api_key)
+    if isinstance(detail, dict):
+        _set_if(out, "title", detail.get("name"))
+        _set_if(out, "year", _tmdb_year_of(detail.get("first_air_date")))
+        _set_if(out, "tagline", detail.get("tagline"))
+        _set_if(out, "overview", detail.get("overview"))
+        _set_if(out, "rating", detail.get("vote_average"))
+        _set_if(out, "vote_count", detail.get("vote_count"))
+        # episode_run_time is a list; the first entry is the typical runtime.
+        run_times = detail.get("episode_run_time")
+        if isinstance(run_times, list) and run_times:
+            _set_if(out, "runtime", run_times[0])
+        _set_if(out, "release_date", detail.get("first_air_date"))
+        _set_if(out, "status", detail.get("status"))
+        _set_if(out, "homepage", detail.get("homepage"))
+        genres = _tmdb_genre_names(detail.get("genres"))
+        if genres:
+            out["genres"] = genres
+        # TV-only show extras.
+        _set_if(out, "number_of_seasons", detail.get("number_of_seasons"))
+        _set_if(out, "number_of_episodes", detail.get("number_of_episodes"))
+        networks = _tmdb_network_names(detail.get("networks"))
+        if networks:
+            out["networks"] = networks
+        created = _tmdb_created_by_names(detail)
+        if created:
+            out["directors"] = created
+
+    ext = _tmdb_get(f"{TMDB_API_ROOT}/tv/{tmdb_id}/external_ids", {}, api_key)
+    if isinstance(ext, dict):
+        _set_imdb(out, ext.get("imdb_id"))
+
+    credits = _tmdb_get(f"{TMDB_API_ROOT}/tv/{tmdb_id}/credits", {}, api_key)
+    if isinstance(credits, dict):
+        cast = _tmdb_cast_names(credits)
+        if cast:
+            out["cast"] = cast
+
+
+def _tmdb_detail_episode(out, tmdb_id, season, episode, api_key):
+    """Fill `out` (in place) with EPISODE detail. GET
+    /3/tv/{id}/season/{s}/episode/{e} for the per-episode fields + the show's
+    /3/tv/{id}/external_ids for the IMDb link. Each call is optional."""
+    detail = _tmdb_get(
+        f"{TMDB_API_ROOT}/tv/{tmdb_id}/season/{season}/episode/{episode}",
+        {}, api_key,
+    )
+    if isinstance(detail, dict):
+        _set_if(out, "episode_title", detail.get("name"))
+        _set_if(out, "overview", detail.get("overview"))
+        _set_if(out, "rating", detail.get("vote_average"))
+        _set_if(out, "vote_count", detail.get("vote_count"))
+        _set_if(out, "runtime", detail.get("runtime"))
+        _set_if(out, "air_date", detail.get("air_date"))
+        _set_if(out, "release_date", detail.get("air_date"))
+        # Prefer TMDB's own numbers, falling back to the id-parsed ones.
+        out["season_number"] = detail.get("season_number") if isinstance(
+            detail.get("season_number"), int) else season
+        out["episode_number"] = detail.get("episode_number") if isinstance(
+            detail.get("episode_number"), int) else episode
+    else:
+        out["season_number"] = season
+        out["episode_number"] = episode
+
+    # IMDb link comes from the SHOW's external ids (episodes have no own imdb_id).
+    ext = _tmdb_get(f"{TMDB_API_ROOT}/tv/{tmdb_id}/external_ids", {}, api_key)
+    if isinstance(ext, dict):
+        _set_imdb(out, ext.get("imdb_id"))
+
+
+def _tmdb_year_of(date_str):
+    """Leading 4-digit year from a TMDB date string ('2010-07-15' -> 2010), or
+    None for a missing/un-parseable value."""
+    m = re.match(r"(\d{4})", str(date_str or ""))
+    return int(m.group(1)) if m else None
+
+
+def _set_if(out, key, value):
+    """Set out[key] = value only when value is meaningful: not None, not an empty
+    string. (0 and 0.0 are kept — a 0-vote/0-runtime is still a real value the UI
+    may want to show.)"""
+    if value is None:
+        return
+    if isinstance(value, str) and value == "":
+        return
+    out[key] = value
+
+
+def _set_imdb(out, imdb_id):
+    """Record imdb_id + the derived imdb_url when imdb_id is a non-empty string.
+    Idempotent (the show external_ids may be fetched once); a falsy id is a no-op
+    so a movie/show with no IMDb mapping simply omits both fields."""
+    if isinstance(imdb_id, str) and imdb_id:
+        out["imdb_id"] = imdb_id
+        out["imdb_url"] = f"https://www.imdb.com/title/{imdb_id}/"
+
+
+def tmdb_detail(library, mid):
+    """Rich TMDB dossier dict for library entry `mid`, or None when it has no
+    metadata.tmdb_id (the ONLY None case — see the section header above).
+
+    READ-ONLY, alias-safe, and NEVER raises: every TMDB call is the cached,
+    None-on-failure _tmdb_get, and the dict is built up from what is computable
+    offline (tmdb_id / kind / tmdb_url) so a partial/total fetch failure yields a
+    partial dict (never a 500). The tmdb_id is read from the STORED entry, not the
+    caller, so a crafted/unknown id is just a missing key -> None.
+    """
+    if not isinstance(library, dict):
+        return None
+    if library.get(mid) is None:
+        return None
+    try:
+        real_id, entry = _resolve_alias(library, mid)
+    except KeyError:
+        return None
+    if not isinstance(entry, dict):
+        return None
+
+    tmdb_id = (entry.get("metadata") or {}).get("tmdb_id")
+    if not tmdb_id:
+        return None
+
+    kind = _tmdb_detail_kind(real_id, entry)
+    api_key = mvcommon.tmdb_api_key()
+
+    # The offline-computable core. tmdb_url uses movie vs tv (an episode is part of
+    # a tv show, so it links to the show page) — derived purely from kind + id.
+    url_kind = "movie" if kind == "movie" else "tv"
+    out = {
+        "tmdb_id": tmdb_id,
+        "kind": kind,
+        "tmdb_url": f"https://www.themoviedb.org/{url_kind}/{tmdb_id}",
+    }
+    # Seed title from the stored metadata so a fully-failed fetch still names the
+    # entry; a successful TMDB call overwrites it with the canonical title.
+    _set_if(out, "title", (entry.get("metadata") or {}).get("title"))
+
+    # No API key -> nothing can be fetched, but the offline core is still useful
+    # (and the route returns it 200, never a misleading "no tmdb_id" 404).
+    if not api_key:
+        return out
+
+    if kind == "movie":
+        _tmdb_detail_movie(out, tmdb_id, api_key)
+    elif kind == "episode":
+        se = _episode_se_of(real_id, entry)
+        if se is not None:
+            _tmdb_detail_episode(out, tmdb_id, se[0], se[1], api_key)
+        else:
+            # Defensive: kind said episode but the parse vanished — degrade to show.
+            _tmdb_detail_tv(out, tmdb_id, api_key)
+    else:
+        _tmdb_detail_tv(out, tmdb_id, api_key)
+
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Folder-tree payload for the web console grouped/folder view (IMP-E14 polish).
 #
 # build_tree() mirrors the on-disk folder hierarchy under each category root,

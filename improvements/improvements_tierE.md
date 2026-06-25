@@ -76,7 +76,7 @@
 - Effort estimate: large (multiple APIs, caching, error handling)
 - Risk: medium — touches `cmd_prep`'s flow and writes new files into media folders (NFOs/posters must be excluded from scan_unprepped video-extension matching — they are, by extension); API failures must degrade to today's naive metadata, never block a prep.
 - If skipped: the Jellyfin library renders slugs-as-titles wherever filename-matching fails (especially anime with absolute numbering), and the Apple-TV-style experience never looks like Netflix no matter what the daemon does. TMDB matching by release-style filenames is mediocre — the curated manual-id → TMDB lookup is the fix.
-- Status: pending
+- Status: in_progress — **local-first TMDB slice delivered** on `feature/imp_e3_u3_d17_tmdb_posters_rename` (2026-06-24): `enrich_metadata` command (show-centric TMDB lookup, cached, dry-run default); sets `metadata.tmdb_id` + real `metadata.title`/`year`; stamps `{tmdb-…}` folder token via `rename_folder`; downloads show + per-season `poster.jpg`/`fanart.jpg` (never overwrites locals); `--nfo` writes `movie.nfo`/`tvshow.nfo` (title/year/plot/rating/`<uniqueid type="tmdb">`). `set_tmdb` command added for manual id pinning. `/api/media-image/{id}` endpoint + `resolve_artwork_path` (season-inheritance resolver). SPA shows real titles + real poster artwork. **Remaining:** synopsis/cast/ratings fields; AniDB/AniList breadth (anime); TheTVDB fallback; per-episode NFOs; `prep`-time auto-enrich hook; watch-state and rating backfill from external sources.
 
 ---
 
@@ -328,7 +328,7 @@
 - Effort estimate: large overall (phased — Phase 1 was medium; Phase 2 was medium; Phase 3 was small; Phases 4-5 each small-to-medium)
 - Risk: low (Phases 1-3 call existing `cmd_*` unchanged via the existing job queue — no rollback-contract change; Phase 3 is CSS/manifest only, no backend change)
 - If skipped: the console stays disk-reclaim-only; there's no browsable media-type view, and fetch-in-UI/mobile access stay future-only.
-- Status: in_progress — **Phases 1-3 done** (web-UI core: media-type tabs + fetch-in-UI + aesthetic motion + PWA + grouped folder view + /api/tree + /api/folder-image + /api/open-folder + space background + open-folder button + iOS no-cache fix; on `feature/imp_e14_polish_pwa`); remote/mobile (Phase 4 = IMP-E15) and TMDB posters/rename (Phase 5 = IMP-E3/U3/D17) continue under their own tasks
+- Status: **done** — all five phases shipped: Phases 1-3 (media-type tabs + fetch-in-UI + motion/PWA + grouped folder view + /api/tree + /api/folder-image + /api/open-folder + space background + iOS no-cache fix; `feature/imp_e14_polish_pwa`); Phase 4 = IMP-E15 (mobile/Tailscale/auth; `feature/imp_e15_mobile_tailscale_auth`); Phase 5 = IMP-E3/U3/D17 (TMDB posters + real titles + rename_folder + /api/media-image; `feature/imp_e3_u3_d17_tmdb_posters_rename`)
 
 ---
 
@@ -350,4 +350,4 @@
 - Risk: low-medium — auth middleware is additive (no cmd_* change, no rollback-contract change, no ENTRY_TYPE_KEYS change); the non-localhost guard is additive; the mvconfig.json loader is additive (fallback to defaults if absent).
 - If skipped: the console stays localhost-only; phone access requires either an SSH tunnel or an insecure LAN URL; the PWA can't be used from the couch.
 - Cross-references: IMP-E14 (Phase 4 of the web media-UI plan); IMP-A5 (full config migration — E15 delivers the minimal slice only); IMP-E3/U3/D17 (Phase 5, next).
-- Status: in_progress — shipped on `feature/imp_e15_mobile_tailscale_auth`; done on merge to main
+- Status: **done** — shipped on `feature/imp_e15_mobile_tailscale_auth`

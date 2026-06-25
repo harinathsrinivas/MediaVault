@@ -106,6 +106,14 @@ export function humanizeId(id) {
 // TMDB metadata.title); otherwise humanizes the id. Kept tiny + pure so card.js
 // and sort.js agree byte-for-byte on what "the title" is.
 export function displayTitle(item) {
-  if (item && item.title && item.title !== item.id) return String(item.title);
-  return humanizeId(item ? item.id : "");
+  var id = item ? item.id : "";
+  if (item && item.title && item.title !== id) {
+    // A real backend (TMDB) title is present — but enrich writes the SHOW title onto
+    // every episode (e.g. "Dark" on all of s01e01..e10), which would render them
+    // identically. Re-attach the episode marker parsed from the id so episodes stay
+    // distinct ("Dark — S01E01"); a movie (no episode marker) just shows its title.
+    var ep = parseId(id).episode;
+    return ep ? String(item.title) + " — " + ep : String(item.title);
+  }
+  return humanizeId(id);
 }

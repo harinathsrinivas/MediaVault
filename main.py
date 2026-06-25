@@ -7,6 +7,8 @@ import re
 import math
 import time
 import stat
+import hashlib
+import difflib
 import tempfile
 import webbrowser
 import requests
@@ -255,8 +257,15 @@ def split_video_file(input_path, output_dir, method, value_str, file_id=""):
     else:
         return []
 
-    # Command Execution
-    cmd = [MKVMERGE_PATH, "-o", output_pattern, "--split", f"size:{split_arg}", input_path]
+    # Command Execution.
+    # mkvmerge v97 formats the --split output name via libfmt, so any literal `{`/`}`
+    # in the path (e.g. a `{tmdb-12345}` Plex/Emby/Jellyfin folder token) is read as a
+    # format field and mkvmerge dies with `fmt::format_error: argument not found`
+    # (exit 3). Escape them as `{{`/`}}` for the -o arg ONLY — mkvmerge renders them
+    # back to single braces and writes to the real folder. (A plain merge -o is taken
+    # literally and must NOT be escaped — see merge_video_files; verified mkvmerge v97.)
+    mkv_out = output_pattern.replace("{", "{{").replace("}", "}}")
+    cmd = [MKVMERGE_PATH, "-o", mkv_out, "--split", f"size:{split_arg}", input_path]
     try:
         # Added stderr capture to output real error messages
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -1056,6 +1065,1060 @@ def cmd_set_fanart(manual_id, url):
         print(f"❌ Error downloading fanart: {e}")
 
 
+def cmd_set_tmdb(manual_id, tmdb_id):
+    # [IMP-E3/U3/D17] Manual override for the optional metadata.tmdb_id leaf field.
+    # Pure zero-byte JSON edit (like set_search): no media touch, NO rehash.
+    # Targets a LEAF entry — resolve a multi_ep_alias to its primary leaf so the
+    # alias's 3-key shape is never mutated; a season_map is a virtual container, so
+    # refuse it (tmdb_id lives on the leaf, not the container).
+    print(f"--- SETTING TMDB ID: {manual_id} ---")
+    library = load_library()
+    if manual_id not in library: print("❌ ID not found."); return
+
+    real_id, entry = _resolve_alias(library, manual_id)
+    if entry.get("type") == "season_map":
+        print("❌ set_tmdb targets a leaf entry, not a season_map container.")
+        return
+
+    # TMDB ids are integers; be lenient — store as int when all-digits, else as-is.
+    value = int(tmdb_id) if str(tmdb_id).isdigit() else tmdb_id
+    entry.setdefault("metadata", {})["tmdb_id"] = value
+    save_library(library)
+    target = f" (resolved to {real_id})" if real_id != manual_id else ""
+    print(f"✅ Set metadata.tmdb_id = {value!r}{target}\n")
+
+
+# ==========================================
+#         TMDB LOCAL-FIRST ENRICH (IMP-E3 / U3 / D17, Phase 5 step 5.4)
+# ==========================================
+# `cmd_enrich_metadata` is a LOCAL-FIRST TMDB backfill: it reads the ids already
+# in the library, asks TMDB (themoviedb.org) for the matching show/movie, and —
+# only with --apply — writes `metadata.tmdb_id`, stamps the Plex/Emby/Jellyfin
+# `{tmdb-<id>}` token on the SHOW/MOVIE folder (via cmd_rename_folder), and
+# downloads poster.jpg / fanart.jpg (+ per-season posters) WITHOUT EVER fetching
+# media bytes. It is SHOW-CENTRIC (user-confirmed design C): every season + every
+# episode of one show resolves ONCE and the folder token is stamped ONCE.
+#
+# Locked behaviours (do not relax without the user):
+#   * DRY-RUN by default; --apply is required to write anything.
+#   * A local poster.jpg/fanart.jpg is NEVER overwritten (the user's art wins).
+#   * Ambiguous matches are LISTED, never guessed/written.
+#   * ZERO media fetches — only TMDB JSON + small JPGs + the JSON library edit.
+#
+# PRE-RESOLVED TMDB FACTS (baked in so an executor never has to browse):
+#   * Image base URL: GET https://api.themoviedb.org/3/configuration ->
+#     images.secure_base_url (currently https://image.tmdb.org/t/p/). Full image
+#     URL = secure_base_url + <size> + file_path. Poster size w342 (card grid),
+#     backdrop/fanart size w780. If /configuration fails we fall back to the
+#     documented https://image.tmdb.org/t/p/ base.
+#   * Movie search:  GET /3/search/movie?api_key=<KEY>&query=<title>&year=<year>
+#   * TV search:     GET /3/search/tv?api_key=<KEY>&query=<title>&first_air_date_year=<year>
+#   * TV season images: GET /3/tv/{series_id}/season/{season_number}/images
+#     (poster_path is used; we read the season_number from each season id).
+#   * A search result already carries poster_path / backdrop_path, so the show/
+#     movie art needs no extra images call — only per-season art does.
+#   * Auth is the v3 api_key query param (the mvconfig tmdb.api_key is a v3 key).
+TMDB_API_ROOT = "https://api.themoviedb.org/3"
+# Fallback image base when /configuration cannot be reached (the documented
+# current value). The live secure_base_url from /configuration is preferred.
+TMDB_IMAGE_BASE_FALLBACK = "https://image.tmdb.org/t/p/"
+TMDB_POSTER_SIZE = "w342"    # card-grid poster size (PRE-RESOLVED above)
+TMDB_BACKDROP_SIZE = "w780"  # fanart/backdrop size (PRE-RESOLVED above)
+TMDB_STILL_SIZE = "w300"     # per-episode still size (16:9 landscape, PRE-RESOLVED)
+
+# Idempotent on-disk cache of TMDB JSON responses, keyed by URL+params, so a
+# re-run does not re-hit the API. Module-level (derived from mvcommon.MV_STATE_DIR)
+# so a test can monkeypatch it to a temp dir and never touch the real home cache
+# — same binding-hazard discipline as MVTOKENS_PATH.
+TMDB_CACHE_DIR = os.path.join(mvcommon.MV_STATE_DIR, "cache", "metadata")
+
+
+def _tmdb_normalize_title(s):
+    """Lower-case, strip punctuation, collapse whitespace — for title matching.
+
+    Used to decide a CONFIDENT vs AMBIGUOUS match: TMDB's result title is compared
+    to the title we parsed from the id under this normalization so 'The Office' and
+    'the office.' compare equal but distinct shows never collide by accident."""
+    if not s:
+        return ""
+    s = re.sub(r"[^\w\s]", " ", str(s).lower())
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _tmdb_cache_key(url, params):
+    """Stable filename for a cached GET (sha1 of url + sorted params)."""
+    raw = url + "?" + "&".join(f"{k}={params[k]}" for k in sorted(params or {}))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest() + ".json"
+
+
+def _tmdb_get(url, params, api_key, _cache=True):
+    """GET a TMDB endpoint and return parsed JSON (dict), or None on any failure.
+
+    The api_key is injected as the ?api_key= query param (TMDB v3 auth). Responses
+    are cached on disk under TMDB_CACHE_DIR keyed by url+params so re-runs are
+    idempotent and don't re-hit the API. NEVER raises: a network error, a non-200,
+    or a JSON-decode failure all return None so the caller skips that entry rather
+    than crashing the whole backfill. The api_key is deliberately EXCLUDED from the
+    cache key so the cache file never embeds the secret and stays stable if the key
+    is rotated."""
+    cache_path = os.path.join(TMDB_CACHE_DIR, _tmdb_cache_key(url, params))
+    if _cache:
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            pass  # cache miss / unreadable -> fall through to a live fetch
+    q = dict(params or {})
+    q["api_key"] = api_key
+    try:
+        r = requests.get(url, params=q, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+    except Exception as e:
+        print(f"   ⚠️  TMDB request failed ({url}): {e}")
+        return None
+    if r.status_code != 200:
+        print(f"   ⚠️  TMDB returned status {r.status_code} for {url}")
+        return None
+    try:
+        data = r.json()
+    except Exception as e:
+        print(f"   ⚠️  TMDB response was not valid JSON ({url}): {e}")
+        return None
+    if _cache:
+        try:
+            os.makedirs(TMDB_CACHE_DIR, exist_ok=True)
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except OSError:
+            pass  # caching is best-effort; a write failure must not break enrich
+    return data
+
+
+def _tmdb_image_base(api_key):
+    """Live images.secure_base_url from /configuration, or the documented
+    fallback. Cached like any other GET, so it costs one call per process at most."""
+    cfg = _tmdb_get(f"{TMDB_API_ROOT}/configuration", {}, api_key)
+    if isinstance(cfg, dict):
+        base = cfg.get("images", {}).get("secure_base_url")
+        if isinstance(base, str) and base.startswith("http"):
+            return base
+    return TMDB_IMAGE_BASE_FALLBACK
+
+
+def _download_to(url, dest_path):
+    """Download `url` to `dest_path` (REUSES cmd_set_poster's requests idiom).
+
+    Returns True on a 200 + written file, else False (NEVER raises). The
+    LOCAL-ALWAYS-WINS check (skip if dest exists) is the CALLER's policy, not
+    this helper's — this only fetches small JPGs. Uses r.content (whole small
+    image) rather than streamed r.raw so it is trivially mockable in tests while
+    hitting the SAME requests library cmd_set_poster uses."""
+    try:
+        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+    except Exception as e:
+        print(f"   ⚠️  image download failed ({url}): {e}")
+        return False
+    if r.status_code != 200:
+        print(f"   ⚠️  image download returned status {r.status_code} ({url})")
+        return False
+    try:
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        with open(dest_path, "wb") as f:
+            f.write(r.content)
+        return True
+    except OSError as e:
+        print(f"   ⚠️  could not write image {dest_path}: {e}")
+        return False
+
+
+def _has_tmdb_token(name):
+    """True if a folder leaf name already carries a `{tmdb-…}` token (idempotency
+    guard — we stamp the token at most once per show/movie folder)."""
+    return re.search(r"\{tmdb-[^}]+\}", name or "") is not None
+
+
+_SEASON_ID_RE = re.compile(r"-s(\d+)$", re.IGNORECASE)
+
+
+def _show_id_of(season_or_episode_id, entry, library):
+    """Best-effort SHOW id for a series/anime id (strip the trailing season tag).
+
+    A season_map id like 'tv-en-2009-bsg-s04' -> 'tv-en-2009-bsg'. An episode leaf
+    resolves through its parent_id (the season_map) first. An id with no season
+    suffix is its own show id. Used only to GROUP seasons of one show together."""
+    sid = season_or_episode_id
+    if entry.get("type") != "season_map":
+        parent = entry.get("parent_id")
+        if parent:
+            sid = parent
+    return _SEASON_ID_RE.sub("", sid)
+
+
+def _season_number_of(season_id):
+    """Integer season number parsed from a season_map id ('…-s04' -> 4), or None.
+    Drives the per-season TMDB images call (/tv/{id}/season/{n}/images)."""
+    m = _SEASON_ID_RE.search(season_id)
+    return int(m.group(1)) if m else None
+
+
+# A leaf id encodes its season+episode as a glued `-sNNeMM` marker (the TV/series
+# canonical shape, e.g. `tv-en-2005-the-office-s01e01`). Anime leaves instead glue
+# the episode onto the slug (`ani-en-2009-bsg19`) and carry the season on their
+# parent_id, so the episode is recovered from the bare trailing digits.
+_EPISODE_SE_RE = re.compile(r"-s(\d+)e(\d+)$", re.IGNORECASE)
+_ANIME_EP_TAIL_RE = re.compile(r"(\d{1,4})$")
+
+
+def _episode_se_of(leaf_id, entry):
+    """(season_number, episode_number) for an EPISODE leaf, or None.
+
+    Drives the per-episode stills call (/tv/{id}/season/{s}/episode/{e}/images).
+    Two id shapes are understood (see ARCHITECTURE §6.2):
+      * TV/series — the glued `-sNNeMM` marker on the id itself (primary path).
+      * Anime — the season comes from the leaf's parent_id (`…-sNN`) and the
+        episode from the bare trailing digits of the id (`ani-…-bsg19` -> 19).
+    Returns None when neither shape yields BOTH numbers, so the caller warns-once
+    and skips that one still (it falls back to the season poster at view time)."""
+    if not leaf_id:
+        return None
+    m = _EPISODE_SE_RE.search(leaf_id)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    # Anime fallback: season off the parent_id, episode off the trailing digits.
+    parent = (entry or {}).get("parent_id")
+    season = _season_number_of(parent) if parent else None
+    if season is None:
+        return None
+    em = _ANIME_EP_TAIL_RE.search(leaf_id)
+    if not em:
+        return None
+    return season, int(em.group(1))
+
+
+def _pick_still_path(images):
+    """file_path of the best still from a /episode/{e}/images payload, or None.
+
+    Picks the highest vote_average still (the most-voted artwork), falling back to
+    the FIRST still when no votes separate them. Guarded against a missing/empty
+    `stills` list and non-dict members so a malformed payload yields None (skip)."""
+    stills = (images or {}).get("stills") or []
+    best = None
+    best_vote = None
+    for s in stills:
+        if not isinstance(s, dict) or not s.get("file_path"):
+            continue
+        if best is None:  # first usable still = the fallback
+            best = s
+            best_vote = s.get("vote_average") or 0
+            continue
+        vote = s.get("vote_average") or 0
+        if vote > best_vote:
+            best, best_vote = s, vote
+    return best.get("file_path") if best else None
+
+
+def _episode_thumb_name(filename):
+    """The Jellyfin/Kodi/Plex local episode-thumbnail name for an episode VIDEO
+    file: `<basename>-thumb.jpg` (e.g. `Dark.S01E01.mkv` -> `Dark.S01E01-thumb.jpg`).
+    Derived ONLY from the library entry's own stored `filename` — never client
+    input. Returns None for a falsy filename."""
+    if not filename:
+        return None
+    return os.path.splitext(filename)[0] + "-thumb.jpg"
+
+
+def _show_folder_of(season_folders):
+    """The on-disk SHOW folder that the `{tmdb-…}` token is stamped onto, given the
+    distinct season folders of one show.
+
+    Layout assumption (Plex/Emby/Jellyfin standard, matched by the project's own
+    fixtures): a series lives at `…/<Show>/Season NN/<episodes>`. So:
+      * >=2 season folders -> the common ancestor IS the show folder (commonpath).
+      * exactly 1 season folder whose basename looks like a season dir
+        ('Season 04', 'S04', 'Season_4') -> climb to its PARENT (the show folder).
+      * exactly 1 season folder that is NOT season-like (a flat show with episodes
+        directly in `…/<Show>/`) -> that folder already IS the show folder.
+    Returns an absolute path, or None if the input is empty/unusable."""
+    folders = [os.path.abspath(f) for f in season_folders if f]
+    if not folders:
+        return None
+    uniq = sorted(set(folders))
+    if len(uniq) >= 2:
+        try:
+            return os.path.commonpath(uniq)
+        except ValueError:
+            return uniq[0]  # mixed drives (shouldn't happen) — degrade gracefully
+    only = uniq[0]
+    base = os.path.basename(only)
+    if re.match(r"(?i)^season[\s_]*\d+$|^s\d+$", base):
+        return os.path.dirname(only)
+    return only
+
+
+def _pick_tmdb_match(results, want_title, want_year, title_key, year_key):
+    """Rank TMDB results by title-similarity + year + popularity, then decide
+    CONFIDENT vs AMBIGUOUS. (Not exact-normalized-equality — that wrongly picked
+    an obscure "Conjuring" over the real "The Conjuring".)
+
+    Returns (status, payload):
+      * ("confident", result_dict)  — a single clear best match.
+      * ("ambiguous", candidates)   — list the top 3-5 {id, title, year} for the
+                                       user to resolve with set_tmdb; write nothing.
+      * ("none", [])                — TMDB returned nothing.
+
+    Scoring per candidate (PROVEN against live TMDB):
+      * norm(s)   = lowercase, alphanumerics ONLY (drops spaces/punct), so
+                    'Battlestar Galactica' and a 'battlestargalactica' slug compare
+                    as identical strings.
+      * title_sim = difflib.SequenceMatcher(None, norm(result_title),
+                    norm(want_title)).ratio()  — 1.0 is an exact (normalized) match.
+      * pop       = popularity (fallback vote_count) — separates same-title remakes.
+      * year_match= result year == want_year (a corroboration signal; for TV the
+                    want_year is SOFT since the id year is often a later season).
+    Rank: title_sim desc, then year_match desc, then pop desc.
+
+    CONFIDENT iff the top candidate has title_sim >= 0.9 AND EITHER
+      (a) it agrees on year (year_match), OR
+      (b) it clearly beats #2 (title_sim lead >= 0.1) AND has meaningful
+          popularity (pop >= 1.0) — so a lone obscure exact-title hit with ~0
+          popularity does NOT auto-win.
+    A near-tie at the top with no year to break it -> AMBIGUOUS (we never guess).
+    """
+    results = results or []
+    if not results:
+        return ("none", [])
+
+    want_norm = re.sub(r"[^a-z0-9]", "", _tmdb_normalize_title(want_title))
+
+    def _year_of(res):
+        raw = res.get(year_key) or ""
+        m = re.match(r"(\d{4})", str(raw))
+        return int(m.group(1)) if m else None
+
+    def _pop_of(res):
+        pop = res.get("popularity")
+        if isinstance(pop, (int, float)):
+            return float(pop)
+        vc = res.get("vote_count")
+        return float(vc) if isinstance(vc, (int, float)) else 0.0
+
+    def _sim_of(res):
+        rnorm = re.sub(r"[^a-z0-9]", "", _tmdb_normalize_title(res.get(title_key)))
+        return difflib.SequenceMatcher(None, rnorm, want_norm).ratio()
+
+    def _cand(res):
+        return {"id": res.get("id"), "title": res.get(title_key), "year": _year_of(res)}
+
+    scored = []
+    for r in results:
+        sim = _sim_of(r)
+        ym = (want_year is not None and _year_of(r) == want_year)
+        scored.append((sim, ym, _pop_of(r), r))
+    # Rank: title_sim desc, year_match desc (True>False), popularity desc.
+    scored.sort(key=lambda t: (t[0], 1 if t[1] else 0, t[2]), reverse=True)
+
+    top_sim, top_ym, top_pop, top_res = scored[0]
+    second_sim = scored[1][0] if len(scored) > 1 else 0.0
+
+    if top_sim >= 0.9:
+        if top_ym:
+            return ("confident", top_res)
+        if (top_sim - second_sim) >= 0.1 and top_pop >= 1.0:
+            return ("confident", top_res)
+    # Not confident — list the strongest candidates (already similarity-ranked).
+    return ("ambiguous", [_cand(t[3]) for t in scored[:5]])
+
+
+def _enrich_title_year(any_id, entry):
+    """(title, year) for an enrich unit, from metadata first then the id parse.
+
+    Prefers an existing metadata.title/year (a human may have curated it) and
+    falls back to parse_metadata_from_id. The id-derived title is the slug, which
+    is a poor query, so when only the id is available we humanize the slug a bit
+    (dashes -> spaces, drop the leading 'mov-/tv-/ani-' + lang + year tokens)."""
+    meta = entry.get("metadata") or {}
+    year = meta.get("year")
+    title = meta.get("title")
+    if not year:
+        year = parse_metadata_from_id(any_id).get("year")
+    # metadata.title is the RAW id in this codebase (parse_metadata_from_id sets
+    # title=manual_id), and for a show the stored title is the *episode* id while
+    # any_id is the season-stripped show id — so `title == any_id` misses it. Treat
+    # any id-shaped title (mov-/tv-/ani- prefixed) as "not a real title" and humanize.
+    if not title or title == any_id or str(title).startswith(("mov-", "tv-", "ani-")):
+        title = _humanize_id_title(any_id)
+    return title, year
+
+
+def _title_is_id_shaped(title, entry_id):
+    """True iff ``title`` is a placeholder/id-shaped title that enrich may safely
+    REPLACE with a real TMDB title — i.e. NOT a human-curated one.
+
+    parse_metadata_from_id seeds ``metadata.title`` to the RAW id, so the common
+    placeholder cases are: missing/blank, the entry's own id, or any id-shaped
+    string carrying a ``mov-/tv-/ani-`` category prefix (a leaf id stored on a
+    season_map, etc.). Any OTHER non-empty string is treated as deliberately
+    curated and is left untouched.
+
+    (A title that already EQUALS the incoming TMDB title is handled by the caller
+    as an idempotent no-op, so it is intentionally NOT classified here.)"""
+    if not title:
+        return True
+    if entry_id is not None and title == entry_id:
+        return True
+    return str(title).startswith(("mov-", "tv-", "ani-"))
+
+
+def _humanize_id_title(any_id):
+    """Turn an id slug into a rough search title.
+
+    'mov-en-2025-f1' -> 'f1'; 'tv-en-2009-bsg' -> 'bsg'. Strips a leading
+    category token (mov/tv/ani), an optional 2-letter language, and a 4-digit
+    year, then turns the remaining dashes into spaces. Conservative: if stripping
+    leaves nothing, fall back to the raw dash-spaced id."""
+    parts = any_id.split("-")
+    if parts and parts[0] in ("mov", "tv", "ani"):
+        parts = parts[1:]
+    if parts and len(parts[0]) == 2 and parts[0].isalpha():
+        parts = parts[1:]
+    # Year position: strip an all-digit segment even if it's not exactly 4 digits
+    # (real data has typo'd years like '20013' for 2013) so it never leaks into the
+    # search query.
+    if parts and parts[0].isdigit():
+        parts = parts[1:]
+    # Drop a trailing season/episode token (s06 / s06e01) so a show query is just the
+    # title (e.g. 'tv-en-2022-peakyblinders-s06e01' -> 'peakyblinders').
+    parts = [p for p in parts if not re.fullmatch(r"s\d{1,2}(e\d{1,3})?", p, re.IGNORECASE)]
+    title = " ".join(parts).strip()
+    return title or any_id.replace("-", " ")
+
+
+def _gather_enrich_units(library, id_or_prefix=None, library_filter=None):
+    """Group the library into SHOW-CENTRIC enrich units (the heart of design C).
+
+    Returns a list of unit dicts, each:
+      {"kind": "movie"|"show",
+       "key":  <show_id or movie id>,        # stable display/group key
+       "title": <best search title>,
+       "year":  <int|None>,
+       "ids":   [entry ids to receive tmdb_id],   # leaves (+ season_maps for shows)
+       "seasons": {season_id: season_folder, ...}, # shows only (per-season art)
+       "folder": <show/movie folder for the token stamp>}
+
+    Iteration rules (whole-library — alias/season_map-safe per ENTRY_TYPE_KEYS):
+      * SKIP `multi_ep_alias` entirely (virtual 3-key rows — no folder, no metadata
+        of their own; their primary leaf carries the tmdb_id).
+      * MOVIES (`mov-` leaf, no parent_id) -> one unit each.
+      * SERIES/ANIME -> group every season_map + its episode leaves under the SHOW
+        (id with the trailing -sNN stripped). One unit per show.
+
+    `id_or_prefix` (optional) restricts to entries whose id == it or startswith it.
+    `library_filter` (movies|series|anime) restricts by id prefix."""
+    prefix_map = {"movies": "mov", "series": "tv", "anime": "ani"}
+    want_prefix = prefix_map.get(library_filter) if library_filter else None
+
+    def _in_scope(mid):
+        if want_prefix and not mid.startswith(want_prefix):
+            return False
+        if id_or_prefix and not (mid == id_or_prefix or mid.startswith(id_or_prefix)):
+            return False
+        return True
+
+    # --- shows: bucket every in-scope season_map (and its leaves) by show id ---
+    shows = {}  # show_id -> {"ids": set, "seasons": {season_id: folder}, ...}
+    movies = []
+
+    for mid, entry in library.items():
+        if entry.get("type") == "multi_ep_alias":
+            continue  # virtual alias — never enriched directly (PR #21 crash class)
+        etype = entry.get("type")
+        cat = category_of_id(mid)
+
+        if etype == "season_map":
+            if not _in_scope(mid):
+                continue
+            show_id = _show_id_of(mid, entry, library)
+            bucket = shows.setdefault(show_id, {"ids": set(), "seasons": {}})
+            bucket["ids"].add(mid)
+            bucket["seasons"][mid] = entry.get("folder_path")
+            continue
+
+        # leaf from here on (has folder_path/filename) — must be in scope.
+        if not entry.get("folder_path"):
+            continue
+        if not _in_scope(mid):
+            continue
+
+        if cat == "movies" and not entry.get("parent_id"):
+            movies.append((mid, entry))
+        elif entry.get("parent_id"):
+            # episode leaf of a show — attach to its show bucket.
+            parent = entry["parent_id"]
+            show_id = _SEASON_ID_RE.sub("", parent)
+            bucket = shows.setdefault(show_id, {"ids": set(), "seasons": {}})
+            bucket["ids"].add(mid)
+            bucket["seasons"].setdefault(parent, entry.get("folder_path"))
+        elif cat in ("series", "anime"):
+            # a show-level leaf with no parent (rare) — treat as its own show.
+            show_id = _SEASON_ID_RE.sub("", mid)
+            bucket = shows.setdefault(show_id, {"ids": set(), "seasons": {}})
+            bucket["ids"].add(mid)
+            bucket["seasons"].setdefault(mid, entry.get("folder_path"))
+        else:
+            # uncategorized leaf — handle singly like a movie (best effort).
+            movies.append((mid, entry))
+
+    units = []
+
+    for show_id, b in sorted(shows.items()):
+        # Title/year from any representative entry (prefer a season_map's metadata).
+        rep_id = next(iter(sorted(b["ids"])))
+        rep_entry = library.get(rep_id, {})
+        title, year = _enrich_title_year(show_id, rep_entry)
+        folder = _show_folder_of(list(b["seasons"].values()))
+        units.append({
+            "kind": "show",
+            "key": show_id,
+            "title": title,
+            "year": year,
+            "ids": sorted(b["ids"]),
+            "seasons": dict(b["seasons"]),
+            "folder": folder,
+        })
+
+    for mid, entry in sorted(movies):
+        title, year = _enrich_title_year(mid, entry)
+        units.append({
+            "kind": "movie",
+            "key": mid,
+            "title": title,
+            "year": year,
+            "ids": [mid],
+            "seasons": {},
+            "folder": entry.get("folder_path"),
+        })
+
+    return units
+
+
+def _tmdb_query_variants(title):
+    """Build a deduped list of search-query variants for a humanized title.
+
+    A concatenated slug like 'battlestargalactica' returns 0 results from TMDB; the
+    word-split 'battlestar galactica' returns the show. So we search BOTH:
+      * the title as-is (already dash->space humanized, e.g. 'the thing'); and
+      * a wordninja split of the space-removed form ('thething' -> 'the thing',
+        'gameofthrones' -> 'game of thrones').
+    wordninja mangles a few inputs ('peakyblinders' -> 'peak y blinders') and
+    non-English ('baasha' stays 'baasha'); that is FINE — the raw variant is still
+    searched, and a bad split just yields no extra match (the ranker then lists it
+    AMBIGUOUS rather than mis-guessing). wordninja is OPTIONAL: if it is not
+    installed we fall back to the raw variant only (graceful, no crash).
+
+    Returns variants in priority order (raw first), case-insensitively deduped,
+    empties dropped."""
+    raw = (title or "").strip()
+    variants = []
+    seen = set()
+
+    def _add(v):
+        v = (v or "").strip()
+        key = v.lower()
+        if v and key not in seen:
+            seen.add(key)
+            variants.append(v)
+
+    _add(raw)
+    # wordninja on the SPACE-REMOVED form so concatenated slugs split well; a
+    # multi-word raw title (already spaced) round-trips to itself and dedupes.
+    joined = re.sub(r"\s+", "", raw)
+    if joined:
+        try:
+            import wordninja
+            _add(" ".join(wordninja.split(joined)))
+        except Exception:
+            pass  # wordninja absent or failed -> raw variant only (graceful)
+    return variants
+
+
+def _resolve_unit(unit, api_key):
+    """Resolve ONE enrich unit against TMDB. Returns a dict:
+      {"status": "confident"|"ambiguous"|"none"|"error",
+       "tmdb_id": int|None, "poster_path": str|None, "backdrop_path": str|None,
+       "title": str, "year": int|None,            # the matched values (confident)
+       "candidates": [...]}                        # ambiguous list
+
+    Searches EACH query variant (raw + wordninja-split) and UNIONs the results by
+    tmdb id before ranking, so a show that only resolves under the split form is
+    still found. TV/anime search is title-ONLY (no first_air_date_year — the id
+    year is often a later season's air year and would wrongly filter the show out);
+    the id year is kept only as a SOFT ranking signal. MOVIE search keeps &year=
+    (release year is reliable).
+
+    NEVER raises — any TMDB failure yields status "error" so the caller skips the
+    unit and continues (additive-only; the library is never corrupted)."""
+    title, year = unit["title"], unit["year"]
+    if unit["kind"] == "movie":
+        url = f"{TMDB_API_ROOT}/search/movie"
+        base_params = {"year": year} if year else {}
+        title_key, year_key = "title", "release_date"
+    else:
+        # TV/anime: NO first_air_date_year filter (id year may be a later season).
+        url = f"{TMDB_API_ROOT}/search/tv"
+        base_params = {}
+        title_key, year_key = "name", "first_air_date"
+
+    # Search every variant; union results by tmdb id (first occurrence wins).
+    union = {}
+    any_ok = False
+    for q in _tmdb_query_variants(title):
+        params = dict(base_params)
+        params["query"] = q
+        data = _tmdb_get(url, params, api_key)
+        if data is None:
+            continue  # this variant failed; try the others before giving up
+        any_ok = True
+        for r in (data.get("results") or []):
+            rid = r.get("id")
+            if rid is not None and rid not in union:
+                union[rid] = r
+    if not any_ok:
+        # Every variant's request failed (network/non-200) -> a true error, skip.
+        return {"status": "error", "candidates": []}
+
+    results = list(union.values())
+    status, payload = _pick_tmdb_match(results, title, year, title_key, year_key)
+    if status == "confident":
+        res = payload
+        yr = None
+        m = re.match(r"(\d{4})", str(res.get(year_key) or ""))
+        if m:
+            yr = int(m.group(1))
+        return {
+            "status": "confident",
+            "tmdb_id": res.get("id"),
+            "poster_path": res.get("poster_path"),
+            "backdrop_path": res.get("backdrop_path"),
+            "title": res.get(title_key),
+            "year": yr,
+            "overview": res.get("overview") or "",
+            "vote_average": res.get("vote_average"),
+            "candidates": [],
+        }
+    if status == "ambiguous":
+        return {"status": "ambiguous", "candidates": payload}
+    return {"status": "none", "candidates": []}
+
+
+def _unit_preset_tmdb_id(unit, library):
+    """The manually-set ``metadata.tmdb_id`` for an enrich unit, or None.
+
+    A user runs `set_tmdb <id> <tmdb_id>` to paste a known id when the title
+    search missed; that command writes ``metadata.tmdb_id`` onto a LEAF entry
+    (it refuses a season_map container — see cmd_set_tmdb). So for a movie the
+    preset lives on the movie leaf, and for a show on (one of) its episode
+    leaves, never on the season_map. The unit dict does not carry the entries'
+    metadata, so this looks the value up from the live library by the unit's
+    ids — alias-resolving each so a multi_ep_alias reads its primary leaf.
+
+    Returns the FIRST truthy tmdb_id found (preserving its stored type — int
+    when set_tmdb saw all-digits, else the raw string), or None when no leaf of
+    the unit carries one (the un-enriched case, which falls through to search)."""
+    for eid in unit.get("ids", []):
+        if library.get(eid) is None:
+            continue
+        try:
+            _real_id, target = _resolve_alias(library, eid)
+        except KeyError:
+            continue
+        if not isinstance(target, dict):
+            continue
+        preset = (target.get("metadata") or {}).get("tmdb_id")
+        if preset:
+            return preset
+    return None
+
+
+def _resolve_unit_by_id(unit, tmdb_id, api_key):
+    """Resolve ONE enrich unit by a KNOWN tmdb_id — fetch the details directly,
+    NO title search. Returns the SAME dict shape as _resolve_unit's confident
+    branch (status/tmdb_id/poster_path/backdrop_path/title/year/overview/
+    vote_average/candidates) so the confident-apply path treats it identically.
+
+    The user explicitly chose this id (via set_tmdb), so we honour it: GET the
+    movie or tv details (per unit["kind"]) and read the canonical fields off the
+    details object —
+      * movie  GET /3/movie/{id}: title, release_date, poster_path, backdrop_path
+      * tv     GET /3/tv/{id}:     name,  first_air_date, poster_path, backdrop_path
+    (the details object's poster_path/backdrop_path is enough, matching how
+    _resolve_unit uses the search result's paths).
+
+    On ANY fetch failure (network/404 -> _tmdb_get returns None) this returns
+    status "error" so the caller SKIPS the unit and continues — it deliberately
+    does NOT fall back to a title search (that would re-miss the very id the user
+    pasted). NEVER raises."""
+    if unit["kind"] == "movie":
+        url = f"{TMDB_API_ROOT}/movie/{tmdb_id}"
+        title_key, year_key = "title", "release_date"
+    else:
+        url = f"{TMDB_API_ROOT}/tv/{tmdb_id}"
+        title_key, year_key = "name", "first_air_date"
+
+    data = _tmdb_get(url, {}, api_key)
+    if not isinstance(data, dict) or data.get("id") is None:
+        # 404 / network / malformed payload -> skip (no search fallback).
+        return {"status": "error", "candidates": []}
+
+    yr = None
+    m = re.match(r"(\d{4})", str(data.get(year_key) or ""))
+    if m:
+        yr = int(m.group(1))
+    return {
+        "status": "confident",
+        "tmdb_id": data.get("id"),
+        "poster_path": data.get("poster_path"),
+        "backdrop_path": data.get("backdrop_path"),
+        "title": data.get(title_key),
+        "year": yr,
+        "overview": data.get("overview") or "",
+        "vote_average": data.get("vote_average"),
+        "candidates": [],
+    }
+
+
+def _write_nfo(folder, kind, title, year, tmdb_id, overview="", vote_average=None):
+    """Write a Kodi/Jellyfin-compatible NFO file into *folder*.
+
+    For a movie (kind="movie") writes ``movie.nfo`` with a ``<movie>`` root.
+    For a show (kind="show") writes ``tvshow.nfo`` with a ``<tvshow>`` root.
+    Uses stdlib xml.etree.ElementTree so all text is properly XML-escaped.
+
+    NEVER raises — any IO/permission failure is printed as a warning so the
+    caller's enrich run is never blocked by an NFO write error.  Overwrites an
+    existing file (NFOs are regenerable metadata).
+    """
+    import xml.etree.ElementTree as ET
+
+    tag = "movie" if kind == "movie" else "tvshow"
+    nfo_name = "movie.nfo" if kind == "movie" else "tvshow.nfo"
+
+    root = ET.Element(tag)
+    ET.SubElement(root, "title").text = title or ""
+    ET.SubElement(root, "year").text = str(year) if year is not None else ""
+    ET.SubElement(root, "plot").text = overview or ""
+    if vote_average is not None:
+        ET.SubElement(root, "rating").text = str(vote_average)
+    uid_el = ET.SubElement(root, "uniqueid")
+    uid_el.set("type", "tmdb")
+    uid_el.set("default", "true")
+    uid_el.text = str(tmdb_id)
+
+    tree = ET.ElementTree(root)
+    ET.indent(tree, space="  ")  # pretty-print (Python 3.9+)
+    nfo_path = os.path.join(folder, nfo_name)
+    try:
+        with open(nfo_path, "w", encoding="utf-8") as fh:
+            fh.write('<?xml version="1.0" encoding="UTF-8"?>\n')
+            tree.write(fh, encoding="unicode", xml_declaration=False)
+        print(f"     📄 wrote {nfo_name}")
+    except Exception as exc:
+        print(f"     ⚠️  NFO write failed ({nfo_path}): {exc} — enrich continues.")
+
+
+def cmd_enrich_metadata(arg=None, *flags):
+    """Local-first TMDB backfill (SHOW-CENTRIC, IMP-E3/U3/D17 — Phase 5 step 5.4).
+
+    Usage: enrich_metadata [id_or_prefix] [--apply] [--library movies|series|anime]
+            [--nfo]
+    DRY-RUN by default (prints what WOULD happen, writes nothing). --apply performs
+    it. --nfo (only honoured when combined with --apply) writes a Kodi/Jellyfin-
+    compatible movie.nfo / tvshow.nfo alongside the poster on a confident match
+    (IMP-U3 down-payment, step 5.8). Any other flag is ignored.
+    """
+    # Fold a flag-shaped positional (e.g. a direct `cmd_enrich_metadata("--apply")`
+    # with no id) into the flags list so --apply/--library are honoured no matter
+    # which slot they arrive in. A non-flag positional is the id/prefix scope.
+    flist = list(flags)
+    if arg and str(arg).startswith("--"):
+        flist = [arg] + flist
+        id_or_prefix = None
+    else:
+        id_or_prefix = arg or None
+
+    apply = "--apply" in flist
+    write_nfo = "--nfo" in flist
+    library_filter = None
+    if "--library" in flist:
+        i = flist.index("--library")
+        if i + 1 < len(flist):
+            library_filter = flist[i + 1].lower()
+
+    api_key = mvcommon.tmdb_api_key()
+    if not api_key:
+        print("❌ No TMDB API key configured. Set tmdb.api_key in mvconfig.json "
+              "(see mvconfig.example.json). Nothing to do.")
+        return
+
+    library = load_library()
+    units = _gather_enrich_units(library, id_or_prefix=id_or_prefix, library_filter=library_filter)
+
+    mode = "APPLY" if apply else "DRY-RUN"
+    print(f"=== ENRICH METADATA ({mode}) ===")
+    if library_filter:
+        print(f"   > library filter: {library_filter}")
+    if id_or_prefix:
+        print(f"   > scope: ids == or startswith '{id_or_prefix}'")
+    print(f"   > {len(units)} show/movie unit(s) to consider.\n")
+
+    image_base = None  # resolved lazily on the first confident match (one call max)
+    ambiguous = []     # collected and printed at the end
+    n_matched = n_stamped = n_images = n_skipped = 0
+
+    for unit in units:
+        label = f"{unit['kind'].upper()} {unit['key']}"
+        yr = f" ({unit['year']})" if unit["year"] else ""
+        # ENRICH-BY-KNOWN-ID: if a leaf of this unit already carries a manually
+        # set metadata.tmdb_id (via `set_tmdb`), honour it directly — fetch the
+        # details BY THAT ID (no title search), so a user-pasted id gets the full
+        # stamp + download treatment instead of being re-searched (and re-missed).
+        preset_id = _unit_preset_tmdb_id(unit, library)
+        try:
+            if preset_id:
+                print(f"   ↳ {label}: using preset tmdb_id={preset_id} (manual) — fetching by id, no search.")
+                res = _resolve_unit_by_id(unit, preset_id, api_key)
+            else:
+                res = _resolve_unit(unit, api_key)
+        except Exception as e:  # defensive — resolvers already swallow, but never crash the run
+            print(f"⏭️  {label}: TMDB error, skipping ({e}).")
+            n_skipped += 1
+            continue
+
+        if res["status"] == "error":
+            print(f"⏭️  {label}: TMDB error, skipping (library untouched).")
+            n_skipped += 1
+            continue
+        if res["status"] == "none":
+            print(f"❓ {label}{yr}: NO TMDB match for '{unit['title']}' — listed for review.")
+            ambiguous.append({"key": unit["key"], "title": unit["title"],
+                              "year": unit["year"], "candidates": []})
+            continue
+        if res["status"] == "ambiguous":
+            print(f"❓ {label}{yr}: AMBIGUOUS '{unit['title']}' — {len(res['candidates'])} candidates, NOT writing.")
+            ambiguous.append({"key": unit["key"], "title": unit["title"],
+                              "year": unit["year"], "candidates": res["candidates"]})
+            continue
+
+        # --- confident match ---
+        tmdb_id = res["tmdb_id"]
+        n_matched += 1
+        n_imgs_unit = (1 if res.get("poster_path") else 0) + (1 if res.get("backdrop_path") else 0)
+        # per-season posters + per-episode stills (shows only) each add one
+        # potential image. An episode leaf is a unit id that carries a filename.
+        season_imgs = len(unit.get("seasons", {})) if unit["kind"] == "show" else 0
+        episode_stills = (
+            sum(1 for i in unit.get("ids", []) if (library.get(i) or {}).get("filename"))
+            if unit["kind"] == "show" else 0)
+        print(f"✅ {label}{yr}: matched '{res['title']}'"
+              f"{(' (' + str(res['year']) + ')') if res['year'] else ''} -> tmdb_id={tmdb_id}")
+
+        folder = unit.get("folder")
+        base_name = os.path.basename(os.path.normpath(folder)) if folder else ""
+        will_stamp = bool(folder) and not _has_tmdb_token(base_name)
+        if will_stamp:
+            print(f"     {'would stamp' if not apply else 'stamping'} folder token: "
+                  f"{base_name} -> {base_name} {{tmdb-{tmdb_id}}}")
+        elif folder:
+            print(f"     folder already has a {{tmdb-…}} token — skip stamp ({base_name}).")
+        print(f"     {'would write' if not apply else 'writing'} metadata.tmdb_id on "
+              f"{len(unit['ids'])} entr(y/ies).")
+        print(f"     {'would download' if not apply else 'downloading'} up to "
+              f"{n_imgs_unit + season_imgs + episode_stills} image(s) (poster/fanart"
+              f"{'/season posters' if season_imgs else ''}"
+              f"{'/episode stills' if episode_stills else ''}, local always wins).")
+
+        if not apply:
+            continue
+
+        # ---- APPLY: write tmdb_id + real title/year (additive), stamp, download ----
+        # 1) tmdb_id + real TITLE/YEAR on every leaf + season_map of the unit. The
+        #    cards read metadata.title (title.js: a non-id title auto-shows), so the
+        #    real TMDB title is filled here. ADDITIVE + IDEMPOTENT: title is replaced
+        #    only when it is still id-shaped/blank (placeholder) — a human-curated
+        #    title that differs from both the id AND the TMDB title is left intact.
+        #    Re-running just rewrites the same TMDB title (no-op). year is filled when
+        #    absent and refreshed when the TMDB year is known (the id year is often a
+        #    season's air year, so the matched show year is preferred).
+        tmdb_title = res.get("title")
+        tmdb_year = res.get("year")
+        live = load_library()
+        for eid in unit["ids"]:
+            ent = live.get(eid)
+            if ent is None:
+                continue
+            real_id, target = _resolve_alias(live, eid)
+            meta = target.setdefault("metadata", {})
+            meta["tmdb_id"] = tmdb_id
+            if tmdb_title:
+                cur = meta.get("title")
+                if _title_is_id_shaped(cur, real_id) or cur == tmdb_title:
+                    meta["title"] = tmdb_title
+            if tmdb_year is not None:
+                meta["year"] = tmdb_year
+        save_library(live)
+
+        # 2) stamp the {tmdb-…} token ONCE on the show/movie folder (paths only —
+        #    cmd_rename_folder is journaled + hash-safe; reused exactly as-is).
+        if will_stamp:
+            new_name = f"{base_name} {{tmdb-{tmdb_id}}}"
+            ok = cmd_rename_folder(folder, new_name)
+            if ok:
+                n_stamped += 1
+                # The folder moved; recompute season folders for the image step.
+                new_folder = os.path.join(os.path.dirname(os.path.normpath(folder)), new_name)
+                unit = _retarget_unit_folders(unit, folder, new_folder)
+                folder = new_folder
+
+        # 3) download images — LOCAL ALWAYS WINS (skip any that already exist).
+        if image_base is None:
+            image_base = _tmdb_image_base(api_key)
+        n_images += _download_unit_images(unit, res, image_base, folder)
+
+        # 4) NFO write — only when --nfo flag is set (IMP-U3 down-payment, step 5.8).
+        if write_nfo and folder:
+            _write_nfo(
+                folder,
+                kind=unit["kind"],
+                title=res.get("title"),
+                year=res.get("year"),
+                tmdb_id=tmdb_id,
+                overview=res.get("overview", ""),
+                vote_average=res.get("vote_average"),
+            )
+
+    # --- ambiguous report (always printed; the user resolves via set_tmdb) ---
+    if ambiguous:
+        print(f"\n--- {len(ambiguous)} unit(s) NEED MANUAL CONFIRMATION (not written) ---")
+        for a in ambiguous:
+            yr = f" ({a['year']})" if a["year"] else ""
+            print(f"  • {a['key']}{yr}  query='{a['title']}'")
+            for c in a["candidates"]:
+                cyr = f" ({c['year']})" if c.get("year") else ""
+                print(f"       candidate: tmdb_id={c['id']}  \"{c['title']}\"{cyr}")
+            print(f"       -> resolve with: python main.py set_tmdb {a['key']} <tmdb_id>")
+
+    print(f"\n=== {'APPLIED' if apply else 'DRY-RUN'} === "
+          f"matched={n_matched} stamped={n_stamped} images={n_images} "
+          f"ambiguous={len(ambiguous)} skipped={n_skipped}")
+    if not apply:
+        print("   (dry-run: nothing was written — re-run with --apply to perform it.)")
+
+
+def _retarget_unit_folders(unit, old_folder, new_folder):
+    """After the show folder is renamed, rewrite the unit's folder + season folder
+    paths to the new location so the image step writes into the moved folders.
+    Pure (returns a new dict); mirrors _rewrite_folder_path's prefix swap."""
+    new = dict(unit)
+    new["folder"] = new_folder
+    new_seasons = {}
+    for sid, sfolder in (unit.get("seasons") or {}).items():
+        if sfolder:
+            new_seasons[sid] = _rewrite_folder_path(sfolder, os.path.abspath(old_folder), os.path.abspath(new_folder))
+        else:
+            new_seasons[sid] = sfolder
+    new["seasons"] = new_seasons
+    return new
+
+
+def _download_unit_images(unit, res, image_base, folder):
+    """Download poster.jpg/fanart.jpg into the show/movie folder, plus per-season
+    posters for a show — LOCAL ALWAYS WINS (any existing file is left untouched).
+    Returns the count of images actually written. NEVER raises."""
+    written = 0
+    if not folder:
+        return 0
+    # Show/movie poster + fanart (the search result carries the paths directly).
+    poster_path = res.get("poster_path")
+    if poster_path:
+        dest = os.path.join(folder, "poster.jpg")
+        if os.path.exists(dest):
+            print(f"     ⏭️  local poster.jpg present — kept (not overwritten).")
+        elif _download_to(f"{image_base}{TMDB_POSTER_SIZE}{poster_path}", dest):
+            print(f"     ⬇️  poster.jpg")
+            written += 1
+    backdrop_path = res.get("backdrop_path")
+    if backdrop_path:
+        dest = os.path.join(folder, "fanart.jpg")
+        if os.path.exists(dest):
+            print(f"     ⏭️  local fanart.jpg present — kept (not overwritten).")
+        elif _download_to(f"{image_base}{TMDB_BACKDROP_SIZE}{backdrop_path}", dest):
+            print(f"     ⬇️  fanart.jpg")
+            written += 1
+
+    if unit["kind"] != "show":
+        return written
+
+    # Per-season posters: /tv/{series_id}/season/{n}/images -> posters[0].file_path.
+    series_id = res.get("tmdb_id")
+    api_key = mvcommon.tmdb_api_key()
+    for season_id, sfolder in (unit.get("seasons") or {}).items():
+        if not sfolder:
+            continue
+        n = _season_number_of(season_id)
+        if n is None:
+            continue
+        dest = os.path.join(sfolder, "poster.jpg")
+        if os.path.exists(dest):
+            print(f"     ⏭️  local season poster present — kept ({os.path.basename(sfolder)}).")
+            continue
+        simg = _tmdb_get(f"{TMDB_API_ROOT}/tv/{series_id}/season/{n}/images", {}, api_key)
+        posters = (simg or {}).get("posters") or []
+        fp = posters[0].get("file_path") if posters else None
+        if fp and _download_to(f"{image_base}{TMDB_POSTER_SIZE}{fp}", dest):
+            print(f"     ⬇️  season {n} poster.jpg ({os.path.basename(sfolder)})")
+            written += 1
+
+    # Per-episode stills: /tv/{id}/season/{s}/episode/{e}/images -> best still,
+    # written as `<episode_video_basename>-thumb.jpg` next to the episode file.
+    # LOCAL ALWAYS WINS (skip if the -thumb.jpg already exists). A failed/empty
+    # call for one episode warns-once and is skipped (it falls back to the season
+    # poster at view time) — it never crashes nor blocks the rest. Reads the LIVE
+    # library so each leaf's folder_path reflects any rename done above.
+    live = load_library()
+    for eid in unit.get("ids", []):
+        ent = live.get(eid)
+        if ent is None:
+            continue
+        try:
+            real_id, leaf = _resolve_alias(live, eid)
+        except KeyError:
+            continue
+        if not isinstance(leaf, dict):
+            continue
+        fname = leaf.get("filename")
+        efolder = leaf.get("folder_path")
+        if not fname or not efolder:
+            continue  # season_map / alias-without-primary — not an episode file
+        se = _episode_se_of(real_id, leaf)
+        if se is None:
+            continue  # id shape gave no season+episode — skip (season poster covers it)
+        s_no, e_no = se
+        thumb = _episode_thumb_name(fname)
+        dest = os.path.join(efolder, thumb)
+        if os.path.exists(dest):
+            print(f"     ⏭️  local episode still present — kept ({thumb}).")
+            continue
+        eimg = _tmdb_get(
+            f"{TMDB_API_ROOT}/tv/{series_id}/season/{s_no}/episode/{e_no}/images",
+            {}, api_key)
+        fp = _pick_still_path(eimg)
+        if not fp:
+            print(f"     ⚠️  no episode still for S{s_no:02d}E{e_no:02d} — falls back to season poster.")
+            continue
+        if _download_to(f"{image_base}{TMDB_STILL_SIZE}{fp}", dest):
+            print(f"     ⬇️  {thumb}")
+            written += 1
+    return written
+
+
 def cmd_set_uploaded(manual_id):
     # [NEW] Helper to force 'uploaded' status for multi-part pushes
     print(f"--- FORCING UPLOAD STATUS: {manual_id} ---")
@@ -1070,6 +2133,219 @@ def cmd_set_uploaded(manual_id):
     save_library(library)
     print(f"✅ Status forced to: onboarded | Uploaded: True")
     print(f"   You can now run: python main.py replace {manual_id}")
+
+
+def _norm_path(p):
+    """Normalised, case-folded absolute path for prefix comparison on Windows.
+
+    Used by rename_folder's descendant scan so `C:\\Media\\Series\\Dark` and a
+    child `c:/media/series/dark/Season 01` compare equal regardless of separators
+    or case. Returns "" for a falsy input so missing folder_paths never match.
+    """
+    if not p:
+        return ""
+    return os.path.normcase(os.path.normpath(os.path.abspath(p)))
+
+
+def _is_under(child_norm, parent_norm):
+    """True if child_norm == parent_norm OR is nested strictly under it.
+
+    Both args must already be _norm_path()'d. The trailing-os.sep guard prevents a
+    sibling like `…\\Dark2` from matching the prefix `…\\Dark` (a plain startswith
+    would wrongly match it)."""
+    if not child_norm or not parent_norm:
+        return False
+    if child_norm == parent_norm:
+        return True
+    return child_norm.startswith(parent_norm + os.sep)
+
+
+def _collect_folder_descendants(library, old_folder):
+    """Whole-library iterator (PR#21 crash class): return the list of (id, entry)
+    whose `folder_path` IS `old_folder` or lives UNDER it.
+
+    Alias/season_map-safe by the SAME rule every whole-library loop must follow:
+      - `multi_ep_alias` entries have NO `folder_path` (their 3-key schema is
+        {type, alias_of, parent_id}) — verify the key is absent and SKIP them.
+      - `season_map` entries DO carry a `folder_path` (= their first episode's
+        folder) — include them so the container pointer is rewritten too.
+      - `leaf` entries carry folder_path — include them.
+    Entries with no `folder_path` key (incl. aliases) are skipped. Read-only — does
+    not mutate the library."""
+    old_norm = _norm_path(old_folder)
+    out = []
+    for mid, entry in library.items():
+        if entry.get("type") == "multi_ep_alias":
+            # No folder_path on an alias by construction — nothing to rewrite.
+            continue
+        fp = entry.get("folder_path")
+        if not fp:
+            continue
+        if _is_under(_norm_path(fp), old_norm):
+            out.append((mid, entry))
+    return out
+
+
+def cmd_rename_folder(old_folder_or_id, new_folder_name_or_token):
+    """Crash-safe cascading folder rename (IMP-D17).
+
+    Rename an on-disk SHOW/season folder (e.g. stamp a `{tmdb-12345}` token onto it)
+    and rewrite `folder_path` for EVERY library entry under that folder — all
+    seasons/episodes leaves AND the show's season_map container — atomically.
+
+    HASH-SAFE: this only moves a directory + rewrites JSON `folder_path` strings. It
+    NEVER re-hashes, re-splits, or re-uploads (the entry `hash` is over file bytes,
+    not the path — ARCHITECTURE §7.4). The on-disk `uid` / `<short_id>.sha256`
+    sidecars live inside the folder and MOVE with it (no content change), so it works
+    identically on ARCHIVED folders (the files are tiny dummies — a directory rename
+    moves dummies like any file; no special-casing).
+
+    CRASH-SAFETY — mirrors cmd_replace's journal pattern WITHOUT changing the
+    rollback contract (CLAUDE.md auto-rollback change-gate). It ADDS a new journaled
+    operation; it does NOT alter the journal format/durability, the PONR semantics,
+    `recover_journal()`, or the `RollbackHardFail` contract.
+
+      - The journal is opened in the PARENT directory of the target folder. The
+        parent does NOT move during the rename, so every existing journal method
+        (`_flush`/`mark_point_of_no_return`/`commit`/`rollback`) and a later
+        `recover_journal(<parent>)` stay valid across the directory rename. (A
+        journal placed INSIDE the renamed folder would be carried to the new path,
+        leaving `commit()`'s delete — which targets the old path — unable to clean
+        it up.) The journal format/durability/API are untouched; only WHICH folder
+        holds this command's journal differs (a per-command choice cmd_replace and
+        cmd_restore already make independently).
+      - Each descendant's folder_path rewrite is recorded as a standard `set_field`
+        record (existed=True, prior=<old folder_path>) BEFORE the rewrite — exactly
+        the vocabulary cmd_prep uses for `split_info`. Its inverse restores the prior
+        path. NO new record `op` is invented.
+      - PONR = the on-disk `os.rename(old → new)`, with `mark_point_of_no_return()`
+        fired immediately after it (same semantics as cmd_replace's commit rename).
+        A failure BEFORE the rename rolls back (the set_field inverses restore the
+        old paths; the folder never moved). A failure AT/AFTER the rename leaves the
+        crossed journal on disk; `recover_journal` correctly declines to auto-undo a
+        crossed journal, and a RE-RUN self-heals the torn window (folder already at
+        new, library still at old) — mirroring cmd_replace's C9 stale-sweep.
+    """
+    old_folder_or_id = old_folder_or_id.strip('"').strip("'")
+    new_folder_name_or_token = new_folder_name_or_token.strip('"').strip("'")
+
+    library = load_library()
+
+    # --- Resolve the target folder: accept an id (-> its folder_path) or a path. ---
+    if old_folder_or_id in library and library[old_folder_or_id].get("folder_path"):
+        old_folder = os.path.abspath(library[old_folder_or_id]["folder_path"])
+        print(f"> Resolved id '{old_folder_or_id}' -> {old_folder}")
+    else:
+        old_folder = os.path.abspath(old_folder_or_id)
+
+    # The new name is a LEAF name (e.g. "Dark {tmdb-70523}"), not a full path:
+    # keep the same parent dir, swap the leaf. Reject a name carrying a separator
+    # (that would move the folder elsewhere — out of scope and a footgun).
+    if os.sep in new_folder_name_or_token or (os.altsep and os.altsep in new_folder_name_or_token):
+        print(f"❌ new name must be a bare folder name, not a path: {new_folder_name_or_token!r}")
+        return False
+
+    parent_dir = os.path.dirname(old_folder)
+    new_folder = os.path.join(parent_dir, new_folder_name_or_token)
+
+    print(f"=== RENAME FOLDER ===")
+    print(f"   > FROM: {old_folder}")
+    print(f"   > TO:   {new_folder}")
+
+    # --- Find descendants up-front (used by both the happy path and the self-heal). ---
+    descendants = _collect_folder_descendants(library, old_folder)
+
+    # --- Forward self-heal for a prior torn run (rename committed, save did not). ---
+    # If the OLD folder is gone but the NEW folder exists AND some entry still points
+    # under OLD, the on-disk rename already happened in a previous (interrupted) run;
+    # finish the JSON rewrite. Mirrors cmd_replace's C9 stale-sweep (forward repair of
+    # a crossed-PONR torn window — recover_journal deliberately won't auto-undo it).
+    if (not os.path.isdir(old_folder)) and os.path.isdir(new_folder) and descendants:
+        print("   > ⚠️ Detected an interrupted prior rename (folder already moved). "
+              "Completing the library pointer rewrite...")
+        for mid, entry in descendants:
+            entry["folder_path"] = _rewrite_folder_path(entry["folder_path"], old_folder, new_folder)
+        save_library(library)
+        # Clean up a crossed journal left by the interrupted run, if present.
+        _jpath = os.path.join(parent_dir, TXN_JOURNAL_NAME)
+        if os.path.exists(_jpath):
+            try:
+                os.remove(_jpath)
+            except Exception:
+                pass
+        print(f"✅ Recovered interrupted rename — {len(descendants)} folder_path(s) rewritten to the new folder.")
+        return True
+
+    # --- Guards (clear refusals; no journal opened yet). ---
+    if not os.path.isdir(old_folder):
+        print(f"❌ No such folder (or unknown id): {old_folder_or_id}")
+        return False
+    if os.path.exists(new_folder):
+        print(f"❌ Target already exists, refusing to overwrite: {new_folder}")
+        return False
+    if not descendants:
+        print(f"❌ No library entries reference {old_folder} — nothing to rename.")
+        return False
+
+    print(f"   > {len(descendants)} library entr(y/ies) will be re-pointed:")
+    for mid, _ in descendants:
+        print(f"       - {mid}")
+
+    # --- Crash-safe sequence (journal in the STABLE parent dir). ---
+    journal = RollbackJournal(parent_dir, old_folder_or_id)
+    # Record every folder_path rewrite BEFORE acting (journal-before-act). The
+    # inverse (restore prior folder_path) is what recover replays on a pre-PONR crash.
+    for mid, entry in descendants:
+        journal.record_set_field(mid, "folder_path", existed=True, prior=entry.get("folder_path"))
+
+    try:
+        # PONR: the on-disk directory rename. BEFORE this line a failure rolls back
+        # (no folder moved). AT/AFTER it the journal is crossed and not auto-undone.
+        os.rename(old_folder, new_folder)  # ROLLBACK SEAM: directory moved here (atomic on one volume / point-of-no-return)
+        journal.mark_point_of_no_return()
+
+        # Post-PONR: rewrite the in-memory pointers + persist atomically (fsync +
+        # os.replace via save_library). On a crash here, a re-run self-heals (above).
+        for mid, entry in descendants:
+            entry["folder_path"] = _rewrite_folder_path(entry["folder_path"], old_folder, new_folder)
+        save_library(library)
+        journal.commit()
+        print(f"✅ Renamed folder + rewrote {len(descendants)} folder_path(s). No rehash (paths only).")
+        return True
+    except Exception as e:
+        if journal.crossed_ponr:
+            # At/after PONR — the directory already moved. Do NOT auto-undo (mirrors
+            # cmd_replace). The crossed journal is left on disk; a re-run self-heals.
+            print(f"❌ IRREVERSIBLE: folder renamed but the library rewrite failed: {e}")
+            print(f"   > The folder is now at: {new_folder}")
+            print(f"   > Re-run to finish the pointer rewrite: rename_folder \"{new_folder}\" \"{new_folder_name_or_token}\"")
+            raise RollbackHardFail(
+                state=f"{old_folder_or_id}: folder moved to {new_folder}",
+                reason=f"folder_path rewrite failed past the rename point-of-no-return: {e}",
+                resume_cmd=f'rename_folder "{new_folder}" "{new_folder_name_or_token}"',
+            )
+        print(f"❌ rename_folder failed (pre-rename): {e}")
+        journal.rollback(library)
+        return False
+
+
+def _rewrite_folder_path(folder_path, old_folder, new_folder):
+    """Replace the old-folder prefix of a single folder_path with the new-folder
+    prefix, PRESERVING the original casing of any nested suffix.
+
+    `old_folder`/`new_folder` are absolute. The entry's stored `folder_path` may be
+    EXACTLY old_folder (the show/season folder itself) or nested under it (e.g. a
+    `Season 01` subfolder). Matching is case/separator-insensitive (via _norm_path)
+    so it works on Windows, but the SUFFIX is taken from the original abspath string
+    so a subfolder's real casing (`Season 01`, not `season 01`) is retained."""
+    abs_fp = os.path.abspath(folder_path)
+    if _norm_path(folder_path) == _norm_path(old_folder):
+        return new_folder
+    # Nested: os.path.relpath matches the common prefix case-insensitively on Windows
+    # but returns the tail with its ORIGINAL casing (verified: `Season 01`, not
+    # `season 01`), so the subfolder's real name is preserved when joined onto new.
+    tail = os.path.relpath(abs_fp, old_folder)
+    return os.path.normpath(os.path.join(new_folder, tail))
 
 
 def cmd_prep_season(base_id, folder_path):
@@ -3805,6 +5081,17 @@ def items_payload():
 
         category = category_of_id(mid)
         metadata = entry.get("metadata") or {}
+        # poster_available: a cheap truthy existence check via resolve_artwork_path
+        # (Phase 5.7) — the SAME resolver /api/media-image uses, so the SPA only
+        # requests a poster <img> when one will actually be served (no speculative
+        # 404 per card). It is a few os.path checks per row (own folder -> season
+        # folder -> {tmdb-…} ancestor, first existing wins); short-circuit to False
+        # when the entry has neither a folder_path nor a parent to inherit from, so
+        # a folderless leaf never even enters the resolver on a large grid.
+        has_anchor = bool(entry.get("folder_path")) or bool(entry.get("parent_id"))
+        poster_available = bool(
+            has_anchor and resolve_artwork_path(library, mid, kind="poster")
+        )
         row = {
             "id": mid,
             "category": category,
@@ -3814,7 +5101,7 @@ def items_payload():
             "title": metadata.get("title") or mid,
             "year": metadata.get("year"),
             "tmdb_id": metadata.get("tmdb_id"),
-            "poster_available": False,  # not yet wired — always False for now (IMP-E14 Phase 1)
+            "poster_available": poster_available,
             "chunk_count": (entry.get("split_info") or {}).get("total_chunks") or 1,
         }
         if entry.get("parent_id") is not None:
@@ -3841,6 +5128,9 @@ def items_payload():
 # Folder-image filenames recognised for has_image / the folder-image route.
 # Lower-cased; comparisons casefold the on-disk name.
 _FOLDER_IMAGE_NAMES = ("poster.jpg", "fanart.jpg")
+
+# The artwork "kinds" resolve_artwork_path accepts, each mapping to "<kind>.jpg".
+_FOLDER_IMAGE_NAMES_KINDS = ("poster", "fanart")
 
 # Map a category bucket to its on-disk root subfolder under LOCAL_ROOT.
 _CATEGORY_ROOT_SUBDIR = {"movies": "Movies", "series": "Series", "anime": "Anime"}
@@ -4165,6 +5455,212 @@ def find_folder_image(folder):
     return None
 
 
+# A folder name carries a provider token like `{tmdb-70523}` / `{tvdb-12345}`
+# (the Plex/Emby/Jellyfin convention rename_folder stamps on a SHOW folder). The
+# season-inheritance resolver walks UP to the nearest ancestor whose basename
+# matches this — i.e. the show folder — and uses ITS poster as the fallback.
+_PROVIDER_TOKEN_RE = re.compile(r"\{tmdb-[^}]+\}", re.IGNORECASE)
+
+
+def _kind_image_under_root(folder, kind):
+    """Return the absolute path of ``<kind>.jpg`` (poster.jpg / fanart.jpg)
+    sitting DIRECTLY in ``folder`` — but ONLY if it exists on disk AND the
+    realpath-resolved file is under LOCAL_ROOT with the exact allowed basename.
+    Otherwise None. The single security funnel every candidate flows through, so
+    a returned path is ALWAYS a vetted poster/fanart inside the media root.
+
+    ``folder`` is derived from a LIBRARY entry's stored ``folder_path`` (or its
+    real on-disk ancestors), never from raw client input, so this re-assertion is
+    defence-in-depth against a stored path that somehow escaped the root."""
+    if not folder:
+        return None
+    candidate = os.path.join(folder, f"{kind}.jpg")
+    try:
+        if not os.path.isfile(candidate):
+            return None
+        real = os.path.realpath(candidate)
+    except OSError:
+        return None
+    # Exact-name allow-list (case-insensitive on-disk name) AND under LOCAL_ROOT.
+    if os.path.basename(real).lower() != f"{kind}.jpg":
+        return None
+    if not _is_within_local_root(real):
+        return None
+    return real
+
+
+def _episode_still_under_root(folder, filename):
+    """Return the absolute path of the per-episode still `<basename>-thumb.jpg`
+    sitting DIRECTLY in ``folder`` — but ONLY if it exists on disk AND the
+    realpath-resolved file is under LOCAL_ROOT with EXACTLY the basename derived
+    from the episode's own stored ``filename`` (never client input). Otherwise
+    None. The still-equivalent of ``_kind_image_under_root`` — the security funnel
+    every per-episode candidate flows through.
+
+    The expected basename is computed from ``filename`` via ``_episode_thumb_name``
+    (``os.path.splitext(filename)[0] + "-thumb.jpg"``); the on-disk file is then
+    matched case-insensitively against THAT exact name, so a sibling that merely
+    ends in `-thumb.jpg` for a DIFFERENT episode is never served here."""
+    if not folder or not filename:
+        return None
+    want = _episode_thumb_name(filename)
+    if not want:
+        return None
+    candidate = os.path.join(folder, want)
+    try:
+        if not os.path.isfile(candidate):
+            return None
+        real = os.path.realpath(candidate)
+    except OSError:
+        return None
+    if os.path.basename(real).lower() != want.lower():
+        return None
+    if not _is_within_local_root(real):
+        return None
+    return real
+
+
+def _ancestor_show_folder_image(start_folder, kind):
+    """Walk UP ``start_folder``'s real on-disk ancestors to the NEAREST ancestor
+    whose basename carries a ``{tmdb-…}`` token (the show folder) and return that
+    folder's vetted ``<kind>.jpg`` (or None). Stops at / never escapes LOCAL_ROOT
+    (the walk halts once it climbs above the media root). READ-ONLY."""
+    if not start_folder or not _is_within_local_root(start_folder):
+        return None
+    try:
+        current = os.path.realpath(start_folder)
+        root = os.path.realpath(LOCAL_ROOT)
+    except OSError:
+        return None
+    # Climb until we exit the media root or hit the filesystem ceiling.
+    while _is_within_local_root(current):
+        name = os.path.basename(current)
+        if _PROVIDER_TOKEN_RE.search(name or ""):
+            hit = _kind_image_under_root(current, kind)
+            if hit:
+                return hit
+            # The show folder was found but has no <kind>.jpg — there is no
+            # higher show folder for this leaf, so stop (don't keep climbing past
+            # the show into collection roots).
+            return None
+        parent = os.path.dirname(current)
+        if parent == current:  # reached a drive/root — cannot climb further
+            break
+        current = parent
+        if current == root or not _is_within_local_root(current):
+            break
+    return None
+
+
+def resolve_artwork_path(library, mid, kind="poster"):
+    """Resolve the absolute path of a leaf/season's artwork file (READ-ONLY,
+    path-only — never opens or copies anything), or None (IMP-E3/U3/D17, Phase 5).
+
+    ``kind`` selects which artwork (``"poster"`` -> poster.jpg, ``"fanart"`` ->
+    fanart.jpg); any other value falls back to "poster".
+
+    RESOLUTION ORDER — LOCAL ALWAYS WINS at each level (locked decision #8, "Dark"
+    requirement). The first existing file wins:
+      (i-still, poster ONLY) for an EPISODE leaf (owns a ``filename`` AND a
+            season+episode id shape), the per-episode still
+            ``<own folder>/<splitext(filename)[0]>-thumb.jpg`` — the
+            Jellyfin/Kodi/Plex local episode-thumbnail name. fanart skips this rung
+            (episodes have no per-episode fanart).
+      (i)   the resolved entry's OWN ``folder_path`` ``<kind>.jpg``. For a season
+            episode this folder IS the season folder, so a season-specific local
+            poster naturally wins here. For a season_map it is the season folder.
+      (ii)  else the entry's season container's folder ``<kind>.jpg`` — found via
+            the leaf's ``parent_id`` -> the ``season_map`` entry's ``folder_path``.
+      (iii) else the NEAREST ancestor folder (walking UP the entry's real
+            ``folder_path``) whose name carries a ``{tmdb-…}`` token — the show
+            folder — and its ``<kind>.jpg`` (so every episode inherits the show
+            poster when nothing more specific exists).
+    So an episode WITHOUT its own still falls back to the season poster, then the
+    show poster — the per-episode waterfall the task pins.
+
+    ALIAS / season_map SAFE (PR #21 crash class): ``mid`` is resolved one hop via
+    ``_resolve_alias`` so a ``multi_ep_alias`` dereferences to its PRIMARY leaf's
+    real folder; ``folder_path`` is NEVER read off a raw virtual entry. A
+    ``season_map`` keeps its own ``folder_path`` (level i). Every ``.get`` /
+    ``os.path`` call is guarded.
+
+    SECURITY: every candidate is derived from the LIBRARY entry's stored paths
+    (and their real ancestors), NEVER from client input beyond ``mid`` (which only
+    indexes the dict) + ``kind`` (allow-listed). Each candidate passes through
+    ``_kind_image_under_root`` / ``_episode_still_under_root`` / the ancestor walk,
+    each of which returns ONLY a file named exactly poster.jpg/fanart.jpg OR the
+    episode's own ``<basename>-thumb.jpg`` (basename taken from the entry's stored
+    ``filename``), and only when it realpath-resolves UNDER LOCAL_ROOT. A crafted
+    ``mid`` (``..``, an absolute path, etc.) cannot escape: it is just a missing
+    dict key -> None.
+    """
+    if kind not in _FOLDER_IMAGE_NAMES_KINDS:
+        kind = "poster"
+    if not isinstance(library, dict):
+        return None
+
+    entry = library.get(mid)
+    if entry is None:
+        return None
+
+    # One-hop alias resolve: a multi_ep_alias -> its primary leaf (which owns the
+    # real folder). _resolve_alias raises only on a missing key, which we've ruled
+    # out above; guard anyway so a malformed library never propagates.
+    try:
+        real_id, entry = _resolve_alias(library, mid)
+    except KeyError:
+        return None
+    if not isinstance(entry, dict):
+        return None
+
+    # If resolution landed on a still-virtual row (an alias whose primary is
+    # missing), it owns no folder of its own — fall back to its season below.
+    own_folder = entry.get("folder_path") if entry.get("type") != "multi_ep_alias" else None
+
+    # (i-still, poster ONLY) An EPISODE leaf — one that owns a `filename` AND whose
+    # (post-alias) id parses to a season+episode — gets its per-episode still as the
+    # FIRST candidate: `<own folder>/<splitext(filename)[0]>-thumb.jpg`. LOCAL wins
+    # here exactly like the season-specific poster below; if the still is absent we
+    # fall straight through to the season/show poster waterfall. fanart is unchanged
+    # (episodes have no per-episode fanart). The candidate basename is derived from
+    # the entry's OWN stored filename (never client input) and is vetted under
+    # LOCAL_ROOT by _episode_still_under_root.
+    if kind == "poster":
+        filename = entry.get("filename")
+        if filename and own_folder and _episode_se_of(real_id, entry) is not None:
+            hit = _episode_still_under_root(own_folder, filename)
+            if hit:
+                return hit
+
+    # (i) The entry's OWN folder — a season-specific local poster wins here.
+    hit = _kind_image_under_root(own_folder, kind)
+    if hit:
+        return hit
+
+    # (ii) The season container's folder. Find the parent season_map via parent_id
+    # (leaf) and use ITS folder_path. Guard the lookup + the parent's shape.
+    parent_id = entry.get("parent_id")
+    if parent_id:
+        parent = library.get(parent_id)
+        if isinstance(parent, dict) and parent.get("type") == "season_map":
+            hit = _kind_image_under_root(parent.get("folder_path"), kind)
+            if hit:
+                return hit
+
+    # (iii) Walk UP to the nearest {tmdb-…} show folder and use its <kind>.jpg.
+    # Anchor the walk at the most-specific folder we have for this entry.
+    anchor = own_folder
+    if not anchor and parent_id:
+        parent = library.get(parent_id)
+        if isinstance(parent, dict):
+            anchor = parent.get("folder_path")
+    hit = _ancestor_show_folder_image(anchor, kind)
+    if hit:
+        return hit
+
+    return None
+
+
 def cmd_web(host=None, port=None, open_browser=True, demo=False):
     """Launch the local web operations console (IMP-E12).
 
@@ -4306,6 +5802,7 @@ if __name__ == "__main__":
         print("  set_search [id] [term]")
         print("  set_poster [id] [url]")
         print("  set_fanart [id] [url]")
+        print("  set_tmdb [id] [tmdb_id]")
         print("  set_uploaded [id]")
         print("  prep_season [base_id] [folder]")
         print("  scan_unprepped")
@@ -4323,6 +5820,7 @@ if __name__ == "__main__":
         print("  sort")
         print("  fetch [id]")
         print("  recover [id|folder]  (or: recover --scan)")
+        print("  rename_folder [id|folder] \"<NewName {tmdb-12345}>\"  — rename a show/season folder + rewrite every descendant folder_path (crash-safe, no rehash)")
         print("  web [--port N] [--host H] [--no-browser] [--demo]  — Launch the local web operations console (Disk Reclaim view); --demo = SAFE build, all actions simulated")
         print("  token create [--label \"X\"] [--ttl 1h|8h|12h|1d|3d|7d|30d|never]  — Mint a web access token (default --ttl 7d)")
         print("  token list                                          — List minted web access tokens")
@@ -4448,8 +5946,23 @@ if __name__ == "__main__":
         else:
             print("❌ Usage: set_fanart [id] [url]")
 
+    elif cmd == "set_tmdb":
+        if len(sys.argv) >= 4:
+            cmd_set_tmdb(sys.argv[2], sys.argv[3])
+        else:
+            print("❌ Usage: set_tmdb [id] [tmdb_id]")
+
     elif cmd == "set_uploaded":
         cmd_set_uploaded(sys.argv[2])
+
+    elif cmd == "enrich_metadata":
+        # enrich_metadata [id_or_prefix] [--apply] [--library movies|series|anime]
+        # DRY-RUN by default; --apply writes. Pass the positional id/prefix (if any)
+        # plus all remaining tokens as flags so cmd_enrich_metadata parses --apply/
+        # --library/--nfo itself.
+        rest = sys.argv[2:]
+        positional = rest[0] if (rest and not rest[0].startswith("--")) else None
+        cmd_enrich_metadata(positional, *rest)
 
     elif cmd == "prep_season":
         if len(sys.argv) >= 4:
@@ -4558,6 +6071,13 @@ if __name__ == "__main__":
             cmd_recover(" ".join(args))
         else:
             print("❌ Usage: recover [id|folder]   (or: recover --scan)")
+
+    elif cmd == "rename_folder":
+        # rename_folder <old_folder_or_id> "<NewName {tmdb-12345}>"
+        if len(sys.argv) >= 4:
+            cmd_rename_folder(sys.argv[2], sys.argv[3])
+        else:
+            print("❌ Usage: rename_folder [id|folder] \"<NewName {tmdb-12345}>\"")
 
     elif cmd == "fetch":
         if len(sys.argv) < 3:

@@ -244,6 +244,9 @@ Brackets denote optional args; `[id]` is the manual library ID like
 | `web` | `web [--port N] [--host H] [--no-browser]` | `cmd_web` — launch the local FastAPI operations console (Disk Reclaim view) at `http://127.0.0.1:8765`; lazy-imports fastapi/uvicorn so importing `main` never hard-requires them (IMP-E12) |
 | `fetch` | `fetch [id] [OPT: episodes <range>]` | `cmd_dispatch_fetch` — spawns `python mainfetch.py fetch ...` |
 | `recover` | `recover [id\|folder]` / `recover --scan` | `cmd_recover` — finish an interrupted rollback (calls `recover_journal`); `--scan` lists leftover journals read-only |
+| `set_tmdb` | `set_tmdb [id] [tmdb_id]` | `cmd_set_tmdb` — sets the OPTIONAL additive leaf field `metadata.tmdb_id`; zero-byte (no rehash); alias-safe |
+| `rename_folder` | `rename_folder [old_id_or_path] "<new_name>"` | `cmd_rename_folder` — crash-safe cascading folder rename: renames the on-disk dir + atomically rewrites `folder_path` for every descendant (season_map + leaves; `multi_ep_alias` skipped); uses the existing `RollbackJournal` (journal in parent dir; `os.rename` = PONR) — additive, does NOT change the rollback contract (journal format/PONR/`RollbackHardFail` unchanged); hash-safe (moves a dir + rewrites JSON; no rehash; `uid`/`.sha256` sidecars move with the folder); works on archived dummies (cross-ref §12a) |
+| `enrich_metadata` | `enrich_metadata [id_or_prefix] [--apply] [--library X] [--nfo]` | `cmd_enrich_metadata` — local-first TMDB backfill (show-centric): resolves each show/movie once, writes `metadata.tmdb_id` + `metadata.title`/`year`, stamps the `{tmdb-…}` token once per show via `rename_folder` (seasons inherit), downloads show + per-season `poster.jpg`/`fanart.jpg` — NEVER overwriting a local image, NEVER fetching media, cached, dry-run default; `--nfo` writes Kodi/Jellyfin `movie.nfo`/`tvshow.nfo` (title/year/plot/rating/`<uniqueid type="tmdb">`; inert to scanners — `.nfo` not in `VIDEO_EXTENSIONS`); search uses title from the id slug, TV searched title-only (no year filter), multi-variant query (raw + wordninja word-split) for concatenated slugs, ranked by difflib title-similarity → year → popularity; ambiguous → listed not guessed |
 
 > **`episodes` keyword is a required literal trigger.** For `fetch`,
 > `fetch_restore`, and `prep_push_rep_season`, the word `episodes` must
@@ -370,7 +373,12 @@ It binds **localhost only**.
   states including `archived`** — it is the complete library inventory for the
   media-type UI. `items_payload` and `collect_reclaimable` share a `_classify_item`
   helper so the two endpoints can't drift on state semantics; `/api/reclaim` output
-  is unchanged.
+  is unchanged. **Phase 5 additions:** `poster_available` is a live
+  `resolve_artwork_path` check (not a stored field); `tmdb_id` is read from
+  `metadata.tmdb_id` (OPTIONAL additive leaf field set by `set_tmdb` /
+  `enrich_metadata`); `title` now returns the real `metadata.title` (set by
+  `enrich_metadata`) rather than the humanized id slug — so the SPA shows real
+  titles and real posters (gradient fallback when neither exists).
 - **Media-type SPA (IMP-E14 Phases 1+2):** the front end gained a **media-type tab
   rail** (Movies / TV series / Anime / Others) — category derived from the entry's
   id prefix via `_category_of`. Within each tab a **sub-view rail** offers the
@@ -427,6 +435,15 @@ It binds **localhost only**.
     `fanart.jpg`, or the first match found in any descendant. The requested path is
     **realpath-contained to `C:\Media`**; only `poster.jpg` / `fanart.jpg` are
     served (no arbitrary file access).
+  - `GET /api/media-image/{id}?kind=poster|fanart` — **season-inheritance artwork
+    resolver** (`resolve_artwork_path`): look in the entry's own `folder_path` for
+    `poster.jpg` / `fanart.jpg`; if absent, check the `season_map`'s
+    `folder_path`; if still absent, walk UP the directory tree to the nearest
+    `{tmdb-…}` show folder. LOCAL copy ALWAYS wins over TMDB-stamped path. Security:
+    only `poster.jpg`/`fanart.jpg`, `realpath`-contained under `LOCAL_ROOT`, derived
+    from the library entry (no traversal); gated by the `/api/*` token guard. Used
+    by the SPA to display real posters on media-type cards; a gradient is the
+    fallback when no artwork exists.
   - `POST /api/open-folder` — opens the specified folder in Windows Explorer via
     `subprocess`. **Localhost-only** (non-loopback callers receive **403**; path is
     realpath-contained to `C:\Media`). Simulated in demo mode without spawning
@@ -625,10 +642,11 @@ parents, and multi-episode aliases.
   "hash":          "e2a0221b...d92d",         // SHA256 of ORIGINAL file; for split entries becomes the deterministic CANONICAL merged hash once blessed (see re_hashed, §6.4a)
   "re_hashed":     false,                      // OPTIONAL — split entries only; true once the canonical merged hash is blessed
   "metadata": {
-    "title":      "<the manual ID>",
+    "title":      "<the manual ID>",              // real title once enrich_metadata runs; raw id slug before
     "year":       2025,
     "genre":      [],
-    "added_date": "2026-01-02"
+    "added_date": "2026-01-02",
+    "tmdb_id":    12345                           // OPTIONAL — set by set_tmdb / enrich_metadata; zero-byte (no rehash); alias-safe
   },
   "tech_spec": {
     "resolution":     "2160p" | "1080p" | "720p" | "<H>p",
@@ -717,6 +735,58 @@ deliberately skipped in `scan_unprepped`, `local_status`, `sort`, and
 > is the PR #21 / IMP-C12 crash class (`KeyError: 'folder_path'`). The registry is
 > documentation/guard-only (not wired into any `cmd_*` path); it is enforced by
 > `tests/test_entry_schema_guard.py` and the `tests/smoke/` alias sweep (§13).
+
+### 6.3a TMDB enrichment conventions (Phase 5 — IMP-E3 / IMP-D17)
+
+**`{tmdb-<id>}` folder token** (Plex/Emby/Jellyfin standard). `enrich_metadata`
+stamps a `{tmdb-<id>}` suffix onto the show's top-level folder exactly once via
+`rename_folder` — e.g. `Death Note (Complete Series)` →
+`Death Note (Complete Series) {tmdb-12345}`. Seasons inside the folder inherit
+the token automatically (their `folder_path` is under the parent directory and
+does not repeat the token). This is push-safe because `split_video_file` already
+escapes literal `{`/`}` as `{{`/`}}` in the mkvmerge `-o` argument (mkvmerge
+v97 treats the output name as a format string; the merge `-o` path is literal, so
+the braces need escaping only in the split `-o` pattern, not in the merge).
+
+**`metadata.tmdb_id` OPTIONAL leaf field.** Set by `set_tmdb` or
+`enrich_metadata`. Additive: adding it is zero-byte (no rehash, no `folder_path`
+change). Alias-safe: `cmd_set_tmdb` skips `multi_ep_alias` entries (aliases carry
+no `metadata` dict). Read by `items_payload` → `/api/items` → the SPA.
+
+**Season-inheritance artwork resolution order (`resolve_artwork_path`).**
+Given an entry id, the resolver checks in order:
+1. Entry's own `folder_path` for `poster.jpg` / `fanart.jpg`.
+2. The `season_map` parent's `folder_path` (via `parent_id`).
+3. Walk UP the directory tree from the entry's folder to find the nearest
+   ancestor whose name contains `{tmdb-…}` (the show-level folder).
+A LOCAL image always wins over a TMDB-downloaded one — `enrich_metadata` never
+overwrites an existing file. Security: only `poster.jpg` / `fanart.jpg` are
+served; the resolved path is `realpath`-contained under `LOCAL_ROOT`; the path is
+derived entirely from the library entry (no user traversal).
+
+**wordninja runtime dependency.** `enrich_metadata`'s slug splitter imports
+`wordninja` for concatenated-slug decomposition (e.g. `kurokosbasketball` →
+`kuroko's basketball`). Imported via `try/except`; if absent the multi-variant
+query degrades to the raw slug only.
+
+**NFO emission (`--nfo` flag).** `enrich_metadata --nfo` writes
+`movie.nfo` / `tvshow.nfo` next to the media with Kodi/Jellyfin-compatible XML
+(`title`, `year`, `plot`, `rating`, `<uniqueid type="tmdb">`). `.nfo` is NOT in
+`VIDEO_EXTENSIONS` so it is invisible to `scan_unprepped` and the push pipeline.
+
+**`rename_folder` + rollback contract (cross-ref §12a).** `rename_folder` uses
+the existing `RollbackJournal` (journal written in the parent directory of the
+folder being renamed; `os.rename` on disk = PONR; `folder_path` JSON rewrite is
+post-PONR). It is ADDITIVE to the rollback mechanism: it does NOT change the
+journal format, the `fsync`+`os.replace` durability, the `RollbackHardFail`
+contract, or any PONR location in other commands. See §12a and
+`docs/feature-auto-rollback/ROLLBACK_MECHANISM.md` §10 (change-gate).
+
+**Hash safety of folder renames.** `rename_folder` moves the on-disk directory
+and rewrites `folder_path` in JSON. It does NOT change any file's bytes — the
+SHA256 hash stored in each leaf's `"hash"` key is over the file's BYTES, not its
+path (§7.4). Chunk hashes in `split_info` are also byte-hashes and are unchanged.
+`uid` / `.sha256` sidecars travel with the folder and remain valid.
 
 ### 6.4 Status state machine
 

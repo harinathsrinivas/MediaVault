@@ -374,3 +374,26 @@
 - Risk: low — read-only; the only hazard is the new whole-library iterator (the PR#21 / IMP-C12 class), handled by the alias-skip + the smoke `TestAliasSweep` sweep.
 - If skipped: N/A — shipped.
 - Status: **done** (`feature/web_console` / IMP-E12; PR to `main` pending).
+
+---
+
+## IMP-D17: `rename_folder` — crash-safe cascading folder rename
+
+- Category: other
+- Priority: high
+- Files: new `cmd_rename_folder` in `main.py`
+- Current behavior: Renaming a media folder requires hand-editing `folder_path` in every library entry that references it (leaf + season_map + any children). Missing even one breaks every downstream operation for that entry.
+- Proposed change (SHIPPED on `feature/imp_e3_u3_d17_tmdb_posters_rename`):
+  - New `python main.py rename_folder <old_id_or_path> "<new_name>"` command.
+  - Renames the on-disk directory via `os.rename` (atomic on Windows within the same volume).
+  - Atomically rewrites `folder_path` in the library for every descendant: season_map entries + leaf entries; `multi_ep_alias` entries are skipped (they carry no `folder_path`).
+  - Uses the **existing `RollbackJournal`** — journal written in the parent directory of the folder being renamed; `os.rename` on disk = PONR; `folder_path` JSON rewrite is post-PONR. **ADDITIVE to the rollback contract** — does NOT change the journal format, `fsync`+`os.replace` durability, `RollbackHardFail` semantics, or any PONR location in other commands (cross-ref §12a and `docs/feature-auto-rollback/ROLLBACK_MECHANISM.md` §10).
+  - **Hash-safe:** moves a directory + rewrites JSON paths only; no file bytes are changed; SHA256 hashes remain valid; `uid`/`.sha256` sidecars travel with the folder.
+  - Works on archived dummies (the dummy file travels with the folder).
+  - Used internally by `enrich_metadata` to stamp the `{tmdb-…}` folder token on show directories.
+- Rationale: Foundation for `enrich_metadata`'s `{tmdb-…}` folder-token stamping, and a long-standing operational need. The `{tmdb-…}` convention is how Plex/Emby/Jellyfin associate a folder with a specific TMDB entry — without it, media servers rely on filename matching alone.
+- Goal: Safe, atomic folder renames with full library bookkeeping; enables the TMDB folder-token convention.
+- Effort estimate: small
+- Risk: low — uses the existing rollback mechanism (additive, no contract change); the only failure mode is an `os.rename` that fails mid-way (PONR not yet crossed) or a JSON save that fails (post-PONR, recoverable via `recover`).
+- If skipped: TMDB folder-token stamping requires manual renames + hand-edited JSON; `enrich_metadata` cannot stamp tokens automatically; folders keep accumulating stale names after a TMDB match.
+- Status: **done** (`feature/imp_e3_u3_d17_tmdb_posters_rename`, 2026-06-24)

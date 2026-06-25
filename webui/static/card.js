@@ -101,6 +101,52 @@ function addOpenFolderButton(poster, item) {
   poster.appendChild(btn);
 }
 
+// Point a card's poster slot at its real artwork: GET /api/media-image/<id>?kind=
+// poster (the server applies season-inheritance + serves the local jpg as-is).
+//
+// GATED on item.poster_available (Phase 5.7): items_payload() now reports, per
+// row, whether resolve_artwork_path finds a poster on disk — the SAME resolver
+// this endpoint uses. When it is FALSE we create NO <img> at all and the gradient
+// + initial placeholder stands alone, so a posterless card never fires a
+// speculative request that would just 404. When it is TRUE we still keep the
+// belt-and-suspenders `error` fallback (the file could vanish between the scan
+// and the request): on error the <img> hides and the gradient shows through, so a
+// missing poster never flashes a broken-image icon.
+//
+// XSS-safe: the id is the library's own canonical id, URL-encoded into the path;
+// no markup is ever interpolated.
+function addPosterImage(poster, item) {
+  var id = item && item.id;
+  if (!poster || !id) return;
+  // No poster on disk -> leave the gradient placeholder; request nothing.
+  if (!item.poster_available) return;
+
+  var img = document.createElement("img");
+  img.className = "poster-img";
+  img.alt = "";              // decorative; the title is the accessible label
+  img.loading = "lazy";
+  img.decoding = "async";
+  img.draggable = false;
+  // Start invisible via CSS opacity (NOT `hidden`/display:none). A loading="lazy"
+  // img with display:none has NO layout box, so the browser never sees it near the
+  // viewport and NEVER fetches it -> the `load` event never fires -> the poster
+  // stays invisible forever (the deadlock this replaces). opacity:0 keeps a layout
+  // box so lazy still fetches it; .is-loaded fades it in on load. On error we drop
+  // the <img> so the gradient placeholder + initial show through (no broken icon).
+  img.addEventListener("load", function () {
+    img.classList.add("is-loaded");
+    poster.classList.add("has-poster"); // enables the bottom scrim (styles.css)
+  });
+  img.addEventListener("error", function () {
+    img.remove();
+    poster.classList.remove("has-poster");
+  });
+  img.src = "/api/media-image/" + encodeURIComponent(id) + "?kind=poster";
+  // Prepend so it sits beneath the badge/open-folder button (which are appended
+  // after) and over the gradient background. The CSS gives it z-index:1.
+  poster.insertBefore(img, poster.firstChild);
+}
+
 // Clipboard with execCommand fallback (localhost is a non-secure context where
 // navigator.clipboard may be undefined).
 function copyText(text) {
@@ -194,11 +240,13 @@ export function buildCard(item) {
   node.dataset.state = item.state;
   if (isArchived) node.classList.add("archived");
 
-  // Poster slot (gradient + big initial placeholder). Phase 5 fills a real
-  // image; the slot must exist now so later phases have a mount point.
+  // Poster slot (gradient + big initial placeholder). Phase 5.2 wires a real
+  // image on top: addPosterImage points an <img> at /api/media-image/<id> and
+  // hides it on error, so a missing poster falls back to this gradient.
   var poster = $(".poster", node);
   poster.classList.add("p-" + m.cssKey);
   $(".initial", poster).textContent = initialFor(item.id);
+  addPosterImage(poster, item);
 
   // Badge (color-coded by state).
   var badge = $(".badge", poster);

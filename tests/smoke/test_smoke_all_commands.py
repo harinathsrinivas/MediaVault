@@ -826,6 +826,117 @@ class TestEachCommand:
         out = capsys.readouterr().out
         assert "POSTER" in out and "FANART" in out  # both ran without a network call
 
+    # ---- set_tmdb -----------------------------------------------------------
+    def test_set_tmdb(self, sandbox, make_video, capsys):
+        """set_tmdb <id> <tmdb_id> writes metadata.tmdb_id on the leaf; no crash."""
+        info = _seed_single(sandbox, make_video)
+        main.cmd_set_tmdb(info["id"], "12345")
+        lib = mvcommon.load_library()
+        assert lib[info["id"]]["metadata"]["tmdb_id"] == 12345
+
+    # ---- rename_folder ------------------------------------------------------
+    def test_rename_folder(self, sandbox, make_video, capsys):
+        """rename_folder <id> <new-name> renames the on-disk folder + rewrites
+        folder_path for every library entry that lives under it. No rehash."""
+        info = _seed_single(sandbox, make_video)
+        old_folder = info["folder"]
+        new_name = old_folder.name + " {tmdb-99901}"  # stamp a token
+
+        result = main.cmd_rename_folder(info["id"], new_name)
+        assert result is True
+
+        # Folder physically moved.
+        new_folder = old_folder.parent / new_name
+        assert new_folder.is_dir()
+        assert not old_folder.exists()
+
+        # Library pointer rewritten.
+        lib = mvcommon.load_library()
+        assert new_name in lib[EP1_ID]["folder_path"]
+
+        # Hash is UNCHANGED (rename is path-only, not a rehash).
+        assert lib[EP1_ID]["hash"] == info["hash"]
+
+    def test_rename_folder_via_alias(self, sandbox_alias, capsys):
+        """rename_folder via an alias-bearing library: season_map folder renamed,
+        all children (primary + alias) have their folder_path updated correctly.
+        No multi_ep_alias corruption; alias still has type == multi_ep_alias."""
+        old_media = sandbox_alias["media_dir"]
+        new_name = old_media.name + " {tmdb-1984}"
+
+        result = main.cmd_rename_folder(sandbox_alias["season_id"], new_name)
+        assert result is True
+
+        new_folder = old_media.parent / new_name
+        assert new_folder.is_dir()
+        assert not old_media.exists()
+
+        lib = mvcommon.load_library()
+        # Primary leaf's folder_path updated.
+        assert new_name in lib[sandbox_alias["primary_id"]]["folder_path"]
+        # Alias entry UNCHANGED (it has no folder_path — it's a 3-key virtual entry).
+        alias = lib[sandbox_alias["alias_id"]]
+        assert alias["type"] == "multi_ep_alias"
+        assert "alias_of" in alias and "parent_id" in alias
+
+    # ---- enrich_metadata (with mock_tmdb) -----------------------------------
+    def test_enrich_metadata_dry_run(self, sandbox, make_video, mock_tmdb, capsys):
+        """DRY-RUN (no --apply): a confident match is REPORTED but NOTHING is
+        written. No network call escapes (mock_tmdb intercepts main.requests.get)."""
+        info = _seed_single(sandbox, make_video)
+        # Adjust the entry's metadata title so mock_tmdb's canned "smk" result matches.
+        lib = mvcommon.load_library()
+        lib[info["id"]].setdefault("metadata", {})["title"] = "SMK"
+        mvcommon.save_library(lib)
+        before = mvcommon.load_library()
+
+        main.cmd_enrich_metadata(info["id"])  # no --apply -> dry-run
+
+        out = capsys.readouterr().out
+        assert "DRY-RUN" in out
+        # Library not changed.
+        assert mvcommon.load_library() == before
+        # No real subprocess was called (no ADB / no media fetch).
+        # The mock_tmdb fixture guarantees no real network hit.
+
+    def test_enrich_metadata_apply(self, sandbox, make_video, mock_tmdb, capsys):
+        """--apply: writes metadata.tmdb_id on a confident match. No network call
+        escapes, no subprocess.run (no ADB), no Popen (no media fetch). The
+        stored entry hash is untouched (no rehash)."""
+        # Ensure subprocess.run / Popen would raise if somehow called.
+        import main as _main
+        _orig_run = _main.subprocess.run
+        _orig_popen = _main.subprocess.Popen
+
+        def _no_run(*a, **k):
+            raise AssertionError("enrich_metadata must NOT call subprocess.run")
+
+        def _no_popen(*a, **k):
+            raise AssertionError("enrich_metadata must NOT call subprocess.Popen")
+
+        _main.subprocess.run = _no_run
+        _main.subprocess.Popen = _no_popen
+
+        try:
+            info = _seed_single(sandbox, make_video)
+            lib = mvcommon.load_library()
+            lib[info["id"]].setdefault("metadata", {})["title"] = "SMK"
+            mvcommon.save_library(lib)
+            original_hash = mvcommon.load_library()[info["id"]]["hash"]
+
+            main.cmd_enrich_metadata(info["id"], "--apply")
+        finally:
+            _main.subprocess.run = _orig_run
+            _main.subprocess.Popen = _orig_popen
+
+        out = capsys.readouterr().out
+        assert "APPLIED" in out or "tmdb_id=99901" in out
+
+        lib = mvcommon.load_library()
+        assert lib[info["id"]]["metadata"]["tmdb_id"] == 99901
+        # Hash must not change (no rehash).
+        assert lib[info["id"]]["hash"] == original_hash
+
 
 # ===========================================================================
 # Group 1b — ONE genuine real-binary split push (gated). Proves the REAL split
@@ -1011,3 +1122,43 @@ class TestAliasSweep:
 
     def test_recover_scan_alias(self, sandbox_alias, smoke_local_root):
         main.cmd_recover(scan=True)  # walks the sandbox tree; tolerates the alias library
+
+    # -- set_tmdb / rename_folder / enrich_metadata over the alias library -----
+
+    def test_set_tmdb_alias(self, sandbox_alias):
+        """set_tmdb on the primary id in an alias-bearing library: no crash, no
+        corruption of the alias entry."""
+        main.cmd_set_tmdb(sandbox_alias["primary_id"], "1984")
+        lib = mvcommon.load_library()
+        assert lib[sandbox_alias["primary_id"]]["metadata"]["tmdb_id"] == 1984
+        # Alias must survive the set_tmdb call unchanged.
+        assert lib[sandbox_alias["alias_id"]]["type"] == "multi_ep_alias"
+
+    def test_rename_folder_alias(self, sandbox_alias, capsys):
+        """rename_folder over an alias-bearing season: folder renamed, primary's
+        folder_path updated, alias 3-key shape preserved (no folder_path on alias)."""
+        old_media = sandbox_alias["media_dir"]
+        new_name = old_media.name + " {tmdb-1984}"
+        result = main.cmd_rename_folder(sandbox_alias["season_id"], new_name)
+        assert result is True
+        # The renamed folder must exist and the old one must not.
+        new_folder = old_media.parent / new_name
+        assert new_folder.is_dir()
+        assert not old_media.exists()
+        lib = mvcommon.load_library()
+        assert new_name in lib[sandbox_alias["primary_id"]]["folder_path"]
+        alias = lib[sandbox_alias["alias_id"]]
+        assert alias["type"] == "multi_ep_alias"  # alias still valid
+
+    def test_enrich_metadata_alias(self, sandbox_alias, mock_tmdb, capsys):
+        """enrich_metadata (dry-run) over an alias-bearing library: must not crash,
+        must not corrupt the multi_ep_alias entry. No network call escapes
+        (mock_tmdb intercepts main.requests.get)."""
+        # The alias library has a BSG show — mock_tmdb has a canned "bsg" result.
+        main.cmd_enrich_metadata()  # whole library, dry-run (no --apply)
+        out = capsys.readouterr().out
+        # No crash; the output should mention the enrich header.
+        assert "ENRICH METADATA" in out
+        # The alias entry must not have been mutated (dry-run + alias has no metadata).
+        lib = mvcommon.load_library()
+        assert lib[sandbox_alias["alias_id"]]["type"] == "multi_ep_alias"

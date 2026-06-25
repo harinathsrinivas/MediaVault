@@ -202,6 +202,9 @@ help text and no `--help` flag; this table is the reference.
 | `set_search`           | `set_search [id] [term]`                                                                                                            | Override the Google Photos search term                                                                                                                 |
 | `set_poster`           | `set_poster [id] [url]`                                                                                                             | Download and save poster.jpg into the media folder                                                                                                     |
 | `set_fanart`           | `set_fanart [id] [url]`                                                                                                             | Download and save fanart.jpg into the media folder                                                                                                     |
+| `set_tmdb`             | `set_tmdb [id] [tmdb_id]`                                                                                                           | Set the TMDB id on a library entry (additive, no rehash, alias-safe)                                                                                  |
+| `rename_folder`        | `rename_folder [old_id_or_path] "<new_name>"`                                                                                       | Crash-safe cascading folder rename — renames the on-disk dir and atomically rewrites `folder_path` for every descendant; uses the existing rollback journal; hash-safe |
+| `enrich_metadata`      | `enrich_metadata [id_or_prefix] [--apply] [--library X] [--nfo]`                                                                   | Local-first TMDB backfill: sets real titles, tmdb_id, downloads poster/fanart (never overwrites locals), stamps `{tmdb-…}` folder token; `--nfo` writes Kodi/Jellyfin NFO files; dry-run by default |
 | `set_uploaded`         | `set_uploaded [id]`                                                                                                                 | Force-mark as uploaded (emergency rescue)                                                                                                              |
 | `sort`                 | `sort`                                                                                                                              | Re-sort all library JSONs by language -> year -> size                                                                                                  |
 | `recover`              | `recover [id\|folder]` (or `recover --scan`)                                                                                        | Finish an interrupted auto-rollback for a media folder (resolves by id or path); `--scan` reports leftover `.mediavault_txn.json` journals (read-only) |
@@ -333,6 +336,55 @@ and returns 403 over Tailscale regardless of the token — by design.
 > If a range matches nothing in a non-empty season, the tool prints a
 > `⚠️` (and the `fetch_restore` auto-pilot skips its green success banner)
 > rather than silently reporting success.
+
+### TMDB metadata enrichment workflow
+
+`enrich_metadata` is the bulk backfill command for real titles, posters, and
+Jellyfin-friendly NFO files. Set `tmdb.api_key` in `mvconfig.json` first (same
+file as `web.host`/`web.port`; see the Remote access section).
+
+**Dry-run first (default):**
+```
+python main.py enrich_metadata                   # preview all entries — prints what WOULD change
+python main.py enrich_metadata mov-en-2024-inception  # preview one entry
+python main.py enrich_metadata --library movies   # preview one library
+```
+
+**Apply:**
+```
+python main.py enrich_metadata --apply            # write metadata.tmdb_id, title, download posters
+python main.py enrich_metadata --apply --nfo      # also write movie.nfo / tvshow.nfo for Jellyfin
+```
+
+What `--apply` does (local-first, never destructive):
+- Sets `metadata.tmdb_id` and real `metadata.title` / `year` on each entry.
+- Downloads `poster.jpg` / `fanart.jpg` into the show/season folder — NEVER
+  overwriting a file that already exists there.
+- Stamps a `{tmdb-12345}` suffix onto the show's top-level folder once via
+  `rename_folder` so Plex/Emby/Jellyfin pick up the id (seasons inherit it).
+- Cached: each show is resolved once and re-used for all its seasons/episodes.
+- Ambiguous matches are LISTED, not guessed — review and use `set_tmdb` to pin.
+
+**Fine-grained TMDB control:**
+```
+python main.py set_tmdb mov-en-2024-inception 27205      # pin a specific TMDB id
+python main.py rename_folder mov-en-2024-inception "Inception (2010) {tmdb-27205}"  # manual rename
+```
+
+`rename_folder` is crash-safe: it uses the existing rollback journal
+(journal in the parent dir; the actual `os.rename` is the point-of-no-return)
+and rewrites `folder_path` in the library for every descendant automatically.
+It does NOT change any file's bytes — hashes remain valid.
+
+**NFO files.** `--nfo` writes `movie.nfo` / `tvshow.nfo` with title / year /
+plot / rating / `<uniqueid type="tmdb">` — Kodi and Jellyfin both read these as
+authoritative metadata. The `.nfo` extension is not in `VIDEO_EXTENSIONS` so it
+is invisible to `scan_unprepped` and the push pipeline.
+
+**Posters in the web UI.** Once `poster.jpg` files exist, media-type cards in
+the operations console (`python main.py web`) show real poster artwork. Cards
+without a poster display a colour-gradient fallback. Real titles (from
+`metadata.title`) also replace the humanized id slug in the card header.
 
 ### Pinning a push to a specific phone (multi-device)
 

@@ -9,19 +9,25 @@
 > Full task text lives in `improvements_tier*.md`; this file only orders them. Legend:
 > 🔴 critical · 🟠 high · 🟡 medium · ⚪ low · ✅ done · 🚦 needs a user decision (change-gate).
 >
-> **Last updated:** 2026-06-23 (IMP-E15 — mobile + Tailscale serve + shared-token auth + mvconfig.json minimal slice — on `feature/imp_e15_mobile_tailscale_auth`: mvconfig.json loader in mvcommon (web.host/port/token + tmdb.api_key); shared-token auth middleware on all /api/* (cookie/header/query, constant-time compare, 401); non-localhost startup guard; tailscale serve HTTPS setup (tools/tailscale_serve_setup.ps1 + REMOTE_ACCESS.md); auth.js token capture → cookie/header on every fetch → 401 prompt; IMP-A5 minimal slice. Earlier: IMP-E14 grouped folder view + space background + open-in-Explorer + iOS no-cache fix; hover motion + PWA; fetch-in-UI; media-type tabs; IMP-D4 integrity guard; IMP-A12 CI pipeline; IMP-E12 web ops console + IMP-D16).
+> **Last updated:** 2026-06-24 (Phase 5: IMP-E3/U3/D17 — TMDB enrich + rename_folder + /api/media-image + real posters/titles in SPA + `{tmdb-…}` folder token fix for mkvmerge split — on `feature/imp_e3_u3_d17_tmdb_posters_rename`. IMP-E14 Phase 5 complete → IMP-E14 fully done. IMP-D17 done. IMP-E15 done. IMP-E3 partial (local-first TMDB slice shipped; AniDB/TheTVDB breadth + per-ep NFOs pending). IMP-U3 partial (NFO/artwork down-payment shipped; per-episode NFOs + anime ids pending). Earlier: IMP-E15 — mobile + Tailscale serve + shared-token auth + mvconfig.json minimal slice; IMP-E14 grouped folder view + space background + open-in-Explorer + iOS no-cache fix; hover motion + PWA; fetch-in-UI; media-type tabs; IMP-D4 integrity guard; IMP-A12 CI pipeline; IMP-E12 web ops console + IMP-D16).
 
 ---
 
-## 👉 SUGGESTED NEXT TASK: **IMP-E3 / IMP-U3 / IMP-D17** — Phase 5: TMDB posters + real titles + rename_folder
+## 👉 SUGGESTED NEXT TASK: **IMP-S1 (Jellyfin stand-up)** + **IMP-S2 (mvdaemon)** — the daemon path + couch-vault plumbing
 
-**IMP-E15 is done** (Phase 4 of the web media-UI plan on `feature/imp_e15_mobile_tailscale_auth`:
-mvconfig.json minimal config; shared-token auth on all `/api/*`; non-localhost startup guard; Tailscale
-HTTPS serve setup script; auth.js client token UX; IMP-A5 minimal slice).
-**Phase 5 is next**: TMDB metadata enrichment (real titles + posters + NFO for Jellyfin), rename_folder
-command, and NFO/artwork pipeline. Tracked as **IMP-E3** (metadata enrichment), **IMP-U3** (NFO + artwork
-pipeline), **IMP-D17** (rename_folder command). Full tracked plan at `docs/feature-web-media-ui/PLAN.md`.
-A cheap zero-code parallel win is still available: **IMP-S1** — stand up Jellyfin (immediate couch value).
+**Phase 5 is done** (IMP-E3 partial / IMP-U3 partial / IMP-D17 done — TMDB enrichment, rename_folder,
+/api/media-image, real posters/titles in SPA, `{tmdb-…}` folder token — on
+`feature/imp_e3_u3_d17_tmdb_posters_rename`). **IMP-E14 fully done** (all 5 phases). **IMP-E15 done**.
+
+**Recommended next starts (pick one or run in parallel):**
+1. **IMP-S1** — stand up Jellyfin using `improvements/JELLYFIN_SETUP_GUIDE.md`: zero code, immediate
+   couch value; the NFOs + posters from Phase 5 will populate the Jellyfin library on first scan.
+2. **IMP-S2** — mvdaemon service: the one new component the end goal needs (the web worker is its seed).
+3. **IMP-E3 / IMP-U3 breadth** — AniDB/AniList/TheTVDB + per-episode NFOs + anime ids in NFOs +
+   backfill review-diff mode (the partial slices still have pending scope).
+4. **IMP-A2 → A5 config chain** — argparse CLI + `--json` + full mvconfig migration (unblocks daemon).
+
+**Headline NEXT: IMP-S1** (zero code, do anytime — Jellyfin is the couch surface the vault is being built for).
 
 > 🚦 **IMP-R6** and **IMP-R7** still await user decisions before any code — see Band 0 table.
 
@@ -77,7 +83,7 @@ Perf: `B1`–`B10`. Utility commands: `D2`,`D3`,`D6`–`D15`. Integration long-t
 `E8`,`E10`,`E11`. Rollback hardening: `R1`,`R3`,`R4`,`R5`,`R8`,`R9` (R4/R8/R9 are 🚦 change-gated).
 Moonshots: `F1`–`F9`. Research-only: `G3`,`G5`,`H2`,`A6`.
 
-## ✅ DONE (25)
+## ✅ DONE (28)
 
 `A1` (mvcommon) · `A7` (pytest harness) · `C2` (retry) · `C4` (device pinning) · `C8` (post-push verify) ·
 `C9` (atomic replace) · `C11` (restore quarantine) · `C12` (alias crash: scan/local_status) ·
@@ -85,7 +91,10 @@ Moonshots: `F1`–`F9`. Research-only: `G3`,`G5`,`H2`,`A6`.
 `H1` (Opus 4.8 effort tiers) · `H3` (smoke gate + consumer-impact guardrail + data-request protocol) ·
 `R2` (recover CLI) · `E12` (web ops console — Disk Reclaim view + suggested next-commands + integrated sort/replace) ·
 `A10` (requirements truth-up) · `D16` (scan_reclaimable — four-state reclaim scan behind `web`) · `A12` (CI pipeline — GitHub Actions full + smoke gate on every PR) ·
-`D4` (partial: integrity guard — verify_library status-to-disk invariant + warn-only pipeline post-conditions; broader audits remain in_progress).
+`D4` (partial: integrity guard — verify_library status-to-disk invariant + warn-only pipeline post-conditions; broader audits remain in_progress) ·
+`E14` (web media-type UI — all 5 phases: tabs + fetch/progress + motion/PWA + grouped folder + remote auth + TMDB posters/titles) ·
+`E15` (mobile + Tailscale + admin-minted token auth) ·
+`D17` (rename_folder — crash-safe cascading folder rename + `{tmdb-…}` token stamp).
 
 ---
 

@@ -33,7 +33,8 @@ import mvcommon
 # docstring + row builder at main.py:3658-3671.
 _ITEM_BASE_KEYS = {
     "id", "category", "state", "size_bytes", "path",
-    "title", "year", "tmdb_id", "poster_available", "chunk_count",
+    "title", "year", "tmdb_id", "poster_available", "backdrop_available",
+    "overview", "episode_title", "chunk_count",
 }
 
 
@@ -484,3 +485,147 @@ def test_api_items_reports_poster_available_and_tmdb_id(sandbox, make_video):
     assert rows[with_id]["title"] == "Inception"
     assert rows[no_id]["poster_available"] is False
     assert rows[no_id]["tmdb_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# (h) overview / episode_title / backdrop_available reporting (IMP-E16 step 1)
+#
+# items_payload() also surfaces, per row:
+#   * overview         = entry.metadata.overview      (TMDB synopsis) or null
+#   * episode_title    = entry.metadata.episode_title (episode name)  or null
+#   * backdrop_available = a LIVE on-disk fanart check via resolve_artwork_path
+#                          (the SAME resolver /api/media-image uses for fanart)
+# These back the hover detail-window (backdrop + synopsis + episode info). All
+# read-only, over the LOCAL_ROOT-hermetic sandbox (never real C:\Media).
+# ---------------------------------------------------------------------------
+
+def _seed_overview_fixtures(sandbox, make_video):
+    """Seed under LOCAL_ROOT:
+      * mov-en-2010-withbackdrop : has fanart.jpg in-folder + metadata
+        {overview:"Dreams within dreams.", title/year/tmdb_id} -> backdrop True
+      * mov-en-2011-plain        : NO fanart.jpg, NO overview metadata -> backdrop
+        False, overview/episode_title null
+      * a series episode under a {tmdb-…} show folder with a SHOW-level fanart.jpg
+        and metadata {overview (episode synopsis), episode_title:"Pilot"} -> the
+        episode inherits the show backdrop (resolve walks up to the {tmdb-…} folder)
+    Returns (backdrop_id, plain_id, ep_id)."""
+    root = sandbox["local_root"]
+
+    # Movie WITH an in-folder fanart.jpg + an overview.
+    bd_dir = root / "Movies" / "Inception {tmdb-27205}"
+    bd_dir.mkdir(parents=True, exist_ok=True)
+    make_video(bd_dir / "Inception.2010.mkv", marker=b"B")
+    (bd_dir / "fanart.jpg").write_bytes(b"\xff\xd8\xff\xe0FAKE-FANART\xff\xd9")
+    bd_id = "mov-en-2010-withbackdrop"
+
+    # Movie WITHOUT any fanart and WITHOUT overview metadata.
+    plain_dir = root / "Movies" / "Plain"
+    plain_dir.mkdir(parents=True, exist_ok=True)
+    make_video(plain_dir / "Plain.2011.mkv", marker=b"P")
+    plain_id = "mov-en-2011-plain"
+
+    # Series episode under a {tmdb-…} show folder carrying a SHOW-level fanart.jpg.
+    show_dir = root / "Series" / "The Office {tmdb-2316}"
+    season_dir = show_dir / "Season 01"
+    season_dir.mkdir(parents=True, exist_ok=True)
+    (show_dir / "fanart.jpg").write_bytes(b"\xff\xd8\xff\xe0SHOW-FANART\xff\xd9")
+    make_video(season_dir / "The.Office.S01E01.mkv", marker=b"E")
+    season_id = "tv-en-2005-the-office-s01"
+    ep_id = "tv-en-2005-the-office-s01e01"
+
+    movies = {
+        bd_id: {
+            "status": "local_ready", "uploaded": False,
+            "folder_path": str(bd_dir), "filename": "Inception.2010.mkv",
+            "type": "movie",
+            "metadata": {"title": "Inception", "year": 2010, "tmdb_id": 27205,
+                         "overview": "Dreams within dreams."},
+        },
+        plain_id: {
+            "status": "local_ready", "uploaded": False,
+            "folder_path": str(plain_dir), "filename": "Plain.2011.mkv",
+            "type": "movie",
+            # No overview / no episode_title -> both null in the payload.
+        },
+    }
+    series = {
+        season_id: {"type": "season_map", "folder_path": str(season_dir),
+                    "total_episodes": 1, "children": [ep_id]},
+        ep_id: {
+            "status": "local_ready", "uploaded": False,
+            "folder_path": str(season_dir), "filename": "The.Office.S01E01.mkv",
+            "parent_id": season_id,
+            "metadata": {"title": "The Office", "year": 2005, "tmdb_id": 2316,
+                         "overview": "The documentary begins.",
+                         "episode_title": "Pilot"},
+        },
+    }
+    _write_libs(sandbox, movies=movies, series=series)
+    return bd_id, plain_id, ep_id
+
+
+def test_overview_episode_title_and_backdrop_reported(sandbox, make_video):
+    """items_payload() reports overview (metadata.overview or null), episode_title
+    (metadata.episode_title or null), and backdrop_available (a real on-disk fanart
+    check via resolve_artwork_path, True only when a fanart.jpg is resolvable)."""
+    bd_id, plain_id, ep_id = _seed_overview_fixtures(sandbox, make_video)
+
+    rows = {it["id"]: it for it in main.items_payload()["items"]}
+    assert {bd_id, plain_id, ep_id} <= set(rows), f"got ids={list(rows)}"
+
+    bd, plain, ep = rows[bd_id], rows[plain_id], rows[ep_id]
+
+    # backdrop_available reflects a REAL on-disk fanart.jpg (in-folder for the movie,
+    # inherited from the {tmdb-…} show folder for the episode); False with no fanart.
+    assert bd["backdrop_available"] is True
+    assert ep["backdrop_available"] is True, "episode inherits the show-folder fanart"
+    assert plain["backdrop_available"] is False
+
+    # overview reflects metadata.overview / null when absent.
+    assert bd["overview"] == "Dreams within dreams."
+    assert ep["overview"] == "The documentary begins."
+    assert plain["overview"] is None
+
+    # episode_title reflects metadata.episode_title (only the episode has one).
+    assert ep["episode_title"] == "Pilot"
+    assert bd["episode_title"] is None
+    assert plain["episode_title"] is None
+
+    # backdrop_available is a real bool (JSON-friendly), never a path/object.
+    for r in (bd, plain, ep):
+        assert isinstance(r["backdrop_available"], bool)
+
+
+def test_backdrop_available_false_when_fanart_removed(sandbox, make_video):
+    """backdrop_available is a LIVE disk check, not a cached flag: deleting the
+    fanart.jpg flips a previously-True row to False on the next call."""
+    bd_id, _, _ = _seed_overview_fixtures(sandbox, make_video)
+
+    first = {it["id"]: it for it in main.items_payload()["items"]}
+    assert first[bd_id]["backdrop_available"] is True
+
+    (sandbox["local_root"] / "Movies" / "Inception {tmdb-27205}" / "fanart.jpg").unlink()
+
+    second = {it["id"]: it for it in main.items_payload()["items"]}
+    assert second[bd_id]["backdrop_available"] is False
+
+
+@pytest.mark.usefixtures("web_as_local_admin")
+def test_api_items_reports_overview_and_backdrop(sandbox, make_video):
+    """The HTTP surface carries overview/episode_title/backdrop_available end-to-end:
+    GET /api/items mirrors items_payload()."""
+    from webui.server import create_app
+
+    bd_id, plain_id, ep_id = _seed_overview_fixtures(sandbox, make_video)
+
+    client = TestClient(create_app())
+    r = client.get("/api/items")
+    assert r.status_code == 200, f"/api/items -> {r.status_code}: {r.text}"
+    rows = {it["id"]: it for it in r.json()["items"]}
+
+    assert rows[bd_id]["backdrop_available"] is True
+    assert rows[bd_id]["overview"] == "Dreams within dreams."
+    assert rows[ep_id]["episode_title"] == "Pilot"
+    assert rows[plain_id]["backdrop_available"] is False
+    assert rows[plain_id]["overview"] is None
+    assert rows[plain_id]["episode_title"] is None

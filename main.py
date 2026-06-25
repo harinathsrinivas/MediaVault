@@ -1326,6 +1326,30 @@ def _episode_thumb_name(filename):
     return os.path.splitext(filename)[0] + "-thumb.jpg"
 
 
+def _season_episode_meta(season_details):
+    """Map episode_number -> {"overview", "name"} from a SEASON DETAILS payload
+    (GET /3/tv/{id}/season/{n}), or {} when the payload has no usable episodes.
+
+    The season-details endpoint returns `episodes[]`, each carrying `episode_number`,
+    `name` (the episode title, e.g. "Secrets") and `overview` (the episode synopsis).
+    This is the ONE-call-per-season source enrich uses to backfill per-episode
+    metadata.overview / metadata.episode_title.
+
+    Defensive: a None/empty payload, a missing/empty `episodes` list, or a member
+    with no integer episode_number all degrade to an empty/partial map so a failed
+    season-details fetch never raises (the caller simply writes nothing for that
+    season). Stores only the two fields enrich persists — overview + name."""
+    out = {}
+    for ep in (season_details or {}).get("episodes") or []:
+        if not isinstance(ep, dict):
+            continue
+        num = ep.get("episode_number")
+        if not isinstance(num, int):
+            continue
+        out[num] = {"overview": ep.get("overview") or "", "name": ep.get("name") or ""}
+    return out
+
+
 def _show_folder_of(season_folders):
     """The on-disk SHOW folder that the `{tmdb-…}` token is stamped onto, given the
     distinct season folders of one show.
@@ -1939,16 +1963,22 @@ def cmd_enrich_metadata(arg=None, *flags):
             continue
 
         # ---- APPLY: write tmdb_id + real title/year (additive), stamp, download ----
-        # 1) tmdb_id + real TITLE/YEAR on every leaf + season_map of the unit. The
-        #    cards read metadata.title (title.js: a non-id title auto-shows), so the
-        #    real TMDB title is filled here. ADDITIVE + IDEMPOTENT: title is replaced
-        #    only when it is still id-shaped/blank (placeholder) — a human-curated
-        #    title that differs from both the id AND the TMDB title is left intact.
-        #    Re-running just rewrites the same TMDB title (no-op). year is filled when
-        #    absent and refreshed when the TMDB year is known (the id year is often a
-        #    season's air year, so the matched show year is preferred).
+        # 1) tmdb_id + real TITLE/YEAR (+ synopsis) on every leaf + season_map of the
+        #    unit. The cards read metadata.title (title.js: a non-id title auto-shows),
+        #    so the real TMDB title is filled here. ADDITIVE + IDEMPOTENT: title is
+        #    replaced only when it is still id-shaped/blank (placeholder) — a
+        #    human-curated title that differs from both the id AND the TMDB title is
+        #    left intact. Re-running just rewrites the same TMDB title (no-op). year is
+        #    filled when absent and refreshed when the TMDB year is known (the id year
+        #    is often a season's air year, so the matched show year is preferred).
+        #    overview = the TMDB synopsis (movie/show overview); for a SHOW this SEEDS
+        #    every episode leaf with the show synopsis, which step 5 then refines into
+        #    each episode's OWN synopsis (so an episode whose season-details fetch fails
+        #    still degrades to the show synopsis rather than nothing). Only written when
+        #    TMDB actually has one, so a no-overview match leaves metadata untouched.
         tmdb_title = res.get("title")
         tmdb_year = res.get("year")
+        tmdb_overview = res.get("overview")
         live = load_library()
         for eid in unit["ids"]:
             ent = live.get(eid)
@@ -1963,6 +1993,8 @@ def cmd_enrich_metadata(arg=None, *flags):
                     meta["title"] = tmdb_title
             if tmdb_year is not None:
                 meta["year"] = tmdb_year
+            if tmdb_overview:
+                meta["overview"] = tmdb_overview
         save_library(live)
 
         # 2) stamp the {tmdb-…} token ONCE on the show/movie folder (paths only —
@@ -1981,6 +2013,18 @@ def cmd_enrich_metadata(arg=None, *flags):
         if image_base is None:
             image_base = _tmdb_image_base(api_key)
         n_images += _download_unit_images(unit, res, image_base, folder)
+
+        # 3b) per-episode synopsis + title (SHOWS only) — ONE season-details call per
+        #     season (cached) fills each episode leaf's metadata.overview (episode
+        #     synopsis) + metadata.episode_title (the episode name). Refines the
+        #     show-overview seeded in step 1; a failed season-details call degrades
+        #     gracefully (episode keeps the show synopsis, no crash). Never fetches
+        #     media. NOTE: this ADDS one cached GET /tv/{id}/season/{n} per season; the
+        #     existing per-season-poster + per-episode-still image calls are unchanged
+        #     (so the highest-vote still selection + the LOCAL-wins/error fall-backs all
+        #     stay exactly as before).
+        if unit["kind"] == "show":
+            _apply_episode_overviews(unit, tmdb_id, api_key)
 
         # 4) NFO write — only when --nfo flag is set (IMP-U3 down-payment, step 5.8).
         if write_nfo and folder:
@@ -2117,6 +2161,72 @@ def _download_unit_images(unit, res, image_base, folder):
             print(f"     ⬇️  {thumb}")
             written += 1
     return written
+
+
+def _apply_episode_overviews(unit, series_id, api_key):
+    """Backfill per-episode `metadata.overview` + `metadata.episode_title` for a
+    SHOW unit, using ONE SEASON DETAILS call per season (GET /3/tv/{id}/season/{n},
+    cached), and persist the result. Returns the number of episode leaves updated.
+
+    The season-details endpoint returns `episodes[]` each with `overview` + `name`,
+    so a single call per season covers every episode of that season (far fewer API
+    calls than one /images call per episode). Episodes are keyed by the
+    (season, episode) numbers `_episode_se_of` parses from each leaf id, exactly as
+    the per-episode still loop keys its /episode/{e}/images call — so the same leaves
+    are reached either way.
+
+    ADDITIVE + IDEMPOTENT: writes overview (episode synopsis) and episode_title (the
+    episode `name`, e.g. "Secrets") onto each episode leaf's metadata; a re-run just
+    rewrites the same values. The SHOW-level overview is written separately by the
+    caller (so the season_map / movie leaf carry the show synopsis); this refines the
+    episode leaves with their own synopsis + title.
+
+    GRACEFUL DEGRADATION: a failed/empty season-details call (network/404 -> None, or
+    a payload with no `episodes`) yields an empty lookup for that season — those
+    episodes are simply left without an episode overview (they keep whatever the
+    caller seeded) and the run continues. Reads the LIVE library so each leaf reflects
+    any rename done earlier in the apply. Alias-safe (`_resolve_alias`); season_maps
+    and aliases that don't resolve to an episode leaf are skipped. NEVER raises."""
+    if unit["kind"] != "show":
+        return 0
+
+    live = load_library()
+    season_cache = {}  # season_number -> {episode_number: {"overview","name"}}
+    updated = 0
+    changed = False
+    for eid in unit.get("ids", []):
+        ent = live.get(eid)
+        if ent is None:
+            continue
+        try:
+            real_id, leaf = _resolve_alias(live, eid)
+        except KeyError:
+            continue
+        if not isinstance(leaf, dict):
+            continue
+        if not leaf.get("filename"):
+            continue  # season_map / alias-without-primary — not an episode leaf
+        se = _episode_se_of(real_id, leaf)
+        if se is None:
+            continue  # id shape gave no season+episode — no per-episode lookup key
+        s_no, e_no = se
+        if s_no not in season_cache:
+            details = _tmdb_get(f"{TMDB_API_ROOT}/tv/{series_id}/season/{s_no}", {}, api_key)
+            season_cache[s_no] = _season_episode_meta(details)
+        epmeta = season_cache[s_no].get(e_no)
+        if not epmeta:
+            continue  # season-details failed/empty, or this episode is absent from it
+        meta = leaf.setdefault("metadata", {})
+        if epmeta["overview"]:
+            meta["overview"] = epmeta["overview"]
+        if epmeta["name"]:
+            meta["episode_title"] = epmeta["name"]
+        updated += 1
+        changed = True
+
+    if changed:
+        save_library(live)
+    return updated
 
 
 def cmd_set_uploaded(manual_id):
@@ -5044,11 +5154,17 @@ def items_payload():
     Returns {
         "items": [ {
             "id", "category", "state", "size_bytes", "path",
-            "title", "year", "tmdb_id", "poster_available", "chunk_count",
+            "title", "year", "tmdb_id", "poster_available", "backdrop_available",
+            "overview", "episode_title", "chunk_count",
             "parent_id"  # only when the entry carries one
         }, ... ],
         "by_category": {"movies": N, "series": N, "anime": N, "other": N},
     }
+
+    overview / episode_title come from the entry's metadata (enrich-written TMDB
+    synopsis + episode name; null when absent); backdrop_available is a LIVE on-disk
+    fanart check (the SAME resolver /api/media-image uses) so the hover detail-window
+    requests a backdrop only when one will be served. All three are read-only.
 
     state is the shared classify_entry_state badge when one applies
     (LOCAL_NOT_PUSHED / PUSHED_NOT_ARCHIVED / RESTORED_REPLACE_AGAIN / ARCHIVED);
@@ -5092,6 +5208,16 @@ def items_payload():
         poster_available = bool(
             has_anchor and resolve_artwork_path(library, mid, kind="poster")
         )
+        # backdrop_available: same cheap, LIVE on-disk check via the SAME resolver
+        # the /api/media-image route uses, but for the FANART (backdrop) the hover
+        # detail-window shows. fanart resolution walks own folder -> season folder ->
+        # {tmdb-…} show folder (it has no per-episode rung), so an episode inherits the
+        # season/show backdrop. Gated on has_anchor + short-circuited like the poster
+        # check so a folderless leaf never enters the resolver (a couple os.path stats
+        # at most). Kept a real bool (JSON-friendly), never a path.
+        backdrop_available = bool(
+            has_anchor and resolve_artwork_path(library, mid, kind="fanart")
+        )
         row = {
             "id": mid,
             "category": category,
@@ -5102,6 +5228,9 @@ def items_payload():
             "year": metadata.get("year"),
             "tmdb_id": metadata.get("tmdb_id"),
             "poster_available": poster_available,
+            "backdrop_available": backdrop_available,
+            "overview": metadata.get("overview"),
+            "episode_title": metadata.get("episode_title"),
             "chunk_count": (entry.get("split_info") or {}).get("total_chunks") or 1,
         }
         if entry.get("parent_id") is not None:

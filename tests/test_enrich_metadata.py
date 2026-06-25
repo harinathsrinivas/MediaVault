@@ -67,10 +67,18 @@ class FakeTMDB:
     """
     def __init__(self, search=None, season_images=None, episode_images=None,
                  network_error_titles=(), episode_error=(),
-                 movie_by_id=None, tv_by_id=None, by_id_error=()):
+                 movie_by_id=None, tv_by_id=None, by_id_error=(),
+                 season_details=None, season_details_error=()):
         self.search = {k.lower(): v for k, v in (search or {}).items()}
         self.season_images = season_images or {}
         self.episode_images = episode_images or {}
+        # Season DETAILS (GET /3/tv/{id}/season/{n}) — the ONE-call-per-season source
+        # of per-episode overview/name. Maps (series_id, season_number) -> a payload
+        # dict (typically {"episodes": [ {episode_number, name, overview, ...}, ... ]}).
+        # A (series_id, season_number) in season_details_error raises to simulate a
+        # transient season-details failure.
+        self.season_details = season_details or {}
+        self.season_details_error = set(season_details_error)
         self.episode_error = set(episode_error)
         self.network_error_titles = {t.lower() for t in network_error_titles}
         # By-id details (enrich-by-known-id): {tmdb_id: details_dict}. An id in
@@ -118,6 +126,19 @@ class FakeTMDB:
             n = int(parts[-2])
             series_id = int(parts[-4])
             return _Resp(200, json_data={"posters": self.season_images.get((series_id, n), [])})
+
+        # Season DETAILS — /tv/{id}/season/{n} (bare: NOT /images, NOT /episode/).
+        # Checked AFTER the two /images shapes above so it only catches the bare URL.
+        # Returns the canned season payload (with its `episodes[]`), or raises for a
+        # season in season_details_error, or an empty {} when unknown (graceful skip).
+        if "/season/" in url and "/episode/" not in url and not url.endswith("/images"):
+            parts = url.rstrip("/").split("/")
+            if len(parts) >= 4 and parts[-1].isdigit() and parts[-2] == "season":
+                n = int(parts[-1])
+                series_id = int(parts[-3])
+                if (series_id, n) in self.season_details_error:
+                    raise ConnectionError("simulated season-details failure")
+                return _Resp(200, json_data=self.season_details.get((series_id, n), {}))
 
         # By-id DETAILS (enrich-by-known-id): /3/movie/{id} or /3/tv/{id} with a
         # bare numeric id and nothing after it. Checked AFTER /search and /images
@@ -251,6 +272,19 @@ def _tv_result(tmdb_id, name, year, poster=True, backdrop=True, popularity=50.0)
     if backdrop:
         r["backdrop_path"] = "/tvbackdrop.jpg"
     return r
+
+
+def _season_details(episodes):
+    """A /3/tv/{id}/season/{n} SEASON DETAILS payload from a list of
+    (episode_number, name, overview) tuples — each becomes an `episodes[]` member
+    carrying episode_number/name/overview (the fields enrich reads for the
+    per-episode synopsis + title). `still_path` is included to mirror the real
+    payload, though this enrich step persists only overview + name."""
+    return {"episodes": [
+        {"episode_number": num, "name": name, "overview": overview,
+         "still_path": f"/still-e{num}.jpg"}
+        for (num, name, overview) in episodes
+    ]}
 
 
 # ===========================================================================
@@ -1264,3 +1298,159 @@ def test_apply_stills_no_media_fetch(sandbox, patch_tmdb, monkeypatch):
     monkeypatch.setattr(main.subprocess, "Popen", _boom_popen)
 
     main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply")  # must not trip guards
+
+
+# ===========================================================================
+# Synopsis / overview storage (IMP-E16 step 1 — the detail-window data).
+#
+# On a confident --apply, enrich now ALSO persists the TMDB synopsis:
+#   * movie / show  -> metadata.overview (the title-level overview), on the unit.
+#   * each episode  -> metadata.overview (episode synopsis) + metadata.episode_title
+#                      (the episode name), via ONE cached SEASON DETAILS call per
+#                      season (GET /3/tv/{id}/season/{n} -> episodes[]).
+# Additive + idempotent; a failed season-details call degrades gracefully (the
+# episode keeps the show synopsis seeded in step 1). NEVER a media fetch.
+# ===========================================================================
+
+def test_apply_movie_writes_overview(sandbox, patch_tmdb):
+    """A confident movie --apply persists metadata.overview = the TMDB overview
+    (alongside tmdb_id/title/year), so the detail-window has a synopsis."""
+    _empty_libs(sandbox)
+    folder, fp, h = _seed_movie(sandbox, "mov-en-2025-f1", "F1")
+    patch_tmdb(FakeTMDB(search={"f1": [
+        _movie_result_with_meta(1003159, "F1", 2025, overview="A racing thriller.")
+    ]}))
+
+    main.cmd_enrich_metadata("mov-en-2025-f1", "--apply")
+
+    meta = mvcommon.load_library()["mov-en-2025-f1"]["metadata"]
+    assert meta["overview"] == "A racing thriller."
+    assert meta["tmdb_id"] == 1003159  # the existing fields are still written
+
+
+def test_apply_movie_by_id_writes_overview(sandbox, patch_tmdb):
+    """The enrich-by-known-id path also persists metadata.overview (the by-id movie
+    details object carries `overview`, read identically to a search result)."""
+    _empty_libs(sandbox)
+    folder, fp, h = _seed_movie(sandbox, "mov-en-2099-f1", "F1")
+    lib = mvcommon.load_library()
+    lib["mov-en-2099-f1"].setdefault("metadata", {})["tmdb_id"] = 1003159
+    mvcommon.save_library(lib)
+    patch_tmdb(FakeTMDB(movie_by_id={
+        1003159: _movie_details(1003159, "F1", 2025, overview="By-id racing synopsis.")
+    }))
+
+    main.cmd_enrich_metadata("mov-en-2099-f1", "--apply")
+
+    meta = mvcommon.load_library()["mov-en-2099-f1"]["metadata"]
+    assert meta["overview"] == "By-id racing synopsis."
+    assert meta["tmdb_id"] == 1003159
+
+
+def test_apply_show_writes_overview_on_seasonmaps_and_episodes(sandbox, patch_tmdb):
+    """A confident show --apply seeds the SHOW overview onto BOTH season_maps (which
+    have no per-episode synopsis of their own) AND — refined by the season-details
+    call — writes each EPISODE's OWN synopsis + episode_title onto its leaf."""
+    _empty_libs(sandbox)
+    show = _seed_two_season_show(sandbox)
+    fake = patch_tmdb(FakeTMDB(
+        search={"the office": [
+            _tv_result_with_meta(2316, "The Office", 2005, overview="A mockumentary.")
+        ]},
+        season_images={(2316, 1): [], (2316, 2): []},
+        season_details={
+            (2316, 1): _season_details([(1, "Pilot", "The documentary begins.")]),
+            (2316, 2): _season_details([(1, "The Dundies", "An awards night.")]),
+        },
+    ))
+
+    main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply")
+
+    lib = mvcommon.load_library()
+
+    # Season_maps carry the SHOW overview (no per-episode synopsis applies to them).
+    for sid in (show["season1"], show["season2"]):
+        assert lib[sid]["metadata"]["overview"] == "A mockumentary.", sid
+        assert "episode_title" not in lib[sid]["metadata"]  # not an episode
+
+    # Each EPISODE leaf carries its OWN synopsis + episode_title (refined from the
+    # show overview seeded in step 1 by the per-season season-details call).
+    assert lib[show["ep1"]]["metadata"]["overview"] == "The documentary begins."
+    assert lib[show["ep1"]]["metadata"]["episode_title"] == "Pilot"
+    assert lib[show["ep2"]]["metadata"]["overview"] == "An awards night."
+    assert lib[show["ep2"]]["metadata"]["episode_title"] == "The Dundies"
+
+    # ONE season-details GET per season (the bare /tv/{id}/season/{n}, not /images).
+    sd_calls = [c for c in fake.calls
+                if "/season/" in c[0] and "/episode/" not in c[0]
+                and not c[0].endswith("/images")]
+    assert len(sd_calls) == 2, f"expected one season-details call per season, got {len(sd_calls)}"
+
+
+def test_apply_show_season_details_failure_degrades_to_show_overview(sandbox, patch_tmdb):
+    """If a season's season-details call FAILS, that episode keeps the SHOW overview
+    seeded in step 1 (graceful degradation, no crash) and has NO episode_title; the
+    healthy season's episode still gets its own synopsis + title."""
+    _empty_libs(sandbox)
+    show = _seed_two_season_show(sandbox)
+    patch_tmdb(FakeTMDB(
+        search={"the office": [
+            _tv_result_with_meta(2316, "The Office", 2005, overview="A mockumentary.")
+        ]},
+        season_images={(2316, 1): [], (2316, 2): []},
+        # Season 1 resolves; season 2's season-details call raises.
+        season_details={(2316, 1): _season_details([(1, "Pilot", "The documentary begins.")])},
+        season_details_error={(2316, 2)},
+    ))
+
+    main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply")  # must NOT crash
+
+    lib = mvcommon.load_library()
+    # Season 1 episode: its OWN synopsis + title.
+    assert lib[show["ep1"]]["metadata"]["overview"] == "The documentary begins."
+    assert lib[show["ep1"]]["metadata"]["episode_title"] == "Pilot"
+    # Season 2 episode: degrades to the SHOW overview, NO episode_title written.
+    assert lib[show["ep2"]]["metadata"]["overview"] == "A mockumentary."
+    assert "episode_title" not in lib[show["ep2"]]["metadata"]
+
+
+def test_apply_episode_overview_is_idempotent(sandbox, patch_tmdb):
+    """A second --apply rewrites the SAME episode overview/title (idempotent — the
+    season-details payload is cached/deterministic, so no drift)."""
+    _empty_libs(sandbox)
+    show = _seed_two_season_show(sandbox)
+    patch_tmdb(FakeTMDB(
+        search={"the office": [
+            _tv_result_with_meta(2316, "The Office", 2005, overview="A mockumentary.")
+        ]},
+        season_images={(2316, 1): [], (2316, 2): []},
+        season_details={
+            (2316, 1): _season_details([(1, "Pilot", "The documentary begins.")]),
+            (2316, 2): _season_details([(1, "The Dundies", "An awards night.")]),
+        },
+    ))
+
+    main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply")
+    main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply")  # re-run
+
+    lib = mvcommon.load_library()
+    assert lib[show["ep1"]]["metadata"]["overview"] == "The documentary begins."
+    assert lib[show["ep1"]]["metadata"]["episode_title"] == "Pilot"
+    assert lib[show["ep2"]]["metadata"]["episode_title"] == "The Dundies"
+
+
+def test_dry_run_writes_no_overview(sandbox, patch_tmdb):
+    """DRY-RUN (no --apply): no overview / episode_title is written (nothing is)."""
+    _empty_libs(sandbox)
+    show = _seed_two_season_show(sandbox)
+    before = mvcommon.load_library()
+    patch_tmdb(FakeTMDB(
+        search={"the office": [
+            _tv_result_with_meta(2316, "The Office", 2005, overview="A mockumentary.")
+        ]},
+        season_details={(2316, 1): _season_details([(1, "Pilot", "Synopsis.")])},
+    ))
+
+    main.cmd_enrich_metadata("tv-en-2005-the-office")  # no --apply
+
+    assert mvcommon.load_library() == before  # nothing written at all

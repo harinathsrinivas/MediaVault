@@ -199,6 +199,11 @@ function mergeRow(itemRow, reclaimRow) {
     year: itemRow.year,
     tmdb_id: itemRow.tmdb_id,
     poster_available: !!itemRow.poster_available,
+    // Hover detail-window (IMP-E16) fields, carried straight from items_payload:
+    // a LIVE on-disk fanart check + the enrich-written synopsis / episode name.
+    backdrop_available: !!itemRow.backdrop_available,
+    overview: itemRow.overview || null,
+    episode_title: itemRow.episode_title || null,
     chunk_count: itemRow.chunk_count || 1,
     parent_id: itemRow.parent_id,
     suggested_command: "",
@@ -228,6 +233,11 @@ function unpreppedRow(r) {
     year: null,
     tmdb_id: null,
     poster_available: false,
+    // UNPREPPED files are unknown to the library, so they carry no TMDB metadata
+    // and no resolvable artwork — the hover dossier falls back to the gradient.
+    backdrop_available: false,
+    overview: null,
+    episode_title: null,
     chunk_count: 1,
     parent_id: undefined,
     suggested_command: r.suggested_command || "",

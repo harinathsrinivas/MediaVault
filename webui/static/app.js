@@ -38,6 +38,7 @@ import { buildCard, runAction, setRefreshHandler, destroyRingsIn } from "./card.
 import { wireModal } from "./modal.js";
 import { getSort, setSort, sortItems, SORT_KEYS } from "./sort.js";
 import { wireCardGlow } from "./glow.js";
+import { wireHoverPreview } from "./preview.js";
 import { buildTreeFragment, treeRootsFor, pruneTreeByState } from "./tree.js";
 import { authFetch, bootstrapToken } from "./auth.js";
 import { initAdmin } from "./admin.js";
@@ -889,6 +890,11 @@ function init() {
   // once in index.html; only its children are cleared on re-render), so every
   // freshly-rendered card is covered with no per-card listener to leak.
   wireCardGlow($("#panel"));
+  // Cinematic hover detail-window (IMP-E16): resting on any card opens a large
+  // translucent "dossier" (backdrop + synopsis + meta). Delegated to the SAME
+  // stable #panel as the glow, desktop-pointer only, pointer-events:none (never
+  // blocks a click). Covers flat + grouped leaf cards with no per-card listener.
+  wireHoverPreview($("#panel"));
   // After any terminal job, reload the model and repaint (preserving the view).
   setRefreshHandler(function () {
     load(false);

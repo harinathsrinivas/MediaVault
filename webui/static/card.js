@@ -240,6 +240,13 @@ export function buildCard(item) {
   node.dataset.state = item.state;
   if (isArchived) node.classList.add("archived");
 
+  // Stash the item on the node so the delegated hover detail-window (preview.js)
+  // can map a hovered/focused .card back to its data with no per-card listener or
+  // side index. An own-property on the element, GC'd with the node (no leak); the
+  // double-underscore namespaces it like node._fetchRing. Covers BOTH the flat
+  // grid AND grouped-tree leaf cards, since every leaf card is built here.
+  node.__mvItem = item;
+
   // Poster slot (gradient + big initial placeholder). Phase 5.2 wires a real
   // image on top: addPosterImage points an <img> at /api/media-image/<id> and
   // hides it on error, so a missing poster falls back to this gradient.

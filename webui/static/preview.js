@@ -1,4 +1,4 @@
-/* MediaVault Console — cinematic hover detail-window (IMP-E16).
+/* MediaVault Console — cinematic detail-window / "dossier" (IMP-E16).
  *
  * THE SIGNATURE "aweee" MOMENT. Resting the pointer on any card — movie, series,
  * episode, or anime — for a short dwell auto-opens a LARGE, translucent glass
@@ -23,12 +23,14 @@
  *      basic dossier (no error flash). Per-id detail is cached in memory so
  *      re-hovering the same card never refetches.
  *
- * LINK ROW (the one interactive exception): the panel is pointer-events:none so
- * it can never block a click / tap / the ⤢ expand arrow. The IMDb / TMDB row is
- * the SOLE element re-enabled to pointer-events:auto, so the user can click
- * through to the external page; everything else stays inert. The hrefs are
- * validated (must start with https://www.imdb.com or https://www.themoviedb.org)
- * before being set, and open in a new tab with rel=noopener.
+ * PERSISTENT + INTERACTIVE (IMP-E16 follow-up): the panel is pointer-events:AUTO
+ * so its contents — chiefly the IMDb / TMDB chips — are clickable. Leaving the
+ * card no longer closes it instantly: an "active region" = (the hovered card) OR
+ * (the panel itself), and leaving BOTH starts a short close-grace timer; entering
+ * either cancels it. So the user can glide card→panel and click a link without it
+ * vanishing. The hrefs are validated (must start with https://www.imdb.com or
+ * https://www.themoviedb.org) before being set, and open in a new tab with
+ * rel=noopener. A small ✕ closes it.
  *
  * DELEGATION (mirrors glow.js): ONE set of listeners on the stable #panel
  * (created once in index.html; only child-cleared on re-render), so every
@@ -37,11 +39,18 @@
  * post-job /api/items refresh. The hovered .card is mapped back to its item via
  * `card.__mvItem`, stamped by buildCard (card.js).
  *
- * DESKTOP-POINTER ONLY: gated on `(any-hover: hover) and (any-pointer: fine)` and
- * only `mouse`/`pen` pointers ever arm it (the SAME gate the cursor glow uses).
- * On touch nothing wires, so a tap still navigates the card and the panel never
- * appears or gets stuck. The panel is `position:fixed; pointer-events:none`, so it
- * is purely informational (bar the one link row) and can never block a click.
+ * TWO PRESENTATIONS, ONE CONTENT (IMP-E16 mobile):
+ *   • DESKTOP-POINTER — gated on `(any-hover: hover) and (any-pointer: fine)`. A
+ *     dwell over a card opens the dossier ANCHORED beside the card (flips to the
+ *     side with room, may overlap the header). Keyboard focus opens it too.
+ *   • TOUCH — when that gate is FALSE we wire a LONG-PRESS instead: holding a card
+ *     ~500ms (without sliding > ~10px, which would be a scroll) opens the SAME
+ *     dossier as a CENTERED MODAL over a dim backdrop, dismissable by tapping the
+ *     backdrop, the ✕, or Escape. The long-press suppresses the click it would
+ *     otherwise generate (so it never trips a card button); a normal short tap is
+ *     untouched and still behaves as today.
+ *   Both presentations share ONE render path (renderInto); they differ only in
+ *   positioning, the backdrop, and a `.is-modal` class.
  *
  * PERF: exactly ONE reusable panel element is built (lazily, on the first open),
  * its contents + backdrop src are swapped per open, and the fanart + the
@@ -71,10 +80,22 @@ import { authFetch } from "./auth.js";
 // short enough that a deliberate hover feels responsive.
 var DWELL_MS = 380;
 
+// Grace window after the pointer leaves BOTH the card and the panel before the
+// dossier closes — long enough to glide across the small card→panel gap without
+// it vanishing, short enough that it doesn't linger once you've truly left.
+var CLOSE_GRACE_MS = 140;
+
+// Touch long-press: hold a card this long (without sliding past the slop) to open
+// the modal dossier. ~500ms is the familiar "press-and-hold" feel.
+var LONGPRESS_MS = 500;
+// Slide further than this between pointerdown and the timer firing and it's a
+// scroll/drag, not a long-press — cancel.
+var LONGPRESS_SLOP_PX = 10;
+
 // A true hovering pointer is AVAILABLE (desktop mouse / trackpad / pen). Uses
 // any-hover/any-pointer so a mouse on a touch-capable Windows box (PRIMARY
 // pointer reported coarse) still counts; on a pure-touch phone both are false and
-// we skip wiring entirely. Mirrors glow.js exactly.
+// we take the long-press path instead. Mirrors glow.js exactly.
 function hasHoverPointer() {
   try {
     return (
@@ -158,8 +179,8 @@ function formatSxxEyy(season, episode) {
   return out;
 }
 
-// The link row is the ONE interactive part of an otherwise inert panel, so we are
-// strict about what we will turn into a real href: an exact-origin allow-list.
+// The IMDb / TMDB links are interactive, so we are strict about what we will turn
+// into a real href: an exact-origin https:// allow-list (anything else is omitted).
 function safeExternalUrl(url) {
   var s = String(url || "").trim();
   if (
@@ -183,7 +204,7 @@ var _detailCache = Object.create(null);
 var NO_DETAIL = { __none: true };
 
 // ---------------------------------------------------------------------------
-// The single reusable panel.
+// The single reusable panel (+ its modal backdrop).
 // ---------------------------------------------------------------------------
 //
 // Built once on the first open and reused for the lifetime of the page. Returns a
@@ -193,12 +214,20 @@ var _panel = null;
 function buildPanel() {
   if (_panel) return _panel;
 
+  // Dim full-screen backdrop, used ONLY in the mobile modal presentation. Always
+  // in the DOM (cheap, empty) but display:none until .show; tapping it dismisses.
+  var backdrop = document.createElement("div");
+  backdrop.className = "hover-preview-backdrop";
+  backdrop.setAttribute("aria-hidden", "true");
+  document.body.appendChild(backdrop);
+
   var root = document.createElement("aside");
   root.id = "hover-preview";
   root.className = "hover-preview";
   root.setAttribute("aria-hidden", "true"); // informational mirror of the card
-  // Belt-and-braces: even if a stylesheet failed, never let the panel eat clicks.
-  root.style.pointerEvents = "none";
+  // Interactive so the IMDb/TMDB chips + ✕ are clickable. (Mirrored in CSS; this
+  // is belt-and-braces in case a stylesheet failed to load.)
+  root.style.pointerEvents = "auto";
 
   // Backdrop layer (dimmed cover image + scrim). The <img> is lazily pointed at
   // the fanart on each open; the scrim is a CSS gradient over it for legibility.
@@ -214,6 +243,16 @@ function buildPanel() {
   var scrim = document.createElement("div");
   scrim.className = "hp-scrim";
   media.appendChild(scrim);
+
+  // Close affordance (✕) — pinned to the hero band's top-right. Subtle on desktop,
+  // prominent in the mobile modal (CSS). Clicking it closes whichever mode is open.
+  var closeBtn = document.createElement("button");
+  closeBtn.type = "button";
+  closeBtn.className = "hp-close";
+  closeBtn.setAttribute("aria-label", "Close");
+  closeBtn.title = "Close";
+  closeBtn.textContent = "✕";
+  media.appendChild(closeBtn);
 
   // Title overlay, anchored to the bottom of the hero band (over the scrim).
   var hero = document.createElement("div");
@@ -276,7 +315,7 @@ function buildPanel() {
   meta.appendChild(catPill);
   body.appendChild(meta);
 
-  // External link row — the SOLE pointer-events:auto element. Built empty; the
+  // External link row — now part of the fully-interactive panel. Built empty; the
   // anchors are revealed only when detail carries a valid imdb_url / tmdb_url.
   var links = document.createElement("div");
   links.className = "hp-links";
@@ -299,8 +338,10 @@ function buildPanel() {
 
   _panel = {
     root: root,
+    backdrop: backdrop,
     media: media,
     img: img,
+    closeBtn: closeBtn,
     kicker: kicker,
     title: title,
     ep: ep,
@@ -317,6 +358,34 @@ function buildPanel() {
     imdb: imdb,
     tmdb: tmdb,
   };
+
+  // ---- Persistence wiring (active region = card OR panel). ------------------
+  // Entering the panel keeps the dossier alive (cancel any pending close AND any
+  // pending dwell for another card); leaving it starts the close-grace timer.
+  // Harmless on touch: the hover path never opens there, and the modal path
+  // ignores these (scheduleClose() no-ops in modal mode).
+  root.addEventListener("pointerenter", function () {
+    _pointerInPanel = true;
+    cancelClose();
+    cancelDwell();
+  });
+  root.addEventListener("pointerleave", function () {
+    _pointerInPanel = false;
+    scheduleClose();
+  });
+
+  // ✕ closes whichever presentation is open.
+  closeBtn.addEventListener("click", function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    close();
+  });
+
+  // Tapping the dim backdrop dismisses the modal.
+  backdrop.addEventListener("click", function () {
+    close();
+  });
+
   return _panel;
 }
 
@@ -562,7 +631,7 @@ function renderRich(p, item, d) {
 
   if (hasCredits) p.credits.classList.add("show");
 
-  // ---- External link row (the one clickable region). ------------------------
+  // ---- External link row (clickable IMDb / TMDB chips). ---------------------
   var imdbUrl = safeExternalUrl(d.imdb_url);
   var tmdbUrl = safeExternalUrl(d.tmdb_url);
   var anyLink = false;
@@ -626,8 +695,10 @@ function fetchRich(p, item, openToken) {
 }
 
 // Re-position after the panel changes height (rich content can make it taller),
-// guarded so a close that raced the fetch doesn't move a hidden panel.
+// guarded so a close that raced the fetch doesn't move a hidden panel. A no-op in
+// the modal presentation (it's centred by CSS, not anchored to the card).
 function reanchor(p) {
+  if (_mode === "modal") return;
   if (_openCard && _openCard.isConnected) position(p, _openCard);
 }
 
@@ -644,7 +715,9 @@ var VIEWPORT_MARGIN = 10; // keep this far from every screen edge
 // A touch tighter at the TOP so the panel may ride a little further up over the
 // header chrome before clamping (the deliberate overlap), without ever clipping.
 var TOP_MARGIN = 6;
-var CARD_GAP = 16; // breathing room between the card and the panel
+// Small gap between the card and the panel. Kept tight so gliding card→panel
+// crosses almost no dead space (the close-grace timer covers the rest).
+var CARD_GAP = 10;
 
 function position(p, card) {
   var root = p.root;
@@ -692,18 +765,14 @@ function position(p, card) {
 }
 
 // ---------------------------------------------------------------------------
-// Open / close.
+// Shared content paint (both presentations call this).
 // ---------------------------------------------------------------------------
-var _openToken = 0; // bumped on every open; stale image/detail callbacks bail
-var _openCard = null; // the card the dossier is currently bound to (or null)
-
-function openFor(card) {
-  var item = card && card.__mvItem;
-  if (!item) return;
-
-  var p = buildPanel();
-  var token = ++_openToken;
-  _openCard = card;
+//
+// Fills the panel from the card's row + kicks the lazy backdrop and /api/detail
+// fetches, all guarded by `token`. Does NOT position or reveal — the caller picks
+// the presentation (anchored hover vs centred modal).
+function renderInto(p, card, token) {
+  var item = card.__mvItem;
 
   // Reset every detail-only region so this open starts as the basic dossier with
   // nothing stale from the previously hovered card.
@@ -749,6 +818,30 @@ function openFor(card) {
   // Rich detail (lazy GET /api/detail/{id}; enriches in place when it resolves
   // AND this same open is still showing — guarded by `token`).
   fetchRich(p, item, token);
+}
+
+// ---------------------------------------------------------------------------
+// Open / close.
+// ---------------------------------------------------------------------------
+var _openToken = 0; // bumped on every open; stale image/detail callbacks bail
+var _openCard = null; // the card the dossier is currently bound to (or null)
+var _mode = null; // "hover" (anchored) | "modal" (centred) | null (closed)
+
+// DESKTOP: open the dossier ANCHORED beside the card with the entrance animation.
+function openFor(card) {
+  var item = card && card.__mvItem;
+  if (!item) return;
+
+  var p = buildPanel();
+  var token = ++_openToken;
+  _openCard = card;
+  _mode = "hover";
+  // Anchored mode never shows the modal chrome.
+  p.root.classList.remove("is-modal");
+  p.backdrop.classList.remove("show");
+  cancelClose();
+
+  renderInto(p, card, token);
 
   // Make it measurable (block) but still hidden (opacity), position against the
   // card's rect, THEN reveal so the entrance animation runs from the final spot
@@ -764,11 +857,49 @@ function openFor(card) {
   });
 }
 
+// MOBILE: open the SAME dossier as a CENTERED MODAL over a dim backdrop. No card
+// anchoring (CSS centres it); the body scrolls if the content is tall.
+function openModalFor(card) {
+  var item = card && card.__mvItem;
+  if (!item) return;
+
+  var p = buildPanel();
+  var token = ++_openToken;
+  _openCard = card;
+  _mode = "modal";
+  cancelClose();
+  cancelDwell();
+
+  renderInto(p, card, token);
+
+  // Centred by CSS — clear any stale anchored coordinates so .is-modal's centring
+  // (left/top 50% + translate) isn't fighting an inline left/top from a prior open.
+  p.root.style.left = "";
+  p.root.style.top = "";
+  p.backdrop.classList.add("show");
+  p.root.classList.add("is-modal");
+  // No measuring pass needed (position is CSS-driven); reveal next frame so the
+  // entrance still animates.
+  p.root.classList.remove("is-measuring");
+  window.requestAnimationFrame(function () {
+    if (token !== _openToken) return;
+    p.root.classList.add("is-open");
+  });
+}
+
 function close() {
   _openCard = null;
+  _mode = null;
   _openToken += 1; // invalidate any in-flight image/detail/dwell callbacks
+  cancelClose();
+  // Drop the active-region tracking so a stale "still inside" flag can never make
+  // a later grace timer skip its close (re-set on the next real enter).
+  _pointerInCard = false;
+  _pointerInPanel = false;
   if (!_panel) return;
   _panel.root.classList.remove("is-open");
+  _panel.root.classList.remove("is-modal");
+  _panel.backdrop.classList.remove("show");
   // Clear the measuring guard too, in case close() landed between openFor()'s
   // position() and its reveal frame (the frame then bails on the token); the
   // panel is already hidden (opacity:0), this just keeps its class state tidy.
@@ -779,7 +910,40 @@ function close() {
 }
 
 // ---------------------------------------------------------------------------
-// Dwell scheduling.
+// Close-grace scheduling (desktop persistence).
+// ---------------------------------------------------------------------------
+//
+// Active region = the hovered card OR the panel. We track whether the pointer is
+// inside each; leaving either schedules a close, and it only actually closes when
+// the pointer is outside BOTH for CLOSE_GRACE_MS. Entering either cancels it.
+var _closeTimer = 0;
+var _pointerInCard = false;
+var _pointerInPanel = false;
+
+function cancelClose() {
+  if (_closeTimer) {
+    window.clearTimeout(_closeTimer);
+    _closeTimer = 0;
+  }
+}
+
+function scheduleClose() {
+  // Only the anchored hover presentation auto-closes on pointer-out; the modal is
+  // dismissed explicitly (backdrop / ✕ / Esc), so never grace-close it.
+  if (_mode !== "hover") return;
+  if (!_openCard) return;
+  cancelClose();
+  _closeTimer = window.setTimeout(function () {
+    _closeTimer = 0;
+    // Re-check the live state: if the pointer slipped back onto the card or panel
+    // during the grace window, an enter already cancelled us — but guard anyway.
+    if (_pointerInCard || _pointerInPanel) return;
+    close();
+  }, CLOSE_GRACE_MS);
+}
+
+// ---------------------------------------------------------------------------
+// Dwell scheduling (desktop hover-to-open).
 // ---------------------------------------------------------------------------
 var _dwellTimer = 0;
 var _dwellCard = null; // the card the pending dwell is for
@@ -819,11 +983,21 @@ function armDwell(card) {
 // ---------------------------------------------------------------------------
 export function wireHoverPreview(container) {
   if (!container) return;
-  // No hovering pointer (pure touch) → never wire. A tap keeps navigating the
-  // card and the dossier never appears or sticks. Unlike the cursor glow, this
-  // does NOT run under a coarse-only pointer.
-  if (!hasHoverPointer()) return;
 
+  if (hasHoverPointer()) {
+    wireDesktopHover(container);
+  } else {
+    wireTouchLongPress(container);
+  }
+
+  // Escape closes whichever presentation is open (parity with the app's modals).
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && _mode) close();
+  });
+}
+
+// ---- Desktop: dwell-to-open, anchored, with the card↔panel grace persistence. -
+function wireDesktopHover(container) {
   // pointerover bubbles (unlike pointerenter), so one delegated listener on the
   // stable container sees the pointer crossing into any current-or-future card.
   container.addEventListener(
@@ -832,6 +1006,9 @@ export function wireHoverPreview(container) {
       if (e.pointerType === "touch") return; // mouse/pen only
       var card = e.target && e.target.closest ? e.target.closest(".card") : null;
       if (!card || !container.contains(card)) return;
+      // Entering the (open) card keeps it alive; entering any card arms the dwell.
+      _pointerInCard = true;
+      if (card === _openCard) cancelClose();
       armDwell(card);
     },
     { passive: true }
@@ -847,14 +1024,17 @@ export function wireHoverPreview(container) {
       if (e.pointerType === "touch") return;
       var card = e.target && e.target.closest ? e.target.closest(".card") : null;
       if (!card || !container.contains(card)) return;
+      _pointerInCard = true;
       armDwell(card);
     },
     { passive: true }
   );
 
-  // Leaving a card: cancel a pending open and close an open dossier. pointerout
-  // bubbles; relatedTarget is where the pointer went. If it moved to ANOTHER card
-  // the pointerover above re-arms; if it left every card (or the grid), close.
+  // Leaving a card: cancel a pending open for it, and start the close-grace timer
+  // (which only fires if the pointer is outside BOTH the card and the panel by
+  // then — so gliding card→panel keeps it open). pointerout bubbles; relatedTarget
+  // is where the pointer went. If it moved to ANOTHER card the pointerover above
+  // re-arms; if it moved onto the panel, the panel's pointerenter cancels the close.
   container.addEventListener(
     "pointerout",
     function (e) {
@@ -865,23 +1045,26 @@ export function wireHoverPreview(container) {
       var to = e.relatedTarget;
       var toCard = to && to.closest ? to.closest(".card") : null;
       if (toCard === fromCard) return; // still inside the same card
+      _pointerInCard = false;
       // Cancel a dwell queued for the card we just left.
       if (_dwellCard === fromCard) cancelDwell();
-      // Close the open dossier when we leave its card (a new card's dwell, if
-      // any, will open the next one).
-      if (_openCard === fromCard) close();
+      // Begin the grace close for an open dossier bound to the card we left. If
+      // the pointer is heading into the panel, its pointerenter cancels this.
+      if (_openCard === fromCard) scheduleClose();
     },
     { passive: true }
   );
 
   // Backstop: the pointer leaving the whole grid (e.g. shooting up into the
-  // header) cancels everything. pointerleave does NOT bubble, so bind it on the
-  // container directly.
+  // header) cancels a pending dwell and starts the grace close. pointerleave does
+  // NOT bubble, so bind it on the container directly. (It does NOT hard-close, so
+  // a pointer that left the grid straight onto the panel still survives.)
   container.addEventListener(
     "pointerleave",
     function () {
+      _pointerInCard = false;
       cancelDwell();
-      close();
+      scheduleClose();
     },
     { passive: true }
   );
@@ -902,6 +1085,8 @@ export function wireHoverPreview(container) {
     var to = e.relatedTarget;
     var toCard = to && to.closest ? to.closest(".card") : null;
     if (toCard === card) return; // focus moved within the same card
+    // Focus moving INTO the panel (e.g. tabbing to a link) must not close it.
+    if (_panel && _panel.root.contains(to)) return;
     if (_openCard === card) close();
   });
 
@@ -912,6 +1097,7 @@ export function wireHoverPreview(container) {
   function reflow() {
     reflowFrame = 0;
     if (!_openCard || !_panel) return;
+    if (_mode !== "hover") return; // the modal is CSS-centred, not card-anchored
     if (!_openCard.isConnected) {
       close();
       return;
@@ -919,9 +1105,113 @@ export function wireHoverPreview(container) {
     position(_panel, _openCard);
   }
   function scheduleReflow() {
-    if (!_openCard) return;
+    if (!_openCard || _mode !== "hover") return;
     if (!reflowFrame) reflowFrame = window.requestAnimationFrame(reflow);
   }
   window.addEventListener("scroll", scheduleReflow, { passive: true });
   window.addEventListener("resize", scheduleReflow, { passive: true });
+}
+
+// ---- Touch: long-press a card to open the centred modal dossier. --------------
+//
+// A pointerdown on a card starts a LONGPRESS_MS timer; sliding past the slop
+// (a scroll) or releasing early cancels it and the tap behaves normally. When the
+// timer fires we open the modal AND arm click-suppression so the synthetic click
+// the press generates can't trip a card button. A short tap is never intercepted.
+function wireTouchLongPress(container) {
+  var pressTimer = 0;
+  var pressCard = null;
+  var startX = 0;
+  var startY = 0;
+  var suppressNextClick = false;
+  var suppressClearTimer = 0;
+
+  function clearPress() {
+    if (pressTimer) {
+      window.clearTimeout(pressTimer);
+      pressTimer = 0;
+    }
+    pressCard = null;
+  }
+
+  // Arm/disarm swallowing the very next click (the one the long-press generates on
+  // release). Auto-clears after a short window so a later legitimate tap is never
+  // eaten if no click happened to fire.
+  function armClickSuppression() {
+    suppressNextClick = true;
+    if (suppressClearTimer) window.clearTimeout(suppressClearTimer);
+    suppressClearTimer = window.setTimeout(function () {
+      suppressNextClick = false;
+      suppressClearTimer = 0;
+    }, 700);
+  }
+
+  container.addEventListener("pointerdown", function (e) {
+    // Only the touch path lives here; ignore an actual mouse/pen if one appears.
+    if (e.pointerType === "mouse") return;
+    var card = e.target && e.target.closest ? e.target.closest(".card") : null;
+    if (!card || !container.contains(card)) return;
+    clearPress();
+    pressCard = card;
+    startX = e.clientX;
+    startY = e.clientY;
+    pressTimer = window.setTimeout(function () {
+      pressTimer = 0;
+      var target = pressCard;
+      pressCard = null;
+      if (!target || !target.isConnected) return;
+      // The press became a long-press: open the modal and make sure the click that
+      // the OS will synthesise on lift-off doesn't also fire a card button.
+      armClickSuppression();
+      try {
+        if (window.getSelection) window.getSelection().removeAllRanges();
+      } catch (err) {
+        /* selection clearing is best-effort */
+      }
+      openModalFor(target);
+    }, LONGPRESS_MS);
+  });
+
+  // Sliding past the slop is a scroll/drag, not a long-press — cancel the pending
+  // open (but don't suppress the tap; the user is scrolling).
+  container.addEventListener(
+    "pointermove",
+    function (e) {
+      if (!pressTimer) return;
+      var dx = e.clientX - startX;
+      var dy = e.clientY - startY;
+      if (dx * dx + dy * dy > LONGPRESS_SLOP_PX * LONGPRESS_SLOP_PX) clearPress();
+    },
+    { passive: true }
+  );
+
+  // Released before the timer fired → a normal tap; let it navigate as today.
+  // (If the timer already fired, clearPress is a no-op and suppression is armed.)
+  container.addEventListener("pointerup", clearPress, { passive: true });
+  container.addEventListener("pointercancel", clearPress, { passive: true });
+
+  // Swallow the synthetic click that follows a long-press so it can't activate a
+  // card button (Fetch & Restore / open-folder / copy). Capture phase so it runs
+  // BEFORE the button's own bubbling handler. A click on the dossier's own links /
+  // ✕ is fine — those live outside `container`, so this never sees them.
+  container.addEventListener(
+    "click",
+    function (e) {
+      if (!suppressNextClick) return;
+      suppressNextClick = false;
+      if (suppressClearTimer) {
+        window.clearTimeout(suppressClearTimer);
+        suppressClearTimer = 0;
+      }
+      e.preventDefault();
+      e.stopPropagation();
+    },
+    true
+  );
+
+  // Suppress the OS callout / context menu that a long-press would otherwise raise
+  // while a press is pending or just opened the modal.
+  container.addEventListener("contextmenu", function (e) {
+    if (pressTimer || suppressNextClick || _mode === "modal") e.preventDefault();
+  });
 }

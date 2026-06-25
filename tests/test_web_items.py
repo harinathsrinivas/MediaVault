@@ -35,6 +35,7 @@ _ITEM_BASE_KEYS = {
     "id", "category", "state", "size_bytes", "path",
     "title", "year", "tmdb_id", "poster_available", "backdrop_available",
     "overview", "episode_title", "chunk_count",
+    "actual_size_bytes", "tech", "release_name",
 }
 
 
@@ -629,3 +630,195 @@ def test_api_items_reports_overview_and_backdrop(sandbox, make_video):
     assert rows[plain_id]["backdrop_available"] is False
     assert rows[plain_id]["overview"] is None
     assert rows[plain_id]["episode_title"] is None
+
+
+# ---------------------------------------------------------------------------
+# (i) actual_size_bytes / tech / release_name — the REAL archived version info
+#     (IMP-E16 B1)
+#
+# An ARCHIVED tile's on-disk file is a tiny dummy, so size_bytes is e.g. ~1 KB.
+# The library stores the REAL fetched size + print in entry.tech_spec and the full
+# release name in entry.filename. items_payload() surfaces, per row:
+#   * actual_size_bytes = tech_spec.size_bytes (the real fetched byte size) / null
+#   * tech              = a compact {resolution, hdr, video_codec, audio,
+#                         audio_channels, duration_mins} dict from tech_spec,
+#                         dropping "Unknown"/"SDR"/empty + normalizing hdr / null
+#   * release_name      = entry.filename / null
+# All read-only, over the LOCAL_ROOT-hermetic sandbox (never real C:\Media).
+# ---------------------------------------------------------------------------
+
+# A realistic 88 GB UHD REMUX tech_spec as get_tech_specs() would write it.
+_ARCHIVED_TECH_SPEC = {
+    "resolution": "2160p",
+    "width_height": "3840x2160",
+    "video_codec": "HEVC",
+    "hdr": "Dolby Vision / SMPTE ST 2086",
+    "frame_rate": "23.976",
+    "audio": "Dolby TrueHD with Dolby Atmos",
+    "audio_channels": 8,
+    "audio_language": "en",
+    "subtitles": ["en", "fr"],
+    "duration_mins": 169,
+    "size_bytes": 88_473_829_376,  # ~82.4 GiB — dwarfs the on-disk dummy
+}
+_ARCHIVED_RELEASE_NAME = (
+    "Interstellar.2014.iMAX.UHD.2160p.REMUX.Hybrid.HDR10.DV.P8.MULTi."
+    "DTS-HD.TrueHD.7.1.mkv"
+)
+
+
+def _seed_archived_with_tech(sandbox, make_video):
+    """Seed two movie leaves under LOCAL_ROOT:
+      * mov-en-2014-interstellar : ARCHIVED dummy on disk (~1 KB) BUT carries a
+        full tech_spec (88 GB real size + 2160p/DV/HEVC/TrueHD-Atmos) and a full
+        release filename -> actual_size_bytes/tech/release_name all populated.
+      * mov-en-2018-notech       : ARCHIVED dummy with NO tech_spec at all ->
+        actual_size_bytes None, tech None (release_name still = its bare filename).
+    Returns (with_tech_id, no_tech_id)."""
+    root = sandbox["local_root"]
+
+    with_dir = root / "Movies" / "Interstellar {tmdb-157336}"
+    with_dir.mkdir(parents=True, exist_ok=True)
+    with_path = with_dir / (
+        "Interstellar.2014.iMAX.UHD.2160p.REMUX.Hybrid.HDR10.DV.P8.MULTi."
+        "DTS-HD.TrueHD.7.1.mkv"
+    )
+    with_path.write_bytes(b"tiny-dummy" * 100)  # 1000 bytes — an archived dummy
+    assert os.path.getsize(with_path) < main.DUMMY_MAX_BYTES
+    with_id = "mov-en-2014-interstellar"
+
+    no_dir = root / "Movies" / "NoTechArchived"
+    no_dir.mkdir(parents=True, exist_ok=True)
+    no_path = no_dir / "NoTech.2018.mkv"
+    no_path.write_bytes(b"tiny-dummy" * 100)
+    assert os.path.getsize(no_path) < main.DUMMY_MAX_BYTES
+    no_id = "mov-en-2018-notech"
+
+    movies = {
+        with_id: {
+            "status": "archived",
+            "uploaded": True,
+            "folder_path": str(with_dir),
+            "filename": _ARCHIVED_RELEASE_NAME,
+            "type": "movie",
+            "tech_spec": dict(_ARCHIVED_TECH_SPEC),
+            "metadata": {"title": "Interstellar", "year": 2014, "tmdb_id": 157336},
+        },
+        no_id: {
+            "status": "archived",
+            "uploaded": True,
+            "folder_path": str(no_dir),
+            "filename": "NoTech.2018.mkv",
+            "type": "movie",
+            # No tech_spec at all -> actual_size_bytes/tech null.
+        },
+    }
+    _write_libs(sandbox, movies=movies)
+    return with_id, no_id
+
+
+def test_archived_tech_spec_size_and_print_reported(sandbox, make_video):
+    """The archived leaf surfaces the REAL fetched size + a compact, normalized
+    tech dict + the full release filename, while its on-disk size_bytes stays the
+    tiny dummy. The no-tech_spec leaf reports null for those without breaking."""
+    with_id, no_id = _seed_archived_with_tech(sandbox, make_video)
+
+    rows = {it["id"]: it for it in main.items_payload()["items"]}
+    assert with_id in rows and no_id in rows, f"got ids={list(rows)}"
+
+    w = rows[with_id]
+
+    # The on-disk size is still the tiny dummy (the right-side card chip), but the
+    # archived/real size is the stored tech_spec size — and clearly far larger.
+    assert w["size_bytes"] < main.DUMMY_MAX_BYTES
+    assert w["actual_size_bytes"] == 88_473_829_376
+    assert w["actual_size_bytes"] > w["size_bytes"] * 1000
+
+    # release_name is the full release filename (carries iMAX/REMUX/DV.P8 tokens).
+    assert w["release_name"] == _ARCHIVED_RELEASE_NAME
+
+    # tech is the compact, NORMALIZED dict: hdr collapsed to "Dolby Vision", the
+    # verbose audio kept as stored (the UI shortens it), Unknown/SDR/empty dropped.
+    assert w["tech"] == {
+        "resolution": "2160p",
+        "video_codec": "HEVC",
+        "audio": "Dolby TrueHD with Dolby Atmos",
+        "hdr": "Dolby Vision",          # "Dolby Vision / SMPTE ST 2086" -> short
+        "audio_channels": 8,
+        "duration_mins": 169,
+    }
+
+    # The no-tech_spec leaf: actual_size_bytes + tech are null; release_name is its
+    # bare filename; nothing crashes and the row is otherwise well-formed.
+    n = rows[no_id]
+    assert n["actual_size_bytes"] is None
+    assert n["tech"] is None
+    assert n["release_name"] == "NoTech.2018.mkv"
+    assert n["state"] == "ARCHIVED"
+
+
+def test_compact_tech_drops_unknown_and_sdr(sandbox, make_video):
+    """A tech_spec full of un-probed 'Unknown'/'SDR'/0 values yields tech=None
+    (nothing meaningful survives) — the helper never emits empty/noise chips."""
+    root = sandbox["local_root"]
+    d = root / "Movies" / "UnknownSpecs"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / "Unknown.2019.mkv"
+    p.write_bytes(b"tiny-dummy" * 100)
+    mid = "mov-en-2019-unknownspecs"
+    movies = {
+        mid: {
+            "status": "archived", "uploaded": True,
+            "folder_path": str(d), "filename": "Unknown.2019.mkv", "type": "movie",
+            "tech_spec": {
+                "resolution": "Unknown", "width_height": "Unknown",
+                "video_codec": "Unknown", "hdr": "SDR", "frame_rate": "Unknown",
+                "audio": "Unknown", "audio_channels": "Unknown",
+                "audio_language": "Unknown", "subtitles": [],
+                "duration_mins": 0, "size_bytes": 5_000_000_000,
+            },
+        },
+    }
+    _write_libs(sandbox, movies=movies)
+
+    row = next(it for it in main.items_payload()["items"] if it["id"] == mid)
+    # Real size still surfaces (it is meaningful) but the print is all-Unknown.
+    assert row["actual_size_bytes"] == 5_000_000_000
+    assert row["tech"] is None
+
+
+def test_non_tech_rows_carry_null_new_fields(sandbox, make_video):
+    """A normal (non-archived, REAL-on-disk) leaf with no tech_spec still carries
+    the three new keys, all null/absent — proving the fields are universal and the
+    archived gating lives in the UI, not the payload."""
+    seeded = _seed_lifecycle(sandbox, make_video)
+    local_id = seeded["mov_local"]["id"]
+
+    row = next(
+        it for it in main.items_payload()["items"] if it["id"] == local_id
+    )
+    # The seeded local_ready leaf has no tech_spec; release_name = its filename.
+    assert row["actual_size_bytes"] is None
+    assert row["tech"] is None
+    assert row["release_name"] == "LocalReady.2022.mkv"
+
+
+@pytest.mark.usefixtures("web_as_local_admin")
+def test_api_items_reports_archived_tech(sandbox, make_video):
+    """The HTTP surface carries the new fields end-to-end: GET /api/items mirrors
+    items_payload(), so the seeded archived tech_spec is visible to the SPA."""
+    from webui.server import create_app
+
+    with_id, no_id = _seed_archived_with_tech(sandbox, make_video)
+
+    client = TestClient(create_app())
+    r = client.get("/api/items")
+    assert r.status_code == 200, f"/api/items -> {r.status_code}: {r.text}"
+    rows = {it["id"]: it for it in r.json()["items"]}
+
+    assert rows[with_id]["actual_size_bytes"] == 88_473_829_376
+    assert rows[with_id]["release_name"] == _ARCHIVED_RELEASE_NAME
+    assert rows[with_id]["tech"]["hdr"] == "Dolby Vision"
+    assert rows[with_id]["tech"]["audio_channels"] == 8
+    assert rows[no_id]["actual_size_bytes"] is None
+    assert rows[no_id]["tech"] is None

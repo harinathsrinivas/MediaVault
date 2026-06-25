@@ -5135,6 +5135,79 @@ def collect_reclaimable():
     }
 
 
+# Tech-spec values that carry no signal and must be dropped from the compact UI
+# `tech` dict (case-insensitive). MediaInfo writes "Unknown" for un-probed tracks
+# and "SDR" for a plain non-HDR video; neither is worth a chip on the tile.
+_TECH_EMPTY_VALUES = {"unknown", "sdr", "none", ""}
+
+
+def _is_tech_empty(value):
+    """True when a tech_spec value carries no UI signal (None / "" / "Unknown" /
+    "SDR" / "None", case-insensitively). Numbers (e.g. audio_channels, duration)
+    are always kept."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in _TECH_EMPTY_VALUES
+    return False
+
+
+def _normalize_hdr(hdr):
+    """Collapse a verbose MediaInfo hdr_format to a short UI label.
+
+    MediaInfo writes long forms like "Dolby Vision / SMPTE ST 2086" or
+    "SMPTE ST 2086, HDR10 compatible"; the tile wants a single short token. We
+    prefer "Dolby Vision" when present, else "HDR10"/"HDR10+"/"HLG" when the
+    string names them, else the first slash/comma-delimited segment trimmed.
+    Returns None for an empty/SDR value (so the chip is simply omitted)."""
+    if _is_tech_empty(hdr):
+        return None
+    s = str(hdr).strip()
+    low = s.lower()
+    if "dolby vision" in low or "dovi" in low:
+        return "Dolby Vision"
+    if "hdr10+" in low or "hdr10 plus" in low:
+        return "HDR10+"
+    if "hdr10" in low:
+        return "HDR10"
+    if "hlg" in low:
+        return "HLG"
+    # Fall back to the first delimited segment (drops the "/ SMPTE ST 2086" tail).
+    head = re.split(r"[\/,]", s, 1)[0].strip()
+    return head or None
+
+
+def _compact_tech(tech_spec):
+    """Build the compact, UI-facing `tech` dict from a leaf's stored tech_spec.
+
+    Read-only + None-safe: takes the raw tech_spec dict (or None) and returns a
+    dict with ONLY the fields the tile/dossier renders — {resolution, hdr,
+    video_codec, audio, audio_channels, duration_mins} — omitting any value that
+    is empty/"Unknown"/"SDR" (via _is_tech_empty) and normalizing hdr to a short
+    label. Returns None when nothing meaningful survives, so the row carries a
+    clean null rather than an empty dict."""
+    if not isinstance(tech_spec, dict):
+        return None
+    out = {}
+    # String fields: keep only when they carry signal.
+    for key in ("resolution", "video_codec", "audio"):
+        val = tech_spec.get(key)
+        if not _is_tech_empty(val):
+            out[key] = val
+    hdr = _normalize_hdr(tech_spec.get("hdr"))
+    if hdr is not None:
+        out["hdr"] = hdr
+    # audio_channels: an int when probed, "Unknown" otherwise — keep ints only.
+    ch = tech_spec.get("audio_channels")
+    if isinstance(ch, int):
+        out["audio_channels"] = ch
+    # duration_mins: a positive int is meaningful; 0/Unknown is not.
+    dur = tech_spec.get("duration_mins")
+    if isinstance(dur, int) and dur > 0:
+        out["duration_mins"] = dur
+    return out or None
+
+
 def items_payload():
     """Read-only inventory of EVERY physical library leaf for the media-type UI
     (IMP-E14). Strictly READ-ONLY — loads the library once via load_library() and
@@ -5156,6 +5229,7 @@ def items_payload():
             "id", "category", "state", "size_bytes", "path",
             "title", "year", "tmdb_id", "poster_available", "backdrop_available",
             "overview", "episode_title", "chunk_count",
+            "actual_size_bytes", "tech", "release_name",
             "parent_id"  # only when the entry carries one
         }, ... ],
         "by_category": {"movies": N, "series": N, "anime": N, "other": N},
@@ -5165,6 +5239,22 @@ def items_payload():
     synopsis + episode name; null when absent); backdrop_available is a LIVE on-disk
     fanart check (the SAME resolver /api/media-image uses) so the hover detail-window
     requests a backdrop only when one will be served. All three are read-only.
+
+    actual_size_bytes / tech / release_name surface the REAL fetched version info
+    stored in the library (IMP-E16 B1) so an ARCHIVED tile — whose on-disk file is a
+    tiny dummy (size_bytes ~= a few hundred bytes) — can still show the true file
+    size + print under the title. They are read straight off the entry, .get()-guarded
+    and null when absent:
+      * actual_size_bytes = entry.tech_spec.size_bytes (the real fetched byte size).
+      * tech              = a compact dict {resolution, hdr, video_codec, audio,
+                            audio_channels, duration_mins} from tech_spec, dropping
+                            "Unknown"/"SDR"/empty values and normalizing hdr to a
+                            short label (e.g. "Dolby Vision / SMPTE ST 2086" ->
+                            "Dolby Vision"); null when nothing meaningful survives.
+      * release_name      = entry.filename (the full release name, carrying iMAX /
+                            REMUX / DV-profile / source tokens the UI parses).
+    size_bytes stays the ON-DISK size (the dummy's), so the tile can still flag a
+    big local file; actual_size_bytes is the archived/real size shown beneath.
 
     state is the shared classify_entry_state badge when one applies
     (LOCAL_NOT_PUSHED / PUSHED_NOT_ARCHIVED / RESTORED_REPLACE_AGAIN / ARCHIVED);
@@ -5218,6 +5308,12 @@ def items_payload():
         backdrop_available = bool(
             has_anchor and resolve_artwork_path(library, mid, kind="fanart")
         )
+        # Real fetched-version info (IMP-E16 B1) — stored in the library even when
+        # the on-disk file is a tiny archived dummy. All .get()-guarded + None-safe.
+        tech_spec = entry.get("tech_spec") or {}
+        actual_size_bytes = tech_spec.get("size_bytes")
+        tech = _compact_tech(tech_spec)
+        release_name = entry.get("filename")
         row = {
             "id": mid,
             "category": category,
@@ -5232,6 +5328,10 @@ def items_payload():
             "overview": metadata.get("overview"),
             "episode_title": metadata.get("episode_title"),
             "chunk_count": (entry.get("split_info") or {}).get("total_chunks") or 1,
+            # The REAL fetched size + compact tech + full release filename (B1).
+            "actual_size_bytes": actual_size_bytes,
+            "tech": tech,
+            "release_name": release_name,
         }
         if entry.get("parent_id") is not None:
             row["parent_id"] = entry["parent_id"]

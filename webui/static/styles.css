@@ -864,6 +864,60 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   vertical-align: middle;
 }
 
+/* Archived/real-version info under the title (IMP-E16 B1). A small line carrying
+   the REAL fetched size (the on-disk file is a tiny dummy) + a capped row of dim
+   tech chips parsed from tech_spec + the release filename. Renders only for an
+   archived / dummy-on-disk leaf; never overlaps the right-side on-disk size. */
+.tech-host { margin-top: -2px; }
+.tech-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 4px 0 2px;
+}
+/* Real (archived) size — mint pill matching the ARCHIVED badge hue, so it reads
+   as the cloud-resident real size, distinct from the local dummy size chip. */
+.tech-size {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.tech-size-label {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: var(--b-archived);
+  opacity: 0.85;
+}
+.tech-size-val {
+  font-weight: 700;
+  color: var(--b-archived);
+  font-variant-numeric: tabular-nums;
+}
+/* Tech chips — small, dim, low-contrast so they inform without overwhelming the
+   tile. A subtle hairline keeps them legible over the poster glow. */
+.tech-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 5px;
+  min-width: 0;
+}
+.tech-chip {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--line-soft);
+  border-radius: 5px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
 /* Raw canonical id at the card foot — small, dim, monospace; subordinate to the
    title at the top. Sits below the job panel with a hairline separator. */
 .item-rawid {

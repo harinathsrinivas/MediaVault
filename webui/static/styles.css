@@ -2563,6 +2563,56 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   color: #f5c518;             /* IMDb yellow on hover */
 }
 
+/* ----- Trivia "Did you know?" liner notes (detail-only) -----
+   A delightful "flavor" footnote at the very BOTTOM of the body: up to 4 short
+   facts, each in a SMALL font (smaller than the 14px synopsis) with its source
+   tagged as a mint [bracket] at the end of the line. A hairline rule sets it off
+   like a dossier's liner notes — calm + secondary, never competing with the key
+   info above. display:none until preview.js adds .show, so a trivia-less dossier
+   adds NO gap and looks exactly as before. */
+.hp-trivia {
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 13px;
+  border-top: 1px solid var(--line-soft);
+}
+.hp-trivia.show { display: flex; }
+.hp-trivia-head {
+  /* Quiet, friendly heading — sentence case (not a shouty system label) keeps the
+     "liner notes" feel; faint + small so it stays subtle. */
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  color: var(--text-faint);
+}
+.hp-trivia-item {
+  /* Smaller than the synopsis, comfortable leading. Each fact may wrap to at most
+     two tidy lines (a longer one trims) — same -webkit-box clamp idiom as the
+     synopsis/awards so it never blows the anchored panel's bounded height. */
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.hp-trivia-src {
+  /* The [source] tag — mint/teal accent, inline at the end of the fact line. The
+     brackets are CSS-only so the source text stays pristine (textContent in JS). */
+  margin-left: 6px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--accent);
+  white-space: nowrap;
+  opacity: 0.9;
+}
+.hp-trivia-src::before { content: "["; }
+.hp-trivia-src::after { content: "]"; }
+
 /* ----- ✕ close affordance (pinned top-right of the hero band) -----
    Subtle on desktop (the dossier mostly closes on its own via the grace timer);
    prominent + bigger in the mobile modal, where it's the primary dismiss. */
@@ -2631,6 +2681,13 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 .hover-preview.is-modal .hp-body { overflow: visible; }
 .hover-preview.is-modal .hp-synopsis,
 .hover-preview.is-modal .hp-synopsis-full {
+  display: block;
+  -webkit-line-clamp: none;
+  overflow: visible;
+}
+/* Trivia footnotes show in full in the scrollable modal (no 2-line clamp) — a
+   slightly longer fact on a narrow phone is never cut, it just extends the scroll. */
+.hover-preview.is-modal .hp-trivia-item {
   display: block;
   -webkit-line-clamp: none;
   overflow: visible;

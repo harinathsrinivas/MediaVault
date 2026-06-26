@@ -381,6 +381,14 @@ function buildPanel() {
   links.appendChild(tmdb);
   body.appendChild(links);
 
+  // Trivia ("Did you know?") liner notes — detail-only/OPTIONAL. Built empty and
+  // LAST in the body so, when present, a few small footnotes sit at the very
+  // BOTTOM of the scrollable body (they extend the scroll without pushing the key
+  // info up); stays hidden (no .show) until detail carries a non-empty `trivia`.
+  var trivia = document.createElement("div");
+  trivia.className = "hp-trivia";
+  body.appendChild(trivia);
+
   root.appendChild(body);
   document.body.appendChild(root);
 
@@ -408,6 +416,7 @@ function buildPanel() {
     links: links,
     imdb: imdb,
     tmdb: tmdb,
+    trivia: trivia,
   };
 
   // ---- Persistence wiring (active region = card OR panel). ------------------
@@ -525,6 +534,8 @@ function clearRich(p) {
   p.tmdb.removeAttribute("href");
   p.tmdb.textContent = "";
   p.links.classList.remove("show");
+  p.trivia.textContent = "";
+  p.trivia.classList.remove("show");
   p.root.classList.remove("has-rich");
 }
 
@@ -800,6 +811,47 @@ function renderRich(p, item, d) {
     anyLink = true;
   }
   if (anyLink) p.links.classList.add("show");
+
+  // ---- Trivia ("Did you know?") liner notes — small dossier footnotes. -------
+  // Detail-only/OPTIONAL: the detail may carry a `trivia` array of up to 4 short
+  // facts, each {text, source}. We paint a subtle heading + one SMALL-font line
+  // per fact, the source tagged in a mint [bracket] at the end of its line. Absent
+  // / empty / every-item-textless → nothing is shown (no heading, no gap), so a
+  // trivia-less dossier is byte-for-byte as before. Sits LAST in the body, so a
+  // long list extends the scroll without pushing the key info above it off-screen.
+  p.trivia.textContent = "";
+  var trivia = Array.isArray(d.trivia) ? d.trivia : [];
+  var triviaShown = 0;
+  for (var ti = 0; ti < trivia.length && triviaShown < 4; ti += 1) {
+    var fact = trivia[ti];
+    if (!fact) continue;
+    var factText = String(fact.text || "").trim();
+    if (!factText) continue;
+    // Lay the subtle heading down once — only when a first real fact exists.
+    if (triviaShown === 0) {
+      var triviaHead = document.createElement("div");
+      triviaHead.className = "hp-trivia-head";
+      triviaHead.textContent = "Did you know?";
+      p.trivia.appendChild(triviaHead);
+    }
+    var line = document.createElement("div");
+    line.className = "hp-trivia-item";
+    var factTextEl = document.createElement("span");
+    factTextEl.className = "hp-trivia-text";
+    factTextEl.textContent = factText;
+    line.appendChild(factTextEl);
+    var factSrc = String(fact.source || "").trim();
+    if (factSrc) {
+      var srcEl = document.createElement("span");
+      srcEl.className = "hp-trivia-src";
+      // Source text stays pristine (textContent); the [brackets] are CSS-only.
+      srcEl.textContent = factSrc;
+      line.appendChild(srcEl);
+    }
+    p.trivia.appendChild(line);
+    triviaShown += 1;
+  }
+  if (triviaShown > 0) p.trivia.classList.add("show");
 
   // Flag the panel as enriched (CSS can grow/relax now there's real content, and
   // the verify harness keys off .has-rich).

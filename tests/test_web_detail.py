@@ -488,6 +488,163 @@ def test_alias_resolves_to_primary(sandbox_alias, patch_tmdb):
 
 
 # ---------------------------------------------------------------------------
+# (f2) ONLINE-METADATA MERGE (IMP-E16) — tmdb_detail merges the mvonline.json cache
+# (OMDb ratings/awards/box-office) when present, omits it when absent, NEVER does a
+# live OMDb call, and an EPISODE inherits the SHOW's cached ratings.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def online_cache(tmp_path, monkeypatch):
+    """Redirect main.ONLINE_CACHE_PATH to a tmp mvonline.json (never the real repo-root
+    one) so the detail-merge reads a sandbox cache. Yields a seed(tmdb_id, data)
+    callable that writes one cache entry. The OMDb network/cache is never touched —
+    these tests exercise the CACHE-READ merge only, so no _omdb_get/omdb_fetch patch
+    is needed (a live OMDb call here would be a bug the tests would catch via the
+    monkeypatched guard)."""
+    cache_path = tmp_path / "mvonline.json"
+    assert str(cache_path) != main.ONLINE_CACHE_PATH, "must redirect away from the real mvonline.json"
+    monkeypatch.setattr(main, "ONLINE_CACHE_PATH", str(cache_path))
+    # Guard: a live OMDb fetch must never happen inside the dossier path.
+    monkeypatch.setattr(
+        main, "omdb_fetch",
+        lambda **k: (_ for _ in ()).throw(AssertionError("tmdb_detail must NOT call omdb_fetch (cache-only)")),
+    )
+
+    def seed(tmdb_id, data):
+        main.online_cache_set(tmdb_id, data)
+
+    return seed
+
+
+_CACHE_INCEPTION = {
+    "imdb_id": "tt1375666",
+    "ratings": {"imdb": "8.8", "rotten_tomatoes": "87%", "metacritic": "74"},
+    "rated": "PG-13",
+    "runtime": "148 min",
+    "awards": "Won 4 Oscars. 159 wins & 220 nominations total",
+    "boxoffice": "$292,587,330",
+    "fetched_at": "2026-06-01T00:00:00+00:00",
+}
+
+
+def test_detail_merges_cached_ratings_when_present(sandbox, make_video, patch_tmdb, online_cache):
+    """A movie with a cached online entry: tmdb_detail adds ratings/rated/awards/
+    boxoffice from mvonline.json (NO live OMDb call — the fixture guard enforces it)."""
+    patch_tmdb()
+    online_cache(27205, dict(_CACHE_INCEPTION))
+    mid = _seed_movie(sandbox, make_video)
+
+    d = main.tmdb_detail(main.load_library(), mid)
+    assert d["ratings"] == {"imdb": "8.8", "rotten_tomatoes": "87%", "metacritic": "74"}
+    assert d["rated"] == "PG-13"
+    assert d["awards"].startswith("Won 4 Oscars")
+    assert d["boxoffice"] == "$292,587,330"
+    # The TMDB-sourced fields are still present (merge is additive).
+    assert d["title"] == "Inception"
+    assert d["tmdb_id"] == 27205
+
+
+def test_detail_omits_online_fields_when_absent(sandbox, make_video, patch_tmdb, online_cache):
+    """With NO cache entry for the title, the online-only keys are simply absent
+    (the dossier degrades to the TMDB-only dict)."""
+    patch_tmdb()
+    # online_cache fixture active but nothing seeded for 27205.
+    mid = _seed_movie(sandbox, make_video)
+
+    d = main.tmdb_detail(main.load_library(), mid)
+    assert "ratings" not in d
+    assert "rated" not in d
+    assert "awards" not in d
+    assert "boxoffice" not in d
+    # TMDB fields still present.
+    assert d["rating"] == 8.4  # the TMDB vote_average (distinct from OMDb ratings)
+
+
+def test_detail_episode_inherits_show_cached_ratings(sandbox, make_video, patch_tmdb, online_cache):
+    """An EPISODE leaf carries the SHOW's tmdb_id (2316). A cache entry keyed by the
+    show id is merged into the episode dossier — episodes inherit show ratings."""
+    patch_tmdb()
+    online_cache(2316, {
+        "imdb_id": "tt0386676",
+        "ratings": {"imdb": "9.0"},
+        "rated": "TV-14",
+        "awards": "Won 5 Primetime Emmys",
+        "boxoffice": "",
+        "fetched_at": "2026-06-01T00:00:00+00:00",
+    })
+    ep_id, _ = _seed_episode(sandbox, make_video)
+
+    d = main.tmdb_detail(main.load_library(), ep_id)
+    assert d["kind"] == "episode"
+    assert d["ratings"] == {"imdb": "9.0"}   # inherited from the show's cache entry
+    assert d["rated"] == "TV-14"
+    assert d["awards"] == "Won 5 Primetime Emmys"
+    # An empty boxoffice in the cache is OMITTED (not a blank string).
+    assert "boxoffice" not in d
+
+
+def test_detail_merge_partial_cache(sandbox, make_video, patch_tmdb, online_cache):
+    """A cache entry with only some fields: ratings present, awards/rated/boxoffice
+    empty -> only the non-empty fields are merged."""
+    patch_tmdb()
+    online_cache(27205, {
+        "imdb_id": "tt1375666",
+        "ratings": {"imdb": "8.8"},  # RT/MC missing
+        "rated": "",                 # empty -> omitted
+        "awards": "",
+        "boxoffice": "",
+        "fetched_at": "2026-06-01T00:00:00+00:00",
+    })
+    mid = _seed_movie(sandbox, make_video)
+
+    d = main.tmdb_detail(main.load_library(), mid)
+    assert d["ratings"] == {"imdb": "8.8"}
+    assert "rated" not in d
+    assert "awards" not in d
+    assert "boxoffice" not in d
+
+
+def test_detail_merge_with_no_tmdb_key(sandbox, make_video, monkeypatch, online_cache):
+    """The online merge is INDEPENDENT of the TMDB key: with NO TMDB key (the offline
+    core path), a populated mvonline.json still enriches the dossier with ratings."""
+    # No TMDB key -> tmdb_detail returns the offline core, but still merges the cache.
+    monkeypatch.setattr(main.mvcommon, "tmdb_api_key", lambda: "")
+    online_cache(27205, dict(_CACHE_INCEPTION))
+    mid = _seed_movie(sandbox, make_video)
+
+    d = main.tmdb_detail(main.load_library(), mid)
+    # Offline core present.
+    assert d["tmdb_id"] == 27205
+    assert d["kind"] == "movie"
+    # The online ratings were merged even though no TMDB fetch happened.
+    assert d["ratings"] == {"imdb": "8.8", "rotten_tomatoes": "87%", "metacritic": "74"}
+    assert d["awards"].startswith("Won 4 Oscars")
+    # No TMDB-only fields (the fetch was skipped).
+    assert "genres" not in d
+
+
+def test_detail_merge_is_read_only(sandbox, make_video, patch_tmdb, online_cache):
+    """Merging the cache must not write the library OR the cache file."""
+    patch_tmdb()
+    online_cache(27205, dict(_CACHE_INCEPTION))
+    mid = _seed_movie(sandbox, make_video)
+
+    lib_paths = [sandbox["lib_movies"], sandbox["lib_series"], sandbox["lib_anime"]]
+    before = {p: p.read_bytes() for p in lib_paths}
+    with open(main.ONLINE_CACHE_PATH, "rb") as fh:
+        cache_before = fh.read()
+
+    lib = main.load_library()
+    main.tmdb_detail(lib, mid)
+    main.tmdb_detail(lib, mid)
+
+    for p in lib_paths:
+        assert p.read_bytes() == before[p], f"{p.name} changed during a read-only detail"
+    with open(main.ONLINE_CACHE_PATH, "rb") as fh:
+        assert fh.read() == cache_before, "mvonline.json changed during a read-only detail"
+
+
+# ---------------------------------------------------------------------------
 # (g) HTTP surface — GET /api/detail/{id} mirrors tmdb_detail end-to-end
 # ---------------------------------------------------------------------------
 
@@ -510,6 +667,41 @@ def test_api_detail_movie_endpoint(sandbox, make_video, patch_tmdb):
     assert body["imdb_url"] == "https://www.imdb.com/title/tt1375666/"
     # The endpoint returns tmdb_detail verbatim.
     assert body == main.tmdb_detail(main.load_library(), mid)
+
+
+@pytest.mark.usefixtures("web_as_local_admin")
+def test_api_detail_endpoint_includes_cached_online_metadata(sandbox, make_video, patch_tmdb, online_cache):
+    """GET /api/detail surfaces the merged online ratings/awards/box-office when the
+    mvonline.json cache has them — the dossier's headline IMP-E16 payload, over HTTP."""
+    from webui.server import create_app
+    patch_tmdb()
+    online_cache(27205, dict(_CACHE_INCEPTION))
+    mid = _seed_movie(sandbox, make_video)
+
+    client = TestClient(create_app())
+    r = client.get(f"/api/detail/{mid}")
+    assert r.status_code == 200, f"/api/detail -> {r.status_code}: {r.text}"
+    body = r.json()
+    assert body["ratings"] == {"imdb": "8.8", "rotten_tomatoes": "87%", "metacritic": "74"}
+    assert body["rated"] == "PG-13"
+    assert body["awards"].startswith("Won 4 Oscars")
+    assert body["boxoffice"] == "$292,587,330"
+
+
+@pytest.mark.usefixtures("web_as_local_admin")
+def test_api_detail_endpoint_omits_online_metadata_when_absent(sandbox, make_video, patch_tmdb, online_cache):
+    """With no cache entry, GET /api/detail omits the online-only keys (200, partial)."""
+    from webui.server import create_app
+    patch_tmdb()
+    mid = _seed_movie(sandbox, make_video)  # no cache seeded
+
+    client = TestClient(create_app())
+    r = client.get(f"/api/detail/{mid}")
+    assert r.status_code == 200
+    body = r.json()
+    assert "ratings" not in body
+    assert "awards" not in body
+    assert "boxoffice" not in body
 
 
 @pytest.mark.usefixtures("web_as_local_admin")

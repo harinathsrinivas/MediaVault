@@ -11,6 +11,10 @@ a.json
 # sha256 of each token is stored, but never commit it.
 /mvtokens.json
 
+# Online-metadata cache (IMP-E16) — OMDb ratings/awards/box-office keyed by
+# tmdb_id, populated by `refresh_online`. A regenerable local cache; never commit.
+/mvonline.json
+
 .git*
 # ...but DO track the line-ending policy (overrides core.autocrlf; stops CRLF phantom diffs)
 !.gitattributes

@@ -10,5 +10,14 @@
   "tmdb": {
     "_comment_api_key": "Optional TMDB API key for metadata lookups. null/empty = unset.",
     "api_key": null
+  },
+  "omdb": {
+    "_comment_api_key": "Optional OMDb (omdbapi.com) API key for the online-metadata refresh (IMP-E16): IMDb/Rotten Tomatoes/Metacritic ratings + Rated/Runtime/Awards/BoxOffice. Populated by `python main.py refresh_online`, cached in the gitignored mvonline.json, and merged read-only into the hover dossier. null/empty = unset (refresh_online then no-ops).",
+    "api_key": null
+  },
+  "rapidapi": {
+    "_comment": "Reserved for future RapidAPI-backed IMDb / Rotten Tomatoes sources. Both null/empty = unset.",
+    "imdb_key": null,
+    "rt_key": null
   }
 }

@@ -12,7 +12,7 @@ import difflib
 import tempfile
 import webbrowser
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pymediainfo import MediaInfo
 
 # Ensure emoji/Unicode output works on Windows consoles
@@ -1193,6 +1193,266 @@ def _tmdb_get(url, params, api_key, _cache=True):
     return data
 
 
+# ===========================================================================
+#   ONLINE METADATA — OMDb ratings/awards/box-office + the mvonline.json cache
+#   (IMP-E16).
+#
+# The hover DOSSIER (GET /api/detail) shows the cross-aggregator ratings TMDB does
+# NOT carry — IMDb / Rotten Tomatoes / Metacritic — plus Rated / Runtime / Awards /
+# BoxOffice. The single source is OMDb (https://www.omdbapi.com), looked up by a
+# title's IMDb id (`?i=tt…`, preferred) or by title+year (`?t=&y=`).
+#
+# COST MODEL — populated ONCE, read MANY times:
+#   * `refresh_online` (cmd_refresh_online) walks the whole library, dedupes by
+#     tmdb_id (each distinct title fetched once — episodes inherit their SHOW's
+#     ratings), resolves each title's imdb_id via TMDB, calls omdb_fetch, and
+#     stores the result in mvonline.json keyed by str(tmdb_id).
+#   * tmdb_detail MERGES the cached entry into the dossier with NO live OMDb call,
+#     so opening the hover preview stays fast and never blocks on the network.
+#
+# mvonline.json schema (atomic write: tempfile + os.replace — the token-store idiom):
+#   {"<tmdb_id>": {"imdb_id": "tt…",
+#                  "ratings": {"imdb": "8.8", "rotten_tomatoes": "87%",
+#                              "metacritic": "74"},
+#                  "rated": "PG-13", "runtime": "148 min",
+#                  "awards": "Won 4 Oscars…", "boxoffice": "$292,587,330",
+#                  "fetched_at": "<iso8601 UTC>"},
+#    ...}
+#
+# BINDING HAZARD: ONLINE_CACHE_PATH / OMDB_CACHE_DIR are module-level so a test can
+# monkeypatch them to a temp path and never touch the real repo-root mvonline.json
+# or the real ~/.mediavault cache — same discipline as MVTOKENS_PATH / TMDB_CACHE_DIR.
+# ===========================================================================
+
+# Repo-root online-metadata cache (gitignored). Sits beside main.py so it is found
+# regardless of CWD, mirroring mvcommon.MVTOKENS_PATH.
+ONLINE_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mvonline.json")
+
+# Raw OMDb responses cached on disk (keyed by url+params) so a re-run is cheap —
+# a sibling of TMDB_CACHE_DIR under the per-user state dir.
+OMDB_CACHE_DIR = os.path.join(mvcommon.MV_STATE_DIR, "cache", "omdb")
+OMDB_API_ROOT = "https://www.omdbapi.com/"
+
+# How long a cached online-metadata entry is considered FRESH. refresh_online
+# skips an entry fetched within this window unless --force is given (ratings/awards
+# drift slowly; re-fetching daily would waste the OMDb quota).
+ONLINE_FRESH_DAYS = 14
+
+# OMDb's three rating Source names -> our stable, compact keys.
+_OMDB_RATING_SOURCES = {
+    "Internet Movie Database": "imdb",
+    "Rotten Tomatoes": "rotten_tomatoes",
+    "Metacritic": "metacritic",
+}
+
+
+def online_cache_load():
+    """Load mvonline.json -> dict keyed by str(tmdb_id). {} when absent/malformed.
+
+    Read fresh each call (the file is tiny) so a refresh_online write is visible to
+    the very next tmdb_detail without a cache-clear dance — same no-in-memory-cache
+    choice as the token store. A malformed file warns to stderr and degrades to {}
+    so a corrupt cache never crashes the dossier or the refresh."""
+    if not os.path.exists(ONLINE_CACHE_PATH):
+        return {}
+    try:
+        with open(ONLINE_CACHE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(
+            f"⚠️  mvonline.json is malformed and will be ignored "
+            f"(online ratings cache reset). Error: {e}",
+            file=sys.stderr,
+        )
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def online_cache_get(tmdb_id):
+    """The cached online-metadata dict for a tmdb_id, or None when not cached.
+
+    The key is always str(tmdb_id) so an int (TMDB's native type) and a stored
+    string id resolve to the same entry. A non-dict stored value -> None."""
+    if tmdb_id is None:
+        return None
+    entry = online_cache_load().get(str(tmdb_id))
+    return entry if isinstance(entry, dict) else None
+
+
+def online_cache_set(tmdb_id, data):
+    """Upsert ``data`` under str(tmdb_id) and atomically persist mvonline.json.
+
+    Atomic write (tempfile + os.replace, mirroring mvcommon._save_tokens) so a crash
+    mid-write can never leave a half-written cache. Loads the current cache, merges
+    the one key, and rewrites — refresh_online writes one title at a time so the
+    cache is durable after every title (an interrupted run keeps everything fetched
+    so far)."""
+    cache = online_cache_load()
+    cache[str(tmdb_id)] = data
+    path = ONLINE_CACHE_PATH
+    dir_name = os.path.dirname(path) or "."
+    os.makedirs(dir_name, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tf:
+            json.dump(cache, tf, indent=2)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _online_entry_is_fresh(entry, now=None):
+    """True iff a cached online entry was fetched within ONLINE_FRESH_DAYS.
+
+    A missing/unparseable fetched_at -> NOT fresh (re-fetch), so a legacy or
+    hand-edited entry without a timestamp is refreshed rather than pinned stale.
+    Uses mvcommon's iso parser + UTC clock so a naive timestamp never raises on a
+    tz-mismatch."""
+    if not isinstance(entry, dict):
+        return False
+    fetched = mvcommon._parse_iso(entry.get("fetched_at"))
+    if fetched is None:
+        return False
+    now = now or mvcommon._now_utc()
+    return (now - fetched) <= timedelta(days=ONLINE_FRESH_DAYS)
+
+
+def _omdb_cache_key(params):
+    """Stable filename for a cached OMDb GET (sha1 of sorted params, MINUS the
+    apikey so the cache file never embeds the secret and survives a key rotation)."""
+    safe = {k: v for k, v in (params or {}).items() if k != "apikey"}
+    raw = "&".join(f"{k}={safe[k]}" for k in sorted(safe))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest() + ".json"
+
+
+def _omdb_get(params, api_key):
+    """GET omdbapi.com with ``params`` (+ the apikey) -> parsed JSON dict, or None.
+
+    NEVER raises: a network error, a non-200, a JSON-decode failure, or an OMDb
+    ``{"Response":"False"}`` (e.g. "Movie not found!") all return None so the caller
+    skips that title rather than crashing the whole refresh. Responses are cached on
+    disk under OMDB_CACHE_DIR keyed by the params (apikey excluded) so a re-run is
+    cheap. Mirrors _tmdb_get's cache + degrade idiom exactly."""
+    cache_path = os.path.join(OMDB_CACHE_DIR, _omdb_cache_key(params))
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        pass  # cache miss / unreadable -> live fetch
+    q = dict(params or {})
+    q["apikey"] = api_key
+    try:
+        r = requests.get(OMDB_API_ROOT, params=q, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+    except Exception as e:
+        print(f"   ⚠️  OMDb request failed: {e}")
+        return None
+    if r.status_code != 200:
+        print(f"   ⚠️  OMDb returned status {r.status_code}")
+        return None
+    try:
+        data = r.json()
+    except Exception as e:
+        print(f"   ⚠️  OMDb response was not valid JSON: {e}")
+        return None
+    # OMDb signals "no such title" with Response:"False" (HTTP 200). Treat as a miss
+    # — do NOT cache it, so adding the imdb_id later re-queries instead of pinning
+    # the not-found.
+    if isinstance(data, dict) and str(data.get("Response", "")).lower() == "false":
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        os.makedirs(OMDB_CACHE_DIR, exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except OSError:
+        pass  # caching is best-effort
+    return data
+
+
+def _omdb_parse_ratings(payload):
+    """Map an OMDb payload's ``Ratings[]`` to {imdb, rotten_tomatoes, metacritic}.
+
+    OMDb returns ``Ratings: [{"Source": "...", "Value": "..."}]`` with the three
+    Source names in _OMDB_RATING_SOURCES. Values are NORMALIZED to the compact dossier
+    form: IMDb '8.8/10' -> '8.8', Metacritic '74/100' -> '74', Rotten Tomatoes keeps
+    its '87%' (the contract shape: {"imdb":"8.8","rotten_tomatoes":"87%",
+    "metacritic":"74"}). Only the recognised sources are kept, and only with a
+    non-empty/non-"N/A" Value. Returns a dict with 0–3 keys (omitting sources OMDb did
+    not provide)."""
+    out = {}
+    for r in (payload or {}).get("Ratings") or []:
+        if not isinstance(r, dict):
+            continue
+        key = _OMDB_RATING_SOURCES.get(r.get("Source"))
+        if not key:
+            continue
+        val = _omdb_clean(r.get("Value"))
+        if not val:
+            continue
+        # Strip the "/N" denominator for the score-style sources (IMDb x/10,
+        # Metacritic x/100); RT is a "%" and is kept verbatim.
+        if key in ("imdb", "metacritic") and "/" in val:
+            val = val.split("/", 1)[0].strip()
+        out[key] = val
+    return out
+
+
+def _omdb_clean(value):
+    """Trim an OMDb scalar to a useful string, or "" for missing/"N/A".
+
+    OMDb fills unknown fields with the literal string "N/A"; we drop those so the
+    dossier omits a field rather than showing "N/A"."""
+    if not isinstance(value, str):
+        return ""
+    v = value.strip()
+    return "" if v.upper() == "N/A" else v
+
+
+def omdb_fetch(imdb_id=None, title=None, year=None):
+    """Fetch online metadata for one title from OMDb -> a dict, or None on failure.
+
+    Looks up by ``imdb_id`` (``?i=tt…``, preferred — exact, no ambiguity) when given,
+    else by ``title`` (+ optional ``year``) (``?t=&y=``). Returns:
+        {"imdb_id": "tt…"|"",            # OMDb's imdbID echo (or "")
+         "ratings": {"imdb": "8.8", "rotten_tomatoes": "87%", "metacritic": "74"},
+         "rated": "PG-13", "runtime": "148 min",
+         "awards": "Won 4 Oscars…", "boxoffice": "$292,587,330"}
+    (any field OMDb did not provide is "" / the ratings sub-keys are omitted).
+
+    NEVER raises and NEVER hits the network on a bad call: with neither imdb_id nor
+    title it returns None immediately; any OMDb/parse failure (via _omdb_get) returns
+    None. Does NOT add fetched_at — the caller (online_cache_set) stamps that so the
+    timestamp reflects when it was STORED."""
+    api_key = mvcommon.omdb_api_key()
+    if not api_key:
+        return None
+    if imdb_id:
+        params = {"i": imdb_id}
+    elif title:
+        params = {"t": title}
+        if year:
+            params["y"] = str(year)
+    else:
+        return None
+
+    data = _omdb_get(params, api_key)
+    if not isinstance(data, dict):
+        return None
+    return {
+        "imdb_id": _omdb_clean(data.get("imdbID")),
+        "ratings": _omdb_parse_ratings(data),
+        "rated": _omdb_clean(data.get("Rated")),
+        "runtime": _omdb_clean(data.get("Runtime")),
+        "awards": _omdb_clean(data.get("Awards")),
+        "boxoffice": _omdb_clean(data.get("BoxOffice")),
+    }
+
+
 def _tmdb_image_base(api_key):
     """Live images.secure_base_url from /configuration, or the documented
     fallback. Cached like any other GET, so it costs one call per process at most."""
@@ -2054,6 +2314,167 @@ def cmd_enrich_metadata(arg=None, *flags):
           f"ambiguous={len(ambiguous)} skipped={n_skipped}")
     if not apply:
         print("   (dry-run: nothing was written — re-run with --apply to perform it.)")
+
+
+# ===========================================================================
+#   cmd_refresh_online — "refresh online metadata for all in one go" (IMP-E16).
+#
+# Walks the library, dedupes to DISTINCT TITLES (by tmdb_id), resolves each title's
+# imdb_id via TMDB, fetches OMDb (IMDb/RT/Metacritic ratings + Rated/Runtime/Awards/
+# BoxOffice), and writes the result into the gitignored mvonline.json cache that
+# tmdb_detail merges into the hover dossier. NEVER mutates library_*.json — this
+# writes ONLY mvonline.json (+ the on-disk OMDb/TMDB response caches).
+#
+# DEDUPE-BY-TMDB_ID: episodes inherit their SHOW's ratings (OMDb has no per-episode
+# RT/Metacritic), and a show has ONE tmdb_id stamped on every leaf + season_map. So
+# _gather_enrich_units already collapses a show's seasons/episodes into ONE unit;
+# we additionally key by the unit's stored tmdb_id so two units that somehow share
+# a tmdb_id are still fetched once. Movies are one unit each. Result: one OMDb call
+# per distinct title, never one per episode.
+#
+# FRESHNESS: an entry fetched within ONLINE_FRESH_DAYS (~14d) is skipped (ratings
+# drift slowly) unless --force re-fetches it.
+# ===========================================================================
+
+def _resolve_imdb_id(tmdb_id, kind, api_key):
+    """The IMDb id ('tt…') for a TMDB id, via the SAME endpoints tmdb_detail uses.
+
+    * movie (kind 'movie')  -> GET /3/movie/{id}, read ``imdb_id``.
+    * tv/show (anything else)-> GET /3/tv/{id}/external_ids, read ``imdb_id``.
+    Both calls funnel through the cached, None-on-failure _tmdb_get, so a network/
+    non-200/bad-JSON failure just yields None (the caller reports no-imdb and skips).
+    Returns a non-empty 'tt…' string or None."""
+    if kind == "movie":
+        data = _tmdb_get(f"{TMDB_API_ROOT}/movie/{tmdb_id}", {}, api_key)
+    else:
+        data = _tmdb_get(f"{TMDB_API_ROOT}/tv/{tmdb_id}/external_ids", {}, api_key)
+    if isinstance(data, dict):
+        imdb_id = data.get("imdb_id")
+        if isinstance(imdb_id, str) and imdb_id.strip():
+            return imdb_id.strip()
+    return None
+
+
+def cmd_refresh_online(arg=None, *flags):
+    """Refresh online metadata (OMDb ratings/awards/box-office) for ALL titles.
+
+    Usage: refresh_online [id_or_prefix] [--force] [--library movies|series|anime]
+
+    Fetches IMDb/Rotten Tomatoes/Metacritic ratings + Rated/Runtime/Awards/BoxOffice
+    for every DISTINCT title (deduped by tmdb_id; episodes inherit the show's
+    ratings), caches them in mvonline.json, and the hover dossier reads that cache.
+    Skips a title cached within ~14 days unless --force. NEVER writes library_*.json.
+
+    Optional positional `id_or_prefix` restricts to ids ==/startswith it; --library
+    restricts by category. Any other flag is ignored."""
+    # Fold a flag-shaped positional (e.g. refresh_online("--force")) into the flags.
+    flist = list(flags)
+    if arg and str(arg).startswith("--"):
+        flist = [arg] + flist
+        id_or_prefix = None
+    else:
+        id_or_prefix = arg or None
+
+    force = "--force" in flist
+    library_filter = None
+    if "--library" in flist:
+        i = flist.index("--library")
+        if i + 1 < len(flist):
+            library_filter = flist[i + 1].lower()
+
+    if not mvcommon.omdb_api_key():
+        print("❌ No OMDb API key configured. Set omdb.api_key in mvconfig.json "
+              "(see mvconfig.example.json). Nothing to do.")
+        return
+    api_key = mvcommon.tmdb_api_key()
+    if not api_key:
+        print("❌ No TMDB API key configured (needed to resolve each title's IMDb "
+              "id). Set tmdb.api_key in mvconfig.json. Nothing to do.")
+        return
+
+    library = load_library()
+    units = _gather_enrich_units(library, id_or_prefix=id_or_prefix, library_filter=library_filter)
+
+    # Dedupe to DISTINCT tmdb_ids (insertion-ordered). A unit with no stored tmdb_id
+    # has not been enriched yet -> counted as no-tmdb and skipped (refresh reads the
+    # tmdb_id that enrich stamps; it never searches by title here).
+    by_tmdb = {}      # tmdb_id (str) -> {"unit": unit, "kind": "movie"|"tv"}
+    no_tmdb = 0
+    for unit in units:
+        tmdb_id = _unit_preset_tmdb_id(unit, library)
+        if not tmdb_id:
+            no_tmdb += 1
+            continue
+        key = str(tmdb_id)
+        if key not in by_tmdb:
+            by_tmdb[key] = {
+                "unit": unit,
+                "kind": "movie" if unit["kind"] == "movie" else "tv",
+            }
+
+    print("=== REFRESH ONLINE METADATA (OMDb) ===")
+    if library_filter:
+        print(f"   > library filter: {library_filter}")
+    if id_or_prefix:
+        print(f"   > scope: ids == or startswith '{id_or_prefix}'")
+    print(f"   > {len(by_tmdb)} distinct title(s) with a tmdb_id"
+          f"{f', {no_tmdb} without a tmdb_id (run enrich_metadata first)' if no_tmdb else ''}.")
+    if force:
+        print("   > --force: re-fetching even fresh entries.")
+    print()
+
+    n_fetched = n_cached = n_no_imdb = n_failed = 0
+    total = len(by_tmdb)
+
+    for idx, (key, info) in enumerate(by_tmdb.items(), start=1):
+        unit = info["unit"]
+        label = unit.get("title") or unit["key"]
+        prefix = f"[{idx}/{total}] {label} ({key})"
+
+        # Freshness skip (unless --force).
+        cached = online_cache_get(key)
+        if not force and _online_entry_is_fresh(cached):
+            n_cached += 1
+            print(f"{prefix} -> cached (fresh), skipping.")
+            continue
+
+        # Resolve the imdb_id via TMDB, then fetch OMDb by id.
+        imdb_id = _resolve_imdb_id(key, info["kind"], api_key)
+        data = omdb_fetch(imdb_id=imdb_id) if imdb_id else None
+        if data is None and not imdb_id:
+            n_no_imdb += 1
+            print(f"{prefix} -> no IMDb id from TMDB, skipping.")
+            continue
+        if data is None:
+            n_failed += 1
+            print(f"{prefix} -> OMDb fetch failed ({imdb_id}), skipping.")
+            continue
+
+        # Stamp imdb_id (prefer OMDb's echo, else the resolved one) + fetched_at, then
+        # persist. This writes ONLY mvonline.json — the library is never touched.
+        data["imdb_id"] = data.get("imdb_id") or imdb_id or ""
+        data["fetched_at"] = mvcommon._now_utc().isoformat()
+        online_cache_set(key, data)
+        n_fetched += 1
+        print(f"{prefix} -> {_fmt_ratings(data.get('ratings') or {})}")
+
+    print(f"\n=== DONE === fetched={n_fetched} cached-skip={n_cached} "
+          f"no-imdb={n_no_imdb} failed={n_failed} no-tmdb={no_tmdb}")
+    if not no_tmdb and total == 0:
+        print("   (nothing to refresh — the matched scope had no titles with a tmdb_id.)")
+
+
+def _fmt_ratings(ratings):
+    """Compact one-line ratings summary for the live progress print, e.g.
+    'IMDb 8.8 · RT 87% · MC 74'. '(no ratings)' when OMDb returned none."""
+    parts = []
+    if ratings.get("imdb"):
+        parts.append(f"IMDb {ratings['imdb']}")
+    if ratings.get("rotten_tomatoes"):
+        parts.append(f"RT {ratings['rotten_tomatoes']}")
+    if ratings.get("metacritic"):
+        parts.append(f"MC {ratings['metacritic']}")
+    return " · ".join(parts) if parts else "(no ratings)"
 
 
 def _retarget_unit_folders(unit, old_folder, new_folder):
@@ -5638,24 +6059,47 @@ def tmdb_detail(library, mid):
     # entry; a successful TMDB call overwrites it with the canonical title.
     _set_if(out, "title", (entry.get("metadata") or {}).get("title"))
 
-    # No API key -> nothing can be fetched, but the offline core is still useful
-    # (and the route returns it 200, never a misleading "no tmdb_id" 404).
-    if not api_key:
-        return out
-
-    if kind == "movie":
-        _tmdb_detail_movie(out, tmdb_id, api_key)
-    elif kind == "episode":
-        se = _episode_se_of(real_id, entry)
-        if se is not None:
-            _tmdb_detail_episode(out, tmdb_id, se[0], se[1], api_key)
+    # No API key -> nothing can be fetched from TMDB, but the offline core is still
+    # useful (and the route returns it 200, never a misleading "no tmdb_id" 404). The
+    # online-metadata MERGE below is independent of the TMDB key — a populated
+    # mvonline.json still enriches the dossier even with no TMDB key configured.
+    if api_key:
+        if kind == "movie":
+            _tmdb_detail_movie(out, tmdb_id, api_key)
+        elif kind == "episode":
+            se = _episode_se_of(real_id, entry)
+            if se is not None:
+                _tmdb_detail_episode(out, tmdb_id, se[0], se[1], api_key)
+            else:
+                # Defensive: kind said episode but the parse vanished — degrade to show.
+                _tmdb_detail_tv(out, tmdb_id, api_key)
         else:
-            # Defensive: kind said episode but the parse vanished — degrade to show.
             _tmdb_detail_tv(out, tmdb_id, api_key)
-    else:
-        _tmdb_detail_tv(out, tmdb_id, api_key)
+
+    # MERGE the cached ONLINE metadata (OMDb ratings/awards/box-office), populated by
+    # `refresh_online`. CACHE-ONLY — NEVER a live OMDb call here, so the hover dossier
+    # stays fast and never blocks on the network. For an EPISODE, out["tmdb_id"] is
+    # already the SHOW's tmdb_id (enrich stamps the show id on every leaf), so the
+    # episode inherits the show's ratings. Only fields present in the cache are added.
+    _merge_online_metadata(out, tmdb_id)
 
     return out
+
+
+def _merge_online_metadata(out, tmdb_id):
+    """Merge the cached online-metadata for ``tmdb_id`` into the detail dict ``out``
+    (in place). Adds ``ratings`` (imdb/rt/metacritic map), ``rated``, ``awards`` and
+    ``boxoffice`` ONLY when present + non-empty in mvonline.json — so an absent cache
+    entry, or a partial one, simply omits those fields. NO live OMDb call (cache read
+    only); never raises (online_cache_get degrades a malformed cache to None)."""
+    cached = online_cache_get(tmdb_id)
+    if not isinstance(cached, dict):
+        return
+    ratings = cached.get("ratings")
+    if isinstance(ratings, dict) and ratings:
+        out["ratings"] = ratings
+    for src_key, out_key in (("rated", "rated"), ("awards", "awards"), ("boxoffice", "boxoffice")):
+        _set_if(out, out_key, cached.get(src_key))
 
 
 # ---------------------------------------------------------------------------
@@ -6348,6 +6792,7 @@ if __name__ == "__main__":
         print("  set_poster [id] [url]")
         print("  set_fanart [id] [url]")
         print("  set_tmdb [id] [tmdb_id]")
+        print("  refresh_online [id_or_prefix] [--force] [--library movies|series|anime]  — Fetch+cache OMDb IMDb/RT/Metacritic ratings + awards/box-office for every title (deduped by tmdb_id; reads into the hover dossier)")
         print("  set_uploaded [id]")
         print("  prep_season [base_id] [folder]")
         print("  scan_unprepped")
@@ -6508,6 +6953,15 @@ if __name__ == "__main__":
         rest = sys.argv[2:]
         positional = rest[0] if (rest and not rest[0].startswith("--")) else None
         cmd_enrich_metadata(positional, *rest)
+
+    elif cmd == "refresh_online":
+        # refresh_online [id_or_prefix] [--force] [--library movies|series|anime]
+        # Fetch+cache OMDb ratings/awards/box-office for every distinct title (deduped
+        # by tmdb_id). Writes ONLY mvonline.json. Pass the positional id/prefix (if any)
+        # plus all remaining tokens as flags so cmd_refresh_online parses them itself.
+        rest = sys.argv[2:]
+        positional = rest[0] if (rest and not rest[0].startswith("--")) else None
+        cmd_refresh_online(positional, *rest)
 
     elif cmd == "prep_season":
         if len(sys.argv) >= 4:

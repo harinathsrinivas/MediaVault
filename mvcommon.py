@@ -155,6 +155,47 @@ def tmdb_api_key():
     return ""
 
 
+def _config_string(section, key):
+    """A trimmed string config value at section[key], or "" when absent/blank.
+
+    Shared by the OMDb / RapidAPI key getters below — each is a runtime getter
+    (never an import-time binding) so a test that monkeypatches it, or a config
+    edit, is honoured on the next call. Returns "" (falsy) for absent / null /
+    blank / non-string, matching tmdb_api_key()'s contract."""
+    val = _config_section(section).get(key)
+    if isinstance(val, str) and val.strip():
+        return val.strip()
+    return ""
+
+
+def omdb_api_key():
+    """Configured OMDb API key (mvconfig.json ``omdb.api_key``), or "" when unset.
+
+    OMDb (https://www.omdbapi.com) is the source of the cross-aggregator ratings
+    (IMDb / Rotten Tomatoes / Metacritic) + Rated/Runtime/Awards/BoxOffice that the
+    online-metadata refresh (IMP-E16) caches. Returns "" (falsy) for absent / null /
+    blank / non-string, so a caller can `if not omdb_api_key(): bail`."""
+    return _config_string("omdb", "api_key")
+
+
+def rapidapi_imdb_key():
+    """Configured RapidAPI IMDb key (mvconfig.json ``rapidapi.imdb_key``), or "".
+
+    Reserved for a future RapidAPI-backed IMDb data source; a runtime getter today
+    so it is available the moment a key is added to the config (no import-time
+    binding). "" (falsy) when unset."""
+    return _config_string("rapidapi", "imdb_key")
+
+
+def rapidapi_rt_key():
+    """Configured RapidAPI Rotten Tomatoes key (mvconfig.json ``rapidapi.rt_key``),
+    or "".
+
+    Reserved for a future RapidAPI-backed Rotten Tomatoes source; a runtime getter
+    (no import-time binding). "" (falsy) when unset."""
+    return _config_string("rapidapi", "rt_key")
+
+
 # ==========================================
 #         WEB ACCESS TOKENS (mvtokens.json)
 # ==========================================

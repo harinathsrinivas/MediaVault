@@ -78,6 +78,20 @@ def sandbox(tmp_path, monkeypatch):
         monkeypatch.setattr(mvcommon, attr, path)
         monkeypatch.setattr(main, attr, path)
 
+    # IMP-E16: redirect the online-metadata cache (mvonline.json) + the OMDb response
+    # cache to the sandbox so NO test reads/writes the real repo-root mvonline.json or
+    # the real ~/.mediavault OMDb cache. tmdb_detail merges this cache, so an
+    # un-redirected real file would silently pollute every detail test once a real
+    # `refresh_online` run created one. Points at a path that does not yet exist (the
+    # online_cache fixture in test_refresh_online / test_web_detail overrides it with
+    # a path it seeds). These live only on `main`.
+    online_cache = tmp_path / "online" / "mvonline.json"
+    omdb_cache = tmp_path / "online" / "omdb"
+    for attr, path in [("ONLINE_CACHE_PATH", str(online_cache)), ("OMDB_CACHE_DIR", str(omdb_cache))]:
+        assert "PycharmProjects" not in str(path) or str(tmp_path) in str(path), \
+            f"Safety check failed: {attr} still points at the real repo cache!"
+        monkeypatch.setattr(main, attr, path)
+
     yield {
         "media_dir":  media_dir,
         "lib_movies": lib_movies,

@@ -19,6 +19,23 @@
   <meta name="theme-color" content="#0b0f17" />
   <link rel="stylesheet" href="./styles.css" />
 
+  <!-- Preload the critical first-paint ES modules (IMP-E16 D5). With no bundler,
+       every `import` is its own network round-trip; without these hints the browser
+       only discovers data.js / card.js / … AFTER it parses + evaluates app.js,
+       forcing a request waterfall. modulepreload fetches app.js and its hottest
+       static deps in PARALLEL during <head> parsing, so the graph is warm by the
+       time app.js runs. Deliberately NOT preloaded: the now-lazy admin.js /
+       palette.js (and the on-demand terminal.js) — they must stay off the first-
+       paint path. No external preconnect either: posters + detail are same-origin
+       (/api/…), and TMDB images are fetched server-side, so a cross-origin
+       preconnect would buy nothing. Paths are relative to this file (siblings). -->
+  <link rel="modulepreload" href="./app.js" />
+  <link rel="modulepreload" href="./data.js" />
+  <link rel="modulepreload" href="./card.js" />
+  <link rel="modulepreload" href="./title.js" />
+  <link rel="modulepreload" href="./auth.js" />
+  <link rel="modulepreload" href="./sort.js" />
+
   <!-- Fail-loud guard (runs BEFORE the module scripts below). This is a plain,
        dependency-free, NON-module inline script so it always executes even if the
        ES-module graph fails to evaluate. If a top-level module/script error or an

@@ -39,7 +39,10 @@ import { wireModal } from "./modal.js";
 import { getSort, setSort, sortItems, SORT_KEYS } from "./sort.js";
 import { wireCardGlow } from "./glow.js";
 import { wireHoverPreview, openPreviewForCard } from "./preview.js";
-import { wireCommandPalette } from "./palette.js";
+// palette.js is intentionally NOT imported statically — it is lazy-loaded on first
+// use (⌘K / Ctrl-K / "/" or the header Search button) via ensurePalette() below,
+// which keeps it out of the first-paint module graph (IMP-E16 D5). Do not restore a
+// static import here: that would re-eager it for every visitor.
 import { wireHero } from "./hero.js";
 import {
   buildTreeFragment,
@@ -48,7 +51,10 @@ import {
   pruneTreeByState,
 } from "./tree.js";
 import { authFetch, bootstrapToken } from "./auth.js";
-import { initAdmin } from "./admin.js";
+// admin.js is intentionally NOT imported statically — it is lazy-loaded ONLY for the
+// local owner (after the tiny /api/whoami probe reports is_admin) via initAdminLazy()
+// below, so a remote/token device never fetches it (IMP-E16 D5). Do not restore a
+// static import here: that would re-eager the ~25KB Access console for everyone.
 
 function $(sel, root) {
   return (root || document).querySelector(sel);
@@ -1248,6 +1254,128 @@ function buildPaletteApi() {
 }
 
 // ---------------------------------------------------------------------------
+// Lazy command-palette loader (IMP-E16 D5)
+// ---------------------------------------------------------------------------
+//
+// palette.js (the overlay + fuzzy index + its OWN ⌘K/"/" keydown wiring) is only
+// needed once the user reaches for it, so it is kept OUT of the first-paint module
+// graph and dynamically imported on the first trigger. A LIGHT keydown shim + a
+// lightweight header "Search" button live here to catch that first trigger; both
+// route through ensurePalette(), which imports + wires the module exactly once
+// (guarded by _paletteReady so subsequent triggers reuse the loaded copy).
+//
+// Hand-off: wireCommandPalette() registers palette.js's OWN keydown listener (the
+// original behaviour), so this shim only OWNS the FIRST trigger — it bails the
+// moment _paletteReady is set, letting palette.js drive every later ⌘K/"/" exactly
+// as before. The opened overlay + index are byte-identical to the old eager path;
+// only the load moment moved.
+var _paletteReady = false; // wireCommandPalette() has run
+var _paletteMod = null; // the loaded palette.js module namespace
+var _paletteLoading = null; // in-flight import() promise (dedupes rapid triggers)
+
+function ensurePalette() {
+  if (_paletteReady) return Promise.resolve(_paletteMod);
+  if (_paletteLoading) return _paletteLoading;
+  _paletteLoading = import("./palette.js")
+    .then(function (m) {
+      if (!_paletteReady) {
+        m.wireCommandPalette(buildPaletteApi());
+        _paletteMod = m;
+        _paletteReady = true;
+      }
+      return _paletteMod;
+    })
+    .catch(function (err) {
+      _paletteLoading = null; // allow a retry on the next trigger
+      console.warn("Command palette (palette.js) failed to load:", err);
+      return null;
+    });
+  return _paletteLoading;
+}
+
+// Load (if needed) then open the palette. open() is idempotent (it no-ops when
+// already open), so a double call during the brief import window is harmless.
+function openPaletteLazy() {
+  ensurePalette().then(function (m) {
+    if (m && typeof m.open === "function") m.open();
+  });
+}
+
+// A bare keystroke is text input in these targets, so the global "/" shortcut must
+// not steal it (mirrors palette.js's own isTypingTarget).
+function isTypingTarget(el) {
+  if (!el) return false;
+  var tag = el.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (el.isContentEditable) return true;
+  return false;
+}
+
+function isMacPlatform() {
+  try {
+    var s = navigator.platform || navigator.userAgent || "";
+    return /Mac|iPhone|iPod|iPad/i.test(s);
+  } catch (e) {
+    return false;
+  }
+}
+
+// Mount the lightweight header "Search" affordance EAGERLY so it exists from first
+// paint — it is the mobile tap target (no keyboard shortcut there) and the desktop
+// discoverability hint. palette.js can't inject its own until it loads, and on
+// mobile there is no shortcut to load it with, so this must be present up front.
+// Mirrors palette.js's injectTrigger markup (#cmdk-trigger) so styles.css applies
+// and, once palette.js loads, its injectTrigger() guard skips re-mounting.
+function mountPaletteTrigger() {
+  var row = document.querySelector(".tabbar-row");
+  if (!row || document.getElementById("cmdk-trigger")) return;
+
+  var hint = isMacPlatform() ? "⌘K" : "Ctrl K";
+
+  var btn = document.createElement("button");
+  btn.type = "button";
+  btn.id = "cmdk-trigger";
+  btn.className = "cmdk-trigger";
+  btn.title = "Search & commands (" + hint + ")";
+  btn.setAttribute("aria-label", "Open command palette");
+
+  var g = document.createElement("span");
+  g.className = "cmdk-trigger-glyph";
+  g.setAttribute("aria-hidden", "true");
+  g.textContent = "⌕";
+  btn.appendChild(g);
+
+  var t = document.createElement("span");
+  t.className = "cmdk-trigger-text";
+  t.textContent = "Search";
+  btn.appendChild(t);
+
+  var kbd = document.createElement("span");
+  kbd.className = "cmdk-trigger-kbd";
+  kbd.setAttribute("aria-hidden", "true");
+  kbd.textContent = hint;
+  btn.appendChild(kbd);
+
+  btn.addEventListener("click", openPaletteLazy);
+  row.appendChild(btn);
+}
+
+// Wire the light first-trigger shim: the eager Search button + a ⌘K/Ctrl-K/"/"
+// keydown listener that bails the instant palette.js has taken over.
+function wirePaletteLazy() {
+  mountPaletteTrigger();
+  document.addEventListener("keydown", function (e) {
+    if (_paletteReady) return; // palette.js owns the shortcut once it has loaded
+    var k = e.key;
+    var combo = (e.metaKey || e.ctrlKey) && (k === "k" || k === "K");
+    var slash = k === "/" && !isTypingTarget(e.target);
+    if (!combo && !slash) return;
+    e.preventDefault();
+    openPaletteLazy();
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
@@ -1286,6 +1414,36 @@ function checkDemoMode() {
     });
 }
 
+// Owner-only "Access" panel (IMP-E15), now LAZY-LOADED (IMP-E16 D5). The tiny
+// no-auth /api/whoami probe STAYS here so we can decide BEFORE fetching any JS:
+// admin.js (the ~25KB mint/list/revoke console) is dynamically imported ONLY when
+// the probe reports the genuine local owner (is_admin). A remote/token device never
+// downloads admin.js at all. A failed probe or import is swallowed → no admin
+// surface (fail-safe, identical to the old eager behaviour), and the device 401
+// token flow in auth.js is untouched. initAdmin() re-checks whoami itself; that
+// second tiny no-auth fetch (owner-only, off the first-paint path) is the deliberate
+// price of leaving admin.js byte-for-byte unchanged.
+function initAdminLazy() {
+  authFetch("/api/whoami")
+    .then(function (res) {
+      return res && res.ok ? res.json() : null;
+    })
+    .then(function (data) {
+      if (data && data.is_admin === true) {
+        import("./admin.js")
+          .then(function (m) {
+            m.initAdmin();
+          })
+          .catch(function (err) {
+            console.warn("Access panel (admin.js) failed to load:", err);
+          });
+      }
+    })
+    .catch(function () {
+      /* not the owner / probe failed — render no admin surface (fail-safe). */
+    });
+}
+
 function init() {
   // Capture/restore the access token (and set the cookie that lets <img> requests
   // carry it) BEFORE any /api/ fetch. Idempotent — auth.js also runs this at
@@ -1293,10 +1451,11 @@ function init() {
   // any future re-ordering of the module graph.
   bootstrapToken();
   checkDemoMode();
-  // Owner-only "Access" panel (IMP-E15): probes /api/whoami and, only for the
-  // genuine local browser, mounts the token mint/list/revoke console. A remote
-  // device gets nothing here and keeps the existing 401 token-prompt flow.
-  initAdmin();
+  // Owner-only "Access" panel (IMP-E15) — LAZY (IMP-E16 D5). Probes /api/whoami and,
+  // ONLY for the genuine local owner, dynamically imports admin.js + mounts the token
+  // mint/list/revoke console. A remote/token device never fetches admin.js and keeps
+  // the existing 401 token-prompt flow.
+  initAdminLazy();
   wireModal();
   wireSort();
   buildSortbar();
@@ -1310,10 +1469,11 @@ function init() {
   // stable #panel as the glow, desktop-pointer only, pointer-events:none (never
   // blocks a click). Covers flat + grouped leaf cards with no per-card listener.
   wireHoverPreview($("#panel"));
-  // ⌘K / Ctrl-K command palette (IMP-E16 D2): fuzzy-jump to any title + run the
-  // global view/sort/state actions. A pure UI module driven by buildPaletteApi();
-  // wired once here. It also injects its own small header "search" affordance.
-  wireCommandPalette(buildPaletteApi());
+  // ⌘K / Ctrl-K command palette (IMP-E16 D2) — LAZY (IMP-E16 D5). A light keydown
+  // shim + an eager lightweight Search button live in app.js; palette.js itself
+  // (overlay + fuzzy index, driven by buildPaletteApi()) is dynamically imported on
+  // the first ⌘K / "/" / Search-button use, then takes over its own shortcut.
+  wirePaletteLazy();
   // Cinematic parallax hero strip (IMP-E16 D4): a wide backdrop band over #panel
   // featuring the active tab's archived/backdrop titles with a Ken-Burns drift,
   // scroll parallax, and crossfading auto-rotation. Built once; refresh() re-picks

@@ -28,7 +28,10 @@ import { authFetch } from "./auth.js";
 import { openConfirmModal } from "./modal.js";
 import { createRing } from "./ring.js";
 import { displayTitle } from "./title.js";
-import { openTerminal, notifyJob } from "./terminal.js";
+// terminal.js is lazy-loaded (IMP-E16 D5 perf): it's only needed once a job's
+// full-screen terminal overlay is opened, so it stays out of the first-paint
+// module graph until the expand button is first clicked.
+var _term = null;
 import { extractAccent } from "./swatch.js";
 
 var POLL_MS = 1000;
@@ -992,11 +995,24 @@ function renderJob(panel, job, running) {
   expand.setAttribute("aria-label", "Expand to full-screen terminal");
   expand.textContent = "⤢"; // ⤢ diagonal arrows
   expand.addEventListener("click", function () {
-    openTerminal(panel);
+    if (_term) {
+      _term.openTerminal(panel);
+      return;
+    }
+    import("./terminal.js")
+      .then(function (m) {
+        _term = m;
+        m.openTerminal(panel);
+      })
+      .catch(function (e) {
+        console.warn("terminal.js failed to load", e);
+      });
   });
   panel.appendChild(expand);
 
   // Fan this same job out to an open, bound terminal overlay (single-poll live
-  // mirror). No-op when the overlay is closed or bound to a different panel.
-  notifyJob(panel, job, panel._jobCommand || "");
+  // mirror). No-op when the overlay is closed or bound to a different panel — and
+  // the overlay can only be open once the expand click lazy-loaded `_term`, so a
+  // not-yet-loaded terminal simply has nothing to notify.
+  if (_term) _term.notifyJob(panel, job, panel._jobCommand || "");
 }

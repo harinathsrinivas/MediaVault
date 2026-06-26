@@ -544,7 +544,11 @@ function isOpen() {
   return _open;
 }
 
-function open() {
+// Exported (IMP-E16 D5) so app.js's lazy loader can open the palette right after it
+// dynamically imports + wires this module on the first ⌘K / "/" / Search trigger.
+// Every other open path (this module's own keydown listener, the injected trigger
+// button) is unchanged.
+export function open() {
   if (_open) return;
   buildPalette();
   _lastFocus =

@@ -163,10 +163,20 @@ class FakeTMDB:
 def patch_tmdb(monkeypatch, tmp_path):
     """Redirect the TMDB cache to a temp dir and install a key, then hand back an
     `install(fake)` that patches `main.requests.get`. Never touches the real home
-    cache or makes a network call."""
+    cache or makes a network call.
+
+    SEALS THE EXA BOUNDARY (IMP-E16/D5): the enrich waterfall now has a step (iii)
+    EXA web-search fallback that fires on a none/ambiguous TMDB result when an EXA
+    key is configured. The dev machine's real mvconfig.json HAS an exa key, so
+    without this seal the existing ambiguous/none tests below would make a REAL EXA
+    POST. Default the key to "" (fallback OFF) and redirect EXA_CACHE_DIR to a temp
+    dir, so the pure-API behaviour is the default; the D5 tests re-enable the key
+    explicitly and monkeypatch the resolver/POST themselves."""
     cache_dir = tmp_path / "tmdb_cache"
     monkeypatch.setattr(main, "TMDB_CACHE_DIR", str(cache_dir))
+    monkeypatch.setattr(main, "EXA_CACHE_DIR", str(tmp_path / "exa_cache"))
     monkeypatch.setattr(mvcommon, "tmdb_api_key", lambda: "TEST-V3-KEY")
+    monkeypatch.setattr(mvcommon, "exa_api_key", lambda: "")  # EXA fallback OFF by default
 
     def install(fake):
         monkeypatch.setattr(main.requests, "get", fake.get)
@@ -1454,3 +1464,209 @@ def test_dry_run_writes_no_overview(sandbox, patch_tmdb):
     main.cmd_enrich_metadata("tv-en-2005-the-office")  # no --apply
 
     assert mvcommon.load_library() == before  # nothing written at all
+
+
+# ===========================================================================
+# EXA web-search fallback for TMDB resolution (IMP-E16/D5).
+#
+# WATERFALL: (i) preset metadata.tmdb_id -> by-id; (ii) else TMDB title-search ->
+# confident; (iii) NEW: else (none/ambiguous) AND an EXA key is configured AND NOT
+# --no-web -> _exa_resolve_tmdb_id web-searches themoviedb.org for the id, which is
+# then VALIDATED by a real by-id details fetch (confident result w/ real title/year/
+# poster) before ANYTHING is written. EXA finding nothing OR a failed by-id
+# validation falls through to the EXISTING manual handling — CONFIDENT-ONLY, never an
+# unvalidated guess. --no-web disables the fallback (pure TMDB-API behaviour).
+#
+# Mocked: the waterfall-wiring tests monkeypatch main._exa_resolve_tmdb_id (a recorder
+# that also proves the API-search-FIRST ordering); the extraction/kind-preference
+# tests drive the REAL function with a canned main.requests.post + a temp EXA cache
+# dir. NEVER a real network call. patch_tmdb defaults the EXA key OFF, so these tests
+# re-enable it explicitly.
+# ===========================================================================
+
+
+class _ExaRecorder:
+    """Stand-in for main._exa_resolve_tmdb_id. Records each (title, year, kind) call
+    and returns a canned id (or None). Bound to a FakeTMDB so the FIRST call snapshots
+    whether a TMDB /search already ran — proving the API-search-FIRST, then-EXA order."""
+    def __init__(self, return_id, fake=None):
+        self.return_id = return_id
+        self.fake = fake
+        self.calls = []
+        self.search_seen_before = None
+
+    def __call__(self, title, year, kind):
+        if self.search_seen_before is None and self.fake is not None:
+            self.search_seen_before = any("/search/" in c[0] for c in self.fake.calls)
+        self.calls.append((title, year, kind))
+        return self.return_id
+
+
+def _exa_response(*urls):
+    """A canned EXA /search response: {"results": [{"url", "title", "text"}, ...]}."""
+    return {"results": [{"url": u, "title": "t", "text": "x"} for u in urls]}
+
+
+def test_api_miss_then_exa_fallback_resolves_confident(sandbox, patch_tmdb, monkeypatch, capsys):
+    """API search MISSES (none) -> EXA fallback returns an id -> by-id VALIDATION ->
+    CONFIDENT: tmdb_id + the real (validated) title/year written and the {tmdb-…} token
+    stamped. Proves the waterfall ORDER: the TMDB title-search runs FIRST, THEN EXA,
+    THEN the by-id validation fetch."""
+    _empty_libs(sandbox)
+    folder, fp, h = _seed_movie(sandbox, "mov-ta-2008-vaaranamaayiram", "Vaaranam Aayiram")
+    # The TMDB title-search knows nothing about this concatenated slug -> status "none".
+    # The by-id details ARE seeded, so the EXA-found id validates to a confident result.
+    fake = patch_tmdb(FakeTMDB(
+        search={},  # 'vaaranamaayiram' -> [] (a true API miss)
+        movie_by_id={38637: _movie_details(38637, "Vaaranam Aayiram", 2008)},
+    ))
+    monkeypatch.setattr(mvcommon, "exa_api_key", lambda: "TEST-EXA-KEY")  # fallback ON
+    rec = _ExaRecorder(38637, fake=fake)
+    monkeypatch.setattr(main, "_exa_resolve_tmdb_id", rec)
+
+    main.cmd_enrich_metadata("mov-ta-2008-vaaranamaayiram", "--apply")
+
+    out = capsys.readouterr().out
+    assert "web-search fallback ON" in out
+    assert "resolved via web search: tmdb_id=38637" in out
+
+    # Waterfall ORDER: the API SEARCH ran first, THEN EXA was consulted exactly once
+    # with the unit's (humanized title, year, kind).
+    assert any("/search/movie" in u for u, _ in fake.calls), "the TMDB title-search must run first"
+    assert rec.calls == [("vaaranamaayiram", 2008, "movie")]
+    assert rec.search_seen_before is True, "EXA must be consulted AFTER the API search misses"
+    # The EXA-found id was VALIDATED by a real by-id details fetch.
+    assert any(u.endswith("/movie/38637") for u, _ in fake.calls), "EXA id must be by-id validated"
+
+    # Confident write: tmdb_id + the real (validated) title/year, and the folder stamp.
+    lib = mvcommon.load_library()
+    meta = lib["mov-ta-2008-vaaranamaayiram"]["metadata"]
+    assert meta["tmdb_id"] == 38637
+    assert meta["title"] == "Vaaranam Aayiram"
+    assert meta["year"] == 2008
+    assert (folder.parent / "Vaaranam Aayiram {tmdb-38637}").is_dir()
+    assert not folder.exists()
+
+
+def test_exa_fallback_returns_none_still_listed_manual(sandbox, patch_tmdb, monkeypatch, capsys):
+    """EXA fallback returns None (no themoviedb hit) -> the unit falls through to the
+    EXISTING manual-review handling UNCHANGED: listed for set_tmdb, NOTHING written,
+    no by-id validation call."""
+    _empty_libs(sandbox)
+    folder, fp, h = _seed_movie(sandbox, "mov-en-2099-noexist", "NoExist")
+    fake = patch_tmdb(FakeTMDB(search={}))  # API miss
+    monkeypatch.setattr(mvcommon, "exa_api_key", lambda: "TEST-EXA-KEY")  # fallback ON
+    rec = _ExaRecorder(None, fake=fake)  # ...but EXA finds nothing
+    monkeypatch.setattr(main, "_exa_resolve_tmdb_id", rec)
+    before = mvcommon.load_library()
+
+    main.cmd_enrich_metadata("mov-en-2099-noexist", "--apply")
+
+    out = capsys.readouterr().out
+    assert len(rec.calls) == 1                         # the fallback WAS attempted
+    assert "resolved via web search" not in out        # ...and resolved nothing
+    assert "NO TMDB match" in out or "NEED MANUAL CONFIRMATION" in out
+    # No id was found -> no by-id validation call was made.
+    assert not any(u.rstrip("/").split("/")[-1].isdigit() and u.rstrip("/").split("/")[-2] == "movie"
+                   for u, _ in fake.calls), "no id found -> must NOT issue a by-id validation call"
+    assert mvcommon.load_library() == before           # nothing written
+    assert folder.exists()
+
+
+def test_no_web_flag_disables_exa_fallback(sandbox, patch_tmdb, monkeypatch, capsys):
+    """--no-web DISABLES the EXA fallback even when an EXA key is configured: the API
+    miss is listed for manual review and _exa_resolve_tmdb_id is NEVER called."""
+    _empty_libs(sandbox)
+    folder, fp, h = _seed_movie(sandbox, "mov-en-2099-noexist", "NoExist")
+    fake = patch_tmdb(FakeTMDB(search={}))  # API miss
+    monkeypatch.setattr(mvcommon, "exa_api_key", lambda: "TEST-EXA-KEY")  # key IS present
+
+    def _boom(*a, **k):
+        raise AssertionError("--no-web must NOT call the EXA fallback")
+    monkeypatch.setattr(main, "_exa_resolve_tmdb_id", _boom)
+    before = mvcommon.load_library()
+
+    main.cmd_enrich_metadata("mov-en-2099-noexist", "--apply", "--no-web")  # must NOT trip _boom
+
+    out = capsys.readouterr().out
+    assert "--no-web" in out and "DISABLED" in out
+    assert "resolved via web search" not in out
+    assert "NO TMDB match" in out or "NEED MANUAL CONFIRMATION" in out
+    assert mvcommon.load_library() == before  # nothing written
+
+
+def test_exa_resolve_prefers_same_kind_url(monkeypatch, tmp_path):
+    """Unit: _exa_resolve_tmdb_id extracts (kind, id) from each themoviedb.org URL and
+    PREFERS the first hit whose kind matches the unit — a MOVIE unit picks the /movie/
+    id even when a /tv/ URL is listed FIRST; a SHOW unit picks the /tv/ id. Also asserts
+    the POST mirrors exa_search_trivia's headers + the documented body shape."""
+    monkeypatch.setattr(main, "EXA_CACHE_DIR", str(tmp_path / "exa_cache"))
+    monkeypatch.setattr(mvcommon, "exa_api_key", lambda: "TEST-EXA-KEY")
+
+    posts = []
+
+    def fake_post(url, headers=None, json=None, timeout=None, **kwargs):
+        posts.append((url, headers, json))
+        # A /tv/ URL appears BEFORE the /movie/ URL, so kind PREFERENCE (not list
+        # order) is what must decide the winner.
+        return _Resp(200, json_data=_exa_response(
+            "https://www.themoviedb.org/tv/99999-some-show",
+            "https://www.themoviedb.org/movie/38637-vaaranam-aayiram",
+        ))
+    monkeypatch.setattr(main.requests, "post", fake_post)
+
+    # MOVIE unit -> the /movie/ id (even though /tv/ is listed first).
+    assert main._exa_resolve_tmdb_id("Vaaranam Aayiram", 2008, "movie") == 38637
+    # SHOW unit (same canned response, distinct year -> fresh query, not cache) -> /tv/ id.
+    assert main._exa_resolve_tmdb_id("Vaaranam Aayiram", 2013, "show") == 99999
+
+    # The EXA POST mirrored exa_search_trivia's headers + the documented body shape.
+    url, headers, body = posts[0]
+    assert url == main.EXA_API_ROOT
+    assert headers["x-api-key"] == "TEST-EXA-KEY"
+    assert body["includeDomains"] == ["themoviedb.org"]
+    assert body["numResults"] == 5
+    assert "site:themoviedb.org" in body["query"]
+
+
+def test_exa_resolve_other_kind_fallback_and_none(monkeypatch, tmp_path):
+    """Unit: the best-effort + None branches of _exa_resolve_tmdb_id —
+      * a MOVIE unit with ONLY a /tv/ URL accepts that other-kind id (best-effort);
+      * a response with NO themoviedb detail URL -> None;
+      * no EXA key -> None, with NO network POST (self-defensive)."""
+    monkeypatch.setattr(main, "EXA_CACHE_DIR", str(tmp_path / "exa_cache"))
+    monkeypatch.setattr(mvcommon, "exa_api_key", lambda: "TEST-EXA-KEY")
+
+    monkeypatch.setattr(main.requests, "post", lambda *a, **k: _Resp(
+        200, json_data=_exa_response("https://www.themoviedb.org/tv/60574-peaky")))
+    # MOVIE unit, only a /tv/ URL present -> accept the other-kind id (best-effort).
+    assert main._exa_resolve_tmdb_id("Peaky Blinders", 2013, "movie") == 60574
+
+    monkeypatch.setattr(main.requests, "post", lambda *a, **k: _Resp(
+        200, json_data=_exa_response("https://example.com/not-tmdb")))
+    assert main._exa_resolve_tmdb_id("Whatever", 2000, "movie") is None
+
+    # No EXA key -> None and NO network call (the guard short-circuits before the POST).
+    monkeypatch.setattr(mvcommon, "exa_api_key", lambda: "")
+
+    def post_boom(*a, **k):
+        raise AssertionError("must NOT POST without an EXA key")
+    monkeypatch.setattr(main.requests, "post", post_boom)
+    assert main._exa_resolve_tmdb_id("Whatever", 2000, "movie") is None
+
+
+def test_exa_resolve_caches_response_idempotent(monkeypatch, tmp_path):
+    """Unit: the raw EXA response is cached on disk (keyed by the query), so a second
+    IDENTICAL call is served from cache and does NOT re-POST to EXA (idempotent)."""
+    monkeypatch.setattr(main, "EXA_CACHE_DIR", str(tmp_path / "exa_cache"))
+    monkeypatch.setattr(mvcommon, "exa_api_key", lambda: "TEST-EXA-KEY")
+    n = {"posts": 0}
+
+    def fake_post(url, headers=None, json=None, timeout=None, **kwargs):
+        n["posts"] += 1
+        return _Resp(200, json_data=_exa_response("https://www.themoviedb.org/movie/281992-sv"))
+    monkeypatch.setattr(main.requests, "post", fake_post)
+
+    assert main._exa_resolve_tmdb_id("Sathuranga Vettai", 2014, "movie") == 281992
+    assert main._exa_resolve_tmdb_id("Sathuranga Vettai", 2014, "movie") == 281992  # cache hit
+    assert n["posts"] == 1, "the second identical call must be served from the disk cache"

@@ -2070,6 +2070,107 @@ def _resolve_unit_by_id(unit, tmdb_id, api_key):
     }
 
 
+# EXA web-search fallback for enrich's TMDB resolution (IMP-E16/D5). When the TMDB
+# title-search MISSES a concatenated/regional title (e.g. 'vaaranamaayiram'), ONE EXA
+# search constrained to themoviedb.org returns the right detail page and the tmdb_id
+# extracts cleanly from its URL. Cheap + rare: numResults=5, ONE POST, fired ONLY when
+# the API search already failed — never on the happy path.
+EXA_RESOLVE_NUM_RESULTS = 5
+# Raw EXA-resolve responses cached on disk (keyed by the query, NOT the api key) so a
+# re-run is idempotent + cheap — a sibling of TMDB_CACHE_DIR / OMDB_CACHE_DIR under the
+# per-user state dir. The key never embeds the secret (mirrors _tmdb_get's cache).
+EXA_CACHE_DIR = os.path.join(mvcommon.MV_STATE_DIR, "cache", "exa")
+# A themoviedb.org detail URL carries the kind + id: …/movie/1003159 or …/tv/60574.
+_TMDB_URL_RE = re.compile(r"themoviedb\.org/(movie|tv)/(\d+)")
+
+
+def _exa_resolve_tmdb_id(title, year, kind):
+    """Resolve a tmdb_id for a title the TMDB API title-search MISSED, via an EXA web
+    search constrained to themoviedb.org. Returns the tmdb_id (int) or None.
+
+    POSTs ONE EXA query ("<title> <year> site:themoviedb.org", numResults=5,
+    includeDomains=[themoviedb.org]) and extracts (url_kind, tmdb_id) from each result
+    URL via _TMDB_URL_RE. The unit kind picks the preferred URL kind — "movie" -> a
+    /movie/ URL; a show/anime -> a /tv/ URL — and the FIRST same-kind hit wins. If no
+    URL matches the wanted kind, the FIRST extracted id of the OTHER kind is accepted
+    (best-effort). Returns None when there is no key/title, the request fails, or no
+    URL yields an id.
+
+    NEVER raises (mirrors exa_search_trivia: a missing key / network error / non-200 /
+    bad payload all yield None) so the caller simply falls through to the existing
+    ambiguous/none manual-review handling. The raw EXA response is cached on disk under
+    EXA_CACHE_DIR keyed by the query so repeated runs are idempotent. The caller is
+    responsible for the --no-web gate; this is also self-defensive (None without a key).
+
+    NOTE: the returned id is a best-effort CANDIDATE — the caller MUST validate it via
+    _resolve_unit_by_id (a real TMDB by-id details fetch) before writing anything, so an
+    EXA mismatch is caught and never written as a guess (locked decision #6)."""
+    api_key = mvcommon.exa_api_key()
+    if not api_key or not title:
+        return None
+    year_str = f" {year}" if year else ""
+    query = f"{title}{year_str} site:themoviedb.org"
+    body = {
+        "query": query,
+        "numResults": EXA_RESOLVE_NUM_RESULTS,
+        "includeDomains": ["themoviedb.org"],
+    }
+
+    # Disk cache (keyed by the query) — idempotent re-runs, the _tmdb_get idiom.
+    cache_path = os.path.join(EXA_CACHE_DIR, _tmdb_cache_key(EXA_API_ROOT, {"query": query}))
+    data = None
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        pass  # cache miss / unreadable -> fall through to a live fetch
+
+    if data is None:
+        try:
+            r = requests.post(
+                EXA_API_ROOT,
+                headers={"x-api-key": api_key, "Content-Type": "application/json"},
+                json=body,
+                timeout=30,
+            )
+        except Exception as e:
+            print(f"   ⚠️  EXA resolve request failed: {e}")
+            return None
+        if r.status_code != 200:
+            print(f"   ⚠️  EXA resolve returned status {r.status_code}")
+            return None
+        try:
+            data = r.json()
+        except Exception as e:
+            print(f"   ⚠️  EXA resolve response was not valid JSON: {e}")
+            return None
+        try:
+            os.makedirs(EXA_CACHE_DIR, exist_ok=True)
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except OSError:
+            pass  # caching is best-effort; a write failure must not break enrich
+
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        return None
+
+    want_kind = "movie" if kind == "movie" else "tv"  # show/anime -> tv
+    fallback_id = None
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        m = _TMDB_URL_RE.search(str(item.get("url") or ""))
+        if not m:
+            continue
+        url_kind, tmdb_id = m.group(1), int(m.group(2))
+        if url_kind == want_kind:
+            return tmdb_id  # first same-kind hit wins (the strong signal)
+        if fallback_id is None:
+            fallback_id = tmdb_id  # remember the first other-kind id as a fallback
+    return fallback_id
+
+
 def _write_nfo(folder, kind, title, year, tmdb_id, overview="", vote_average=None):
     """Write a Kodi/Jellyfin-compatible NFO file into *folder*.
 
@@ -2113,11 +2214,18 @@ def cmd_enrich_metadata(arg=None, *flags):
     """Local-first TMDB backfill (SHOW-CENTRIC, IMP-E3/U3/D17 — Phase 5 step 5.4).
 
     Usage: enrich_metadata [id_or_prefix] [--apply] [--library movies|series|anime]
-            [--nfo]
+            [--nfo] [--no-web]
     DRY-RUN by default (prints what WOULD happen, writes nothing). --apply performs
     it. --nfo (only honoured when combined with --apply) writes a Kodi/Jellyfin-
     compatible movie.nfo / tvshow.nfo alongside the poster on a confident match
-    (IMP-U3 down-payment, step 5.8). Any other flag is ignored.
+    (IMP-U3 down-payment, step 5.8).
+
+    --no-web disables the EXA web-search fallback (IMP-E16/D5). By default, when an
+    EXA key is configured, a title the TMDB API title-search MISSES (none/ambiguous)
+    is given ONE more chance: an EXA search constrained to themoviedb.org resolves a
+    tmdb_id, which is then VALIDATED by a real by-id details fetch before anything is
+    written (confident-only — never an unvalidated guess). --no-web keeps the pure
+    TMDB-API behaviour. Any other flag is ignored.
     """
     # Fold a flag-shaped positional (e.g. a direct `cmd_enrich_metadata("--apply")`
     # with no id) into the flags list so --apply/--library are honoured no matter
@@ -2131,6 +2239,7 @@ def cmd_enrich_metadata(arg=None, *flags):
 
     apply = "--apply" in flist
     write_nfo = "--nfo" in flist
+    no_web = "--no-web" in flist
     library_filter = None
     if "--library" in flist:
         i = flist.index("--library")
@@ -2143,6 +2252,12 @@ def cmd_enrich_metadata(arg=None, *flags):
               "(see mvconfig.example.json). Nothing to do.")
         return
 
+    # EXA web-search fallback (IMP-E16/D5): when the TMDB title-search misses a
+    # concatenated/regional title, ONE EXA search constrained to themoviedb.org can
+    # auto-resolve it (the found id is by-id VALIDATED before use). ON by default when
+    # an EXA key is configured; --no-web disables it (pure TMDB-API behaviour).
+    web_fallback = (not no_web) and bool(mvcommon.exa_api_key())
+
     library = load_library()
     units = _gather_enrich_units(library, id_or_prefix=id_or_prefix, library_filter=library_filter)
 
@@ -2152,6 +2267,10 @@ def cmd_enrich_metadata(arg=None, *flags):
         print(f"   > library filter: {library_filter}")
     if id_or_prefix:
         print(f"   > scope: ids == or startswith '{id_or_prefix}'")
+    if no_web:
+        print("   > --no-web: EXA web-search fallback DISABLED (pure TMDB API).")
+    elif web_fallback:
+        print("   > web-search fallback ON (EXA) for titles the API search misses.")
     print(f"   > {len(units)} show/movie unit(s) to consider.\n")
 
     image_base = None  # resolved lazily on the first confident match (one call max)
@@ -2172,6 +2291,20 @@ def cmd_enrich_metadata(arg=None, *flags):
                 res = _resolve_unit_by_id(unit, preset_id, api_key)
             else:
                 res = _resolve_unit(unit, api_key)
+                # WATERFALL step (iii) — the TMDB title-search MISSED (none/ambiguous):
+                # give the title ONE more chance via an EXA web search constrained to
+                # themoviedb.org. A found id is VALIDATED by a real by-id details fetch
+                # (confident result w/ real title/year/poster); ONLY a validated id is
+                # used. EXA finding nothing — OR a failed by-id validation — falls
+                # through to the EXISTING none/ambiguous manual handling, unchanged.
+                # CONFIDENT-ONLY: an unvalidated guess is NEVER written.
+                if web_fallback and res["status"] in ("none", "ambiguous"):
+                    exa_id = _exa_resolve_tmdb_id(unit["title"], unit["year"], unit["kind"])
+                    if exa_id is not None:
+                        by_id = _resolve_unit_by_id(unit, exa_id, api_key)
+                        if by_id.get("status") == "confident":
+                            print(f"   ↳ {label}: resolved via web search: tmdb_id={exa_id}")
+                            res = by_id
         except Exception as e:  # defensive — resolvers already swallow, but never crash the run
             print(f"⏭️  {label}: TMDB error, skipping ({e}).")
             n_skipped += 1

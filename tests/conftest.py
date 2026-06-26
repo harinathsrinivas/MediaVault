@@ -921,7 +921,9 @@ def mock_tmdb(monkeypatch, tmp_path):
     """Canned TMDB backend: patches main.requests.get + redirects main.TMDB_CACHE_DIR.
 
     GUARANTEES:
-      - No real network call can escape (requests.get is fully replaced).
+      - No real network call can escape (requests.get is fully replaced, and the
+        IMP-E16/D5 EXA web-search fallback is sealed: exa_api_key() -> "" so the
+        none/ambiguous EXA POST never fires, and EXA_CACHE_DIR points at a temp dir).
       - The real ~/.mediavault metadata cache is never touched (TMDB_CACHE_DIR
         points at a fresh temp dir under tmp_path).
       - mvcommon.tmdb_api_key() returns a fake test key so cmd_enrich_metadata
@@ -934,7 +936,9 @@ def mock_tmdb(monkeypatch, tmp_path):
     cache_dir = tmp_path / "tmdb_cache"
     cache_dir.mkdir(exist_ok=True)
     monkeypatch.setattr(main, "TMDB_CACHE_DIR", str(cache_dir))
+    monkeypatch.setattr(main, "EXA_CACHE_DIR", str(tmp_path / "exa_cache"))
     monkeypatch.setattr(mvcommon, "tmdb_api_key", lambda: "SMOKE-TEST-KEY")
+    monkeypatch.setattr(mvcommon, "exa_api_key", lambda: "")  # D5 EXA fallback sealed OFF
 
     fake = MockTMDB(search=_SMOKE_TMDB_SEARCH)
     monkeypatch.setattr(main.requests, "get", fake.get)

@@ -1185,6 +1185,21 @@ function armDwell(card) {
   }, DWELL_MS);
 }
 
+// Open the dossier for a card on demand (used by the command palette's title
+// jump — palette.js → app.js). Picks the SAME presentation the hover/long-press
+// paths would: anchored beside the card on a desktop pointer, the centred modal
+// on touch. Reuses the exact open path (renderInto + the open-token guard), so
+// the dossier behaves identically to a hover-opened one (Escape / grace-close /
+// scroll-reanchor all apply). No-op for a card without a bound item.
+export function openPreviewForCard(card) {
+  if (!card || !card.__mvItem) return;
+  if (hasHoverPointer()) {
+    openFor(card);
+  } else {
+    openModalFor(card);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Wiring (call once with #panel).
 // ---------------------------------------------------------------------------

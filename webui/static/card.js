@@ -472,6 +472,11 @@ export function buildCard(item) {
   // double-underscore namespaces it like node._fetchRing. Covers BOTH the flat
   // grid AND grouped-tree leaf cards, since every leaf card is built here.
   node.__mvItem = item;
+  // Also expose the canonical id as a DOM attribute so the command palette
+  // (palette.js) — and any inspector / verify harness — can find a card by id.
+  // The actual jump uses __mvItem identity (escaping-proof for odd ids); this is
+  // the inspectable, queryable mirror. XSS-safe (an attribute value, never markup).
+  if (item && item.id != null) node.dataset.id = String(item.id);
 
   // Poster slot (gradient + big initial placeholder). Phase 5.2 wires a real
   // image on top: addPosterImage points an <img> at /api/media-image/<id> and

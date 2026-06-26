@@ -38,7 +38,8 @@ import { buildCard, runAction, setRefreshHandler, destroyRingsIn } from "./card.
 import { wireModal } from "./modal.js";
 import { getSort, setSort, sortItems, SORT_KEYS } from "./sort.js";
 import { wireCardGlow } from "./glow.js";
-import { wireHoverPreview } from "./preview.js";
+import { wireHoverPreview, openPreviewForCard } from "./preview.js";
+import { wireCommandPalette } from "./palette.js";
 import {
   buildTreeFragment,
   buildGridFragment,
@@ -392,6 +393,98 @@ function selectState(state, opts) {
     var seg = $("#seg-" + state);
     if (seg) seg.focus();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Command-palette jump (IMP-E16 D2)
+// ---------------------------------------------------------------------------
+
+function prefersReducedMotion() {
+  try {
+    return (
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    );
+  } catch (e) {
+    return false;
+  }
+}
+
+// Jump straight to a library entry by id (the palette's title activation). The
+// flat DECLUTTERED grid renders synchronously from the already-loaded MODEL and
+// always contains the card for (category, state), so a jump is reliable and
+// flash-free — unlike the grouped tree, which is async + folder-collapsed +
+// state-pruned. So: force decluttered, switch to the item's category + its own
+// state sub-view, repaint synchronously, then scroll + pulse + open its dossier.
+// Returns true when the item exists in the current model.
+function jumpToItem(id) {
+  if (!MODEL) return false;
+  var item = MODEL_BY_ID[id];
+  if (!item) return false;
+
+  // The flat grid is the dependable target — leave grouped mode if we're in it.
+  if (isGrouped()) {
+    writeViewMode("decluttered");
+    refreshViewbar();
+  }
+
+  // Land on the item's exact coordinates (its category tab + its state sub-view).
+  // item.state is always a present state for this category, so its rail segment
+  // exists and paintFlat's `it.state === activeState` filter keeps the card.
+  activeCategory = item.category;
+  activeState = item.state;
+  resetGridNav();
+  refreshTabSelection();
+  buildSubnav();
+  renderPanel(false); // synchronous paintFlat — the card is now in #panel
+
+  revealCardForId(id);
+  return true;
+}
+
+// Find the rendered .card for an id (identity match on the stamped __mvItem, so
+// any odd id is handled without CSS-selector escaping), scroll it into view,
+// pulse a highlight ring, and open its dossier. Best-effort: a missing card (e.g.
+// filtered out) simply does nothing.
+function revealCardForId(id) {
+  var panel = $("#panel");
+  if (!panel) return;
+  var cards = panel.querySelectorAll(".card");
+  var target = null;
+  for (var i = 0; i < cards.length; i += 1) {
+    var it = cards[i].__mvItem;
+    if (it && it.id === id) {
+      target = cards[i];
+      break;
+    }
+  }
+  if (!target) return;
+
+  try {
+    target.scrollIntoView({
+      block: "center",
+      inline: "nearest",
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+    });
+  } catch (e) {
+    target.scrollIntoView();
+  }
+
+  // Highlight pulse — restart the animation if the same card was just jumped to.
+  target.classList.remove("cmdk-flash");
+  void target.offsetWidth; // force reflow so re-adding the class replays it
+  target.classList.add("cmdk-flash");
+  window.setTimeout(function () {
+    target.classList.remove("cmdk-flash");
+  }, 1600);
+
+  // Open the cinematic dossier for the jumped-to card (reuses preview.js). The
+  // smooth scroll fires scroll events that preview.js re-anchors against, so the
+  // anchored panel tracks the card as it settles. Deferred one frame so the card
+  // has its post-scroll rect before the first position() measurement.
+  window.requestAnimationFrame(function () {
+    if (target.isConnected) openPreviewForCard(target);
+  });
 }
 
 // Sync the chrome around the panel to the active view mode. The state sub-view
@@ -1037,6 +1130,46 @@ function selectGroupedStyle(style) {
 }
 
 // ---------------------------------------------------------------------------
+// Command palette wiring (IMP-E16 D2)
+// ---------------------------------------------------------------------------
+
+// The public surface the ⌘K / Ctrl-K palette (palette.js) drives. Built here so
+// palette.js stays a pure UI module (no import of app.js → no circular graph):
+// it receives the live model + every navigation action through this object. Each
+// callback routes to the SAME internal function a click on the chrome would use,
+// so the palette can never drift from the visible controls.
+function buildPaletteApi() {
+  return {
+    // Live candidate list — the merged model rows (all categories/states).
+    getItems: function () {
+      return MODEL ? MODEL.items : [];
+    },
+    // Title activation: switch tab + state, scroll, pulse, open the dossier.
+    jumpToItem: jumpToItem,
+    // Global actions (mirror the header chrome).
+    selectCategory: function (cat) {
+      selectCategory(cat);
+    },
+    selectState: function (state) {
+      selectState(state);
+    },
+    setViewMode: function (mode) {
+      selectViewMode(mode);
+    },
+    // Grid/List only apply in grouped mode — enter it first, then set the style.
+    setGroupedStyle: function (style) {
+      if (!isGrouped()) selectViewMode("grouped");
+      selectGroupedStyle(style);
+    },
+    setSortKey: function (key) {
+      setSort(key, null);
+      refreshSortbar();
+      renderPanel(false); // instant client-side reorder, no view swap
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 
@@ -1099,6 +1232,10 @@ function init() {
   // stable #panel as the glow, desktop-pointer only, pointer-events:none (never
   // blocks a click). Covers flat + grouped leaf cards with no per-card listener.
   wireHoverPreview($("#panel"));
+  // ⌘K / Ctrl-K command palette (IMP-E16 D2): fuzzy-jump to any title + run the
+  // global view/sort/state actions. A pure UI module driven by buildPaletteApi();
+  // wired once here. It also injects its own small header "search" affordance.
+  wireCommandPalette(buildPaletteApi());
   // After any terminal job, reload the model and repaint (preserving the view).
   setRefreshHandler(function () {
     load(false);

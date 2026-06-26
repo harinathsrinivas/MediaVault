@@ -106,6 +106,15 @@
   </header>
 
   <main>
+    <!-- Cinematic parallax hero strip (IMP-E16 D4). A wide backdrop band opening
+         each media-type tab on its most characteristic content — archived/backdrop
+         titles with a Ken-Burns drift, scroll parallax, and crossfading rotation.
+         Built + owned by hero.js (wired from app.js init). Starts hidden; hero.js
+         unhides it only when the active tab has something to feature, and collapses
+         it again when it doesn't. It sits in normal flow ABOVE #panel, so it never
+         carries #panel's view-transition-name (no morph flicker on tab switch). -->
+    <section id="hero" class="hero-strip" hidden></section>
+
     <!-- View toggle: Grouped (on-disk folder hierarchy) vs Decluttered (the flat
          by-state grid). Mirrors the #sortbar pattern; built + wired in app.js. The
          choice persists in sessionStorage and applies within each media-type tab. -->

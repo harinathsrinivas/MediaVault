@@ -40,6 +40,7 @@ import { getSort, setSort, sortItems, SORT_KEYS } from "./sort.js";
 import { wireCardGlow } from "./glow.js";
 import { wireHoverPreview, openPreviewForCard } from "./preview.js";
 import { wireCommandPalette } from "./palette.js";
+import { wireHero } from "./hero.js";
 import {
   buildTreeFragment,
   buildGridFragment,
@@ -65,6 +66,11 @@ var activeState = null; // chosen sub-view within the active category
 // id -> enriched MODEL row, for the grouped (tree) view to JOIN raw /api/tree
 // leaves back onto their reclaim-enriched card payload. Rebuilt on every load().
 var MODEL_BY_ID = {};
+
+// Cinematic parallax hero strip (IMP-E16 D4). Built once in init() over the #hero
+// section; its { refresh } re-picks the featured set for the active category. Null
+// until init wires it, so every call site guards with `hero && hero.refresh()`.
+var hero = null;
 
 // View mode: "decluttered" = the existing flat by-state grid; "grouped" = the
 // on-disk folder hierarchy (tree.js). Persisted in sessionStorage so it survives a
@@ -369,6 +375,9 @@ function selectCategory(cat, opts) {
   resetGridNav(); // a media-type change restarts the grid drill-down at root
   refreshTabSelection();
   buildSubnav();
+  // Re-pick the hero BEFORE the panel's view-transition snapshot so the band
+  // settles in the held-still root layer (instant cut, no morph flicker).
+  if (hero) hero.refresh();
   renderPanel(true);
   if (opts && opts.focus) {
     var tab = $("#tab-" + cat);
@@ -472,6 +481,8 @@ function jumpToItem(id) {
   resetGridNav();
   refreshTabSelection();
   buildSubnav();
+  // Keep the hero in sync if the jump crossed into another media-type tab.
+  if (hero) hero.refresh();
   renderPanel(false); // synchronous paintFlat — the card is now in #panel
 
   revealCardForId(id);
@@ -934,6 +945,9 @@ function renderAll(isFirst) {
   refreshTabSelection();
   buildSubnav();
   renderPanel(false);
+  // Re-pick the hero's featured set for the (possibly changed) active category from
+  // the freshly-loaded model. No-op when the category + featured set are unchanged.
+  if (hero) hero.refresh();
   setStatus("");
 }
 
@@ -1300,6 +1314,21 @@ function init() {
   // global view/sort/state actions. A pure UI module driven by buildPaletteApi();
   // wired once here. It also injects its own small header "search" affordance.
   wireCommandPalette(buildPaletteApi());
+  // Cinematic parallax hero strip (IMP-E16 D4): a wide backdrop band over #panel
+  // featuring the active tab's archived/backdrop titles with a Ken-Burns drift,
+  // scroll parallax, and crossfading auto-rotation. Built once; refresh() re-picks
+  // per category (called from renderAll / selectCategory / jumpToItem). Clicking a
+  // slide reuses the palette's jump (scroll the card in + pulse + open its dossier).
+  hero = wireHero(
+    $("#hero"),
+    function () {
+      return MODEL;
+    },
+    function () {
+      return activeCategory;
+    },
+    jumpToItem
+  );
   // After any terminal job, reload the model and repaint (preserving the view).
   setRefreshHandler(function () {
     load(false);

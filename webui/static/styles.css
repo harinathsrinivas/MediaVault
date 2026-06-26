@@ -3434,3 +3434,254 @@ button.crumb:hover { color: var(--accent); background: var(--bg-card-hover); }
   .cmdk-trigger,
   .cmdk-trigger-glyph { transition: none; }
 }
+
+/* ============================================================================
+   Cinematic parallax hero strip (IMP-E16 D4)
+   ----------------------------------------------------------------------------
+   Built + owned by hero.js over the `#hero` <section> (index.html, above #panel).
+   A wide backdrop band that opens each media-type tab on its most characteristic
+   content. Layering inside #hero (back → front):
+     .hero-parallax   the JS-translated layer (oversized w/ vertical bleed)
+       .hero-backdrop two reused <img> cover layers; the live one carries .is-front
+     .hero-scrim      fixed legibility + bottom blend into the grid (never moves)
+     .hero-hit        transparent full-bleed <button> — click/Enter jumps to the title
+     .hero-overlay    pointer-events:none text block (clicks fall through to .hero-hit)
+     .hero-dots       indicator buttons, above everything
+   It sits in normal flow above #panel, so it stays BEHIND the fixed overlays and
+   does NOT carry #panel's view-transition-name (it rides the held-still root
+   snapshot, cutting instantly on a tab switch rather than morphing). ============ */
+
+#hero.hero-strip {
+  position: relative;
+  width: 100%;
+  /* A tasteful cinematic band; collapses (display:none via [hidden]) when a tab has
+     nothing to feature. */
+  height: clamp(180px, 26vh, 320px);
+  margin: 0 0 18px;
+  border-radius: var(--radius);
+  overflow: hidden;                 /* clip the oversized parallax layer + Ken-Burns */
+  border: 1px solid var(--line-soft);
+  /* Dark floor so any momentary edge from the parallax translate is a deep tint,
+     never a bright gap; also the backdrop-less look while the first image loads. */
+  background: linear-gradient(135deg, #131a26, #0b0f17);
+  box-shadow: var(--shadow);
+  isolation: isolate;               /* keep the band's stacking self-contained */
+}
+/* hero.js toggles the `hidden` attribute to collapse the band. #hero has no author
+   `display` (UA <section> block), so the UA `[hidden]{display:none}` already wins —
+   this rule just makes that intent explicit + guards a future author display. */
+#hero[hidden] { display: none; }
+
+/* The parallax layer. Oversized with 25% vertical bleed top+bottom so hero.js can
+   translate it on scroll without ever exposing the band edge (the translate is
+   clamped to 20% of the band height). will-change keeps the transform on its own
+   compositor layer. */
+.hero-parallax {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -25%;
+  height: 150%;
+  z-index: 0;
+  will-change: transform;
+}
+
+/* Two reused cover layers. Only the .is-front one is visible + Ken-Burns animated;
+   a slide swap crossfades the opacity between them. The base scale(1.04) matches
+   the Ken-Burns `from`, so removing the animation from the outgoing layer can't
+   cause a visible jump (it is fading out anyway). */
+.hero-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 28%;      /* bias high — backdrops frame action up */
+  display: block;
+  opacity: 0;
+  transform: scale(1.04);
+  transition: opacity 0.9s ease;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.hero-backdrop.is-front { opacity: 0.88; }
+
+/* Slow Ken-Burns drift on the FRONT layer only (each new slide restarts it fresh).
+   Transform-only → compositor-friendly. Paused (frozen, not reset) while the tab is
+   hidden so it costs nothing in the background; disabled entirely under reduced
+   motion below. */
+.hero-strip .hero-backdrop.is-front {
+  animation: heroKenBurns 16s ease-in-out infinite alternate;
+}
+.hero-strip.is-paused .hero-backdrop.is-front { animation-play-state: paused; }
+@keyframes heroKenBurns {
+  from { transform: scale(1.04) translate3d(0, 0, 0); }
+  to   { transform: scale(1.10) translate3d(-1.6%, -2.2%, 0); }
+}
+
+/* Fixed legibility scrim (does NOT parallax, so the title stays readable at any
+   scroll). The left wash darkens behind the overlay text; the bottom gradient fades
+   to the page background so the band blends into the grid below it. */
+.hero-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, rgba(7, 11, 18, 0.82) 0%, rgba(7, 11, 18, 0.45) 38%, rgba(7, 11, 18, 0) 66%),
+    linear-gradient(0deg, var(--bg) 0%, rgba(7, 11, 18, 0.55) 16%, rgba(7, 11, 18, 0) 48%);
+}
+
+/* Transparent full-bleed click/keyboard target. The overlay text sits above it but
+   is pointer-events:none, so clicks land here; the dots are separate elements on
+   top, so a dot click never reaches it. */
+.hero-hit {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.hero-hit:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -3px;
+  border-radius: var(--radius);
+}
+
+/* Left-aligned cinematic text block, anchored to the band's bottom-left over the
+   scrim. pointer-events:none so the whole band stays one big click target. */
+.hero-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 3;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+  padding: clamp(16px, 3vw, 30px) clamp(16px, 4vw, 40px);
+  max-width: min(680px, 84%);
+}
+.hero-kicker {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  color: var(--accent);
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.7);
+}
+.hero-title {
+  margin: 0;
+  font-size: clamp(24px, 4.2vw, 42px);
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: -0.4px;
+  color: var(--text);
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.7);
+  overflow-wrap: anywhere;
+}
+.hero-meta { display: flex; align-items: center; gap: 10px; }
+/* State chip — reuses the per-state badge palette (mint ARCHIVED, etc.). */
+.hero-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.42);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+.hero-chip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  box-shadow: 0 0 7px currentColor;
+}
+.hero-chip.s-all .hero-chip-dot       { color: var(--text-dim);    background: var(--text-dim); }
+.hero-chip.s-unprepped .hero-chip-dot { color: var(--b-unprepped); background: var(--b-unprepped); }
+.hero-chip.s-local .hero-chip-dot     { color: var(--b-local);     background: var(--b-local); }
+.hero-chip.s-pushed .hero-chip-dot    { color: var(--b-pushed);    background: var(--b-pushed); }
+.hero-chip.s-restored .hero-chip-dot  { color: var(--b-restored);  background: var(--b-restored); }
+.hero-chip.s-archived .hero-chip-dot  { color: var(--b-archived);  background: var(--b-archived); }
+.hero-chip.s-unknown .hero-chip-dot   { color: var(--b-unknown);   background: var(--b-unknown); }
+
+/* One-line overview clip. Hidden (hero.js sets [hidden]) when an item has none. */
+.hero-overview {
+  margin: 0;
+  width: 100%;
+  max-width: 60ch;
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.7);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hero-overview[hidden] { display: none; }
+
+/* Slide indicators, bottom-right. Empty (single slide) → no dots shown. */
+.hero-dots {
+  position: absolute;
+  right: clamp(14px, 3vw, 28px);
+  bottom: clamp(14px, 2.4vw, 22px);
+  z-index: 4;
+  display: flex;
+  gap: 8px;
+}
+.hero-dots:empty { display: none; }
+.hero-dot {
+  width: 9px;
+  height: 9px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.18);
+  cursor: pointer;
+  transition: background 0.16s, transform 0.16s, border-color 0.16s;
+}
+.hero-dot:hover { background: rgba(255, 255, 255, 0.5); }
+.hero-dot.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  transform: scale(1.15);
+  box-shadow: 0 0 8px rgba(56, 224, 200, 0.7);
+}
+.hero-dot:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* Narrow viewports: a shorter band and drop the one-line overview to keep the
+   title + chip uncluttered. */
+@media (max-width: 520px) {
+  #hero.hero-strip { height: clamp(150px, 30vh, 220px); }
+  .hero-overview { display: none; }
+}
+
+/* Reduced motion: NO Ken-Burns, NO crossfade transition, NO parallax (hero.js also
+   skips the auto-rotate + leaves the parallax transform unset). A single static
+   featured backdrop is shown. */
+@media (prefers-reduced-motion: reduce) {
+  .hero-backdrop {
+    transition: none;
+    transform: none;
+    animation: none;
+  }
+  .hero-strip .hero-backdrop.is-front {
+    transform: none;
+    animation: none;
+  }
+  .hero-dot { transition: none; }
+}

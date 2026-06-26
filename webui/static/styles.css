@@ -572,7 +572,14 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
    expand arrow. Default opacity 0; glow.js writes --mx/--my (px, relative to the
    card) one update per frame as the pointer moves; CSS handles the fade. The
    --mx/--my fallbacks centre the glow before the first move / on un-tracked
-   cards so it never flashes at the 0,0 corner. */
+   cards so it never flashes at the 0,0 corner.
+
+   POSTER TINT (IMP-E16 D1): the accent colour is `var(--accent-rgb, 56, 224, 200)`
+   — the fixed mint UNLESS card.js extracted a film accent from the loaded poster
+   (swatch.js) and set `--accent-rgb`/`--accent-bright-rgb` on the card. So a card
+   with no poster (or a failed/muddy extraction) is byte-identical to the old mint;
+   an enriched card glows in its film's colour. The glow/ring/box-shadow below all
+   read this var with the SAME mint fallback. */
 .card::before {
   content: "";
   position: absolute;
@@ -583,8 +590,8 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   transition: opacity 0.2s ease;
   background: radial-gradient(
     circle at var(--mx, 50%) var(--my, 50%),
-    rgba(56, 224, 200, 0.16),
-    rgba(56, 224, 200, 0.06) 90px,
+    rgba(var(--accent-rgb, 56, 224, 200), 0.16),
+    rgba(var(--accent-rgb, 56, 224, 200), 0.06) 90px,
     transparent 160px
   );
 }
@@ -638,7 +645,7 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
    is the whole (still pretty, never-blank) effect. */
 @media (any-hover: hover) and (any-pointer: fine) {
   .card:hover {
-    box-shadow: var(--shadow), 0 0 0 1px rgba(56, 224, 200, 0.28);
+    box-shadow: var(--shadow), 0 0 0 1px rgba(var(--accent-rgb, 56, 224, 200), 0.28);
   }
 }
 
@@ -669,8 +676,8 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
     background: conic-gradient(
       from var(--ring-angle),
       transparent 0deg,
-      rgba(56, 224, 200, 0.95) 42deg,   /* --accent core of the arc */
-      rgba(90, 160, 255, 0.85) 88deg,   /* --focus trailing edge */
+      rgba(var(--accent-rgb, 56, 224, 200), 0.95) 42deg,        /* poster accent core (mint default) */
+      rgba(var(--accent-bright-rgb, 90, 160, 255), 0.85) 88deg, /* brighter sibling trailing edge (blue default) */
       transparent 150deg,
       transparent 360deg
     );
@@ -780,7 +787,14 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   position: absolute;
   inset: auto 0 0 0;
   height: 56%;
-  background: linear-gradient(to top, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0));
+  /* Black legibility scrim (unchanged) PLUS a faint poster-accent wash layered over
+     it. The wash's alpha is `var(--accent-scrim-a, 0)` — 0 by default, so a poster
+     whose accent wasn't extracted renders the EXACT original black gradient. card.js
+     sets --accent-scrim-a (and --accent-rgb) only on a successful extraction, lifting
+     the film-coloured wash in. */
+  background:
+    linear-gradient(to top, rgba(var(--accent-rgb, 56, 224, 200), var(--accent-scrim-a, 0)), rgba(0, 0, 0, 0) 70%),
+    linear-gradient(to top, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0));
   z-index: 1;
   pointer-events: none;
 }

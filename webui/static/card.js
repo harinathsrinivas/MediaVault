@@ -29,6 +29,7 @@ import { openConfirmModal } from "./modal.js";
 import { createRing } from "./ring.js";
 import { displayTitle } from "./title.js";
 import { openTerminal, notifyJob } from "./terminal.js";
+import { extractAccent } from "./swatch.js";
 
 var POLL_MS = 1000;
 
@@ -101,6 +102,29 @@ function addOpenFolderButton(poster, item) {
   poster.appendChild(btn);
 }
 
+// Poster-driven ambient tint (IMP-E16 D1): once a card's real poster has LOADED,
+// pull one representative "film accent" colour out of its pixels (swatch.js) and
+// publish it as CSS custom properties on the CARD. The hover glow, rotating ring,
+// and scrim in styles.css read `var(--accent-rgb, 56,224,200)` etc., so a tinted
+// card glows in its film's colour while every un-tinted card keeps the mint default.
+//
+// Runs at most ONCE per card (guarded on the <img>) and only on a same-origin
+// poster that actually loaded, so re-hovers / re-renders never recompute and
+// off-screen lazy cards do nothing until their image enters the viewport. On any
+// failure or a too-monochrome poster extractAccent() returns null and we set
+// nothing — the card stays byte-identical mint.
+function applyPosterAccent(img, poster) {
+  if (img._accentDone) return;
+  img._accentDone = true;
+  var card = poster && poster.closest ? poster.closest(".card") : null;
+  if (!card) return;
+  var sw = extractAccent(img);
+  if (!sw) return; // extraction failed / muddy → keep the mint default
+  card.style.setProperty("--accent-rgb", sw.accent.join(","));
+  card.style.setProperty("--accent-bright-rgb", sw.bright.join(","));
+  card.style.setProperty("--accent-scrim-a", "0.1"); // un-gates the faint scrim tint
+}
+
 // Point a card's poster slot at its real artwork: GET /api/media-image/<id>?kind=
 // poster (the server applies season-inheritance + serves the local jpg as-is).
 //
@@ -136,6 +160,7 @@ function addPosterImage(poster, item) {
   img.addEventListener("load", function () {
     img.classList.add("is-loaded");
     poster.classList.add("has-poster"); // enables the bottom scrim (styles.css)
+    applyPosterAccent(img, poster); // tint the card's glow/ring/scrim to the poster
   });
   img.addEventListener("error", function () {
     img.remove();

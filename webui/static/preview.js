@@ -19,6 +19,12 @@
  *      chips, runtime, the tagline, the FULL overview (replacing the clamped
  *      short one), top cast, director(s)/creator(s), show seasons·episodes·
  *      networks / episode air-date·S·E, and a clickable IMDb / TMDB link row.
+ *      When the title has been refreshed online the detail ALSO carries external
+ *      critic scores (`ratings`: IMDb / Rotten Tomatoes / Metacritic), an MPAA
+ *      certificate (`rated`), an awards summary (`awards`) and box office
+ *      (`boxoffice`); those paint a prominent ratings-COIN strip, a certificate
+ *      chip, a 🏆 awards line and a box-office meta pill — all OPTIONAL, so a
+ *      not-yet-refreshed title's dossier looks exactly as it did before.
  *      A 404 ("no tmdb_id"), a fetch error, or a stale open → we simply keep the
  *      basic dossier (no error flash). Per-id detail is cached in memory so
  *      re-hovering the same card never refetches.
@@ -179,6 +185,27 @@ function formatSxxEyy(season, episode) {
   return out;
 }
 
+// Best-effort: the FIRST number in a string ("87%" -> 87, "74" -> 74, "8.8" ->
+// 8.8). NaN when there's no digit run — callers treat that as "no colour band"
+// (e.g. a non-numeric Rotten Tomatoes / Metacritic value renders neutrally).
+function leadingNumber(value) {
+  var m = /(\d+(?:\.\d+)?)/.exec(String(value || ""));
+  return m ? Number(m[1]) : NaN;
+}
+
+// "$292,587,330" -> "$292M"; "$1,250,000,000" -> "$1.2B". Pulls the magnitude out
+// of OMDb's formatted figure and TRUNCATES (matching the product spec's examples);
+// a small (< $1M) or unparseable amount is shown as the raw string unchanged.
+function formatBoxOffice(value) {
+  var raw = String(value || "").trim();
+  if (!raw) return "";
+  var n = Number(raw.replace(/[^0-9.]/g, ""));
+  if (!isFinite(n) || n <= 0) return raw;
+  if (n >= 1e9) return "$" + Math.floor(n / 1e8) / 10 + "B";
+  if (n >= 1e6) return "$" + Math.floor(n / 1e6) + "M";
+  return raw;
+}
+
 // The IMDb / TMDB links are interactive, so we are strict about what we will turn
 // into a real href: an exact-origin https:// allow-list (anything else is omitted).
 function safeExternalUrl(url) {
@@ -274,6 +301,14 @@ function buildPanel() {
   var body = document.createElement("div");
   body.className = "hp-body";
 
+  // External ratings strip (IMDb / Rotten Tomatoes / Metacritic coins). Detail-
+  // only and OPTIONAL — hidden (display:none, so it contributes NO flex gap) until
+  // a refreshed title's detail carries `ratings`. Sits first so the critic scores
+  // read just under the hero title; the ★ TMDB rating stays in .hp-rich below.
+  var ratings = document.createElement("div");
+  ratings.className = "hp-ratings";
+  body.appendChild(ratings);
+
   // Rich strip (★ rating · runtime · genres). Populated only once detail loads;
   // hidden (empty) until then so the instant paint has no blank gap.
   var rich = document.createElement("div");
@@ -294,6 +329,11 @@ function buildPanel() {
   credits.className = "hp-credits";
   body.appendChild(credits);
 
+  // Awards line (🏆 + a dim, ≤2-line accolades summary). Detail-only/OPTIONAL.
+  var awards = document.createElement("p");
+  awards.className = "hp-awards";
+  body.appendChild(awards);
+
   var meta = document.createElement("div");
   meta.className = "hp-meta";
   // State badge (chip with a coloured dot, reusing the per-state palette).
@@ -313,6 +353,14 @@ function buildPanel() {
   var catPill = document.createElement("span");
   catPill.className = "hp-pill hp-cat";
   meta.appendChild(catPill);
+  // Box office pill (detail-only/OPTIONAL) — built hidden, revealed in renderRich
+  // when detail carries `boxoffice`. Last in the meta row so it trails the state/
+  // size/category pills. .hp-pill has no author `display`, so the `hidden`
+  // attribute (UA display:none) reliably hides it — same idiom as the link chips.
+  var boxoffice = document.createElement("span");
+  boxoffice.className = "hp-pill hp-boxoffice";
+  boxoffice.hidden = true;
+  meta.appendChild(boxoffice);
   body.appendChild(meta);
 
   // External link row — now part of the fully-interactive panel. Built empty; the
@@ -345,15 +393,18 @@ function buildPanel() {
     kicker: kicker,
     title: title,
     ep: ep,
+    ratings: ratings,
     rich: rich,
     tagline: tagline,
     synopsis: synopsis,
     credits: credits,
+    awards: awards,
     stateChip: stateChip,
     stateDot: stateDot,
     stateLabel: stateLabel,
     sizePill: sizePill,
     catPill: catPill,
+    boxoffice: boxoffice,
     links: links,
     imdb: imdb,
     tmdb: tmdb,
@@ -455,12 +506,18 @@ function loadBackdrop(p, item, openToken) {
 // Clear every detail-only region so a re-open starts from the basic dossier with
 // no stale rich content bleeding through from the previously hovered item.
 function clearRich(p) {
+  p.ratings.textContent = "";
+  p.ratings.classList.remove("show");
   p.rich.textContent = "";
   p.rich.classList.remove("show");
   p.tagline.textContent = "";
   p.tagline.classList.remove("show");
   p.credits.textContent = "";
   p.credits.classList.remove("show");
+  p.awards.textContent = "";
+  p.awards.classList.remove("show");
+  p.boxoffice.hidden = true;
+  p.boxoffice.textContent = "";
   p.imdb.hidden = true;
   p.imdb.removeAttribute("href");
   p.imdb.textContent = "";
@@ -480,10 +537,72 @@ function appendChip(row, text, extraClass) {
   row.appendChild(chip);
 }
 
+// One external-rating "coin" for the ratings strip: a brand label (`src`) plus a
+// pre-built value node (a plain `.hp-coin-val` span, or the Metacritic colour
+// box). Returns the coin so the caller can flag it (RT fresh/rotten). XSS-safe —
+// `src` is set via textContent and the value node was built the same way.
+function appendCoin(strip, src, valueNode, coinClass) {
+  var coin = document.createElement("span");
+  coin.className = "hp-coin" + (coinClass ? " " + coinClass : "");
+  var label = document.createElement("span");
+  label.className = "hp-coin-src";
+  label.textContent = src;
+  coin.appendChild(label);
+  coin.appendChild(valueNode);
+  strip.appendChild(coin);
+  return coin;
+}
+
 // Paint the resolved /api/detail payload. `item` is the card's row (for the
 // id/episode context); `d` is the server detail object.
 function renderRich(p, item, d) {
   if (!d || d.__none) return; // 404 / no-tmdb_id → keep the basic dossier
+
+  // ---- External ratings strip: IMDb / Rotten Tomatoes / Metacritic coins. ----
+  // Each source is OPTIONAL (any subset of detail.ratings may be present/absent),
+  // rendered in pure text/CSS reproducing each brand's signature: IMDb gold, RT
+  // fresh (green ≥60%) vs rotten (red <60%), and the Metacritic colour-banded
+  // metascore square. The TMDB ★ stays in the rich strip below (not duplicated).
+  p.ratings.textContent = "";
+  var ratings = d.ratings && typeof d.ratings === "object" ? d.ratings : null;
+  var hasRatings = false;
+  if (ratings) {
+    var imdbScore = String(ratings.imdb || "").trim();
+    if (imdbScore) {
+      var imdbVal = document.createElement("span");
+      imdbVal.className = "hp-coin-val";
+      imdbVal.textContent = imdbScore;
+      appendCoin(p.ratings, "IMDb", imdbVal, "hp-coin-imdb");
+      hasRatings = true;
+    }
+    var rt = String(ratings.rotten_tomatoes || "").trim();
+    if (rt) {
+      var rtVal = document.createElement("span");
+      rtVal.className = "hp-coin-val";
+      rtVal.textContent = rt;
+      var rtCoin = appendCoin(p.ratings, "RT", rtVal, "hp-coin-rt");
+      var rtNum = leadingNumber(rt);
+      if (isFinite(rtNum)) {
+        rtCoin.classList.add(rtNum >= 60 ? "is-fresh" : "is-rotten");
+      }
+      hasRatings = true;
+    }
+    var mc = String(ratings.metacritic || "").trim();
+    if (mc) {
+      var mcBox = document.createElement("span");
+      mcBox.className = "hp-coin-val hp-mc-box";
+      mcBox.textContent = mc;
+      var mcNum = leadingNumber(mc);
+      if (isFinite(mcNum)) {
+        mcBox.classList.add(
+          mcNum >= 61 ? "is-green" : mcNum >= 40 ? "is-yellow" : "is-red"
+        );
+      }
+      appendCoin(p.ratings, "Metacritic", mcBox, "hp-coin-mc");
+      hasRatings = true;
+    }
+  }
+  if (hasRatings) p.ratings.classList.add("show");
 
   // ---- Rich strip: ★ rating (+ faint votes) · runtime · genre chips. --------
   p.rich.textContent = "";
@@ -515,6 +634,14 @@ function renderRich(p, item, d) {
   var runtime = formatRuntime(d.runtime);
   if (runtime) {
     appendChip(p.rich, runtime, "hp-runtime");
+    hasStrip = true;
+  }
+
+  // MPAA certificate (e.g. "PG-13") — a boxy, bordered chip reading like a ratings
+  // certificate, grouped with the runtime/genre facts. Detail-only/OPTIONAL.
+  var rated = String(d.rated || "").trim();
+  if (rated) {
+    appendChip(p.rich, rated, "hp-rated");
     hasStrip = true;
   }
 
@@ -630,6 +757,31 @@ function renderRich(p, item, d) {
   }
 
   if (hasCredits) p.credits.classList.add("show");
+
+  // ---- Awards line (🏆 prefix, dim, clamped to ≤2 lines). -------------------
+  // Detail-only/OPTIONAL. Shown faithfully (raw awards string) — the clamp keeps a
+  // long "X wins & Y nominations" line tidy without fragile text surgery.
+  p.awards.textContent = "";
+  var awards = String(d.awards || "").trim();
+  if (awards) {
+    var trophy = document.createElement("span");
+    trophy.className = "hp-awards-icon";
+    trophy.textContent = "🏆";
+    var awardsText = document.createElement("span");
+    awardsText.className = "hp-awards-text";
+    awardsText.textContent = awards;
+    p.awards.appendChild(trophy);
+    p.awards.appendChild(awardsText);
+    p.awards.classList.add("show");
+  }
+
+  // ---- Box office meta pill (abbreviated $; raw string if small/unparseable). -
+  // Detail-only/OPTIONAL — trails the state/size/category pills in the meta row.
+  var box = formatBoxOffice(d.boxoffice);
+  if (box) {
+    p.boxoffice.textContent = "Box office " + box;
+    p.boxoffice.hidden = false;
+  }
 
   // ---- External link row (clickable IMDb / TMDB chips). ---------------------
   var imdbUrl = safeExternalUrl(d.imdb_url);

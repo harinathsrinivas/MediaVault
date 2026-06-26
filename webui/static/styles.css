@@ -2257,6 +2257,93 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   border-color: rgba(56, 224, 200, 0.22);
   font-variant-numeric: tabular-nums;
 }
+/* Certificate (MPAA) chip — e.g. "PG-13". A boxier, more strongly-bordered chip
+   than the pill-shaped genres so it reads as a ratings certificate beside the
+   runtime in the rich strip. (.hp-rated follows .hp-chip so it wins the cascade.) */
+.hp-rated {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.26);
+  border-radius: 5px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+}
+
+/* ----- External ratings strip: IMDb / Rotten Tomatoes / Metacritic coins -----
+   Detail-only (IMP-E16): a prominent, tasteful row of up to three rating "coins",
+   shown ONLY for the sources present in detail.ratings (display:none until then,
+   so it adds NO gap to a not-yet-refreshed dossier). Each coin reproduces its
+   source's signature in pure CSS/text — no external images — so it stays crisp on
+   the dark mint glass: IMDb gold, RT fresh-green / rotten-red, and Metacritic's
+   colour-banded metascore square. The ★ TMDB rating stays in .hp-rich below. */
+.hp-ratings {
+  display: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.hp-ratings.show { display: flex; }
+.hp-coin {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 11px 4px 9px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line-soft);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.hp-coin-src {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.hp-coin-val {
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0.2px;
+  color: var(--text);
+}
+/* IMDb — signature gold accent on the source label + a faint gold coin. */
+.hp-coin-imdb {
+  background: rgba(245, 197, 24, 0.10);
+  border-color: rgba(245, 197, 24, 0.38);
+}
+.hp-coin-imdb .hp-coin-src { color: #f5c518; }
+/* Rotten Tomatoes — fresh (green ≥60%) vs rotten (red <60%); neutral if unparsed
+   (no is-fresh/is-rotten class added → it falls back to the base coin look). */
+.hp-coin-rt.is-fresh {
+  background: rgba(106, 224, 122, 0.10);
+  border-color: rgba(106, 224, 122, 0.42);
+}
+.hp-coin-rt.is-fresh .hp-coin-src { color: #6ae07a; }
+.hp-coin-rt.is-rotten {
+  background: rgba(255, 92, 114, 0.10);
+  border-color: rgba(255, 92, 114, 0.42);
+}
+.hp-coin-rt.is-rotten .hp-coin-src { color: #ff5c72; }
+/* Metacritic — the metascore sits in its signature colour-banded square (dark
+   text on the fill): green ≥61 / yellow 40–60 / red <40; neutral box if unparsed.
+   (.hp-mc-box follows .hp-coin-val so its colour/size/background win the cascade.) */
+.hp-mc-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 23px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 5px;
+  font-size: 12.5px;
+  color: #0b0f17;
+  background: var(--text-faint);
+}
+.hp-mc-box.is-green  { background: #6ae07a; }
+.hp-mc-box.is-yellow { background: #ffc233; }
+.hp-mc-box.is-red    { background: #ff5c72; }
 
 /* ----- Tagline (italic, above the synopsis; detail-only) ----- */
 .hp-tagline {
@@ -2345,6 +2432,27 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   border-color: rgba(127, 224, 168, 0.3);
 }
 
+/* ----- Awards line (detail-only): 🏆 + a dim, ≤2-line accolades summary -----
+   Uses the same -webkit-box line-clamp idiom as .hp-synopsis so a long
+   "X wins & Y nominations" string trims to two tidy lines instead of wrapping
+   the panel taller. display:none until .show, so an awards-less title adds no gap. */
+.hp-awards {
+  display: none;
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--text-faint);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.hp-awards.show { display: -webkit-box; }
+.hp-awards-icon {
+  margin-right: 6px;
+  /* Keep the trophy's emoji colour; a soft gold glow ties it to the IMDb coin. */
+  filter: drop-shadow(0 0 5px rgba(245, 197, 24, 0.4));
+}
+
 /* ----- Meta row ----- */
 .hp-meta {
   display: flex;
@@ -2400,6 +2508,17 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   border-color: rgba(56, 224, 200, 0.22);
   font-variant-numeric: tabular-nums;
 }
+/* Box office — a quiet money figure in the meta row (detail-only). Kept neutral
+   (base .hp-pill look) so the row never gets busy; tabular figures keep it crisp. */
+.hp-boxoffice {
+  font-variant-numeric: tabular-nums;
+}
+/* Defensive guard (mirrors .subnav[hidden] above): unlike the IMDb/TMDB chips
+   whose .hp-links parent is display:none until shown, this pill lives in the
+   always-visible .hp-meta row and is toggled by the `hidden` attribute alone.
+   .hp-pill has no author `display` today so the UA `[hidden]` already hides it;
+   this keeps that true even if .hp-pill ever gains a `display`. */
+.hp-boxoffice[hidden] { display: none; }
 
 /* ----- External link row — clickable IMDb / TMDB chips (detail-only) -----
    The whole panel is now interactive (pointer-events:auto), so these chips are

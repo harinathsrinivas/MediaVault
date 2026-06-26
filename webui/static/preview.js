@@ -252,9 +252,12 @@ function buildPanel() {
   root.id = "hover-preview";
   root.className = "hover-preview";
   root.setAttribute("aria-hidden", "true"); // informational mirror of the card
-  // Interactive so the IMDb/TMDB chips + ✕ are clickable. (Mirrored in CSS; this
-  // is belt-and-braces in case a stylesheet failed to load.)
-  root.style.pointerEvents = "auto";
+  // Interactivity (IMDb/TMDB chips + ✕ clickable) is gated in CSS on `.is-open`: a
+  // CLOSED panel MUST be pointer-events:none. It lingers at opacity 0 at its last
+  // fixed coordinates, so if it kept pointer-events:auto it would keep intercepting
+  // hover over the tiles it had covered (the bug this fixes). NEVER set
+  // pointer-events inline here — an inline value beats the class rule and is exactly
+  // what trapped those tiles.
 
   // Backdrop layer (dimmed cover image + scrim). The <img> is lazily pointed at
   // the fanart on each open; the scrim is a CSS gradient over it for legibility.

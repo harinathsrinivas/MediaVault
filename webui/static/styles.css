@@ -2229,11 +2229,12 @@ button.crumb:hover { color: var(--accent); background: var(--bg-card-hover); }
   /* Cap the height so an extreme overview can never push it off-screen; the
      internal regions are bounded (line-clamped) so content fits inside this. */
   max-height: min(86vh, 840px);
-  /* INTERACTIVE: the panel's contents (the IMDb/TMDB chips, the ✕) are clickable.
-     preview.js sets this too as belt-and-braces. On desktop the panel sits beside
-     the card so it doesn't cover the card's own buttons; in the overlap with the
-     header it intentionally captures the pointer while open. */
-  pointer-events: auto;
+  /* CLOSED = pointer-events:none. The panel lingers in the DOM at opacity 0 at its
+     last fixed coordinates after closing; if it kept pointer-events:auto it would
+     keep intercepting hover over the tiles it had covered, so those tiles stop
+     glowing / opening a dossier (the bug this fixes). Only `.is-open` flips it to
+     auto (below) so the IMDb/TMDB chips + ✕ are clickable WHILE shown. */
+  pointer-events: none;
   border-radius: 22px;
   overflow: hidden;
   /* GLASS: a semi-opaque dark fill the page shows through (~a third to a half),
@@ -2270,6 +2271,7 @@ button.crumb:hover { color: var(--accent); background: var(--bg-card-hover); }
 .hover-preview.is-open {
   opacity: 1;
   transform: translateY(0) scale(1);
+  pointer-events: auto;   /* interactive ONLY while open (chips + ✕ clickable) */
 }
 
 /* ----- Hero backdrop band ----- */

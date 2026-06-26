@@ -9,7 +9,7 @@
 > Full task text lives in `improvements_tier*.md`; this file only orders them. Legend:
 > 🔴 critical · 🟠 high · 🟡 medium · ⚪ low · ✅ done · 🚦 needs a user decision (change-gate).
 >
-> **Last updated:** 2026-06-24 (Phase 5: IMP-E3/U3/D17 — TMDB enrich + rename_folder + /api/media-image + real posters/titles in SPA + `{tmdb-…}` folder token fix for mkvmerge split — on `feature/imp_e3_u3_d17_tmdb_posters_rename`. IMP-E14 Phase 5 complete → IMP-E14 fully done. IMP-D17 done. IMP-E15 done. IMP-E3 partial (local-first TMDB slice shipped; AniDB/TheTVDB breadth + per-ep NFOs pending). IMP-U3 partial (NFO/artwork down-payment shipped; per-episode NFOs + anime ids pending). Earlier: IMP-E15 — mobile + Tailscale serve + shared-token auth + mvconfig.json minimal slice; IMP-E14 grouped folder view + space background + open-in-Explorer + iOS no-cache fix; hover motion + PWA; fetch-in-UI; media-type tabs; IMP-D4 integrity guard; IMP-A12 CI pipeline; IMP-E12 web ops console + IMP-D16).
+> **Last updated:** 2026-06-27 (IMP-E16 — UI dossier (hover/long-press cinematic glass panel) + /api/detail (TMDB full detail + merged OMDb ratings + trivia) + `refresh_online`/`fetch_trivia` commands (mvonline.json/mvextra.json caches; OMDb/EXA/GROQ config keys) + EXA web-search auto-resolve waterfall in `enrich_metadata` + grouped grid/drill-down view + poster-driven ambient glow (`swatch.js`) + ⌘K command palette (`palette.js`) + View-Transitions morphs + cinematic parallax hero (`hero.js`) + lazy-load perf — on `feature/imp_e16_ui_wow`. Earlier: Phase 5 IMP-E3/U3/D17 — TMDB enrich + rename_folder + /api/media-image + real posters/titles in SPA — on `feature/imp_e3_u3_d17_tmdb_posters_rename`. IMP-E14 fully done. IMP-D17 done. IMP-E15 done.)
 
 ---
 
@@ -73,7 +73,7 @@ The vault's three accounts are a single point of failure. Prioritize:
 
 `S2` (mvdaemon) → `S3` (in-client fetch + notify) → `S4` (grace-archive) → `S5` (smart prefetch),
 with `E4` (watch-state), `E9` (library refresh), `E5` (phone cleanup), `U1` (enrichment-before-archive),
-`U2` (status home rows). Library beauty: `E3` (metadata) → `U3` (NFO/artwork), `U4` (DV-FEL paths).
+`U2` (status home rows). Library beauty: `E3` (metadata) → `E16` (dossier + ratings/trivia + EXA auto-resolve + grid + palette; in_progress on `feature/imp_e16_ui_wow`) → `U3` (NFO/artwork), `U4` (DV-FEL paths).
 Feels-instant spikes: `G2` (gphotosdl) → `S7` (fetch hardening); `S6` (watch-while-fetching); `S8`
 (proxy-stream). Polish: `U5` (C# plugin), `E12` ✅ /`F10` (ops web UI — E12 shipped; its card-grid SPA is the substrate the future media UI grows on).
 

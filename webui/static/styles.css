@@ -2938,3 +2938,429 @@ button.crumb:hover { color: var(--accent); background: var(--bg-card-hover); }
   .hp-media { height: clamp(170px, 30vh, 240px); }
   .hp-synopsis-full { -webkit-line-clamp: 4; }
 }
+
+/* ============================================================================
+   ⌘K / Ctrl-K command palette (IMP-E16 D2)
+   ----------------------------------------------------------------------------
+   Built + owned by palette.js. Everything here is `#cmd-palette` / `.cmdk*`
+   namespaced, so it cannot collide with any existing rule. The DOM (from
+   palette.js buildPalette/buildRow) is:
+     #cmd-palette.cmdk            full-screen dim backdrop (toggles .is-open)
+       .cmdk-panel               the floating glass pane
+         .cmdk-input-row         ⌕ glyph · input · Esc keycap  (hairline under)
+         .cmdk-results#cmdk-listbox   scrollable listbox
+           .cmdk-section         dim uppercase header ("Actions")
+           .cmdk-item[.cmdk-action]   a row: glyph · text · ↵ tail
+             .cmdk-glyph[.s-KEY] leading tile (state actions tint the ● by hue)
+             .cmdk-text → .cmdk-title (mark.cmdk-hl) + .cmdk-sub
+               .cmdk-sub → .cmdk-state.s-KEY (.cmdk-state-dot) + .cmdk-sub-rest
+             .cmdk-tail          ↵, revealed on the active row
+           .cmdk-empty           no-results / prompt text
+         .cmdk-foot → .cmdk-foot-part (kbd.cmdk-kbd + .cmdk-foot-label)
+     button#cmdk-trigger.cmdk-trigger   header affordance (.tabbar-row)
+
+   OPEN / CLOSE: palette.js adds `.is-open` to the ROOT (and aria-hidden flips).
+   CLOSED = display:none → no box, no pointer-events, fully hidden. OPEN flips to
+   a flex layer that centres the panel near the top third over a dim, blurred
+   backdrop. z-index 130 sits ABOVE the dossier (95 / .is-modal 100) and the job
+   terminal (120) so the palette always wins. The backdrop dim lives on the ROOT;
+   the click-to-close handler keys on `e.target === root`, so the panel (a child)
+   keeps its own clicks. Matches the established glass: semi-opaque dark fill +
+   backdrop blur/saturate + a thin mint edge + a deep shadow (cf. .hover-preview).
+   ============================================================================ */
+
+#cmd-palette.cmdk {
+  display: none;                 /* CLOSED: no box, no pointer-events at all */
+  position: fixed;
+  inset: 0;
+  z-index: 130;                  /* above dossier (95/100) + terminal (120) */
+  /* Dim, lightly-frosted backdrop — lighter than the destructive modals (0.78+)
+     because the palette is a fast, non-blocking tool, not a confirm gate. */
+  background: rgba(4, 7, 12, 0.6);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  /* Centre the panel horizontally; seat it near the top third (~14vh down).
+     These take effect once .is-open flips `display` to flex. */
+  justify-content: center;
+  align-items: flex-start;
+  padding: clamp(64px, 14vh, 160px) 16px 24px;
+}
+#cmd-palette.cmdk.is-open {
+  display: flex;                 /* OPEN: reveal + run the backdrop fade */
+  animation: cmdk-overlay-in 0.14s ease-out;
+}
+@keyframes cmdk-overlay-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* The glass pane. A flex column: input row (auto) · results (scroll) · footer. */
+.cmdk-panel {
+  width: clamp(420px, 56vw, 640px);
+  max-width: 100%;
+  max-height: min(70vh, 560px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;              /* clip the rounded corners + the scroll region */
+  border-radius: 18px;
+  /* GLASS: a semi-opaque dark fill the page frosts through, a thin mint edge, a
+     deep shadow + a faint inner highlight + a soft mint bloom — matched to the
+     dossier (.hover-preview) but a touch more opaque for text legibility. */
+  background: linear-gradient(180deg, rgba(15, 22, 34, 0.82), rgba(9, 14, 22, 0.88));
+  border: 1px solid rgba(56, 224, 200, 0.24);
+  box-shadow:
+    0 36px 110px rgba(0, 0, 0, 0.68),
+    0 0 0 1px rgba(255, 255, 255, 0.05) inset,
+    0 0 56px rgba(56, 224, 200, 0.1);
+  -webkit-backdrop-filter: blur(22px) saturate(140%);
+  backdrop-filter: blur(22px) saturate(140%);
+}
+/* Quick entrance: a slight rise + scale, re-triggered every open because the
+   rule only matches while .is-open is present (the backdrop fade is on root). */
+#cmd-palette.cmdk.is-open .cmdk-panel {
+  animation: cmdk-panel-in 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes cmdk-panel-in {
+  from { transform: translateY(-8px) scale(0.97); }
+  to   { transform: none; }
+}
+
+/* ----- Input row ----- */
+.cmdk-input-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line-soft);   /* hairline under the row */
+}
+.cmdk-search-glyph {
+  flex: none;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--text-faint);
+  transition: color 0.14s;
+}
+/* Brighten the search glyph to mint while the field is focused (it's a preceding
+   sibling, so key off the row's :focus-within rather than the input's :focus). */
+.cmdk-input-row:focus-within .cmdk-search-glyph { color: var(--accent); }
+
+.cmdk-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 17px;               /* >=16px so iOS Safari never zooms on focus */
+  font-weight: 500;
+  line-height: 1.3;
+  padding: 2px 0;
+}
+.cmdk-input::placeholder { color: var(--text-dim); opacity: 1; }
+
+/* ----- Keycaps (the Esc pill in the row + the footer hint keys) ----- */
+.cmdk-kbd,
+.cmdk-esc {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;      /* a hair of "depth" so it reads as a key */
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  font-family: ui-monospace, "Consolas", monospace;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+.cmdk-esc {
+  flex: none;
+  height: 22px;
+  padding: 0 8px;
+  color: var(--text-faint);
+}
+
+/* ----- Results listbox ----- */
+.cmdk-results {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+.cmdk-results::-webkit-scrollbar { width: 10px; }
+.cmdk-results::-webkit-scrollbar-track { background: transparent; }
+.cmdk-results::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+.cmdk-results::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
+
+.cmdk-section {
+  padding: 10px 12px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* ----- Result rows ----- */
+.cmdk-item {
+  position: relative;            /* anchor the selection bar (::before) */
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  scroll-margin: 8px;            /* keep a margin when scrollIntoView fires */
+}
+/* The keyboard-selection indicator bar in the left gutter. */
+.cmdk-item::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  width: 3px;
+  height: 56%;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: 0;
+  transform: translateY(-50%) scaleY(0);
+  transition: opacity 0.12s ease-out, transform 0.12s ease-out;
+}
+
+.cmdk-glyph {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  font-size: 17px;
+  line-height: 1;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid var(--line-soft);
+  color: var(--text-dim);
+}
+/* Action rows read slightly distinct: a mint-tinted glyph tile. */
+.cmdk-action .cmdk-glyph {
+  color: var(--accent);
+  background: rgba(56, 224, 200, 0.1);
+  border-color: rgba(56, 224, 200, 0.18);
+}
+/* State-filter actions carry a ● glyph with `.s-KEY`; tint it by the same state
+   hue the seg-rail / badges use (reset the action mint first). Ordered AFTER the
+   action rule above so equal-specificity ties resolve to the hue. */
+.cmdk-glyph.s-all,
+.cmdk-glyph.s-unprepped,
+.cmdk-glyph.s-local,
+.cmdk-glyph.s-pushed,
+.cmdk-glyph.s-restored,
+.cmdk-glyph.s-archived,
+.cmdk-glyph.s-unknown {
+  background: rgba(255, 255, 255, 0.045);
+  border-color: var(--line-soft);
+  text-shadow: 0 0 10px currentColor;   /* a colored bloom, like the seg-dot */
+}
+.cmdk-glyph.s-all       { color: var(--text-dim); }
+.cmdk-glyph.s-unprepped { color: var(--b-unprepped); }
+.cmdk-glyph.s-local     { color: var(--b-local); }
+.cmdk-glyph.s-pushed    { color: var(--b-pushed); }
+.cmdk-glyph.s-restored  { color: var(--b-restored); }
+.cmdk-glyph.s-archived  { color: var(--b-archived); }
+.cmdk-glyph.s-unknown   { color: var(--b-unknown); }
+
+.cmdk-text {
+  flex: 1 1 auto;
+  min-width: 0;                  /* let the children ellipsis instead of overflow */
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.cmdk-title {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Matched-substring emphasis (a <mark>); kill the UA yellow, go mint + bold. */
+.cmdk-hl {
+  background: transparent;
+  color: var(--accent);
+  font-weight: 800;
+}
+.cmdk-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cmdk-sub-rest {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* State chip on a title's sub-line: a small dot tinted by the lifecycle hue,
+   reusing the badge palette exactly as .seg.s-KEY .seg-dot does. */
+.cmdk-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  color: var(--text-dim);
+}
+.cmdk-state-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--text-dim);
+  box-shadow: 0 0 6px currentColor;
+}
+.cmdk-state.s-all .cmdk-state-dot       { color: var(--text-dim);   background: var(--text-dim); }
+.cmdk-state.s-unprepped .cmdk-state-dot { color: var(--b-unprepped); background: var(--b-unprepped); }
+.cmdk-state.s-local .cmdk-state-dot     { color: var(--b-local);     background: var(--b-local); }
+.cmdk-state.s-pushed .cmdk-state-dot    { color: var(--b-pushed);    background: var(--b-pushed); }
+.cmdk-state.s-restored .cmdk-state-dot  { color: var(--b-restored);  background: var(--b-restored); }
+.cmdk-state.s-archived .cmdk-state-dot  { color: var(--b-archived);  background: var(--b-archived); }
+.cmdk-state.s-unknown .cmdk-state-dot   { color: var(--b-unknown);   background: var(--b-unknown); }
+
+/* Trailing ↵ — hidden until the row is the active (keyboard-selected) one. */
+.cmdk-tail {
+  flex: none;
+  font-size: 14px;
+  color: var(--accent);
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+/* ----- Hover + keyboard selection -----
+   palette.js sets BOTH `.is-active` and `aria-selected="true"` together; either
+   matches. Selection (mint fill + left bar + revealed ↵) is ordered AFTER :hover
+   so it wins the equal-specificity tie when a row is both hovered and selected. */
+.cmdk-item:hover { background: rgba(255, 255, 255, 0.04); }
+
+.cmdk-item.is-active,
+.cmdk-item[aria-selected="true"] {
+  background: rgba(56, 224, 200, 0.1);
+  border-color: rgba(56, 224, 200, 0.18);
+}
+.cmdk-item.is-active::before,
+.cmdk-item[aria-selected="true"]::before {
+  opacity: 1;
+  transform: translateY(-50%) scaleY(1);
+}
+.cmdk-item.is-active .cmdk-tail,
+.cmdk-item[aria-selected="true"] .cmdk-tail { opacity: 1; }
+
+/* ----- Empty / prompt state ----- */
+.cmdk-empty {
+  padding: 36px 20px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+/* ----- Footer key hints ----- */
+.cmdk-foot {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--line-soft);
+  background: rgba(0, 0, 0, 0.16);
+}
+.cmdk-foot-part {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.cmdk-foot-label {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  letter-spacing: 0.2px;
+}
+
+/* ----- Header trigger affordance (⌕ Search ⌘K) -----
+   Injected by palette.js into .tabbar-row; styled like the other header controls
+   (.btn-sort / .seg) so it sits in the row natively. Also the mobile tap target. */
+.cmdk-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.14s, color 0.14s, border-color 0.14s;
+}
+.cmdk-trigger:hover {
+  color: var(--text);
+  background: var(--bg-card-hover);
+  border-color: var(--accent-deep);
+}
+.cmdk-trigger:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.cmdk-trigger-glyph {
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text-dim);
+  transition: color 0.14s;
+}
+.cmdk-trigger:hover .cmdk-trigger-glyph { color: var(--accent); }
+.cmdk-trigger-text { letter-spacing: 0.2px; }
+.cmdk-trigger-kbd {
+  font-family: ui-monospace, "Consolas", monospace;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-faint);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line-soft);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+
+/* ----- Responsive ----- */
+@media (max-width: 640px) {
+  #cmd-palette.cmdk { padding: clamp(40px, 9vh, 88px) 12px 16px; }
+  .cmdk-panel { width: 92vw; max-height: min(74vh, 560px); }
+  .cmdk-foot { gap: 12px; }
+  /* The shortcut hint is desktop discovery; on mobile the button is just the tap
+     target, so drop the keycap to keep it compact. */
+  .cmdk-trigger-kbd { display: none; }
+}
+
+/* ----- Reduced motion: open INSTANTLY, no fade/scale/indicator slide ----- */
+@media (prefers-reduced-motion: reduce) {
+  #cmd-palette.cmdk.is-open,
+  #cmd-palette.cmdk.is-open .cmdk-panel { animation: none; }
+  .cmdk-item::before,
+  .cmdk-tail,
+  .cmdk-search-glyph,
+  .cmdk-trigger,
+  .cmdk-trigger-glyph { transition: none; }
+}

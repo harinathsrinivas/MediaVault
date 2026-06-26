@@ -437,6 +437,16 @@ button, input { font-family: inherit; }
   box-shadow: 0 3px 12px rgba(56, 224, 200, 0.26);
 }
 
+/* Grouped-mode LAYOUT sub-toggle (List | Grid). Shares the #viewbar row, sitting
+   to the right of the Grouped/Decluttered modes; hidden wholesale in decluttered
+   mode (app.js sets [hidden] on #grouped-style). Reuses the .view-modes pills. */
+.grouped-style {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.grouped-style[hidden] { display: none; }
+
 /* ---------------- Layout ---------------- */
 
 main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
@@ -1289,6 +1299,183 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 .folder-children > .folder-node { grid-column: 1 / -1; }
 @media (max-width: 460px) {
   .folder-children { grid-template-columns: 1fr; padding-left: 18px; }
+}
+
+/* ---------------- Grouped (GRID drill-down) view ---------------- */
+/* The GRID style of the grouped tab (IMP-E16). One level at a time: child folders
+   render as a responsive grid of navigable .folder-box tiles (folders first); any
+   leaf items at the level render below as the SAME .card grid as every other view.
+   A .crumbs breadcrumb bar (Back + clickable trail) drives the drill-down. Built
+   off-DOM and swapped into #panel atomically (app.js paintGrid). */
+
+.crumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 16px;
+}
+.crumb-back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 6px 13px;
+  margin-right: 4px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.14s, color 0.14s, border-color 0.14s;
+}
+.crumb-back:hover:not(:disabled) {
+  background: var(--bg-card-hover);
+  color: var(--accent);
+  border-color: var(--accent-deep);
+}
+.crumb-back:disabled { opacity: 0.4; cursor: default; }
+
+/* Trail crumbs — earlier segments are buttons (jump to that level); the current
+   level is plain text. Separators are dim slashes. */
+.crumb {
+  border: 0;
+  background: transparent;
+  padding: 5px 7px;
+  border-radius: 6px;
+  color: var(--text-dim);
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: color 0.14s, background 0.14s;
+}
+button.crumb:hover { color: var(--accent); background: var(--bg-card-hover); }
+.crumb-current {
+  color: var(--text);
+  font-weight: 700;
+  cursor: default;
+}
+.crumb-sep {
+  color: var(--text-faint);
+  font-size: 12px;
+  user-select: none;
+}
+
+/* Responsive grid of folder boxes. A denser min track than the .card grid so the
+   language / season tiles read as a "shelf" distinct from the leaf cards. */
+.grid-view {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 16px;
+  margin: 0 0 18px;
+}
+@media (max-width: 420px) {
+  .grid-view {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 12px;
+  }
+}
+
+/* A folder box: a poster-forward, navigable TILE (not a card — no dossier). A
+   stacked-sheet box-shadow signals it opens INTO something (the drill-down
+   affordance), visually distinct from the flat leaf cards. box-shadow is not
+   clipped by the tile's own overflow:hidden (which rounds the cover). */
+.folder-box {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  padding: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, var(--bg-card), #121a28);
+  color: var(--text);
+  cursor: pointer;
+  overflow: hidden;
+  font-family: inherit;
+  box-shadow:
+    5px 5px 0 -2px var(--bg-card),
+    5px 5px 0 -1px var(--line-soft);
+  transition:
+    transform 0.22s cubic-bezier(0.22, 0.61, 0.36, 1),
+    box-shadow 0.22s cubic-bezier(0.22, 0.61, 0.36, 1),
+    border-color 0.18s ease;
+}
+.folder-box:hover {
+  transform: translateY(-3px);
+  border-color: var(--accent-deep);
+  box-shadow:
+    5px 5px 0 -2px var(--bg-card),
+    5px 5px 0 -1px var(--line-soft),
+    0 10px 28px rgba(0, 0, 0, 0.45);
+}
+.folder-box:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* Cover image — a soft landscape folder poster; gradient + folder glyph fallback. */
+.folder-box-cover {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  background: linear-gradient(135deg, #1b2638, #0e1622);
+  overflow: hidden;
+}
+.folder-box-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.folder-box-cover.fallback::after {
+  content: "🗀";                /* unicode folder — no external asset */
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 40px;
+  color: rgba(56, 224, 200, 0.45);
+}
+/* Soft bottom scrim so a bright cover never fights the name below it. */
+.folder-box-cover::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, transparent 55%, rgba(8, 12, 20, 0.55));
+  pointer-events: none;
+}
+
+.folder-box-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px 12px;
+  min-width: 0;
+}
+.folder-box-name {
+  font-weight: 700;
+  font-size: 14.5px;
+  letter-spacing: 0.2px;
+  overflow-wrap: anywhere;
+}
+.folder-box-sub {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The leaf-card grid inside a grid level reuses .grid; this only nudges the gap
+   from the breadcrumb when a level has no folder boxes above it. */
+.grid-view-cards { margin-top: 2px; }
+
+/* Reduced motion: keep the stacked-sheet depth (static) but drop the lift. */
+@media (prefers-reduced-motion: reduce) {
+  .folder-box { transition: border-color 0.18s ease; }
+  .folder-box:hover { transform: none; }
 }
 
 /* ---------------- Toast (open-folder outcomes) ---------------- */

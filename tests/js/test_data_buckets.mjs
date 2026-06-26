@@ -339,6 +339,88 @@ async function runPruneScenario(tree) {
   eq(JSON.stringify(tree), before, "pruneTreeByState does NOT mutate the input tree");
 }
 
+// ---------------------------------------------------------------------------
+// Scenario 3 — the GROUPED-view GRID drill-down level extraction (gridChildrenAt
+// in tree.js). PURE + DOM-free, imported the same way as pruneTreeByState.
+//
+// THE BEHAVIOR THIS PINS: the grid style shows ONE level at a time. Given a nav
+// path of folder NAMES from the category root, gridChildrenAt returns that level's
+// { folders, leaves }. The top level returns the category's folder boxes; drilling
+// a path returns that folder's child folders + leaf items; an active state prune
+// (applied FIRST via pruneTreeByState, exactly as the grid does) drops folders with
+// no matching descendant, and the drill-down walks the PRUNED tree. A path that no
+// longer resolves returns an empty level (recoverable via the breadcrumb).
+//
+// Reuses the SAME fakeTree() + PRUNE_MODEL_BY_ID fixture as Scenario 2.
+// ---------------------------------------------------------------------------
+function names(nodes) {
+  return (nodes || []).map(function (n) { return n && n.name; });
+}
+function ids(nodes) {
+  return (nodes || []).map(function (n) { return n && n.id; });
+}
+
+async function runGridScenario(tree) {
+  const mod = await import(TREE_JS_URL);
+  const { gridChildrenAt, pruneTreeByState } = mod;
+
+  console.log("\nScenario 3: grouped-view GRID drill-down (gridChildrenAt)");
+
+  // (1) Top level (path []) — the category's folder boxes, no root-level leaves.
+  const top = gridChildrenAt(tree, []);
+  eq(
+    JSON.stringify(names(top.folders).sort()),
+    JSON.stringify(["AllArchived", "Mixed"]),
+    "grid top level returns the category's folder boxes (Mixed, AllArchived)"
+  );
+  eq(top.leaves.length, 0, "grid top level has no leaf cards (all items live in folders)");
+
+  // (2) Drill into Mixed — its sub-folder (Sub) as a box + its direct leaf (a1).
+  const mixed = gridChildrenAt(tree, ["Mixed"]);
+  eq(JSON.stringify(names(mixed.folders)), JSON.stringify(["Sub"]),
+    "drilling [Mixed] returns its sub-folder box Sub");
+  eq(JSON.stringify(ids(mixed.leaves)), JSON.stringify(["x-a1"]),
+    "drilling [Mixed] returns its direct leaf a1 as a card");
+
+  // (3) Drill into Mixed/Sub — only the u1 leaf, no further folders.
+  const sub = gridChildrenAt(tree, ["Mixed", "Sub"]);
+  eq(sub.folders.length, 0, "drilling [Mixed, Sub] has no further folder boxes");
+  eq(JSON.stringify(ids(sub.leaves)), JSON.stringify(["x-u1"]),
+    "drilling [Mixed, Sub] returns the u1 leaf card");
+
+  // (4) An unknown / pruned-away path returns an empty level (graceful, not a throw).
+  const gone = gridChildrenAt(tree, ["NoSuchFolder"]);
+  eq(gone.folders.length + gone.leaves.length, 0, "an unknown path yields an empty level");
+
+  // (5) State prune carries over: prune to UNPREPPED, THEN walk the grid path.
+  const unprepped = pruneTreeByState(tree, "UNPREPPED", PRUNE_MODEL_BY_ID);
+  eq(
+    JSON.stringify(names(gridChildrenAt(unprepped, []).folders)),
+    JSON.stringify(["Mixed"]),
+    "UNPREPPED prune drops the AllArchived box from the grid top level"
+  );
+  const upGone = gridChildrenAt(unprepped, ["AllArchived"]);
+  eq(upGone.folders.length + upGone.leaves.length, 0,
+    "drilling a pruned-away folder (AllArchived) is empty under UNPREPPED");
+  const upMixed = gridChildrenAt(unprepped, ["Mixed"]);
+  eq(JSON.stringify(names(upMixed.folders)), JSON.stringify(["Sub"]),
+    "UNPREPPED prune keeps the Sub box under Mixed (holds the unprepped leaf)");
+  eq(upMixed.leaves.length, 0,
+    "UNPREPPED prune drops Mixed's archived direct leaf a1 from the grid");
+
+  // (6) Prune to ARCHIVED: Mixed keeps a1 as a card; the only-unprepped Sub box drops.
+  const archived = pruneTreeByState(tree, "ARCHIVED", PRUNE_MODEL_BY_ID);
+  const arMixed = gridChildrenAt(archived, ["Mixed"]);
+  eq(arMixed.folders.length, 0, "ARCHIVED prune drops the Sub box under Mixed");
+  eq(JSON.stringify(ids(arMixed.leaves)), JSON.stringify(["x-a1"]),
+    "ARCHIVED prune keeps a1 as a leaf card under Mixed");
+
+  // (7) Extraction must NOT mutate the input tree (it returns node references).
+  const beforeGrid = JSON.stringify(tree);
+  gridChildrenAt(tree, ["Mixed"]);
+  eq(JSON.stringify(tree), beforeGrid, "gridChildrenAt does NOT mutate the input tree");
+}
+
 async function main() {
   const mod = await import(DATA_JS_URL);
   const model = await mod.loadModel();
@@ -398,6 +480,10 @@ async function main() {
   // Scenario 2: the grouped-view state prune (folder kept iff a descendant leaf
   // matches; folder size = aggregate of visible leaves; All keeps everything).
   await runPruneScenario(fakeTree());
+
+  // Scenario 3: the grouped-view GRID drill-down level extraction (gridChildrenAt
+  // walks a folder-name nav path through the — possibly pruned — tree).
+  await runGridScenario(fakeTree());
 
   if (failures > 0) {
     console.error("\n" + failures + " assertion(s) FAILED");

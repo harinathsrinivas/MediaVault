@@ -39,7 +39,12 @@ import { wireModal } from "./modal.js";
 import { getSort, setSort, sortItems, SORT_KEYS } from "./sort.js";
 import { wireCardGlow } from "./glow.js";
 import { wireHoverPreview } from "./preview.js";
-import { buildTreeFragment, treeRootsFor, pruneTreeByState } from "./tree.js";
+import {
+  buildTreeFragment,
+  buildGridFragment,
+  treeRootsFor,
+  pruneTreeByState,
+} from "./tree.js";
 import { authFetch, bootstrapToken } from "./auth.js";
 import { initAdmin } from "./admin.js";
 
@@ -86,6 +91,60 @@ function writeViewMode(mode) {
 
 function isGrouped() {
   return viewMode === "grouped";
+}
+
+// Grouped-mode presentation STYLE: "list" = today's collapsible folder tree
+// (tree.js renderFolder), "grid" = the drill-down grid of folder boxes
+// (buildGridFragment). Only meaningful while viewMode === "grouped"; decluttered
+// ignores it. Persisted separately in sessionStorage with a "list" default so the
+// existing behavior is unchanged on first run and the choice survives a reload.
+var GROUPED_STYLE_KEY = "mv_grouped_style";
+var groupedStyle = readGroupedStyle();
+
+function readGroupedStyle() {
+  try {
+    var v = window.sessionStorage.getItem(GROUPED_STYLE_KEY);
+    return v === "grid" ? "grid" : "list";
+  } catch (e) {
+    return "list";
+  }
+}
+
+function writeGroupedStyle(style) {
+  groupedStyle = style === "grid" ? "grid" : "list";
+  try {
+    window.sessionStorage.setItem(GROUPED_STYLE_KEY, groupedStyle);
+  } catch (e) {
+    /* sessionStorage unavailable — keep the in-memory style. */
+  }
+}
+
+function isGridStyle() {
+  return isGrouped() && groupedStyle === "grid";
+}
+
+// Grid drill-down nav stack: an array of folder NAMES from the active category
+// root (e.g. ["English"] or ["Show","Season 1"]). [] = the category root level.
+// Reset to root whenever the media-type tab OR the state filter changes (the two
+// resets the spec mandates); kept across List<->Grid toggles so re-entering the
+// grid resumes where you were. gridPendingScrollTop, when non-null, pins the next
+// paint's scroll position (0 on a drill / jump so a new level starts at the top;
+// null preserves the live scroll for an in-place re-render like a sort change or a
+// post-job refresh).
+var gridPath = [];
+var gridPendingScrollTop = null;
+
+function resetGridNav() {
+  gridPath = [];
+  gridPendingScrollTop = 0;
+}
+
+// Drill into / jump to a level: set the path and repaint. Always lands at the top
+// of the new level. Wired into every folder box + breadcrumb crumb by tree.js.
+function navigateGrid(nextPath) {
+  gridPath = (nextPath || []).slice();
+  gridPendingScrollTop = 0;
+  renderPanel(false);
 }
 
 // Sub-view order = the leading "All" segment, THEN the 5 known states, PLUS any
@@ -306,6 +365,7 @@ function selectCategory(cat, opts) {
   // Reset the sub-view to "All" (the first non-empty sub-view for any non-empty
   // category; falls back to "All" for an entirely empty category too).
   activeState = firstNonEmptyState(cat) || ALL_STATE;
+  resetGridNav(); // a media-type change restarts the grid drill-down at root
   refreshTabSelection();
   buildSubnav();
   renderPanel(true);
@@ -325,6 +385,7 @@ function selectState(state, opts) {
     return;
   }
   activeState = state;
+  resetGridNav(); // a state-filter change restarts the grid drill-down at root
   refreshSubnavSelection();
   renderPanel(true);
   if (opts && opts.focus) {
@@ -357,6 +418,10 @@ function syncViewChrome() {
     subnav.classList.remove("is-hidden");
   }
   if (sortbar) sortbar.hidden = false;
+  // The List|Grid layout sub-toggle is only meaningful in grouped mode; hide the
+  // whole group in decluttered so the chrome stays clean.
+  var styleGroup = $("#grouped-style");
+  if (styleGroup) styleGroup.hidden = !grouped;
   document.body.classList.toggle("grouped-view", grouped);
 }
 
@@ -380,8 +445,14 @@ function renderPanel(animate) {
     panel.setAttribute("aria-label", CATEGORY_META[activeCategory].label + " folders");
     panel.removeAttribute("aria-labelledby");
     // Atomic, flash-free swap owns its own transition; do NOT add `.swapping`
-    // (which would fade the panel to empty while the async tree resolves).
-    paintTree(panel);
+    // (which would fade the panel to empty while the async tree resolves). The
+    // grouped tab has two presentation STYLES: the collapsible list (paintTree)
+    // and the drill-down grid (paintGrid); both read the SAME cached /api/tree.
+    if (groupedStyle === "grid") {
+      paintGrid(panel);
+    } else {
+      paintTree(panel);
+    }
     return;
   }
 
@@ -510,6 +581,67 @@ function paintTree(panel) {
     });
 }
 
+// Grouped GRID drill-down for the active category — same ATOMIC, flash-free swap
+// discipline as paintTree (it shares the cached /api/tree + the subtle loading
+// overlay + the stale-resolution guard), but renders ONE level (buildGridFragment)
+// at the current gridPath instead of the whole collapsible tree. The active state
+// filter prunes the tree FIRST (pruneTreeByState — the identical rule the list
+// uses), so a folder box appears only if it has a matching descendant leaf and its
+// size / count reflect the filter; the sort applies to each level via compareNodes
+// inside buildGridFragment.
+function paintGrid(panel) {
+  // Capture the category AND state filter this paint is for; a tab / state-filter /
+  // view-style change before /api/tree resolves must NOT overwrite the newer view.
+  var forCategory = activeCategory;
+  var forState = activeState;
+
+  // Decide the post-swap scroll NOW (synchronously): a drill / jump sets 0 via
+  // gridPendingScrollTop so a new level opens at the top; an in-place re-render
+  // (sort change / post-job refresh) preserves the live scrollTop. Consume the
+  // pending value so the next paint preserves by default.
+  var scrollTarget =
+    gridPendingScrollTop != null ? gridPendingScrollTop : panel.scrollTop;
+  gridPendingScrollTop = null;
+
+  var overlay = showTreeLoading(panel);
+
+  treeRootsFor(forCategory)
+    .then(function (roots) {
+      hideTreeLoading(overlay);
+      if (
+        !isGridStyle() ||
+        activeCategory !== forCategory ||
+        activeState !== forState
+      ) {
+        return; // superseded by a tab / state-filter / view-style change
+      }
+      // "All" → the whole category tree; a specific state → the tree PRUNED to it
+      // (same rule + folder-size aggregation as the list view, see paintTree).
+      var view =
+        forState === ALL_STATE
+          ? roots
+          : pruneTreeByState(roots, forState, MODEL_BY_ID);
+
+      var fragment = buildGridFragment(view, MODEL_BY_ID, gridPath, {
+        rootLabel: CATEGORY_META[forCategory].label,
+        onNavigate: navigateGrid,
+      });
+      // Teardown invariant: dispose the OUTGOING content's fetch-ring observers
+      // immediately before the atomic replace (buildGridFragment only built new DOM).
+      destroyRingsIn(panel);
+      panel.replaceChildren(fragment);
+      panel.scrollTop = scrollTarget;
+    })
+    .catch(function (err) {
+      hideTreeLoading(overlay);
+      if (!isGridStyle() || activeCategory !== forCategory) return;
+      setStatus(
+        "Failed to load the folder tree — " + ((err && err.message) || err),
+        true
+      );
+    });
+}
+
 // --- Subtle tree-loading overlay (no content clear) ------------------------
 // Reveals a small "Loading folders…" chip pinned over #panel ONLY if the async
 // /api/tree is slow to resolve. A grace delay means a fast (cached) switch never
@@ -618,6 +750,7 @@ function renderAll(isFirst) {
     // Default sub-view = "All" (firstNonEmptyState resolves to ALL_STATE for any
     // non-empty category; fall back to ALL_STATE for an empty library too).
     activeState = firstNonEmptyState(activeCategory) || ALL_STATE;
+    resetGridNav(); // first paint starts the grid drill-down at the category root
   } else {
     // Re-render after a job. Keep the active sub-view if it still has items;
     // else drop to the first non-empty sub-view of the same category (= "All"
@@ -637,6 +770,7 @@ function renderAll(isFirst) {
           activeState = ALL_STATE;
         }
       }
+      resetGridNav(); // the post-job fallback moved category/state; grid → root
     }
   }
 
@@ -769,6 +903,13 @@ var VIEW_MODES = [
   { mode: "decluttered", label: "Decluttered", glyph: "▦", hint: "Flat, grouped by disk state" },
 ];
 
+// The two grouped-mode layout styles for the List|Grid sub-toggle. "list" keeps
+// today's collapsible tree (default); "grid" is the drill-down folder boxes.
+var GROUPED_STYLES = [
+  { style: "list", label: "List", glyph: "☰", hint: "Collapsible folder list" },
+  { style: "grid", label: "Grid", glyph: "⊞", hint: "Drill-down grid of folder boxes" },
+];
+
 function buildViewbar() {
   var bar = $("#viewbar");
   if (!bar) return;
@@ -809,18 +950,69 @@ function buildViewbar() {
   });
   bar.appendChild(group);
 
+  // Grouped-mode LAYOUT sub-toggle (List | Grid). Mounted in the SAME #viewbar
+  // chrome but wrapped in #grouped-style so syncViewChrome can hide it wholesale in
+  // decluttered mode. Mirrors the view-modes segmented-pill styling.
+  var styleWrap = document.createElement("span");
+  styleWrap.className = "grouped-style";
+  styleWrap.id = "grouped-style";
+  // Initial visibility matches the current mode so it never flashes during the
+  // first (async) load; syncViewChrome keeps it in sync on every later repaint.
+  styleWrap.hidden = !isGrouped();
+
+  var styleLabel = document.createElement("span");
+  styleLabel.className = "viewbar-label";
+  styleLabel.textContent = "Layout";
+  styleWrap.appendChild(styleLabel);
+
+  var styleGroup = document.createElement("div");
+  styleGroup.className = "view-modes";
+  styleGroup.setAttribute("role", "group");
+  styleGroup.setAttribute("aria-label", "Grouped layout style");
+
+  GROUPED_STYLES.forEach(function (def) {
+    var sb = document.createElement("button");
+    sb.type = "button";
+    sb.className = "view-mode grouped-style-btn";
+    sb.dataset.style = def.style;
+    sb.title = def.hint;
+
+    var sg = document.createElement("span");
+    sg.className = "view-mode-glyph";
+    sg.setAttribute("aria-hidden", "true");
+    sg.textContent = def.glyph;
+    sb.appendChild(sg);
+
+    var st = document.createElement("span");
+    st.className = "view-mode-text";
+    st.textContent = def.label;
+    sb.appendChild(st);
+
+    sb.addEventListener("click", function () {
+      selectGroupedStyle(def.style);
+    });
+    styleGroup.appendChild(sb);
+  });
+  styleWrap.appendChild(styleGroup);
+  bar.appendChild(styleWrap);
+
   refreshViewbar();
 }
 
-// Reflect the active mode (pressed state) on the toggle.
+// Reflect the active mode + layout style (pressed state) on the toggles. The bar
+// holds two segmented groups: the Grouped/Decluttered MODE buttons (data-mode) and
+// the List/Grid LAYOUT buttons (data-style); each reflects against its own value.
 function refreshViewbar() {
   var bar = $("#viewbar");
   if (!bar) return;
   var btns = bar.querySelectorAll(".view-mode");
   for (var i = 0; i < btns.length; i += 1) {
-    var on = btns[i].dataset.mode === viewMode;
-    btns[i].classList.toggle("active", on);
-    btns[i].setAttribute("aria-pressed", on ? "true" : "false");
+    var b = btns[i];
+    var on = b.dataset.style
+      ? b.dataset.style === groupedStyle
+      : b.dataset.mode === viewMode;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-pressed", on ? "true" : "false");
   }
 }
 
@@ -830,6 +1022,18 @@ function selectViewMode(mode) {
   refreshViewbar();
   setStatus(""); // clear any stale tree-load error from a prior attempt
   renderPanel(true); // animated swap; flat from MODEL, tree from cached /api/tree
+                     // (renderPanel→syncViewChrome reveals/hides the List|Grid toggle)
+}
+
+// Switch the grouped LAYOUT style (List <-> Grid). Persisted; the nav stack is
+// intentionally kept so re-entering the grid resumes where you were. The grid
+// renders from the SAME cached /api/tree, so this is a synchronous-feeling swap.
+function selectGroupedStyle(style) {
+  if (style === groupedStyle) return;
+  writeGroupedStyle(style);
+  refreshViewbar();
+  setStatus(""); // clear any stale tree-load error from a prior attempt
+  renderPanel(true); // animated swap between the list and grid presentations
 }
 
 // ---------------------------------------------------------------------------

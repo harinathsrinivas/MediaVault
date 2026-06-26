@@ -196,6 +196,26 @@ def rapidapi_rt_key():
     return _config_string("rapidapi", "rt_key")
 
 
+def exa_api_key():
+    """Configured EXA API key (mvconfig.json ``exa.api_key``), or "" when unset.
+
+    EXA (https://exa.ai) is the web-search source for the trivia backfill (IMP-E16/A5):
+    `fetch_trivia` queries EXA for a title's behind-the-scenes facts, GROQ distills
+    them, and the result is cached in the gitignored mvextra.json. A runtime getter
+    (no import-time binding) mirroring omdb_api_key()'s contract — "" (falsy) for
+    absent / null / blank / non-string, so a caller can `if not exa_api_key(): bail`."""
+    return _config_string("exa", "api_key")
+
+
+def groq_api_key():
+    """Configured GROQ API key (mvconfig.json ``groq.api_key``), or "" when unset.
+
+    GROQ (https://groq.com) hosts the LLM that distills the EXA web snippets into the
+    2-4 short, source-tagged trivia facts the trivia backfill (IMP-E16/A5) caches.
+    A runtime getter (no import-time binding); "" (falsy) when unset."""
+    return _config_string("groq", "api_key")
+
+
 # ==========================================
 #         WEB ACCESS TOKENS (mvtokens.json)
 # ==========================================

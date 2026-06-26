@@ -19,5 +19,13 @@
     "_comment": "Reserved for future RapidAPI-backed IMDb / Rotten Tomatoes sources. Both null/empty = unset.",
     "imdb_key": null,
     "rt_key": null
+  },
+  "exa": {
+    "_comment_api_key": "Optional EXA (exa.ai) API key for the trivia backfill (IMP-E16/A5): `python main.py fetch_trivia` web-searches each title's behind-the-scenes facts via EXA, GROQ distills them, and the result is cached in the gitignored mvextra.json and merged read-only into the hover dossier. null/empty = unset (fetch_trivia then no-ops).",
+    "api_key": null
+  },
+  "groq": {
+    "_comment_api_key": "Optional GROQ (groq.com) API key for the trivia backfill (IMP-E16/A5): GROQ's LLM distills the EXA web snippets into 2-4 short, source-tagged trivia facts. null/empty = unset (fetch_trivia then no-ops).",
+    "api_key": null
   }
 }

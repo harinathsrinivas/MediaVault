@@ -15,6 +15,10 @@ a.json
 # tmdb_id, populated by `refresh_online`. A regenerable local cache; never commit.
 /mvonline.json
 
+# Trivia/extra cache (IMP-E16/A5) — EXA+GROQ-distilled trivia facts keyed by
+# tmdb_id, populated by `fetch_trivia`. A regenerable local cache; never commit.
+/mvextra.json
+
 .git*
 # ...but DO track the line-ending policy (overrides core.autocrlf; stops CRLF phantom diffs)
 !.gitattributes

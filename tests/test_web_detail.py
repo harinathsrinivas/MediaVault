@@ -516,6 +516,39 @@ def online_cache(tmp_path, monkeypatch):
     return seed
 
 
+@pytest.fixture()
+def extra_cache(tmp_path, monkeypatch):
+    """Redirect main.EXTRA_CACHE_PATH to a tmp mvextra.json (never the real repo-root
+    one) so the detail-merge reads a sandbox trivia cache. Yields a seed(tmdb_id,
+    trivia_list) callable that writes one cache entry. EXA/GROQ are never touched —
+    these tests exercise the CACHE-READ merge only, so the fixture installs a guard
+    that fails if tmdb_detail ever makes a live EXA/GROQ call (the cache-not-live
+    contract)."""
+    cache_path = tmp_path / "mvextra.json"
+    assert str(cache_path) != main.EXTRA_CACHE_PATH, "must redirect away from the real mvextra.json"
+    monkeypatch.setattr(main, "EXTRA_CACHE_PATH", str(cache_path))
+    # Guard: a live EXA/GROQ fetch must never happen inside the dossier path.
+    monkeypatch.setattr(
+        main, "exa_search_trivia",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("tmdb_detail must NOT call exa_search_trivia (cache-only)")),
+    )
+    monkeypatch.setattr(
+        main, "groq_distill_trivia",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("tmdb_detail must NOT call groq_distill_trivia (cache-only)")),
+    )
+
+    def seed(tmdb_id, trivia):
+        main.extra_cache_set(tmdb_id, {"trivia": trivia, "fetched_at": "2026-06-01T00:00:00+00:00"})
+
+    return seed
+
+
+_TRIVIA_INCEPTION = [
+    {"text": "The rotating-hallway fight used a giant practical set.", "source": "ScreenRant"},
+    {"text": "The spinning-top ending was deliberately left ambiguous.", "source": "IMDb"},
+]
+
+
 _CACHE_INCEPTION = {
     "imdb_id": "tt1375666",
     "ratings": {"imdb": "8.8", "rotten_tomatoes": "87%", "metacritic": "74"},
@@ -645,6 +678,81 @@ def test_detail_merge_is_read_only(sandbox, make_video, patch_tmdb, online_cache
 
 
 # ---------------------------------------------------------------------------
+# (f3) TRIVIA MERGE (IMP-E16/A5) — tmdb_detail merges the mvextra.json cache (EXA+GROQ
+# distilled facts) when present, omits it when absent, NEVER does a live EXA/GROQ call,
+# and an EPISODE inherits the SHOW's cached trivia.
+# ---------------------------------------------------------------------------
+
+def test_detail_merges_trivia_when_present(sandbox, make_video, patch_tmdb, extra_cache):
+    """A movie with a cached trivia entry: tmdb_detail adds `trivia` from mvextra.json
+    (NO live EXA/GROQ call — the fixture guard enforces it)."""
+    patch_tmdb()
+    extra_cache(27205, _TRIVIA_INCEPTION)
+    mid = _seed_movie(sandbox, make_video)
+
+    d = main.tmdb_detail(main.load_library(), mid)
+    assert d["trivia"] == _TRIVIA_INCEPTION
+    # The TMDB-sourced fields are still present (merge is additive).
+    assert d["title"] == "Inception"
+    assert d["tmdb_id"] == 27205
+
+
+def test_detail_omits_trivia_when_absent(sandbox, make_video, patch_tmdb, extra_cache):
+    """With NO cache entry for the title, the `trivia` key is simply absent."""
+    patch_tmdb()
+    # extra_cache fixture active but nothing seeded for 27205.
+    mid = _seed_movie(sandbox, make_video)
+
+    d = main.tmdb_detail(main.load_library(), mid)
+    assert "trivia" not in d
+    assert d["rating"] == 8.4  # TMDB fields still present
+
+
+def test_detail_empty_trivia_list_omitted(sandbox, make_video, patch_tmdb, extra_cache):
+    """A cache entry whose trivia list is empty is OMITTED (not a blank list)."""
+    patch_tmdb()
+    extra_cache(27205, [])
+    mid = _seed_movie(sandbox, make_video)
+
+    d = main.tmdb_detail(main.load_library(), mid)
+    assert "trivia" not in d
+
+
+def test_detail_episode_inherits_show_trivia(sandbox, make_video, patch_tmdb, extra_cache):
+    """An EPISODE leaf carries the SHOW's tmdb_id (2316). A trivia entry keyed by the
+    show id is merged into the episode dossier — episodes inherit show trivia."""
+    patch_tmdb()
+    show_trivia = [{"text": "The cast improvised many of the talking-head scenes.", "source": "IMDb"}]
+    extra_cache(2316, show_trivia)
+    ep_id, _ = _seed_episode(sandbox, make_video)
+
+    d = main.tmdb_detail(main.load_library(), ep_id)
+    assert d["kind"] == "episode"
+    assert d["trivia"] == show_trivia  # inherited from the show's cache entry
+
+
+def test_detail_trivia_merge_is_read_only(sandbox, make_video, patch_tmdb, extra_cache):
+    """Merging the trivia cache must not write the library OR the cache file."""
+    patch_tmdb()
+    extra_cache(27205, _TRIVIA_INCEPTION)
+    mid = _seed_movie(sandbox, make_video)
+
+    lib_paths = [sandbox["lib_movies"], sandbox["lib_series"], sandbox["lib_anime"]]
+    before = {p: p.read_bytes() for p in lib_paths}
+    with open(main.EXTRA_CACHE_PATH, "rb") as fh:
+        cache_before = fh.read()
+
+    lib = main.load_library()
+    main.tmdb_detail(lib, mid)
+    main.tmdb_detail(lib, mid)
+
+    for p in lib_paths:
+        assert p.read_bytes() == before[p], f"{p.name} changed during a read-only detail"
+    with open(main.EXTRA_CACHE_PATH, "rb") as fh:
+        assert fh.read() == cache_before, "mvextra.json changed during a read-only detail"
+
+
+# ---------------------------------------------------------------------------
 # (g) HTTP surface — GET /api/detail/{id} mirrors tmdb_detail end-to-end
 # ---------------------------------------------------------------------------
 
@@ -702,6 +810,36 @@ def test_api_detail_endpoint_omits_online_metadata_when_absent(sandbox, make_vid
     assert "ratings" not in body
     assert "awards" not in body
     assert "boxoffice" not in body
+
+
+@pytest.mark.usefixtures("web_as_local_admin")
+def test_api_detail_endpoint_includes_trivia(sandbox, make_video, patch_tmdb, extra_cache):
+    """GET /api/detail surfaces the merged EXA+GROQ trivia when the mvextra.json cache
+    has it (IMP-E16/A5), over HTTP — and never makes a live EXA/GROQ call (the fixture
+    guard enforces the cache-only contract)."""
+    from webui.server import create_app
+    patch_tmdb()
+    extra_cache(27205, _TRIVIA_INCEPTION)
+    mid = _seed_movie(sandbox, make_video)
+
+    client = TestClient(create_app())
+    r = client.get(f"/api/detail/{mid}")
+    assert r.status_code == 200, f"/api/detail -> {r.status_code}: {r.text}"
+    body = r.json()
+    assert body["trivia"] == _TRIVIA_INCEPTION
+
+
+@pytest.mark.usefixtures("web_as_local_admin")
+def test_api_detail_endpoint_omits_trivia_when_absent(sandbox, make_video, patch_tmdb, extra_cache):
+    """With no trivia cache entry, GET /api/detail omits the `trivia` key (200, partial)."""
+    from webui.server import create_app
+    patch_tmdb()
+    mid = _seed_movie(sandbox, make_video)  # no trivia seeded
+
+    client = TestClient(create_app())
+    r = client.get(f"/api/detail/{mid}")
+    assert r.status_code == 200
+    assert "trivia" not in r.json()
 
 
 @pytest.mark.usefixtures("web_as_local_admin")

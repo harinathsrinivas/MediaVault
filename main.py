@@ -13,6 +13,7 @@ import tempfile
 import webbrowser
 import requests
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse
 from pymediainfo import MediaInfo
 
 # Ensure emoji/Unicode output works on Windows consoles
@@ -2475,6 +2476,479 @@ def _fmt_ratings(ratings):
     if ratings.get("metacritic"):
         parts.append(f"MC {ratings['metacritic']}")
     return " · ".join(parts) if parts else "(no ratings)"
+
+
+# ===========================================================================
+#   TRIVIA BACKFILL — EXA web-search + GROQ distillation + the mvextra.json cache
+#   (IMP-E16/A5).
+#
+# The hover DOSSIER (GET /api/detail) can show a few short, genuinely-interesting
+# behind-the-scenes facts per title, each tagged with its [source]. The pipeline:
+#   1. EXA (exa_search_trivia) web-searches "<title> <year> movie trivia behind the
+#      scenes facts" and returns up to 4 page snippets, each with its source URL.
+#   2. GROQ (groq_distill_trivia) reads those source-tagged snippets and distills
+#      2-4 SHORT, standalone facts as STRICT JSON, attributing each to the most
+#      likely source host (IMDb / ScreenRant / Reddit / Wikipedia / …).
+#   3. fetch_trivia (cmd_fetch_trivia) runs that per DISTINCT title and caches the
+#      result in the gitignored mvextra.json keyed by str(tmdb_id).
+#   4. tmdb_detail MERGES the cached facts into the dossier with NO live call, so
+#      opening the hover preview stays fast and never blocks on the network.
+#
+# COST MODEL — populated ONCE, read MANY times. EXA + GROQ are cheap; this is a
+# one-time cached backfill, so numResults is kept small (4) and max_tokens modest
+# (~300) to stay well under budget for a whole-library pass.
+#
+# ACCURACY: these facts are FLAVOR — they need not be perfectly accurate, but they
+# are kept plausible and always sourced (every fact carries a `source`).
+#
+# mvextra.json schema (atomic write: tempfile + os.replace — the mvonline.json idiom):
+#   {"<tmdb_id>": {"trivia": [{"text": "...", "source": "IMDb"}, ...],
+#                  "fetched_at": "<iso8601 UTC>"},
+#    ...}
+#
+# BINDING HAZARD: EXTRA_CACHE_PATH is module-level so a test can monkeypatch it to a
+# temp path and never touch the real repo-root mvextra.json — same discipline as
+# ONLINE_CACHE_PATH / MVTOKENS_PATH (the sandbox fixture redirects it).
+# ===========================================================================
+
+# Repo-root trivia cache (gitignored). Sits beside main.py so it is found
+# regardless of CWD, mirroring ONLINE_CACHE_PATH.
+EXTRA_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mvextra.json")
+
+EXA_API_ROOT = "https://api.exa.ai/search"
+GROQ_API_ROOT = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.3-70b-versatile"
+# GROQ sits behind Cloudflare, which 403s (error 1010) a default python-requests
+# User-Agent. A browser-ish UA is REQUIRED for every GROQ call.
+GROQ_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MediaVault/1.0"
+
+# Cost knobs — kept small/modest because this is a one-time cached backfill.
+EXA_NUM_RESULTS = 4
+GROQ_MAX_TOKENS = 300
+# Trivia essentially never drifts; a 30-day freshness window means a re-run skips
+# already-fetched titles unless --force.
+TRIVIA_FRESH_DAYS = 30
+# Be polite to EXA/GROQ between fetched titles in the bulk loop (seconds).
+TRIVIA_THROTTLE_SECONDS = 0.4
+
+# Common trivia-source hosts -> clean display names. A known host (or any subdomain
+# of one) maps to the name; an unknown host degrades to its bare domain.
+_TRIVIA_SOURCE_NAMES = {
+    "imdb.com": "IMDb",
+    "screenrant.com": "ScreenRant",
+    "reddit.com": "Reddit",
+    "wikipedia.org": "Wikipedia",
+}
+
+
+def _trivia_host_to_source(url):
+    """Map a result URL (or bare host) to a clean trivia source name.
+
+    imdb.com -> 'IMDb', screenrant.com -> 'ScreenRant', reddit.com -> 'Reddit',
+    en.wikipedia.org -> 'Wikipedia' (a subdomain of a known host matches too). An
+    unknown host -> its bare domain (leading 'www.' stripped); an empty/unparseable
+    value -> 'web'."""
+    if not isinstance(url, str) or not url.strip():
+        return "web"
+    candidate = url.strip()
+    if "://" not in candidate:
+        candidate = "http://" + candidate.lstrip("/")
+    try:
+        host = urlparse(candidate).netloc.lower()
+    except Exception:
+        return "web"
+    # Drop any userinfo@ / :port that slipped into netloc.
+    host = host.split("@")[-1].split(":")[0]
+    if host.startswith("www."):
+        host = host[4:]
+    if not host:
+        return "web"
+    for known, name in _TRIVIA_SOURCE_NAMES.items():
+        if host == known or host.endswith("." + known):
+            return name
+    return host
+
+
+def _normalize_source(value, fallback="web"):
+    """Coerce a GROQ-returned source (a clean name, a bare host, or a full URL) to a
+    clean display source. A value that looks like a host/URL (has a '.' or '/') is
+    mapped through _trivia_host_to_source; an already-clean word (e.g. 'IMDb') is
+    kept verbatim; blank/None -> ``fallback``."""
+    if not isinstance(value, str) or not value.strip():
+        return fallback
+    v = value.strip()
+    if "." in v or "/" in v:
+        return _trivia_host_to_source(v)
+    return v
+
+
+def extra_cache_load():
+    """Load mvextra.json -> dict keyed by str(tmdb_id). {} when absent/malformed.
+
+    Read fresh each call (the file is small) so a fetch_trivia write is visible to
+    the very next tmdb_detail — the same no-in-memory-cache choice as the online /
+    token stores. A malformed file warns to stderr and degrades to {} so a corrupt
+    cache never crashes the dossier or the backfill."""
+    if not os.path.exists(EXTRA_CACHE_PATH):
+        return {}
+    try:
+        with open(EXTRA_CACHE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(
+            f"⚠️  mvextra.json is malformed and will be ignored "
+            f"(trivia cache reset). Error: {e}",
+            file=sys.stderr,
+        )
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def extra_cache_get(tmdb_id):
+    """The cached trivia/extra dict for a tmdb_id, or None when not cached.
+
+    The key is always str(tmdb_id) so an int (TMDB's native type) and a stored
+    string id resolve to the same entry. A non-dict stored value -> None."""
+    if tmdb_id is None:
+        return None
+    entry = extra_cache_load().get(str(tmdb_id))
+    return entry if isinstance(entry, dict) else None
+
+
+def extra_cache_set(tmdb_id, data):
+    """Upsert ``data`` under str(tmdb_id) and atomically persist mvextra.json.
+
+    Atomic write (tempfile + os.replace, mirroring online_cache_set / _save_tokens)
+    so a crash mid-write can never leave a half-written cache. fetch_trivia writes
+    one title at a time, so the cache is durable after every title (an interrupted
+    run keeps everything fetched so far)."""
+    cache = extra_cache_load()
+    cache[str(tmdb_id)] = data
+    path = EXTRA_CACHE_PATH
+    dir_name = os.path.dirname(path) or "."
+    os.makedirs(dir_name, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tf:
+            json.dump(cache, tf, indent=2)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _trivia_entry_is_fresh(entry, now=None):
+    """True iff a cached trivia entry was fetched within TRIVIA_FRESH_DAYS.
+
+    A missing/unparseable fetched_at -> NOT fresh (re-fetch). Mirrors
+    _online_entry_is_fresh (mvcommon's iso parser + UTC clock so a naive timestamp
+    never raises on a tz-mismatch)."""
+    if not isinstance(entry, dict):
+        return False
+    fetched = mvcommon._parse_iso(entry.get("fetched_at"))
+    if fetched is None:
+        return False
+    now = now or mvcommon._now_utc()
+    return (now - fetched) <= timedelta(days=TRIVIA_FRESH_DAYS)
+
+
+def exa_search_trivia(title, year):
+    """Web-search a title's trivia via EXA -> a list of {title, url, text}, or [].
+
+    POSTs https://api.exa.ai/search with the title+year trivia query and asks for
+    EXA_NUM_RESULTS results, each with up to 800 chars of page text. The result
+    ``url`` host is the SOURCE the distiller attributes facts to (imdb-trivia /
+    ScreenRant / Reddit / Wikipedia / …). NEVER raises: a missing key, a network
+    error, a non-200, or a bad/empty payload all return [] so the caller simply
+    reports 'no web results' and moves on."""
+    api_key = mvcommon.exa_api_key()
+    if not api_key or not title:
+        return []
+    year_str = f" {year}" if year else ""
+    body = {
+        "query": f"{title}{year_str} movie trivia behind the scenes facts",
+        "numResults": EXA_NUM_RESULTS,
+        "contents": {"text": {"maxCharacters": 800}},
+    }
+    try:
+        r = requests.post(
+            EXA_API_ROOT,
+            headers={"x-api-key": api_key, "Content-Type": "application/json"},
+            json=body,
+            timeout=30,
+        )
+    except Exception as e:
+        print(f"   ⚠️  EXA request failed: {e}")
+        return []
+    if r.status_code != 200:
+        print(f"   ⚠️  EXA returned status {r.status_code}")
+        return []
+    try:
+        data = r.json()
+    except Exception as e:
+        print(f"   ⚠️  EXA response was not valid JSON: {e}")
+        return []
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        return []
+    out = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        out.append({
+            "title": item.get("title") or "",
+            "url": item.get("url") or "",
+            "text": item.get("text") or "",
+        })
+    return out
+
+
+def _groq_chat(messages, api_key, max_tokens=GROQ_MAX_TOKENS):
+    """POST a chat-completion to GROQ -> the assistant message content string, or
+    None on any failure. The single requests seam groq_distill_trivia funnels
+    through (tests patch this to inject a canned reply).
+
+    The Mozilla User-Agent is REQUIRED (see GROQ_USER_AGENT). NEVER raises — a
+    network error / non-200 / bad JSON / a reply missing choices all return None."""
+    try:
+        r = requests.post(
+            GROQ_API_ROOT,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": GROQ_USER_AGENT,
+            },
+            json={"model": GROQ_MODEL, "messages": messages, "max_tokens": max_tokens},
+            timeout=60,
+        )
+    except Exception as e:
+        print(f"   ⚠️  GROQ request failed: {e}")
+        return None
+    if r.status_code != 200:
+        print(f"   ⚠️  GROQ returned status {r.status_code}")
+        return None
+    try:
+        data = r.json()
+        content = data["choices"][0]["message"]["content"]
+    except (ValueError, KeyError, IndexError, TypeError) as e:
+        print(f"   ⚠️  GROQ response was not in the expected shape: {e}")
+        return None
+    return content if isinstance(content, str) else None
+
+
+def _build_trivia_prompt(title, year, snippets):
+    """Build the GROQ chat messages: a strict-JSON system instruction + a user
+    message carrying each EXA snippet tagged with its source host, asking for 2-4
+    short, sourced, standalone facts attributed to the most likely provided source."""
+    year_str = f" ({year})" if year else ""
+    lines = []
+    for s in snippets:
+        src = _trivia_host_to_source(s.get("url"))
+        text = " ".join((s.get("text") or "").split())
+        if text:
+            lines.append(f"[source: {src}] {text[:800]}")
+    context = "\n\n".join(lines)
+    system = (
+        "You are a film/TV trivia curator. From the provided web snippets, extract "
+        "2 to 4 SHORT, genuinely interesting, standalone trivia facts about the given "
+        "title. Each fact must be at most about 160 characters, understandable on its "
+        "own, and attributed to the most likely source among the snippet sources (use "
+        "a clean name like IMDb, ScreenRant, Reddit, or Wikipedia). Return STRICT JSON "
+        'ONLY: a JSON array of objects [{"text": "...", "source": "IMDb"}]. No prose, '
+        "no markdown, no code fences."
+    )
+    user = (
+        f"Title: {title}{year_str}\n\n"
+        f"Web snippets (each tagged with its source):\n{context}\n\n"
+        "Return the JSON array now."
+    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def groq_distill_trivia(title, year, snippets):
+    """Distill EXA trivia snippets into 2-4 short, source-tagged facts via GROQ.
+
+    Returns a list of {"text": "...", "source": "IMDb"} (capped at 4), or [] on any
+    failure (no key, no snippets, a GROQ error, or an unparseable reply with no
+    salvageable lines). NEVER raises. The reply is parsed defensively by
+    _parse_trivia_facts: the first JSON array of {text, source} objects is used; if
+    that fails, the reply is split into lines each tagged source='web' (the
+    documented graceful fallback). Every returned fact carries a non-empty source."""
+    if not snippets:
+        return []
+    api_key = mvcommon.groq_api_key()
+    if not api_key:
+        return []
+    content = _groq_chat(_build_trivia_prompt(title, year, snippets), api_key)
+    if not content:
+        return []
+    return _parse_trivia_facts(content)[:4]
+
+
+def _parse_trivia_facts(content):
+    """Parse a GROQ reply string into a list of {text, source} facts.
+
+    Primary path: extract the FIRST JSON array (``[ ... ]``) in the reply and read
+    {text, source} objects from it, normalizing each source to a clean name. If
+    there is no array, it fails to parse, or it yields no usable fact, fall back to
+    splitting the reply into lines (stripping bullet/number markers), each tagged
+    source='web'. Always returns a list (possibly empty); each fact has a non-empty
+    text (clamped to 240 chars) and a non-empty source."""
+    facts = []
+    m = re.search(r"\[.*\]", content, re.DOTALL)
+    if m:
+        try:
+            arr = json.loads(m.group(0))
+        except (json.JSONDecodeError, ValueError):
+            arr = None
+        if isinstance(arr, list):
+            for item in arr:
+                if not isinstance(item, dict):
+                    continue
+                text = item.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                facts.append({
+                    "text": _clamp_trivia(text),
+                    "source": _normalize_source(item.get("source")),
+                })
+            if facts:
+                return facts
+    # Fallback: line-split, tag source='web'.
+    for raw in content.splitlines():
+        line = raw.strip().lstrip("-*•").strip()
+        line = re.sub(r"^\d+[.)]\s*", "", line)  # drop "1. " / "2) " list markers
+        if len(line) < 12:
+            continue
+        facts.append({"text": _clamp_trivia(line), "source": "web"})
+    return facts
+
+
+def _clamp_trivia(text, limit=240):
+    """Trim a fact to a sane stored length (the prompt asks for ~160; this is a hard
+    safety cap). Collapses inner whitespace; appends '…' only when truncated."""
+    t = " ".join(text.split())
+    return t if len(t) <= limit else t[: limit - 1].rstrip() + "…"
+
+
+# COST NOTE: EXA (4 results) + GROQ (~300 tokens) per title is cheap; this is a
+# one-time cached backfill (the freshness window means a re-run mostly skips), so a
+# whole-library pass stays well under budget.
+def cmd_fetch_trivia(arg=None, *flags):
+    """Fetch + cache 2-4 short, sourced TRIVIA facts per title (EXA + GROQ).
+
+    Usage: fetch_trivia [id_or_prefix] [--force] [--library movies|series|anime]
+
+    For every DISTINCT title (deduped by tmdb_id; episodes inherit the show's
+    trivia), web-searches behind-the-scenes facts via EXA, distills 2-4 short facts
+    via GROQ each tagged with its [source], and caches them in mvextra.json keyed by
+    tmdb_id. The hover dossier reads that cache (never a live call). Skips a title
+    cached within ~30 days unless --force. NEVER writes library_*.json.
+
+    Optional positional `id_or_prefix` restricts to ids ==/startswith it; --library
+    restricts by category. Any other flag is ignored."""
+    # Fold a flag-shaped positional (e.g. fetch_trivia("--force")) into the flags.
+    flist = list(flags)
+    if arg and str(arg).startswith("--"):
+        flist = [arg] + flist
+        id_or_prefix = None
+    else:
+        id_or_prefix = arg or None
+
+    force = "--force" in flist
+    library_filter = None
+    if "--library" in flist:
+        i = flist.index("--library")
+        if i + 1 < len(flist):
+            library_filter = flist[i + 1].lower()
+
+    if not mvcommon.exa_api_key():
+        print("❌ No EXA API key configured. Set exa.api_key in mvconfig.json "
+              "(see mvconfig.example.json). Nothing to do.")
+        return
+    if not mvcommon.groq_api_key():
+        print("❌ No GROQ API key configured. Set groq.api_key in mvconfig.json "
+              "(see mvconfig.example.json). Nothing to do.")
+        return
+
+    library = load_library()
+    units = _gather_enrich_units(library, id_or_prefix=id_or_prefix, library_filter=library_filter)
+
+    # Dedupe to DISTINCT tmdb_ids (insertion-ordered) — the cache key + the dossier
+    # merge key. A unit with no stored tmdb_id has not been enriched yet -> counted
+    # as no-tmdb and skipped (we never search by title to GUESS an id here). One
+    # fetch per distinct TITLE; episodes of a show share the show's tmdb_id, so they
+    # collapse to a single fetch and inherit the show's trivia.
+    by_tmdb = {}
+    no_tmdb = 0
+    for unit in units:
+        tmdb_id = _unit_preset_tmdb_id(unit, library)
+        if not tmdb_id:
+            no_tmdb += 1
+            continue
+        key = str(tmdb_id)
+        if key not in by_tmdb:
+            by_tmdb[key] = unit
+
+    print("=== FETCH TRIVIA (EXA + GROQ) ===")
+    if library_filter:
+        print(f"   > library filter: {library_filter}")
+    if id_or_prefix:
+        print(f"   > scope: ids == or startswith '{id_or_prefix}'")
+    print(f"   > {len(by_tmdb)} distinct title(s) with a tmdb_id"
+          f"{f', {no_tmdb} without a tmdb_id (run enrich_metadata first)' if no_tmdb else ''}.")
+    if force:
+        print("   > --force: re-fetching even fresh entries.")
+    print()
+
+    n_fetched = n_cached = n_no_results = n_failed = 0
+    total = len(by_tmdb)
+
+    for idx, (key, unit) in enumerate(by_tmdb.items(), start=1):
+        label = unit.get("title") or unit["key"]
+        prefix = f"[{idx}/{total}] {label} ({key})"
+
+        # Freshness skip (unless --force).
+        cached = extra_cache_get(key)
+        if not force and _trivia_entry_is_fresh(cached):
+            n_cached += 1
+            print(f"{prefix} -> cached (fresh), skipping.")
+            continue
+
+        title = unit.get("title") or label
+        year = unit.get("year")
+
+        # EXA web-search -> GROQ distill. no-results = EXA found nothing to distill;
+        # failed = EXA had material but GROQ produced no usable fact (API/parse miss).
+        snippets = exa_search_trivia(title, year)
+        if not snippets:
+            n_no_results += 1
+            print(f"{prefix} -> no web results, skipping.")
+            continue
+
+        facts = groq_distill_trivia(title, year, snippets)
+        if not facts:
+            n_failed += 1
+            print(f"{prefix} -> distill produced no facts, skipping.")
+            continue
+
+        # Writes ONLY mvextra.json — the library is never touched.
+        extra_cache_set(key, {"trivia": facts, "fetched_at": mvcommon._now_utc().isoformat()})
+        n_fetched += 1
+        sources = ",".join(dict.fromkeys(f["source"] for f in facts))
+        print(f"{prefix} -> {len(facts)} facts [{sources}]")
+
+        # Be polite to EXA/GROQ between fetched titles (no wait after the last one).
+        if idx < total:
+            time.sleep(TRIVIA_THROTTLE_SECONDS)
+
+    print(f"\n=== DONE === fetched={n_fetched} cached-skip={n_cached} "
+          f"no-results={n_no_results} failed={n_failed} no-tmdb={no_tmdb}")
+    if not no_tmdb and total == 0:
+        print("   (nothing to fetch — the matched scope had no titles with a tmdb_id.)")
 
 
 def _retarget_unit_folders(unit, old_folder, new_folder):
@@ -6083,7 +6557,29 @@ def tmdb_detail(library, mid):
     # episode inherits the show's ratings. Only fields present in the cache are added.
     _merge_online_metadata(out, tmdb_id)
 
+    # MERGE the cached TRIVIA (EXA+GROQ-distilled facts), populated by `fetch_trivia`.
+    # Same CACHE-ONLY contract — never a live EXA/GROQ call in the request path. For
+    # an episode this uses the SHOW's tmdb_id, so the episode inherits the show's
+    # trivia. Adds `trivia` only when present + non-empty.
+    _merge_trivia(out, tmdb_id)
+
     return out
+
+
+def _merge_trivia(out, tmdb_id):
+    """Merge the cached TRIVIA for ``tmdb_id`` into the detail dict ``out`` (in place).
+    Adds ``trivia`` (a list of {text, source}) ONLY when present + non-empty in
+    mvextra.json — so an absent/empty cache entry simply omits the field. NO live
+    EXA/GROQ call (cache read only — fetch_trivia populates it), so the hover dossier
+    stays fast. For an EPISODE, ``tmdb_id`` is already the SHOW's tmdb_id (enrich
+    stamps the show id on every leaf), so the episode inherits the show's trivia.
+    Never raises (extra_cache_get degrades a malformed cache to None)."""
+    entry = extra_cache_get(tmdb_id)
+    if not isinstance(entry, dict):
+        return
+    trivia = entry.get("trivia")
+    if isinstance(trivia, list) and trivia:
+        out["trivia"] = trivia
 
 
 def _merge_online_metadata(out, tmdb_id):
@@ -6793,6 +7289,7 @@ if __name__ == "__main__":
         print("  set_fanart [id] [url]")
         print("  set_tmdb [id] [tmdb_id]")
         print("  refresh_online [id_or_prefix] [--force] [--library movies|series|anime]  — Fetch+cache OMDb IMDb/RT/Metacritic ratings + awards/box-office for every title (deduped by tmdb_id; reads into the hover dossier)")
+        print("  fetch_trivia [id_or_prefix] [--force] [--library movies|series|anime]  — EXA+GROQ-distill 2-4 short, sourced trivia facts per title (deduped by tmdb_id) into the gitignored mvextra.json the hover dossier reads")
         print("  set_uploaded [id]")
         print("  prep_season [base_id] [folder]")
         print("  scan_unprepped")
@@ -6962,6 +7459,16 @@ if __name__ == "__main__":
         rest = sys.argv[2:]
         positional = rest[0] if (rest and not rest[0].startswith("--")) else None
         cmd_refresh_online(positional, *rest)
+
+    elif cmd == "fetch_trivia":
+        # fetch_trivia [id_or_prefix] [--force] [--library movies|series|anime]
+        # EXA web-search + GROQ-distill 2-4 sourced trivia facts for every distinct
+        # title (deduped by tmdb_id). Writes ONLY mvextra.json. Pass the positional
+        # id/prefix (if any) plus all remaining tokens as flags so cmd_fetch_trivia
+        # parses them itself.
+        rest = sys.argv[2:]
+        positional = rest[0] if (rest and not rest[0].startswith("--")) else None
+        cmd_fetch_trivia(positional, *rest)
 
     elif cmd == "prep_season":
         if len(sys.argv) >= 4:

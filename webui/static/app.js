@@ -145,7 +145,7 @@ function resetGridNav() {
 function navigateGrid(nextPath) {
   gridPath = (nextPath || []).slice();
   gridPendingScrollTop = 0;
-  renderPanel(false);
+  renderPanel(true); // morph the drill-in / breadcrumb jump (VT when available)
 }
 
 // Sub-view order = the leading "All" segment, THEN the 5 known states, PLUS any
@@ -410,6 +410,42 @@ function prefersReducedMotion() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// View-Transitions morph (IMP-E16 D3)
+// ---------------------------------------------------------------------------
+
+// True only when the native View-Transitions API is present AND the user has not
+// requested reduced motion. Guarded so older Safari/Firefox (no
+// startViewTransition) and reduced-motion users transparently keep the classic
+// atomic swap with no morph.
+function canUseViewTransition() {
+  return (
+    typeof document !== "undefined" &&
+    typeof document.startViewTransition === "function" &&
+    !prefersReducedMotion()
+  );
+}
+
+// Run `fn` (a SYNCHRONOUS DOM mutation — the panel repaint) inside a native View
+// Transition so the browser cross-fades the #panel region from its old content to
+// its new content (the morph is scoped to #panel + tuned in styles.css). When the
+// API is unavailable or motion is reduced, `fn` is called directly — identical end
+// state, today's instant swap. NEVER throws: any unexpected failure degrades to a
+// direct call so a repaint can't be dropped.
+function withViewTransition(fn) {
+  if (!canUseViewTransition()) {
+    fn();
+    return;
+  }
+  try {
+    document.startViewTransition(function () {
+      fn();
+    });
+  } catch (e) {
+    fn();
+  }
+}
+
 // Jump straight to a library entry by id (the palette's title activation). The
 // flat DECLUTTERED grid renders synchronously from the already-loaded MODEL and
 // always contains the card for (category, state), so a jump is reliable and
@@ -542,9 +578,9 @@ function renderPanel(animate) {
     // grouped tab has two presentation STYLES: the collapsible list (paintTree)
     // and the drill-down grid (paintGrid); both read the SAME cached /api/tree.
     if (groupedStyle === "grid") {
-      paintGrid(panel);
+      paintGrid(panel, animate);
     } else {
-      paintTree(panel);
+      paintTree(panel, animate);
     }
     return;
   }
@@ -563,7 +599,17 @@ function renderPanel(animate) {
     });
   }
 
-  if (animate) {
+  if (animate && canUseViewTransition()) {
+    // Native View-Transitions morph: snapshot → swap → cross-fade, scoped to
+    // #panel (see styles.css). paintFlat is the synchronous DOM update the API
+    // snapshots around. NO `.swapping` here — that would double-animate the swap
+    // (a fade-on-fade); the VT cross-fade fully owns the transition.
+    withViewTransition(function () {
+      paintFlat(panel);
+    });
+  } else if (animate) {
+    // Fallback (API absent / reduced motion): the classic fade-out → swap →
+    // fade-in via the `.swapping` opacity+slide transition.
     panel.classList.add("swapping");
     // Wait one frame for the fade-out, then swap + fade-in.
     requestAnimationFrame(function () {
@@ -625,7 +671,7 @@ function paintFlat(panel) {
 //
 // The atomic swap is intentionally instant (no fade) because there is no empty
 // intermediate state to hide — the content simply changes in place.
-function paintTree(panel) {
+function paintTree(panel, animate) {
   // Capture the category AND state filter this paint is for; if the user switches
   // tabs or the state filter before the tree resolves, a stale resolution must NOT
   // overwrite the newer view.
@@ -655,12 +701,21 @@ function paintTree(panel) {
       // flashes empty. Preserve scroll position across the swap.
       var fragment = buildTreeFragment(view, MODEL_BY_ID);
       var prevScroll = panel.scrollTop;
-      // Teardown invariant: dispose the OUTGOING content's fetch-ring
-      // ResizeObservers right before replacing it (buildTreeFragment built only
-      // new DOM and did not touch these).
-      destroyRingsIn(panel);
-      panel.replaceChildren(fragment);
-      panel.scrollTop = prevScroll;
+      // Atomic swap — optionally inside a View Transition. We snapshot AFTER the
+      // async tree resolved (never around the loading state) so the morph cross-
+      // fades the real old content → real new content. Teardown invariant: dispose
+      // the OUTGOING content's fetch-ring ResizeObservers right before replacing it
+      // (buildTreeFragment built only new DOM and did not touch these).
+      var swap = function () {
+        destroyRingsIn(panel);
+        panel.replaceChildren(fragment);
+        panel.scrollTop = prevScroll;
+      };
+      if (animate) {
+        withViewTransition(swap);
+      } else {
+        swap();
+      }
     })
     .catch(function (err) {
       hideTreeLoading(overlay);
@@ -682,7 +737,7 @@ function paintTree(panel) {
 // uses), so a folder box appears only if it has a matching descendant leaf and its
 // size / count reflect the filter; the sort applies to each level via compareNodes
 // inside buildGridFragment.
-function paintGrid(panel) {
+function paintGrid(panel, animate) {
   // Capture the category AND state filter this paint is for; a tab / state-filter /
   // view-style change before /api/tree resolves must NOT overwrite the newer view.
   var forCategory = activeCategory;
@@ -719,11 +774,20 @@ function paintGrid(panel) {
         rootLabel: CATEGORY_META[forCategory].label,
         onNavigate: navigateGrid,
       });
-      // Teardown invariant: dispose the OUTGOING content's fetch-ring observers
-      // immediately before the atomic replace (buildGridFragment only built new DOM).
-      destroyRingsIn(panel);
-      panel.replaceChildren(fragment);
-      panel.scrollTop = scrollTarget;
+      // Atomic swap — optionally inside a View Transition (snapshot AFTER the data
+      // is ready, never around the loading state). Teardown invariant: dispose the
+      // OUTGOING content's fetch-ring observers immediately before the atomic
+      // replace (buildGridFragment only built new DOM).
+      var swap = function () {
+        destroyRingsIn(panel);
+        panel.replaceChildren(fragment);
+        panel.scrollTop = scrollTarget;
+      };
+      if (animate) {
+        withViewTransition(swap);
+      } else {
+        swap();
+      }
     })
     .catch(function (err) {
       hideTreeLoading(overlay);

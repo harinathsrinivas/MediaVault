@@ -469,6 +469,13 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   transform: translateY(0);
   transition: opacity 0.18s ease, transform 0.18s ease;
   outline: none;
+  /* Scope the View-Transitions morph (IMP-E16 D3) to THIS content region so a
+     tab / state-filter / view-mode swap cross-fades only the panel. Everything
+     else — header, tabs, sub-nav AND the fixed overlays (hover dossier, command
+     palette, job terminal, toasts) + the animated background canvas — is captured
+     into ::*-(root), whose animation is zeroed below, so it's left untouched.
+     Inert (ignored) when the API is absent. */
+  view-transition-name: mv-panel;
 }
 .panel.swapping {
   opacity: 0;
@@ -477,6 +484,69 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 @media (prefers-reduced-motion: reduce) {
   .panel { transition: none; }
   .panel.swapping { opacity: 1; transform: none; }
+}
+
+/* ---------------- View-Transitions panel morph (IMP-E16 D3) ----------------
+   UPGRADE of the .panel content-swap to the native document.startViewTransition()
+   (app.js withViewTransition). The morph is SCOPED to #panel by the
+   `view-transition-name: mv-panel` above: only the panel cross-fades. The page
+   root — header, tabs, sub-nav AND every fixed overlay (hover dossier, command
+   palette, job terminal, toasts) + the background canvas — is captured into
+   ::*-(root), held still just below, so nothing else flickers. When the API is
+   absent the whole block is simply ignored and the .swapping fallback runs. */
+
+/* The panel box morphs (its height tracks the changing card count) on a calm
+   ~240ms ease-out; the old/new snapshots cross-fade with plus-lighter so there is
+   no mid-fade brightness dip. A few-px lift makes the content feel like it is
+   gracefully recomposing rather than hard-cutting. */
+::view-transition-group(mv-panel) {
+  animation-duration: 240ms;
+  animation-timing-function: cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+::view-transition-old(mv-panel),
+::view-transition-new(mv-panel) {
+  animation-duration: 240ms;
+  animation-timing-function: cubic-bezier(0.22, 0.61, 0.36, 1);
+  mix-blend-mode: plus-lighter;
+}
+::view-transition-old(mv-panel) {
+  animation-name: mv-panel-out;
+}
+::view-transition-new(mv-panel) {
+  animation-name: mv-panel-in;
+}
+@keyframes mv-panel-out {
+  to {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+@keyframes mv-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+/* Belt-and-braces: leave EVERYTHING outside #panel untouched. The page-root
+   snapshot (which contains the fixed overlays + the background canvas) would
+   otherwise cross-fade as one block; zero its animation so the new root paints
+   immediately — no visible change to the chrome/overlays/background. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+/* Reduced motion: the JS helper already skips startViewTransition, but if a view
+   transition is ever triggered another way, zero every VT animation so motion-
+   sensitive users get an instant cut (no morph, no slide). */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
 }
 
 /* Grouped-view loading overlay. Shown ONLY when the async /api/tree is slow to

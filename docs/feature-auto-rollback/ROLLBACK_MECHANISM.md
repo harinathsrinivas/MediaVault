@@ -155,10 +155,15 @@ bytes are only in the cloud / need a re-fetch, so the hard-fail names the existi
 - **`cmd_replace`** — PONR at the commit rename; the dummy temp is the only
   pre-PONR artifact. `mark_point_of_no_return()` fires right after the rename; a
   later failure → `RollbackHardFail`. C9's stale-sweep is left intact.
-- **`cmd_restore`** (split) — the merged target is recorded as `create_reproducible`
-  before merging, so a merge failure removes it and keeps the chunks for a re-merge;
-  C11 quarantine is reused for a corrupt chunk. `mark_point_of_no_return()` +
-  `commit()` fire before the chunk delete. Standard path unchanged.
+- **`cmd_restore`** (split) — **(IMP-R6, option a)** the split-path merge now stages
+  the output to `<target>.merge_tmp<ext>` (a sibling of the archived dummy at
+  `target_path`) and `os.replace()`s it onto `target_path` ONLY after the
+  verify/bless gate passes. The journal records the **temp path** as the
+  `create_reproducible` output. A merge or verify failure removes the temp and
+  leaves the archived dummy intact; the entry stays `archived` and a file exists at
+  `target_path`, so media servers never drop the title. PONR placement is unchanged
+  — the chunk delete still fires after the successful swap. C11 quarantine is reused
+  for a corrupt chunk. Standard (non-split) path unchanged.
 - **Orchestrators** — `cmd_prep_push_rep` drops the ad-hoc cleanup and relies on
   the wrapped `cmd_push` (O-1) and `cmd_replace` (catches `RollbackHardFail`).
   `cmd_prep_push_rep_season` keeps completed episodes, lets the in-flight item
@@ -186,6 +191,27 @@ flowchart TD
 entry point. A journal that crossed its PONR is deliberately left untouched (the
 command committed irreversibly; there is nothing to undo).
 
+### IMP-R7: journal-open auto-recovery of leftover journals (option b)
+
+**(IMP-R7, option b — shipped 2026-06-27)** `RollbackJournal.__init__` now
+calls `_handle_leftover()` before writing the fresh journal, closing the
+one-step hole where a user's natural crash→re-run reflex would silently
+overwrite the crashed run's inverses:
+
+- **Pre-PONR leftover** → `_handle_leftover` calls `recover_journal()` first
+  (idempotent; restores clean pre-command state), then the new command proceeds.
+  The crashed run's artifacts are properly cleaned up before the new run starts.
+- **Post-PONR leftover** (the prior run committed irreversibly) → preserved
+  under a timestamped sibling name (`.mediavault_txn.<ts>.json`) rather than
+  silently overwritten. The user can inspect it or run `recover` manually.
+- **No leftover** (the common happy path) → `_handle_leftover` is a no-op;
+  `_flush()` then behaves exactly as before (byte-for-byte identical).
+
+**Contract delta:** `recover_journal()` may now be called from inside
+`RollbackJournal.__init__` when a pre-PONR leftover is found. Its own semantics
+are unchanged (it is still only called when the previous run was NOT happy, so
+D-4's "not on the happy path" principle is not violated).
+
 ---
 
 ## 8. Every failure scenario at a glance
@@ -198,14 +224,16 @@ command committed irreversibly; there is nothing to undo).
 | 4 | `push` resume | pre-existing `_parts/`, then a failure | pre-existing artifacts never recorded → never deleted |
 | 5 | `replace` fails pre-PONR | dummy gen / first rename throws before commit rename | rollback: delete the dummy temp; original in place |
 | 6 | `replace` fails at/after PONR | commit rename done, later step throws | `RollbackHardFail` → `fetch_restore <id>`; C9 guarantees bytes at `.tobedeleted` |
-| 7 | `restore` split fails pre-PONR | corrupt chunk / merge fail | C11 quarantine; drop the reproducible target, keep chunks |
+| 7 | `restore` split fails pre-PONR | corrupt chunk / merge fail | **(IMP-R6)** merge staged to `merge_tmp`; failure removes the temp; archived dummy at `target_path` is untouched; entry stays archived with a file at its path; chunks kept for retry |
 | 8 | `restore` split fails at/after PONR | chunks already deleted from `restore/` | `RollbackHardFail` → `fetch_restore <id>` (needs re-fetch) |
 | 9 | season batch fails | one episode fails mid-run | completed episodes stay; in-flight self-handles; print resume-range command |
 | 10 | **hard kill mid-command** | power loss / SIGKILL / SystemExit | in-process `except` never runs; journal survives → `recover_journal()` finishes cleanup |
 | 11 | **hard kill mid-rollback** | killed during `_replay_inverses` | journal still on disk (deleted only at the end) → `recover_journal()` replays the *remaining* inverses |
 | 12 | file lock during rollback | Plex/Windows Search holds a chunk | partial-rollback reported honestly; journal kept; `recover_journal()` retries later |
+| 13 | **(IMP-R7)** crash → re-run, pre-PONR leftover | user re-runs the command after a hard kill | `RollbackJournal.__init__` detects the leftover, calls `recover_journal()` to finish the interrupted rollback, then the new command proceeds cleanly |
+| 14 | **(IMP-R7)** crash → re-run, post-PONR leftover | user re-runs after a kill that crossed PONR | leftover preserved as `.mediavault_txn.<ts>.json`; new run proceeds; user can inspect / `recover` the preserved journal |
 
-Scenarios 1–9 behave identically regardless of mechanism; **10–12 are where the
+Scenarios 1–9 behave identically regardless of mechanism; **10–14 are where the
 durable journal earns its place** — the test
 `tests/test_rollback.py::test_journal_survives_hard_kill_and_recovers` proves #10/#11.
 
@@ -267,6 +295,14 @@ ask the user as an explicit decision.** Do not silently modify it.
 This rule is also recorded in the project [`CLAUDE.md`](../../CLAUDE.md) so every
 session and sub-agent sees it.
 
+> **IMP-R6 and IMP-R7 (2026-06-27, branch `feature/imp_r6_r7_restore_journal_crashsafe`)
+> passed through this gate** with explicit user approval. Their single contract
+> deltas are: R6 — the `create_reproducible` record in the split-restore path now
+> carries the temp path (`<target>.merge_tmp<ext>`) rather than `target_path`
+> pre-swap (PONR placement unchanged); R7 — `recover_journal()` may be called from
+> inside `RollbackJournal.__init__` when a pre-PONR leftover is detected (its own
+> semantics unchanged). All other journal/PONR/D-4 contracts are unaltered.
+
 ---
 
 ## 11. Code & test map
@@ -278,5 +314,7 @@ session and sub-agent sees it.
   ~2048). Line numbers verified against the merged branch; treat names as canonical
   if they drift.
 - Tests: `tests/test_rollback.py` (full scenario matrix incl. the durable-journal
-  crash-recovery test) + `tests/test_baseline_happy_path.py` (the D-4 happy-path
-  oracle). `pytest -q` → 67 passed, 1 ffmpeg-gated skip.
+  crash-recovery test, R6 merge-to-temp, and R7 auto-recovery + timestamped-preserve
+  scenarios) + `tests/test_baseline_happy_path.py` (the D-4 happy-path oracle).
+  `pytest -q` → 583 passed (full suite), 60 rollback/recover/restore tests,
+  69 smoke tests (as of 2026-06-27).

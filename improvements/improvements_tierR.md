@@ -197,8 +197,16 @@ change the happy path (D-4) without an explicit, change-gated decision.
 - If skipped: any mkvmerge failure during a daemon-triggered restore (bad chunk
   pairings, tool drift, disk hiccup) makes the title VANISH from Jellyfin —
   the user on the couch sees the movie disappear instead of an error.
-- Status: pending
-- **Change-gate:** options (a)/(b) alter restore-failure artifact handling — ask first.
+- Status: done (option a — branch `feature/imp_r6_r7_restore_journal_crashsafe`, 2026-06-27)
+- **Chosen option (a):** the split-path merge now stages the output to
+  `<target>.merge_tmp<ext>` and `os.replace()`s it onto the dummy ONLY after the
+  verify/bless gate passes. Any merge or verify failure leaves the dummy intact
+  (`target_path` is never touched until the swap succeeds); the entry stays
+  `archived` with a file at its path. **Single contract delta:** the journal's
+  `create_reproducible` record carries the temp path (`merge_tmp`) rather than
+  `target_path` pre-swap; PONR placement (chunk delete fires after the successful
+  swap) is unchanged.
+- **Change-gate:** options (a)/(b) alter restore-failure artifact handling — asked and approved.
 
 ## IMP-R7: Re-running a command silently clobbers a leftover pre-PONR journal
 
@@ -229,8 +237,17 @@ change the happy path (D-4) without an explicit, change-gated decision.
 - If skipped: the most likely real-world crash sequence (crash → re-run) keeps
   leaking artifacts out of rollback scope; e.g. a killed prep leaves sidecars that
   no future rollback will ever remove.
-- Status: pending
-- **Change-gate:** journal lifecycle — ask first with the (a)/(b)/(c) options.
+- Status: done (option b — branch `feature/imp_r6_r7_restore_journal_crashsafe`, 2026-06-27)
+- **Chosen option (b):** `RollbackJournal.__init__` now calls `_handle_leftover()`
+  before `_flush()`. Pre-PONR leftover → auto-run `recover_journal()` first (its
+  replay is idempotent; restores the clean pre-command state, then the new command
+  proceeds). Post-PONR leftover → preserved under a timestamped
+  `.mediavault_txn.<ts>.json` sibling so the crashed run's recovery info is never
+  silently overwritten. No-leftover path (the overwhelmingly common case) is
+  byte-for-byte unchanged. **Single contract delta:** `recover_journal()` may now be
+  called from within `RollbackJournal.__init__` on a non-happy (crashed) prior run;
+  its own semantics are unchanged.
+- **Change-gate:** journal lifecycle — asked and approved.
 
 ## IMP-R8: Journal the eager-rehash merge temp
 

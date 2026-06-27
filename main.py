@@ -629,9 +629,83 @@ class RollbackJournal:
         self.manual_id = manual_id
         self._records = []          # list of dict records (ordered = creation order)
         self.crossed_ponr = False
-        # Fresh journal per command run (a leftover from a crashed run is handled by
-        # recover_journal(), not silently appended to).
+        # IMP-R7: handle a leftover journal from a CRASHED previous run BEFORE we
+        # flush a fresh one over it. The user's reflex after a crash is to RE-RUN the
+        # command, not to run `recover` — and the bare _flush() below would destroy
+        # the crashed run's inverses, permanently orphaning its artifacts from
+        # rollback. _handle_leftover is a no-op when there is no leftover (the common
+        # case), so the normal path stays byte-for-byte identical.
+        self._handle_leftover(folder_path)
+        # Fresh journal per command run.
         self._flush()
+
+    def _handle_leftover(self, folder_path):
+        """IMP-R7 (option b): if a `.mediavault_txn.json` already exists here, the
+        PREVIOUS run for this folder did not finish cleanly. Deal with it BEFORE the
+        fresh _flush() overwrites it:
+
+        - Pre-PONR leftover  → auto-run recover_journal() now (its pre-PONR replay is
+          idempotent and restores the clean pre-command state), THEN continue. A
+          crash→re-run therefore recovers the crashed run before starting the new one.
+        - Post-PONR leftover → NOT auto-recoverable (that run committed irreversibly —
+          O-2 territory). Preserve it under a timestamped name so its recovery info is
+          not lost and the user can inspect / run `recover`, then continue.
+        - No leftover (the overwhelmingly common case) → do nothing; the caller's
+          _flush() then behaves exactly as before (fresh empty journal, no recovery).
+
+        D-4 tension (the documented decision behind option b): this calls recovery code
+        adjacent to a command invocation. It does NOT violate the
+        recover-not-on-happy-path principle because a leftover journal means the
+        previous run was NOT happy — so handling it is by definition OFF the happy path.
+        recover_journal()'s own semantics are UNCHANGED; this only CALLS it earlier.
+        Because every command does load_library() BEFORE opening its journal and
+        save_library() at the end, recovery's library reverts only matter for the
+        negligible save_library→commit window the journal design already treats as
+        non-existent; in the dominant crash-before-save case nothing was persisted, so
+        the host command's in-memory library matches the recovered on-disk state."""
+        if not os.path.exists(self.path):
+            return  # no leftover — byte-for-byte the old behavior
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            # An unreadable leftover may still be hand-recoverable — never destroy it.
+            print(f"   > ⚠️ Found an unreadable leftover {TXN_JOURNAL_NAME}; preserving it before continuing.")
+            self._preserve_leftover()
+            return
+        if data.get("crossed_ponr"):
+            print(f"   > ⚠️ Found a leftover {TXN_JOURNAL_NAME} that crossed its "
+                  "point-of-no-return; preserving it for inspection before continuing.")
+            self._preserve_leftover()
+            return
+        # Pre-PONR: finish the interrupted rollback first (idempotent).
+        print("   > 🔧 Found an interrupted run's journal — recovering it before continuing.")
+        recover_journal(folder_path)
+        # If recovery was only PARTIAL (e.g. a Windows file lock blocked an inverse),
+        # recover_journal leaves the journal in place. Do NOT _flush() a fresh journal
+        # over those surviving inverses — preserve them so they are not lost (the user
+        # can retry `recover` later). On a full recovery the journal is already gone and
+        # this is a no-op.
+        if os.path.exists(self.path):
+            print(f"   > ⚠️ Recovery was partial; preserving the remaining {TXN_JOURNAL_NAME} before continuing.")
+            self._preserve_leftover()
+
+    def _preserve_leftover(self):
+        """Rename the leftover journal to a timestamped sibling
+        (`.mediavault_txn.<ts>.json`) so the fresh _flush() cannot silently destroy it.
+        Used for post-PONR, unreadable, and partial-recovery leftovers."""
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        root, ext = os.path.splitext(self.path)  # (<folder>/.mediavault_txn, .json)
+        preserved = f"{root}.{ts}{ext}"
+        n = 1
+        while os.path.exists(preserved):
+            preserved = f"{root}.{ts}-{n}{ext}"
+            n += 1
+        try:
+            os.replace(self.path, preserved)
+            print(f"   > 💾 Preserved leftover journal as {os.path.basename(preserved)}.")
+        except Exception as e:
+            print(f"   > ⚠️ Could not preserve leftover journal: {e}")
 
     def _flush(self):
         """Persist the journal to disk durably (write-temp + os.replace + fsync)."""
@@ -5023,24 +5097,34 @@ def cmd_restore(manual_id):
         # Chosen/persisted BEFORE the merge so the canonical-producing merge below
         # uses exactly the stored value.
         seed = entry["split_info"].get("merge_seed") or entry.get("short_id") or manual_id
-        # [ROLLBACK C] The merge is PRE-PONR. Open a journal and log the
-        # reproducible merged output before merging; a merge failure replays the
-        # inverse (remove the reproducible target) and keeps chunks for a re-merge.
+        # [ROLLBACK C + IMP-R6] The merge is PRE-PONR. To guarantee the archived
+        # dummy at target_path is NEVER lost on a merge/verify failure, merge into a
+        # TEMP sibling (<target>.merge_tmp<ext>) and atomically os.replace() it into
+        # place ONLY after the merge SUCCEEDS and its hash is verified/blessed
+        # (option a). The journal records the TEMP path as the reproducible output, so
+        # any pre-swap failure removes the TEMP and leaves the dummy intact — the entry
+        # stays archived AND a file still exists at target_path, so media servers do
+        # not drop the title; it self-heals on retry. PONR placement is UNCHANGED — the
+        # chunk delete still happens after the swap.
+        merge_root, merge_ext = os.path.splitext(target_path)
+        merge_tmp_path = f"{merge_root}.merge_tmp{merge_ext}"
         journal = RollbackJournal(local_folder, manual_id)
-        journal.record_create_reproducible(target_path)
+        journal.record_create_reproducible(merge_tmp_path)
         try:
-            merged_ok = merge_video_files(chunk_paths_in_restore, target_path, seed=seed)
+            merged_ok = merge_video_files(chunk_paths_in_restore, merge_tmp_path, seed=seed)
         except Exception as e:
             print(f"❌ Merge crashed: {e}")
             merged_ok = False
         if not merged_ok:
             print(f"❌ Merge failed for {manual_id}. Chunks left in restore/ for re-merge.")
-            journal.rollback(library)
+            journal.rollback(library)  # removes the temp; the dummy at target_path is untouched
             return False
 
         if merged_ok:
             print(f"   > 💾 Re-indexing Merged File (New Container)...")
-            new_hash = calculate_file_hash(target_path)
+            # [IMP-R6] Hash/verify the TEMP merge output; it is swapped onto
+            # target_path only after this verify/bless gate passes.
+            new_hash = calculate_file_hash(merge_tmp_path)
 
             # VERIFY-OR-BLESS. The pure helper returns the policy; ALL mutations,
             # save_library, journal calls, and I/O stay HERE so the seam stays
@@ -5074,6 +5158,20 @@ def cmd_restore(manual_id):
                 library[manual_id]["split_info"]["rehashed_at"] = _rehashed_at()
             # decision == "ok": already-blessed and the re-merge reproduced the
             # canonical hash — leave hash/split_info untouched.
+
+            # [IMP-R6] Verify/bless passed → atomically swap the verified-good merged
+            # file into place. PRE-PONR: target_path's prior content (the archived
+            # dummy) is only ever replaced by a verified-good, chunk-reproducible file,
+            # and the chunks in restore/ stay the source of truth until the delete
+            # below. A failed swap (e.g. a locked target) is reversible — drop the temp
+            # and keep the dummy, so NO failure path ever leaves zero bytes at the path.
+            try:
+                os.replace(merge_tmp_path, target_path)
+            except Exception as e:
+                print(f"❌ Could not place the merged file (target locked?): {e}")
+                print("   Dummy left intact in place; chunks kept in restore/ for retry.")
+                journal.rollback(library)  # removes the temp; the dummy at target_path is untouched
+                return False
 
             library[manual_id]["status"] = "restored_local"
             save_library(library)

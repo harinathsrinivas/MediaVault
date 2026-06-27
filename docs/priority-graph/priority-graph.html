@@ -222,8 +222,8 @@ const TASKS = [
  ["R3","stale-journal in doctor","R","low","todo","--scan shipped; fold into doctor + add age"],
  ["R4","group-command rollback parity","R","med","decision","replace_group misses RollbackHardFail (change-gate)"],
  ["R5","self-describing journal","R","low","decision","Add created_at/command/version (change-gate)"],
- ["R6","restore-merge dummy loss","R","crit","decision","Failed merge → no file at path → title vanishes from Jellyfin"],
- ["R7","journal clobber on re-run","R","crit","decision","Re-run after crash destroys recovery inverses"],
+ ["R6","restore temp-merge (no lost dummy)","R","done","done","Merge staged to <target>.merge_tmp; os.replace on verify success — dummy never lost on failure (IMP-R6, 2026-06-27)"],
+ ["R7","crash-re-run auto-recovers the journal","R","done","done","RollbackJournal.__init__ auto-recovers pre-PONR leftover; preserves post-PONR leftover timestamped (IMP-R7, 2026-06-27)"],
  ["R8","journal eager temp","R","low","decision","Eager rehash temp unjournalled (disk leak on crash)"],
  ["R9","prep_season alias journaling","R","low","decision","Alias block mutates outside the journal"],
  // S — streaming / daemon

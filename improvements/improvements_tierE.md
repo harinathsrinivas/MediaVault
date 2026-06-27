@@ -376,6 +376,9 @@
   - **Cinematic parallax hero (`hero.js`):** per-tab backdrop band of archived/featured titles (Ken-Burns animation + scroll parallax + auto-rotate + click-jump; `prefers-reduced-motion` static fallback).
   - **Lazy-load perf:** admin, palette, and terminal modules are lazy-loaded; the critical path is `<link rel="modulepreload">`-preloaded.
   - **Config:** `mvconfig.json` extended with `omdb.api_key`, `exa.api_key`, `groq.api_key`, `rapidapi.*` keys (all gitignored). New gitignored caches: `mvonline.json`, `mvextra.json`, `~/.mediavault/cache/exa/`.
+- Open follow-ups (forward-looking, not blocking):
+  - **RapidAPI keys present but unused** — `mvconfig.rapidapi.imdb_key`/`rt_key` are stored but the probed hosts returned 403 (a RapidAPI key only works on the specific *subscribed* product). To light up richer IMDb/RT data, the user must supply the subscribed product host(s) from their RapidAPI dashboard, then wire a `_rapidapi_get(host, path)` helper into `tmdb_detail`. OMDb already covers IMDb/RT/Metacritic, so this is purely additive.
+  - Re-run `refresh_online` / `fetch_trivia` (idempotent, cached) after adding new titles to backfill ratings + trivia for them.
 - Rationale: Turns the ops console into a cinematic media browser: the dossier gives richer context than any external app page, online ratings and trivia make "what should I watch?" decisions inside the vault, and the EXA auto-resolve waterfall finally makes `enrich_metadata` robust on difficult titles.
 - Goal: Any card hover/press opens a rich detail panel; `refresh_online`/`fetch_trivia` populate ratings and trivia; hard-to-match titles auto-resolve without manual TMDB id pasting.
 - Effort estimate: large

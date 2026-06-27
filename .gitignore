@@ -11,6 +11,14 @@ a.json
 # sha256 of each token is stored, but never commit it.
 /mvtokens.json
 
+# Online-metadata cache (IMP-E16) — OMDb ratings/awards/box-office keyed by
+# tmdb_id, populated by `refresh_online`. A regenerable local cache; never commit.
+/mvonline.json
+
+# Trivia/extra cache (IMP-E16/A5) — EXA+GROQ-distilled trivia facts keyed by
+# tmdb_id, populated by `fetch_trivia`. A regenerable local cache; never commit.
+/mvextra.json
+
 .git*
 # ...but DO track the line-ending policy (overrides core.autocrlf; stops CRLF phantom diffs)
 !.gitattributes
@@ -67,3 +75,5 @@ dummy_size_test_mp4/
 # Local command-caveat transcript dumps written at the repo root by interactive runs
 *local-command-caveat*.txt
 
+# Interruption-recovery session file — never commit
+SESSION_STATE.md

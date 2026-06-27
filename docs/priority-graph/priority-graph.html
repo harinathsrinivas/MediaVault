@@ -111,7 +111,7 @@
   <a class="open" id="p-open" href="#" target="_blank" rel="noopener">Open task in tier file →</a>
 </div>
 
-<div class="footer">Generated 2026-06-24 · keep in sync with <code>PRIORITY.md</code> (see its maintenance protocol) · ~113 tasks</div>
+<div class="footer">Generated 2026-06-27 · keep in sync with <code>PRIORITY.md</code> (see its maintenance protocol) · ~114 tasks</div>
 
 <script>
 /* ───────────────────────── TASK DATA — keep in sync with PRIORITY.md + improvements_tier*.md ─────────────────────────
@@ -194,6 +194,7 @@ const TASKS = [
  ["E13","multi-episode support","E","done","done","Shipped PR #21 (follow-ups → C12/C13)"],
  ["E14","web media-type UI","E","done","done","All 5 phases done: tabs + fetch/progress + motion/PWA + grouped folder view + /api/tree + /api/folder-image + /api/open-folder + space background + iOS no-cache fix (Phases 1-3); mobile/Tailscale/token auth (Phase 4=E15); TMDB posters/titles + /api/media-image (Phase 5=E3/U3/D17)"],
  ["E15","mobile + Tailscale + token auth","E","done","done","Done: admin-minted/expiring/revocable tokens (mvtokens.json, sha256-hashed) on all /api/* + genuine-local-admin detection + secure-by-default (empty store locks remote) + tailscale serve HTTPS + Access panel/CLI + mvconfig (IMP-A5 slice)"],
+ ["E16","UI wow + online enrichment","E","high","todo","Dossier + /api/detail (TMDB+OMDb ratings+trivia) + refresh_online/fetch_trivia + EXA auto-resolve + grid view + poster glow + ⌘K palette + view-transitions + parallax hero + lazy-load perf"],
  // F — moonshots
  ["F1","encrypt-at-rest","F","med","todo","Privacy — see X3 (container constraint)"],
  ["F2","CDC dedup","F","low","todo","Blocked by container constraint; small real win"],
@@ -255,7 +256,7 @@ const EDGES = [
  ["C6","S3"],["S4","U1"],["E4","S4"],["E4","S5"],["E5","S5"],["C1","S2"],
  ["R6","S3"],["G4","S2"],["G4","U5"],["G2","S7"],["S6","S8"],
  ["E7","X1"],["F3","X1"],["X1","X2"],["X1","X4"],["X1","X5"],["X3","F1"],
- ["C12","B7"],["E1","F7"],["U3","U2"],["C16","X1"],["C16","S3"],["C17","C6"],["C16","C17"],["E14","E15"],["A5","E15"],
+ ["C12","B7"],["E1","F7"],["U3","U2"],["C16","X1"],["C16","S3"],["C17","C6"],["C16","C17"],["E14","E15"],["A5","E15"],["E14","E16"],["E3","E16"],
 ];
 
 const PRI={crit:{c:"#ff2d55",r:140,size:30,lbl:"Critical / decision"},high:{c:"#ff9f0a",r:300,size:22,lbl:"High"},

@@ -926,6 +926,27 @@ def create_app(demo=False):
             raise HTTPException(status_code=404, detail="Not an allowed image filename")
         return FileResponse(real, media_type="image/jpeg")
 
+    @app.get("/api/detail/{id}")
+    def api_detail(id: str):
+        # Rich TMDB dossier (rating/genres/runtime/tagline/cast/director(s)/IMDb
+        # link/…) for the hover-preview detail window (IMP-E16). READ-ONLY.
+        #
+        # SECURITY: under /api/*, so the always-on auth middleware (IMP-E15) already
+        # gates it exactly like every other /api route — no second mechanism here.
+        # The id ONLY indexes the library; the tmdb_id comes from the STORED entry
+        # (metadata.tmdb_id), NEVER the client, so a crafted/unknown id is just a
+        # missing key -> tmdb_detail returns None -> 404.
+        #
+        # main.tmdb_detail is alias-safe and NEVER raises: every TMDB call is the
+        # on-disk-cached, None-on-failure _tmdb_get, so a partial fetch failure
+        # yields a partial dict (never a 500) and repeat opens hit the cache (fast).
+        # The ONLY None case is "entry has no tmdb_id" -> 404 {"detail":"no tmdb_id"}.
+        library = main.load_library()
+        detail = main.tmdb_detail(library, id)
+        if detail is None:
+            raise HTTPException(status_code=404, detail="no tmdb_id")
+        return detail
+
     @app.post("/api/open-folder")
     def api_open_folder(request: Request, body: dict = Body(default=None)):
         # Open a folder in Windows Explorer — GENUINE-LOCAL ADMIN ONLY. Over

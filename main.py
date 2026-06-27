@@ -12,7 +12,8 @@ import difflib
 import tempfile
 import webbrowser
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse
 from pymediainfo import MediaInfo
 
 # Ensure emoji/Unicode output works on Windows consoles
@@ -1193,6 +1194,266 @@ def _tmdb_get(url, params, api_key, _cache=True):
     return data
 
 
+# ===========================================================================
+#   ONLINE METADATA — OMDb ratings/awards/box-office + the mvonline.json cache
+#   (IMP-E16).
+#
+# The hover DOSSIER (GET /api/detail) shows the cross-aggregator ratings TMDB does
+# NOT carry — IMDb / Rotten Tomatoes / Metacritic — plus Rated / Runtime / Awards /
+# BoxOffice. The single source is OMDb (https://www.omdbapi.com), looked up by a
+# title's IMDb id (`?i=tt…`, preferred) or by title+year (`?t=&y=`).
+#
+# COST MODEL — populated ONCE, read MANY times:
+#   * `refresh_online` (cmd_refresh_online) walks the whole library, dedupes by
+#     tmdb_id (each distinct title fetched once — episodes inherit their SHOW's
+#     ratings), resolves each title's imdb_id via TMDB, calls omdb_fetch, and
+#     stores the result in mvonline.json keyed by str(tmdb_id).
+#   * tmdb_detail MERGES the cached entry into the dossier with NO live OMDb call,
+#     so opening the hover preview stays fast and never blocks on the network.
+#
+# mvonline.json schema (atomic write: tempfile + os.replace — the token-store idiom):
+#   {"<tmdb_id>": {"imdb_id": "tt…",
+#                  "ratings": {"imdb": "8.8", "rotten_tomatoes": "87%",
+#                              "metacritic": "74"},
+#                  "rated": "PG-13", "runtime": "148 min",
+#                  "awards": "Won 4 Oscars…", "boxoffice": "$292,587,330",
+#                  "fetched_at": "<iso8601 UTC>"},
+#    ...}
+#
+# BINDING HAZARD: ONLINE_CACHE_PATH / OMDB_CACHE_DIR are module-level so a test can
+# monkeypatch them to a temp path and never touch the real repo-root mvonline.json
+# or the real ~/.mediavault cache — same discipline as MVTOKENS_PATH / TMDB_CACHE_DIR.
+# ===========================================================================
+
+# Repo-root online-metadata cache (gitignored). Sits beside main.py so it is found
+# regardless of CWD, mirroring mvcommon.MVTOKENS_PATH.
+ONLINE_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mvonline.json")
+
+# Raw OMDb responses cached on disk (keyed by url+params) so a re-run is cheap —
+# a sibling of TMDB_CACHE_DIR under the per-user state dir.
+OMDB_CACHE_DIR = os.path.join(mvcommon.MV_STATE_DIR, "cache", "omdb")
+OMDB_API_ROOT = "https://www.omdbapi.com/"
+
+# How long a cached online-metadata entry is considered FRESH. refresh_online
+# skips an entry fetched within this window unless --force is given (ratings/awards
+# drift slowly; re-fetching daily would waste the OMDb quota).
+ONLINE_FRESH_DAYS = 14
+
+# OMDb's three rating Source names -> our stable, compact keys.
+_OMDB_RATING_SOURCES = {
+    "Internet Movie Database": "imdb",
+    "Rotten Tomatoes": "rotten_tomatoes",
+    "Metacritic": "metacritic",
+}
+
+
+def online_cache_load():
+    """Load mvonline.json -> dict keyed by str(tmdb_id). {} when absent/malformed.
+
+    Read fresh each call (the file is tiny) so a refresh_online write is visible to
+    the very next tmdb_detail without a cache-clear dance — same no-in-memory-cache
+    choice as the token store. A malformed file warns to stderr and degrades to {}
+    so a corrupt cache never crashes the dossier or the refresh."""
+    if not os.path.exists(ONLINE_CACHE_PATH):
+        return {}
+    try:
+        with open(ONLINE_CACHE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(
+            f"⚠️  mvonline.json is malformed and will be ignored "
+            f"(online ratings cache reset). Error: {e}",
+            file=sys.stderr,
+        )
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def online_cache_get(tmdb_id):
+    """The cached online-metadata dict for a tmdb_id, or None when not cached.
+
+    The key is always str(tmdb_id) so an int (TMDB's native type) and a stored
+    string id resolve to the same entry. A non-dict stored value -> None."""
+    if tmdb_id is None:
+        return None
+    entry = online_cache_load().get(str(tmdb_id))
+    return entry if isinstance(entry, dict) else None
+
+
+def online_cache_set(tmdb_id, data):
+    """Upsert ``data`` under str(tmdb_id) and atomically persist mvonline.json.
+
+    Atomic write (tempfile + os.replace, mirroring mvcommon._save_tokens) so a crash
+    mid-write can never leave a half-written cache. Loads the current cache, merges
+    the one key, and rewrites — refresh_online writes one title at a time so the
+    cache is durable after every title (an interrupted run keeps everything fetched
+    so far)."""
+    cache = online_cache_load()
+    cache[str(tmdb_id)] = data
+    path = ONLINE_CACHE_PATH
+    dir_name = os.path.dirname(path) or "."
+    os.makedirs(dir_name, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tf:
+            json.dump(cache, tf, indent=2)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _online_entry_is_fresh(entry, now=None):
+    """True iff a cached online entry was fetched within ONLINE_FRESH_DAYS.
+
+    A missing/unparseable fetched_at -> NOT fresh (re-fetch), so a legacy or
+    hand-edited entry without a timestamp is refreshed rather than pinned stale.
+    Uses mvcommon's iso parser + UTC clock so a naive timestamp never raises on a
+    tz-mismatch."""
+    if not isinstance(entry, dict):
+        return False
+    fetched = mvcommon._parse_iso(entry.get("fetched_at"))
+    if fetched is None:
+        return False
+    now = now or mvcommon._now_utc()
+    return (now - fetched) <= timedelta(days=ONLINE_FRESH_DAYS)
+
+
+def _omdb_cache_key(params):
+    """Stable filename for a cached OMDb GET (sha1 of sorted params, MINUS the
+    apikey so the cache file never embeds the secret and survives a key rotation)."""
+    safe = {k: v for k, v in (params or {}).items() if k != "apikey"}
+    raw = "&".join(f"{k}={safe[k]}" for k in sorted(safe))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest() + ".json"
+
+
+def _omdb_get(params, api_key):
+    """GET omdbapi.com with ``params`` (+ the apikey) -> parsed JSON dict, or None.
+
+    NEVER raises: a network error, a non-200, a JSON-decode failure, or an OMDb
+    ``{"Response":"False"}`` (e.g. "Movie not found!") all return None so the caller
+    skips that title rather than crashing the whole refresh. Responses are cached on
+    disk under OMDB_CACHE_DIR keyed by the params (apikey excluded) so a re-run is
+    cheap. Mirrors _tmdb_get's cache + degrade idiom exactly."""
+    cache_path = os.path.join(OMDB_CACHE_DIR, _omdb_cache_key(params))
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        pass  # cache miss / unreadable -> live fetch
+    q = dict(params or {})
+    q["apikey"] = api_key
+    try:
+        r = requests.get(OMDB_API_ROOT, params=q, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+    except Exception as e:
+        print(f"   ⚠️  OMDb request failed: {e}")
+        return None
+    if r.status_code != 200:
+        print(f"   ⚠️  OMDb returned status {r.status_code}")
+        return None
+    try:
+        data = r.json()
+    except Exception as e:
+        print(f"   ⚠️  OMDb response was not valid JSON: {e}")
+        return None
+    # OMDb signals "no such title" with Response:"False" (HTTP 200). Treat as a miss
+    # — do NOT cache it, so adding the imdb_id later re-queries instead of pinning
+    # the not-found.
+    if isinstance(data, dict) and str(data.get("Response", "")).lower() == "false":
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        os.makedirs(OMDB_CACHE_DIR, exist_ok=True)
+        with open(cache_path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except OSError:
+        pass  # caching is best-effort
+    return data
+
+
+def _omdb_parse_ratings(payload):
+    """Map an OMDb payload's ``Ratings[]`` to {imdb, rotten_tomatoes, metacritic}.
+
+    OMDb returns ``Ratings: [{"Source": "...", "Value": "..."}]`` with the three
+    Source names in _OMDB_RATING_SOURCES. Values are NORMALIZED to the compact dossier
+    form: IMDb '8.8/10' -> '8.8', Metacritic '74/100' -> '74', Rotten Tomatoes keeps
+    its '87%' (the contract shape: {"imdb":"8.8","rotten_tomatoes":"87%",
+    "metacritic":"74"}). Only the recognised sources are kept, and only with a
+    non-empty/non-"N/A" Value. Returns a dict with 0–3 keys (omitting sources OMDb did
+    not provide)."""
+    out = {}
+    for r in (payload or {}).get("Ratings") or []:
+        if not isinstance(r, dict):
+            continue
+        key = _OMDB_RATING_SOURCES.get(r.get("Source"))
+        if not key:
+            continue
+        val = _omdb_clean(r.get("Value"))
+        if not val:
+            continue
+        # Strip the "/N" denominator for the score-style sources (IMDb x/10,
+        # Metacritic x/100); RT is a "%" and is kept verbatim.
+        if key in ("imdb", "metacritic") and "/" in val:
+            val = val.split("/", 1)[0].strip()
+        out[key] = val
+    return out
+
+
+def _omdb_clean(value):
+    """Trim an OMDb scalar to a useful string, or "" for missing/"N/A".
+
+    OMDb fills unknown fields with the literal string "N/A"; we drop those so the
+    dossier omits a field rather than showing "N/A"."""
+    if not isinstance(value, str):
+        return ""
+    v = value.strip()
+    return "" if v.upper() == "N/A" else v
+
+
+def omdb_fetch(imdb_id=None, title=None, year=None):
+    """Fetch online metadata for one title from OMDb -> a dict, or None on failure.
+
+    Looks up by ``imdb_id`` (``?i=tt…``, preferred — exact, no ambiguity) when given,
+    else by ``title`` (+ optional ``year``) (``?t=&y=``). Returns:
+        {"imdb_id": "tt…"|"",            # OMDb's imdbID echo (or "")
+         "ratings": {"imdb": "8.8", "rotten_tomatoes": "87%", "metacritic": "74"},
+         "rated": "PG-13", "runtime": "148 min",
+         "awards": "Won 4 Oscars…", "boxoffice": "$292,587,330"}
+    (any field OMDb did not provide is "" / the ratings sub-keys are omitted).
+
+    NEVER raises and NEVER hits the network on a bad call: with neither imdb_id nor
+    title it returns None immediately; any OMDb/parse failure (via _omdb_get) returns
+    None. Does NOT add fetched_at — the caller (online_cache_set) stamps that so the
+    timestamp reflects when it was STORED."""
+    api_key = mvcommon.omdb_api_key()
+    if not api_key:
+        return None
+    if imdb_id:
+        params = {"i": imdb_id}
+    elif title:
+        params = {"t": title}
+        if year:
+            params["y"] = str(year)
+    else:
+        return None
+
+    data = _omdb_get(params, api_key)
+    if not isinstance(data, dict):
+        return None
+    return {
+        "imdb_id": _omdb_clean(data.get("imdbID")),
+        "ratings": _omdb_parse_ratings(data),
+        "rated": _omdb_clean(data.get("Rated")),
+        "runtime": _omdb_clean(data.get("Runtime")),
+        "awards": _omdb_clean(data.get("Awards")),
+        "boxoffice": _omdb_clean(data.get("BoxOffice")),
+    }
+
+
 def _tmdb_image_base(api_key):
     """Live images.secure_base_url from /configuration, or the documented
     fallback. Cached like any other GET, so it costs one call per process at most."""
@@ -1324,6 +1585,30 @@ def _episode_thumb_name(filename):
     if not filename:
         return None
     return os.path.splitext(filename)[0] + "-thumb.jpg"
+
+
+def _season_episode_meta(season_details):
+    """Map episode_number -> {"overview", "name"} from a SEASON DETAILS payload
+    (GET /3/tv/{id}/season/{n}), or {} when the payload has no usable episodes.
+
+    The season-details endpoint returns `episodes[]`, each carrying `episode_number`,
+    `name` (the episode title, e.g. "Secrets") and `overview` (the episode synopsis).
+    This is the ONE-call-per-season source enrich uses to backfill per-episode
+    metadata.overview / metadata.episode_title.
+
+    Defensive: a None/empty payload, a missing/empty `episodes` list, or a member
+    with no integer episode_number all degrade to an empty/partial map so a failed
+    season-details fetch never raises (the caller simply writes nothing for that
+    season). Stores only the two fields enrich persists — overview + name."""
+    out = {}
+    for ep in (season_details or {}).get("episodes") or []:
+        if not isinstance(ep, dict):
+            continue
+        num = ep.get("episode_number")
+        if not isinstance(num, int):
+            continue
+        out[num] = {"overview": ep.get("overview") or "", "name": ep.get("name") or ""}
+    return out
 
 
 def _show_folder_of(season_folders):
@@ -1785,6 +2070,107 @@ def _resolve_unit_by_id(unit, tmdb_id, api_key):
     }
 
 
+# EXA web-search fallback for enrich's TMDB resolution (IMP-E16/D5). When the TMDB
+# title-search MISSES a concatenated/regional title (e.g. 'vaaranamaayiram'), ONE EXA
+# search constrained to themoviedb.org returns the right detail page and the tmdb_id
+# extracts cleanly from its URL. Cheap + rare: numResults=5, ONE POST, fired ONLY when
+# the API search already failed — never on the happy path.
+EXA_RESOLVE_NUM_RESULTS = 5
+# Raw EXA-resolve responses cached on disk (keyed by the query, NOT the api key) so a
+# re-run is idempotent + cheap — a sibling of TMDB_CACHE_DIR / OMDB_CACHE_DIR under the
+# per-user state dir. The key never embeds the secret (mirrors _tmdb_get's cache).
+EXA_CACHE_DIR = os.path.join(mvcommon.MV_STATE_DIR, "cache", "exa")
+# A themoviedb.org detail URL carries the kind + id: …/movie/1003159 or …/tv/60574.
+_TMDB_URL_RE = re.compile(r"themoviedb\.org/(movie|tv)/(\d+)")
+
+
+def _exa_resolve_tmdb_id(title, year, kind):
+    """Resolve a tmdb_id for a title the TMDB API title-search MISSED, via an EXA web
+    search constrained to themoviedb.org. Returns the tmdb_id (int) or None.
+
+    POSTs ONE EXA query ("<title> <year> site:themoviedb.org", numResults=5,
+    includeDomains=[themoviedb.org]) and extracts (url_kind, tmdb_id) from each result
+    URL via _TMDB_URL_RE. The unit kind picks the preferred URL kind — "movie" -> a
+    /movie/ URL; a show/anime -> a /tv/ URL — and the FIRST same-kind hit wins. If no
+    URL matches the wanted kind, the FIRST extracted id of the OTHER kind is accepted
+    (best-effort). Returns None when there is no key/title, the request fails, or no
+    URL yields an id.
+
+    NEVER raises (mirrors exa_search_trivia: a missing key / network error / non-200 /
+    bad payload all yield None) so the caller simply falls through to the existing
+    ambiguous/none manual-review handling. The raw EXA response is cached on disk under
+    EXA_CACHE_DIR keyed by the query so repeated runs are idempotent. The caller is
+    responsible for the --no-web gate; this is also self-defensive (None without a key).
+
+    NOTE: the returned id is a best-effort CANDIDATE — the caller MUST validate it via
+    _resolve_unit_by_id (a real TMDB by-id details fetch) before writing anything, so an
+    EXA mismatch is caught and never written as a guess (locked decision #6)."""
+    api_key = mvcommon.exa_api_key()
+    if not api_key or not title:
+        return None
+    year_str = f" {year}" if year else ""
+    query = f"{title}{year_str} site:themoviedb.org"
+    body = {
+        "query": query,
+        "numResults": EXA_RESOLVE_NUM_RESULTS,
+        "includeDomains": ["themoviedb.org"],
+    }
+
+    # Disk cache (keyed by the query) — idempotent re-runs, the _tmdb_get idiom.
+    cache_path = os.path.join(EXA_CACHE_DIR, _tmdb_cache_key(EXA_API_ROOT, {"query": query}))
+    data = None
+    try:
+        with open(cache_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        pass  # cache miss / unreadable -> fall through to a live fetch
+
+    if data is None:
+        try:
+            r = requests.post(
+                EXA_API_ROOT,
+                headers={"x-api-key": api_key, "Content-Type": "application/json"},
+                json=body,
+                timeout=30,
+            )
+        except Exception as e:
+            print(f"   ⚠️  EXA resolve request failed: {e}")
+            return None
+        if r.status_code != 200:
+            print(f"   ⚠️  EXA resolve returned status {r.status_code}")
+            return None
+        try:
+            data = r.json()
+        except Exception as e:
+            print(f"   ⚠️  EXA resolve response was not valid JSON: {e}")
+            return None
+        try:
+            os.makedirs(EXA_CACHE_DIR, exist_ok=True)
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+        except OSError:
+            pass  # caching is best-effort; a write failure must not break enrich
+
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        return None
+
+    want_kind = "movie" if kind == "movie" else "tv"  # show/anime -> tv
+    fallback_id = None
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        m = _TMDB_URL_RE.search(str(item.get("url") or ""))
+        if not m:
+            continue
+        url_kind, tmdb_id = m.group(1), int(m.group(2))
+        if url_kind == want_kind:
+            return tmdb_id  # first same-kind hit wins (the strong signal)
+        if fallback_id is None:
+            fallback_id = tmdb_id  # remember the first other-kind id as a fallback
+    return fallback_id
+
+
 def _write_nfo(folder, kind, title, year, tmdb_id, overview="", vote_average=None):
     """Write a Kodi/Jellyfin-compatible NFO file into *folder*.
 
@@ -1828,11 +2214,18 @@ def cmd_enrich_metadata(arg=None, *flags):
     """Local-first TMDB backfill (SHOW-CENTRIC, IMP-E3/U3/D17 — Phase 5 step 5.4).
 
     Usage: enrich_metadata [id_or_prefix] [--apply] [--library movies|series|anime]
-            [--nfo]
+            [--nfo] [--no-web]
     DRY-RUN by default (prints what WOULD happen, writes nothing). --apply performs
     it. --nfo (only honoured when combined with --apply) writes a Kodi/Jellyfin-
     compatible movie.nfo / tvshow.nfo alongside the poster on a confident match
-    (IMP-U3 down-payment, step 5.8). Any other flag is ignored.
+    (IMP-U3 down-payment, step 5.8).
+
+    --no-web disables the EXA web-search fallback (IMP-E16/D5). By default, when an
+    EXA key is configured, a title the TMDB API title-search MISSES (none/ambiguous)
+    is given ONE more chance: an EXA search constrained to themoviedb.org resolves a
+    tmdb_id, which is then VALIDATED by a real by-id details fetch before anything is
+    written (confident-only — never an unvalidated guess). --no-web keeps the pure
+    TMDB-API behaviour. Any other flag is ignored.
     """
     # Fold a flag-shaped positional (e.g. a direct `cmd_enrich_metadata("--apply")`
     # with no id) into the flags list so --apply/--library are honoured no matter
@@ -1846,6 +2239,7 @@ def cmd_enrich_metadata(arg=None, *flags):
 
     apply = "--apply" in flist
     write_nfo = "--nfo" in flist
+    no_web = "--no-web" in flist
     library_filter = None
     if "--library" in flist:
         i = flist.index("--library")
@@ -1858,6 +2252,12 @@ def cmd_enrich_metadata(arg=None, *flags):
               "(see mvconfig.example.json). Nothing to do.")
         return
 
+    # EXA web-search fallback (IMP-E16/D5): when the TMDB title-search misses a
+    # concatenated/regional title, ONE EXA search constrained to themoviedb.org can
+    # auto-resolve it (the found id is by-id VALIDATED before use). ON by default when
+    # an EXA key is configured; --no-web disables it (pure TMDB-API behaviour).
+    web_fallback = (not no_web) and bool(mvcommon.exa_api_key())
+
     library = load_library()
     units = _gather_enrich_units(library, id_or_prefix=id_or_prefix, library_filter=library_filter)
 
@@ -1867,6 +2267,10 @@ def cmd_enrich_metadata(arg=None, *flags):
         print(f"   > library filter: {library_filter}")
     if id_or_prefix:
         print(f"   > scope: ids == or startswith '{id_or_prefix}'")
+    if no_web:
+        print("   > --no-web: EXA web-search fallback DISABLED (pure TMDB API).")
+    elif web_fallback:
+        print("   > web-search fallback ON (EXA) for titles the API search misses.")
     print(f"   > {len(units)} show/movie unit(s) to consider.\n")
 
     image_base = None  # resolved lazily on the first confident match (one call max)
@@ -1887,6 +2291,20 @@ def cmd_enrich_metadata(arg=None, *flags):
                 res = _resolve_unit_by_id(unit, preset_id, api_key)
             else:
                 res = _resolve_unit(unit, api_key)
+                # WATERFALL step (iii) — the TMDB title-search MISSED (none/ambiguous):
+                # give the title ONE more chance via an EXA web search constrained to
+                # themoviedb.org. A found id is VALIDATED by a real by-id details fetch
+                # (confident result w/ real title/year/poster); ONLY a validated id is
+                # used. EXA finding nothing — OR a failed by-id validation — falls
+                # through to the EXISTING none/ambiguous manual handling, unchanged.
+                # CONFIDENT-ONLY: an unvalidated guess is NEVER written.
+                if web_fallback and res["status"] in ("none", "ambiguous"):
+                    exa_id = _exa_resolve_tmdb_id(unit["title"], unit["year"], unit["kind"])
+                    if exa_id is not None:
+                        by_id = _resolve_unit_by_id(unit, exa_id, api_key)
+                        if by_id.get("status") == "confident":
+                            print(f"   ↳ {label}: resolved via web search: tmdb_id={exa_id}")
+                            res = by_id
         except Exception as e:  # defensive — resolvers already swallow, but never crash the run
             print(f"⏭️  {label}: TMDB error, skipping ({e}).")
             n_skipped += 1
@@ -1939,16 +2357,22 @@ def cmd_enrich_metadata(arg=None, *flags):
             continue
 
         # ---- APPLY: write tmdb_id + real title/year (additive), stamp, download ----
-        # 1) tmdb_id + real TITLE/YEAR on every leaf + season_map of the unit. The
-        #    cards read metadata.title (title.js: a non-id title auto-shows), so the
-        #    real TMDB title is filled here. ADDITIVE + IDEMPOTENT: title is replaced
-        #    only when it is still id-shaped/blank (placeholder) — a human-curated
-        #    title that differs from both the id AND the TMDB title is left intact.
-        #    Re-running just rewrites the same TMDB title (no-op). year is filled when
-        #    absent and refreshed when the TMDB year is known (the id year is often a
-        #    season's air year, so the matched show year is preferred).
+        # 1) tmdb_id + real TITLE/YEAR (+ synopsis) on every leaf + season_map of the
+        #    unit. The cards read metadata.title (title.js: a non-id title auto-shows),
+        #    so the real TMDB title is filled here. ADDITIVE + IDEMPOTENT: title is
+        #    replaced only when it is still id-shaped/blank (placeholder) — a
+        #    human-curated title that differs from both the id AND the TMDB title is
+        #    left intact. Re-running just rewrites the same TMDB title (no-op). year is
+        #    filled when absent and refreshed when the TMDB year is known (the id year
+        #    is often a season's air year, so the matched show year is preferred).
+        #    overview = the TMDB synopsis (movie/show overview); for a SHOW this SEEDS
+        #    every episode leaf with the show synopsis, which step 5 then refines into
+        #    each episode's OWN synopsis (so an episode whose season-details fetch fails
+        #    still degrades to the show synopsis rather than nothing). Only written when
+        #    TMDB actually has one, so a no-overview match leaves metadata untouched.
         tmdb_title = res.get("title")
         tmdb_year = res.get("year")
+        tmdb_overview = res.get("overview")
         live = load_library()
         for eid in unit["ids"]:
             ent = live.get(eid)
@@ -1963,6 +2387,8 @@ def cmd_enrich_metadata(arg=None, *flags):
                     meta["title"] = tmdb_title
             if tmdb_year is not None:
                 meta["year"] = tmdb_year
+            if tmdb_overview:
+                meta["overview"] = tmdb_overview
         save_library(live)
 
         # 2) stamp the {tmdb-…} token ONCE on the show/movie folder (paths only —
@@ -1981,6 +2407,18 @@ def cmd_enrich_metadata(arg=None, *flags):
         if image_base is None:
             image_base = _tmdb_image_base(api_key)
         n_images += _download_unit_images(unit, res, image_base, folder)
+
+        # 3b) per-episode synopsis + title (SHOWS only) — ONE season-details call per
+        #     season (cached) fills each episode leaf's metadata.overview (episode
+        #     synopsis) + metadata.episode_title (the episode name). Refines the
+        #     show-overview seeded in step 1; a failed season-details call degrades
+        #     gracefully (episode keeps the show synopsis, no crash). Never fetches
+        #     media. NOTE: this ADDS one cached GET /tv/{id}/season/{n} per season; the
+        #     existing per-season-poster + per-episode-still image calls are unchanged
+        #     (so the highest-vote still selection + the LOCAL-wins/error fall-backs all
+        #     stay exactly as before).
+        if unit["kind"] == "show":
+            _apply_episode_overviews(unit, tmdb_id, api_key)
 
         # 4) NFO write — only when --nfo flag is set (IMP-U3 down-payment, step 5.8).
         if write_nfo and folder:
@@ -2010,6 +2448,640 @@ def cmd_enrich_metadata(arg=None, *flags):
           f"ambiguous={len(ambiguous)} skipped={n_skipped}")
     if not apply:
         print("   (dry-run: nothing was written — re-run with --apply to perform it.)")
+
+
+# ===========================================================================
+#   cmd_refresh_online — "refresh online metadata for all in one go" (IMP-E16).
+#
+# Walks the library, dedupes to DISTINCT TITLES (by tmdb_id), resolves each title's
+# imdb_id via TMDB, fetches OMDb (IMDb/RT/Metacritic ratings + Rated/Runtime/Awards/
+# BoxOffice), and writes the result into the gitignored mvonline.json cache that
+# tmdb_detail merges into the hover dossier. NEVER mutates library_*.json — this
+# writes ONLY mvonline.json (+ the on-disk OMDb/TMDB response caches).
+#
+# DEDUPE-BY-TMDB_ID: episodes inherit their SHOW's ratings (OMDb has no per-episode
+# RT/Metacritic), and a show has ONE tmdb_id stamped on every leaf + season_map. So
+# _gather_enrich_units already collapses a show's seasons/episodes into ONE unit;
+# we additionally key by the unit's stored tmdb_id so two units that somehow share
+# a tmdb_id are still fetched once. Movies are one unit each. Result: one OMDb call
+# per distinct title, never one per episode.
+#
+# FRESHNESS: an entry fetched within ONLINE_FRESH_DAYS (~14d) is skipped (ratings
+# drift slowly) unless --force re-fetches it.
+# ===========================================================================
+
+def _resolve_imdb_id(tmdb_id, kind, api_key):
+    """The IMDb id ('tt…') for a TMDB id, via the SAME endpoints tmdb_detail uses.
+
+    * movie (kind 'movie')  -> GET /3/movie/{id}, read ``imdb_id``.
+    * tv/show (anything else)-> GET /3/tv/{id}/external_ids, read ``imdb_id``.
+    Both calls funnel through the cached, None-on-failure _tmdb_get, so a network/
+    non-200/bad-JSON failure just yields None (the caller reports no-imdb and skips).
+    Returns a non-empty 'tt…' string or None."""
+    if kind == "movie":
+        data = _tmdb_get(f"{TMDB_API_ROOT}/movie/{tmdb_id}", {}, api_key)
+    else:
+        data = _tmdb_get(f"{TMDB_API_ROOT}/tv/{tmdb_id}/external_ids", {}, api_key)
+    if isinstance(data, dict):
+        imdb_id = data.get("imdb_id")
+        if isinstance(imdb_id, str) and imdb_id.strip():
+            return imdb_id.strip()
+    return None
+
+
+def cmd_refresh_online(arg=None, *flags):
+    """Refresh online metadata (OMDb ratings/awards/box-office) for ALL titles.
+
+    Usage: refresh_online [id_or_prefix] [--force] [--library movies|series|anime]
+
+    Fetches IMDb/Rotten Tomatoes/Metacritic ratings + Rated/Runtime/Awards/BoxOffice
+    for every DISTINCT title (deduped by tmdb_id; episodes inherit the show's
+    ratings), caches them in mvonline.json, and the hover dossier reads that cache.
+    Skips a title cached within ~14 days unless --force. NEVER writes library_*.json.
+
+    Optional positional `id_or_prefix` restricts to ids ==/startswith it; --library
+    restricts by category. Any other flag is ignored."""
+    # Fold a flag-shaped positional (e.g. refresh_online("--force")) into the flags.
+    flist = list(flags)
+    if arg and str(arg).startswith("--"):
+        flist = [arg] + flist
+        id_or_prefix = None
+    else:
+        id_or_prefix = arg or None
+
+    force = "--force" in flist
+    library_filter = None
+    if "--library" in flist:
+        i = flist.index("--library")
+        if i + 1 < len(flist):
+            library_filter = flist[i + 1].lower()
+
+    if not mvcommon.omdb_api_key():
+        print("❌ No OMDb API key configured. Set omdb.api_key in mvconfig.json "
+              "(see mvconfig.example.json). Nothing to do.")
+        return
+    api_key = mvcommon.tmdb_api_key()
+    if not api_key:
+        print("❌ No TMDB API key configured (needed to resolve each title's IMDb "
+              "id). Set tmdb.api_key in mvconfig.json. Nothing to do.")
+        return
+
+    library = load_library()
+    units = _gather_enrich_units(library, id_or_prefix=id_or_prefix, library_filter=library_filter)
+
+    # Dedupe to DISTINCT tmdb_ids (insertion-ordered). A unit with no stored tmdb_id
+    # has not been enriched yet -> counted as no-tmdb and skipped (refresh reads the
+    # tmdb_id that enrich stamps; it never searches by title here).
+    by_tmdb = {}      # tmdb_id (str) -> {"unit": unit, "kind": "movie"|"tv"}
+    no_tmdb = 0
+    for unit in units:
+        tmdb_id = _unit_preset_tmdb_id(unit, library)
+        if not tmdb_id:
+            no_tmdb += 1
+            continue
+        key = str(tmdb_id)
+        if key not in by_tmdb:
+            by_tmdb[key] = {
+                "unit": unit,
+                "kind": "movie" if unit["kind"] == "movie" else "tv",
+            }
+
+    print("=== REFRESH ONLINE METADATA (OMDb) ===")
+    if library_filter:
+        print(f"   > library filter: {library_filter}")
+    if id_or_prefix:
+        print(f"   > scope: ids == or startswith '{id_or_prefix}'")
+    print(f"   > {len(by_tmdb)} distinct title(s) with a tmdb_id"
+          f"{f', {no_tmdb} without a tmdb_id (run enrich_metadata first)' if no_tmdb else ''}.")
+    if force:
+        print("   > --force: re-fetching even fresh entries.")
+    print()
+
+    n_fetched = n_cached = n_no_imdb = n_failed = 0
+    total = len(by_tmdb)
+
+    for idx, (key, info) in enumerate(by_tmdb.items(), start=1):
+        unit = info["unit"]
+        label = unit.get("title") or unit["key"]
+        prefix = f"[{idx}/{total}] {label} ({key})"
+
+        # Freshness skip (unless --force).
+        cached = online_cache_get(key)
+        if not force and _online_entry_is_fresh(cached):
+            n_cached += 1
+            print(f"{prefix} -> cached (fresh), skipping.")
+            continue
+
+        # Resolve the imdb_id via TMDB, then fetch OMDb by id.
+        imdb_id = _resolve_imdb_id(key, info["kind"], api_key)
+        data = omdb_fetch(imdb_id=imdb_id) if imdb_id else None
+        if data is None and not imdb_id:
+            n_no_imdb += 1
+            print(f"{prefix} -> no IMDb id from TMDB, skipping.")
+            continue
+        if data is None:
+            n_failed += 1
+            print(f"{prefix} -> OMDb fetch failed ({imdb_id}), skipping.")
+            continue
+
+        # Stamp imdb_id (prefer OMDb's echo, else the resolved one) + fetched_at, then
+        # persist. This writes ONLY mvonline.json — the library is never touched.
+        data["imdb_id"] = data.get("imdb_id") or imdb_id or ""
+        data["fetched_at"] = mvcommon._now_utc().isoformat()
+        online_cache_set(key, data)
+        n_fetched += 1
+        print(f"{prefix} -> {_fmt_ratings(data.get('ratings') or {})}")
+
+    print(f"\n=== DONE === fetched={n_fetched} cached-skip={n_cached} "
+          f"no-imdb={n_no_imdb} failed={n_failed} no-tmdb={no_tmdb}")
+    if not no_tmdb and total == 0:
+        print("   (nothing to refresh — the matched scope had no titles with a tmdb_id.)")
+
+
+def _fmt_ratings(ratings):
+    """Compact one-line ratings summary for the live progress print, e.g.
+    'IMDb 8.8 · RT 87% · MC 74'. '(no ratings)' when OMDb returned none."""
+    parts = []
+    if ratings.get("imdb"):
+        parts.append(f"IMDb {ratings['imdb']}")
+    if ratings.get("rotten_tomatoes"):
+        parts.append(f"RT {ratings['rotten_tomatoes']}")
+    if ratings.get("metacritic"):
+        parts.append(f"MC {ratings['metacritic']}")
+    return " · ".join(parts) if parts else "(no ratings)"
+
+
+# ===========================================================================
+#   TRIVIA BACKFILL — EXA web-search + GROQ distillation + the mvextra.json cache
+#   (IMP-E16/A5).
+#
+# The hover DOSSIER (GET /api/detail) can show a few short, genuinely-interesting
+# behind-the-scenes facts per title, each tagged with its [source]. The pipeline:
+#   1. EXA (exa_search_trivia) web-searches "<title> <year> movie trivia behind the
+#      scenes facts" and returns up to 4 page snippets, each with its source URL.
+#   2. GROQ (groq_distill_trivia) reads those source-tagged snippets and distills
+#      2-4 SHORT, standalone facts as STRICT JSON, attributing each to the most
+#      likely source host (IMDb / ScreenRant / Reddit / Wikipedia / …).
+#   3. fetch_trivia (cmd_fetch_trivia) runs that per DISTINCT title and caches the
+#      result in the gitignored mvextra.json keyed by str(tmdb_id).
+#   4. tmdb_detail MERGES the cached facts into the dossier with NO live call, so
+#      opening the hover preview stays fast and never blocks on the network.
+#
+# COST MODEL — populated ONCE, read MANY times. EXA + GROQ are cheap; this is a
+# one-time cached backfill, so numResults is kept small (4) and max_tokens modest
+# (~300) to stay well under budget for a whole-library pass.
+#
+# ACCURACY: these facts are FLAVOR — they need not be perfectly accurate, but they
+# are kept plausible and always sourced (every fact carries a `source`).
+#
+# mvextra.json schema (atomic write: tempfile + os.replace — the mvonline.json idiom):
+#   {"<tmdb_id>": {"trivia": [{"text": "...", "source": "IMDb"}, ...],
+#                  "fetched_at": "<iso8601 UTC>"},
+#    ...}
+#
+# BINDING HAZARD: EXTRA_CACHE_PATH is module-level so a test can monkeypatch it to a
+# temp path and never touch the real repo-root mvextra.json — same discipline as
+# ONLINE_CACHE_PATH / MVTOKENS_PATH (the sandbox fixture redirects it).
+# ===========================================================================
+
+# Repo-root trivia cache (gitignored). Sits beside main.py so it is found
+# regardless of CWD, mirroring ONLINE_CACHE_PATH.
+EXTRA_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mvextra.json")
+
+EXA_API_ROOT = "https://api.exa.ai/search"
+GROQ_API_ROOT = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "llama-3.3-70b-versatile"
+# GROQ sits behind Cloudflare, which 403s (error 1010) a default python-requests
+# User-Agent. A browser-ish UA is REQUIRED for every GROQ call.
+GROQ_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MediaVault/1.0"
+
+# Cost knobs — kept small/modest because this is a one-time cached backfill.
+EXA_NUM_RESULTS = 4
+GROQ_MAX_TOKENS = 300
+# Trivia essentially never drifts; a 30-day freshness window means a re-run skips
+# already-fetched titles unless --force.
+TRIVIA_FRESH_DAYS = 30
+# Be polite to EXA/GROQ between fetched titles in the bulk loop (seconds).
+TRIVIA_THROTTLE_SECONDS = 0.4
+
+# Common trivia-source hosts -> clean display names. A known host (or any subdomain
+# of one) maps to the name; an unknown host degrades to its bare domain.
+_TRIVIA_SOURCE_NAMES = {
+    "imdb.com": "IMDb",
+    "screenrant.com": "ScreenRant",
+    "reddit.com": "Reddit",
+    "wikipedia.org": "Wikipedia",
+}
+
+
+def _trivia_host_to_source(url):
+    """Map a result URL (or bare host) to a clean trivia source name.
+
+    imdb.com -> 'IMDb', screenrant.com -> 'ScreenRant', reddit.com -> 'Reddit',
+    en.wikipedia.org -> 'Wikipedia' (a subdomain of a known host matches too). An
+    unknown host -> its bare domain (leading 'www.' stripped); an empty/unparseable
+    value -> 'web'."""
+    if not isinstance(url, str) or not url.strip():
+        return "web"
+    candidate = url.strip()
+    if "://" not in candidate:
+        candidate = "http://" + candidate.lstrip("/")
+    try:
+        host = urlparse(candidate).netloc.lower()
+    except Exception:
+        return "web"
+    # Drop any userinfo@ / :port that slipped into netloc.
+    host = host.split("@")[-1].split(":")[0]
+    if host.startswith("www."):
+        host = host[4:]
+    if not host:
+        return "web"
+    for known, name in _TRIVIA_SOURCE_NAMES.items():
+        if host == known or host.endswith("." + known):
+            return name
+    return host
+
+
+def _normalize_source(value, fallback="web"):
+    """Coerce a GROQ-returned source (a clean name, a bare host, or a full URL) to a
+    clean display source. A value that looks like a host/URL (has a '.' or '/') is
+    mapped through _trivia_host_to_source; an already-clean word (e.g. 'IMDb') is
+    kept verbatim; blank/None -> ``fallback``."""
+    if not isinstance(value, str) or not value.strip():
+        return fallback
+    v = value.strip()
+    if "." in v or "/" in v:
+        return _trivia_host_to_source(v)
+    return v
+
+
+def extra_cache_load():
+    """Load mvextra.json -> dict keyed by str(tmdb_id). {} when absent/malformed.
+
+    Read fresh each call (the file is small) so a fetch_trivia write is visible to
+    the very next tmdb_detail — the same no-in-memory-cache choice as the online /
+    token stores. A malformed file warns to stderr and degrades to {} so a corrupt
+    cache never crashes the dossier or the backfill."""
+    if not os.path.exists(EXTRA_CACHE_PATH):
+        return {}
+    try:
+        with open(EXTRA_CACHE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(
+            f"⚠️  mvextra.json is malformed and will be ignored "
+            f"(trivia cache reset). Error: {e}",
+            file=sys.stderr,
+        )
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def extra_cache_get(tmdb_id):
+    """The cached trivia/extra dict for a tmdb_id, or None when not cached.
+
+    The key is always str(tmdb_id) so an int (TMDB's native type) and a stored
+    string id resolve to the same entry. A non-dict stored value -> None."""
+    if tmdb_id is None:
+        return None
+    entry = extra_cache_load().get(str(tmdb_id))
+    return entry if isinstance(entry, dict) else None
+
+
+def extra_cache_set(tmdb_id, data):
+    """Upsert ``data`` under str(tmdb_id) and atomically persist mvextra.json.
+
+    Atomic write (tempfile + os.replace, mirroring online_cache_set / _save_tokens)
+    so a crash mid-write can never leave a half-written cache. fetch_trivia writes
+    one title at a time, so the cache is durable after every title (an interrupted
+    run keeps everything fetched so far)."""
+    cache = extra_cache_load()
+    cache[str(tmdb_id)] = data
+    path = EXTRA_CACHE_PATH
+    dir_name = os.path.dirname(path) or "."
+    os.makedirs(dir_name, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tf:
+            json.dump(cache, tf, indent=2)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def _trivia_entry_is_fresh(entry, now=None):
+    """True iff a cached trivia entry was fetched within TRIVIA_FRESH_DAYS.
+
+    A missing/unparseable fetched_at -> NOT fresh (re-fetch). Mirrors
+    _online_entry_is_fresh (mvcommon's iso parser + UTC clock so a naive timestamp
+    never raises on a tz-mismatch)."""
+    if not isinstance(entry, dict):
+        return False
+    fetched = mvcommon._parse_iso(entry.get("fetched_at"))
+    if fetched is None:
+        return False
+    now = now or mvcommon._now_utc()
+    return (now - fetched) <= timedelta(days=TRIVIA_FRESH_DAYS)
+
+
+def exa_search_trivia(title, year):
+    """Web-search a title's trivia via EXA -> a list of {title, url, text}, or [].
+
+    POSTs https://api.exa.ai/search with the title+year trivia query and asks for
+    EXA_NUM_RESULTS results, each with up to 800 chars of page text. The result
+    ``url`` host is the SOURCE the distiller attributes facts to (imdb-trivia /
+    ScreenRant / Reddit / Wikipedia / …). NEVER raises: a missing key, a network
+    error, a non-200, or a bad/empty payload all return [] so the caller simply
+    reports 'no web results' and moves on."""
+    api_key = mvcommon.exa_api_key()
+    if not api_key or not title:
+        return []
+    year_str = f" {year}" if year else ""
+    body = {
+        "query": f"{title}{year_str} movie trivia behind the scenes facts",
+        "numResults": EXA_NUM_RESULTS,
+        "contents": {"text": {"maxCharacters": 800}},
+    }
+    try:
+        r = requests.post(
+            EXA_API_ROOT,
+            headers={"x-api-key": api_key, "Content-Type": "application/json"},
+            json=body,
+            timeout=30,
+        )
+    except Exception as e:
+        print(f"   ⚠️  EXA request failed: {e}")
+        return []
+    if r.status_code != 200:
+        print(f"   ⚠️  EXA returned status {r.status_code}")
+        return []
+    try:
+        data = r.json()
+    except Exception as e:
+        print(f"   ⚠️  EXA response was not valid JSON: {e}")
+        return []
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        return []
+    out = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        out.append({
+            "title": item.get("title") or "",
+            "url": item.get("url") or "",
+            "text": item.get("text") or "",
+        })
+    return out
+
+
+def _groq_chat(messages, api_key, max_tokens=GROQ_MAX_TOKENS):
+    """POST a chat-completion to GROQ -> the assistant message content string, or
+    None on any failure. The single requests seam groq_distill_trivia funnels
+    through (tests patch this to inject a canned reply).
+
+    The Mozilla User-Agent is REQUIRED (see GROQ_USER_AGENT). NEVER raises — a
+    network error / non-200 / bad JSON / a reply missing choices all return None."""
+    try:
+        r = requests.post(
+            GROQ_API_ROOT,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": GROQ_USER_AGENT,
+            },
+            json={"model": GROQ_MODEL, "messages": messages, "max_tokens": max_tokens},
+            timeout=60,
+        )
+    except Exception as e:
+        print(f"   ⚠️  GROQ request failed: {e}")
+        return None
+    if r.status_code != 200:
+        print(f"   ⚠️  GROQ returned status {r.status_code}")
+        return None
+    try:
+        data = r.json()
+        content = data["choices"][0]["message"]["content"]
+    except (ValueError, KeyError, IndexError, TypeError) as e:
+        print(f"   ⚠️  GROQ response was not in the expected shape: {e}")
+        return None
+    return content if isinstance(content, str) else None
+
+
+def _build_trivia_prompt(title, year, snippets):
+    """Build the GROQ chat messages: a strict-JSON system instruction + a user
+    message carrying each EXA snippet tagged with its source host, asking for 2-4
+    short, sourced, standalone facts attributed to the most likely provided source."""
+    year_str = f" ({year})" if year else ""
+    lines = []
+    for s in snippets:
+        src = _trivia_host_to_source(s.get("url"))
+        text = " ".join((s.get("text") or "").split())
+        if text:
+            lines.append(f"[source: {src}] {text[:800]}")
+    context = "\n\n".join(lines)
+    system = (
+        "You are a film/TV trivia curator. From the provided web snippets, extract "
+        "2 to 4 SHORT, genuinely interesting, standalone trivia facts about the given "
+        "title. Each fact must be at most about 160 characters, understandable on its "
+        "own, and attributed to the most likely source among the snippet sources (use "
+        "a clean name like IMDb, ScreenRant, Reddit, or Wikipedia). Return STRICT JSON "
+        'ONLY: a JSON array of objects [{"text": "...", "source": "IMDb"}]. No prose, '
+        "no markdown, no code fences."
+    )
+    user = (
+        f"Title: {title}{year_str}\n\n"
+        f"Web snippets (each tagged with its source):\n{context}\n\n"
+        "Return the JSON array now."
+    )
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
+
+
+def groq_distill_trivia(title, year, snippets):
+    """Distill EXA trivia snippets into 2-4 short, source-tagged facts via GROQ.
+
+    Returns a list of {"text": "...", "source": "IMDb"} (capped at 4), or [] on any
+    failure (no key, no snippets, a GROQ error, or an unparseable reply with no
+    salvageable lines). NEVER raises. The reply is parsed defensively by
+    _parse_trivia_facts: the first JSON array of {text, source} objects is used; if
+    that fails, the reply is split into lines each tagged source='web' (the
+    documented graceful fallback). Every returned fact carries a non-empty source."""
+    if not snippets:
+        return []
+    api_key = mvcommon.groq_api_key()
+    if not api_key:
+        return []
+    content = _groq_chat(_build_trivia_prompt(title, year, snippets), api_key)
+    if not content:
+        return []
+    return _parse_trivia_facts(content)[:4]
+
+
+def _parse_trivia_facts(content):
+    """Parse a GROQ reply string into a list of {text, source} facts.
+
+    Primary path: extract the FIRST JSON array (``[ ... ]``) in the reply and read
+    {text, source} objects from it, normalizing each source to a clean name. If
+    there is no array, it fails to parse, or it yields no usable fact, fall back to
+    splitting the reply into lines (stripping bullet/number markers), each tagged
+    source='web'. Always returns a list (possibly empty); each fact has a non-empty
+    text (clamped to 240 chars) and a non-empty source."""
+    facts = []
+    m = re.search(r"\[.*\]", content, re.DOTALL)
+    if m:
+        try:
+            arr = json.loads(m.group(0))
+        except (json.JSONDecodeError, ValueError):
+            arr = None
+        if isinstance(arr, list):
+            for item in arr:
+                if not isinstance(item, dict):
+                    continue
+                text = item.get("text")
+                if not isinstance(text, str) or not text.strip():
+                    continue
+                facts.append({
+                    "text": _clamp_trivia(text),
+                    "source": _normalize_source(item.get("source")),
+                })
+            if facts:
+                return facts
+    # Fallback: line-split, tag source='web'.
+    for raw in content.splitlines():
+        line = raw.strip().lstrip("-*•").strip()
+        line = re.sub(r"^\d+[.)]\s*", "", line)  # drop "1. " / "2) " list markers
+        if len(line) < 12:
+            continue
+        facts.append({"text": _clamp_trivia(line), "source": "web"})
+    return facts
+
+
+def _clamp_trivia(text, limit=240):
+    """Trim a fact to a sane stored length (the prompt asks for ~160; this is a hard
+    safety cap). Collapses inner whitespace; appends '…' only when truncated."""
+    t = " ".join(text.split())
+    return t if len(t) <= limit else t[: limit - 1].rstrip() + "…"
+
+
+# COST NOTE: EXA (4 results) + GROQ (~300 tokens) per title is cheap; this is a
+# one-time cached backfill (the freshness window means a re-run mostly skips), so a
+# whole-library pass stays well under budget.
+def cmd_fetch_trivia(arg=None, *flags):
+    """Fetch + cache 2-4 short, sourced TRIVIA facts per title (EXA + GROQ).
+
+    Usage: fetch_trivia [id_or_prefix] [--force] [--library movies|series|anime]
+
+    For every DISTINCT title (deduped by tmdb_id; episodes inherit the show's
+    trivia), web-searches behind-the-scenes facts via EXA, distills 2-4 short facts
+    via GROQ each tagged with its [source], and caches them in mvextra.json keyed by
+    tmdb_id. The hover dossier reads that cache (never a live call). Skips a title
+    cached within ~30 days unless --force. NEVER writes library_*.json.
+
+    Optional positional `id_or_prefix` restricts to ids ==/startswith it; --library
+    restricts by category. Any other flag is ignored."""
+    # Fold a flag-shaped positional (e.g. fetch_trivia("--force")) into the flags.
+    flist = list(flags)
+    if arg and str(arg).startswith("--"):
+        flist = [arg] + flist
+        id_or_prefix = None
+    else:
+        id_or_prefix = arg or None
+
+    force = "--force" in flist
+    library_filter = None
+    if "--library" in flist:
+        i = flist.index("--library")
+        if i + 1 < len(flist):
+            library_filter = flist[i + 1].lower()
+
+    if not mvcommon.exa_api_key():
+        print("❌ No EXA API key configured. Set exa.api_key in mvconfig.json "
+              "(see mvconfig.example.json). Nothing to do.")
+        return
+    if not mvcommon.groq_api_key():
+        print("❌ No GROQ API key configured. Set groq.api_key in mvconfig.json "
+              "(see mvconfig.example.json). Nothing to do.")
+        return
+
+    library = load_library()
+    units = _gather_enrich_units(library, id_or_prefix=id_or_prefix, library_filter=library_filter)
+
+    # Dedupe to DISTINCT tmdb_ids (insertion-ordered) — the cache key + the dossier
+    # merge key. A unit with no stored tmdb_id has not been enriched yet -> counted
+    # as no-tmdb and skipped (we never search by title to GUESS an id here). One
+    # fetch per distinct TITLE; episodes of a show share the show's tmdb_id, so they
+    # collapse to a single fetch and inherit the show's trivia.
+    by_tmdb = {}
+    no_tmdb = 0
+    for unit in units:
+        tmdb_id = _unit_preset_tmdb_id(unit, library)
+        if not tmdb_id:
+            no_tmdb += 1
+            continue
+        key = str(tmdb_id)
+        if key not in by_tmdb:
+            by_tmdb[key] = unit
+
+    print("=== FETCH TRIVIA (EXA + GROQ) ===")
+    if library_filter:
+        print(f"   > library filter: {library_filter}")
+    if id_or_prefix:
+        print(f"   > scope: ids == or startswith '{id_or_prefix}'")
+    print(f"   > {len(by_tmdb)} distinct title(s) with a tmdb_id"
+          f"{f', {no_tmdb} without a tmdb_id (run enrich_metadata first)' if no_tmdb else ''}.")
+    if force:
+        print("   > --force: re-fetching even fresh entries.")
+    print()
+
+    n_fetched = n_cached = n_no_results = n_failed = 0
+    total = len(by_tmdb)
+
+    for idx, (key, unit) in enumerate(by_tmdb.items(), start=1):
+        label = unit.get("title") or unit["key"]
+        prefix = f"[{idx}/{total}] {label} ({key})"
+
+        # Freshness skip (unless --force).
+        cached = extra_cache_get(key)
+        if not force and _trivia_entry_is_fresh(cached):
+            n_cached += 1
+            print(f"{prefix} -> cached (fresh), skipping.")
+            continue
+
+        title = unit.get("title") or label
+        year = unit.get("year")
+
+        # EXA web-search -> GROQ distill. no-results = EXA found nothing to distill;
+        # failed = EXA had material but GROQ produced no usable fact (API/parse miss).
+        snippets = exa_search_trivia(title, year)
+        if not snippets:
+            n_no_results += 1
+            print(f"{prefix} -> no web results, skipping.")
+            continue
+
+        facts = groq_distill_trivia(title, year, snippets)
+        if not facts:
+            n_failed += 1
+            print(f"{prefix} -> distill produced no facts, skipping.")
+            continue
+
+        # Writes ONLY mvextra.json — the library is never touched.
+        extra_cache_set(key, {"trivia": facts, "fetched_at": mvcommon._now_utc().isoformat()})
+        n_fetched += 1
+        sources = ",".join(dict.fromkeys(f["source"] for f in facts))
+        print(f"{prefix} -> {len(facts)} facts [{sources}]")
+
+        # Be polite to EXA/GROQ between fetched titles (no wait after the last one).
+        if idx < total:
+            time.sleep(TRIVIA_THROTTLE_SECONDS)
+
+    print(f"\n=== DONE === fetched={n_fetched} cached-skip={n_cached} "
+          f"no-results={n_no_results} failed={n_failed} no-tmdb={no_tmdb}")
+    if not no_tmdb and total == 0:
+        print("   (nothing to fetch — the matched scope had no titles with a tmdb_id.)")
 
 
 def _retarget_unit_folders(unit, old_folder, new_folder):
@@ -2117,6 +3189,72 @@ def _download_unit_images(unit, res, image_base, folder):
             print(f"     ⬇️  {thumb}")
             written += 1
     return written
+
+
+def _apply_episode_overviews(unit, series_id, api_key):
+    """Backfill per-episode `metadata.overview` + `metadata.episode_title` for a
+    SHOW unit, using ONE SEASON DETAILS call per season (GET /3/tv/{id}/season/{n},
+    cached), and persist the result. Returns the number of episode leaves updated.
+
+    The season-details endpoint returns `episodes[]` each with `overview` + `name`,
+    so a single call per season covers every episode of that season (far fewer API
+    calls than one /images call per episode). Episodes are keyed by the
+    (season, episode) numbers `_episode_se_of` parses from each leaf id, exactly as
+    the per-episode still loop keys its /episode/{e}/images call — so the same leaves
+    are reached either way.
+
+    ADDITIVE + IDEMPOTENT: writes overview (episode synopsis) and episode_title (the
+    episode `name`, e.g. "Secrets") onto each episode leaf's metadata; a re-run just
+    rewrites the same values. The SHOW-level overview is written separately by the
+    caller (so the season_map / movie leaf carry the show synopsis); this refines the
+    episode leaves with their own synopsis + title.
+
+    GRACEFUL DEGRADATION: a failed/empty season-details call (network/404 -> None, or
+    a payload with no `episodes`) yields an empty lookup for that season — those
+    episodes are simply left without an episode overview (they keep whatever the
+    caller seeded) and the run continues. Reads the LIVE library so each leaf reflects
+    any rename done earlier in the apply. Alias-safe (`_resolve_alias`); season_maps
+    and aliases that don't resolve to an episode leaf are skipped. NEVER raises."""
+    if unit["kind"] != "show":
+        return 0
+
+    live = load_library()
+    season_cache = {}  # season_number -> {episode_number: {"overview","name"}}
+    updated = 0
+    changed = False
+    for eid in unit.get("ids", []):
+        ent = live.get(eid)
+        if ent is None:
+            continue
+        try:
+            real_id, leaf = _resolve_alias(live, eid)
+        except KeyError:
+            continue
+        if not isinstance(leaf, dict):
+            continue
+        if not leaf.get("filename"):
+            continue  # season_map / alias-without-primary — not an episode leaf
+        se = _episode_se_of(real_id, leaf)
+        if se is None:
+            continue  # id shape gave no season+episode — no per-episode lookup key
+        s_no, e_no = se
+        if s_no not in season_cache:
+            details = _tmdb_get(f"{TMDB_API_ROOT}/tv/{series_id}/season/{s_no}", {}, api_key)
+            season_cache[s_no] = _season_episode_meta(details)
+        epmeta = season_cache[s_no].get(e_no)
+        if not epmeta:
+            continue  # season-details failed/empty, or this episode is absent from it
+        meta = leaf.setdefault("metadata", {})
+        if epmeta["overview"]:
+            meta["overview"] = epmeta["overview"]
+        if epmeta["name"]:
+            meta["episode_title"] = epmeta["name"]
+        updated += 1
+        changed = True
+
+    if changed:
+        save_library(live)
+    return updated
 
 
 def cmd_set_uploaded(manual_id):
@@ -5025,6 +6163,79 @@ def collect_reclaimable():
     }
 
 
+# Tech-spec values that carry no signal and must be dropped from the compact UI
+# `tech` dict (case-insensitive). MediaInfo writes "Unknown" for un-probed tracks
+# and "SDR" for a plain non-HDR video; neither is worth a chip on the tile.
+_TECH_EMPTY_VALUES = {"unknown", "sdr", "none", ""}
+
+
+def _is_tech_empty(value):
+    """True when a tech_spec value carries no UI signal (None / "" / "Unknown" /
+    "SDR" / "None", case-insensitively). Numbers (e.g. audio_channels, duration)
+    are always kept."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() in _TECH_EMPTY_VALUES
+    return False
+
+
+def _normalize_hdr(hdr):
+    """Collapse a verbose MediaInfo hdr_format to a short UI label.
+
+    MediaInfo writes long forms like "Dolby Vision / SMPTE ST 2086" or
+    "SMPTE ST 2086, HDR10 compatible"; the tile wants a single short token. We
+    prefer "Dolby Vision" when present, else "HDR10"/"HDR10+"/"HLG" when the
+    string names them, else the first slash/comma-delimited segment trimmed.
+    Returns None for an empty/SDR value (so the chip is simply omitted)."""
+    if _is_tech_empty(hdr):
+        return None
+    s = str(hdr).strip()
+    low = s.lower()
+    if "dolby vision" in low or "dovi" in low:
+        return "Dolby Vision"
+    if "hdr10+" in low or "hdr10 plus" in low:
+        return "HDR10+"
+    if "hdr10" in low:
+        return "HDR10"
+    if "hlg" in low:
+        return "HLG"
+    # Fall back to the first delimited segment (drops the "/ SMPTE ST 2086" tail).
+    head = re.split(r"[\/,]", s, 1)[0].strip()
+    return head or None
+
+
+def _compact_tech(tech_spec):
+    """Build the compact, UI-facing `tech` dict from a leaf's stored tech_spec.
+
+    Read-only + None-safe: takes the raw tech_spec dict (or None) and returns a
+    dict with ONLY the fields the tile/dossier renders — {resolution, hdr,
+    video_codec, audio, audio_channels, duration_mins} — omitting any value that
+    is empty/"Unknown"/"SDR" (via _is_tech_empty) and normalizing hdr to a short
+    label. Returns None when nothing meaningful survives, so the row carries a
+    clean null rather than an empty dict."""
+    if not isinstance(tech_spec, dict):
+        return None
+    out = {}
+    # String fields: keep only when they carry signal.
+    for key in ("resolution", "video_codec", "audio"):
+        val = tech_spec.get(key)
+        if not _is_tech_empty(val):
+            out[key] = val
+    hdr = _normalize_hdr(tech_spec.get("hdr"))
+    if hdr is not None:
+        out["hdr"] = hdr
+    # audio_channels: an int when probed, "Unknown" otherwise — keep ints only.
+    ch = tech_spec.get("audio_channels")
+    if isinstance(ch, int):
+        out["audio_channels"] = ch
+    # duration_mins: a positive int is meaningful; 0/Unknown is not.
+    dur = tech_spec.get("duration_mins")
+    if isinstance(dur, int) and dur > 0:
+        out["duration_mins"] = dur
+    return out or None
+
+
 def items_payload():
     """Read-only inventory of EVERY physical library leaf for the media-type UI
     (IMP-E14). Strictly READ-ONLY — loads the library once via load_library() and
@@ -5044,11 +6255,34 @@ def items_payload():
     Returns {
         "items": [ {
             "id", "category", "state", "size_bytes", "path",
-            "title", "year", "tmdb_id", "poster_available", "chunk_count",
+            "title", "year", "tmdb_id", "poster_available", "backdrop_available",
+            "overview", "episode_title", "chunk_count",
+            "actual_size_bytes", "tech", "release_name",
             "parent_id"  # only when the entry carries one
         }, ... ],
         "by_category": {"movies": N, "series": N, "anime": N, "other": N},
     }
+
+    overview / episode_title come from the entry's metadata (enrich-written TMDB
+    synopsis + episode name; null when absent); backdrop_available is a LIVE on-disk
+    fanart check (the SAME resolver /api/media-image uses) so the hover detail-window
+    requests a backdrop only when one will be served. All three are read-only.
+
+    actual_size_bytes / tech / release_name surface the REAL fetched version info
+    stored in the library (IMP-E16 B1) so an ARCHIVED tile — whose on-disk file is a
+    tiny dummy (size_bytes ~= a few hundred bytes) — can still show the true file
+    size + print under the title. They are read straight off the entry, .get()-guarded
+    and null when absent:
+      * actual_size_bytes = entry.tech_spec.size_bytes (the real fetched byte size).
+      * tech              = a compact dict {resolution, hdr, video_codec, audio,
+                            audio_channels, duration_mins} from tech_spec, dropping
+                            "Unknown"/"SDR"/empty values and normalizing hdr to a
+                            short label (e.g. "Dolby Vision / SMPTE ST 2086" ->
+                            "Dolby Vision"); null when nothing meaningful survives.
+      * release_name      = entry.filename (the full release name, carrying iMAX /
+                            REMUX / DV-profile / source tokens the UI parses).
+    size_bytes stays the ON-DISK size (the dummy's), so the tile can still flag a
+    big local file; actual_size_bytes is the archived/real size shown beneath.
 
     state is the shared classify_entry_state badge when one applies
     (LOCAL_NOT_PUSHED / PUSHED_NOT_ARCHIVED / RESTORED_REPLACE_AGAIN / ARCHIVED);
@@ -5092,6 +6326,22 @@ def items_payload():
         poster_available = bool(
             has_anchor and resolve_artwork_path(library, mid, kind="poster")
         )
+        # backdrop_available: same cheap, LIVE on-disk check via the SAME resolver
+        # the /api/media-image route uses, but for the FANART (backdrop) the hover
+        # detail-window shows. fanart resolution walks own folder -> season folder ->
+        # {tmdb-…} show folder (it has no per-episode rung), so an episode inherits the
+        # season/show backdrop. Gated on has_anchor + short-circuited like the poster
+        # check so a folderless leaf never enters the resolver (a couple os.path stats
+        # at most). Kept a real bool (JSON-friendly), never a path.
+        backdrop_available = bool(
+            has_anchor and resolve_artwork_path(library, mid, kind="fanart")
+        )
+        # Real fetched-version info (IMP-E16 B1) — stored in the library even when
+        # the on-disk file is a tiny archived dummy. All .get()-guarded + None-safe.
+        tech_spec = entry.get("tech_spec") or {}
+        actual_size_bytes = tech_spec.get("size_bytes")
+        tech = _compact_tech(tech_spec)
+        release_name = entry.get("filename")
         row = {
             "id": mid,
             "category": category,
@@ -5102,7 +6352,14 @@ def items_payload():
             "year": metadata.get("year"),
             "tmdb_id": metadata.get("tmdb_id"),
             "poster_available": poster_available,
+            "backdrop_available": backdrop_available,
+            "overview": metadata.get("overview"),
+            "episode_title": metadata.get("episode_title"),
             "chunk_count": (entry.get("split_info") or {}).get("total_chunks") or 1,
+            # The REAL fetched size + compact tech + full release filename (B1).
+            "actual_size_bytes": actual_size_bytes,
+            "tech": tech,
+            "release_name": release_name,
         }
         if entry.get("parent_id") is not None:
             row["parent_id"] = entry["parent_id"]
@@ -5111,6 +6368,367 @@ def items_payload():
         by_category[category] += 1
 
     return {"items": items, "by_category": by_category}
+
+
+# ---------------------------------------------------------------------------
+# Rich TMDB dossier for the hover-preview detail window (IMP-E16).
+#
+# tmdb_detail(library, mid) returns the RICH TMDB fields the SPA's hover dossier
+# renders (rating, genres, runtime, tagline, cast, director/creators, IMDb link,
+# …) for ONE library entry, or None when the entry has no metadata.tmdb_id.
+#
+# Design contract (the parallel frontend agent renders this exact dict):
+#   * READ-ONLY + alias-safe + NEVER raises. The id ONLY indexes the library; the
+#     tmdb_id comes from the STORED entry (metadata.tmdb_id), never the client, so
+#     a crafted id is just a missing key -> None. _resolve_alias dereferences a
+#     multi_ep_alias to its primary leaf. No library mutation, no media touch.
+#   * Kind is derived from the id: `movie` (mov-…), `episode` (a tv-/ani- leaf
+#     whose id parses to a season+episode via _episode_se_of), else `tv`
+#     (show/season). The SAME tmdb_id is the SHOW id for an episode leaf (enrich
+#     stamps the show id on every leaf, including episodes), and season/episode
+#     come from the leaf id.
+#   * GRACEFUL DEGRADATION: every TMDB call goes through _tmdb_get (on-disk cached
+#     under TMDB_CACHE_DIR; returns None on network/non-200/bad-JSON — never
+#     raises). The dict is built incrementally from what is computable with NO
+#     network (tmdb_id / kind / tmdb_url), then enriched from each call that
+#     succeeds. A failed sub-call (credits, external_ids, episode details) simply
+#     contributes nothing — the caller still gets a partial dict, never a 500.
+#     Because the cache is reused, repeat opens of the same entry are instant.
+# ---------------------------------------------------------------------------
+
+# Cast / director list caps (the contract truncates cast to 8, directors to 3).
+_TMDB_DETAIL_CAST_MAX = 8
+_TMDB_DETAIL_DIRECTORS_MAX = 3
+
+
+def _tmdb_detail_kind(real_id, entry):
+    """The detail `kind` for a (post-alias) library leaf: 'movie' | 'tv' | 'episode'.
+
+    mov-… -> 'movie'. A tv-/ani- leaf whose id parses to a season+episode (via the
+    canonical _episode_se_of parser, which understands both the glued `-sNNeMM`
+    TV form and the anime parent_id+tail form) -> 'episode'. Anything else (a
+    season_map / show-level id, or a leaf with no parseable episode) -> 'tv'."""
+    if category_of_id(real_id) == "movies":
+        return "movie"
+    if _episode_se_of(real_id, entry) is not None:
+        return "episode"
+    return "tv"
+
+
+def _tmdb_genre_names(genres):
+    """List of genre `name` strings from a TMDB `genres` array, dropping any
+    malformed member. [] for a missing/empty/non-list value."""
+    out = []
+    for g in genres or []:
+        if isinstance(g, dict):
+            name = g.get("name")
+            if name:
+                out.append(name)
+    return out
+
+
+def _tmdb_cast_names(credits, limit=_TMDB_DETAIL_CAST_MAX):
+    """Top-`limit` cast entries as [{"name","character"}, …] from a TMDB credits
+    payload's `cast` (already TMDB-ordered by billing). Skips members with no
+    name; tolerates a missing `character`. [] for a missing/empty `cast`."""
+    out = []
+    for c in (credits or {}).get("cast") or []:
+        if not isinstance(c, dict):
+            continue
+        name = c.get("name")
+        if not name:
+            continue
+        out.append({"name": name, "character": c.get("character") or ""})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _tmdb_directors_from_crew(credits, limit=_TMDB_DETAIL_DIRECTORS_MAX):
+    """Up-to-`limit` director names from a MOVIE credits payload's `crew`
+    (job == 'Director'). Order-preserving, de-duped. [] when none."""
+    out = []
+    seen = set()
+    for c in (credits or {}).get("crew") or []:
+        if not isinstance(c, dict):
+            continue
+        if c.get("job") != "Director":
+            continue
+        name = c.get("name")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _tmdb_created_by_names(detail, limit=_TMDB_DETAIL_DIRECTORS_MAX):
+    """Up-to-`limit` creator names from a TV detail payload's `created_by`
+    ([{name,…}]). Order-preserving, de-duped. [] when none."""
+    out = []
+    seen = set()
+    for c in detail.get("created_by") or []:
+        if not isinstance(c, dict):
+            continue
+        name = c.get("name")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _tmdb_network_names(networks):
+    """List of network `name` strings from a TV detail `networks` array. [] when
+    missing/empty/malformed."""
+    out = []
+    for n in networks or []:
+        if isinstance(n, dict):
+            name = n.get("name")
+            if name:
+                out.append(name)
+    return out
+
+
+def _tmdb_detail_movie(out, tmdb_id, api_key):
+    """Fill `out` (in place) with MOVIE detail. GET /3/movie/{id} for the core
+    fields + /3/movie/{id}/credits for cast + crew Director(s). Each call is
+    optional — a None response just leaves those fields unset."""
+    detail = _tmdb_get(f"{TMDB_API_ROOT}/movie/{tmdb_id}", {}, api_key)
+    if isinstance(detail, dict):
+        _set_if(out, "title", detail.get("title"))
+        _set_if(out, "year", _tmdb_year_of(detail.get("release_date")))
+        _set_if(out, "tagline", detail.get("tagline"))
+        _set_if(out, "overview", detail.get("overview"))
+        _set_if(out, "rating", detail.get("vote_average"))
+        _set_if(out, "vote_count", detail.get("vote_count"))
+        _set_if(out, "runtime", detail.get("runtime"))
+        _set_if(out, "release_date", detail.get("release_date"))
+        _set_if(out, "status", detail.get("status"))
+        _set_if(out, "homepage", detail.get("homepage"))
+        genres = _tmdb_genre_names(detail.get("genres"))
+        if genres:
+            out["genres"] = genres
+        _set_imdb(out, detail.get("imdb_id"))
+
+    credits = _tmdb_get(f"{TMDB_API_ROOT}/movie/{tmdb_id}/credits", {}, api_key)
+    if isinstance(credits, dict):
+        cast = _tmdb_cast_names(credits)
+        if cast:
+            out["cast"] = cast
+        directors = _tmdb_directors_from_crew(credits)
+        if directors:
+            out["directors"] = directors
+
+
+def _tmdb_detail_tv(out, tmdb_id, api_key):
+    """Fill `out` (in place) with TV-SHOW detail. GET /3/tv/{id} (core + show
+    extras: seasons/episodes/networks/created_by) + /3/tv/{id}/external_ids (imdb)
+    + /3/tv/{id}/credits (cast). Each call is optional."""
+    detail = _tmdb_get(f"{TMDB_API_ROOT}/tv/{tmdb_id}", {}, api_key)
+    if isinstance(detail, dict):
+        _set_if(out, "title", detail.get("name"))
+        _set_if(out, "year", _tmdb_year_of(detail.get("first_air_date")))
+        _set_if(out, "tagline", detail.get("tagline"))
+        _set_if(out, "overview", detail.get("overview"))
+        _set_if(out, "rating", detail.get("vote_average"))
+        _set_if(out, "vote_count", detail.get("vote_count"))
+        # episode_run_time is a list; the first entry is the typical runtime.
+        run_times = detail.get("episode_run_time")
+        if isinstance(run_times, list) and run_times:
+            _set_if(out, "runtime", run_times[0])
+        _set_if(out, "release_date", detail.get("first_air_date"))
+        _set_if(out, "status", detail.get("status"))
+        _set_if(out, "homepage", detail.get("homepage"))
+        genres = _tmdb_genre_names(detail.get("genres"))
+        if genres:
+            out["genres"] = genres
+        # TV-only show extras.
+        _set_if(out, "number_of_seasons", detail.get("number_of_seasons"))
+        _set_if(out, "number_of_episodes", detail.get("number_of_episodes"))
+        networks = _tmdb_network_names(detail.get("networks"))
+        if networks:
+            out["networks"] = networks
+        created = _tmdb_created_by_names(detail)
+        if created:
+            out["directors"] = created
+
+    ext = _tmdb_get(f"{TMDB_API_ROOT}/tv/{tmdb_id}/external_ids", {}, api_key)
+    if isinstance(ext, dict):
+        _set_imdb(out, ext.get("imdb_id"))
+
+    credits = _tmdb_get(f"{TMDB_API_ROOT}/tv/{tmdb_id}/credits", {}, api_key)
+    if isinstance(credits, dict):
+        cast = _tmdb_cast_names(credits)
+        if cast:
+            out["cast"] = cast
+
+
+def _tmdb_detail_episode(out, tmdb_id, season, episode, api_key):
+    """Fill `out` (in place) with EPISODE detail. GET
+    /3/tv/{id}/season/{s}/episode/{e} for the per-episode fields + the show's
+    /3/tv/{id}/external_ids for the IMDb link. Each call is optional."""
+    detail = _tmdb_get(
+        f"{TMDB_API_ROOT}/tv/{tmdb_id}/season/{season}/episode/{episode}",
+        {}, api_key,
+    )
+    if isinstance(detail, dict):
+        _set_if(out, "episode_title", detail.get("name"))
+        _set_if(out, "overview", detail.get("overview"))
+        _set_if(out, "rating", detail.get("vote_average"))
+        _set_if(out, "vote_count", detail.get("vote_count"))
+        _set_if(out, "runtime", detail.get("runtime"))
+        _set_if(out, "air_date", detail.get("air_date"))
+        _set_if(out, "release_date", detail.get("air_date"))
+        # Prefer TMDB's own numbers, falling back to the id-parsed ones.
+        out["season_number"] = detail.get("season_number") if isinstance(
+            detail.get("season_number"), int) else season
+        out["episode_number"] = detail.get("episode_number") if isinstance(
+            detail.get("episode_number"), int) else episode
+    else:
+        out["season_number"] = season
+        out["episode_number"] = episode
+
+    # IMDb link comes from the SHOW's external ids (episodes have no own imdb_id).
+    ext = _tmdb_get(f"{TMDB_API_ROOT}/tv/{tmdb_id}/external_ids", {}, api_key)
+    if isinstance(ext, dict):
+        _set_imdb(out, ext.get("imdb_id"))
+
+
+def _tmdb_year_of(date_str):
+    """Leading 4-digit year from a TMDB date string ('2010-07-15' -> 2010), or
+    None for a missing/un-parseable value."""
+    m = re.match(r"(\d{4})", str(date_str or ""))
+    return int(m.group(1)) if m else None
+
+
+def _set_if(out, key, value):
+    """Set out[key] = value only when value is meaningful: not None, not an empty
+    string. (0 and 0.0 are kept — a 0-vote/0-runtime is still a real value the UI
+    may want to show.)"""
+    if value is None:
+        return
+    if isinstance(value, str) and value == "":
+        return
+    out[key] = value
+
+
+def _set_imdb(out, imdb_id):
+    """Record imdb_id + the derived imdb_url when imdb_id is a non-empty string.
+    Idempotent (the show external_ids may be fetched once); a falsy id is a no-op
+    so a movie/show with no IMDb mapping simply omits both fields."""
+    if isinstance(imdb_id, str) and imdb_id:
+        out["imdb_id"] = imdb_id
+        out["imdb_url"] = f"https://www.imdb.com/title/{imdb_id}/"
+
+
+def tmdb_detail(library, mid):
+    """Rich TMDB dossier dict for library entry `mid`, or None when it has no
+    metadata.tmdb_id (the ONLY None case — see the section header above).
+
+    READ-ONLY, alias-safe, and NEVER raises: every TMDB call is the cached,
+    None-on-failure _tmdb_get, and the dict is built up from what is computable
+    offline (tmdb_id / kind / tmdb_url) so a partial/total fetch failure yields a
+    partial dict (never a 500). The tmdb_id is read from the STORED entry, not the
+    caller, so a crafted/unknown id is just a missing key -> None.
+    """
+    if not isinstance(library, dict):
+        return None
+    if library.get(mid) is None:
+        return None
+    try:
+        real_id, entry = _resolve_alias(library, mid)
+    except KeyError:
+        return None
+    if not isinstance(entry, dict):
+        return None
+
+    tmdb_id = (entry.get("metadata") or {}).get("tmdb_id")
+    if not tmdb_id:
+        return None
+
+    kind = _tmdb_detail_kind(real_id, entry)
+    api_key = mvcommon.tmdb_api_key()
+
+    # The offline-computable core. tmdb_url uses movie vs tv (an episode is part of
+    # a tv show, so it links to the show page) — derived purely from kind + id.
+    url_kind = "movie" if kind == "movie" else "tv"
+    out = {
+        "tmdb_id": tmdb_id,
+        "kind": kind,
+        "tmdb_url": f"https://www.themoviedb.org/{url_kind}/{tmdb_id}",
+    }
+    # Seed title from the stored metadata so a fully-failed fetch still names the
+    # entry; a successful TMDB call overwrites it with the canonical title.
+    _set_if(out, "title", (entry.get("metadata") or {}).get("title"))
+
+    # No API key -> nothing can be fetched from TMDB, but the offline core is still
+    # useful (and the route returns it 200, never a misleading "no tmdb_id" 404). The
+    # online-metadata MERGE below is independent of the TMDB key — a populated
+    # mvonline.json still enriches the dossier even with no TMDB key configured.
+    if api_key:
+        if kind == "movie":
+            _tmdb_detail_movie(out, tmdb_id, api_key)
+        elif kind == "episode":
+            se = _episode_se_of(real_id, entry)
+            if se is not None:
+                _tmdb_detail_episode(out, tmdb_id, se[0], se[1], api_key)
+            else:
+                # Defensive: kind said episode but the parse vanished — degrade to show.
+                _tmdb_detail_tv(out, tmdb_id, api_key)
+        else:
+            _tmdb_detail_tv(out, tmdb_id, api_key)
+
+    # MERGE the cached ONLINE metadata (OMDb ratings/awards/box-office), populated by
+    # `refresh_online`. CACHE-ONLY — NEVER a live OMDb call here, so the hover dossier
+    # stays fast and never blocks on the network. For an EPISODE, out["tmdb_id"] is
+    # already the SHOW's tmdb_id (enrich stamps the show id on every leaf), so the
+    # episode inherits the show's ratings. Only fields present in the cache are added.
+    _merge_online_metadata(out, tmdb_id)
+
+    # MERGE the cached TRIVIA (EXA+GROQ-distilled facts), populated by `fetch_trivia`.
+    # Same CACHE-ONLY contract — never a live EXA/GROQ call in the request path. For
+    # an episode this uses the SHOW's tmdb_id, so the episode inherits the show's
+    # trivia. Adds `trivia` only when present + non-empty.
+    _merge_trivia(out, tmdb_id)
+
+    return out
+
+
+def _merge_trivia(out, tmdb_id):
+    """Merge the cached TRIVIA for ``tmdb_id`` into the detail dict ``out`` (in place).
+    Adds ``trivia`` (a list of {text, source}) ONLY when present + non-empty in
+    mvextra.json — so an absent/empty cache entry simply omits the field. NO live
+    EXA/GROQ call (cache read only — fetch_trivia populates it), so the hover dossier
+    stays fast. For an EPISODE, ``tmdb_id`` is already the SHOW's tmdb_id (enrich
+    stamps the show id on every leaf), so the episode inherits the show's trivia.
+    Never raises (extra_cache_get degrades a malformed cache to None)."""
+    entry = extra_cache_get(tmdb_id)
+    if not isinstance(entry, dict):
+        return
+    trivia = entry.get("trivia")
+    if isinstance(trivia, list) and trivia:
+        out["trivia"] = trivia
+
+
+def _merge_online_metadata(out, tmdb_id):
+    """Merge the cached online-metadata for ``tmdb_id`` into the detail dict ``out``
+    (in place). Adds ``ratings`` (imdb/rt/metacritic map), ``rated``, ``awards`` and
+    ``boxoffice`` ONLY when present + non-empty in mvonline.json — so an absent cache
+    entry, or a partial one, simply omits those fields. NO live OMDb call (cache read
+    only); never raises (online_cache_get degrades a malformed cache to None)."""
+    cached = online_cache_get(tmdb_id)
+    if not isinstance(cached, dict):
+        return
+    ratings = cached.get("ratings")
+    if isinstance(ratings, dict) and ratings:
+        out["ratings"] = ratings
+    for src_key, out_key in (("rated", "rated"), ("awards", "awards"), ("boxoffice", "boxoffice")):
+        _set_if(out, out_key, cached.get(src_key))
 
 
 # ---------------------------------------------------------------------------
@@ -5803,6 +7421,8 @@ if __name__ == "__main__":
         print("  set_poster [id] [url]")
         print("  set_fanart [id] [url]")
         print("  set_tmdb [id] [tmdb_id]")
+        print("  refresh_online [id_or_prefix] [--force] [--library movies|series|anime]  — Fetch+cache OMDb IMDb/RT/Metacritic ratings + awards/box-office for every title (deduped by tmdb_id; reads into the hover dossier)")
+        print("  fetch_trivia [id_or_prefix] [--force] [--library movies|series|anime]  — EXA+GROQ-distill 2-4 short, sourced trivia facts per title (deduped by tmdb_id) into the gitignored mvextra.json the hover dossier reads")
         print("  set_uploaded [id]")
         print("  prep_season [base_id] [folder]")
         print("  scan_unprepped")
@@ -5963,6 +7583,25 @@ if __name__ == "__main__":
         rest = sys.argv[2:]
         positional = rest[0] if (rest and not rest[0].startswith("--")) else None
         cmd_enrich_metadata(positional, *rest)
+
+    elif cmd == "refresh_online":
+        # refresh_online [id_or_prefix] [--force] [--library movies|series|anime]
+        # Fetch+cache OMDb ratings/awards/box-office for every distinct title (deduped
+        # by tmdb_id). Writes ONLY mvonline.json. Pass the positional id/prefix (if any)
+        # plus all remaining tokens as flags so cmd_refresh_online parses them itself.
+        rest = sys.argv[2:]
+        positional = rest[0] if (rest and not rest[0].startswith("--")) else None
+        cmd_refresh_online(positional, *rest)
+
+    elif cmd == "fetch_trivia":
+        # fetch_trivia [id_or_prefix] [--force] [--library movies|series|anime]
+        # EXA web-search + GROQ-distill 2-4 sourced trivia facts for every distinct
+        # title (deduped by tmdb_id). Writes ONLY mvextra.json. Pass the positional
+        # id/prefix (if any) plus all remaining tokens as flags so cmd_fetch_trivia
+        # parses them itself.
+        rest = sys.argv[2:]
+        positional = rest[0] if (rest and not rest[0].startswith("--")) else None
+        cmd_fetch_trivia(positional, *rest)
 
     elif cmd == "prep_season":
         if len(sys.argv) >= 4:

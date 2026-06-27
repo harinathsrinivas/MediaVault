@@ -204,7 +204,9 @@ help text and no `--help` flag; this table is the reference.
 | `set_fanart`           | `set_fanart [id] [url]`                                                                                                             | Download and save fanart.jpg into the media folder                                                                                                     |
 | `set_tmdb`             | `set_tmdb [id] [tmdb_id]`                                                                                                           | Set the TMDB id on a library entry (additive, no rehash, alias-safe)                                                                                  |
 | `rename_folder`        | `rename_folder [old_id_or_path] "<new_name>"`                                                                                       | Crash-safe cascading folder rename — renames the on-disk dir and atomically rewrites `folder_path` for every descendant; uses the existing rollback journal; hash-safe |
-| `enrich_metadata`      | `enrich_metadata [id_or_prefix] [--apply] [--library X] [--nfo]`                                                                   | Local-first TMDB backfill: sets real titles, tmdb_id, downloads poster/fanart (never overwrites locals), stamps `{tmdb-…}` folder token; `--nfo` writes Kodi/Jellyfin NFO files; dry-run by default |
+| `enrich_metadata`      | `enrich_metadata [id_or_prefix] [--apply] [--library X] [--nfo] [--no-web]`                                                        | Local-first TMDB backfill: sets real titles, tmdb_id, overview, downloads poster/fanart (never overwrites locals), stamps `{tmdb-…}` folder token; `--nfo` writes Kodi/Jellyfin NFO files; EXA auto-resolve waterfall on TMDB miss (`--no-web` to disable); dry-run by default |
+| `refresh_online`       | `refresh_online [id_or_prefix] [--force] [--library X]`                                                                             | Bulk OMDb ratings fetch → gitignored `mvonline.json` (requires `omdb.api_key` in mvconfig.json) |
+| `fetch_trivia`         | `fetch_trivia [id_or_prefix] [--force] [--library X]`                                                                               | EXA web-search → GROQ-distilled trivia facts → gitignored `mvextra.json` (requires `exa.api_key` + `groq.api_key` in mvconfig.json) |
 | `set_uploaded`         | `set_uploaded [id]`                                                                                                                 | Force-mark as uploaded (emergency rescue)                                                                                                              |
 | `sort`                 | `sort`                                                                                                                              | Re-sort all library JSONs by language -> year -> size                                                                                                  |
 | `recover`              | `recover [id\|folder]` (or `recover --scan`)                                                                                        | Finish an interrupted auto-rollback for a media folder (resolves by id or path); `--scan` reports leftover `.mediavault_txn.json` journals (read-only) |
@@ -385,6 +387,66 @@ is invisible to `scan_unprepped` and the push pipeline.
 the operations console (`python main.py web`) show real poster artwork. Cards
 without a poster display a colour-gradient fallback. Real titles (from
 `metadata.title`) also replace the humanized id slug in the card header.
+
+**EXA auto-resolve (IMP-E16).** When TMDB's text search returns no match,
+`enrich_metadata` falls back to an EXA web search on `themoviedb.org`, extracts
+a candidate TMDB id from the result, and validates it with a TMDB by-id fetch.
+This resolves concatenated slugs and regional/translated titles that the TMDB
+search API misses. Pass `--no-web` to disable the EXA leg and stay purely local.
+Set `exa.api_key` in `mvconfig.json` to enable it.
+
+### Online ratings and trivia (IMP-E16)
+
+Two supplemental commands pull online data into read-only gitignored caches
+(`mvonline.json` for ratings, `mvextra.json` for trivia). The web UI's
+`GET /api/detail/{id}` endpoint serves this data alongside TMDB metadata —
+no live API calls in the request path.
+
+**OMDb ratings (`refresh_online`):**
+```
+python main.py refresh_online                        # fetch OMDb data for every enriched entry
+python main.py refresh_online mov-en-2024-inception  # one entry
+python main.py refresh_online --force                # re-fetch even if already cached
+```
+Requires `omdb.api_key` in `mvconfig.json`. Writes `mvonline.json` (gitignored)
+with `{tmdb_id → {imdb_rating, rt_score, metacritic, mpaa_rated, awards, boxoffice}}`.
+
+**EXA/GROQ trivia (`fetch_trivia`):**
+```
+python main.py fetch_trivia                          # fetch trivia for every enriched entry
+python main.py fetch_trivia tv-en-2019-chernobyl    # one entry
+python main.py fetch_trivia --force                  # re-fetch even if already cached
+```
+Requires `exa.api_key` + `groq.api_key` in `mvconfig.json`. Writes `mvextra.json`
+(gitignored) with `{tmdb_id → [{text, source}]}` trivia facts.
+
+### Cinematic dossier and enhanced UI (IMP-E16)
+
+`python main.py web` opens the operations console with a suite of cinematic UI
+additions on top of the existing media-type card grid:
+
+- **Hover/long-press dossier:** resting a pointer (desktop) or long-pressing
+  (touch/mobile) on any card opens a translucent glass "dossier" panel —
+  backdrop hero image, real title, year, episode info, synopsis, runtime,
+  genres, tagline, top cast, directors/creators, status, IMDb/TMDb links, and
+  merged OMDb + Metacritic/RT scores. The panel is persistent and interactive;
+  IMDb/TMDb links are clickable. A closed dossier is fully inert (never traps
+  hover events on the card beneath it).
+- **Grouped GRID / drill-down view:** a List|Grid toggle switches between the
+  flat card grid and a hierarchical drill-down — language/folder boxes →
+  Show → Seasons → Episodes — with breadcrumb + Back navigation.
+- **Poster-driven ambient glow:** each card's glow, border, and scrim tint to
+  its poster's dominant colour (mint fallback when no poster).
+- **⌘K / Ctrl-K command palette:** fuzzy-jump to any title or run global
+  actions from the keyboard.
+- **View-Transitions morphs:** smooth cross-fade/morph animations on
+  tab/filter/view switches (graceful fallback for older browsers).
+- **Cinematic parallax hero:** a per-tab backdrop band of archived/featured
+  titles with Ken-Burns + scroll parallax + auto-rotate; `prefers-reduced-motion`
+  static fallback.
+- **Archived tile tech chips:** real fetched file size plus resolution,
+  Dolby-Vision profile, REMUX, IMAX, codec, and audio-format chips on
+  Archived cards.
 
 ### Pinning a push to a specific phone (multi-device)
 

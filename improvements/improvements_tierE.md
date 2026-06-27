@@ -351,3 +351,34 @@
 - If skipped: the console stays localhost-only; phone access requires either an SSH tunnel or an insecure LAN URL; the PWA can't be used from the couch.
 - Cross-references: IMP-E14 (Phase 4 of the web media-UI plan); IMP-A5 (full config migration — E15 delivers the minimal slice only); IMP-E3/U3/D17 (Phase 5, next).
 - Status: **done** — shipped on `feature/imp_e15_mobile_tailscale_auth`
+
+---
+
+## IMP-E16: UI wow + online enrichment (dossier, ratings, trivia, grid view, palette, glow, view-transitions, hero, perf, auto-resolve)
+
+- Category: integration / UX
+- Priority: high
+- Parent / prerequisites: IMP-E3 (extends the local-first TMDB slice with online ratings, trivia, and a web-search auto-resolve waterfall), IMP-E14 (built on the card-grid SPA substrate), IMP-E15 (auth layer)
+- Files: `webui/server.py` (new `GET /api/detail/{id}` route; `refresh_online`/`fetch_trivia` JSON dispatch); `main.py` (`tmdb_detail`, `cmd_refresh_online`, `cmd_fetch_trivia`, EXA auto-resolve waterfall in `cmd_enrich_metadata`); `mvcommon.py` (mvconfig EXA/OMDb/GROQ key loaders); `webui/static/preview.js` (cinematic dossier), `webui/static/swatch.js` (poster-driven ambient glow), `webui/static/palette.js` (⌘K command palette), `webui/static/hero.js` (parallax hero band), plus CSS/JS changes throughout `webui/static/`
+- What shipped (branch `feature/imp_e16_ui_wow`):
+  - **Cinematic hover/long-press dossier (`preview.js`):** resting a pointer (desktop) or long-pressing (touch) on any card opens a large translucent glass "dossier" — backdrop hero image, real title, year, episode line, synopsis, and meta (rating, runtime, genres, tagline, cast, directors/creators, status, IMDb/TMDb links, merged OMDb + Metacritic/RT scores). Persistent + interactive: `pointer-events` gated on `.is-open` — a closed panel NEVER traps hover events (invariant: dossier is inert unless explicitly `.is-open`). Lazy-fetches `GET /api/detail/{id}`.
+  - **`GET /api/detail/{id}`** (webui/server.py + `main.py:tmdb_detail`): cached, `/api/*`-auth-gated, read-only — full TMDB detail (rating/votes, runtime, genres, tagline, full overview, top cast, directors/creators, status, IMDb+TMDb links; TV seasons/episodes/networks; episode title/air-date/S·E number) PLUS merged OMDb ratings (IMDb/RT/Metacritic), MPAA `rated`, `awards`, `boxoffice` (read from gitignored `mvonline.json`) PLUS `trivia` (`[{text, source}]` read from gitignored `mvextra.json`). Cache-read only: the request path makes NO live API calls.
+  - **`metadata.overview`** stored by `enrich_metadata` (also `metadata.episode_title` per episode); `items_payload` exposes `overview`, `episode_title`, `backdrop_available`, `actual_size_bytes`, `tech`, and `release_name` as new item fields.
+  - **New commands:**
+    - `refresh_online [id_or_prefix] [--force] [--library X]` — bulk OMDb ratings fetch → writes gitignored `mvonline.json` keyed by `tmdb_id`.
+    - `fetch_trivia [id_or_prefix] [--force] [--library X]` — EXA web-search → GROQ-distilled `[source]`-tagged trivia facts → gitignored `mvextra.json`.
+  - **EXA auto-resolve waterfall in `enrich_metadata`:** on TMDB API miss → EXA searches themoviedb.org → extracts a candidate TMDB id → validates by-id fetch; `--no-web` flag disables the web leg. Resolves hard/regional/concatenated titles without manual link-pasting. Cross-ref IMP-E3 (extends that slice).
+  - **Archived tile chips:** show real fetched size (`tech_spec.size_bytes`) + print/tech chips (resolution, Dolby-Vision+profile, REMUX, IMAX, codec, audio format).
+  - **Grouped GRID / drill-down view (List|Grid toggle, persisted):** language/folder boxes → drill in (Show→Seasons→Episodes) with breadcrumb + Back; state-prune + sort + leaf-card reuse.
+  - **Poster-driven ambient glow (`swatch.js`):** each card's glow, border, and scrim tint to its poster's dominant color (mint fallback when no poster).
+  - **⌘K / Ctrl-K command palette (`palette.js`):** fuzzy-jump to any title + run global actions.
+  - **View-Transitions morphs:** `document.startViewTransition` scoped to `#panel` on tab/filter/view switches; graceful fallback for unsupporting browsers.
+  - **Cinematic parallax hero (`hero.js`):** per-tab backdrop band of archived/featured titles (Ken-Burns animation + scroll parallax + auto-rotate + click-jump; `prefers-reduced-motion` static fallback).
+  - **Lazy-load perf:** admin, palette, and terminal modules are lazy-loaded; the critical path is `<link rel="modulepreload">`-preloaded.
+  - **Config:** `mvconfig.json` extended with `omdb.api_key`, `exa.api_key`, `groq.api_key`, `rapidapi.*` keys (all gitignored). New gitignored caches: `mvonline.json`, `mvextra.json`, `~/.mediavault/cache/exa/`.
+- Rationale: Turns the ops console into a cinematic media browser: the dossier gives richer context than any external app page, online ratings and trivia make "what should I watch?" decisions inside the vault, and the EXA auto-resolve waterfall finally makes `enrich_metadata` robust on difficult titles.
+- Goal: Any card hover/press opens a rich detail panel; `refresh_online`/`fetch_trivia` populate ratings and trivia; hard-to-match titles auto-resolve without manual TMDB id pasting.
+- Effort estimate: large
+- Risk: low — `/api/detail` is read-only and cache-gated; no `cmd_*` rollback contract changes; `mvonline.json`/`mvextra.json` are gitignored caches (never in the library JSONs); `ENTRY_TYPE_KEYS` unchanged; new config keys are additive.
+- Cross-references: IMP-E3 (extends the local-first TMDB slice); IMP-E14 (the card-grid SPA substrate); IMP-E15 (auth layer for `/api/*`).
+- Status: in_progress — on `feature/imp_e16_ui_wow` (done on merge of this branch)

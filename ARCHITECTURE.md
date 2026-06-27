@@ -246,7 +246,9 @@ Brackets denote optional args; `[id]` is the manual library ID like
 | `recover` | `recover [id\|folder]` / `recover --scan` | `cmd_recover` — finish an interrupted rollback (calls `recover_journal`); `--scan` lists leftover journals read-only |
 | `set_tmdb` | `set_tmdb [id] [tmdb_id]` | `cmd_set_tmdb` — sets the OPTIONAL additive leaf field `metadata.tmdb_id`; zero-byte (no rehash); alias-safe |
 | `rename_folder` | `rename_folder [old_id_or_path] "<new_name>"` | `cmd_rename_folder` — crash-safe cascading folder rename: renames the on-disk dir + atomically rewrites `folder_path` for every descendant (season_map + leaves; `multi_ep_alias` skipped); uses the existing `RollbackJournal` (journal in parent dir; `os.rename` = PONR) — additive, does NOT change the rollback contract (journal format/PONR/`RollbackHardFail` unchanged); hash-safe (moves a dir + rewrites JSON; no rehash; `uid`/`.sha256` sidecars move with the folder); works on archived dummies (cross-ref §12a) |
-| `enrich_metadata` | `enrich_metadata [id_or_prefix] [--apply] [--library X] [--nfo]` | `cmd_enrich_metadata` — local-first TMDB backfill (show-centric): resolves each show/movie once, writes `metadata.tmdb_id` + `metadata.title`/`year`, stamps the `{tmdb-…}` token once per show via `rename_folder` (seasons inherit), downloads show + per-season `poster.jpg`/`fanart.jpg` — NEVER overwriting a local image, NEVER fetching media, cached, dry-run default; `--nfo` writes Kodi/Jellyfin `movie.nfo`/`tvshow.nfo` (title/year/plot/rating/`<uniqueid type="tmdb">`; inert to scanners — `.nfo` not in `VIDEO_EXTENSIONS`); search uses title from the id slug, TV searched title-only (no year filter), multi-variant query (raw + wordninja word-split) for concatenated slugs, ranked by difflib title-similarity → year → popularity; ambiguous → listed not guessed |
+| `enrich_metadata` | `enrich_metadata [id_or_prefix] [--apply] [--library X] [--nfo] [--no-web]` | `cmd_enrich_metadata` — local-first TMDB backfill (show-centric): resolves each show/movie once, writes `metadata.tmdb_id` + `metadata.title`/`year`/`overview`/`episode_title`, stamps the `{tmdb-…}` token once per show via `rename_folder` (seasons inherit), downloads show + per-season `poster.jpg`/`fanart.jpg` — NEVER overwriting a local image, NEVER fetching media, cached, dry-run default; `--nfo` writes Kodi/Jellyfin `movie.nfo`/`tvshow.nfo`; `--no-web` disables EXA auto-resolve (IMP-E16: on TMDB API miss → EXA searches themoviedb.org → validates candidate id; resolves hard/regional titles without manual pinning); ambiguous → listed not guessed |
+| `refresh_online` | `refresh_online [id_or_prefix] [--force] [--library X]` | `cmd_refresh_online` (IMP-E16) — bulk OMDb ratings fetch for entries that have a `tmdb_id`; writes gitignored `mvonline.json` keyed by `tmdb_id`; requires `omdb.api_key` in `mvconfig.json`; `--force` re-fetches even if cached |
+| `fetch_trivia` | `fetch_trivia [id_or_prefix] [--force] [--library X]` | `cmd_fetch_trivia` (IMP-E16) — EXA web-search → GROQ-distilled `[source]`-tagged trivia facts; writes gitignored `mvextra.json`; requires `exa.api_key` + `groq.api_key` in `mvconfig.json`; `--force` re-fetches even if cached |
 
 > **`episodes` keyword is a required literal trigger.** For `fetch`,
 > `fetch_restore`, and `prep_push_rep_season`, the word `episodes` must
@@ -523,6 +525,59 @@ It binds **localhost only**.
   `127.0.0.1` URL (no `?token=` needed — the genuine-local admin never needs a
   token). One-time Tailscale admin setup: enable MagicDNS and HTTPS in the
   Tailscale admin console.
+- **Cinematic hover/long-press dossier — IMP-E16 (`preview.js`):** resting a
+  pointer (desktop) or long-pressing (touch) on any card opens a large
+  translucent glass "dossier" overlay — backdrop hero image, real title, year,
+  episode info, synopsis, rating, runtime, genres, tagline, top cast,
+  directors/creators, status, IMDb/TMDb links, and merged OMDb
+  (IMDb/RT/Metacritic) scores. **Invariant:** `pointer-events` are gated on the
+  `.is-open` class — a closed dossier is inert and never traps hover or click
+  events on the card beneath it. Lazy-fetches `GET /api/detail/{id}`.
+- **`GET /api/detail/{id}` (IMP-E16):** cached, `/api/*`-auth-gated, read-only
+  endpoint. Returns full TMDB detail (rating/votes, runtime, genres, tagline,
+  full overview, top cast, directors/creators, status, IMDb+TMDb links; TV
+  seasons/episodes/networks; episode title/air-date/S·E) PLUS merged OMDb
+  ratings (`rated`, IMDb/RT/Metacritic), `awards`, `boxoffice` (read from
+  gitignored `mvonline.json` keyed by `tmdb_id`) PLUS `trivia`
+  (`[{text, source}]` read from gitignored `mvextra.json`). **Cache-read only**
+  — the request path makes no live API calls; all data is pre-populated by
+  `refresh_online` / `fetch_trivia` / `enrich_metadata`.
+- **New commands — IMP-E16:**
+  - `refresh_online [id_or_prefix] [--force] [--library X]` — bulk OMDb ratings
+    fetch, writes gitignored `mvonline.json` keyed by `tmdb_id`.
+  - `fetch_trivia [id_or_prefix] [--force] [--library X]` — EXA web-search →
+    GROQ-distilled `[source]`-tagged trivia facts, writes gitignored `mvextra.json`.
+- **EXA auto-resolve waterfall in `enrich_metadata` (IMP-E16):** on TMDB API
+  miss → EXA searches `themoviedb.org` → extracts a candidate TMDB id →
+  validates with a by-id TMDB fetch. `--no-web` disables the web leg. Resolves
+  hard/regional/concatenated titles without manual `set_tmdb` pinning.
+- **`items_payload` additions (IMP-E16):** each item now also carries
+  `overview`, `episode_title`, `backdrop_available`, `actual_size_bytes`, `tech`
+  (resolution/codec/audio chips), and `release_name`.
+- **Archived tile tech chips (IMP-E16):** cards display the real fetched size
+  (`tech_spec.size_bytes`) plus print/tech chips — resolution, Dolby-Vision
+  profile, REMUX, IMAX, codec, audio format.
+- **Grouped GRID / drill-down view (IMP-E16):** a List|Grid toggle (persisted)
+  switches between the flat card grid and a hierarchical drill-down view
+  (language/folder boxes → Show → Seasons → Episodes) with breadcrumb + Back
+  navigation; state-prune + sort + leaf-card reuse carry over.
+- **Poster-driven ambient glow (`swatch.js`, IMP-E16):** each card's glow,
+  border, and scrim tint to its poster's dominant color (mint fallback when no
+  poster is available).
+- **⌘K / Ctrl-K command palette (`palette.js`, IMP-E16):** fuzzy-jump to any
+  title + run global actions.
+- **View-Transitions morphs (IMP-E16):** `document.startViewTransition` scoped
+  to `#panel` on tab/filter/view switches; graceful no-op fallback for browsers
+  that do not support the API.
+- **Cinematic parallax hero (`hero.js`, IMP-E16):** per-tab backdrop band of
+  archived/featured titles with Ken-Burns animation, scroll parallax,
+  auto-rotate, and click-jump; `prefers-reduced-motion` static fallback.
+- **Lazy-load perf (IMP-E16):** admin, palette, and terminal modules are
+  lazy-loaded on demand; the critical-path modules are
+  `<link rel="modulepreload">`-preloaded.
+- **Config extensions (IMP-E16):** `mvconfig.json` (gitignored) extended with
+  `omdb.api_key`, `exa.api_key`, `groq.api_key`, `rapidapi.*`. New gitignored
+  caches: `mvonline.json`, `mvextra.json`, `~/.mediavault/cache/exa/`.
 
 ---
 

@@ -33,7 +33,9 @@ import mvcommon
 # docstring + row builder at main.py:3658-3671.
 _ITEM_BASE_KEYS = {
     "id", "category", "state", "size_bytes", "path",
-    "title", "year", "tmdb_id", "poster_available", "chunk_count",
+    "title", "year", "tmdb_id", "poster_available", "backdrop_available",
+    "overview", "episode_title", "chunk_count",
+    "actual_size_bytes", "tech", "release_name",
 }
 
 
@@ -484,3 +486,339 @@ def test_api_items_reports_poster_available_and_tmdb_id(sandbox, make_video):
     assert rows[with_id]["title"] == "Inception"
     assert rows[no_id]["poster_available"] is False
     assert rows[no_id]["tmdb_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# (h) overview / episode_title / backdrop_available reporting (IMP-E16 step 1)
+#
+# items_payload() also surfaces, per row:
+#   * overview         = entry.metadata.overview      (TMDB synopsis) or null
+#   * episode_title    = entry.metadata.episode_title (episode name)  or null
+#   * backdrop_available = a LIVE on-disk fanart check via resolve_artwork_path
+#                          (the SAME resolver /api/media-image uses for fanart)
+# These back the hover detail-window (backdrop + synopsis + episode info). All
+# read-only, over the LOCAL_ROOT-hermetic sandbox (never real C:\Media).
+# ---------------------------------------------------------------------------
+
+def _seed_overview_fixtures(sandbox, make_video):
+    """Seed under LOCAL_ROOT:
+      * mov-en-2010-withbackdrop : has fanart.jpg in-folder + metadata
+        {overview:"Dreams within dreams.", title/year/tmdb_id} -> backdrop True
+      * mov-en-2011-plain        : NO fanart.jpg, NO overview metadata -> backdrop
+        False, overview/episode_title null
+      * a series episode under a {tmdb-…} show folder with a SHOW-level fanart.jpg
+        and metadata {overview (episode synopsis), episode_title:"Pilot"} -> the
+        episode inherits the show backdrop (resolve walks up to the {tmdb-…} folder)
+    Returns (backdrop_id, plain_id, ep_id)."""
+    root = sandbox["local_root"]
+
+    # Movie WITH an in-folder fanart.jpg + an overview.
+    bd_dir = root / "Movies" / "Inception {tmdb-27205}"
+    bd_dir.mkdir(parents=True, exist_ok=True)
+    make_video(bd_dir / "Inception.2010.mkv", marker=b"B")
+    (bd_dir / "fanart.jpg").write_bytes(b"\xff\xd8\xff\xe0FAKE-FANART\xff\xd9")
+    bd_id = "mov-en-2010-withbackdrop"
+
+    # Movie WITHOUT any fanart and WITHOUT overview metadata.
+    plain_dir = root / "Movies" / "Plain"
+    plain_dir.mkdir(parents=True, exist_ok=True)
+    make_video(plain_dir / "Plain.2011.mkv", marker=b"P")
+    plain_id = "mov-en-2011-plain"
+
+    # Series episode under a {tmdb-…} show folder carrying a SHOW-level fanart.jpg.
+    show_dir = root / "Series" / "The Office {tmdb-2316}"
+    season_dir = show_dir / "Season 01"
+    season_dir.mkdir(parents=True, exist_ok=True)
+    (show_dir / "fanart.jpg").write_bytes(b"\xff\xd8\xff\xe0SHOW-FANART\xff\xd9")
+    make_video(season_dir / "The.Office.S01E01.mkv", marker=b"E")
+    season_id = "tv-en-2005-the-office-s01"
+    ep_id = "tv-en-2005-the-office-s01e01"
+
+    movies = {
+        bd_id: {
+            "status": "local_ready", "uploaded": False,
+            "folder_path": str(bd_dir), "filename": "Inception.2010.mkv",
+            "type": "movie",
+            "metadata": {"title": "Inception", "year": 2010, "tmdb_id": 27205,
+                         "overview": "Dreams within dreams."},
+        },
+        plain_id: {
+            "status": "local_ready", "uploaded": False,
+            "folder_path": str(plain_dir), "filename": "Plain.2011.mkv",
+            "type": "movie",
+            # No overview / no episode_title -> both null in the payload.
+        },
+    }
+    series = {
+        season_id: {"type": "season_map", "folder_path": str(season_dir),
+                    "total_episodes": 1, "children": [ep_id]},
+        ep_id: {
+            "status": "local_ready", "uploaded": False,
+            "folder_path": str(season_dir), "filename": "The.Office.S01E01.mkv",
+            "parent_id": season_id,
+            "metadata": {"title": "The Office", "year": 2005, "tmdb_id": 2316,
+                         "overview": "The documentary begins.",
+                         "episode_title": "Pilot"},
+        },
+    }
+    _write_libs(sandbox, movies=movies, series=series)
+    return bd_id, plain_id, ep_id
+
+
+def test_overview_episode_title_and_backdrop_reported(sandbox, make_video):
+    """items_payload() reports overview (metadata.overview or null), episode_title
+    (metadata.episode_title or null), and backdrop_available (a real on-disk fanart
+    check via resolve_artwork_path, True only when a fanart.jpg is resolvable)."""
+    bd_id, plain_id, ep_id = _seed_overview_fixtures(sandbox, make_video)
+
+    rows = {it["id"]: it for it in main.items_payload()["items"]}
+    assert {bd_id, plain_id, ep_id} <= set(rows), f"got ids={list(rows)}"
+
+    bd, plain, ep = rows[bd_id], rows[plain_id], rows[ep_id]
+
+    # backdrop_available reflects a REAL on-disk fanart.jpg (in-folder for the movie,
+    # inherited from the {tmdb-…} show folder for the episode); False with no fanart.
+    assert bd["backdrop_available"] is True
+    assert ep["backdrop_available"] is True, "episode inherits the show-folder fanart"
+    assert plain["backdrop_available"] is False
+
+    # overview reflects metadata.overview / null when absent.
+    assert bd["overview"] == "Dreams within dreams."
+    assert ep["overview"] == "The documentary begins."
+    assert plain["overview"] is None
+
+    # episode_title reflects metadata.episode_title (only the episode has one).
+    assert ep["episode_title"] == "Pilot"
+    assert bd["episode_title"] is None
+    assert plain["episode_title"] is None
+
+    # backdrop_available is a real bool (JSON-friendly), never a path/object.
+    for r in (bd, plain, ep):
+        assert isinstance(r["backdrop_available"], bool)
+
+
+def test_backdrop_available_false_when_fanart_removed(sandbox, make_video):
+    """backdrop_available is a LIVE disk check, not a cached flag: deleting the
+    fanart.jpg flips a previously-True row to False on the next call."""
+    bd_id, _, _ = _seed_overview_fixtures(sandbox, make_video)
+
+    first = {it["id"]: it for it in main.items_payload()["items"]}
+    assert first[bd_id]["backdrop_available"] is True
+
+    (sandbox["local_root"] / "Movies" / "Inception {tmdb-27205}" / "fanart.jpg").unlink()
+
+    second = {it["id"]: it for it in main.items_payload()["items"]}
+    assert second[bd_id]["backdrop_available"] is False
+
+
+@pytest.mark.usefixtures("web_as_local_admin")
+def test_api_items_reports_overview_and_backdrop(sandbox, make_video):
+    """The HTTP surface carries overview/episode_title/backdrop_available end-to-end:
+    GET /api/items mirrors items_payload()."""
+    from webui.server import create_app
+
+    bd_id, plain_id, ep_id = _seed_overview_fixtures(sandbox, make_video)
+
+    client = TestClient(create_app())
+    r = client.get("/api/items")
+    assert r.status_code == 200, f"/api/items -> {r.status_code}: {r.text}"
+    rows = {it["id"]: it for it in r.json()["items"]}
+
+    assert rows[bd_id]["backdrop_available"] is True
+    assert rows[bd_id]["overview"] == "Dreams within dreams."
+    assert rows[ep_id]["episode_title"] == "Pilot"
+    assert rows[plain_id]["backdrop_available"] is False
+    assert rows[plain_id]["overview"] is None
+    assert rows[plain_id]["episode_title"] is None
+
+
+# ---------------------------------------------------------------------------
+# (i) actual_size_bytes / tech / release_name — the REAL archived version info
+#     (IMP-E16 B1)
+#
+# An ARCHIVED tile's on-disk file is a tiny dummy, so size_bytes is e.g. ~1 KB.
+# The library stores the REAL fetched size + print in entry.tech_spec and the full
+# release name in entry.filename. items_payload() surfaces, per row:
+#   * actual_size_bytes = tech_spec.size_bytes (the real fetched byte size) / null
+#   * tech              = a compact {resolution, hdr, video_codec, audio,
+#                         audio_channels, duration_mins} dict from tech_spec,
+#                         dropping "Unknown"/"SDR"/empty + normalizing hdr / null
+#   * release_name      = entry.filename / null
+# All read-only, over the LOCAL_ROOT-hermetic sandbox (never real C:\Media).
+# ---------------------------------------------------------------------------
+
+# A realistic 88 GB UHD REMUX tech_spec as get_tech_specs() would write it.
+_ARCHIVED_TECH_SPEC = {
+    "resolution": "2160p",
+    "width_height": "3840x2160",
+    "video_codec": "HEVC",
+    "hdr": "Dolby Vision / SMPTE ST 2086",
+    "frame_rate": "23.976",
+    "audio": "Dolby TrueHD with Dolby Atmos",
+    "audio_channels": 8,
+    "audio_language": "en",
+    "subtitles": ["en", "fr"],
+    "duration_mins": 169,
+    "size_bytes": 88_473_829_376,  # ~82.4 GiB — dwarfs the on-disk dummy
+}
+_ARCHIVED_RELEASE_NAME = (
+    "Interstellar.2014.iMAX.UHD.2160p.REMUX.Hybrid.HDR10.DV.P8.MULTi."
+    "DTS-HD.TrueHD.7.1.mkv"
+)
+
+
+def _seed_archived_with_tech(sandbox, make_video):
+    """Seed two movie leaves under LOCAL_ROOT:
+      * mov-en-2014-interstellar : ARCHIVED dummy on disk (~1 KB) BUT carries a
+        full tech_spec (88 GB real size + 2160p/DV/HEVC/TrueHD-Atmos) and a full
+        release filename -> actual_size_bytes/tech/release_name all populated.
+      * mov-en-2018-notech       : ARCHIVED dummy with NO tech_spec at all ->
+        actual_size_bytes None, tech None (release_name still = its bare filename).
+    Returns (with_tech_id, no_tech_id)."""
+    root = sandbox["local_root"]
+
+    with_dir = root / "Movies" / "Interstellar {tmdb-157336}"
+    with_dir.mkdir(parents=True, exist_ok=True)
+    with_path = with_dir / (
+        "Interstellar.2014.iMAX.UHD.2160p.REMUX.Hybrid.HDR10.DV.P8.MULTi."
+        "DTS-HD.TrueHD.7.1.mkv"
+    )
+    with_path.write_bytes(b"tiny-dummy" * 100)  # 1000 bytes — an archived dummy
+    assert os.path.getsize(with_path) < main.DUMMY_MAX_BYTES
+    with_id = "mov-en-2014-interstellar"
+
+    no_dir = root / "Movies" / "NoTechArchived"
+    no_dir.mkdir(parents=True, exist_ok=True)
+    no_path = no_dir / "NoTech.2018.mkv"
+    no_path.write_bytes(b"tiny-dummy" * 100)
+    assert os.path.getsize(no_path) < main.DUMMY_MAX_BYTES
+    no_id = "mov-en-2018-notech"
+
+    movies = {
+        with_id: {
+            "status": "archived",
+            "uploaded": True,
+            "folder_path": str(with_dir),
+            "filename": _ARCHIVED_RELEASE_NAME,
+            "type": "movie",
+            "tech_spec": dict(_ARCHIVED_TECH_SPEC),
+            "metadata": {"title": "Interstellar", "year": 2014, "tmdb_id": 157336},
+        },
+        no_id: {
+            "status": "archived",
+            "uploaded": True,
+            "folder_path": str(no_dir),
+            "filename": "NoTech.2018.mkv",
+            "type": "movie",
+            # No tech_spec at all -> actual_size_bytes/tech null.
+        },
+    }
+    _write_libs(sandbox, movies=movies)
+    return with_id, no_id
+
+
+def test_archived_tech_spec_size_and_print_reported(sandbox, make_video):
+    """The archived leaf surfaces the REAL fetched size + a compact, normalized
+    tech dict + the full release filename, while its on-disk size_bytes stays the
+    tiny dummy. The no-tech_spec leaf reports null for those without breaking."""
+    with_id, no_id = _seed_archived_with_tech(sandbox, make_video)
+
+    rows = {it["id"]: it for it in main.items_payload()["items"]}
+    assert with_id in rows and no_id in rows, f"got ids={list(rows)}"
+
+    w = rows[with_id]
+
+    # The on-disk size is still the tiny dummy (the right-side card chip), but the
+    # archived/real size is the stored tech_spec size — and clearly far larger.
+    assert w["size_bytes"] < main.DUMMY_MAX_BYTES
+    assert w["actual_size_bytes"] == 88_473_829_376
+    assert w["actual_size_bytes"] > w["size_bytes"] * 1000
+
+    # release_name is the full release filename (carries iMAX/REMUX/DV.P8 tokens).
+    assert w["release_name"] == _ARCHIVED_RELEASE_NAME
+
+    # tech is the compact, NORMALIZED dict: hdr collapsed to "Dolby Vision", the
+    # verbose audio kept as stored (the UI shortens it), Unknown/SDR/empty dropped.
+    assert w["tech"] == {
+        "resolution": "2160p",
+        "video_codec": "HEVC",
+        "audio": "Dolby TrueHD with Dolby Atmos",
+        "hdr": "Dolby Vision",          # "Dolby Vision / SMPTE ST 2086" -> short
+        "audio_channels": 8,
+        "duration_mins": 169,
+    }
+
+    # The no-tech_spec leaf: actual_size_bytes + tech are null; release_name is its
+    # bare filename; nothing crashes and the row is otherwise well-formed.
+    n = rows[no_id]
+    assert n["actual_size_bytes"] is None
+    assert n["tech"] is None
+    assert n["release_name"] == "NoTech.2018.mkv"
+    assert n["state"] == "ARCHIVED"
+
+
+def test_compact_tech_drops_unknown_and_sdr(sandbox, make_video):
+    """A tech_spec full of un-probed 'Unknown'/'SDR'/0 values yields tech=None
+    (nothing meaningful survives) — the helper never emits empty/noise chips."""
+    root = sandbox["local_root"]
+    d = root / "Movies" / "UnknownSpecs"
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / "Unknown.2019.mkv"
+    p.write_bytes(b"tiny-dummy" * 100)
+    mid = "mov-en-2019-unknownspecs"
+    movies = {
+        mid: {
+            "status": "archived", "uploaded": True,
+            "folder_path": str(d), "filename": "Unknown.2019.mkv", "type": "movie",
+            "tech_spec": {
+                "resolution": "Unknown", "width_height": "Unknown",
+                "video_codec": "Unknown", "hdr": "SDR", "frame_rate": "Unknown",
+                "audio": "Unknown", "audio_channels": "Unknown",
+                "audio_language": "Unknown", "subtitles": [],
+                "duration_mins": 0, "size_bytes": 5_000_000_000,
+            },
+        },
+    }
+    _write_libs(sandbox, movies=movies)
+
+    row = next(it for it in main.items_payload()["items"] if it["id"] == mid)
+    # Real size still surfaces (it is meaningful) but the print is all-Unknown.
+    assert row["actual_size_bytes"] == 5_000_000_000
+    assert row["tech"] is None
+
+
+def test_non_tech_rows_carry_null_new_fields(sandbox, make_video):
+    """A normal (non-archived, REAL-on-disk) leaf with no tech_spec still carries
+    the three new keys, all null/absent — proving the fields are universal and the
+    archived gating lives in the UI, not the payload."""
+    seeded = _seed_lifecycle(sandbox, make_video)
+    local_id = seeded["mov_local"]["id"]
+
+    row = next(
+        it for it in main.items_payload()["items"] if it["id"] == local_id
+    )
+    # The seeded local_ready leaf has no tech_spec; release_name = its filename.
+    assert row["actual_size_bytes"] is None
+    assert row["tech"] is None
+    assert row["release_name"] == "LocalReady.2022.mkv"
+
+
+@pytest.mark.usefixtures("web_as_local_admin")
+def test_api_items_reports_archived_tech(sandbox, make_video):
+    """The HTTP surface carries the new fields end-to-end: GET /api/items mirrors
+    items_payload(), so the seeded archived tech_spec is visible to the SPA."""
+    from webui.server import create_app
+
+    with_id, no_id = _seed_archived_with_tech(sandbox, make_video)
+
+    client = TestClient(create_app())
+    r = client.get("/api/items")
+    assert r.status_code == 200, f"/api/items -> {r.status_code}: {r.text}"
+    rows = {it["id"]: it for it in r.json()["items"]}
+
+    assert rows[with_id]["actual_size_bytes"] == 88_473_829_376
+    assert rows[with_id]["release_name"] == _ARCHIVED_RELEASE_NAME
+    assert rows[with_id]["tech"]["hdr"] == "Dolby Vision"
+    assert rows[with_id]["tech"]["audio_channels"] == 8
+    assert rows[no_id]["actual_size_bytes"] is None
+    assert rows[no_id]["tech"] is None

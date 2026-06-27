@@ -38,9 +38,23 @@ import { buildCard, runAction, setRefreshHandler, destroyRingsIn } from "./card.
 import { wireModal } from "./modal.js";
 import { getSort, setSort, sortItems, SORT_KEYS } from "./sort.js";
 import { wireCardGlow } from "./glow.js";
-import { buildTreeFragment, treeRootsFor, pruneTreeByState } from "./tree.js";
+import { wireHoverPreview, openPreviewForCard } from "./preview.js";
+// palette.js is intentionally NOT imported statically — it is lazy-loaded on first
+// use (⌘K / Ctrl-K / "/" or the header Search button) via ensurePalette() below,
+// which keeps it out of the first-paint module graph (IMP-E16 D5). Do not restore a
+// static import here: that would re-eager it for every visitor.
+import { wireHero } from "./hero.js";
+import {
+  buildTreeFragment,
+  buildGridFragment,
+  treeRootsFor,
+  pruneTreeByState,
+} from "./tree.js";
 import { authFetch, bootstrapToken } from "./auth.js";
-import { initAdmin } from "./admin.js";
+// admin.js is intentionally NOT imported statically — it is lazy-loaded ONLY for the
+// local owner (after the tiny /api/whoami probe reports is_admin) via initAdminLazy()
+// below, so a remote/token device never fetches it (IMP-E16 D5). Do not restore a
+// static import here: that would re-eager the ~25KB Access console for everyone.
 
 function $(sel, root) {
   return (root || document).querySelector(sel);
@@ -58,6 +72,11 @@ var activeState = null; // chosen sub-view within the active category
 // id -> enriched MODEL row, for the grouped (tree) view to JOIN raw /api/tree
 // leaves back onto their reclaim-enriched card payload. Rebuilt on every load().
 var MODEL_BY_ID = {};
+
+// Cinematic parallax hero strip (IMP-E16 D4). Built once in init() over the #hero
+// section; its { refresh } re-picks the featured set for the active category. Null
+// until init wires it, so every call site guards with `hero && hero.refresh()`.
+var hero = null;
 
 // View mode: "decluttered" = the existing flat by-state grid; "grouped" = the
 // on-disk folder hierarchy (tree.js). Persisted in sessionStorage so it survives a
@@ -85,6 +104,60 @@ function writeViewMode(mode) {
 
 function isGrouped() {
   return viewMode === "grouped";
+}
+
+// Grouped-mode presentation STYLE: "list" = today's collapsible folder tree
+// (tree.js renderFolder), "grid" = the drill-down grid of folder boxes
+// (buildGridFragment). Only meaningful while viewMode === "grouped"; decluttered
+// ignores it. Persisted separately in sessionStorage with a "list" default so the
+// existing behavior is unchanged on first run and the choice survives a reload.
+var GROUPED_STYLE_KEY = "mv_grouped_style";
+var groupedStyle = readGroupedStyle();
+
+function readGroupedStyle() {
+  try {
+    var v = window.sessionStorage.getItem(GROUPED_STYLE_KEY);
+    return v === "grid" ? "grid" : "list";
+  } catch (e) {
+    return "list";
+  }
+}
+
+function writeGroupedStyle(style) {
+  groupedStyle = style === "grid" ? "grid" : "list";
+  try {
+    window.sessionStorage.setItem(GROUPED_STYLE_KEY, groupedStyle);
+  } catch (e) {
+    /* sessionStorage unavailable — keep the in-memory style. */
+  }
+}
+
+function isGridStyle() {
+  return isGrouped() && groupedStyle === "grid";
+}
+
+// Grid drill-down nav stack: an array of folder NAMES from the active category
+// root (e.g. ["English"] or ["Show","Season 1"]). [] = the category root level.
+// Reset to root whenever the media-type tab OR the state filter changes (the two
+// resets the spec mandates); kept across List<->Grid toggles so re-entering the
+// grid resumes where you were. gridPendingScrollTop, when non-null, pins the next
+// paint's scroll position (0 on a drill / jump so a new level starts at the top;
+// null preserves the live scroll for an in-place re-render like a sort change or a
+// post-job refresh).
+var gridPath = [];
+var gridPendingScrollTop = null;
+
+function resetGridNav() {
+  gridPath = [];
+  gridPendingScrollTop = 0;
+}
+
+// Drill into / jump to a level: set the path and repaint. Always lands at the top
+// of the new level. Wired into every folder box + breadcrumb crumb by tree.js.
+function navigateGrid(nextPath) {
+  gridPath = (nextPath || []).slice();
+  gridPendingScrollTop = 0;
+  renderPanel(true); // morph the drill-in / breadcrumb jump (VT when available)
 }
 
 // Sub-view order = the leading "All" segment, THEN the 5 known states, PLUS any
@@ -305,8 +378,12 @@ function selectCategory(cat, opts) {
   // Reset the sub-view to "All" (the first non-empty sub-view for any non-empty
   // category; falls back to "All" for an entirely empty category too).
   activeState = firstNonEmptyState(cat) || ALL_STATE;
+  resetGridNav(); // a media-type change restarts the grid drill-down at root
   refreshTabSelection();
   buildSubnav();
+  // Re-pick the hero BEFORE the panel's view-transition snapshot so the band
+  // settles in the held-still root layer (instant cut, no morph flicker).
+  if (hero) hero.refresh();
   renderPanel(true);
   if (opts && opts.focus) {
     var tab = $("#tab-" + cat);
@@ -324,12 +401,143 @@ function selectState(state, opts) {
     return;
   }
   activeState = state;
+  resetGridNav(); // a state-filter change restarts the grid drill-down at root
   refreshSubnavSelection();
   renderPanel(true);
   if (opts && opts.focus) {
     var seg = $("#seg-" + state);
     if (seg) seg.focus();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Command-palette jump (IMP-E16 D2)
+// ---------------------------------------------------------------------------
+
+function prefersReducedMotion() {
+  try {
+    return (
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    );
+  } catch (e) {
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// View-Transitions morph (IMP-E16 D3)
+// ---------------------------------------------------------------------------
+
+// True only when the native View-Transitions API is present AND the user has not
+// requested reduced motion. Guarded so older Safari/Firefox (no
+// startViewTransition) and reduced-motion users transparently keep the classic
+// atomic swap with no morph.
+function canUseViewTransition() {
+  return (
+    typeof document !== "undefined" &&
+    typeof document.startViewTransition === "function" &&
+    !prefersReducedMotion()
+  );
+}
+
+// Run `fn` (a SYNCHRONOUS DOM mutation — the panel repaint) inside a native View
+// Transition so the browser cross-fades the #panel region from its old content to
+// its new content (the morph is scoped to #panel + tuned in styles.css). When the
+// API is unavailable or motion is reduced, `fn` is called directly — identical end
+// state, today's instant swap. NEVER throws: any unexpected failure degrades to a
+// direct call so a repaint can't be dropped.
+function withViewTransition(fn) {
+  if (!canUseViewTransition()) {
+    fn();
+    return;
+  }
+  try {
+    document.startViewTransition(function () {
+      fn();
+    });
+  } catch (e) {
+    fn();
+  }
+}
+
+// Jump straight to a library entry by id (the palette's title activation). The
+// flat DECLUTTERED grid renders synchronously from the already-loaded MODEL and
+// always contains the card for (category, state), so a jump is reliable and
+// flash-free — unlike the grouped tree, which is async + folder-collapsed +
+// state-pruned. So: force decluttered, switch to the item's category + its own
+// state sub-view, repaint synchronously, then scroll + pulse + open its dossier.
+// Returns true when the item exists in the current model.
+function jumpToItem(id) {
+  if (!MODEL) return false;
+  var item = MODEL_BY_ID[id];
+  if (!item) return false;
+
+  // The flat grid is the dependable target — leave grouped mode if we're in it.
+  if (isGrouped()) {
+    writeViewMode("decluttered");
+    refreshViewbar();
+  }
+
+  // Land on the item's exact coordinates (its category tab + its state sub-view).
+  // item.state is always a present state for this category, so its rail segment
+  // exists and paintFlat's `it.state === activeState` filter keeps the card.
+  activeCategory = item.category;
+  activeState = item.state;
+  resetGridNav();
+  refreshTabSelection();
+  buildSubnav();
+  // Keep the hero in sync if the jump crossed into another media-type tab.
+  if (hero) hero.refresh();
+  renderPanel(false); // synchronous paintFlat — the card is now in #panel
+
+  revealCardForId(id);
+  return true;
+}
+
+// Find the rendered .card for an id (identity match on the stamped __mvItem, so
+// any odd id is handled without CSS-selector escaping), scroll it into view,
+// pulse a highlight ring, and open its dossier. Best-effort: a missing card (e.g.
+// filtered out) simply does nothing.
+function revealCardForId(id) {
+  var panel = $("#panel");
+  if (!panel) return;
+  var cards = panel.querySelectorAll(".card");
+  var target = null;
+  for (var i = 0; i < cards.length; i += 1) {
+    var it = cards[i].__mvItem;
+    if (it && it.id === id) {
+      target = cards[i];
+      break;
+    }
+  }
+  if (!target) return;
+
+  try {
+    target.scrollIntoView({
+      block: "center",
+      inline: "nearest",
+      behavior: prefersReducedMotion() ? "auto" : "smooth",
+    });
+  } catch (e) {
+    target.scrollIntoView();
+  }
+
+  // Highlight pulse — restart the animation if the same card was just jumped to.
+  target.classList.remove("cmdk-flash");
+  void target.offsetWidth; // force reflow so re-adding the class replays it
+  target.classList.add("cmdk-flash");
+  window.setTimeout(function () {
+    target.classList.remove("cmdk-flash");
+  }, 1600);
+
+  // Open the cinematic dossier for the jumped-to card (reuses preview.js). The
+  // smooth scroll fires scroll events that preview.js re-anchors against, so the
+  // anchored panel tracks the card as it settles. Deferred one frame so the card
+  // has its post-scroll rect before the first position() measurement.
+  window.requestAnimationFrame(function () {
+    if (target.isConnected) openPreviewForCard(target);
+  });
 }
 
 // Sync the chrome around the panel to the active view mode. The state sub-view
@@ -356,6 +564,10 @@ function syncViewChrome() {
     subnav.classList.remove("is-hidden");
   }
   if (sortbar) sortbar.hidden = false;
+  // The List|Grid layout sub-toggle is only meaningful in grouped mode; hide the
+  // whole group in decluttered so the chrome stays clean.
+  var styleGroup = $("#grouped-style");
+  if (styleGroup) styleGroup.hidden = !grouped;
   document.body.classList.toggle("grouped-view", grouped);
 }
 
@@ -379,8 +591,14 @@ function renderPanel(animate) {
     panel.setAttribute("aria-label", CATEGORY_META[activeCategory].label + " folders");
     panel.removeAttribute("aria-labelledby");
     // Atomic, flash-free swap owns its own transition; do NOT add `.swapping`
-    // (which would fade the panel to empty while the async tree resolves).
-    paintTree(panel);
+    // (which would fade the panel to empty while the async tree resolves). The
+    // grouped tab has two presentation STYLES: the collapsible list (paintTree)
+    // and the drill-down grid (paintGrid); both read the SAME cached /api/tree.
+    if (groupedStyle === "grid") {
+      paintGrid(panel, animate);
+    } else {
+      paintTree(panel, animate);
+    }
     return;
   }
 
@@ -398,7 +616,17 @@ function renderPanel(animate) {
     });
   }
 
-  if (animate) {
+  if (animate && canUseViewTransition()) {
+    // Native View-Transitions morph: snapshot → swap → cross-fade, scoped to
+    // #panel (see styles.css). paintFlat is the synchronous DOM update the API
+    // snapshots around. NO `.swapping` here — that would double-animate the swap
+    // (a fade-on-fade); the VT cross-fade fully owns the transition.
+    withViewTransition(function () {
+      paintFlat(panel);
+    });
+  } else if (animate) {
+    // Fallback (API absent / reduced motion): the classic fade-out → swap →
+    // fade-in via the `.swapping` opacity+slide transition.
     panel.classList.add("swapping");
     // Wait one frame for the fade-out, then swap + fade-in.
     requestAnimationFrame(function () {
@@ -460,7 +688,7 @@ function paintFlat(panel) {
 //
 // The atomic swap is intentionally instant (no fade) because there is no empty
 // intermediate state to hide — the content simply changes in place.
-function paintTree(panel) {
+function paintTree(panel, animate) {
   // Capture the category AND state filter this paint is for; if the user switches
   // tabs or the state filter before the tree resolves, a stale resolution must NOT
   // overwrite the newer view.
@@ -490,18 +718,97 @@ function paintTree(panel) {
       // flashes empty. Preserve scroll position across the swap.
       var fragment = buildTreeFragment(view, MODEL_BY_ID);
       var prevScroll = panel.scrollTop;
-      // Teardown invariant: dispose the OUTGOING content's fetch-ring
-      // ResizeObservers right before replacing it (buildTreeFragment built only
-      // new DOM and did not touch these).
-      destroyRingsIn(panel);
-      panel.replaceChildren(fragment);
-      panel.scrollTop = prevScroll;
+      // Atomic swap — optionally inside a View Transition. We snapshot AFTER the
+      // async tree resolved (never around the loading state) so the morph cross-
+      // fades the real old content → real new content. Teardown invariant: dispose
+      // the OUTGOING content's fetch-ring ResizeObservers right before replacing it
+      // (buildTreeFragment built only new DOM and did not touch these).
+      var swap = function () {
+        destroyRingsIn(panel);
+        panel.replaceChildren(fragment);
+        panel.scrollTop = prevScroll;
+      };
+      if (animate) {
+        withViewTransition(swap);
+      } else {
+        swap();
+      }
     })
     .catch(function (err) {
       hideTreeLoading(overlay);
       if (!isGrouped() || activeCategory !== forCategory) return;
       // Non-destructive on failure: keep whatever is currently shown and surface
       // the error on the status line so the user can retry (re-toggle the tab).
+      setStatus(
+        "Failed to load the folder tree — " + ((err && err.message) || err),
+        true
+      );
+    });
+}
+
+// Grouped GRID drill-down for the active category — same ATOMIC, flash-free swap
+// discipline as paintTree (it shares the cached /api/tree + the subtle loading
+// overlay + the stale-resolution guard), but renders ONE level (buildGridFragment)
+// at the current gridPath instead of the whole collapsible tree. The active state
+// filter prunes the tree FIRST (pruneTreeByState — the identical rule the list
+// uses), so a folder box appears only if it has a matching descendant leaf and its
+// size / count reflect the filter; the sort applies to each level via compareNodes
+// inside buildGridFragment.
+function paintGrid(panel, animate) {
+  // Capture the category AND state filter this paint is for; a tab / state-filter /
+  // view-style change before /api/tree resolves must NOT overwrite the newer view.
+  var forCategory = activeCategory;
+  var forState = activeState;
+
+  // Decide the post-swap scroll NOW (synchronously): a drill / jump sets 0 via
+  // gridPendingScrollTop so a new level opens at the top; an in-place re-render
+  // (sort change / post-job refresh) preserves the live scrollTop. Consume the
+  // pending value so the next paint preserves by default.
+  var scrollTarget =
+    gridPendingScrollTop != null ? gridPendingScrollTop : panel.scrollTop;
+  gridPendingScrollTop = null;
+
+  var overlay = showTreeLoading(panel);
+
+  treeRootsFor(forCategory)
+    .then(function (roots) {
+      hideTreeLoading(overlay);
+      if (
+        !isGridStyle() ||
+        activeCategory !== forCategory ||
+        activeState !== forState
+      ) {
+        return; // superseded by a tab / state-filter / view-style change
+      }
+      // "All" → the whole category tree; a specific state → the tree PRUNED to it
+      // (same rule + folder-size aggregation as the list view, see paintTree).
+      var view =
+        forState === ALL_STATE
+          ? roots
+          : pruneTreeByState(roots, forState, MODEL_BY_ID);
+
+      var fragment = buildGridFragment(view, MODEL_BY_ID, gridPath, {
+        rootLabel: CATEGORY_META[forCategory].label,
+        onNavigate: navigateGrid,
+      });
+      // Atomic swap — optionally inside a View Transition (snapshot AFTER the data
+      // is ready, never around the loading state). Teardown invariant: dispose the
+      // OUTGOING content's fetch-ring observers immediately before the atomic
+      // replace (buildGridFragment only built new DOM).
+      var swap = function () {
+        destroyRingsIn(panel);
+        panel.replaceChildren(fragment);
+        panel.scrollTop = scrollTarget;
+      };
+      if (animate) {
+        withViewTransition(swap);
+      } else {
+        swap();
+      }
+    })
+    .catch(function (err) {
+      hideTreeLoading(overlay);
+      if (!isGridStyle() || activeCategory !== forCategory) return;
       setStatus(
         "Failed to load the folder tree — " + ((err && err.message) || err),
         true
@@ -617,6 +924,7 @@ function renderAll(isFirst) {
     // Default sub-view = "All" (firstNonEmptyState resolves to ALL_STATE for any
     // non-empty category; fall back to ALL_STATE for an empty library too).
     activeState = firstNonEmptyState(activeCategory) || ALL_STATE;
+    resetGridNav(); // first paint starts the grid drill-down at the category root
   } else {
     // Re-render after a job. Keep the active sub-view if it still has items;
     // else drop to the first non-empty sub-view of the same category (= "All"
@@ -636,12 +944,16 @@ function renderAll(isFirst) {
           activeState = ALL_STATE;
         }
       }
+      resetGridNav(); // the post-job fallback moved category/state; grid → root
     }
   }
 
   refreshTabSelection();
   buildSubnav();
   renderPanel(false);
+  // Re-pick the hero's featured set for the (possibly changed) active category from
+  // the freshly-loaded model. No-op when the category + featured set are unchanged.
+  if (hero) hero.refresh();
   setStatus("");
 }
 
@@ -768,6 +1080,13 @@ var VIEW_MODES = [
   { mode: "decluttered", label: "Decluttered", glyph: "▦", hint: "Flat, grouped by disk state" },
 ];
 
+// The two grouped-mode layout styles for the List|Grid sub-toggle. "list" keeps
+// today's collapsible tree (default); "grid" is the drill-down folder boxes.
+var GROUPED_STYLES = [
+  { style: "list", label: "List", glyph: "☰", hint: "Collapsible folder list" },
+  { style: "grid", label: "Grid", glyph: "⊞", hint: "Drill-down grid of folder boxes" },
+];
+
 function buildViewbar() {
   var bar = $("#viewbar");
   if (!bar) return;
@@ -808,18 +1127,69 @@ function buildViewbar() {
   });
   bar.appendChild(group);
 
+  // Grouped-mode LAYOUT sub-toggle (List | Grid). Mounted in the SAME #viewbar
+  // chrome but wrapped in #grouped-style so syncViewChrome can hide it wholesale in
+  // decluttered mode. Mirrors the view-modes segmented-pill styling.
+  var styleWrap = document.createElement("span");
+  styleWrap.className = "grouped-style";
+  styleWrap.id = "grouped-style";
+  // Initial visibility matches the current mode so it never flashes during the
+  // first (async) load; syncViewChrome keeps it in sync on every later repaint.
+  styleWrap.hidden = !isGrouped();
+
+  var styleLabel = document.createElement("span");
+  styleLabel.className = "viewbar-label";
+  styleLabel.textContent = "Layout";
+  styleWrap.appendChild(styleLabel);
+
+  var styleGroup = document.createElement("div");
+  styleGroup.className = "view-modes";
+  styleGroup.setAttribute("role", "group");
+  styleGroup.setAttribute("aria-label", "Grouped layout style");
+
+  GROUPED_STYLES.forEach(function (def) {
+    var sb = document.createElement("button");
+    sb.type = "button";
+    sb.className = "view-mode grouped-style-btn";
+    sb.dataset.style = def.style;
+    sb.title = def.hint;
+
+    var sg = document.createElement("span");
+    sg.className = "view-mode-glyph";
+    sg.setAttribute("aria-hidden", "true");
+    sg.textContent = def.glyph;
+    sb.appendChild(sg);
+
+    var st = document.createElement("span");
+    st.className = "view-mode-text";
+    st.textContent = def.label;
+    sb.appendChild(st);
+
+    sb.addEventListener("click", function () {
+      selectGroupedStyle(def.style);
+    });
+    styleGroup.appendChild(sb);
+  });
+  styleWrap.appendChild(styleGroup);
+  bar.appendChild(styleWrap);
+
   refreshViewbar();
 }
 
-// Reflect the active mode (pressed state) on the toggle.
+// Reflect the active mode + layout style (pressed state) on the toggles. The bar
+// holds two segmented groups: the Grouped/Decluttered MODE buttons (data-mode) and
+// the List/Grid LAYOUT buttons (data-style); each reflects against its own value.
 function refreshViewbar() {
   var bar = $("#viewbar");
   if (!bar) return;
   var btns = bar.querySelectorAll(".view-mode");
   for (var i = 0; i < btns.length; i += 1) {
-    var on = btns[i].dataset.mode === viewMode;
-    btns[i].classList.toggle("active", on);
-    btns[i].setAttribute("aria-pressed", on ? "true" : "false");
+    var b = btns[i];
+    var on = b.dataset.style
+      ? b.dataset.style === groupedStyle
+      : b.dataset.mode === viewMode;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-pressed", on ? "true" : "false");
   }
 }
 
@@ -829,6 +1199,180 @@ function selectViewMode(mode) {
   refreshViewbar();
   setStatus(""); // clear any stale tree-load error from a prior attempt
   renderPanel(true); // animated swap; flat from MODEL, tree from cached /api/tree
+                     // (renderPanel→syncViewChrome reveals/hides the List|Grid toggle)
+}
+
+// Switch the grouped LAYOUT style (List <-> Grid). Persisted; the nav stack is
+// intentionally kept so re-entering the grid resumes where you were. The grid
+// renders from the SAME cached /api/tree, so this is a synchronous-feeling swap.
+function selectGroupedStyle(style) {
+  if (style === groupedStyle) return;
+  writeGroupedStyle(style);
+  refreshViewbar();
+  setStatus(""); // clear any stale tree-load error from a prior attempt
+  renderPanel(true); // animated swap between the list and grid presentations
+}
+
+// ---------------------------------------------------------------------------
+// Command palette wiring (IMP-E16 D2)
+// ---------------------------------------------------------------------------
+
+// The public surface the ⌘K / Ctrl-K palette (palette.js) drives. Built here so
+// palette.js stays a pure UI module (no import of app.js → no circular graph):
+// it receives the live model + every navigation action through this object. Each
+// callback routes to the SAME internal function a click on the chrome would use,
+// so the palette can never drift from the visible controls.
+function buildPaletteApi() {
+  return {
+    // Live candidate list — the merged model rows (all categories/states).
+    getItems: function () {
+      return MODEL ? MODEL.items : [];
+    },
+    // Title activation: switch tab + state, scroll, pulse, open the dossier.
+    jumpToItem: jumpToItem,
+    // Global actions (mirror the header chrome).
+    selectCategory: function (cat) {
+      selectCategory(cat);
+    },
+    selectState: function (state) {
+      selectState(state);
+    },
+    setViewMode: function (mode) {
+      selectViewMode(mode);
+    },
+    // Grid/List only apply in grouped mode — enter it first, then set the style.
+    setGroupedStyle: function (style) {
+      if (!isGrouped()) selectViewMode("grouped");
+      selectGroupedStyle(style);
+    },
+    setSortKey: function (key) {
+      setSort(key, null);
+      refreshSortbar();
+      renderPanel(false); // instant client-side reorder, no view swap
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Lazy command-palette loader (IMP-E16 D5)
+// ---------------------------------------------------------------------------
+//
+// palette.js (the overlay + fuzzy index + its OWN ⌘K/"/" keydown wiring) is only
+// needed once the user reaches for it, so it is kept OUT of the first-paint module
+// graph and dynamically imported on the first trigger. A LIGHT keydown shim + a
+// lightweight header "Search" button live here to catch that first trigger; both
+// route through ensurePalette(), which imports + wires the module exactly once
+// (guarded by _paletteReady so subsequent triggers reuse the loaded copy).
+//
+// Hand-off: wireCommandPalette() registers palette.js's OWN keydown listener (the
+// original behaviour), so this shim only OWNS the FIRST trigger — it bails the
+// moment _paletteReady is set, letting palette.js drive every later ⌘K/"/" exactly
+// as before. The opened overlay + index are byte-identical to the old eager path;
+// only the load moment moved.
+var _paletteReady = false; // wireCommandPalette() has run
+var _paletteMod = null; // the loaded palette.js module namespace
+var _paletteLoading = null; // in-flight import() promise (dedupes rapid triggers)
+
+function ensurePalette() {
+  if (_paletteReady) return Promise.resolve(_paletteMod);
+  if (_paletteLoading) return _paletteLoading;
+  _paletteLoading = import("./palette.js")
+    .then(function (m) {
+      if (!_paletteReady) {
+        m.wireCommandPalette(buildPaletteApi());
+        _paletteMod = m;
+        _paletteReady = true;
+      }
+      return _paletteMod;
+    })
+    .catch(function (err) {
+      _paletteLoading = null; // allow a retry on the next trigger
+      console.warn("Command palette (palette.js) failed to load:", err);
+      return null;
+    });
+  return _paletteLoading;
+}
+
+// Load (if needed) then open the palette. open() is idempotent (it no-ops when
+// already open), so a double call during the brief import window is harmless.
+function openPaletteLazy() {
+  ensurePalette().then(function (m) {
+    if (m && typeof m.open === "function") m.open();
+  });
+}
+
+// A bare keystroke is text input in these targets, so the global "/" shortcut must
+// not steal it (mirrors palette.js's own isTypingTarget).
+function isTypingTarget(el) {
+  if (!el) return false;
+  var tag = el.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (el.isContentEditable) return true;
+  return false;
+}
+
+function isMacPlatform() {
+  try {
+    var s = navigator.platform || navigator.userAgent || "";
+    return /Mac|iPhone|iPod|iPad/i.test(s);
+  } catch (e) {
+    return false;
+  }
+}
+
+// Mount the lightweight header "Search" affordance EAGERLY so it exists from first
+// paint — it is the mobile tap target (no keyboard shortcut there) and the desktop
+// discoverability hint. palette.js can't inject its own until it loads, and on
+// mobile there is no shortcut to load it with, so this must be present up front.
+// Mirrors palette.js's injectTrigger markup (#cmdk-trigger) so styles.css applies
+// and, once palette.js loads, its injectTrigger() guard skips re-mounting.
+function mountPaletteTrigger() {
+  var row = document.querySelector(".tabbar-row");
+  if (!row || document.getElementById("cmdk-trigger")) return;
+
+  var hint = isMacPlatform() ? "⌘K" : "Ctrl K";
+
+  var btn = document.createElement("button");
+  btn.type = "button";
+  btn.id = "cmdk-trigger";
+  btn.className = "cmdk-trigger";
+  btn.title = "Search & commands (" + hint + ")";
+  btn.setAttribute("aria-label", "Open command palette");
+
+  var g = document.createElement("span");
+  g.className = "cmdk-trigger-glyph";
+  g.setAttribute("aria-hidden", "true");
+  g.textContent = "⌕";
+  btn.appendChild(g);
+
+  var t = document.createElement("span");
+  t.className = "cmdk-trigger-text";
+  t.textContent = "Search";
+  btn.appendChild(t);
+
+  var kbd = document.createElement("span");
+  kbd.className = "cmdk-trigger-kbd";
+  kbd.setAttribute("aria-hidden", "true");
+  kbd.textContent = hint;
+  btn.appendChild(kbd);
+
+  btn.addEventListener("click", openPaletteLazy);
+  row.appendChild(btn);
+}
+
+// Wire the light first-trigger shim: the eager Search button + a ⌘K/Ctrl-K/"/"
+// keydown listener that bails the instant palette.js has taken over.
+function wirePaletteLazy() {
+  mountPaletteTrigger();
+  document.addEventListener("keydown", function (e) {
+    if (_paletteReady) return; // palette.js owns the shortcut once it has loaded
+    var k = e.key;
+    var combo = (e.metaKey || e.ctrlKey) && (k === "k" || k === "K");
+    var slash = k === "/" && !isTypingTarget(e.target);
+    if (!combo && !slash) return;
+    e.preventDefault();
+    openPaletteLazy();
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -870,6 +1414,36 @@ function checkDemoMode() {
     });
 }
 
+// Owner-only "Access" panel (IMP-E15), now LAZY-LOADED (IMP-E16 D5). The tiny
+// no-auth /api/whoami probe STAYS here so we can decide BEFORE fetching any JS:
+// admin.js (the ~25KB mint/list/revoke console) is dynamically imported ONLY when
+// the probe reports the genuine local owner (is_admin). A remote/token device never
+// downloads admin.js at all. A failed probe or import is swallowed → no admin
+// surface (fail-safe, identical to the old eager behaviour), and the device 401
+// token flow in auth.js is untouched. initAdmin() re-checks whoami itself; that
+// second tiny no-auth fetch (owner-only, off the first-paint path) is the deliberate
+// price of leaving admin.js byte-for-byte unchanged.
+function initAdminLazy() {
+  authFetch("/api/whoami")
+    .then(function (res) {
+      return res && res.ok ? res.json() : null;
+    })
+    .then(function (data) {
+      if (data && data.is_admin === true) {
+        import("./admin.js")
+          .then(function (m) {
+            m.initAdmin();
+          })
+          .catch(function (err) {
+            console.warn("Access panel (admin.js) failed to load:", err);
+          });
+      }
+    })
+    .catch(function () {
+      /* not the owner / probe failed — render no admin surface (fail-safe). */
+    });
+}
+
 function init() {
   // Capture/restore the access token (and set the cookie that lets <img> requests
   // carry it) BEFORE any /api/ fetch. Idempotent — auth.js also runs this at
@@ -877,10 +1451,11 @@ function init() {
   // any future re-ordering of the module graph.
   bootstrapToken();
   checkDemoMode();
-  // Owner-only "Access" panel (IMP-E15): probes /api/whoami and, only for the
-  // genuine local browser, mounts the token mint/list/revoke console. A remote
-  // device gets nothing here and keeps the existing 401 token-prompt flow.
-  initAdmin();
+  // Owner-only "Access" panel (IMP-E15) — LAZY (IMP-E16 D5). Probes /api/whoami and,
+  // ONLY for the genuine local owner, dynamically imports admin.js + mounts the token
+  // mint/list/revoke console. A remote/token device never fetches admin.js and keeps
+  // the existing 401 token-prompt flow.
+  initAdminLazy();
   wireModal();
   wireSort();
   buildSortbar();
@@ -889,6 +1464,31 @@ function init() {
   // once in index.html; only its children are cleared on re-render), so every
   // freshly-rendered card is covered with no per-card listener to leak.
   wireCardGlow($("#panel"));
+  // Cinematic hover detail-window (IMP-E16): resting on any card opens a large
+  // translucent "dossier" (backdrop + synopsis + meta). Delegated to the SAME
+  // stable #panel as the glow, desktop-pointer only, pointer-events:none (never
+  // blocks a click). Covers flat + grouped leaf cards with no per-card listener.
+  wireHoverPreview($("#panel"));
+  // ⌘K / Ctrl-K command palette (IMP-E16 D2) — LAZY (IMP-E16 D5). A light keydown
+  // shim + an eager lightweight Search button live in app.js; palette.js itself
+  // (overlay + fuzzy index, driven by buildPaletteApi()) is dynamically imported on
+  // the first ⌘K / "/" / Search-button use, then takes over its own shortcut.
+  wirePaletteLazy();
+  // Cinematic parallax hero strip (IMP-E16 D4): a wide backdrop band over #panel
+  // featuring the active tab's archived/backdrop titles with a Ken-Burns drift,
+  // scroll parallax, and crossfading auto-rotation. Built once; refresh() re-picks
+  // per category (called from renderAll / selectCategory / jumpToItem). Clicking a
+  // slide reuses the palette's jump (scroll the card in + pulse + open its dossier).
+  hero = wireHero(
+    $("#hero"),
+    function () {
+      return MODEL;
+    },
+    function () {
+      return activeCategory;
+    },
+    jumpToItem
+  );
   // After any terminal job, reload the model and repaint (preserving the view).
   setRefreshHandler(function () {
     load(false);

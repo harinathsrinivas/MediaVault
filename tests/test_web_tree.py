@@ -181,7 +181,9 @@ def _all_leaf_ids(nodes):
 
 _LEAF_BASE_KEYS = {
     "type", "id", "category", "state", "size_bytes", "path",
-    "title", "year", "tmdb_id", "poster_available", "chunk_count",
+    "title", "year", "tmdb_id", "poster_available", "backdrop_available",
+    "overview", "episode_title", "chunk_count",
+    "actual_size_bytes", "tech", "release_name",
 }
 
 

@@ -437,6 +437,16 @@ button, input { font-family: inherit; }
   box-shadow: 0 3px 12px rgba(56, 224, 200, 0.26);
 }
 
+/* Grouped-mode LAYOUT sub-toggle (List | Grid). Shares the #viewbar row, sitting
+   to the right of the Grouped/Decluttered modes; hidden wholesale in decluttered
+   mode (app.js sets [hidden] on #grouped-style). Reuses the .view-modes pills. */
+.grouped-style {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+.grouped-style[hidden] { display: none; }
+
 /* ---------------- Layout ---------------- */
 
 main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
@@ -459,6 +469,13 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   transform: translateY(0);
   transition: opacity 0.18s ease, transform 0.18s ease;
   outline: none;
+  /* Scope the View-Transitions morph (IMP-E16 D3) to THIS content region so a
+     tab / state-filter / view-mode swap cross-fades only the panel. Everything
+     else — header, tabs, sub-nav AND the fixed overlays (hover dossier, command
+     palette, job terminal, toasts) + the animated background canvas — is captured
+     into ::*-(root), whose animation is zeroed below, so it's left untouched.
+     Inert (ignored) when the API is absent. */
+  view-transition-name: mv-panel;
 }
 .panel.swapping {
   opacity: 0;
@@ -467,6 +484,69 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 @media (prefers-reduced-motion: reduce) {
   .panel { transition: none; }
   .panel.swapping { opacity: 1; transform: none; }
+}
+
+/* ---------------- View-Transitions panel morph (IMP-E16 D3) ----------------
+   UPGRADE of the .panel content-swap to the native document.startViewTransition()
+   (app.js withViewTransition). The morph is SCOPED to #panel by the
+   `view-transition-name: mv-panel` above: only the panel cross-fades. The page
+   root — header, tabs, sub-nav AND every fixed overlay (hover dossier, command
+   palette, job terminal, toasts) + the background canvas — is captured into
+   ::*-(root), held still just below, so nothing else flickers. When the API is
+   absent the whole block is simply ignored and the .swapping fallback runs. */
+
+/* The panel box morphs (its height tracks the changing card count) on a calm
+   ~240ms ease-out; the old/new snapshots cross-fade with plus-lighter so there is
+   no mid-fade brightness dip. A few-px lift makes the content feel like it is
+   gracefully recomposing rather than hard-cutting. */
+::view-transition-group(mv-panel) {
+  animation-duration: 240ms;
+  animation-timing-function: cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+::view-transition-old(mv-panel),
+::view-transition-new(mv-panel) {
+  animation-duration: 240ms;
+  animation-timing-function: cubic-bezier(0.22, 0.61, 0.36, 1);
+  mix-blend-mode: plus-lighter;
+}
+::view-transition-old(mv-panel) {
+  animation-name: mv-panel-out;
+}
+::view-transition-new(mv-panel) {
+  animation-name: mv-panel-in;
+}
+@keyframes mv-panel-out {
+  to {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+}
+@keyframes mv-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+}
+
+/* Belt-and-braces: leave EVERYTHING outside #panel untouched. The page-root
+   snapshot (which contains the fixed overlays + the background canvas) would
+   otherwise cross-fade as one block; zero its animation so the new root paints
+   immediately — no visible change to the chrome/overlays/background. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+/* Reduced motion: the JS helper already skips startViewTransition, but if a view
+   transition is ever triggered another way, zero every VT animation so motion-
+   sensitive users get an instant cut (no morph, no slide). */
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
 }
 
 /* Grouped-view loading overlay. Shown ONLY when the async /api/tree is slow to
@@ -562,7 +642,14 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
    expand arrow. Default opacity 0; glow.js writes --mx/--my (px, relative to the
    card) one update per frame as the pointer moves; CSS handles the fade. The
    --mx/--my fallbacks centre the glow before the first move / on un-tracked
-   cards so it never flashes at the 0,0 corner. */
+   cards so it never flashes at the 0,0 corner.
+
+   POSTER TINT (IMP-E16 D1): the accent colour is `var(--accent-rgb, 56, 224, 200)`
+   — the fixed mint UNLESS card.js extracted a film accent from the loaded poster
+   (swatch.js) and set `--accent-rgb`/`--accent-bright-rgb` on the card. So a card
+   with no poster (or a failed/muddy extraction) is byte-identical to the old mint;
+   an enriched card glows in its film's colour. The glow/ring/box-shadow below all
+   read this var with the SAME mint fallback. */
 .card::before {
   content: "";
   position: absolute;
@@ -573,8 +660,8 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   transition: opacity 0.2s ease;
   background: radial-gradient(
     circle at var(--mx, 50%) var(--my, 50%),
-    rgba(56, 224, 200, 0.16),
-    rgba(56, 224, 200, 0.06) 90px,
+    rgba(var(--accent-rgb, 56, 224, 200), 0.16),
+    rgba(var(--accent-rgb, 56, 224, 200), 0.06) 90px,
     transparent 160px
   );
 }
@@ -628,7 +715,7 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
    is the whole (still pretty, never-blank) effect. */
 @media (any-hover: hover) and (any-pointer: fine) {
   .card:hover {
-    box-shadow: var(--shadow), 0 0 0 1px rgba(56, 224, 200, 0.28);
+    box-shadow: var(--shadow), 0 0 0 1px rgba(var(--accent-rgb, 56, 224, 200), 0.28);
   }
 }
 
@@ -659,8 +746,8 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
     background: conic-gradient(
       from var(--ring-angle),
       transparent 0deg,
-      rgba(56, 224, 200, 0.95) 42deg,   /* --accent core of the arc */
-      rgba(90, 160, 255, 0.85) 88deg,   /* --focus trailing edge */
+      rgba(var(--accent-rgb, 56, 224, 200), 0.95) 42deg,        /* poster accent core (mint default) */
+      rgba(var(--accent-bright-rgb, 90, 160, 255), 0.85) 88deg, /* brighter sibling trailing edge (blue default) */
       transparent 150deg,
       transparent 360deg
     );
@@ -770,7 +857,14 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   position: absolute;
   inset: auto 0 0 0;
   height: 56%;
-  background: linear-gradient(to top, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0));
+  /* Black legibility scrim (unchanged) PLUS a faint poster-accent wash layered over
+     it. The wash's alpha is `var(--accent-scrim-a, 0)` — 0 by default, so a poster
+     whose accent wasn't extracted renders the EXACT original black gradient. card.js
+     sets --accent-scrim-a (and --accent-rgb) only on a successful extraction, lifting
+     the film-coloured wash in. */
+  background:
+    linear-gradient(to top, rgba(var(--accent-rgb, 56, 224, 200), var(--accent-scrim-a, 0)), rgba(0, 0, 0, 0) 70%),
+    linear-gradient(to top, rgba(0, 0, 0, 0.55), rgba(0, 0, 0, 0));
   z-index: 1;
   pointer-events: none;
 }
@@ -862,6 +956,60 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
   padding: 1px 5px;
   margin-left: 6px;
   vertical-align: middle;
+}
+
+/* Archived/real-version info under the title (IMP-E16 B1). A small line carrying
+   the REAL fetched size (the on-disk file is a tiny dummy) + a capped row of dim
+   tech chips parsed from tech_spec + the release filename. Renders only for an
+   archived / dummy-on-disk leaf; never overlaps the right-side on-disk size. */
+.tech-host { margin-top: -2px; }
+.tech-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  margin: 4px 0 2px;
+}
+/* Real (archived) size — mint pill matching the ARCHIVED badge hue, so it reads
+   as the cloud-resident real size, distinct from the local dummy size chip. */
+.tech-size {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.tech-size-label {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: var(--b-archived);
+  opacity: 0.85;
+}
+.tech-size-val {
+  font-weight: 700;
+  color: var(--b-archived);
+  font-variant-numeric: tabular-nums;
+}
+/* Tech chips — small, dim, low-contrast so they inform without overwhelming the
+   tile. A subtle hairline keeps them legible over the poster glow. */
+.tech-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 5px;
+  min-width: 0;
+}
+.tech-chip {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--line-soft);
+  border-radius: 5px;
+  padding: 1px 6px;
+  white-space: nowrap;
 }
 
 /* Raw canonical id at the card foot — small, dim, monospace; subordinate to the
@@ -1235,6 +1383,183 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 .folder-children > .folder-node { grid-column: 1 / -1; }
 @media (max-width: 460px) {
   .folder-children { grid-template-columns: 1fr; padding-left: 18px; }
+}
+
+/* ---------------- Grouped (GRID drill-down) view ---------------- */
+/* The GRID style of the grouped tab (IMP-E16). One level at a time: child folders
+   render as a responsive grid of navigable .folder-box tiles (folders first); any
+   leaf items at the level render below as the SAME .card grid as every other view.
+   A .crumbs breadcrumb bar (Back + clickable trail) drives the drill-down. Built
+   off-DOM and swapped into #panel atomically (app.js paintGrid). */
+
+.crumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 16px;
+}
+.crumb-back {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  padding: 6px 13px;
+  margin-right: 4px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.14s, color 0.14s, border-color 0.14s;
+}
+.crumb-back:hover:not(:disabled) {
+  background: var(--bg-card-hover);
+  color: var(--accent);
+  border-color: var(--accent-deep);
+}
+.crumb-back:disabled { opacity: 0.4; cursor: default; }
+
+/* Trail crumbs — earlier segments are buttons (jump to that level); the current
+   level is plain text. Separators are dim slashes. */
+.crumb {
+  border: 0;
+  background: transparent;
+  padding: 5px 7px;
+  border-radius: 6px;
+  color: var(--text-dim);
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: color 0.14s, background 0.14s;
+}
+button.crumb:hover { color: var(--accent); background: var(--bg-card-hover); }
+.crumb-current {
+  color: var(--text);
+  font-weight: 700;
+  cursor: default;
+}
+.crumb-sep {
+  color: var(--text-faint);
+  font-size: 12px;
+  user-select: none;
+}
+
+/* Responsive grid of folder boxes. A denser min track than the .card grid so the
+   language / season tiles read as a "shelf" distinct from the leaf cards. */
+.grid-view {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 16px;
+  margin: 0 0 18px;
+}
+@media (max-width: 420px) {
+  .grid-view {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 12px;
+  }
+}
+
+/* A folder box: a poster-forward, navigable TILE (not a card — no dossier). A
+   stacked-sheet box-shadow signals it opens INTO something (the drill-down
+   affordance), visually distinct from the flat leaf cards. box-shadow is not
+   clipped by the tile's own overflow:hidden (which rounds the cover). */
+.folder-box {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  padding: 0;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+  background: linear-gradient(180deg, var(--bg-card), #121a28);
+  color: var(--text);
+  cursor: pointer;
+  overflow: hidden;
+  font-family: inherit;
+  box-shadow:
+    5px 5px 0 -2px var(--bg-card),
+    5px 5px 0 -1px var(--line-soft);
+  transition:
+    transform 0.22s cubic-bezier(0.22, 0.61, 0.36, 1),
+    box-shadow 0.22s cubic-bezier(0.22, 0.61, 0.36, 1),
+    border-color 0.18s ease;
+}
+.folder-box:hover {
+  transform: translateY(-3px);
+  border-color: var(--accent-deep);
+  box-shadow:
+    5px 5px 0 -2px var(--bg-card),
+    5px 5px 0 -1px var(--line-soft),
+    0 10px 28px rgba(0, 0, 0, 0.45);
+}
+.folder-box:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* Cover image — a soft landscape folder poster; gradient + folder glyph fallback. */
+.folder-box-cover {
+  position: relative;
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  background: linear-gradient(135deg, #1b2638, #0e1622);
+  overflow: hidden;
+}
+.folder-box-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.folder-box-cover.fallback::after {
+  content: "🗀";                /* unicode folder — no external asset */
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 40px;
+  color: rgba(56, 224, 200, 0.45);
+}
+/* Soft bottom scrim so a bright cover never fights the name below it. */
+.folder-box-cover::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, transparent 55%, rgba(8, 12, 20, 0.55));
+  pointer-events: none;
+}
+
+.folder-box-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px 12px;
+  min-width: 0;
+}
+.folder-box-name {
+  font-weight: 700;
+  font-size: 14.5px;
+  letter-spacing: 0.2px;
+  overflow-wrap: anywhere;
+}
+.folder-box-sub {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The leaf-card grid inside a grid level reuses .grid; this only nudges the gap
+   from the breadcrumb when a level has no folder boxes above it. */
+.grid-view-cards { margin-top: 2px; }
+
+/* Reduced motion: keep the stacked-sheet depth (static) but drop the lift. */
+@media (prefers-reduced-motion: reduce) {
+  .folder-box { transition: border-color 0.18s ease; }
+  .folder-box:hover { transform: none; }
 }
 
 /* ---------------- Toast (open-folder outcomes) ---------------- */
@@ -1940,4 +2265,1423 @@ main { padding: 22px clamp(16px, 4vw, 40px) 60px; }
 
 @media (prefers-reduced-motion: reduce) {
   .access-modal { animation: none; }
+}
+
+/* ============================================================================
+   DETAIL-WINDOW — the cinematic "dossier" (IMP-E16). preview.js builds ONE
+   reusable #hover-preview and swaps its contents per open. A large, translucent
+   glass card: the show's backdrop as a dimmed cover, the real title + year, the
+   episode line, the synopsis, the rich strip, and a tight meta row. A personal
+   film vault, so it reads like a "now showing" placard.
+
+   TWO PRESENTATIONS, ONE PANEL:
+     • DESKTOP HOVER — pinned BESIDE the hovered card (preview.js anchors it).
+       The panel is pointer-events:AUTO so the IMDb/TMDB chips + ✕ are clickable;
+       leaving the card no longer closes it instantly — a short grace timer lets
+       you glide card→panel (see preview.js). It may rise UP over the header.
+     • MOBILE MODAL (.is-modal) — a long-press opens it CENTERED over a dim
+       backdrop (.hover-preview-backdrop), body-scrollable, dismissed by the
+       backdrop / ✕ / Escape.
+   ----------------------------------------------------------------------------*/
+
+/* Dim full-screen backdrop behind the MOBILE modal presentation only. Built once
+   by preview.js, display:none until .show. Tapping it dismisses the dossier. */
+.hover-preview-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 99;                 /* just under the modal panel (100); see below */
+  display: none;
+  background: rgba(4, 7, 12, 0.66);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+  pointer-events: auto;        /* catch the dismiss tap */
+}
+.hover-preview-backdrop.show { display: block; }
+
+.hover-preview {
+  position: fixed;
+  top: 0;
+  left: 0;
+  /* CINEMATIC SCALE (IMP-E16): the dossier is allowed to rise UP over the header
+     (z-index 20) and the demo banner (z-index 30) while a leaf is hovered — that
+     deliberate overlap of the top chrome is the whole effect. Still below the
+     terminal (120) so it always wins. (In .is-modal it lifts to 100, above its
+     own backdrop at 99.) */
+  z-index: 95;
+  /* Bigger (IMP-E16 follow-up): there was empty space top & bottom, so grow it. */
+  width: clamp(680px, 56vw, 1040px);
+  /* Cap the height so an extreme overview can never push it off-screen; the
+     internal regions are bounded (line-clamped) so content fits inside this. */
+  max-height: min(86vh, 840px);
+  /* CLOSED = pointer-events:none. The panel lingers in the DOM at opacity 0 at its
+     last fixed coordinates after closing; if it kept pointer-events:auto it would
+     keep intercepting hover over the tiles it had covered, so those tiles stop
+     glowing / opening a dossier (the bug this fixes). Only `.is-open` flips it to
+     auto (below) so the IMDb/TMDB chips + ✕ are clickable WHILE shown. */
+  pointer-events: none;
+  border-radius: 22px;
+  overflow: hidden;
+  /* GLASS: a semi-opaque dark fill the page shows through (~a third to a half),
+     lifted by a real backdrop blur + saturation so the space background and cards
+     behind it smear into a frosted pane rather than vanish. A thin accent edge +
+     a soft, deep shadow make it float, big and confident. */
+  background: linear-gradient(180deg, rgba(15, 22, 34, 0.64), rgba(9, 14, 22, 0.78));
+  border: 1px solid rgba(56, 224, 200, 0.24);
+  box-shadow:
+    0 36px 110px rgba(0, 0, 0, 0.68),
+    0 0 0 1px rgba(255, 255, 255, 0.05) inset,
+    0 0 56px rgba(56, 224, 200, 0.12);
+  -webkit-backdrop-filter: blur(20px) saturate(140%);
+  backdrop-filter: blur(20px) saturate(140%);
+  /* Hidden until preview.js adds .is-open. The closed state is the entrance's
+     START: nudged down + slightly shrunk, fully transparent. */
+  opacity: 0;
+  transform: translateY(12px) scale(0.985);
+  transform-origin: top center;
+  transition:
+    opacity 0.18s ease-out,
+    transform 0.18s ease-out;
+  will-change: opacity, transform;
+  display: flex;
+  flex-direction: column;
+}
+/* While preview.js measures the panel to position it, keep it laid out (so it has
+   a real box) but invisible AND non-transitioning, so the reveal animates from the
+   final coordinates rather than sliding in from a stale spot. */
+.hover-preview.is-measuring {
+  transition: none;
+  opacity: 0;
+}
+.hover-preview.is-open {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;   /* interactive ONLY while open (chips + ✕ clickable) */
+}
+
+/* ----- Hero backdrop band ----- */
+/* The dimmed cover is now a PROMINENT hero band across the top of the dossier,
+   with the title overlaid on its scrim ("placard over the poster"). A state-tinted
+   gradient floor is ALWAYS painted (so a backdrop-less item still looks composed);
+   the <img> fades in over it only once a real fanart/poster loads (.has-art), and a
+   bottom-to-top scrim keeps the title legible over any bright still. */
+.hp-media {
+  position: relative;
+  /* Tall, cinematic hero band — scales a little with the (wider) panel. Grown a
+     touch (IMP-E16 follow-up) so the bigger panel's hero fills more of the space. */
+  height: clamp(264px, 28vw, 400px);
+  flex: 0 0 auto;
+  overflow: hidden;
+}
+.hp-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 26%;   /* bias slightly high — backdrops frame action up */
+  display: block;
+  opacity: 0;
+  transform: scale(1.04);        /* gentle starting zoom for the Ken-Burns drift */
+  transition: opacity 0.3s ease-out;
+  user-select: none;
+}
+.hp-media.has-art .hp-backdrop { opacity: 0.9; }
+/* Slow, gentle Ken-Burns drift ONLY once a real image is shown AND motion is
+   allowed (the reduced-motion block below disables it). Very low amplitude so it
+   reads as "alive", never as movement that distracts. */
+.hp-media.has-art .hp-backdrop {
+  animation: hpKenBurns 18s ease-in-out infinite alternate;
+}
+@keyframes hpKenBurns {
+  from { transform: scale(1.04) translate3d(0, 0, 0); }
+  to   { transform: scale(1.10) translate3d(-1.5%, -2%, 0); }
+}
+/* Legibility scrim: darkens the bottom of the cover so the overlaid title never
+   fights the still, plus a soft top vignette. Always on (over art or the bare
+   gradient). Stronger at the very bottom now the title sits ON the hero band. */
+.hp-scrim {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, rgba(7, 11, 18, 0) 38%, rgba(7, 11, 18, 0.62) 74%, rgba(7, 11, 18, 0.94) 100%),
+    linear-gradient(180deg, rgba(7, 11, 18, 0.22), rgba(7, 11, 18, 0) 30%);
+}
+/* State-tinted gradient floor (under the <img>), reusing the poster palette so a
+   backdrop-less dossier still carries the item's lifecycle hue. */
+.hp-media.p-unprepped { background: linear-gradient(135deg, #4a3a10, #1a1408); }
+.hp-media.p-local     { background: linear-gradient(135deg, #16335e, #0a1424); }
+.hp-media.p-pushed    { background: linear-gradient(135deg, #3a2360, #150d24); }
+.hp-media.p-restored  { background: linear-gradient(135deg, #5e2f18, #241008); }
+.hp-media.p-archived  { background: linear-gradient(135deg, #103a2c, #08201a); }
+.hp-media.p-unknown   { background: linear-gradient(135deg, #28323e, #131a22); }
+.hp-media.p-all       { background: linear-gradient(135deg, #1b2638, #0e1622); }
+
+/* ----- Hero title overlay (sits ON the backdrop band, over the scrim) ----- */
+.hp-hero {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 0 26px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  pointer-events: none;
+}
+.hp-kicker {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 2.4px;
+  text-transform: uppercase;
+  color: var(--accent);
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.75);
+}
+.hp-title {
+  margin: 0;
+  /* Big, confident hero title — scales gently with the panel width. */
+  font-size: clamp(26px, 3vw, 38px);
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: 0.2px;
+  color: var(--text);
+  text-shadow: 0 3px 16px rgba(0, 0, 0, 0.85);
+  overflow-wrap: anywhere;
+  /* Never let an absurd title push the overlay off the band. */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.hp-episode {
+  display: none;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--b-restored);    /* warm "episode" accent, distinct from the title */
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.75);
+}
+.hp-episode.show { display: block; }
+
+/* ----- Body (below the hero band) ----- */
+.hp-body {
+  position: relative;
+  /* A touch more padding + gap so the (bigger) body breathes (IMP-E16 follow-up). */
+  padding: 18px 28px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  min-height: 0;               /* allow the flex column to bound its children */
+  overflow: hidden;            /* the anchored panel can't scroll; clamp content */
+}
+
+/* ----- Rich strip: ★ rating · runtime · genres (detail-only) ----- */
+.hp-rich {
+  display: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+}
+.hp-rich.show { display: flex; }
+.hp-rating {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+}
+.hp-star {
+  color: #ffc857;              /* warm gold star, distinct from the mint accent */
+  font-size: 15px;
+  line-height: 1;
+  text-shadow: 0 0 10px rgba(255, 200, 87, 0.35);
+}
+.hp-score {
+  font-size: 16px;
+  font-weight: 800;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.2px;
+}
+.hp-votes {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+/* Chips shared by genres + runtime in the rich strip. */
+.hp-chip {
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  padding: 3px 11px;
+  white-space: nowrap;
+}
+.hp-genre {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+.hp-runtime {
+  color: var(--accent);
+  background: rgba(56, 224, 200, 0.10);
+  border-color: rgba(56, 224, 200, 0.22);
+  font-variant-numeric: tabular-nums;
+}
+/* Certificate (MPAA) chip — e.g. "PG-13". A boxier, more strongly-bordered chip
+   than the pill-shaped genres so it reads as a ratings certificate beside the
+   runtime in the rich strip. (.hp-rated follows .hp-chip so it wins the cascade.) */
+.hp-rated {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.26);
+  border-radius: 5px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+}
+
+/* ----- External ratings strip: IMDb / Rotten Tomatoes / Metacritic coins -----
+   Detail-only (IMP-E16): a prominent, tasteful row of up to three rating "coins",
+   shown ONLY for the sources present in detail.ratings (display:none until then,
+   so it adds NO gap to a not-yet-refreshed dossier). Each coin reproduces its
+   source's signature in pure CSS/text — no external images — so it stays crisp on
+   the dark mint glass: IMDb gold, RT fresh-green / rotten-red, and Metacritic's
+   colour-banded metascore square. The ★ TMDB rating stays in .hp-rich below. */
+.hp-ratings {
+  display: none;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.hp-ratings.show { display: flex; }
+.hp-coin {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 11px 4px 9px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line-soft);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.hp-coin-src {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.hp-coin-val {
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: 0.2px;
+  color: var(--text);
+}
+/* IMDb — signature gold accent on the source label + a faint gold coin. */
+.hp-coin-imdb {
+  background: rgba(245, 197, 24, 0.10);
+  border-color: rgba(245, 197, 24, 0.38);
+}
+.hp-coin-imdb .hp-coin-src { color: #f5c518; }
+/* Rotten Tomatoes — fresh (green ≥60%) vs rotten (red <60%); neutral if unparsed
+   (no is-fresh/is-rotten class added → it falls back to the base coin look). */
+.hp-coin-rt.is-fresh {
+  background: rgba(106, 224, 122, 0.10);
+  border-color: rgba(106, 224, 122, 0.42);
+}
+.hp-coin-rt.is-fresh .hp-coin-src { color: #6ae07a; }
+.hp-coin-rt.is-rotten {
+  background: rgba(255, 92, 114, 0.10);
+  border-color: rgba(255, 92, 114, 0.42);
+}
+.hp-coin-rt.is-rotten .hp-coin-src { color: #ff5c72; }
+/* Metacritic — the metascore sits in its signature colour-banded square (dark
+   text on the fill): green ≥61 / yellow 40–60 / red <40; neutral box if unparsed.
+   (.hp-mc-box follows .hp-coin-val so its colour/size/background win the cascade.) */
+.hp-mc-box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 23px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 5px;
+  font-size: 12.5px;
+  color: #0b0f17;
+  background: var(--text-faint);
+}
+.hp-mc-box.is-green  { background: #6ae07a; }
+.hp-mc-box.is-yellow { background: #ffc233; }
+.hp-mc-box.is-red    { background: #ff5c72; }
+
+/* ----- Tagline (italic, above the synopsis; detail-only) ----- */
+.hp-tagline {
+  display: none;
+  margin: 0;
+  font-size: 14px;
+  font-style: italic;
+  line-height: 1.4;
+  color: var(--accent);
+  opacity: 0.92;
+  overflow-wrap: anywhere;
+}
+.hp-tagline.show { display: block; }
+
+.hp-synopsis {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  /* Clamp to a few lines with an ellipsis so a long synopsis never blows the panel
+     out. -webkit-line-clamp is the broadly-supported (incl. Safari) idiom. */
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+/* Once the FULL overview arrives there's room for more lines (the panel is big). */
+.hp-synopsis-full {
+  -webkit-line-clamp: 9;
+}
+.hp-synopsis.empty {
+  color: var(--text-faint);
+  font-style: italic;
+}
+
+/* ----- Credits: cast / director(s) · show or episode facts (detail-only) ----- */
+.hp-credits {
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+}
+.hp-credits.show { display: flex; }
+.hp-cred-row {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  font-size: 13px;
+  line-height: 1.4;
+  min-width: 0;
+}
+.hp-cred-label {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  font-weight: 800;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  padding-top: 1px;
+}
+.hp-cred-value {
+  color: var(--text-dim);
+  /* One tidy line per credit row — overflow trims rather than wraps a huge cast. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.hp-facts {
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.hp-fact {
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  padding: 2px 9px;
+  white-space: nowrap;
+}
+.hp-network { color: var(--text); }
+.hp-status {
+  color: var(--b-archived);
+  border-color: rgba(127, 224, 168, 0.3);
+}
+
+/* ----- Awards line (detail-only): 🏆 + a dim, ≤2-line accolades summary -----
+   Uses the same -webkit-box line-clamp idiom as .hp-synopsis so a long
+   "X wins & Y nominations" string trims to two tidy lines instead of wrapping
+   the panel taller. display:none until .show, so an awards-less title adds no gap. */
+.hp-awards {
+  display: none;
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--text-faint);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+}
+.hp-awards.show { display: -webkit-box; }
+.hp-awards-icon {
+  margin-right: 6px;
+  /* Keep the trophy's emoji colour; a soft gold glow ties it to the IMDb coin. */
+  filter: drop-shadow(0 0 5px rgba(245, 197, 24, 0.4));
+}
+
+/* ----- Meta row ----- */
+.hp-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+/* State chip — a coloured dot + label, hue driven by the per-state badge palette
+   (mirrors .badge so the dossier and the card agree at a glance). */
+.hp-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  background: rgba(0, 0, 0, 0.34);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  white-space: nowrap;
+}
+.hp-state-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  box-shadow: 0 0 7px currentColor;
+  background: currentColor;
+}
+.hp-state.b-unprepped { color: var(--b-unprepped); }
+.hp-state.b-local     { color: var(--b-local); }
+.hp-state.b-pushed    { color: var(--b-pushed); }
+.hp-state.b-restored  { color: var(--b-restored); }
+.hp-state.b-archived  { color: var(--b-archived); }
+.hp-state.b-unknown   { color: var(--b-unknown); }
+.hp-state.b-all       { color: var(--text-dim); }
+/* Quiet pills for size + category. */
+.hp-pill {
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  padding: 3px 9px;
+  white-space: nowrap;
+}
+.hp-size {
+  color: var(--accent);
+  background: rgba(56, 224, 200, 0.10);
+  border-color: rgba(56, 224, 200, 0.22);
+  font-variant-numeric: tabular-nums;
+}
+/* Box office — a quiet money figure in the meta row (detail-only). Kept neutral
+   (base .hp-pill look) so the row never gets busy; tabular figures keep it crisp. */
+.hp-boxoffice {
+  font-variant-numeric: tabular-nums;
+}
+/* Defensive guard (mirrors .subnav[hidden] above): unlike the IMDb/TMDB chips
+   whose .hp-links parent is display:none until shown, this pill lives in the
+   always-visible .hp-meta row and is toggled by the `hidden` attribute alone.
+   .hp-pill has no author `display` today so the UA `[hidden]` already hides it;
+   this keeps that true even if .hp-pill ever gains a `display`. */
+.hp-boxoffice[hidden] { display: none; }
+
+/* ----- External link row — clickable IMDb / TMDB chips (detail-only) -----
+   The whole panel is now interactive (pointer-events:auto), so these chips are
+   reliably clickable; they open in a new tab. The hrefs are origin-validated in
+   preview.js (https://www.imdb.com/… | https://www.themoviedb.org/…) before being
+   set, and anything else is omitted. */
+.hp-links {
+  display: none;
+  flex-wrap: wrap;
+  gap: 9px;
+  margin-top: 2px;
+}
+.hp-links.show { display: flex; }
+.hp-link {
+  pointer-events: auto;        /* clickable chip (panel is interactive anyway) */
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  text-decoration: none;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  padding: 5px 12px;
+  transition: background 0.14s ease-out, border-color 0.14s ease-out, color 0.14s ease-out;
+}
+.hp-link:hover {
+  background: rgba(56, 224, 200, 0.12);
+  border-color: rgba(56, 224, 200, 0.4);
+  color: var(--accent);
+}
+.hp-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.hp-link-imdb:hover {
+  background: rgba(245, 197, 24, 0.14);
+  border-color: rgba(245, 197, 24, 0.45);
+  color: #f5c518;             /* IMDb yellow on hover */
+}
+
+/* ----- Trivia "Did you know?" liner notes (detail-only) -----
+   A delightful "flavor" footnote at the very BOTTOM of the body: up to 4 short
+   facts, each in a SMALL font (smaller than the 14px synopsis) with its source
+   tagged as a mint [bracket] at the end of the line. A hairline rule sets it off
+   like a dossier's liner notes — calm + secondary, never competing with the key
+   info above. display:none until preview.js adds .show, so a trivia-less dossier
+   adds NO gap and looks exactly as before. */
+.hp-trivia {
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 13px;
+  border-top: 1px solid var(--line-soft);
+}
+.hp-trivia.show { display: flex; }
+.hp-trivia-head {
+  /* Quiet, friendly heading — sentence case (not a shouty system label) keeps the
+     "liner notes" feel; faint + small so it stays subtle. */
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  color: var(--text-faint);
+}
+.hp-trivia-item {
+  /* Smaller than the synopsis, comfortable leading. Each fact may wrap to at most
+     two tidy lines (a longer one trims) — same -webkit-box clamp idiom as the
+     synopsis/awards so it never blows the anchored panel's bounded height. */
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.hp-trivia-src {
+  /* The [source] tag — mint/teal accent, inline at the end of the fact line. The
+     brackets are CSS-only so the source text stays pristine (textContent in JS). */
+  margin-left: 6px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--accent);
+  white-space: nowrap;
+  opacity: 0.9;
+}
+.hp-trivia-src::before { content: "["; }
+.hp-trivia-src::after { content: "]"; }
+
+/* ----- ✕ close affordance (pinned top-right of the hero band) -----
+   Subtle on desktop (the dossier mostly closes on its own via the grace timer);
+   prominent + bigger in the mobile modal, where it's the primary dismiss. */
+.hp-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2;                  /* above the scrim + title overlay */
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text);
+  background: rgba(8, 12, 20, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  cursor: pointer;
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  /* Quiet by default; the hero art reads cleaner without a loud button on top. */
+  opacity: 0.62;
+  transition: opacity 0.14s ease-out, background 0.14s ease-out, border-color 0.14s ease-out;
+}
+.hp-close:hover {
+  opacity: 1;
+  background: rgba(255, 92, 114, 0.18);
+  border-color: var(--danger-deep, rgba(255, 92, 114, 0.6));
+}
+.hp-close:focus-visible {
+  opacity: 1;
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ----- MOBILE MODAL presentation (.is-modal) -----
+   The SAME panel, re-presented as a centred overlay for the touch long-press: it
+   lifts above its dim backdrop, centres itself, caps to the small viewport, and
+   lets the body SCROLL (the anchored desktop body never scrolls). */
+.hover-preview.is-modal {
+  z-index: 100;                /* above .hover-preview-backdrop (99) */
+  top: 50%;
+  left: 50%;
+  /* The closed (entrance start) transform also centres it; .is-open settles it. */
+  transform: translate(-50%, -50%) translateY(10px) scale(0.985);
+  width: min(92vw, 560px);
+  max-height: 88vh;
+  /* Let the whole panel be a scroll container: a tall dossier scrolls within the
+     viewport cap rather than overflowing it. The hero band stays at the top. */
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.hover-preview.is-modal.is-open {
+  transform: translate(-50%, -50%) scale(1);
+}
+/* The hero band can shrink a little on a phone so the body has room above the fold. */
+.hover-preview.is-modal .hp-media {
+  height: clamp(180px, 38vw, 260px);
+}
+/* In the modal the body is part of the scroll flow — show the full synopsis rather
+   than clamping it (the panel scrolls), and don't double-clip. */
+.hover-preview.is-modal .hp-body { overflow: visible; }
+.hover-preview.is-modal .hp-synopsis,
+.hover-preview.is-modal .hp-synopsis-full {
+  display: block;
+  -webkit-line-clamp: none;
+  overflow: visible;
+}
+/* Trivia footnotes show in full in the scrollable modal (no 2-line clamp) — a
+   slightly longer fact on a narrow phone is never cut, it just extends the scroll. */
+.hover-preview.is-modal .hp-trivia-item {
+  display: block;
+  -webkit-line-clamp: none;
+  overflow: visible;
+}
+/* A bigger, more obvious close target on touch. */
+.hover-preview.is-modal .hp-close {
+  width: 40px;
+  height: 40px;
+  font-size: 18px;
+  opacity: 0.9;
+}
+
+/* Reduced motion: the dossier still OPENS (it's information), just instantly —
+   no fade/scale entrance and no Ken-Burns drift. The backdrop still fades to its
+   resting opacity without the slow zoom. */
+@media (prefers-reduced-motion: reduce) {
+  .hover-preview {
+    transition: none;
+    transform: none;
+  }
+  .hover-preview.is-open { transform: none; }
+  /* The modal MUST keep its centring transform even with motion off — drop only
+     the entrance scale/slide, never the translate(-50%,-50%) that centres it. */
+  .hover-preview.is-modal,
+  .hover-preview.is-modal.is-open {
+    transition: none;
+    transform: translate(-50%, -50%);
+  }
+  .hp-backdrop {
+    transition: none;
+    transform: none;
+    animation: none;
+  }
+  .hp-media.has-art .hp-backdrop { animation: none; transform: none; }
+}
+
+/* Narrow / short viewports: a desktop-pointer device or window this small is rare,
+   but keep the (now large) dossier from overflowing one. The clamp's 640px floor
+   would exceed a sub-700px window, so let it fall back to most of the width and
+   shrink the hero band; preview.js still clamps the final position to the viewport. */
+@media (max-width: 700px) {
+  .hover-preview { width: min(92vw, 640px); }
+}
+@media (max-height: 640px) {
+  .hp-media { height: clamp(170px, 30vh, 240px); }
+  .hp-synopsis-full { -webkit-line-clamp: 4; }
+}
+
+/* ============================================================================
+   ⌘K / Ctrl-K command palette (IMP-E16 D2)
+   ----------------------------------------------------------------------------
+   Built + owned by palette.js. Everything here is `#cmd-palette` / `.cmdk*`
+   namespaced, so it cannot collide with any existing rule. The DOM (from
+   palette.js buildPalette/buildRow) is:
+     #cmd-palette.cmdk            full-screen dim backdrop (toggles .is-open)
+       .cmdk-panel               the floating glass pane
+         .cmdk-input-row         ⌕ glyph · input · Esc keycap  (hairline under)
+         .cmdk-results#cmdk-listbox   scrollable listbox
+           .cmdk-section         dim uppercase header ("Actions")
+           .cmdk-item[.cmdk-action]   a row: glyph · text · ↵ tail
+             .cmdk-glyph[.s-KEY] leading tile (state actions tint the ● by hue)
+             .cmdk-text → .cmdk-title (mark.cmdk-hl) + .cmdk-sub
+               .cmdk-sub → .cmdk-state.s-KEY (.cmdk-state-dot) + .cmdk-sub-rest
+             .cmdk-tail          ↵, revealed on the active row
+           .cmdk-empty           no-results / prompt text
+         .cmdk-foot → .cmdk-foot-part (kbd.cmdk-kbd + .cmdk-foot-label)
+     button#cmdk-trigger.cmdk-trigger   header affordance (.tabbar-row)
+
+   OPEN / CLOSE: palette.js adds `.is-open` to the ROOT (and aria-hidden flips).
+   CLOSED = display:none → no box, no pointer-events, fully hidden. OPEN flips to
+   a flex layer that centres the panel near the top third over a dim, blurred
+   backdrop. z-index 130 sits ABOVE the dossier (95 / .is-modal 100) and the job
+   terminal (120) so the palette always wins. The backdrop dim lives on the ROOT;
+   the click-to-close handler keys on `e.target === root`, so the panel (a child)
+   keeps its own clicks. Matches the established glass: semi-opaque dark fill +
+   backdrop blur/saturate + a thin mint edge + a deep shadow (cf. .hover-preview).
+   ============================================================================ */
+
+#cmd-palette.cmdk {
+  display: none;                 /* CLOSED: no box, no pointer-events at all */
+  position: fixed;
+  inset: 0;
+  z-index: 130;                  /* above dossier (95/100) + terminal (120) */
+  /* Dim, lightly-frosted backdrop — lighter than the destructive modals (0.78+)
+     because the palette is a fast, non-blocking tool, not a confirm gate. */
+  background: rgba(4, 7, 12, 0.6);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+  /* Centre the panel horizontally; seat it near the top third (~14vh down).
+     These take effect once .is-open flips `display` to flex. */
+  justify-content: center;
+  align-items: flex-start;
+  padding: clamp(64px, 14vh, 160px) 16px 24px;
+}
+#cmd-palette.cmdk.is-open {
+  display: flex;                 /* OPEN: reveal + run the backdrop fade */
+  animation: cmdk-overlay-in 0.14s ease-out;
+}
+@keyframes cmdk-overlay-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* The glass pane. A flex column: input row (auto) · results (scroll) · footer. */
+.cmdk-panel {
+  width: clamp(420px, 56vw, 640px);
+  max-width: 100%;
+  max-height: min(70vh, 560px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;              /* clip the rounded corners + the scroll region */
+  border-radius: 18px;
+  /* GLASS: a semi-opaque dark fill the page frosts through, a thin mint edge, a
+     deep shadow + a faint inner highlight + a soft mint bloom — matched to the
+     dossier (.hover-preview) but a touch more opaque for text legibility. */
+  background: linear-gradient(180deg, rgba(15, 22, 34, 0.82), rgba(9, 14, 22, 0.88));
+  border: 1px solid rgba(56, 224, 200, 0.24);
+  box-shadow:
+    0 36px 110px rgba(0, 0, 0, 0.68),
+    0 0 0 1px rgba(255, 255, 255, 0.05) inset,
+    0 0 56px rgba(56, 224, 200, 0.1);
+  -webkit-backdrop-filter: blur(22px) saturate(140%);
+  backdrop-filter: blur(22px) saturate(140%);
+}
+/* Quick entrance: a slight rise + scale, re-triggered every open because the
+   rule only matches while .is-open is present (the backdrop fade is on root). */
+#cmd-palette.cmdk.is-open .cmdk-panel {
+  animation: cmdk-panel-in 0.16s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes cmdk-panel-in {
+  from { transform: translateY(-8px) scale(0.97); }
+  to   { transform: none; }
+}
+
+/* ----- Input row ----- */
+.cmdk-input-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line-soft);   /* hairline under the row */
+}
+.cmdk-search-glyph {
+  flex: none;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--text-faint);
+  transition: color 0.14s;
+}
+/* Brighten the search glyph to mint while the field is focused (it's a preceding
+   sibling, so key off the row's :focus-within rather than the input's :focus). */
+.cmdk-input-row:focus-within .cmdk-search-glyph { color: var(--accent); }
+
+.cmdk-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 17px;               /* >=16px so iOS Safari never zooms on focus */
+  font-weight: 500;
+  line-height: 1.3;
+  padding: 2px 0;
+}
+.cmdk-input::placeholder { color: var(--text-dim); opacity: 1; }
+
+/* ----- Keycaps (the Esc pill in the row + the footer hint keys) ----- */
+.cmdk-kbd,
+.cmdk-esc {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 5px;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;      /* a hair of "depth" so it reads as a key */
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  font-family: ui-monospace, "Consolas", monospace;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+.cmdk-esc {
+  flex: none;
+  height: 22px;
+  padding: 0 8px;
+  color: var(--text-faint);
+}
+
+/* ----- Results listbox ----- */
+.cmdk-results {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+.cmdk-results::-webkit-scrollbar { width: 10px; }
+.cmdk-results::-webkit-scrollbar-track { background: transparent; }
+.cmdk-results::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+.cmdk-results::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.2); }
+
+.cmdk-section {
+  padding: 10px 12px 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+/* ----- Result rows ----- */
+.cmdk-item {
+  position: relative;            /* anchor the selection bar (::before) */
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  scroll-margin: 8px;            /* keep a margin when scrollIntoView fires */
+}
+/* The keyboard-selection indicator bar in the left gutter. */
+.cmdk-item::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 50%;
+  width: 3px;
+  height: 56%;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: 0;
+  transform: translateY(-50%) scaleY(0);
+  transition: opacity 0.12s ease-out, transform 0.12s ease-out;
+}
+
+.cmdk-glyph {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 9px;
+  font-size: 17px;
+  line-height: 1;
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid var(--line-soft);
+  color: var(--text-dim);
+}
+/* Action rows read slightly distinct: a mint-tinted glyph tile. */
+.cmdk-action .cmdk-glyph {
+  color: var(--accent);
+  background: rgba(56, 224, 200, 0.1);
+  border-color: rgba(56, 224, 200, 0.18);
+}
+/* State-filter actions carry a ● glyph with `.s-KEY`; tint it by the same state
+   hue the seg-rail / badges use (reset the action mint first). Ordered AFTER the
+   action rule above so equal-specificity ties resolve to the hue. */
+.cmdk-glyph.s-all,
+.cmdk-glyph.s-unprepped,
+.cmdk-glyph.s-local,
+.cmdk-glyph.s-pushed,
+.cmdk-glyph.s-restored,
+.cmdk-glyph.s-archived,
+.cmdk-glyph.s-unknown {
+  background: rgba(255, 255, 255, 0.045);
+  border-color: var(--line-soft);
+  text-shadow: 0 0 10px currentColor;   /* a colored bloom, like the seg-dot */
+}
+.cmdk-glyph.s-all       { color: var(--text-dim); }
+.cmdk-glyph.s-unprepped { color: var(--b-unprepped); }
+.cmdk-glyph.s-local     { color: var(--b-local); }
+.cmdk-glyph.s-pushed    { color: var(--b-pushed); }
+.cmdk-glyph.s-restored  { color: var(--b-restored); }
+.cmdk-glyph.s-archived  { color: var(--b-archived); }
+.cmdk-glyph.s-unknown   { color: var(--b-unknown); }
+
+.cmdk-text {
+  flex: 1 1 auto;
+  min-width: 0;                  /* let the children ellipsis instead of overflow */
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.cmdk-title {
+  font-size: 14.5px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Matched-substring emphasis (a <mark>); kill the UA yellow, go mint + bold. */
+.cmdk-hl {
+  background: transparent;
+  color: var(--accent);
+  font-weight: 800;
+}
+.cmdk-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cmdk-sub-rest {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* State chip on a title's sub-line: a small dot tinted by the lifecycle hue,
+   reusing the badge palette exactly as .seg.s-KEY .seg-dot does. */
+.cmdk-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  color: var(--text-dim);
+}
+.cmdk-state-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--text-dim);
+  box-shadow: 0 0 6px currentColor;
+}
+.cmdk-state.s-all .cmdk-state-dot       { color: var(--text-dim);   background: var(--text-dim); }
+.cmdk-state.s-unprepped .cmdk-state-dot { color: var(--b-unprepped); background: var(--b-unprepped); }
+.cmdk-state.s-local .cmdk-state-dot     { color: var(--b-local);     background: var(--b-local); }
+.cmdk-state.s-pushed .cmdk-state-dot    { color: var(--b-pushed);    background: var(--b-pushed); }
+.cmdk-state.s-restored .cmdk-state-dot  { color: var(--b-restored);  background: var(--b-restored); }
+.cmdk-state.s-archived .cmdk-state-dot  { color: var(--b-archived);  background: var(--b-archived); }
+.cmdk-state.s-unknown .cmdk-state-dot   { color: var(--b-unknown);   background: var(--b-unknown); }
+
+/* Trailing ↵ — hidden until the row is the active (keyboard-selected) one. */
+.cmdk-tail {
+  flex: none;
+  font-size: 14px;
+  color: var(--accent);
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+/* ----- Hover + keyboard selection -----
+   palette.js sets BOTH `.is-active` and `aria-selected="true"` together; either
+   matches. Selection (mint fill + left bar + revealed ↵) is ordered AFTER :hover
+   so it wins the equal-specificity tie when a row is both hovered and selected. */
+.cmdk-item:hover { background: rgba(255, 255, 255, 0.04); }
+
+.cmdk-item.is-active,
+.cmdk-item[aria-selected="true"] {
+  background: rgba(56, 224, 200, 0.1);
+  border-color: rgba(56, 224, 200, 0.18);
+}
+.cmdk-item.is-active::before,
+.cmdk-item[aria-selected="true"]::before {
+  opacity: 1;
+  transform: translateY(-50%) scaleY(1);
+}
+.cmdk-item.is-active .cmdk-tail,
+.cmdk-item[aria-selected="true"] .cmdk-tail { opacity: 1; }
+
+/* ----- Empty / prompt state ----- */
+.cmdk-empty {
+  padding: 36px 20px;
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+/* ----- Footer key hints ----- */
+.cmdk-foot {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--line-soft);
+  background: rgba(0, 0, 0, 0.16);
+}
+.cmdk-foot-part {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.cmdk-foot-label {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  letter-spacing: 0.2px;
+}
+
+/* ----- Header trigger affordance (⌕ Search ⌘K) -----
+   Injected by palette.js into .tabbar-row; styled like the other header controls
+   (.btn-sort / .seg) so it sits in the row natively. Also the mobile tap target. */
+.cmdk-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.14s, color 0.14s, border-color 0.14s;
+}
+.cmdk-trigger:hover {
+  color: var(--text);
+  background: var(--bg-card-hover);
+  border-color: var(--accent-deep);
+}
+.cmdk-trigger:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.cmdk-trigger-glyph {
+  font-size: 15px;
+  line-height: 1;
+  color: var(--text-dim);
+  transition: color 0.14s;
+}
+.cmdk-trigger:hover .cmdk-trigger-glyph { color: var(--accent); }
+.cmdk-trigger-text { letter-spacing: 0.2px; }
+.cmdk-trigger-kbd {
+  font-family: ui-monospace, "Consolas", monospace;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-faint);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--line-soft);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+
+/* ----- Responsive ----- */
+@media (max-width: 640px) {
+  #cmd-palette.cmdk { padding: clamp(40px, 9vh, 88px) 12px 16px; }
+  .cmdk-panel { width: 92vw; max-height: min(74vh, 560px); }
+  .cmdk-foot { gap: 12px; }
+  /* The shortcut hint is desktop discovery; on mobile the button is just the tap
+     target, so drop the keycap to keep it compact. */
+  .cmdk-trigger-kbd { display: none; }
+}
+
+/* ----- Reduced motion: open INSTANTLY, no fade/scale/indicator slide ----- */
+@media (prefers-reduced-motion: reduce) {
+  #cmd-palette.cmdk.is-open,
+  #cmd-palette.cmdk.is-open .cmdk-panel { animation: none; }
+  .cmdk-item::before,
+  .cmdk-tail,
+  .cmdk-search-glyph,
+  .cmdk-trigger,
+  .cmdk-trigger-glyph { transition: none; }
+}
+
+/* ============================================================================
+   Cinematic parallax hero strip (IMP-E16 D4)
+   ----------------------------------------------------------------------------
+   Built + owned by hero.js over the `#hero` <section> (index.html, above #panel).
+   A wide backdrop band that opens each media-type tab on its most characteristic
+   content. Layering inside #hero (back → front):
+     .hero-parallax   the JS-translated layer (oversized w/ vertical bleed)
+       .hero-backdrop two reused <img> cover layers; the live one carries .is-front
+     .hero-scrim      fixed legibility + bottom blend into the grid (never moves)
+     .hero-hit        transparent full-bleed <button> — click/Enter jumps to the title
+     .hero-overlay    pointer-events:none text block (clicks fall through to .hero-hit)
+     .hero-dots       indicator buttons, above everything
+   It sits in normal flow above #panel, so it stays BEHIND the fixed overlays and
+   does NOT carry #panel's view-transition-name (it rides the held-still root
+   snapshot, cutting instantly on a tab switch rather than morphing). ============ */
+
+#hero.hero-strip {
+  position: relative;
+  width: 100%;
+  /* A tasteful cinematic band; collapses (display:none via [hidden]) when a tab has
+     nothing to feature. */
+  height: clamp(180px, 26vh, 320px);
+  margin: 0 0 18px;
+  border-radius: var(--radius);
+  overflow: hidden;                 /* clip the oversized parallax layer + Ken-Burns */
+  border: 1px solid var(--line-soft);
+  /* Dark floor so any momentary edge from the parallax translate is a deep tint,
+     never a bright gap; also the backdrop-less look while the first image loads. */
+  background: linear-gradient(135deg, #131a26, #0b0f17);
+  box-shadow: var(--shadow);
+  isolation: isolate;               /* keep the band's stacking self-contained */
+}
+/* hero.js toggles the `hidden` attribute to collapse the band. #hero has no author
+   `display` (UA <section> block), so the UA `[hidden]{display:none}` already wins —
+   this rule just makes that intent explicit + guards a future author display. */
+#hero[hidden] { display: none; }
+
+/* The parallax layer. Oversized with 25% vertical bleed top+bottom so hero.js can
+   translate it on scroll without ever exposing the band edge (the translate is
+   clamped to 20% of the band height). will-change keeps the transform on its own
+   compositor layer. */
+.hero-parallax {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -25%;
+  height: 150%;
+  z-index: 0;
+  will-change: transform;
+}
+
+/* Two reused cover layers. Only the .is-front one is visible + Ken-Burns animated;
+   a slide swap crossfades the opacity between them. The base scale(1.04) matches
+   the Ken-Burns `from`, so removing the animation from the outgoing layer can't
+   cause a visible jump (it is fading out anyway). */
+.hero-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center 28%;      /* bias high — backdrops frame action up */
+  display: block;
+  opacity: 0;
+  transform: scale(1.04);
+  transition: opacity 0.9s ease;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.hero-backdrop.is-front { opacity: 0.88; }
+
+/* Slow Ken-Burns drift on the FRONT layer only (each new slide restarts it fresh).
+   Transform-only → compositor-friendly. Paused (frozen, not reset) while the tab is
+   hidden so it costs nothing in the background; disabled entirely under reduced
+   motion below. */
+.hero-strip .hero-backdrop.is-front {
+  animation: heroKenBurns 16s ease-in-out infinite alternate;
+}
+.hero-strip.is-paused .hero-backdrop.is-front { animation-play-state: paused; }
+@keyframes heroKenBurns {
+  from { transform: scale(1.04) translate3d(0, 0, 0); }
+  to   { transform: scale(1.10) translate3d(-1.6%, -2.2%, 0); }
+}
+
+/* Fixed legibility scrim (does NOT parallax, so the title stays readable at any
+   scroll). The left wash darkens behind the overlay text; the bottom gradient fades
+   to the page background so the band blends into the grid below it. */
+.hero-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background:
+    linear-gradient(90deg, rgba(7, 11, 18, 0.82) 0%, rgba(7, 11, 18, 0.45) 38%, rgba(7, 11, 18, 0) 66%),
+    linear-gradient(0deg, var(--bg) 0%, rgba(7, 11, 18, 0.55) 16%, rgba(7, 11, 18, 0) 48%);
+}
+
+/* Transparent full-bleed click/keyboard target. The overlay text sits above it but
+   is pointer-events:none, so clicks land here; the dots are separate elements on
+   top, so a dot click never reaches it. */
+.hero-hit {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.hero-hit:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -3px;
+  border-radius: var(--radius);
+}
+
+/* Left-aligned cinematic text block, anchored to the band's bottom-left over the
+   scrim. pointer-events:none so the whole band stays one big click target. */
+.hero-overlay {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 3;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+  padding: clamp(16px, 3vw, 30px) clamp(16px, 4vw, 40px);
+  max-width: min(680px, 84%);
+}
+.hero-kicker {
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 1.6px;
+  text-transform: uppercase;
+  color: var(--accent);
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.7);
+}
+.hero-title {
+  margin: 0;
+  font-size: clamp(24px, 4.2vw, 42px);
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: -0.4px;
+  color: var(--text);
+  text-shadow: 0 2px 18px rgba(0, 0, 0, 0.7);
+  overflow-wrap: anywhere;
+}
+.hero-meta { display: flex; align-items: center; gap: 10px; }
+/* State chip — reuses the per-state badge palette (mint ARCHIVED, etc.). */
+.hero-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.42);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+.hero-chip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  box-shadow: 0 0 7px currentColor;
+}
+.hero-chip.s-all .hero-chip-dot       { color: var(--text-dim);    background: var(--text-dim); }
+.hero-chip.s-unprepped .hero-chip-dot { color: var(--b-unprepped); background: var(--b-unprepped); }
+.hero-chip.s-local .hero-chip-dot     { color: var(--b-local);     background: var(--b-local); }
+.hero-chip.s-pushed .hero-chip-dot    { color: var(--b-pushed);    background: var(--b-pushed); }
+.hero-chip.s-restored .hero-chip-dot  { color: var(--b-restored);  background: var(--b-restored); }
+.hero-chip.s-archived .hero-chip-dot  { color: var(--b-archived);  background: var(--b-archived); }
+.hero-chip.s-unknown .hero-chip-dot   { color: var(--b-unknown);   background: var(--b-unknown); }
+
+/* One-line overview clip. Hidden (hero.js sets [hidden]) when an item has none. */
+.hero-overview {
+  margin: 0;
+  width: 100%;
+  max-width: 60ch;
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.7);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hero-overview[hidden] { display: none; }
+
+/* Slide indicators, bottom-right. Empty (single slide) → no dots shown. */
+.hero-dots {
+  position: absolute;
+  right: clamp(14px, 3vw, 28px);
+  bottom: clamp(14px, 2.4vw, 22px);
+  z-index: 4;
+  display: flex;
+  gap: 8px;
+}
+.hero-dots:empty { display: none; }
+.hero-dot {
+  width: 9px;
+  height: 9px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.18);
+  cursor: pointer;
+  transition: background 0.16s, transform 0.16s, border-color 0.16s;
+}
+.hero-dot:hover { background: rgba(255, 255, 255, 0.5); }
+.hero-dot.is-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  transform: scale(1.15);
+  box-shadow: 0 0 8px rgba(56, 224, 200, 0.7);
+}
+.hero-dot:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* Narrow viewports: a shorter band and drop the one-line overview to keep the
+   title + chip uncluttered. */
+@media (max-width: 520px) {
+  #hero.hero-strip { height: clamp(150px, 30vh, 220px); }
+  .hero-overview { display: none; }
+}
+
+/* Reduced motion: NO Ken-Burns, NO crossfade transition, NO parallax (hero.js also
+   skips the auto-rotate + leaves the parallax transform unset). A single static
+   featured backdrop is shown. */
+@media (prefers-reduced-motion: reduce) {
+  .hero-backdrop {
+    transition: none;
+    transform: none;
+    animation: none;
+  }
+  .hero-strip .hero-backdrop.is-front {
+    transform: none;
+    animation: none;
+  }
+  .hero-dot { transition: none; }
 }

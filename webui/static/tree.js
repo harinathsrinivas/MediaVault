@@ -149,6 +149,56 @@ export function pruneTreeByState(roots, state, modelById) {
 }
 
 // ---------------------------------------------------------------------------
+// Grid drill-down level extraction (PURE, DOM-free — importable by the node guard
+// like pruneTreeByState / compareNodes).
+//
+// The grouped tab's GRID style shows ONE level at a time: a folder's child FOLDERS
+// as navigable boxes, plus any LEAF items at that level as cards. The nav path is
+// an array of folder NAMES from the category root (e.g. ["English"] or
+// ["Show","Season 1"]); [] is the root level. gridChildrenAt walks that path
+// through `roots` and returns { folders, leaves } for the level it lands on —
+// folders and leaves in their natural input order (the renderer sorts each group
+// via compareNodes, so this stays free of sort.js's mutable state and is trivially
+// testable).
+//
+// `roots` is whatever the caller passes: the raw category roots for "All", or the
+// output of pruneTreeByState(...) for an active state filter — so the SAME prune
+// the list view uses carries straight over (a box appears only if it has a matching
+// descendant leaf; folder sizes/counts reflect the filter). A path that no longer
+// resolves (the folder was pruned away, or never existed) returns an EMPTY level
+// rather than throwing, so a stale breadcrumb is always recoverable.
+//
+// Pure: never mutates `roots`; the returned arrays hold references to the existing
+// nodes (callers only read name/path/size/children/id off them).
+// ---------------------------------------------------------------------------
+
+export function gridChildrenAt(roots, path) {
+  var level = roots || [];
+  var segments = path || [];
+  for (var i = 0; i < segments.length; i += 1) {
+    var next = null;
+    for (var j = 0; j < level.length; j += 1) {
+      var n = level[j];
+      if (n && n.type === "folder" && n.name === segments[i]) {
+        next = n;
+        break;
+      }
+    }
+    if (!next) return { folders: [], leaves: [] };
+    level = next.children || [];
+  }
+  var folders = [];
+  var leaves = [];
+  for (var k = 0; k < level.length; k += 1) {
+    var node = level[k];
+    if (!node) continue;
+    if (node.type === "leaf") leaves.push(node);
+    else folders.push(node);
+  }
+  return { folders: folders, leaves: leaves };
+}
+
+// ---------------------------------------------------------------------------
 // Public entry — render the category's roots into `container` (#panel).
 // `roots` is the array of top-level nodes for the active category (may be []).
 // `modelById` maps leaf id -> the enriched MODEL row for buildCard reuse.
@@ -381,6 +431,201 @@ function makeOpenFolderButton(path) {
     openFolder(path);
   });
   return btn;
+}
+
+// ---------------------------------------------------------------------------
+// GRID drill-down view (IMP-E16) — one level at a time as boxes + leaf cards.
+//
+// buildGridFragment renders the level identified by `path` (folder names from the
+// category root): a .crumbs breadcrumb (Back + clickable trail), the level's child
+// FOLDERS as a responsive .grid-view of navigable .folder-box tiles (folders
+// first), then any LEAF items at that level as the SAME buildCard cards the list /
+// flat views use — so posters, badges, actions and the hover dossier all carry
+// over for free. Folder boxes are NOT cards: each is just a tile whose click drills
+// in via the onNavigate callback (app.js owns the nav stack + repaints).
+//
+// `roots` is already pruned by the caller for an active state filter (or the raw
+// roots for "All"), and each level is ordered by the active sort (compareNodes) —
+// exactly like the list view. Built entirely off-DOM so app.js can swap it into
+// #panel atomically. XSS-safe: names / sizes via textContent, image src
+// encodeURIComponent'd.
+// ---------------------------------------------------------------------------
+
+export function buildGridFragment(roots, modelById, path, opts) {
+  opts = opts || {};
+  var onNavigate =
+    typeof opts.onNavigate === "function" ? opts.onNavigate : function () {};
+  var rootLabel = opts.rootLabel || "All";
+  var navPath = (path || []).slice();
+  var byId = modelById || {};
+
+  var frag = document.createDocumentFragment();
+  var level = gridChildrenAt(roots, navPath);
+  var isEmpty = level.folders.length === 0 && level.leaves.length === 0;
+
+  // Breadcrumb whenever we're drilled in (so Back / jump always works); at the
+  // EMPTY root we drop it and show the same empty-state the list view uses.
+  if (navPath.length > 0 || !isEmpty) {
+    frag.appendChild(buildCrumbs(navPath, rootLabel, onNavigate));
+  }
+
+  if (isEmpty) {
+    frag.appendChild(emptyGrid(navPath.length === 0));
+    return frag;
+  }
+
+  // Folders first — a responsive grid of navigable boxes, ordered by active sort.
+  if (level.folders.length) {
+    var folders = level.folders.slice().sort(compareNodes);
+    var grid = document.createElement("div");
+    grid.className = "grid-view";
+    folders.forEach(function (folder) {
+      grid.appendChild(buildFolderBox(folder, navPath, onNavigate));
+    });
+    frag.appendChild(grid);
+  }
+
+  // Then leaf items at this level — the SAME enriched cards as every other view
+  // (joined onto the MODEL row by id, exactly like renderLeaf above).
+  if (level.leaves.length) {
+    var leaves = level.leaves.slice().sort(compareNodes);
+    var cardGrid = document.createElement("div");
+    cardGrid.className = "grid grid-view-cards";
+    leaves.forEach(function (leaf) {
+      var row = (leaf && leaf.id != null && byId[leaf.id]) || leaf;
+      cardGrid.appendChild(buildCard(row));
+    });
+    frag.appendChild(cardGrid);
+  }
+
+  return frag;
+}
+
+// One navigable folder tile: cover image (or gradient + folder-glyph fallback),
+// name, real size and a child summary. The whole tile is a <button>; clicking it
+// drills in by pushing this folder's name onto the nav path. Not a card (no
+// dossier / actions) — just a tile, so no per-leaf wiring leaks here.
+function buildFolderBox(folder, parentPath, onNavigate) {
+  var box = document.createElement("button");
+  box.type = "button";
+  box.className = "folder-box";
+  box.setAttribute(
+    "aria-label",
+    "Open folder " + (folder.name || "") + " — " + childSummary(folder)
+  );
+
+  var cover = document.createElement("span");
+  cover.className = "folder-box-cover";
+  if (folder.has_image) {
+    var img = document.createElement("img");
+    img.className = "folder-box-img";
+    img.alt = "";
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.src = "/api/folder-image?path=" + encodeURIComponent(folder.path || "");
+    img.addEventListener("error", function () {
+      // Drop the broken <img> so the CSS gradient + folder glyph shows through.
+      if (img.parentNode) img.parentNode.removeChild(img);
+      cover.classList.add("fallback");
+    });
+    cover.appendChild(img);
+  } else {
+    cover.classList.add("fallback");
+  }
+  box.appendChild(cover);
+
+  var meta = document.createElement("span");
+  meta.className = "folder-box-meta";
+
+  var name = document.createElement("span");
+  name.className = "folder-box-name";
+  name.textContent = folder.name || "";
+  meta.appendChild(name);
+
+  var sub = document.createElement("span");
+  sub.className = "folder-box-sub";
+  sub.textContent = humanSize(folder.size_bytes) + " · " + childSummary(folder);
+  meta.appendChild(sub);
+
+  box.appendChild(meta);
+
+  box.addEventListener("click", function () {
+    onNavigate(parentPath.concat([folder.name]));
+  });
+  return box;
+}
+
+// Breadcrumb bar: a Back affordance (pops one level; disabled at root) then the
+// clickable trail rootLabel / seg / seg…. The last crumb is the CURRENT level
+// (plain text, aria-current); each earlier crumb jumps straight to that level.
+function buildCrumbs(path, rootLabel, onNavigate) {
+  var bar = document.createElement("nav");
+  bar.className = "crumbs";
+  bar.setAttribute("aria-label", "Folder breadcrumb");
+
+  var back = document.createElement("button");
+  back.type = "button";
+  back.className = "crumb-back";
+  back.textContent = "‹ Back";
+  if (!path || path.length === 0) {
+    back.disabled = true;
+  } else {
+    back.setAttribute("aria-label", "Back one level");
+    back.addEventListener("click", function () {
+      onNavigate(path.slice(0, path.length - 1));
+    });
+  }
+  bar.appendChild(back);
+
+  var trail = [{ label: rootLabel, to: [] }];
+  (path || []).forEach(function (seg, i) {
+    trail.push({ label: seg, to: (path || []).slice(0, i + 1) });
+  });
+
+  trail.forEach(function (crumb, i) {
+    if (i > 0) {
+      var sep = document.createElement("span");
+      sep.className = "crumb-sep";
+      sep.setAttribute("aria-hidden", "true");
+      sep.textContent = "/";
+      bar.appendChild(sep);
+    }
+    if (i === trail.length - 1) {
+      var cur = document.createElement("span");
+      cur.className = "crumb crumb-current";
+      cur.setAttribute("aria-current", "page");
+      cur.textContent = crumb.label;
+      bar.appendChild(cur);
+    } else {
+      var link = document.createElement("button");
+      link.type = "button";
+      link.className = "crumb";
+      link.textContent = crumb.label;
+      link.addEventListener("click", function () {
+        onNavigate(crumb.to);
+      });
+      bar.appendChild(link);
+    }
+  });
+
+  return bar;
+}
+
+// Empty-level placeholder. Mirrors the list view's emptyTree at the root and gives
+// a filter-aware message deeper in (where the breadcrumb above still escapes back).
+function emptyGrid(atRoot) {
+  var wrap = document.createElement("div");
+  wrap.className = "empty-state";
+  var big = document.createElement("div");
+  big.className = "big";
+  big.textContent = "∅";
+  var p = document.createElement("div");
+  p.textContent = atRoot
+    ? "No folders on disk for this media type."
+    : "This folder is empty in the current filter.";
+  wrap.appendChild(big);
+  wrap.appendChild(p);
+  return wrap;
 }
 
 // ---------------------------------------------------------------------------

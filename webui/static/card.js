@@ -28,7 +28,11 @@ import { authFetch } from "./auth.js";
 import { openConfirmModal } from "./modal.js";
 import { createRing } from "./ring.js";
 import { displayTitle } from "./title.js";
-import { openTerminal, notifyJob } from "./terminal.js";
+// terminal.js is lazy-loaded (IMP-E16 D5 perf): it's only needed once a job's
+// full-screen terminal overlay is opened, so it stays out of the first-paint
+// module graph until the expand button is first clicked.
+var _term = null;
+import { extractAccent } from "./swatch.js";
 
 var POLL_MS = 1000;
 
@@ -101,6 +105,29 @@ function addOpenFolderButton(poster, item) {
   poster.appendChild(btn);
 }
 
+// Poster-driven ambient tint (IMP-E16 D1): once a card's real poster has LOADED,
+// pull one representative "film accent" colour out of its pixels (swatch.js) and
+// publish it as CSS custom properties on the CARD. The hover glow, rotating ring,
+// and scrim in styles.css read `var(--accent-rgb, 56,224,200)` etc., so a tinted
+// card glows in its film's colour while every un-tinted card keeps the mint default.
+//
+// Runs at most ONCE per card (guarded on the <img>) and only on a same-origin
+// poster that actually loaded, so re-hovers / re-renders never recompute and
+// off-screen lazy cards do nothing until their image enters the viewport. On any
+// failure or a too-monochrome poster extractAccent() returns null and we set
+// nothing — the card stays byte-identical mint.
+function applyPosterAccent(img, poster) {
+  if (img._accentDone) return;
+  img._accentDone = true;
+  var card = poster && poster.closest ? poster.closest(".card") : null;
+  if (!card) return;
+  var sw = extractAccent(img);
+  if (!sw) return; // extraction failed / muddy → keep the mint default
+  card.style.setProperty("--accent-rgb", sw.accent.join(","));
+  card.style.setProperty("--accent-bright-rgb", sw.bright.join(","));
+  card.style.setProperty("--accent-scrim-a", "0.1"); // un-gates the faint scrim tint
+}
+
 // Point a card's poster slot at its real artwork: GET /api/media-image/<id>?kind=
 // poster (the server applies season-inheritance + serves the local jpg as-is).
 //
@@ -136,6 +163,7 @@ function addPosterImage(poster, item) {
   img.addEventListener("load", function () {
     img.classList.add("is-loaded");
     poster.classList.add("has-poster"); // enables the bottom scrim (styles.css)
+    applyPosterAccent(img, poster); // tint the card's glow/ring/scrim to the poster
   });
   img.addEventListener("error", function () {
     img.remove();
@@ -226,6 +254,207 @@ export function destroyRingsIn(container) {
 }
 
 // ---------------------------------------------------------------------------
+// Archived/real-version info under the title (IMP-E16 B1)
+//
+// An ARCHIVED tile's on-disk file is a tiny dummy, so item.size_bytes (shown on
+// the right) is e.g. "0.45 KB". The library stores the REAL fetched size +
+// print (actual_size_bytes / tech / release_name), surfaced here as a small line
+// UNDER the title: a humanized real size with a tiny label, plus a capped row of
+// dim tech chips. Everything is XSS-safe (textContent only) and best-effort —
+// missing fields just drop their chip.
+// ---------------------------------------------------------------------------
+
+// Channel COUNT -> the conventional layout label. 8->7.1, 6->5.1, 2->2.0, 1->Mono;
+// any other count falls back to "<n>ch". Returns "" for a non-positive/NaN count.
+function channelLayout(ch) {
+  var n = Number(ch);
+  if (!isFinite(n) || n <= 0) return "";
+  if (n === 1) return "Mono";
+  if (n === 2) return "2.0";
+  if (n === 6) return "5.1";
+  if (n === 8) return "7.1";
+  return n + "ch";
+}
+
+// Shorten a verbose MediaInfo audio commercial-name to the useful codec keywords.
+// "Dolby TrueHD with Dolby Atmos" -> "TrueHD Atmos"; "DTS-HD Master Audio" ->
+// "DTS-HD MA"; falls back to the trimmed original (first ~24 chars) when nothing
+// known matches, so an unrecognised codec still shows something sensible.
+function shortAudio(audio) {
+  var s = String(audio || "").trim();
+  if (!s) return "";
+  var low = s.toLowerCase();
+  var parts = [];
+  if (/true\s*hd/.test(low)) parts.push("TrueHD");
+  else if (/dts-?hd\s*ma|dts-?hd\s*master/.test(low)) parts.push("DTS-HD MA");
+  else if (/dts-?hd/.test(low)) parts.push("DTS-HD");
+  else if (/\bdts\b/.test(low)) parts.push("DTS");
+  else if (/e-?ac-?3|ddp|dolby digital plus|dd\+/.test(low)) parts.push("DD+");
+  else if (/ac-?3|dolby digital/.test(low)) parts.push("DD");
+  else if (/\baac\b/.test(low)) parts.push("AAC");
+  else if (/\bflac\b/.test(low)) parts.push("FLAC");
+  if (/atmos/.test(low) && parts.indexOf("Atmos") < 0) parts.push("Atmos");
+  if (parts.length) return parts.join(" ");
+  return s.length > 24 ? s.slice(0, 24).trim() : s;
+}
+
+// Best-effort token parser over the full release filename. Pure: returns
+// { dv, source, edition } where each is a short display string or null. Used to
+// surface print details (DV profile, source/encode, edition) that the structured
+// tech_spec does not carry. Patterns mirror the step's spec and are intentionally
+// forgiving (case-insensitive, dot/space tolerant); we show only what matches.
+function parseReleaseTokens(releaseName) {
+  var out = { dv: null, source: null, edition: null };
+  var s = String(releaseName || "");
+  if (!s) return out;
+
+  // Dolby Vision profile / FEL — "DV.P8", "DV P7", "Profile 7", "FEL".
+  var m = s.match(/DV[.\s_-]?P?(\d)/i);
+  if (m) {
+    out.dv = "DV P" + m[1];
+  } else if (/\bFEL\b/i.test(s)) {
+    out.dv = "DV FEL";
+  } else {
+    var mp = s.match(/Profile[.\s_-]?(\d)/i);
+    if (mp) out.dv = "DV P" + mp[1];
+  }
+
+  // Source / encode — first match wins, normalized to a canonical label.
+  var sources = [
+    [/\bREMUX\b/i, "REMUX"],
+    [/\bBlu-?Ray\b/i, "BluRay"],
+    [/\bBDRip\b/i, "BDRip"],
+    [/\bWEB-?DL\b/i, "WEB-DL"],
+    [/\bWEB-?Rip\b/i, "WEBRip"],
+    [/\bHDTV\b/i, "HDTV"],
+  ];
+  for (var i = 0; i < sources.length; i += 1) {
+    if (sources[i][0].test(s)) {
+      out.source = sources[i][1];
+      break;
+    }
+  }
+
+  // Edition — first match wins.
+  var editions = [
+    [/\biMAX\b/i, "iMAX"],
+    [/\bExtended\b/i, "Extended"],
+    [/\bDirector'?s[.\s_-]?Cut\b/i, "Director's Cut"],
+    [/\bTheatrical\b/i, "Theatrical"],
+    [/\bRemastered\b/i, "Remastered"],
+  ];
+  for (var j = 0; j < editions.length; j += 1) {
+    if (editions[j][0].test(s)) {
+      out.edition = editions[j][1];
+      break;
+    }
+  }
+  return out;
+}
+
+// Maximum chips shown on the tile; the rest can surface in the hover dossier.
+var MAX_TECH_CHIPS = 5;
+
+// Compose the ordered, de-duplicated, capped list of chip strings from the
+// compact `tech` dict + tokens parsed from the release filename. Order is
+// most-useful-first: resolution, HDR/DV, source/edition, codec, audio. DV (from
+// the filename) supersedes a plain HDR/DV value from tech when present.
+function buildTechChips(tech, releaseName) {
+  var t = tech || {};
+  var tokens = parseReleaseTokens(releaseName);
+  var chips = [];
+
+  function add(label) {
+    var s = String(label || "").trim();
+    if (s && chips.indexOf(s) < 0) chips.push(s);
+  }
+
+  // 1) Resolution (e.g. "2160p").
+  add(t.resolution);
+
+  // 2) HDR / Dolby Vision. A DV profile parsed from the name ("DV P8") is richer
+  //    than tech.hdr's "Dolby Vision", so prefer it; otherwise show tech.hdr.
+  if (tokens.dv) add(tokens.dv);
+  else add(t.hdr);
+
+  // 3) Source/encode + edition from the filename ("REMUX", "iMAX").
+  add(tokens.source);
+  add(tokens.edition);
+
+  // 4) Video codec ("HEVC").
+  add(t.video_codec);
+
+  // 5) Audio — combine the short codec name with the channel layout
+  //    ("TrueHD Atmos" + 8 -> "TrueHD Atmos 7.1").
+  var audio = shortAudio(t.audio);
+  var layout = channelLayout(t.audio_channels);
+  var audioChip = [audio, layout].filter(Boolean).join(" ");
+  add(audioChip);
+
+  return chips.slice(0, MAX_TECH_CHIPS);
+}
+
+// Decide whether the archived/real-size line should render for this item. It is
+// meant for a tile whose on-disk file is a fetched/archived DUMMY — so the real
+// size + print is informative and the on-disk size_bytes is misleadingly tiny.
+// Gate: actual_size_bytes is present AND either the state is ARCHIVED, or the
+// real size is clearly larger than the on-disk size (a fetched dummy). For a
+// fully-restored REAL file (the big file IS on disk, so actual ~= on-disk) we do
+// NOT show it — labelling a local file "archived 82 GB" would be misleading.
+function shouldShowArchivedSize(item) {
+  var actual = Number(item && item.actual_size_bytes);
+  if (!isFinite(actual) || actual <= 0) return false;
+  if (item.state === "ARCHIVED") return true;
+  var onDisk = Number(item.size_bytes);
+  if (!isFinite(onDisk) || onDisk < 0) return false;
+  // "Clearly larger": the real size dwarfs what's on disk (a dummy/placeholder).
+  // 4x with a small floor avoids tripping on rounding for a near-complete file.
+  return actual > Math.max(onDisk * 4, onDisk + 1024 * 1024);
+}
+
+// Render the archived/real-size line + tech chip row UNDER the title, into the
+// provided container. XSS-safe (textContent only). No-op when the gate is off or
+// nothing meaningful is available, so non-archived / no-tech leaves are untouched.
+function renderArchivedInfo(container, item) {
+  if (!container) return;
+  if (!shouldShowArchivedSize(item)) return;
+
+  var line = document.createElement("div");
+  line.className = "tech-line";
+
+  // The humanized REAL size, tagged so it reads as the archived/real version size
+  // (distinct from the on-disk dummy shown on the right).
+  var sizeWrap = document.createElement("span");
+  sizeWrap.className = "tech-size";
+  var sizeLabel = document.createElement("span");
+  sizeLabel.className = "tech-size-label";
+  sizeLabel.textContent = "Archived";
+  sizeLabel.title = "Real fetched file size (the local copy is a tiny placeholder)";
+  var sizeVal = document.createElement("span");
+  sizeVal.className = "tech-size-val";
+  sizeVal.textContent = humanSize(item.actual_size_bytes);
+  sizeWrap.appendChild(sizeLabel);
+  sizeWrap.appendChild(sizeVal);
+  line.appendChild(sizeWrap);
+
+  // Capped row of dim tech chips (resolution / HDR-DV / source / codec / audio).
+  var chips = buildTechChips(item.tech, item.release_name);
+  if (chips.length) {
+    var chipRow = document.createElement("span");
+    chipRow.className = "tech-chips";
+    chips.forEach(function (label) {
+      var chip = document.createElement("span");
+      chip.className = "tech-chip";
+      chip.textContent = label;
+      chipRow.appendChild(chip);
+    });
+    line.appendChild(chipRow);
+  }
+
+  container.appendChild(line);
+}
+
+// ---------------------------------------------------------------------------
 // Card rendering
 // ---------------------------------------------------------------------------
 
@@ -239,6 +468,18 @@ export function buildCard(item) {
   var node = tpl.content.firstElementChild.cloneNode(true);
   node.dataset.state = item.state;
   if (isArchived) node.classList.add("archived");
+
+  // Stash the item on the node so the delegated hover detail-window (preview.js)
+  // can map a hovered/focused .card back to its data with no per-card listener or
+  // side index. An own-property on the element, GC'd with the node (no leak); the
+  // double-underscore namespaces it like node._fetchRing. Covers BOTH the flat
+  // grid AND grouped-tree leaf cards, since every leaf card is built here.
+  node.__mvItem = item;
+  // Also expose the canonical id as a DOM attribute so the command palette
+  // (palette.js) — and any inspector / verify harness — can find a card by id.
+  // The actual jump uses __mvItem identity (escaping-proof for odd ids); this is
+  // the inspectable, queryable mirror. XSS-safe (an attribute value, never markup).
+  if (item && item.id != null) node.dataset.id = String(item.id);
 
   // Poster slot (gradient + big initial placeholder). Phase 5.2 wires a real
   // image on top: addPosterImage points an <img> at /api/media-image/<id> and
@@ -274,8 +515,20 @@ export function buildCard(item) {
   }
   $(".item-size", node).textContent = humanSize(item.size_bytes);
 
+  // Archived/real-version line UNDER the title (IMP-E16 B1): for an archived (or
+  // otherwise dummy-on-disk) leaf, show the REAL fetched size + a capped tech chip
+  // row built from tech_spec + tokens parsed from the release filename. Mounted
+  // between the title row and the path so it reads as title metadata. No-op (and
+  // unchanged layout) for non-archived / no-tech leaves. The right-side on-disk
+  // size above stays exactly as-is.
+  var pathEl = $(".item-path", node);
+  var techHost = document.createElement("div");
+  techHost.className = "tech-host";
+  renderArchivedInfo(techHost, item);
+  if (techHost.firstChild) pathEl.parentNode.insertBefore(techHost, pathEl);
+
   // Path.
-  $(".item-path", node).textContent = item.path || "";
+  pathEl.textContent = item.path || "";
 
   // Raw canonical id at the foot — small/dim/monospace, visually subordinate to
   // the title above. Always shown (it's the stable handle for the entry).
@@ -742,11 +995,24 @@ function renderJob(panel, job, running) {
   expand.setAttribute("aria-label", "Expand to full-screen terminal");
   expand.textContent = "⤢"; // ⤢ diagonal arrows
   expand.addEventListener("click", function () {
-    openTerminal(panel);
+    if (_term) {
+      _term.openTerminal(panel);
+      return;
+    }
+    import("./terminal.js")
+      .then(function (m) {
+        _term = m;
+        m.openTerminal(panel);
+      })
+      .catch(function (e) {
+        console.warn("terminal.js failed to load", e);
+      });
   });
   panel.appendChild(expand);
 
   // Fan this same job out to an open, bound terminal overlay (single-poll live
-  // mirror). No-op when the overlay is closed or bound to a different panel.
-  notifyJob(panel, job, panel._jobCommand || "");
+  // mirror). No-op when the overlay is closed or bound to a different panel — and
+  // the overlay can only be open once the expand click lazy-loaded `_term`, so a
+  // not-yet-loaded terminal simply has nothing to notify.
+  if (_term) _term.notifyJob(panel, job, panel._jobCommand || "");
 }

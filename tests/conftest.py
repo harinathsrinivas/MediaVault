@@ -78,6 +78,23 @@ def sandbox(tmp_path, monkeypatch):
         monkeypatch.setattr(mvcommon, attr, path)
         monkeypatch.setattr(main, attr, path)
 
+    # IMP-E16: redirect the online-metadata cache (mvonline.json), the OMDb response
+    # cache, AND the trivia cache (mvextra.json, IMP-E16/A5) to the sandbox so NO test
+    # reads/writes the real repo-root mvonline.json / mvextra.json or the real
+    # ~/.mediavault OMDb cache. tmdb_detail merges BOTH caches, so an un-redirected
+    # real file would silently pollute every detail test once a real `refresh_online`
+    # / `fetch_trivia` run created one. Each points at a path that does not yet exist
+    # (the online_cache / extra_cache fixtures in test_refresh_online / test_fetch_trivia
+    # / test_web_detail override them with a path they seed). These live only on `main`.
+    online_cache = tmp_path / "online" / "mvonline.json"
+    omdb_cache = tmp_path / "online" / "omdb"
+    extra_cache = tmp_path / "online" / "mvextra.json"
+    for attr, path in [("ONLINE_CACHE_PATH", str(online_cache)), ("OMDB_CACHE_DIR", str(omdb_cache)),
+                       ("EXTRA_CACHE_PATH", str(extra_cache))]:
+        assert "PycharmProjects" not in str(path) or str(tmp_path) in str(path), \
+            f"Safety check failed: {attr} still points at the real repo cache!"
+        monkeypatch.setattr(main, attr, path)
+
     yield {
         "media_dir":  media_dir,
         "lib_movies": lib_movies,
@@ -904,7 +921,9 @@ def mock_tmdb(monkeypatch, tmp_path):
     """Canned TMDB backend: patches main.requests.get + redirects main.TMDB_CACHE_DIR.
 
     GUARANTEES:
-      - No real network call can escape (requests.get is fully replaced).
+      - No real network call can escape (requests.get is fully replaced, and the
+        IMP-E16/D5 EXA web-search fallback is sealed: exa_api_key() -> "" so the
+        none/ambiguous EXA POST never fires, and EXA_CACHE_DIR points at a temp dir).
       - The real ~/.mediavault metadata cache is never touched (TMDB_CACHE_DIR
         points at a fresh temp dir under tmp_path).
       - mvcommon.tmdb_api_key() returns a fake test key so cmd_enrich_metadata
@@ -917,7 +936,9 @@ def mock_tmdb(monkeypatch, tmp_path):
     cache_dir = tmp_path / "tmdb_cache"
     cache_dir.mkdir(exist_ok=True)
     monkeypatch.setattr(main, "TMDB_CACHE_DIR", str(cache_dir))
+    monkeypatch.setattr(main, "EXA_CACHE_DIR", str(tmp_path / "exa_cache"))
     monkeypatch.setattr(mvcommon, "tmdb_api_key", lambda: "SMOKE-TEST-KEY")
+    monkeypatch.setattr(mvcommon, "exa_api_key", lambda: "")  # D5 EXA fallback sealed OFF
 
     fake = MockTMDB(search=_SMOKE_TMDB_SEARCH)
     monkeypatch.setattr(main.requests, "get", fake.get)

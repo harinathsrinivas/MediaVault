@@ -442,3 +442,249 @@ def test_journal_survives_hard_kill_and_recovers(sandbox, stub_tech_specs, monke
     assert not journal_path.exists(), "journal removed after a clean recovery"
     assert not (media_dir / "uid").exists(), "orphan sidecar removed by recovery"
     assert _movies(sandbox) == {}, "orphan entry removed by recovery"
+
+
+# ===========================================================================
+# IMP-R6 — split restore merges to a TEMP + os.replace, so a merge/verify
+# failure can never delete the archived dummy at target_path.
+# ===========================================================================
+
+def test_restore_merge_fail_preserves_dummy(sandbox, fail_merge, monkeypatch):
+    """IMP-R6 SIMULATED FAILURE: merge_video_files returns False (pre-PONR) for a
+    split restore whose target_path holds the archived dummy. ASSERTED POST-STATE:
+    the dummy is STILL PRESENT and byte-for-byte intact (entry stays archived, a
+    file still exists → no media-server drop), chunks are kept for a re-merge, and
+    there is NO rollback-orphan (journal removed, no .merge_tmp left).
+
+    This is the regression the old code missed: it merged directly onto target_path
+    and recorded target_path as the reproducible output, so the merge-fail rollback
+    `os.remove`d the dummy too. The merge now writes to a TEMP, recorded as the
+    reproducible output, so rollback removes the temp and never the dummy.
+
+    The restore-side disk pre-check (`_free_space_ok`, a 2 GB-buffer guard) is
+    orthogonal to the merge-failure path under test, so it is stubbed True to keep
+    this test hermetic (independent of the host's free space)."""
+    monkeypatch.setattr(main, "_free_space_ok", lambda *a, **k: True)
+    media_dir, restore_folder, filename, c1, c2 = _seed_restore_split(sandbox)
+    target_path = os.path.join(media_dir, filename)
+    dummy_bytes = b"DUMMY-PLACEHOLDER"
+    with open(target_path, "wb") as f:
+        f.write(dummy_bytes)
+
+    fail_merge("return_false")
+
+    result = main.cmd_restore(_RID)
+    assert result is False
+    # The dummy survives untouched (the core IMP-R6 guarantee).
+    assert os.path.exists(target_path), "merge failure must NOT delete the archived dummy"
+    with open(target_path, "rb") as f:
+        assert f.read() == dummy_bytes, "dummy bytes must be byte-for-byte intact"
+    # Chunks kept for a re-merge; status stays archived (no fake success).
+    assert os.path.exists(os.path.join(restore_folder, c1))
+    assert os.path.exists(os.path.join(restore_folder, c2))
+    assert _movies(sandbox)[_RID]["status"] == "archived"
+    # No rollback-orphan: clean rollback deleted the journal and no merge temp lingers.
+    assert not os.path.exists(os.path.join(media_dir, main.TXN_JOURNAL_NAME))
+    leftovers = [n for n in os.listdir(media_dir) if ".merge_tmp" in n]
+    assert leftovers == [], f"merge temp must be cleaned up, found {leftovers}"
+
+
+def test_restore_merge_crash_preserves_dummy(sandbox, fail_merge, monkeypatch):
+    """IMP-R6: same guarantee when merge_video_files RAISES (unexpected mkvmerge
+    crash) rather than returning False — the dummy still survives intact."""
+    monkeypatch.setattr(main, "_free_space_ok", lambda *a, **k: True)
+    media_dir, restore_folder, filename, c1, c2 = _seed_restore_split(sandbox)
+    target_path = os.path.join(media_dir, filename)
+    dummy_bytes = b"DUMMY-PLACEHOLDER-2"
+    with open(target_path, "wb") as f:
+        f.write(dummy_bytes)
+
+    fail_merge("raise")
+
+    result = main.cmd_restore(_RID)
+    assert result is False
+    assert os.path.exists(target_path)
+    with open(target_path, "rb") as f:
+        assert f.read() == dummy_bytes
+    assert not os.path.exists(os.path.join(media_dir, main.TXN_JOURNAL_NAME))
+
+
+def test_restore_split_success_swaps_temp_into_place(sandbox, monkeypatch):
+    """IMP-R6 SUCCESS: a split restore merges into a TEMP sibling, then atomically
+    os.replace()s it onto target_path ONLY after the hash gate passes. ASSERTED:
+    the merge output never lands directly on target_path (proves merge-to-temp),
+    the swapped file holds the merged bytes, the temp is consumed, the chunks are
+    deleted (PONR unchanged), the journal is committed, and the first restore
+    blesses the merged hash as canonical truth (no rehash regression).
+
+    The restore-side disk pre-check (`_free_space_ok`) is stubbed True to keep this
+    test hermetic (independent of the host's free space)."""
+    monkeypatch.setattr(main, "_free_space_ok", lambda *a, **k: True)
+    media_dir, restore_folder, filename, c1, c2 = _seed_restore_split(sandbox)
+    target_path = os.path.join(media_dir, filename)
+    with open(target_path, "wb") as f:
+        f.write(b"DUMMY-PLACEHOLDER")
+
+    merged = b"MERGED-REAL-OUTPUT-BYTES"
+    seen = {"output_paths": []}
+
+    def fake_merge(chunk_paths, output_path, seed=None):
+        seen["output_paths"].append(output_path)
+        with open(output_path, "wb") as f:
+            f.write(merged)
+        return True
+
+    monkeypatch.setattr(main, "merge_video_files", fake_merge)
+
+    result = main.cmd_restore(_RID)
+    assert result is True
+    # The merge wrote to a TEMP sibling, NEVER directly onto target_path.
+    assert len(seen["output_paths"]) == 1
+    out_path = seen["output_paths"][0]
+    assert out_path != target_path
+    assert os.path.basename(out_path) == "film.merge_tmp.mkv"
+    # os.replace landed the merged bytes onto target_path (dummy replaced).
+    assert os.path.exists(target_path)
+    with open(target_path, "rb") as f:
+        assert f.read() == merged
+    # The temp was consumed by the swap — no orphan temp.
+    assert not os.path.exists(out_path)
+    # PONR reached: chunks deleted, journal committed.
+    assert not os.path.exists(os.path.join(restore_folder, c1))
+    assert not os.path.exists(os.path.join(restore_folder, c2))
+    assert not os.path.exists(os.path.join(media_dir, main.TXN_JOURNAL_NAME))
+    # No rehash regression: the first restore blesses the merged hash as truth.
+    e = _movies(sandbox)[_RID]
+    assert e["status"] == "restored_local"
+    assert e["re_hashed"] is True
+    assert e["hash"] == hashlib.sha256(merged).hexdigest()
+
+
+# ===========================================================================
+# IMP-R7 — opening a journal auto-recovers a leftover PRE-PONR journal before
+# flushing a fresh one (crash → re-run no longer destroys recovery info), and
+# preserves a POST-PONR / partial leftover under a timestamped name.
+# ===========================================================================
+
+def _write_leftover_journal(media_dir, manual_id, crossed_ponr, records):
+    """Seed a leftover .mediavault_txn.json (as a crashed run would leave behind)."""
+    jpath = os.path.join(str(media_dir), main.TXN_JOURNAL_NAME)
+    with open(jpath, "w", encoding="utf-8") as f:
+        json.dump({"manual_id": manual_id, "crossed_ponr": crossed_ponr,
+                   "records": records}, f)
+    return jpath
+
+
+def _preserved_journals(media_dir):
+    """Timestamped sibling journals (.mediavault_txn.<ts>.json), excluding the
+    live .mediavault_txn.json and any transient .tmp."""
+    return [n for n in os.listdir(str(media_dir))
+            if n.startswith(".mediavault_txn.") and n.endswith(".json")
+            and n != main.TXN_JOURNAL_NAME]
+
+
+def test_journal_open_auto_recovers_pre_ponr_leftover(sandbox, capsys):
+    """IMP-R7 (option b): opening a new journal over a leftover PRE-PONR journal
+    AUTO-RUNS recover_journal() FIRST (its inverse removes the crashed run's orphan
+    artifact), THEN flushes the fresh journal. Proves a crash→re-run recovers the
+    crashed run instead of silently clobbering its inverses."""
+    _empty(sandbox)
+    media_dir = sandbox["media_dir"]
+    orphan = media_dir / "rbk777.sha256"
+    orphan.write_text("deadbeef *film.mkv", encoding="utf-8")
+
+    _write_leftover_journal(media_dir, "mov-crashed", False,
+                            [{"op": "create_file", "path": str(orphan)}])
+
+    journal = main.RollbackJournal(str(media_dir), "mov-newrun")
+
+    out = capsys.readouterr().out
+    assert "Found an interrupted run's journal" in out
+    # Recovery ran: the crashed run's orphan sidecar was removed.
+    assert not orphan.exists(), "leftover artifact must be recovered before the new run"
+    # A FRESH journal for the new run now sits at the path (empty records, new id).
+    data = json.loads((media_dir / main.TXN_JOURNAL_NAME).read_text(encoding="utf-8"))
+    assert data == {"manual_id": "mov-newrun", "crossed_ponr": False, "records": []}
+    # No timestamped preserve for a clean pre-PONR recovery.
+    assert _preserved_journals(media_dir) == []
+
+
+def test_journal_open_preserves_post_ponr_leftover(sandbox, capsys):
+    """IMP-R7: a leftover POST-PONR journal must NOT be auto-recovered (that run
+    committed irreversibly) and must NOT be silently overwritten — it is preserved
+    under a timestamped name, and a fresh journal is then created for the new run."""
+    _empty(sandbox)
+    media_dir = sandbox["media_dir"]
+    # A file the post-PONR record points at: recovery must NOT touch it.
+    keep = media_dir / "keep.sha256"
+    keep.write_text("x", encoding="utf-8")
+
+    _write_leftover_journal(media_dir, "mov-crashed", True,
+                            [{"op": "create_file", "path": str(keep)}])
+
+    journal = main.RollbackJournal(str(media_dir), "mov-newrun")
+
+    out = capsys.readouterr().out
+    assert "crossed its point-of-no-return" in out
+    assert "preserving it for inspection" in out
+    # Post-PONR recovery did NOT run — the referenced artifact survives.
+    assert keep.exists(), "post-PONR leftover must NOT be auto-recovered"
+    # The leftover was preserved (not destroyed) under a timestamped name.
+    preserved = _preserved_journals(media_dir)
+    assert len(preserved) == 1, f"expected one preserved journal, got {preserved}"
+    pdata = json.loads((media_dir / preserved[0]).read_text(encoding="utf-8"))
+    assert pdata["crossed_ponr"] is True
+    assert pdata["records"] == [{"op": "create_file", "path": str(keep)}]
+    # A fresh journal exists for the new run.
+    data = json.loads((media_dir / main.TXN_JOURNAL_NAME).read_text(encoding="utf-8"))
+    assert data == {"manual_id": "mov-newrun", "crossed_ponr": False, "records": []}
+
+
+def test_journal_open_no_leftover_is_byte_unchanged(sandbox, capsys):
+    """IMP-R7: the overwhelmingly common no-leftover path is byte-for-byte the old
+    behavior — a fresh empty journal, no recovery call, no preserve, no extra files."""
+    media_dir = sandbox["media_dir"]
+    jpath = media_dir / main.TXN_JOURNAL_NAME
+    assert not jpath.exists()  # precondition: no leftover
+
+    journal = main.RollbackJournal(str(media_dir), "mov-fresh")
+
+    out = capsys.readouterr().out
+    assert "interrupted" not in out.lower()
+    assert "recover" not in out.lower()
+    assert "preserv" not in out.lower()
+    # Canonical fresh-journal content.
+    data = json.loads(jpath.read_text(encoding="utf-8"))
+    assert data == {"manual_id": "mov-fresh", "crossed_ponr": False, "records": []}
+    # No timestamped preserve was created.
+    assert _preserved_journals(media_dir) == []
+
+
+def test_journal_open_partial_recovery_preserves_leftover(sandbox, capsys, monkeypatch):
+    """IMP-R7: if the auto-recovery is only PARTIAL (an inverse fails, e.g. a file
+    lock), recover_journal leaves the journal in place — the fresh _flush() must NOT
+    destroy those surviving inverses. They are preserved under a timestamped name so
+    `recover` can be retried, and a fresh journal is still created for the new run."""
+    _empty(sandbox)
+    media_dir = sandbox["media_dir"]
+    orphan = media_dir / "partial.sha256"
+    orphan.write_text("x", encoding="utf-8")
+    record = {"op": "create_file", "path": str(orphan)}
+    _write_leftover_journal(media_dir, "mov-crashed", False, [record])
+
+    # Simulate a partial recovery: the inverse replay reports failure, so
+    # recover_journal keeps the journal on disk.
+    monkeypatch.setattr(main, "_replay_inverses", lambda records, library: False)
+
+    journal = main.RollbackJournal(str(media_dir), "mov-newrun")
+
+    out = capsys.readouterr().out
+    assert "Recovery was partial; preserving" in out
+    # The surviving inverses were preserved, not destroyed.
+    preserved = _preserved_journals(media_dir)
+    assert len(preserved) == 1, f"expected one preserved journal, got {preserved}"
+    pdata = json.loads((media_dir / preserved[0]).read_text(encoding="utf-8"))
+    assert pdata["records"] == [record]
+    # A fresh journal still exists for the new run.
+    data = json.loads((media_dir / main.TXN_JOURNAL_NAME).read_text(encoding="utf-8"))
+    assert data == {"manual_id": "mov-newrun", "crossed_ponr": False, "records": []}

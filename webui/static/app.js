@@ -1385,7 +1385,7 @@ function wirePaletteLazy() {
 // data is interpolated (XSS-safe). A failed/absent probe leaves the banner
 // hidden (fail-safe toward the normal real UI; the SERVER still enforces demo).
 function checkDemoMode() {
-  authFetch("/api/mode")
+  authFetch("/api/mode", { cache: "no-store" })
     .then(function (res) {
       return res.ok ? res.json() : null;
     })

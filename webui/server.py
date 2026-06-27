@@ -760,7 +760,18 @@ def create_app(demo=False):
                         status_code=401,
                         content={"detail": "Access token required or expired"},
                     )
-        return await call_next(request)
+        response = await call_next(request)
+        # NO-CACHE on every /api/* response. The _NoCacheStaticFiles fix covered the
+        # static SPA shell, but API routes (notably /api/mode and /api/items) had NO
+        # Cache-Control — so a browser heuristically cached them. The real bug this
+        # fixes: after first loading the page against a `--demo` server, the cached
+        # /api/mode `{"demo":true}` kept the yellow DEMO banner showing even on a
+        # real (non-demo) server across hard refreshes, because the SPA's fetch was
+        # served the stale cached response. `no-store` forbids any caching of live
+        # state (mode / library / job status), so the UI always reflects the server.
+        if path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     # -- /api/whoami (NO auth — always reachable) ----------------------------
     # The SPA reads this on load to decide whether to render the admin Access

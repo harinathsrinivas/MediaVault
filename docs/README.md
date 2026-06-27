@@ -29,7 +29,7 @@
 | [`BEST_PRACTICES.md`](../BEST_PRACTICES.md) | Compounding decisions: choices to lock now (chunk size, DV/HDR verification, multi-account replication, enrich-before-archive, automation gates) that are cheap today and expensive to fix once the library scales / the daemon automates |
 | [`CLAUDE.md`](../CLAUDE.md) | Session rules for AI-assisted work: gates, change-gate, keep-PRIORITY-current rule, pipeline notes |
 | [`apple_tv_ui_roadmap.md`](../apple_tv_ui_roadmap.md) | 2026-05 Jellyfin-plugin UI design. **Partially superseded** — carries a correction banner; current plan is `improvements/ROADMAP_END_GOAL.md` |
-| `PLAN.md`, `STATUS.md` (root) | **Gitignored/stale live working copies** used by the agent pipeline during runs (root STATUS.md is currently still tracked — cleanup tracked as IMP-A11). Canonical copies live under `docs/<feature>/` |
+| `PLAN.md`, `STATUS.md` (root) | **Gitignored live working copies** used by the agent pipeline during runs — both now gitignored and untracked (the root-`STATUS.md` cleanup of IMP-A11). They are session scratch, not durable records; the durable record per feature is its `DECISIONS.md` + the `improvements/` task entry. |
 
 ## 1b. The `improvements/` folder — backlog + direction ("the brain")
 

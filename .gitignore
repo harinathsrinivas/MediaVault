@@ -50,6 +50,7 @@ archive/unrelated/a.json
 
 # Local plan / scratch files written by the agent (root-level only)
 /PLAN.md
+/STATUS.md
 
 # Local reference copies of personal library data and command logs
 # (the live files at C:\Media\*.json are the source of truth; these are snapshots)

@@ -2031,6 +2031,7 @@ operation journal in `main.py`:
   Candidate C from the in-memory alternatives (A: transaction context-manager;
   B: compensating-action stack — see `docs/feature-auto-rollback/`).
   `recover_journal` is now reachable from the CLI via `python main.py recover <id|folder>` (and `recover --scan` for a read-only sweep of all media roots); the function's semantics and journal format are unchanged.
+  **(IMP-R7, 2026-06-27)** `RollbackJournal.__init__` now calls `_handle_leftover()` before `_flush()`: a pre-PONR leftover triggers an auto-call to `recover_journal()` first (idempotent; restores clean state before the new command runs); a post-PONR leftover is renamed to a timestamped sibling (`.mediavault_txn.<ts>.json`) instead of silently overwritten. The no-leftover path (the common happy path) is byte-for-byte unchanged.
 
 ### Point-of-no-return (PONR) table — verified against current `main.py`
 
@@ -2044,7 +2045,7 @@ failure.
 | `cmd_prep` (`main.py:795`) | none — fully reversible | auto-rollback this-run entry / sidecars / parent child-link (early-skips create no artifacts and never roll back) |
 | `cmd_push` (`main.py:1217`) | **none (O-1)** — resumable | resume-message: leave the partial upload, entry stays `local_ready`/`uploaded=False`, print `push <id>`. Roll back this-run `_parts`/`checksums`/`split_info` only if created this run AND failure is pre-any-upload; a pre-existing `_parts/` (resume) is never deleted |
 | `cmd_replace` (`main.py:1741`) | **commit rename `os.rename(original, tobedeleted)` (`main.py:1804`)**, marked at `main.py:1806` | pre-PONR: roll back the dummy temp. At/after PONR: `RollbackHardFail` naming `fetch_restore <id>` (`main.py:1866`). C9 stale-sweep self-heals a torn crash on the next `replace` |
-| `cmd_restore` (`main.py:2032`) | **split-path merged-chunk delete**, marked at `main.py:2185` | pre-PONR: reuse C11 `quarantine_restore_file` + reproducible-output cleanup. At/after PONR: `RollbackHardFail` naming `fetch_restore <id>`. Standard path is a single `shutil.move` — no torn window |
+| `cmd_restore` (`main.py:2032`) | **split-path merged-chunk delete**, marked at `main.py:2185` | pre-PONR: **(IMP-R6)** merge staged to `<target>.merge_tmp<ext>`; `os.replace()` onto dummy only after verify/bless passes; the `create_reproducible` journal record carries the temp path; a failure removes the temp and leaves the dummy intact. At/after PONR: `RollbackHardFail` naming `fetch_restore <id>`. Standard path is a single `shutil.move` — no torn window |
 
 *(Line numbers re-verified 2026-06-12.)*
 

@@ -164,6 +164,7 @@ C:\Media\
 |-- library_movies.json              ACTIVE  (keys: mov-*)
 |-- library_series.json              ACTIVE  (keys: tv-* + season_map entries)
 |-- library_anime.json               ACTIVE  (keys: ani-* + season_map entries)
+|-- library_others.json              ACTIVE  (keys: oth-* + season_map entries) — IMP-D18 "Others" category (sports now; documentaries later)
 |-- library.json                     LEGACY  pre-migration combined file (read-only backup)
 |-- library - Copy.json              LEGACY  hand-made backup of legacy library.json
 |-- library - Copy (2).json          LEGACY  hand-made backup of legacy library.json
@@ -171,15 +172,18 @@ C:\Media\
 |-- Movies\                          media root for `scan_unprepped` Movies category
 |-- Series\                          media root for Series category
 |-- Anime\                           media root for Anime category
+|-- Sports\                          media root for the "other" category (CATEGORY_ROOTS["other"] = ["Sports"]; list-capable — append "Documentary" later)
 |-- Utils\
     |-- ChromeProfile\               Selenium-attached Chrome user data dir for movies
     |-- ChromeProfile_TV\            Selenium-attached Chrome user data dir for TV (series account)
     |-- ChromeProfile_Anime\         Selenium-attached Chrome user data dir for anime
+    |-- ChromeProfile_Others\        Selenium-attached Chrome user data dir for the Others/sports account (IMP-D18)
 ```
 
 > The current `main.py` and `mainfetch.py` read/write
-> `library_movies.json`, `library_series.json`, `library_anime.json`
-> from `C:\Media\`. The older single `C:\Media\library.json` is no
+> `library_movies.json`, `library_series.json`, `library_anime.json`,
+> and `library_others.json` (IMP-D18) from `C:\Media\`. The older single
+> `C:\Media\library.json` is no
 > longer the source of truth and is only consumed by
 > `tools/migrate_lib.py`. `archive/legacy/media_library.json` is
 > unrelated to the live system and unused.
@@ -583,25 +587,33 @@ It binds **localhost only**.
 
 ## 6. Data Model and Library State
 
-### 6.1 The three library JSON files
+### 6.1 The four library JSON files
 
-`main.py` and `mainfetch.py` both define:
+The shared path constants live in `mvcommon.py` (imported by both `main.py`
+and `mainfetch.py` as of IMP-A1):
 
 ```python
 LIBRARY_MOVIES = r'C:\Media\library_movies.json'
 LIBRARY_SERIES = r'C:\Media\library_series.json'
 LIBRARY_ANIME  = r'C:\Media\library_anime.json'
+LIBRARY_OTHERS = r'C:\Media\library_others.json'   # IMP-D18 "Others" category
 ```
 
-`load_library()` reads all three and merges into a single dict in memory
+`load_library()` reads all four and merges into a single dict in memory
 keyed by manual ID. `save_library()` splits back by ID prefix:
 
 - key starts with `mov`  -> movies file
 - key starts with `tv`   -> series file
 - key starts with `ani`  -> anime file
-- otherwise -> fallback to movies file (legacy keys without a prefix)
+- key starts with `oth`  -> others file (IMP-D18)
+- otherwise -> fallback to movies file (legacy keys without a prefix), and the
+  unrouted key is **warned to stderr** so a future unknown/typo'd prefix can
+  never vanish silently (the hardened `else→movies` trap).
 
-This split-by-prefix is hardcoded at `main.py:75-84`.
+This split-by-prefix lives in `mvcommon.save_library()`. `load_library()`
+`os.path.exists`-guards each file, and `save_library()` always writes all four
+(even an empty `library_others.json`), so the Others file is created on the
+first `oth-` save and is never a special case.
 
 ### 6.2 Manual ID format
 
@@ -619,6 +631,22 @@ first three characters select which library JSON the entry lands in.
 - Anime: `ani-<lang2>-<year>-<slug><EE>` (no `e` separator before the
   episode number) e.g. `ani-ja-2006-deathnote07`. Parent ID strips the
   trailing digits (`ani-ja-2006-deathnote`).
+- Others (sports): `oth-<sport>-<year>-<competition>-s01e<NN>` e.g.
+  `oth-football-2026-fifaworldcup-s01e01` (IMP-D18). Sport and competition are
+  spelled out (`football`, `cricket`). A tournament edition is modeled as ONE TV
+  season — it **reuses `season_map` + leaf, adding no `ENTRY_TYPE_KEYS` type**:
+  each match-half is one episode and a match is two adjacent episodes
+  (`e01`+`e02` = the first match). `cmd_prep_season` position-numbers `oth-`
+  files `e01..eNN` by **filename sort order** (a dedicated `is_other` branch that
+  bypasses the SxxExx / anime episode regex, because Tivimate-derived sports
+  filenames carry no episode marker). On-disk naming convention: name the
+  halves/periods so they sort in play order (`First`<`Second`, or `1`<`2`, or
+  `Q1`..`Q4`). The `-s01` segment is REQUIRED so `mvcommon.episode_num_from_id`
+  strips a clean `-s01` and reads `e01`→1.0 (a bare `oth-…-e01` would strip to
+  `-e01`, which the anchored `^[eExX]?(\d+…)$` regex rejects → silent 0-match).
+  Because the id parses cleanly, every push/replace/restore/season command — and
+  its rollback journaling — operates on `oth-` ids verbatim: **no
+  rollback-contract change**.
 - Half-episodes are floats appended to the episode segment: `...e16.5`
   (series convention) or `...165.5`/`...16.5` (anime). Live data has
   3 half-eps (all anime: `ani-ja-2012-kurokosbasketball-s0122.5`,
@@ -842,6 +870,16 @@ and rewrites `folder_path` in JSON. It does NOT change any file's bytes — the
 SHA256 hash stored in each leaf's `"hash"` key is over the file's BYTES, not its
 path (§7.4). Chunk hashes in `split_info` are also byte-hashes and are unchanged.
 `uid` / `.sha256` sidecars travel with the folder and remain valid.
+
+**Enrichment skips the Others category (IMP-D18).** `enrich_metadata`,
+`refresh_online`, and `fetch_trivia` all gather their work-set through the single
+`_gather_enrich_units` chokepoint, which drops every entry whose
+`category_of_id(...)` is `"other"` before bucketing — so no `oth-` id ever
+reaches a movie/show unit. Sports/Others content is not on TMDB/OMDb, so
+enriching it would mis-match a title, stamp a wrong `metadata.tmdb_id`, rename
+the real Sports folder with a bogus `{tmdb-…}` token, and download wrong artwork.
+The guard is unconditional (one place covers all three commands), so even a
+no-arg whole-library `enrich_metadata` run is safe.
 
 ### 6.4 Status state machine
 
@@ -2176,7 +2214,8 @@ file**. There are no env vars, `.env`, `config.json`, `settings.py`, or
 CLI flags for paths. To re-target the system, you edit the source.
 
 > **As of IMP-A1**, the shared library/path constants (`LIBRARY_MOVIES`,
-> `LIBRARY_SERIES`, `LIBRARY_ANIME`, `LOCAL_ROOT`, `MKVMERGE_PATH`,
+> `LIBRARY_SERIES`, `LIBRARY_ANIME`, `LIBRARY_OTHERS`, `LOCAL_ROOT`,
+> `MKVMERGE_PATH`,
 > `SPLIT_DIR_NAME`, `CHECKSUM_DIR_NAME`, `RESTORE_DIR_NAME`,
 > `VIDEO_EXTENSIONS`) are now defined once in `mvcommon.py` and imported by both
 > entry points. The "Defined in" column below reflects the historical
@@ -2189,11 +2228,13 @@ CLI flags for paths. To re-target the system, you edit the source.
 | `LIBRARY_MOVIES` | `main.py:19`, `mainfetch.py:29` | `C:\Media\library_movies.json` |
 | `LIBRARY_SERIES` | `main.py:20`, `mainfetch.py:30` | `C:\Media\library_series.json` |
 | `LIBRARY_ANIME` | `main.py:21`, `mainfetch.py:31` | `C:\Media\library_anime.json` |
+| `LIBRARY_OTHERS` | `mvcommon.py:24` | `C:\Media\library_others.json` (IMP-D18 "Others"/sports category) |
 | `LOCAL_ROOT` | `main.py:23`, `mainfetch.py:33` | `C:\Media` |
 | `REMOTE_ROOT` | `main.py:24` | `/sdcard/Media` |
 | `MKVMERGE_PATH` | `main.py:25`, `mainfetch.py:34` | `C:\Program Files\MKVToolNix\mkvmerge.exe` |
 | `MAINFETCH_SCRIPT` | `main.py:26` | `mainfetch.py` |
-| `DEVICE_ALIASES` | `main.py` near line 68 | `{"movies": "FA69H0300200", "series": "FA75V0303405"}` — hardcoded user-edited mapping from CLI alias to ADB serial; consumed by `resolve_device()` |
+| `DEVICE_ALIASES` | `main.py:82` | `{"movies": "FA69H0300200", "series": "FA75V0303405", "others": "<NEW_PIXEL_SERIAL>"}` — hardcoded user-edited mapping from CLI alias to ADB serial; consumed by `resolve_device()`. The `others` serial is a `<NEW_PIXEL_SERIAL>` placeholder (IMP-D18 user prerequisite — `device others` fails at adb until the real Others Pixel serial is filled in) |
+| `CATEGORY_ROOTS` | `main.py:107` | `{"movies":["Movies"],"series":["Series"],"anime":["Anime"],"other":["Sports"]}` — IMP-D18 single source of truth mapping each content category to a LIST of top-level subdirs under `LOCAL_ROOT`. Every disk walker (`cmd_recover --scan`, `cmd_scan_unprepped`, `collect_reclaimable`) derives its roots from this one table; list-capable, so appending `"Documentary"` to `"other"` is a one-line data edit with NO walker code change |
 | `SPLIT_DIR_NAME` | both | `_parts` |
 | `CHECKSUM_DIR_NAME` | both | `checksums` |
 | `RESTORE_DIR_NAME` | both | `restore` |
@@ -2202,6 +2243,8 @@ CLI flags for paths. To re-target the system, you edit the source.
 | `MVMETA_SUFFIX` | `main.py` | `.mvmeta.json` — remote disaster-recovery sidecar name (`<base> [<short_id>].mvmeta.json`) written on full push success |
 | `CHROME_PROFILES["default"]` | `mainfetch.py:38` | `C:\Media\Utils\ChromeProfile` |
 | `CHROME_PROFILES["tv"]` | `mainfetch.py:39` | `C:\Media\Utils\ChromeProfile_TV` |
+| `CHROME_PROFILES["others"]` | `mainfetch.py:36` | `C:\Media\Utils\ChromeProfile_Others` (IMP-D18 Others/sports account) |
+| `ID_PREFIX_PROFILE` / `DEFAULT_PROFILE` | `mainfetch.py:40-41` | `[("ani","anime"),("tv","tv"),("mov","movies"),("oth","others")]` / `"movies"` — ordered id-prefix→Chrome-profile map consumed by `profile_for_id()`; `oth-` ids route to the Others profile (IMP-D18) |
 | `CHROME_PROFILE_NAME` | `mainfetch.py:41` | `Default` (sub-profile inside the user-data-dir) |
 | `SYSTEM_DOWNLOADS_FOLDER` | `mainfetch.py:42` | `~/Downloads` |
 | `CHROME_PATH` | `mainfetch.py:112` | `C:\Program Files\Google\Chrome\Application\chrome.exe` (falls back to `(x86)`) |

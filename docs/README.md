@@ -103,6 +103,7 @@ history only on archived branch tags — these folders are the readable record).
 | `imp-r2-recover-cli/` | PR #18 (2026-06-03) — recover CLI | `PLAN.md`, `DECISIONS.md` |
 | `feature-video-dummy/` | PRs #1/#3 (2026-05-28) — real video dummies | `PLAN.md`/`planv2.md`, `DECISION.md`, dummy-size test scripts |
 | `feature-adb-device-select/` | PR #2 (2026-05-28) — device pinning | `PLAN.md`, `STATUS.md` |
+| `feature-others-category/` | IMP-D18 (2026-06-28) — 4th "Others" content category (sports now; documentaries later) | `PLAN.md`, `step-02-save_library-DECISION.md` + `step-04-disk-walk-roots-DECISION.md` (the two multi-candidate judge decisions) |
 | `feature-fable-review/` | THIS review session | see §3 |
 
 ## 6. Agent-pipeline docs (`.claude/`)

@@ -96,10 +96,14 @@ interrupted rollback can be finished afterward via `recover_journal`. See
 - A Google Pixel phone connected over USB with ADB debugging authorised and
   the Google Photos app configured to back up the `/sdcard/Media` folder at
   original quality.
-- Three persistent Chrome user-data directories under `C:\Media\Utils\`:
+- Four persistent Chrome user-data directories under `C:\Media\Utils\`:
   - `ChromeProfile` — signed into the Google account that holds your movies.
   - `ChromeProfile_TV` — signed into the Google account that holds your TV series.
   - `ChromeProfile_Anime` — signed into the Google account that holds your anime.
+  - `ChromeProfile_Others` — signed into the (new) Google account that holds your
+    Others / sports content (IMP-D18). Pairs with a dedicated Pixel whose ADB
+    serial goes in `DEVICE_ALIASES["others"]` — a user prerequisite
+    (`<NEW_PIXEL_SERIAL>` placeholder until you fill it in).
   Each profile must be signed in manually at least once before MediaVault can
   attach to it.
 
@@ -127,10 +131,10 @@ first manual sign-in):
 **Warm-up commands:**
 
 ```
-# Warm all three profiles (movies, tv, anime)
+# Warm all four profiles (movies, tv, anime, others)
 python tools/warm_profiles.py
 
-# Warm a single profile (valid keys: movies, tv, anime)
+# Warm a single profile (valid keys: movies, tv, anime, others)
 python tools/warm_profiles.py --profile anime
 ```
 
@@ -157,9 +161,10 @@ Remove it with:
 schtasks /delete /tn "MediaVault Warm Profiles" /f
 ```
 
-- The three library JSON files at `C:\Media\library_movies.json`,
-  `C:\Media\library_series.json`, and `C:\Media\library_anime.json`. These
-  are created on first `prep` if missing.
+- The four library JSON files at `C:\Media\library_movies.json`,
+  `C:\Media\library_series.json`, `C:\Media\library_anime.json`, and
+  `C:\Media\library_others.json` (IMP-D18). These are created on first `prep`
+  (or first `oth-` save) if missing.
 
 ## Installation
 
@@ -211,6 +216,14 @@ help text and no `--help` flag; this table is the reference.
 | `sort`                 | `sort`                                                                                                                              | Re-sort all library JSONs by language -> year -> size                                                                                                  |
 | `recover`              | `recover [id\|folder]` (or `recover --scan`)                                                                                        | Finish an interrupted auto-rollback for a media folder (resolves by id or path); `--scan` reports leftover `.mediavault_txn.json` journals (read-only) |
 | `web`                  | `web [--port N] [--host H] [--no-browser]`                                                                                          | Launch the local web operations console (Disk Reclaim view) at `http://127.0.0.1:8765` — requires `fastapi`+`uvicorn` (in `requirements.txt`)          |
+
+> **Content categories.** Every command above works identically for all four
+> content categories, selected by the id prefix: `mov-` (movies), `tv-` (series),
+> `ani-` (anime), and `oth-` (**Others** — sports now, documentaries later;
+> IMP-D18). An `oth-` season behaves exactly like a TV season — same
+> `prep_season` / `push_group` / `replace_group` / `restore_group` /
+> `fetch_restore … episodes N-M` range filtering, resume messaging, and rollback
+> machinery. See "Manual ID conventions" below.
 
 The Selenium fetcher can also be invoked directly:
 
@@ -454,9 +467,10 @@ All four push-flavoured subcommands (`push`, `push_group`, `prep_push_rep`,
 `prep_push_rep_season`) accept an optional `device <id_or_name>` keyword that
 selects a specific ADB device. The value is either a raw ADB serial or a
 short alias defined in the hardcoded `DEVICE_ALIASES` dict near the top of
-`main.py` (currently `movies` -> `FA69H0300200`, `series` -> `FA75V0303405`).
-When omitted, ADB picks the connected device on its own (and errors if more
-than one is connected without `-s`).
+`main.py` (currently `movies` -> `FA69H0300200`, `series` -> `FA75V0303405`,
+and `others` -> `<NEW_PIXEL_SERIAL>` — the Others / sports Pixel, a user-supplied
+prerequisite per IMP-D18). When omitted, ADB picks the connected device on its
+own (and errors if more than one is connected without `-s`).
 
 ```
 python main.py push mov-en-2024-inception SIZE_MB 9900 device movies
@@ -479,6 +493,12 @@ characters select which library JSON the entry lands in. Conventional shapes:
   `tv-en-2016-strangerthings-s01e03`
 - **Anime**: `ani-<lang2>-<year>-<slug><NN>` (no `e` separator before the
   episode number) e.g. `ani-ja-2006-deathnote07`
+- **Others (sports)**: `oth-<sport>-<year>-<competition>-s01e<NN>` e.g.
+  `oth-football-2026-fifaworldcup-s01e01` (IMP-D18). Sport + competition spelled
+  out (`football`, `cricket`). A tournament edition = one season; each match-half
+  = one episode; a match = two adjacent episodes (`e01`+`e02`). `prep_season`
+  numbers `oth-` files `e01..eNN` by **filename sort order**, so name the halves
+  so they sort in play order (`First`<`Second`, or `1`<`2`, or `Q1`..`Q4`).
 
 Season-map parent entries are auto-created during `prep` by stripping the
 trailing episode segment.
@@ -516,10 +536,12 @@ MediaVault/
     └── transcripts/         # Session transcript artifacts
 ```
 
-The three live library JSON files (`library_movies.json`, `library_series.json`,
-`library_anime.json`) live **outside** the repo at `C:\Media\` and are never
-committed. Media files themselves live under `C:\Media\Movies\`,
-`C:\Media\Series\`, and `C:\Media\Anime\`.
+The four live library JSON files (`library_movies.json`, `library_series.json`,
+`library_anime.json`, `library_others.json`) live **outside** the repo at
+`C:\Media\` and are never committed. Media files themselves live under
+`C:\Media\Movies\`, `C:\Media\Series\`, `C:\Media\Anime\`, and `C:\Media\Sports\`
+(the "Others" / sports category — IMP-D18; the category→subdir map is
+list-capable, so a `Documentary` root can be added later with no code change).
 
 ## External dependencies
 

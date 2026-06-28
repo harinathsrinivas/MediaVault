@@ -79,7 +79,7 @@ MAINFETCH_SCRIPT = "mainfetch.py"  # Name of the automation script
 
 # Human-friendly aliases for the user's ADB devices. Maps alias -> serial.
 # Edit this dict when the physical phones change.
-DEVICE_ALIASES = {"movies": "FA69H0300200", "series": "FA75V0303405"}
+DEVICE_ALIASES = {"movies": "FA69H0300200", "series": "FA75V0303405", "others": "<NEW_PIXEL_SERIAL>"}  # TODO(user): real Others Pixel serial — prerequisite
 
 # Remote push reliability conventions (rclone "chunker"-style).
 # AUTO-ROLLBACK SEAM: each chunk is uploaded to "<final>.partial" then atomically
@@ -90,6 +90,26 @@ MVMETA_SUFFIX = ".mvmeta.json"  # Remote disaster-recovery sidecar mirroring spl
 # IMP-C8: post-push remote hash verification. Gated off here; config-file
 # support (toggle without editing source) arrives with IMP-A5.
 PUSH_VERIFY_REMOTE = False
+
+# CATEGORY_ROOTS — THE single source of truth for "which on-disk subfolders under
+# LOCAL_ROOT hold each content category's media". Every disk walker derives its
+# roots from this ONE table (cmd_recover --scan, cmd_scan_unprepped,
+# collect_reclaimable PASS 1) — no walker hardcodes folder names anymore.
+# Insertion order is Movies -> Series -> Anime -> other, so the flattened walk
+# order reproduces the historical Movies/Series/Anime sequence and appends Others.
+# A category maps to a LIST of subdir names: the three original categories own one
+# folder each; "other" (IMP-D18) may span many — Sports now; append "Documentary"
+# here later as a sibling, a pure one-line data edit with NO walker code change.
+#
+# NOTE: build_tree does NOT consume this table. An oth- leaf must nest with its OWN
+# subfolder (Sports/…) as a top folder under the Others bucket, so build_tree keeps
+# resolving cat=="other" to LOCAL_ROOT itself (see _CATEGORY_ROOT_SUBDIR below).
+CATEGORY_ROOTS = {
+    "movies": ["Movies"],
+    "series": ["Series"],
+    "anime":  ["Anime"],
+    "other":  ["Sports"],
+}
 
 # ENTRY_TYPE_KEYS — THE single source of truth for "what keys does each top-level
 # library entry type have", and the seam future entry types extend (IMP-H3).
@@ -862,7 +882,9 @@ def recover_journal(folder_path):
 def cmd_recover(target=None, scan=False):
     # Wrapper around recover_journal: scan for stale journals or resolve one folder/id
     if scan:
-        roots = [os.path.join(LOCAL_ROOT, c) for c in ("Movies", "Series", "Anime")]
+        # Walk every category root (CATEGORY_ROOTS — single source of truth) for
+        # stale journals; an oth- push/replace rollback leaves one under Sports.
+        roots = [os.path.join(LOCAL_ROOT, d) for subs in CATEGORY_ROOTS.values() for d in subs]
         found = 0
         for root in roots:
             if not os.path.exists(root):
@@ -1891,6 +1913,12 @@ def _gather_enrich_units(library, id_or_prefix=None, library_filter=None):
             continue  # virtual alias — never enriched directly (PR #21 crash class)
         etype = entry.get("type")
         cat = category_of_id(mid)
+        if cat == "other":
+            # IMP-D18: Others/sports is not on TMDB/OMDb. Never enrich it — enriching
+            # would mis-tag (wrong tmdb_id), rename the real Sports folder via a bogus
+            # {tmdb-…} token, and fetch wrong posters. One skip here covers
+            # enrich_metadata / refresh_online / fetch_trivia (all gather via this fn).
+            continue
 
         if etype == "season_map":
             if not _in_scope(mid):
@@ -3570,38 +3598,47 @@ def cmd_prep_season(base_id, folder_path):
 
     # [UPDATED] Anime Detection Logic
     is_anime = base_id.startswith("ani-")
+    # IMP-D18: sports/Others — position-numbered; tournament-edition = season,
+    # each half = an episode (the filenames carry no SxxExx / absolute-episode marker).
+    is_other = base_id.startswith("oth")
     count = 0
 
-    for filename in files:
+    for idx, filename in enumerate(files, start=1):
         ep_num = None
         is_sxxexx_combined = False  # Track SxxExxExx combined-episode TV files
 
-        # Strategy 1: Standard S01E01 (Works for TV and some Anime, handles .5)
-        match = re.search(r"[sS]\d+[eE](\d+)", filename)
-        matched_sxxexx = bool(match)  # Strategy-1 matched via the SxxExx sub-regex
-        if not match: match = re.search(r"\d+[xX](\d+(?:\.\d+)?)", filename)
+        if is_other:
+            # IMP-D18: sports/Others files carry no SxxExx / absolute-episode number;
+            # number by sorted-filename position (1-based), each half = one episode.
+            # Name halves/periods so they sort in play order (First<Second, 1<2, Q1..Q4).
+            ep_num = f"{idx:02d}"
+        else:
+            # Strategy 1: Standard S01E01 (Works for TV and some Anime, handles .5)
+            match = re.search(r"[sS]\d+[eE](\d+)", filename)
+            matched_sxxexx = bool(match)  # Strategy-1 matched via the SxxExx sub-regex
+            if not match: match = re.search(r"\d+[xX](\d+(?:\.\d+)?)", filename)
 
-        if match:
-            ep_num = match.group(1)
-            # Combined-episode detector: ONLY for the SxxExx (TV) branch, never the
-            # \d+xYY anime fallback. Fires on 2+ consecutive E-numbers (S04E19E20).
-            if matched_sxxexx:
-                combined = re.search(r"[sS]\d+(?:[eE]\d+){2,}", filename)
-                if combined:
-                    is_sxxexx_combined = True
-                    combined_eps = re.findall(r"[eE](\d+)", combined.group(0))
+            if match:
+                ep_num = match.group(1)
+                # Combined-episode detector: ONLY for the SxxExx (TV) branch, never the
+                # \d+xYY anime fallback. Fires on 2+ consecutive E-numbers (S04E19E20).
+                if matched_sxxexx:
+                    combined = re.search(r"[sS]\d+(?:[eE]\d+){2,}", filename)
+                    if combined:
+                        is_sxxexx_combined = True
+                        combined_eps = re.findall(r"[eE](\d+)", combined.group(0))
 
-        # Strategy 2: Anime Absolute Numbering (001, 01, 135, handles .5)
-        # Look for numbers at start or surrounded by delimiters
-        elif is_anime:
-            # Matches: "01.mkv", "001.mkv", "[Grp] 01 [Hash]", " - 01 - ", "16.5"
-            # Excludes years 19xx/20xx
-            match_ani = re.search(r"(?:^|[ ._\-\[\]])(\d{1,4}(?:\.\d+)?)(?:[ ._\-\[\]]|$|\.)", filename)
-            if match_ani:
-                num_str = match_ani.group(1)
-                # Basic year filter
-                if not (len(num_str) == 4 and (num_str.startswith("19") or num_str.startswith("20"))):
-                    ep_num = num_str
+            # Strategy 2: Anime Absolute Numbering (001, 01, 135, handles .5)
+            # Look for numbers at start or surrounded by delimiters
+            elif is_anime:
+                # Matches: "01.mkv", "001.mkv", "[Grp] 01 [Hash]", " - 01 - ", "16.5"
+                # Excludes years 19xx/20xx
+                match_ani = re.search(r"(?:^|[ ._\-\[\]])(\d{1,4}(?:\.\d+)?)(?:[ ._\-\[\]]|$|\.)", filename)
+                if match_ani:
+                    num_str = match_ani.group(1)
+                    # Basic year filter
+                    if not (len(num_str) == 4 and (num_str.startswith("19") or num_str.startswith("20"))):
+                        ep_num = num_str
 
         if ep_num:
             # Format ID
@@ -5453,11 +5490,24 @@ def cmd_scan_unprepped():
     # [UPDATED] Scans the separate JSON files and their respective local root folders explicitly
     print("--- SCANNING FOR UNPREPPED FILES ---")
 
-    # Define Categories to Scan
+    # Define Categories to Scan — derived from CATEGORY_ROOTS (single source of
+    # truth) so every category's folders come from ONE table. One
+    # (display, lib_file, folder) triple per (category, subdir): the subdir IS the
+    # display label, so Movies/Series/Anime print exactly as before and "other"'s
+    # Sports folder prints as "Sports". lib_files is resolved HERE (call time), not
+    # at module scope, so the conftest sandbox's monkeypatch of main.LIBRARY_* /
+    # mvcommon.LIBRARY_OTHERS is honoured (binding hazard). LIBRARY_OTHERS is
+    # mvcommon-only (main never imports it), hence read module-qualified.
+    lib_files = {
+        "movies": LIBRARY_MOVIES,
+        "series": LIBRARY_SERIES,
+        "anime":  LIBRARY_ANIME,
+        "other":  mvcommon.LIBRARY_OTHERS,
+    }
     categories = [
-        ("Movies", LIBRARY_MOVIES, os.path.join(LOCAL_ROOT, "Movies")),
-        ("Series", LIBRARY_SERIES, os.path.join(LOCAL_ROOT, "Series")),
-        ("Anime", LIBRARY_ANIME, os.path.join(LOCAL_ROOT, "Anime"))
+        (subdir, lib_files[cat], os.path.join(LOCAL_ROOT, subdir))
+        for cat, subs in CATEGORY_ROOTS.items()
+        for subdir in subs
     ]
 
     total_unprepped = 0
@@ -6190,12 +6240,11 @@ def collect_reclaimable():
         }
         items.append(row)
 
-    # ---- PASS 1: disk-first walk of the three category roots ----
-    categories = [
-        os.path.join(LOCAL_ROOT, "Movies"),
-        os.path.join(LOCAL_ROOT, "Series"),
-        os.path.join(LOCAL_ROOT, "Anime"),
-    ]
+    # ---- PASS 1: disk-first walk of every category root ----
+    # Roots derived from CATEGORY_ROOTS (single source of truth) — includes the
+    # Others folder(s) (Sports) so UNPREPPED oth- files surface here. (PREPPED oth-
+    # leaves already come through PASS 2 below via load_library.)
+    categories = [os.path.join(LOCAL_ROOT, d) for subs in CATEGORY_ROOTS.values() for d in subs]
     for folder_path in categories:
         if not os.path.exists(folder_path):
             # Degrade gracefully like cmd_scan_unprepped (warn + continue).
@@ -6848,7 +6897,11 @@ _FOLDER_IMAGE_NAMES = ("poster.jpg", "fanart.jpg")
 # The artwork "kinds" resolve_artwork_path accepts, each mapping to "<kind>.jpg".
 _FOLDER_IMAGE_NAMES_KINDS = ("poster", "fanart")
 
-# Map a category bucket to its on-disk root subfolder under LOCAL_ROOT.
+# Map a category bucket to its on-disk root subfolder under LOCAL_ROOT, used by
+# build_tree to nest leaves. "other" is intentionally ABSENT: .get("other") -> None
+# makes build_tree resolve it to LOCAL_ROOT, so an oth- leaf nests with its OWN
+# subfolder (Sports/…) as a top folder under the Others bucket (multi-folder safe).
+# The disk WALKERS instead derive their roots from CATEGORY_ROOTS (see config).
 _CATEGORY_ROOT_SUBDIR = {"movies": "Movies", "series": "Series", "anime": "Anime"}
 
 

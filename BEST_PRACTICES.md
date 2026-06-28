@@ -178,6 +178,35 @@ library grows and *before* you delete local originals.
   possible but a backfill is work).
 - **Tracked as:** `write_mvmeta` (`main.py`), IMP-F5 (library-JSON git backup).
 
+### B7. Archiving sports / "Others" videos — the IMP-D18 conventions
+- **Decision (shipped, IMP-D18):** sports (and, later, documentaries) live in a
+  4th **Others** category — `oth-` prefix, `C:\Media\library_others.json`, media
+  under `C:\Media\Sports\<Sport>\<Competition>\<Edition>\`. The category→subdir
+  map (`CATEGORY_ROOTS`) is **list-capable**, so `Documentary` can be added as a
+  sibling root later with a one-line edit and no walker code change.
+- **Folder + id scheme:** a tournament edition is ONE season. Base id =
+  `oth-<sport>-<year>-<competition>-s01`, episodes `…-s01e01..eNN`; sport and
+  competition spelled out (`football`, `cricket`). Each match-half is an episode;
+  a match is two adjacent episodes (`e01`+`e02`). `prep_season` numbers files by
+  **filename sort order**, so **name the halves so they sort in play order**
+  (`First`<`Second`, or `1`<`2`, or `Q1`..`Q4`). A mis-sorting name mis-numbers
+  the episodes — an editing concern, not a crash.
+- **Why it compounds (B3 sibling):** the `oth-`→Others-account/profile routing and
+  the id/naming scheme become load-bearing the moment chunks, `.mvmeta` sidecars,
+  and dummies are written. Adding a *new* prefix is safe; mutating existing `oth-`
+  ids later breaks fetch routing and every sidecar already on disk. Freeze the
+  scheme before mass-archiving — and reuse the existing `season_map` + leaf model
+  (no new entry type, no rollback-contract change).
+- **Media-server presentation:** point an **"Other Videos" (Plex) / "Home Videos"
+  (Jellyfin/Emby)** library at `C:\Media\Sports` — **filename-as-title, no online
+  metadata scraper** (sports isn't on TMDB; MediaVault auto-captures the exact
+  tech spec into `library_others.json`). Enrichment (`enrich_metadata` /
+  `refresh_online` / `fetch_trivia`) deliberately **skips** `oth-` entries, so no
+  scraper can mis-tag or rename the Sports folders. See
+  `improvements/JELLYFIN_SETUP_GUIDE.md` §3.4.
+- **Tracked as:** IMP-D18 (shipped); follow-ons IMP-X1 (replicate Others to a 2nd
+  account) and OD-2 (an optional sports scraper, e.g. TheSportsDB) stay open.
+
 ---
 
 ## C. 🟢 Fix-before-automating — operational gates the daemon depends on

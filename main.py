@@ -1913,6 +1913,12 @@ def _gather_enrich_units(library, id_or_prefix=None, library_filter=None):
             continue  # virtual alias — never enriched directly (PR #21 crash class)
         etype = entry.get("type")
         cat = category_of_id(mid)
+        if cat == "other":
+            # IMP-D18: Others/sports is not on TMDB/OMDb. Never enrich it — enriching
+            # would mis-tag (wrong tmdb_id), rename the real Sports folder via a bogus
+            # {tmdb-…} token, and fetch wrong posters. One skip here covers
+            # enrich_metadata / refresh_online / fetch_trivia (all gather via this fn).
+            continue
 
         if etype == "season_map":
             if not _in_scope(mid):

@@ -79,7 +79,7 @@ MAINFETCH_SCRIPT = "mainfetch.py"  # Name of the automation script
 
 # Human-friendly aliases for the user's ADB devices. Maps alias -> serial.
 # Edit this dict when the physical phones change.
-DEVICE_ALIASES = {"movies": "FA69H0300200", "series": "FA75V0303405"}
+DEVICE_ALIASES = {"movies": "FA69H0300200", "series": "FA75V0303405", "others": "<NEW_PIXEL_SERIAL>"}  # TODO(user): real Others Pixel serial — prerequisite
 
 # Remote push reliability conventions (rclone "chunker"-style).
 # AUTO-ROLLBACK SEAM: each chunk is uploaded to "<final>.partial" then atomically

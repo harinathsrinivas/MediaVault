@@ -21,6 +21,7 @@ from subprocess import SubprocessError
 LIBRARY_MOVIES = r'C:\Media\library_movies.json'
 LIBRARY_SERIES = r'C:\Media\library_series.json'
 LIBRARY_ANIME = r'C:\Media\library_anime.json'
+LIBRARY_OTHERS = r'C:\Media\library_others.json'
 
 LOCAL_ROOT = r"C:\Media"  # Your PC Root
 MKVMERGE_PATH = r"C:\Program Files\MKVToolNix\mkvmerge.exe"
@@ -551,7 +552,7 @@ def load_library():
     """Loads all three libraries and merges them into one dictionary."""
     data = {}
 
-    for path in [LIBRARY_MOVIES, LIBRARY_SERIES, LIBRARY_ANIME]:
+    for path in [LIBRARY_MOVIES, LIBRARY_SERIES, LIBRARY_ANIME, LIBRARY_OTHERS]:
         if os.path.exists(path):
             try:
                 with open(path, 'r') as f:

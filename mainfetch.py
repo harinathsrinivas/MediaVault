@@ -33,10 +33,11 @@ CHROME_PROFILES = {
     "movies": r"C:\Media\Utils\ChromeProfile",
     "tv":     r"C:\Media\Utils\ChromeProfile_TV",
     "anime":  r"C:\Media\Utils\ChromeProfile_Anime",
+    "others": r"C:\Media\Utils\ChromeProfile_Others",
 }
 # Ordered id-prefix -> profile map. Most-specific prefix FIRST.
 # IMP-A5 will source these two constants from mvconfig.json.
-ID_PREFIX_PROFILE = [("ani", "anime"), ("tv", "tv"), ("mov", "movies")]
+ID_PREFIX_PROFILE = [("ani", "anime"), ("tv", "tv"), ("mov", "movies"), ("oth", "others")]
 DEFAULT_PROFILE = "movies"
 CHROME_PROFILE_NAME = "Default"
 SYSTEM_DOWNLOADS_FOLDER = os.path.join(os.path.expanduser("~"), "Downloads")

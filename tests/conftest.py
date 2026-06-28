@@ -28,7 +28,7 @@ TEST_ENTRY_ID = "mov_test_c9_001"  # "mov" prefix -> goes to LIBRARY_MOVIES
 @pytest.fixture()
 def sandbox(tmp_path, monkeypatch):
     """
-    Redirects all three LIBRARY_* constants AND LOCAL_ROOT to a sandbox tree,
+    Redirects all four LIBRARY_* constants AND LOCAL_ROOT to a sandbox tree,
     creates the required directories, and hard-guards against real C:\\Media.
 
     The LOCAL_ROOT redirect makes the "no writes to real C:\\Media" guarantee
@@ -47,6 +47,7 @@ def sandbox(tmp_path, monkeypatch):
         lib_movies   - Path: sandbox LIBRARY_MOVIES json
         lib_series   - Path: sandbox LIBRARY_SERIES json
         lib_anime    - Path: sandbox LIBRARY_ANIME json
+        lib_others   - Path: sandbox LIBRARY_OTHERS json
         local_root   - Path: tmp_path/"Media" (the patched LOCAL_ROOT, == media_dir.parent.parent)
     """
     media_dir = tmp_path / "Media" / "Movies" / "TestMovie"
@@ -60,6 +61,7 @@ def sandbox(tmp_path, monkeypatch):
     lib_movies = lib_dir / "library_movies.json"
     lib_series = lib_dir / "library_series.json"
     lib_anime  = lib_dir / "library_anime.json"
+    lib_others = lib_dir / "library_others.json"
 
     # Hard guard: fail immediately if any constant still points under C:\Media.
     # After the mvcommon extraction, load_library/save_library read mvcommon's
@@ -77,6 +79,15 @@ def sandbox(tmp_path, monkeypatch):
         assert "C:\\Media" not in path, f"Safety check failed: {attr} still points to real media!"
         monkeypatch.setattr(mvcommon, attr, path)
         monkeypatch.setattr(main, attr, path)
+
+    # LIBRARY_OTHERS (IMP-D18): mvcommon-only — main does NOT import/use it (its
+    # `from mvcommon import (...)` list omits LIBRARY_OTHERS), and save_library/
+    # load_library read mvcommon's OWN binding. So patching mvcommon is sufficient
+    # AND correct; a `monkeypatch.setattr(main, "LIBRARY_OTHERS", ...)` would raise
+    # AttributeError (no such attr on main). Redirect it so an oth- entry (or
+    # save_library's 4th-file write) never touches real C:\Media. Same C:\Media guard.
+    assert "C:\\Media" not in str(lib_others), "Safety check failed: LIBRARY_OTHERS still points to real media!"
+    monkeypatch.setattr(mvcommon, "LIBRARY_OTHERS", str(lib_others))
 
     # IMP-E16: redirect the online-metadata cache (mvonline.json), the OMDb response
     # cache, AND the trivia cache (mvextra.json, IMP-E16/A5) to the sandbox so NO test
@@ -100,6 +111,7 @@ def sandbox(tmp_path, monkeypatch):
         "lib_movies": lib_movies,
         "lib_series": lib_series,
         "lib_anime":  lib_anime,
+        "lib_others": lib_others,
         "local_root": media_root,
     }
 

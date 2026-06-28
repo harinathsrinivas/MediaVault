@@ -3570,38 +3570,47 @@ def cmd_prep_season(base_id, folder_path):
 
     # [UPDATED] Anime Detection Logic
     is_anime = base_id.startswith("ani-")
+    # IMP-D18: sports/Others — position-numbered; tournament-edition = season,
+    # each half = an episode (the filenames carry no SxxExx / absolute-episode marker).
+    is_other = base_id.startswith("oth")
     count = 0
 
-    for filename in files:
+    for idx, filename in enumerate(files, start=1):
         ep_num = None
         is_sxxexx_combined = False  # Track SxxExxExx combined-episode TV files
 
-        # Strategy 1: Standard S01E01 (Works for TV and some Anime, handles .5)
-        match = re.search(r"[sS]\d+[eE](\d+)", filename)
-        matched_sxxexx = bool(match)  # Strategy-1 matched via the SxxExx sub-regex
-        if not match: match = re.search(r"\d+[xX](\d+(?:\.\d+)?)", filename)
+        if is_other:
+            # IMP-D18: sports/Others files carry no SxxExx / absolute-episode number;
+            # number by sorted-filename position (1-based), each half = one episode.
+            # Name halves/periods so they sort in play order (First<Second, 1<2, Q1..Q4).
+            ep_num = f"{idx:02d}"
+        else:
+            # Strategy 1: Standard S01E01 (Works for TV and some Anime, handles .5)
+            match = re.search(r"[sS]\d+[eE](\d+)", filename)
+            matched_sxxexx = bool(match)  # Strategy-1 matched via the SxxExx sub-regex
+            if not match: match = re.search(r"\d+[xX](\d+(?:\.\d+)?)", filename)
 
-        if match:
-            ep_num = match.group(1)
-            # Combined-episode detector: ONLY for the SxxExx (TV) branch, never the
-            # \d+xYY anime fallback. Fires on 2+ consecutive E-numbers (S04E19E20).
-            if matched_sxxexx:
-                combined = re.search(r"[sS]\d+(?:[eE]\d+){2,}", filename)
-                if combined:
-                    is_sxxexx_combined = True
-                    combined_eps = re.findall(r"[eE](\d+)", combined.group(0))
+            if match:
+                ep_num = match.group(1)
+                # Combined-episode detector: ONLY for the SxxExx (TV) branch, never the
+                # \d+xYY anime fallback. Fires on 2+ consecutive E-numbers (S04E19E20).
+                if matched_sxxexx:
+                    combined = re.search(r"[sS]\d+(?:[eE]\d+){2,}", filename)
+                    if combined:
+                        is_sxxexx_combined = True
+                        combined_eps = re.findall(r"[eE](\d+)", combined.group(0))
 
-        # Strategy 2: Anime Absolute Numbering (001, 01, 135, handles .5)
-        # Look for numbers at start or surrounded by delimiters
-        elif is_anime:
-            # Matches: "01.mkv", "001.mkv", "[Grp] 01 [Hash]", " - 01 - ", "16.5"
-            # Excludes years 19xx/20xx
-            match_ani = re.search(r"(?:^|[ ._\-\[\]])(\d{1,4}(?:\.\d+)?)(?:[ ._\-\[\]]|$|\.)", filename)
-            if match_ani:
-                num_str = match_ani.group(1)
-                # Basic year filter
-                if not (len(num_str) == 4 and (num_str.startswith("19") or num_str.startswith("20"))):
-                    ep_num = num_str
+            # Strategy 2: Anime Absolute Numbering (001, 01, 135, handles .5)
+            # Look for numbers at start or surrounded by delimiters
+            elif is_anime:
+                # Matches: "01.mkv", "001.mkv", "[Grp] 01 [Hash]", " - 01 - ", "16.5"
+                # Excludes years 19xx/20xx
+                match_ani = re.search(r"(?:^|[ ._\-\[\]])(\d{1,4}(?:\.\d+)?)(?:[ ._\-\[\]]|$|\.)", filename)
+                if match_ani:
+                    num_str = match_ani.group(1)
+                    # Basic year filter
+                    if not (len(num_str) == 4 and (num_str.startswith("19") or num_str.startswith("20"))):
+                        ep_num = num_str
 
         if ep_num:
             # Format ID

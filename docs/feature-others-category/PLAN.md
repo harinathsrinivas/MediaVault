@@ -292,7 +292,7 @@ auto-commit-after-judge behavior for this plan only.
   - Acceptance: docs describe the 4th category accurately; `docs/README.md` indexes the feature folder; IMP-D18 reads
     `done` in all three trackers consistently. opus: cross-file documented-behavior change spanning architecture + user docs + the media-server guide.
 
-- [ ] 11. [model: sonnet] [effort: medium] Final verification + smoke gate (the cross-command gate, last).
+- [x] 11. [model: sonnet] [effort: medium] Final verification + smoke gate (the cross-command gate, last).
   - Files: none (runs the suites).
   - Details: Run the full Verification block below from the repo root using `python -m pytest`. Confirm
     `tests/test_entry_schema_guard.py` is green AND its diff is empty (no new entry type). Fix any failure before the PR.

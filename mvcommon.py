@@ -567,10 +567,11 @@ def load_library():
 
 
 def save_library(data):
-    """Splits the merged dictionary back into 3 files based on prefix."""
+    """Splits the merged dictionary back into 4 files based on prefix."""
     mov_data = {}
     tv_data = {}
     ani_data = {}
+    oth_data = {}
 
     for key, val in data.items():
         if key.startswith("mov"):
@@ -579,13 +580,15 @@ def save_library(data):
             tv_data[key] = val
         elif key.startswith("ani"):
             ani_data[key] = val
+        elif key.startswith("oth"):
+            oth_data[key] = val
         else:
             # Fallback for legacy/unknown keys -> Movies
             mov_data[key] = val
 
     # Atomic write: write to a temp file then os.replace() to prevent
     # partial-write corruption if the process is killed mid-save.
-    for path, content in [(LIBRARY_MOVIES, mov_data), (LIBRARY_SERIES, tv_data), (LIBRARY_ANIME, ani_data)]:
+    for path, content in [(LIBRARY_MOVIES, mov_data), (LIBRARY_SERIES, tv_data), (LIBRARY_ANIME, ani_data), (LIBRARY_OTHERS, oth_data)]:
         dir_name = os.path.dirname(path)
         fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix='.tmp')
         try:

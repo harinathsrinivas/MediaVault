@@ -493,3 +493,33 @@ def test_sub_threshold_unknown_file_not_in_items(sandbox):
     assert str(tiny_file) not in paths and not any(
         os.path.basename(p) == "TinyUnknown.2024.mkv" for p in paths
     ), f"Sub-threshold unknown file must NOT appear in items, but paths include: {paths}"
+
+
+# ---------------------------------------------------------------------------
+# (g) category_of_id  — IMP-D18 Others category (oth- prefix)
+# ---------------------------------------------------------------------------
+
+class TestCategoryOfId:
+    """Pin that category_of_id routes each id prefix to the correct category string.
+
+    IMP-D18 adds the fourth category "other" for oth- prefixed ids.  Tests for the
+    three pre-existing prefixes (mov-/tv-/ani-) are included so the full routing
+    table is pinned in one place and a regression on any prefix is caught here.
+    """
+
+    def test_mov_prefix_returns_movies(self):
+        assert main.category_of_id("mov-en-2024-darkriver") == "movies"
+
+    def test_tv_prefix_returns_series(self):
+        assert main.category_of_id("tv-en-2017-dark-s01e01") == "series"
+
+    def test_ani_prefix_returns_anime(self):
+        assert main.category_of_id("ani-ja-2006-deathnote07") == "anime"
+
+    def test_oth_prefix_returns_other(self):
+        """oth- id must classify as 'other' — the IMP-D18 Others category."""
+        assert main.category_of_id("oth-football-2026-fifaworldcup-s01e01") == "other"
+
+    def test_oth_season_prefix_returns_other(self):
+        """Season-level oth- id also classifies as 'other' (no leaf suffix required)."""
+        assert main.category_of_id("oth-football-2026-fifaworldcup-s01") == "other"

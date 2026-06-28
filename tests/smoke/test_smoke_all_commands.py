@@ -181,6 +181,58 @@ def _seed_anime_ssee_season(sandbox, make_video, *, uploaded=False):
 
 
 # ===========================================================================
+# IMP-D18 Others/Sports category helpers (oth- prefix)
+# ===========================================================================
+
+OTH_SEASON_ID = "oth-football-2026-fifaworldcup-s01"
+OTH_EP_IDS = [f"{OTH_SEASON_ID}e0{i}" for i in (1, 2, 3)]
+
+
+def _seed_others_season(sandbox, make_video, *, uploaded=False):
+    """Seed a season_map with THREE oth- episodes and real >200 KB files on disk.
+
+    Mirrors _seed_season_two but for the IMP-D18 Others/Sports category:
+    - Season id: oth-football-2026-fifaworldcup-s01
+    - Episodes: …e01, …e02, …e03 (3 real files)
+    - Files placed under LOCAL_ROOT/Sports/Football/FIFA World Cup/FIFA World Cup 2026/
+      so the Step-4 disk walkers find them.
+    - All four lib files written (oth- ids route to library_others.json via save_library).
+
+    Returns dict(season_id, ep_ids, oth_dir).
+    """
+    oth_dir = (sandbox["local_root"] / "Sports" / "Football"
+               / "FIFA World Cup" / "FIFA World Cup 2026")
+    oth_dir.mkdir(parents=True, exist_ok=True)
+    out = {}
+    for i, ep_id in enumerate(OTH_EP_IDS, 1):
+        fname = f"FifaWC2026.e{i:02d}.mkv"
+        path, fhash = make_video(oth_dir / fname, marker=ep_id.encode())
+        out[ep_id] = {
+            "short_id": _short(ep_id), "filename": fname,
+            "folder_path": str(oth_dir),
+            "status": "onboarded" if uploaded else "local_ready",
+            "uploaded": uploaded,
+            "hash": fhash,
+            "metadata": {"title": "FIFA World Cup 2026", "year": 2026},
+            "tech_spec": {"resolution": "2160p", "size_bytes": os.path.getsize(path)},
+            "parent_id": OTH_SEASON_ID,
+        }
+    library = {
+        OTH_SEASON_ID: {
+            "type": "season_map", "folder_path": str(oth_dir),
+            "total_episodes": len(OTH_EP_IDS), "children": list(OTH_EP_IDS),
+        },
+        **out,
+    }
+    _write_all_libs(sandbox, library)
+    # save_library routes oth- ids to LIBRARY_OTHERS; guarantee the file exists
+    # (mirrors the movies/series/anime guarantee in _write_all_libs).
+    if not sandbox["lib_others"].exists():
+        sandbox["lib_others"].write_text("{}", encoding="utf-8")
+    return {"season_id": OTH_SEASON_ID, "ep_ids": list(OTH_EP_IDS), "oth_dir": oth_dir}
+
+
+# ===========================================================================
 # Group 1 — one fast smoke per command (+ major options)
 # ===========================================================================
 
@@ -1162,3 +1214,122 @@ class TestAliasSweep:
         # The alias entry must not have been mutated (dry-run + alias has no metadata).
         lib = mvcommon.load_library()
         assert lib[sandbox_alias["alias_id"]]["type"] == "multi_ep_alias"
+
+
+# ===========================================================================
+# Group 3 — IMP-D18 Others/Sports category smoke (oth- prefix)
+# Three smokes: round-trip, season sweep, enrich-skip.
+# ===========================================================================
+
+class TestOthersCategory:
+    """Smoke coverage for the IMP-D18 oth- content category.
+
+    Three orthogonal smokes (no crash + correct top-level effect):
+      1. round-trip  — scan_unprepped / local_status / sort / verify_library see the
+                       oth- season and its Sports files without crashing.
+      2. season sweep — push_group pushes all 3 episodes; restore_group with range
+                        "1-2" restores exactly 2 and leaves ep3 untouched; a
+                        fetch_restore call over the season is also neutralized by
+                        mock_device without crash.
+      3. enrich-skip  — cmd_enrich_metadata dry-run produces 0 oth- units in
+                        _gather_enrich_units and does not rename the Sports folder.
+    """
+
+    # ---- round-trip -------------------------------------------------------
+    def test_oth_round_trip(self, sandbox, make_video, smoke_local_root, capsys):
+        """scan_unprepped / local_status / sort / verify_library run without crashing
+        over an oth- season library and report the oth- entries / Sports files."""
+        info = _seed_others_season(sandbox, make_video)
+
+        main.cmd_scan_unprepped()  # must not crash; oth- files are prepped (in library)
+        capsys.readouterr()
+
+        main.cmd_local_status()
+        out = capsys.readouterr().out
+        # At least one oth- leaf should appear in the local_status output.
+        assert any(ep_id in out for ep_id in OTH_EP_IDS), (
+            f"cmd_local_status must list oth- entries; output: {out!r}"
+        )
+
+        main.cmd_sort()
+        out = capsys.readouterr().out
+        assert "Library sorted" in out
+
+        # verify_library must not crash and must return True (no violations):
+        # all three entries are local_ready + real files on disk -> clean.
+        result = main.cmd_verify_library()
+        capsys.readouterr()
+        assert result is True, "cmd_verify_library must return True for clean oth- season"
+
+    # ---- season sweep (push_group + restore_group) -----------------------
+    def test_oth_season_sweep(self, sandbox, make_video, mock_device, capsys):
+        """push_group uploads all 3 oth- episodes; restore_group with range '1-2'
+        restores exactly 2 and leaves ep3 untouched; fetch_restore must not crash."""
+        info = _seed_others_season(sandbox, make_video, uploaded=False)
+
+        # Phase 1: push all 3 episodes.
+        main.cmd_push_group(info["season_id"])
+        lib = mvcommon.load_library()
+        for ep_id in OTH_EP_IDS:
+            assert lib[ep_id]["uploaded"] is True, (
+                f"push_group must upload {ep_id}; got: {lib[ep_id]!r}"
+            )
+        # Files should be on the (fake) device — search by name, never a bracketed glob.
+        on_device = {f.name for f in mock_device.rglob("*.mkv")}
+        assert any("FifaWC2026" in n for n in on_device), (
+            f"oth- files must appear on device after push_group; found: {on_device!r}"
+        )
+        capsys.readouterr()
+
+        # Phase 2: seed restore/ copies for episodes 1-2 only, then restore_group "1-2".
+        restore_folder = info["oth_dir"] / main.RESTORE_DIR_NAME
+        restore_folder.mkdir(exist_ok=True)
+        lib = mvcommon.load_library()
+        for ep_id in OTH_EP_IDS[:2]:
+            fname = lib[ep_id]["filename"]
+            data = open(info["oth_dir"] / fname, "rb").read()
+            (restore_folder / fname).write_bytes(data)
+            with open(info["oth_dir"] / fname, "wb") as f:
+                f.write(b"PLACEHOLDER")
+
+        count = main.cmd_restore_group(info["season_id"], "1-2")
+        capsys.readouterr()
+        lib = mvcommon.load_library()
+        assert lib[OTH_EP_IDS[0]]["status"] == "restored_local", (
+            f"ep01 must be restored_local after restore_group '1-2'; got: {lib[OTH_EP_IDS[0]]!r}"
+        )
+        assert lib[OTH_EP_IDS[1]]["status"] == "restored_local", (
+            f"ep02 must be restored_local after restore_group '1-2'; got: {lib[OTH_EP_IDS[1]]!r}"
+        )
+        assert lib[OTH_EP_IDS[2]]["status"] != "restored_local", (
+            f"ep03 is outside range '1-2' and must NOT be restored; got: {lib[OTH_EP_IDS[2]]!r}"
+        )
+
+        # Phase 3: fetch_restore over the season — mock_device neutralizes subprocess.
+        # After phase 2, ep1/ep2 are restored_local; ep3 is still onboarded/uploaded.
+        # fetch_restore on the whole season must not crash regardless of restore/ state.
+        main.cmd_fetch_restore(info["season_id"])
+        capsys.readouterr()
+
+    # ---- enrich-skip ------------------------------------------------------
+    def test_oth_enrich_skip(self, sandbox, make_video, mock_tmdb, capsys):
+        """Dry-run cmd_enrich_metadata: 0 oth- units processed and Sports folder
+        is untouched (no rename_folder on the Sports tree)."""
+        info = _seed_others_season(sandbox, make_video)
+        sports_dir = info["oth_dir"]
+
+        main.cmd_enrich_metadata()  # whole-library dry-run (no --apply)
+        capsys.readouterr()
+
+        # Sports folder must not have been renamed or removed.
+        assert sports_dir.is_dir(), (
+            f"Sports dir must not be renamed by enrich_metadata: {sports_dir}"
+        )
+
+        # _gather_enrich_units must return zero oth- units.
+        lib = mvcommon.load_library()
+        units = main._gather_enrich_units(lib)
+        oth_units = [u for u in units if u["key"].startswith("oth-")]
+        assert len(oth_units) == 0, (
+            f"_gather_enrich_units must exclude oth- entries; found: {oth_units!r}"
+        )

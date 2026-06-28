@@ -567,25 +567,65 @@ def load_library():
 
 
 def save_library(data):
-    """Splits the merged dictionary back into 3 files based on prefix."""
-    mov_data = {}
-    tv_data = {}
-    ani_data = {}
+    """Split the merged library dict back into its 4 per-prefix files.
+
+    Routing is table-driven (see ``_PREFIX_TO_LIB`` below): each key goes to the
+    FIRST prefix it matches —
+        mov… -> library_movies.json
+        tv…  -> library_series.json
+        ani… -> library_anime.json
+        oth… -> library_others.json   (IMP-D18)
+    Both the per-file buckets AND the atomic-write set are derived from that one
+    table, so adding the next category is a single-line edit there — there is no
+    second list to keep in sync.
+
+    A key matching NO known prefix is still routed to Movies for backward
+    compatibility (legacy / no-prefix ids), but the routing is WARNED on stderr —
+    never silent — so an unknown prefix can never vanish into library_movies.json
+    undetected.
+    """
+    # Ordered prefix -> destination-file routing table. FIRST match wins, so this
+    # order reproduces the historical mov/tv/ani if-chain with "oth" (IMP-D18)
+    # appended. Kept FUNCTION-LOCAL on purpose: the tests redirect library I/O by
+    # monkeypatching mvcommon.LIBRARY_* AFTER import (the `sandbox` fixture), so the
+    # table must read the CURRENT module globals at call time — a module-level table
+    # would freeze the real C:\Media paths at import and defeat the sandbox redirect.
+    _PREFIX_TO_LIB = [
+        ("mov", LIBRARY_MOVIES),
+        ("tv", LIBRARY_SERIES),
+        ("ani", LIBRARY_ANIME),
+        ("oth", LIBRARY_OTHERS),
+    ]
+    # Legacy / unknown-prefix keys fall back to Movies for back-compat. This is the
+    # SAME bucket as the "mov" entry above, so they share library_movies.json
+    # exactly as before — only now the fallback is explicit and warned, not silent.
+    fallback_path = LIBRARY_MOVIES
+
+    # One bucket per destination file, keyed by path and derived from the table so
+    # the set of output files always matches _PREFIX_TO_LIB. Insertion order = table
+    # order, preserved by the write loop below (movies, series, anime, others).
+    buckets = {path: {} for _, path in _PREFIX_TO_LIB}
 
     for key, val in data.items():
-        if key.startswith("mov"):
-            mov_data[key] = val
-        elif key.startswith("tv"):
-            tv_data[key] = val
-        elif key.startswith("ani"):
-            ani_data[key] = val
+        for prefix, path in _PREFIX_TO_LIB:
+            if key.startswith(prefix):
+                buckets[path][key] = val
+                break
         else:
-            # Fallback for legacy/unknown keys -> Movies
-            mov_data[key] = val
+            # No known prefix. Keep back-compat (route to Movies) but WARN loudly,
+            # ONCE per key, so a future unknown prefix can never silently vanish.
+            known = "/".join(prefix for prefix, _ in _PREFIX_TO_LIB)
+            print(
+                f"⚠️  save_library: key '{key}' has no known prefix ({known}) — "
+                f"routing to {os.path.basename(fallback_path)} (legacy fallback).",
+                file=sys.stderr,
+            )
+            buckets[fallback_path][key] = val
 
     # Atomic write: write to a temp file then os.replace() to prevent
-    # partial-write corruption if the process is killed mid-save.
-    for path, content in [(LIBRARY_MOVIES, mov_data), (LIBRARY_SERIES, tv_data), (LIBRARY_ANIME, ani_data)]:
+    # partial-write corruption if the process is killed mid-save. The file set is
+    # derived from the same table (buckets), so it stays in lock-step with routing.
+    for path, content in buckets.items():
         dir_name = os.path.dirname(path)
         fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix='.tmp')
         try:

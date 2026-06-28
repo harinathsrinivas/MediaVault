@@ -81,6 +81,14 @@ MAINFETCH_SCRIPT = "mainfetch.py"  # Name of the automation script
 # Edit this dict when the physical phones change.
 DEVICE_ALIASES = {"movies": "FA69H0300200", "series": "FA75V0303405", "others": "<NEW_PIXEL_SERIAL>"}  # TODO(user): real Others Pixel serial — prerequisite
 
+# IMP-D18: disk roots of the "Others" category under LOCAL_ROOT. Unlike
+# Movies/Series/Anime (one folder each, via _CATEGORY_ROOT_SUBDIR), Others spans
+# MULTIPLE top-level folders. Every disk walker (cmd_recover --scan,
+# cmd_scan_unprepped, collect_reclaimable PASS 1) walks each of these IN ADDITION
+# to the three known-category roots. Adding a sibling (e.g. "Documentary") is a
+# one-line edit here — no walker code changes.
+_OTHER_ROOT_SUBDIRS = ["Sports"]
+
 # Remote push reliability conventions (rclone "chunker"-style).
 # AUTO-ROLLBACK SEAM: each chunk is uploaded to "<final>.partial" then atomically
 # renamed; remnant "<chunk>.partial" files are the only thing a push rollback must
@@ -862,7 +870,10 @@ def recover_journal(folder_path):
 def cmd_recover(target=None, scan=False):
     # Wrapper around recover_journal: scan for stale journals or resolve one folder/id
     if scan:
-        roots = [os.path.join(LOCAL_ROOT, c) for c in ("Movies", "Series", "Anime")]
+        # IMP-D18: *_OTHER_ROOT_SUBDIRS appends the Others roots (e.g. "Sports")
+        # so a rollback journal left in an oth- season folder is found by --scan.
+        roots = [os.path.join(LOCAL_ROOT, c)
+                 for c in ("Movies", "Series", "Anime", *_OTHER_ROOT_SUBDIRS)]
         found = 0
         for root in roots:
             if not os.path.exists(root):
@@ -5468,6 +5479,13 @@ def cmd_scan_unprepped():
         ("Series", LIBRARY_SERIES, os.path.join(LOCAL_ROOT, "Series")),
         ("Anime", LIBRARY_ANIME, os.path.join(LOCAL_ROOT, "Anime"))
     ]
+    # IMP-D18: the Others bucket spans multiple disk roots (LOCAL_ROOT/Sports, …),
+    # all backed by the single library_others.json. LIBRARY_OTHERS is read
+    # module-qualified (mvcommon.LIBRARY_OTHERS) — NOT imported into main — so the
+    # sandbox fixture's mvcommon-only patch is honoured (main never binds it; see
+    # the binding-hazard note at the `import mvcommon` line).
+    categories += [("Others", mvcommon.LIBRARY_OTHERS, os.path.join(LOCAL_ROOT, d))
+                   for d in _OTHER_ROOT_SUBDIRS]
 
     total_unprepped = 0
 
@@ -6205,6 +6223,10 @@ def collect_reclaimable():
         os.path.join(LOCAL_ROOT, "Series"),
         os.path.join(LOCAL_ROOT, "Anime"),
     ]
+    # IMP-D18: also walk the Others disk roots (LOCAL_ROOT/Sports, …) so UNPREPPED
+    # sports/other files surface here. (PASS 2 iterates every library leaf, so
+    # PREPPED oth- leaves are already caught there — only PASS 1 needs these.)
+    categories += [os.path.join(LOCAL_ROOT, d) for d in _OTHER_ROOT_SUBDIRS]
     for folder_path in categories:
         if not os.path.exists(folder_path):
             # Degrade gracefully like cmd_scan_unprepped (warn + continue).
@@ -7037,6 +7059,10 @@ def build_tree():
         if cat not in roots:
             cat = "other"
         folder = os.path.dirname(leaf_path)
+        # IMP-D18: "other" is intentionally NOT in _CATEGORY_ROOT_SUBDIR — it spans
+        # MULTIPLE folders (see _OTHER_ROOT_SUBDIRS), so it falls back to LOCAL_ROOT
+        # and nests Sports/Documentary/… as sibling top-folders under the Others
+        # bucket. Do NOT add "other" here (a single subdir would strip that nesting).
         subdir = _CATEGORY_ROOT_SUBDIR.get(cat)
         cat_root = os.path.join(LOCAL_ROOT, subdir) if subdir else LOCAL_ROOT
 

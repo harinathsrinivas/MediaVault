@@ -9,13 +9,13 @@
 > Full task text lives in `improvements_tier*.md`; this file only orders them. Legend:
 > 🔴 critical · 🟠 high · 🟡 medium · ⚪ low · ✅ done · 🚦 needs a user decision (change-gate).
 >
-> **Last updated:** 2026-06-28 (IMP-D18 Others/sports content category — in_progress on `feature/imp_d18_others_category`. Earlier: IMP-R6 restore-merge temp-stage + IMP-R7 crash-re-run auto-recover — both done on `feature/imp_r6_r7_restore_journal_crashsafe`. IMP-E16 — UI dossier + /api/detail + EXA auto-resolve + grid + palette + parallax hero + lazy-load perf — on `feature/imp_e16_ui_wow`. Phase 5 IMP-E3/U3/D17 — TMDB enrich + rename_folder + /api/media-image + real posters/titles in SPA. IMP-E14 fully done. IMP-D17 done. IMP-E15 done.)
+> **Last updated:** 2026-06-28 (IMP-D18 Others/sports content category — **done** on `feature/imp_d18_others_category`: 4th `oth-` category — `library_others.json`, season_map/leaf reuse, list-capable disk roots via `CATEGORY_ROOTS`, enrichment-skip, Others Chrome profile + Pixel. Earlier: IMP-R6 restore-merge temp-stage + IMP-R7 crash-re-run auto-recover — both done on `feature/imp_r6_r7_restore_journal_crashsafe`. IMP-E16 — UI dossier + /api/detail + EXA auto-resolve + grid + palette + parallax hero + lazy-load perf — on `feature/imp_e16_ui_wow`. Phase 5 IMP-E3/U3/D17 — TMDB enrich + rename_folder + /api/media-image + real posters/titles in SPA. IMP-E14 fully done. IMP-D17 done. IMP-E15 done.)
 
 ---
 
 ## 👉 SUGGESTED NEXT TASK: **IMP-S1 (Jellyfin stand-up)** + **IMP-S2 (mvdaemon)** — the daemon path + couch-vault plumbing
 
-> **IMP-D18 is currently in flight** on `feature/imp_d18_others_category` (steps 1–8 done; step 9 = this tracker registration). It will be marked done here when its PR merges.
+> **IMP-D18 is done** (4th "Others"/sports content category) on `feature/imp_d18_others_category` — PR to `main` pending. It creates two follow-ons: **IMP-X1** (replicate the Others account's chunks to a 2nd Google account — the same CSAM-ban single-point-of-failure applies to the 4th account) and the open **OD-2** question (whether to ever add a sports metadata scraper, e.g. TheSportsDB; today it's filename-as-title, no scraper). IMP-S1/S2 remain the headline next.
 
 **IMP-R6 + IMP-R7 done** (crash-safety fixes — restore merge-to-temp + journal auto-recovery on re-run
 — on `feature/imp_r6_r7_restore_journal_crashsafe`). **Band 0 is now clear** (no remaining decision-gated
@@ -50,7 +50,6 @@ critical items). **Phase 5 done** (IMP-E3 partial / IMP-U3 partial / IMP-D17 don
 |---|---|---|---|
 | 9 | 🟠 **IMP-S1** | stand up Jellyfin (the `JELLYFIN_SETUP_GUIDE.md` run) — **zero code, immediate couch value**, can run in parallel | low |
 | 10 | ⚪ **IMP-A11** | repo hygiene (gitignore stale root `STATUS.md`, drop stray files, clean leftover worktrees) | low |
-| 11 | 🟠 **IMP-D18** | "Others" content category (sports now; documentaries later) — `oth-` prefix, `library_others.json`, season_map/leaf reuse, web UI Others tab; **in_progress** on `feature/imp_d18_others_category` | medium |
 
 ## 🟡 BAND 2 — FOUNDATIONS that unblock the daemon + new commands
 
@@ -87,7 +86,7 @@ Perf: `B1`–`B10`. Utility commands: `D2`,`D3`,`D6`–`D15`. Integration long-t
 `E8`,`E10`,`E11`. Rollback hardening: `R1`,`R3`,`R4`,`R5`,`R8`,`R9` (R4/R8/R9 are 🚦 change-gated; R6/R7 ✅ done).
 Moonshots: `F1`–`F9`. Research-only: `G3`,`G5`,`H2`,`A6`.
 
-## ✅ DONE (30)
+## ✅ DONE (31)
 
 `A1` (mvcommon) · `A7` (pytest harness) · `C2` (retry) · `C4` (device pinning) · `C8` (post-push verify) ·
 `C9` (atomic replace) · `C11` (restore quarantine) · `C12` (alias crash: scan/local_status) ·
@@ -99,7 +98,8 @@ Moonshots: `F1`–`F9`. Research-only: `G3`,`G5`,`H2`,`A6`.
 `D4` (partial: integrity guard — verify_library status-to-disk invariant + warn-only pipeline post-conditions; broader audits remain in_progress) ·
 `E14` (web media-type UI — all 5 phases: tabs + fetch/progress + motion/PWA + grouped folder + remote auth + TMDB posters/titles) ·
 `E15` (mobile + Tailscale + admin-minted token auth) ·
-`D17` (rename_folder — crash-safe cascading folder rename + `{tmdb-…}` token stamp).
+`D17` (rename_folder — crash-safe cascading folder rename + `{tmdb-…}` token stamp) ·
+`D18` (4th "Others"/sports content category — `oth-` prefix + `library_others.json`; season_map/leaf reuse, no new entry type, no rollback change; list-capable disk roots via `CATEGORY_ROOTS`; enrichment-skip; Others Chrome profile + Pixel; web Others tab populated — `feature/imp_d18_others_category`).
 
 ---
 

@@ -42,7 +42,7 @@ MediaVault. Written against Jellyfin **10.11.x** (current stable line, 2026-06).
 
 ## 3. Libraries — exact settings per library (20 min)
 
-Create three libraries (Dashboard → Libraries → Add Media Library):
+Create four libraries (Dashboard → Libraries → Add Media Library):
 
 ### 3.1 Movies
 - Content type: **Movies**; Display name: Movies; Folder: `C:\Media\Movies`.
@@ -74,7 +74,30 @@ Create three libraries (Dashboard → Libraries → Add Media Library):
 - Absolute-numbered files (`deathnote07`) may need per-show "Display order: Absolute" (Series →
   Edit Metadata → Display order) — fix-as-you-notice, not upfront.
 
-### 3.4 Library-level hygiene
+### 3.4 Sports / Others (filename-as-title)
+- Content type: **Other Videos** (Plex) / **Home Videos** (Jellyfin/Emby; Emby
+  also exposes this as a "Mixed Content / Home videos" type); Display name: Sports
+  (or Others); Folder: `C:\Media\Sports`.
+- These library types use the **filename as the title with no online metadata
+  agent** — exactly right for sports, which isn't on TheMovieDb/TheTVDB. Do
+  **not** attach a metadata downloader or image fetcher; leave all scrapers OFF.
+  (As of the 2026 server versions, Plex "Other Videos", Jellyfin/Emby "Home
+  Videos" are the filename-as-title, no-agent library kinds — verify the exact
+  label in your server's "Add Library → Content type" dropdown.)
+- This is the home of MediaVault's `oth-` / `library_others.json` category
+  (IMP-D18). MediaVault auto-captures the exact technical spec (codecs, HDR,
+  audio, duration) into `library_others.json`; the on-disk filenames ARE the
+  display titles, so name them meaningfully (date, teams, half/stage, e.g.
+  `2026-06-14 Spain vs Portugal - First half ...`).
+- Same dummy expectation as §3.1: an archived match-half is a 10 KB / 2-second
+  dummy that probes as a *valid* (absurdly short) video — keep it visible, it IS
+  the catalog. MediaVault's enrichment commands deliberately skip `oth-` entries,
+  so no scraper will mis-tag or rename the Sports folders.
+- List-capable: when documentaries arrive they get the same treatment — point the
+  same "Other / Home Videos" library at the added subfolder, or create a second
+  one (the MediaVault `CATEGORY_ROOTS["other"]` list grows with no code change).
+
+### 3.5 Library-level hygiene
 - Dashboard → Libraries → Manage Libraries: confirm **"Delete files" stays admin-only** and never
   enable any "remove missing" auto-cleanup. MediaVault is the only thing that deletes media.
 - Scheduled Tasks (Dashboard → Scheduled Tasks): set "Scan media library" to every 12 h (real-time

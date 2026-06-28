@@ -419,4 +419,4 @@
 - Effort estimate: small-medium
 - Risk: medium — new-category plumbing touches `mvcommon`, `mainfetch`, `main` load/save paths, every whole-library walker, and the web API; the `ENTRY_TYPE_KEYS` guard + smoke gate catch regressions. No rollback-contract change (reuses existing season_map/leaf types).
 - If skipped: sports and future documentary content either pollutes the movies/series libraries (confusing stats + UI) or stays unarchived entirely — the vault misses a growing share of the user's media diet.
-- Status: in_progress (being built on `feature/imp_d18_others_category`; the architect/PR step will flip this to `done` on merge)
+- Status: **done** (`feature/imp_d18_others_category`, 2026-06-28)

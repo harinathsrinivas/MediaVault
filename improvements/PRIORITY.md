@@ -9,11 +9,13 @@
 > Full task text lives in `improvements_tier*.md`; this file only orders them. Legend:
 > 🔴 critical · 🟠 high · 🟡 medium · ⚪ low · ✅ done · 🚦 needs a user decision (change-gate).
 >
-> **Last updated:** 2026-06-27 (IMP-R6 restore-merge temp-stage + IMP-R7 crash-re-run auto-recover — both done on `feature/imp_r6_r7_restore_journal_crashsafe`. Earlier: IMP-E16 — UI dossier (hover/long-press cinematic glass panel) + /api/detail (TMDB full detail + merged OMDb ratings + trivia) + `refresh_online`/`fetch_trivia` commands (mvonline.json/mvextra.json caches; OMDb/EXA/GROQ config keys) + EXA web-search auto-resolve waterfall in `enrich_metadata` + grouped grid/drill-down view + poster-driven ambient glow (`swatch.js`) + ⌘K command palette (`palette.js`) + View-Transitions morphs + cinematic parallax hero (`hero.js`) + lazy-load perf — on `feature/imp_e16_ui_wow`. Phase 5 IMP-E3/U3/D17 — TMDB enrich + rename_folder + /api/media-image + real posters/titles in SPA — on `feature/imp_e3_u3_d17_tmdb_posters_rename`. IMP-E14 fully done. IMP-D17 done. IMP-E15 done.)
+> **Last updated:** 2026-06-28 (IMP-D18 Others/sports content category — in_progress on `feature/imp_d18_others_category`. Earlier: IMP-R6 restore-merge temp-stage + IMP-R7 crash-re-run auto-recover — both done on `feature/imp_r6_r7_restore_journal_crashsafe`. IMP-E16 — UI dossier + /api/detail + EXA auto-resolve + grid + palette + parallax hero + lazy-load perf — on `feature/imp_e16_ui_wow`. Phase 5 IMP-E3/U3/D17 — TMDB enrich + rename_folder + /api/media-image + real posters/titles in SPA. IMP-E14 fully done. IMP-D17 done. IMP-E15 done.)
 
 ---
 
 ## 👉 SUGGESTED NEXT TASK: **IMP-S1 (Jellyfin stand-up)** + **IMP-S2 (mvdaemon)** — the daemon path + couch-vault plumbing
+
+> **IMP-D18 is currently in flight** on `feature/imp_d18_others_category` (steps 1–8 done; step 9 = this tracker registration). It will be marked done here when its PR merges.
 
 **IMP-R6 + IMP-R7 done** (crash-safety fixes — restore merge-to-temp + journal auto-recovery on re-run
 — on `feature/imp_r6_r7_restore_journal_crashsafe`). **Band 0 is now clear** (no remaining decision-gated
@@ -48,6 +50,7 @@ critical items). **Phase 5 done** (IMP-E3 partial / IMP-U3 partial / IMP-D17 don
 |---|---|---|---|
 | 9 | 🟠 **IMP-S1** | stand up Jellyfin (the `JELLYFIN_SETUP_GUIDE.md` run) — **zero code, immediate couch value**, can run in parallel | low |
 | 10 | ⚪ **IMP-A11** | repo hygiene (gitignore stale root `STATUS.md`, drop stray files, clean leftover worktrees) | low |
+| 11 | 🟠 **IMP-D18** | "Others" content category (sports now; documentaries later) — `oth-` prefix, `library_others.json`, season_map/leaf reuse, web UI Others tab; **in_progress** on `feature/imp_d18_others_category` | medium |
 
 ## 🟡 BAND 2 — FOUNDATIONS that unblock the daemon + new commands
 

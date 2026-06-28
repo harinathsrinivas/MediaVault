@@ -397,3 +397,26 @@
 - Risk: low — uses the existing rollback mechanism (additive, no contract change); the only failure mode is an `os.rename` that fails mid-way (PONR not yet crossed) or a JSON save that fails (post-PONR, recoverable via `recover`).
 - If skipped: TMDB folder-token stamping requires manual renames + hand-edited JSON; `enrich_metadata` cannot stamp tokens automatically; folders keep accumulating stale names after a TMDB match.
 - Status: **done** (`feature/imp_e3_u3_d17_tmdb_posters_rename`, 2026-06-24)
+
+---
+
+## IMP-D18: "Others" content category (sports now; documentaries later)
+
+- Category: other
+- Priority: high
+- Files: `mvcommon.py` (LIBRARY_OTHERS / OTHERS_PREFIX / OTHERS_ROOT constants), `mainfetch.py` (oth- fetch profile), `main.py` (oth- routing in load_library / save_library / all cmd_* walkers; ENTRY_TYPE_KEYS guard; new Chrome profile + DEVICE_ALIASES entry), `tests/` (smoke + unit tests for oth- routing and walker safety)
+- Current behavior: MediaVault has three content categories — movies (`mov-`), TV series (`tv-`), anime (`ani-`) — each with its own library JSON and root folder. Sports content (FIFA football, IPL cricket) and future documentaries have no home: they would have to be shoehorned into movies or series, losing semantic identity and requiring per-entry manual category overrides.
+- Proposed change:
+  - Add a 4th content category **Others** (`oth-` prefix, `C:\Media\library_others.json`, root `C:\Media\Sports\...`).
+  - `LIBRARY_OTHERS` / `OTHERS_PREFIX` / `OTHERS_ROOT` declared in `mvcommon.py` (parallel to the existing three constants); `mainfetch.py` routes `oth-` IDs to a dedicated Chrome profile; `main.py` wires `oth-` into `load_library`, `save_library`, and every whole-library walker/iterator.
+  - **ID scheme**: `oth-football-2026-fifaworldcup-s01e01` (tournament-edition = TV season; each half = an episode). Reuses the existing `season_map` + leaf structure — NO new `ENTRY_TYPE_KEYS` entry type; no rollback-contract change.
+  - Storage layout uses an `"other"` → list-of-subdirs mapping (list-capable so multiple sports can coexist).
+  - **Enrichment** skips `oth-` entries (no TMDB/AniDB match for sports; guard added in `enrich_metadata`).
+  - New Chrome profile for oth- fetch; new Pixel DEVICE_ALIASES entry (serial is a user prerequisite — not automated).
+  - All existing commands (`push`, `replace`, `fetch_restore`, `local_status`, `scan_reclaimable`, `rename_folder`, `verify_library`, etc.) work transparently for `oth-` entries via the shared walker; the `multi_ep_alias` / `season_map` skip-or-resolve rules apply unchanged.
+- Rationale: Sports content is a real archiving use case (FIFA 2026, IPL 2025) that does not fit movies or series semantically. A dedicated category keeps the library clean and lets the web UI surface an "Others" tab (IMP-E14 already has the tab slot). Documentaries can follow the same path later with zero further structural change.
+- Goal: Store, push, fetch, and browse sports/others content with the same pipeline reliability as movies/series/anime; web UI Others tab populated from `library_others.json`.
+- Effort estimate: small-medium
+- Risk: medium — new-category plumbing touches `mvcommon`, `mainfetch`, `main` load/save paths, every whole-library walker, and the web API; the `ENTRY_TYPE_KEYS` guard + smoke gate catch regressions. No rollback-contract change (reuses existing season_map/leaf types).
+- If skipped: sports and future documentary content either pollutes the movies/series libraries (confusing stats + UI) or stays unarchived entirely — the vault misses a growing share of the user's media diet.
+- Status: in_progress (being built on `feature/imp_d18_others_category`; the architect/PR step will flip this to `done` on merge)

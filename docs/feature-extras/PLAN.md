@@ -428,7 +428,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
     both at once (two groups); a changed-byte file flips that item's `uploaded` to False. opus: this is the shared data
     contract.
 
-- [ ] 2. [model: sonnet] [effort: medium] CLI parsing for `--extras`/`--extras-size`/`--fetchExtras` + new `add_extras`.
+- [x] 2. [model: sonnet] [effort: medium] CLI parsing for `--extras`/`--extras-size`/`--fetchExtras` + new `add_extras`.
   - Files: `main.py` dispatch (`7603`–`7895`), a new pure `parse_extras_tokens(tokens)` helper near
     `parse_push_group_args` (`4236`).
   - Details (Card B = B1; Card C = flag-only): Add `--extras`/`-extras` (collect ALL occurrences AND split each on

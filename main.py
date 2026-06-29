@@ -953,7 +953,7 @@ def cmd_recover(target=None, scan=False):
 #             CORE COMMANDS
 # ==========================================
 
-def cmd_prep(manual_id, filepath, parent_id=None):
+def cmd_prep(manual_id, filepath, parent_id=None, extras=None, extras_size=None):
     filepath = filepath.strip('"').strip("'")
     if not os.path.exists(filepath): print(f"❌ File not found: {filepath}"); return False
 
@@ -1099,6 +1099,9 @@ def cmd_prep(manual_id, filepath, parent_id=None):
         # [ROLLBACK C] Clean success — discard the journal.
         journal.commit()
         print(f"✅ Library Entry Created & Linked (Search Key: {default_search_term}).\n")
+        # IMP-D19: scan+merge extras if provided (prep never uploads)
+        if extras:
+            _extras_scan_merge_and_save(library, manual_id, extras)
         return True
     except Exception as e:
         # [ROLLBACK C] No PONR in prep — replay the journalled inverses.
@@ -3783,7 +3786,31 @@ def merge_extras_into_title(library, title_id, scanned):
     return library
 
 
-def cmd_prep_season(base_id, folder_path):
+def _extras_scan_merge_and_save(library, mid, extras):
+    """Resolve `mid` to its title id, scan the extras folders, merge into the
+    library, save, and print a concise summary.  Called by cmd_prep /
+    cmd_prep_season / cmd_add_extras (prep-phase only — no upload)."""
+    title_id = _extras_title_id(library, mid)
+    if not title_id:
+        print(f"⚠️  Could not resolve a title entry for extras (id: {mid}) — skipping.")
+        return
+    title_entry = library.get(title_id, {})
+    title_folder = title_entry.get("folder_path", "")
+    scanned = scan_extras_folders(extras, title_folder, title_id)
+    if not scanned:
+        print("⚠️  No video files found in any extras folder — nothing merged.")
+        return
+    merge_extras_into_title(library, title_id, scanned)
+    save_library(library)
+    total = sum(len(g["items"]) for g in scanned.values())
+    groups_str = ", ".join(
+        f"{k} ({len(v['items'])} item{'s' if len(v['items']) != 1 else ''})"
+        for k, v in scanned.items()
+    )
+    print(f"✅ Extras merged into {title_id}: {groups_str} ({total} total item{'s' if total != 1 else ''}).")
+
+
+def cmd_prep_season(base_id, folder_path, extras=None, extras_size=None):
     print(f"=== BATCH PREP: {base_id} ===")
     folder_path = folder_path.strip('"').strip("'")
     if not os.path.exists(folder_path): print("❌ Folder not found."); return
@@ -3866,6 +3893,11 @@ def cmd_prep_season(base_id, folder_path):
             print(f"⚠️ Skipping {filename} (No episode number detected)")
 
     print(f"=== Batch Complete: Processed {count} episodes. ===")
+
+    # IMP-D19: scan+merge extras into the season_map after all episodes are prepped
+    if extras:
+        library = load_library()
+        _extras_scan_merge_and_save(library, base_id, extras)
 
 
 def cmd_check(manual_id):
@@ -4006,7 +4038,7 @@ def _verify_chunk_hash(adb_base, remote_path, safe_path, expected_sha256):
         )
 
 
-def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, device_id=None, eager_rehash=False, temp_dir=None):
+def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, device_id=None, eager_rehash=False, temp_dir=None, extras=None, extras_size=None):
     print(f"--- PUSHING: {manual_id} ---")
     library = load_library()
     if manual_id not in library: print(f"❌ ID not found."); return False
@@ -4381,6 +4413,7 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
             _warn_if_entry_inconsistent(library[manual_id], manual_id)
             print("✅ SUCCESS.\n")
+            # IMP-D19 Step 3: extras upload wired here
             return True
         else:
             journal.commit()
@@ -4426,6 +4459,95 @@ def _resolve_alias(lib, mid):
             return (mid, entry)
         return (primary_id, primary_entry)
     return (mid, entry)
+
+
+def _parse_extras_size_unit(size_str):
+    """Parse a compact size string like '9900mb' or '8gb' into the normalised
+    (method, val) tuple used by extras_size.
+
+      '9900mb'  ->  ('SIZE_MB', '9900')
+      '8gb'     ->  ('SIZE_GB', '8')
+
+    Returns None if the string does not match the expected pattern."""
+    m = re.match(r'^(\d+(?:\.\d+)?)\s*(mb|gb)$', size_str.lower().strip())
+    if not m:
+        return None
+    num = int(float(m.group(1)))
+    unit = m.group(2)
+    return ("SIZE_MB", str(num)) if unit == "mb" else ("SIZE_GB", str(num))
+
+
+def parse_extras_tokens(tokens):
+    """Parse ``--extras`` / ``-extras`` / ``--extras-size`` / ``-extras-size``
+    from a flat token list.
+
+    --extras <value>
+        value may be semicolon-separated paths; the flag is repeatable; all
+        paths are split on ``;``, stripped of surrounding quotes/whitespace,
+        and collected in a flat ordered list.
+
+    --extras-size <value>
+        Accepted forms:
+          'none'                -> ('NONE', None)
+          '9900mb' / '8gb'      -> ('SIZE_MB','9900') / ('SIZE_GB','8')
+          'SIZE_MB|SIZE_GB|COUNT <val>'  (triplet, consumes two tokens)
+
+    Unknown tokens are silently skipped (matches the existing parsers).
+    A value-taking flag with no following value prints an error and
+    calls sys.exit(1).
+
+    Returns: {'folders': [...], 'extras_size': <tuple or None>}
+
+    Acceptance:
+      parse_extras_tokens(['--extras','A;B','--extras','C',
+                           '--extras-size','9900mb'])
+      -> {'folders': ['A','B','C'], 'extras_size': ('SIZE_MB','9900')}
+    """
+    folders = []
+    extras_size = None
+
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in ("--extras", "-extras"):
+            if i + 1 < len(tokens):
+                raw = tokens[i + 1]
+                for part in raw.split(";"):
+                    part = part.strip().strip('"').strip("'").strip()
+                    if part:
+                        folders.append(part)
+                i += 2
+            else:
+                print("❌ Error: Missing value for --extras")
+                sys.exit(1)
+        elif tok in ("--extras-size", "-extras-size"):
+            if i + 1 < len(tokens):
+                sv = tokens[i + 1]
+                if sv.lower() == "none":
+                    extras_size = ("NONE", None)
+                    i += 2
+                elif sv.upper() in ("SIZE_MB", "SIZE_GB", "COUNT"):
+                    # triplet form: --extras-size SIZE_MB 9900
+                    if i + 2 < len(tokens):
+                        extras_size = (sv.upper(), tokens[i + 2])
+                        i += 3
+                    else:
+                        print(f"❌ Error: Missing value for {sv}")
+                        sys.exit(1)
+                else:
+                    result = _parse_extras_size_unit(sv)
+                    if result is None:
+                        print(f"❌ Error: Unrecognized --extras-size value: {sv!r}")
+                        sys.exit(1)
+                    extras_size = result
+                    i += 2
+            else:
+                print("❌ Error: Missing value for --extras-size")
+                sys.exit(1)
+        else:
+            i += 1
+
+    return {"folders": folders, "extras_size": extras_size}
 
 
 def parse_push_group_args(args):
@@ -4491,7 +4613,7 @@ def parse_push_group_args(args):
     return (group_id, method, val, ep_range, dev, eager, tdir)
 
 
-def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False, temp_dir=None):
+def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False, temp_dir=None, extras=None, extras_size=None):
     print(f"=== BATCH PUSH GROUP: {group_id} ===")
     library = load_library()
     target_ids = []
@@ -4603,6 +4725,8 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
             print(f"⏭️  Skipping {mid} (Already uploaded)")
             continue
         cmd_push(mid, split_method, split_val, device_id=device_id, eager_rehash=eager_rehash, temp_dir=temp_dir)
+
+    # IMP-D19 Step 3: extras upload wired here
 
 
 def cmd_replace(manual_id):
@@ -5776,7 +5900,7 @@ def cmd_scan_unprepped():
         print("\n✅ All libraries are completely in sync.")
 
 
-def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, device_id=None, eager_rehash=False, temp_dir=None):
+def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, device_id=None, eager_rehash=False, temp_dir=None, extras=None, extras_size=None):
     print(f"=== 🚀 AUTO-PILOT: PREP -> PUSH -> REPLACE for {manual_id} ===")
 
     # 1. PREP
@@ -5812,9 +5936,10 @@ def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, de
         return
 
     print("\n✅✅✅ AUTO-PILOT COMPLETE: Movie is safely archived.")
+    # IMP-D19 Step 3/4: extras upload + replace wired here
 
 
-def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False, temp_dir=None):
+def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False, temp_dir=None, extras=None, extras_size=None):
     # [NEW] TV SERIES SEQUENTIAL AUTO-PILOT
     print(f"=== 📺 SEASON AUTO-PILOT (SEQUENTIAL): PREP -> PUSH -> REPLACE for {base_id} ===")
 
@@ -5975,9 +6100,10 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
             return
 
     print("\n✅✅✅ SEASON AUTO-PILOT COMPLETE.")
+    # IMP-D19 Step 3/4: extras upload + replace wired here
 
 
-def cmd_dispatch_fetch(manual_id, episode_range=None):
+def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False):
     # This keeps main.py clean but still lets you run "main.py fetch"
     cmd = ["python", MAINFETCH_SCRIPT, "fetch", manual_id]
 
@@ -5987,6 +6113,9 @@ def cmd_dispatch_fetch(manual_id, episode_range=None):
         print(f"   > 🚀 Dispatching Batch Fetch for episodes {episode_range}...")
     else:
         print(f"   > 🚀 Dispatching Fetch...")
+
+    # IMP-D19 Step 5: fetch extras when fetch_extras
+    # (--fetchExtras forwarded to mainfetch in Step 5)
 
     try:
         # Force the child's stdio to UTF-8 — a PIPEd child defaults to cp1252 on Windows and would crash printing mainfetch's emoji.
@@ -6018,12 +6147,13 @@ def cmd_dispatch_fetch(manual_id, episode_range=None):
         print(f"❌ Error running fetch script: {e}")
 
 
-def cmd_fetch_restore(manual_id, episode_range=None):
+def cmd_fetch_restore(manual_id, episode_range=None, fetch_extras=False):
     # [NEW] Automated Fetch -> Restore Pipeline
     print(f"=== 🔄 AUTO-PILOT: FETCH -> RESTORE for {manual_id} ===")
 
     # 1. FETCH
-    cmd_dispatch_fetch(manual_id, episode_range)
+    cmd_dispatch_fetch(manual_id, episode_range, fetch_extras=fetch_extras)
+    # IMP-D19 Step 5: fetch extras when fetch_extras (forwarded above to mainfetch)
 
     # 2. DETECT & RESTORE
     print("\n>>> STARTING RESTORE PHASE...")
@@ -6054,6 +6184,42 @@ def cmd_fetch_restore(manual_id, episode_range=None):
               f"(range {episode_range} selected nothing).")
     else:
         print("\n✅✅✅ FETCH & RESTORE COMPLETE.")
+
+
+def cmd_add_extras(title_id, folders, extras_size=None, device_id=None, no_replace=False):
+    """Attach extras to an existing / archived / local-only title entry.
+
+    Syntax (from the CLI):
+      add_extras <title_id> "<folders>" [--extras-size <v|none>]
+                 [device <id_or_name>] [no-replace]
+
+    Step 2 (this step): scan+merge the extras into the library, save, and
+    print a summary.  The `device_id`, `extras_size`, and `no_replace`
+    arguments are accepted and stored here so later steps can act on them.
+
+    # IMP-D19 Step 3/4: push + replace extras here
+    """
+    print(f"=== ADD EXTRAS: {title_id} ===")
+    library = load_library()
+
+    # Resolve the title id and validate it exists.
+    real_title_id = _extras_title_id(library, title_id)
+    if not real_title_id:
+        print(f"❌ '{title_id}' not found in library or cannot be resolved to a title entry.")
+        return
+
+    # Scan+merge (prep-phase only — no upload in this step).
+    _extras_scan_merge_and_save(library, real_title_id, folders)
+
+    # Surface the stored intent for future steps.
+    if extras_size:
+        print(f"   > extras-size: {extras_size}")
+    if device_id:
+        print(f"   > device: {device_id}")
+    if no_replace:
+        print("   > no-replace: extras will be uploaded only (not dummied).")
+
+    # IMP-D19 Step 3/4: push + replace extras here
 
 
 # ==========================================
@@ -7787,6 +7953,7 @@ if __name__ == "__main__":
         print("  fetch [id]")
         print("  recover [id|folder]  (or: recover --scan)")
         print("  rename_folder [id|folder] \"<NewName {tmdb-12345}>\"  — rename a show/season folder + rewrite every descendant folder_path (crash-safe, no rehash)")
+        print("  add_extras <title_id> \"<folders>\" [--extras-size <v|none>] [device <id>] [no-replace]  — attach extras (Specials/Trailers/BTS) to an existing title")
         print("  web [--port N] [--host H] [--no-browser] [--demo]  — Launch the local web operations console (Disk Reclaim view); --demo = SAFE build, all actions simulated")
         print("  token create [--label \"X\"] [--ttl 1h|8h|12h|1d|3d|7d|30d|never]  — Mint a web access token (default --ttl 7d)")
         print("  token list                                          — List minted web access tokens")
@@ -7796,10 +7963,30 @@ if __name__ == "__main__":
     cmd = sys.argv[1]
 
     if cmd == "prep":
-        if len(sys.argv) >= 4:
-            cmd_prep(sys.argv[2], " ".join(sys.argv[3:]))
+        if len(sys.argv) < 4:
+            print("❌ Usage: prep [id] [path] [--extras <folders>] [--extras-size <v>]")
         else:
-            print("❌ Usage: prep [id] [path]")
+            _mid = sys.argv[2]
+            _rest = sys.argv[3:]
+            _fp_parts, _et = [], []
+            _pi = 0
+            while _pi < len(_rest):
+                _a = _rest[_pi]
+                if _a in ("--extras", "-extras", "--extras-size", "-extras-size"):
+                    _et.append(_a)
+                    _pi += 1
+                    if _pi < len(_rest):
+                        _sv2 = _rest[_pi]
+                        _et.append(_sv2)
+                        _pi += 1
+                        if _a in ("--extras-size", "-extras-size") and _sv2.upper() in ("SIZE_MB", "SIZE_GB", "COUNT") and _pi < len(_rest):
+                            _et.append(_rest[_pi])
+                            _pi += 1
+                else:
+                    _fp_parts.append(_a)
+                    _pi += 1
+            _er = parse_extras_tokens(_et)
+            cmd_prep(_mid, " ".join(_fp_parts), extras=_er["folders"] or None, extras_size=_er["extras_size"])
 
     elif cmd == "prep_push_rep":
         if len(sys.argv) < 4:
@@ -7815,6 +8002,7 @@ if __name__ == "__main__":
         eager = False
         tdir = None
         filepath_parts = []
+        _et_ppr = []
 
         i = 0
         while i < len(rest):
@@ -7839,11 +8027,24 @@ if __name__ == "__main__":
                     tdir = rest[i + 1]
                     i += 2
                     continue
+            elif arg in ("--extras", "-extras", "--extras-size", "-extras-size"):
+                _et_ppr.append(arg)
+                i += 1
+                if i < len(rest):
+                    _sv3 = rest[i]
+                    _et_ppr.append(_sv3)
+                    i += 1
+                    if arg in ("--extras-size", "-extras-size") and _sv3.upper() in ("SIZE_MB", "SIZE_GB", "COUNT") and i < len(rest):
+                        _et_ppr.append(rest[i])
+                        i += 1
+                continue
             filepath_parts.append(arg)
             i += 1
 
         filepath = " ".join(filepath_parts)
-        cmd_prep_push_rep(mid, filepath, method, val, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir)
+        _er_ppr = parse_extras_tokens(_et_ppr)
+        cmd_prep_push_rep(mid, filepath, method, val, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
+                          extras=_er_ppr["folders"] or None, extras_size=_er_ppr["extras_size"])
 
     elif cmd == "prep_push_rep_season":
         if len(sys.argv) < 4:
@@ -7859,6 +8060,7 @@ if __name__ == "__main__":
         device_arg = None
         eager = False
         tdir = None
+        _et_pprs = []
 
         i = 0
         while i < len(args):
@@ -7888,11 +8090,24 @@ if __name__ == "__main__":
                     tdir = args[i + 1]
                     i += 2
                     continue
+            elif arg in ("--extras", "-extras", "--extras-size", "-extras-size"):
+                _et_pprs.append(arg)
+                i += 1
+                if i < len(args):
+                    _sv4 = args[i]
+                    _et_pprs.append(_sv4)
+                    i += 1
+                    if arg in ("--extras-size", "-extras-size") and _sv4.upper() in ("SIZE_MB", "SIZE_GB", "COUNT") and i < len(args):
+                        _et_pprs.append(args[i])
+                        i += 1
+                continue
             folder_parts.append(arg)
             i += 1
 
         folder_path = " ".join(folder_parts)
-        cmd_prep_push_rep_season(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir)
+        _er_pprs = parse_extras_tokens(_et_pprs)
+        cmd_prep_push_rep_season(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
+                                 extras=_er_pprs["folders"] or None, extras_size=_er_pprs["extras_size"])
 
     elif cmd == "set_search":
         if len(sys.argv) >= 4:
@@ -7950,10 +8165,30 @@ if __name__ == "__main__":
         cmd_fetch_trivia(positional, *rest)
 
     elif cmd == "prep_season":
-        if len(sys.argv) >= 4:
-            cmd_prep_season(sys.argv[2], " ".join(sys.argv[3:]))
+        if len(sys.argv) < 4:
+            print("❌ Usage: prep_season [base_id] [folder] [--extras <folders>] [--extras-size <v>]")
         else:
-            print("❌ Usage: prep_season [base_id] [folder]")
+            _ps_id = sys.argv[2]
+            _ps_rest = sys.argv[3:]
+            _ps_fp, _ps_et = [], []
+            _ps_i = 0
+            while _ps_i < len(_ps_rest):
+                _a = _ps_rest[_ps_i]
+                if _a in ("--extras", "-extras", "--extras-size", "-extras-size"):
+                    _ps_et.append(_a)
+                    _ps_i += 1
+                    if _ps_i < len(_ps_rest):
+                        _sv5 = _ps_rest[_ps_i]
+                        _ps_et.append(_sv5)
+                        _ps_i += 1
+                        if _a in ("--extras-size", "-extras-size") and _sv5.upper() in ("SIZE_MB", "SIZE_GB", "COUNT") and _ps_i < len(_ps_rest):
+                            _ps_et.append(_ps_rest[_ps_i])
+                            _ps_i += 1
+                else:
+                    _ps_fp.append(_a)
+                    _ps_i += 1
+            _er_ps = parse_extras_tokens(_ps_et)
+            cmd_prep_season(_ps_id, " ".join(_ps_fp), extras=_er_ps["folders"] or None, extras_size=_er_ps["extras_size"])
 
     elif cmd == "scan_unprepped":
         cmd_scan_unprepped()
@@ -8001,6 +8236,7 @@ if __name__ == "__main__":
         dev = None
         eager = False
         tdir = None
+        _et_push = []
 
         i = 1
         while i < len(args):
@@ -8036,14 +8272,46 @@ if __name__ == "__main__":
                 else:
                     print("❌ Error: Missing value for tempdir.")
                     sys.exit(1)
+            elif args[i] in ("--extras", "-extras", "--extras-size", "-extras-size"):
+                _et_push.append(args[i])
+                i += 1
+                if i < len(args):
+                    _sv6 = args[i]
+                    _et_push.append(_sv6)
+                    i += 1
+                    if args[i - 2] in ("--extras-size", "-extras-size") and _sv6.upper() in ("SIZE_MB", "SIZE_GB", "COUNT") and i < len(args):
+                        _et_push.append(args[i])
+                        i += 1
             else:
                 i += 1
 
-        cmd_push(mid, method, val, c_range, device_id=resolve_device(dev), eager_rehash=eager, temp_dir=tdir)
+        _er_push = parse_extras_tokens(_et_push)
+        cmd_push(mid, method, val, c_range, device_id=resolve_device(dev), eager_rehash=eager, temp_dir=tdir,
+                 extras=_er_push["folders"] or None, extras_size=_er_push["extras_size"])
 
     elif cmd == "push_group":
-        group_id, method, val, ep_range, dev, eager, tdir = parse_push_group_args(sys.argv[2:])
-        cmd_push_group(group_id, method, val, ep_range, device_id=resolve_device(dev), eager_rehash=eager, temp_dir=tdir)
+        _pgg_all = sys.argv[2:]
+        _et_pgg, _other_pgg = [], []
+        _pgg_i = 0
+        while _pgg_i < len(_pgg_all):
+            _a = _pgg_all[_pgg_i]
+            if _a in ("--extras", "-extras", "--extras-size", "-extras-size"):
+                _et_pgg.append(_a)
+                _pgg_i += 1
+                if _pgg_i < len(_pgg_all):
+                    _sv7 = _pgg_all[_pgg_i]
+                    _et_pgg.append(_sv7)
+                    _pgg_i += 1
+                    if _a in ("--extras-size", "-extras-size") and _sv7.upper() in ("SIZE_MB", "SIZE_GB", "COUNT") and _pgg_i < len(_pgg_all):
+                        _et_pgg.append(_pgg_all[_pgg_i])
+                        _pgg_i += 1
+            else:
+                _other_pgg.append(_a)
+                _pgg_i += 1
+        group_id, method, val, ep_range, dev, eager, tdir = parse_push_group_args(_other_pgg)
+        _er_pgg = parse_extras_tokens(_et_pgg)
+        cmd_push_group(group_id, method, val, ep_range, device_id=resolve_device(dev), eager_rehash=eager, temp_dir=tdir,
+                       extras=_er_pgg["folders"] or None, extras_size=_er_pgg["extras_size"])
 
     elif cmd == "sort":
         cmd_sort()
@@ -8064,30 +8332,82 @@ if __name__ == "__main__":
         else:
             print("❌ Usage: rename_folder [id|folder] \"<NewName {tmdb-12345}>\"")
 
+    elif cmd == "add_extras":
+        # add_extras <title_id> "<folders>" [--extras-size <v|none>] [device <id_or_name>] [no-replace]
+        if len(sys.argv) < 4:
+            print("❌ Usage: add_extras <title_id> \"<folders>\" [--extras-size <v|none>] [device <id>] [no-replace]")
+            sys.exit(1)
+        _ae_title_id = sys.argv[2]
+        # sys.argv[3] is the semicolon-separated folder list (positional)
+        _ae_folders = [f.strip().strip('"').strip("'").strip() for f in sys.argv[3].split(";") if f.strip()]
+        _ae_rest = sys.argv[4:]
+        # Parse device, no-replace, and extras-size from remaining tokens
+        _ae_dev = None
+        _ae_no_replace = False
+        _ae_et = []
+        _ae_i = 0
+        while _ae_i < len(_ae_rest):
+            _a = _ae_rest[_ae_i]
+            if _a == "device" and _ae_i + 1 < len(_ae_rest):
+                _ae_dev = _ae_rest[_ae_i + 1]
+                _ae_i += 2
+            elif _a == "no-replace":
+                _ae_no_replace = True
+                _ae_i += 1
+            elif _a in ("--extras-size", "-extras-size"):
+                _ae_et.append(_a)
+                _ae_i += 1
+                if _ae_i < len(_ae_rest):
+                    _sv_ae = _ae_rest[_ae_i]
+                    _ae_et.append(_sv_ae)
+                    _ae_i += 1
+                    if _sv_ae.upper() in ("SIZE_MB", "SIZE_GB", "COUNT") and _ae_i < len(_ae_rest):
+                        _ae_et.append(_ae_rest[_ae_i])
+                        _ae_i += 1
+            else:
+                _ae_i += 1
+        _er_ae = parse_extras_tokens(_ae_et)
+        cmd_add_extras(_ae_title_id, _ae_folders, extras_size=_er_ae["extras_size"],
+                       device_id=resolve_device(_ae_dev), no_replace=_ae_no_replace)
+
     elif cmd == "fetch":
         if len(sys.argv) < 3:
-            print("❌ Usage: fetch [id] [OPT: episodes 1-3]")
+            print("❌ Usage: fetch [id] [OPT: episodes 1-3] [--fetchExtras]")
             sys.exit(1)
 
         mid = sys.argv[2]
+        _fetch_tokens = sys.argv[3:]
+        _fetch_extras = any(t in ("--fetchExtras", "--fetch-extras", "--extras", "--extra") for t in _fetch_tokens)
+        # Scan tokens for "episodes <range>" regardless of position
         epr = None
-        if len(sys.argv) >= 5 and sys.argv[3] == "episodes":
-            epr = sys.argv[4]
+        _ft_i = 0
+        while _ft_i < len(_fetch_tokens):
+            if _fetch_tokens[_ft_i] == "episodes" and _ft_i + 1 < len(_fetch_tokens):
+                epr = _fetch_tokens[_ft_i + 1]
+                break
+            _ft_i += 1
 
-        cmd_dispatch_fetch(mid, epr)
+        cmd_dispatch_fetch(mid, epr, fetch_extras=_fetch_extras)
 
     elif cmd == "fetch_restore":
-        # [NEW] Usage: fetch_restore [id] [OPT: episodes 1-3]
+        # [NEW] Usage: fetch_restore [id] [OPT: episodes 1-3] [--fetchExtras]
         if len(sys.argv) < 3:
-            print("❌ Usage: fetch_restore [id] [OPT: episodes 1-3]")
+            print("❌ Usage: fetch_restore [id] [OPT: episodes 1-3] [--fetchExtras]")
             sys.exit(1)
 
         mid = sys.argv[2]
+        _fr_tokens = sys.argv[3:]
+        _fetch_extras = any(t in ("--fetchExtras", "--fetch-extras", "--extras", "--extra") for t in _fr_tokens)
+        # Scan tokens for "episodes <range>" regardless of position
         epr = None
-        if len(sys.argv) >= 5 and sys.argv[3] == "episodes":
-            epr = sys.argv[4]
+        _fr_i = 0
+        while _fr_i < len(_fr_tokens):
+            if _fr_tokens[_fr_i] == "episodes" and _fr_i + 1 < len(_fr_tokens):
+                epr = _fr_tokens[_fr_i + 1]
+                break
+            _fr_i += 1
 
-        cmd_fetch_restore(mid, epr)
+        cmd_fetch_restore(mid, epr, fetch_extras=_fetch_extras)
 
     elif cmd == "token":
         # Web access token management (IMP-E15): create / list / revoke.

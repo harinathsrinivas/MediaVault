@@ -165,6 +165,56 @@ class TestParseFetchArgs:
 
 
 # ===========================================================================
+# parse_extras_tokens
+# ===========================================================================
+
+class TestParseExtrasTokens:
+    """Tests for main.parse_extras_tokens(tokens).
+
+    The function takes the already-extracted extras-related tokens (not the
+    full argv) and returns {'folders': [...], 'extras_size': tuple|None}.
+    """
+
+    def test_empty_returns_defaults(self):
+        result = main.parse_extras_tokens([])
+        assert result == {"folders": [], "extras_size": None}
+
+    def test_single_extras_single_folder(self):
+        result = main.parse_extras_tokens(["--extras", "C:/Specials"])
+        assert result["folders"] == ["C:/Specials"]
+        assert result["extras_size"] is None
+
+    def test_extras_semicolon_split(self):
+        """A semicolon-separated value inside --extras is split into multiple folders."""
+        result = main.parse_extras_tokens(["--extras", "A;B"])
+        assert result["folders"] == ["A", "B"]
+
+    def test_multiple_extras_flags_accumulate(self):
+        """Repeated --extras flags accumulate; semicolons in each are also split."""
+        result = main.parse_extras_tokens(["--extras", "A;B", "--extras", "C"])
+        assert result["folders"] == ["A", "B", "C"]
+
+    def test_extras_size_mb(self):
+        result = main.parse_extras_tokens(["--extras-size", "9900mb"])
+        assert result["extras_size"] == ("SIZE_MB", "9900")
+        assert result["folders"] == []
+
+    def test_extras_size_gb(self):
+        result = main.parse_extras_tokens(["--extras-size", "4gb"])
+        assert result["extras_size"] == ("SIZE_GB", "4")
+
+    def test_extras_size_none_returns_none_sentinel(self):
+        """'none' maps to the ('NONE', None) sentinel (not Python None)."""
+        result = main.parse_extras_tokens(["--extras-size", "none"])
+        assert result["extras_size"] == ("NONE", None)
+
+    def test_combined_folders_and_size(self):
+        """Acceptance test: the exact invocation from the task spec."""
+        result = main.parse_extras_tokens(["--extras", "A;B", "--extras", "C", "--extras-size", "9900mb"])
+        assert result == {"folders": ["A", "B", "C"], "extras_size": ("SIZE_MB", "9900")}
+
+
+# ===========================================================================
 # cmd_replace — not-found path
 # ===========================================================================
 

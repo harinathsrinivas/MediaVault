@@ -11,14 +11,17 @@
   (`add_extras` cmd + `--extras`/`--extras-size` on prep/push family) · C = FLAG-ONLY (`--fetchExtras`, aliases
   `--fetch-extras`/`--extras`/`--extra`; no prompt; absent = no extras) · extras-size default = inherit main split ·
   D1 (full push→dummy→fetch→restore lifecycle) · E1 (additive rollback; main contract byte-for-byte unchanged).
-- **Last updated:** 2026-06-29 (Step 0 = `415ae4b`; Step 1 done + committing; Step 2 next).
+- **Last updated:** 2026-06-29 (Step 0 `415ae4b`, Step 1 `dccd993`, Step 2 done + committing; Step 3 next — the
+  multi-candidate step with the 🚦 user checkpoint).
 
 ## ▶ NEXT ACTION
-**Step 2 — CLI parsing for `--extras` / `--extras-size` / `--fetchExtras` + new `add_extras` command.** [model: sonnet].
-Dispatch the sonnet executor against `main.py` dispatch (argv walkers ~7603–7895) + a new pure `parse_extras_tokens`
-helper near `parse_push_group_args`. The Step 1 helpers (`_extras_title_id`/`scan_extras_folders`/
-`merge_extras_into_title`) are in place for Step 2 to wire into. Do NOT re-run the planner; do NOT re-open Cards A–E.
-At Step 3, honor the 🚦 candidate checkpoint (stop for the user's pick before merging).
+**Step 3 — Extras upload phase (independent chunk size; resumable). [model: opus] [candidates: 2] — MULTI-CANDIDATE.**
+Create the feature-branch candidate worktrees (A = refactor `cmd_push` core into shared `_upload_file`; B = isolated
+`push_one_extra` duplication, `cmd_push` untouched), run each opus candidate, then the judge writes `DECISION.md`.
+**🚦 THEN STOP — do NOT auto-merge.** Relay the judge's full analysis + recommendation to the user and let the user
+pick the candidate to merge. Only after the user's explicit choice: merge → smoke gate on merged result → commit.
+The Step 2 markers `# IMP-D19 Step 3:` in `cmd_push`/`cmd_push_group`/autopilots show where the upload call wires in.
+Do NOT re-run the planner; do NOT re-open Cards A–E.
 
 ## Resume protocol (first thing a new session does)
 1. `git fetch && git checkout feature/imp_d19_extras` (or create it from `main` if it does not exist — first run).
@@ -31,8 +34,8 @@ At Step 3, honor the 🚦 candidate checkpoint (stop for the user's pick before 
 | Step | Description | Status | Completing SHA | Tests | Notes |
 |------|-------------|--------|----------------|-------|-------|
 | 0  | Scaffold + commit this execution journal | done | 415ae4b | n/a | plan + DECISIONS + journal committed onto the branch |
-| 1  | Extras data model + scan/merge/dedup core (A2 grouped) | done | (this commit) | smoke 72✓, schema-guard 2✓, self-check 8/8✓ | [model: opus] `_extras_title_id`/`scan_extras_folders`/`merge_extras_into_title` + ENTRY_TYPE_KEYS comment; `re_hashed` dropped (not True) on byte-change |
-| 2  | CLI parsing `--extras`/`--extras-size`/`--fetchExtras` + `add_extras` | pending | — | — | [model: sonnet] |
+| 1  | Extras data model + scan/merge/dedup core (A2 grouped) | done | dccd993 | smoke 72✓, schema-guard 2✓, self-check 8/8✓ | [model: opus] `_extras_title_id`/`scan_extras_folders`/`merge_extras_into_title` + ENTRY_TYPE_KEYS comment; `re_hashed` dropped (not True) on byte-change |
+| 2  | CLI parsing `--extras`/`--extras-size`/`--fetchExtras` + `add_extras` | done | (this commit) | cli-parsers 29✓, smoke 72✓ | [model: sonnet] `parse_extras_tokens`; 6 cmds + argv walkers; `cmd_add_extras` routed; `--fetchExtras`(+aliases) on fetch/fetch_restore; prep/prep_season/add_extras scan+merge; markers left for Steps 3/4/5. `--extras-size none`→`('NONE',None)` |
 | 3  | Extras upload phase (independent chunk size; resumable) | pending | — | — | [model: opus] **multi-candidate (2)** — judge required |
 | 4  | Extras replace (dummy) phase for reclaim | pending | — | — | [model: opus] rollback-adjacent (E1) |
 | 5  | Extras fetch (flag-only `--fetchExtras`, no prompt) | pending | — | — | [model: opus] |

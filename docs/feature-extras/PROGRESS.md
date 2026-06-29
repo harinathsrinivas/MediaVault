@@ -11,14 +11,14 @@
   (`add_extras` cmd + `--extras`/`--extras-size` on prep/push family) · C = FLAG-ONLY (`--fetchExtras`, aliases
   `--fetch-extras`/`--extras`/`--extra`; no prompt; absent = no extras) · extras-size default = inherit main split ·
   D1 (full push→dummy→fetch→restore lifecycle) · E1 (additive rollback; main contract byte-for-byte unchanged).
-- **Last updated:** 2026-06-29 (branch `feature/imp_d19_extras` created from `8a3c38a`; Step 0 committing the plan +
-  journal; Step 1 next).
+- **Last updated:** 2026-06-29 (Step 0 = `415ae4b`; Step 1 done + committing; Step 2 next).
 
 ## ▶ NEXT ACTION
-**Step 1 — Extras data model + scan/merge/dedup core (A2 grouped per source folder).** [model: opus]. Dispatch the
-opus executor against `main.py` (data layer near `cmd_prep_season` + the `ENTRY_TYPE_KEYS` comment). Do NOT re-run the
-planner and do NOT re-open Cards A–E. At Step 3, honor the 🚦 candidate checkpoint (stop for the user's pick before
-merging).
+**Step 2 — CLI parsing for `--extras` / `--extras-size` / `--fetchExtras` + new `add_extras` command.** [model: sonnet].
+Dispatch the sonnet executor against `main.py` dispatch (argv walkers ~7603–7895) + a new pure `parse_extras_tokens`
+helper near `parse_push_group_args`. The Step 1 helpers (`_extras_title_id`/`scan_extras_folders`/
+`merge_extras_into_title`) are in place for Step 2 to wire into. Do NOT re-run the planner; do NOT re-open Cards A–E.
+At Step 3, honor the 🚦 candidate checkpoint (stop for the user's pick before merging).
 
 ## Resume protocol (first thing a new session does)
 1. `git fetch && git checkout feature/imp_d19_extras` (or create it from `main` if it does not exist — first run).
@@ -30,8 +30,8 @@ merging).
 ## Step status
 | Step | Description | Status | Completing SHA | Tests | Notes |
 |------|-------------|--------|----------------|-------|-------|
-| 0  | Scaffold + commit this execution journal | done | (this commit) | n/a | plan + DECISIONS + journal committed onto the branch |
-| 1  | Extras data model + scan/merge/dedup core (A2 grouped) | pending | — | — | [model: opus] shared data contract |
+| 0  | Scaffold + commit this execution journal | done | 415ae4b | n/a | plan + DECISIONS + journal committed onto the branch |
+| 1  | Extras data model + scan/merge/dedup core (A2 grouped) | done | (this commit) | smoke 72✓, schema-guard 2✓, self-check 8/8✓ | [model: opus] `_extras_title_id`/`scan_extras_folders`/`merge_extras_into_title` + ENTRY_TYPE_KEYS comment; `re_hashed` dropped (not True) on byte-change |
 | 2  | CLI parsing `--extras`/`--extras-size`/`--fetchExtras` + `add_extras` | pending | — | — | [model: sonnet] |
 | 3  | Extras upload phase (independent chunk size; resumable) | pending | — | — | [model: opus] **multi-candidate (2)** — judge required |
 | 4  | Extras replace (dummy) phase for reclaim | pending | — | — | [model: opus] rollback-adjacent (E1) |

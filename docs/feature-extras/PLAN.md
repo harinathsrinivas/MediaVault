@@ -401,7 +401,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
   - Acceptance: `PROGRESS.md` exists on the branch, lists every step, and names Step 1 as the NEXT ACTION; a fresh
     checkout + read of PLAN/DECISIONS/PROGRESS unambiguously says "do Step 1 next."
 
-- [ ] 1. [model: opus] [effort: high] Extras data model + pure scan/merge/dedup core.
+- [x] 1. [model: opus] [effort: high] Extras data model + pure scan/merge/dedup core.
   - Files: `main.py` (new helpers near the data layer / `cmd_prep_season`; `ENTRY_TYPE_KEYS` comment `144-148`).
   - Details (Card A = A2 — GROUPED per source folder): Define the nested block grouped per source folder:
     `entry["extras"] = {"groups": { "<group_rel>": {"added_date": "<YYYY-MM-DD>", "items": [ {filename, sub_rel,

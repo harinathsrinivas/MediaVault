@@ -130,6 +130,18 @@ CATEGORY_ROOTS = {
 #                      No physical-file keys at all — dereferencing folder_path/
 #                      filename on it is the PR #21 crash class.
 #
+# OPTIONAL nested blocks add NO entry type and are in NO `required` set —
+# `metadata`/`tech_spec`/`split_info`/`parent_id` on a leaf, and (IMP-D19) an
+# `extras` block on a TITLE entry: the movie *leaf*, or the *season_map* for
+# series/anime/others. Exactly like `split_info`, `extras` just nests on an
+# existing entry and round-trips through save_library/load_library — it changes
+# no `required`/`physical` set and adds no type. Shape (Card A2 — grouped per
+# source folder): extras = {"groups": {"<group_rel>": {"added_date", "items":
+# [ {filename, sub_rel, short_id, hash, status, uploaded, search_term,
+# tech_spec, [split_info], [re_hashed]}, ... ]}}}, where group_rel is the extra
+# folder's path relative to the title's folder_path and sub_rel is the file's
+# path within that group (see scan_extras_folders / docs/feature-extras/DECISIONS.md).
+#
 # `required` = keys that distinguish the type and are always present; it is the
 # minimal set, not the exhaustive set (leaves also carry hash/metadata/etc.).
 # `physical` = "this entry owns a physical file on disk" (has folder_path AND
@@ -3586,6 +3598,189 @@ def _rewrite_folder_path(folder_path, old_folder, new_folder):
     # `season 01`), so the subfolder's real name is preserved when joined onto new.
     tail = os.path.relpath(abs_fp, old_folder)
     return os.path.normpath(os.path.join(new_folder, tail))
+
+
+# ==========================================
+#   EXTRAS DATA LAYER (Specials / Trailers / …)
+# ==========================================
+# IMP-D19 — an "extras" block is an OPTIONAL nested field on the TITLE entry (the
+# season_map for series/anime/others, the movie leaf for movies) that carries
+# extra videos — a Specials / Trailers / Behind-the-Scenes subfolder — so they
+# run through the SAME push/replace/fetch/restore lifecycle as main content.
+#
+# Shape (Card A2 — GROUPED per source folder; docs/feature-extras/DECISIONS.md):
+#   entry["extras"] = {"groups": {
+#       "<group_rel>": {                    # extra folder path RELATIVE to the title folder
+#           "added_date": "YYYY-MM-DD",     # e.g. "Specials", "Extra", nested "Bonus/Trailers"
+#           "items": [ {filename, sub_rel, short_id, hash, status, uploaded,
+#                       search_term, tech_spec, [split_info], [re_hashed]}, ...]}}}
+# Each item mirrors a leaf's scan-derived fields. `sub_rel` is the file's path
+# WITHIN its group (just the filename when the group is flat). The "groups"
+# wrapper keeps an arbitrary folder name from ever colliding with a reserved key.
+# An item's on-disk / restore path = <title folder_path>/<group_rel>/<sub_rel>.
+# De-dup / additive identity = per group, by normalized `sub_rel`.
+
+# Internal folders never scanned as extras content (the *_DIR_NAME values are the
+# shared mvcommon constants; same idea as cmd_scan_unprepped's walk-excludes).
+_EXTRAS_EXCLUDE_DIRS = {SPLIT_DIR_NAME, CHECKSUM_DIR_NAME, RESTORE_DIR_NAME,
+                        ".git", ".idea", "__pycache__"}
+
+
+def _extras_rel_posix(rel):
+    """Normalize an os.path.relpath result to forward-slash form so a stored
+    group_rel/sub_rel is portable and the short_id seed is deterministic. The
+    realistic one-level-flat case (no separators) is unchanged; a nested spec
+    gains '/' separators."""
+    return rel.replace(os.sep, "/")
+
+
+def _extras_title_id(library, mid):
+    """Resolve `mid` to the id of the TITLE entry an extras block attaches to:
+
+      - season_map (series/anime/others) -> itself (it IS the title)
+      - episode leaf / multi_ep_alias     -> its parent_id season_map
+      - movie leaf (no usable parent)     -> itself
+
+    Returns the title id, or None if `mid` is absent or cannot resolve to a
+    title. Uses _resolve_alias (defined later, in the push/group region) to
+    follow a combined-episode alias one hop to its primary leaf first."""
+    if mid not in library:
+        return None
+    real_id, entry = _resolve_alias(library, mid)
+    if entry.get("type") == "multi_ep_alias":
+        return None  # alias whose primary is missing — no resolvable title
+    if entry.get("type") == "season_map":
+        return real_id
+    # Leaf: an episode (has a parent_id season_map) -> the parent; a movie -> itself.
+    parent_id = entry.get("parent_id")
+    if parent_id and parent_id in library:
+        return parent_id
+    return real_id
+
+
+def scan_extras_folders(folder_specs, title_folder_path, title_id):
+    """Recursively scan each extra folder for videos; return the scanned groups
+    keyed by group_rel: {group_rel: {"items": [item, ...]}}.
+
+    `folder_specs` is a LIST of folder paths (the caller has already `;`-split
+    and flattened the repeated --extras flag); a single string is tolerated.
+    Each folder spec becomes ONE group whose key is its path relative to the
+    title folder (group_rel), and every VIDEO_EXTENSIONS file inside it is
+    collected recursively as one item with sub_rel = the file's path within the
+    group. Each item is hashed (calculate_file_hash) and tech-scanned
+    (get_tech_specs); status="local_ready", uploaded=False. short_id is seeded
+    from title_id + group_rel + sub_rel (NOT the bare filename) so the same
+    basename in two groups never collides. PURE: no upload, no library/device
+    I/O (the .endswith match also catches the real `.mkv.mkv` double extension)."""
+    if isinstance(folder_specs, str):
+        folder_specs = [folder_specs]
+
+    scanned = {}
+    for raw in folder_specs:
+        spec = (raw or "").strip().strip('"').strip("'").strip()
+        if not spec:
+            continue
+        folder = os.path.abspath(spec)
+        if not os.path.isdir(folder):
+            print(f"⚠️  Extras folder not found, skipping: {folder}")
+            continue
+
+        # group_rel = the folder's path relative to the title folder. Fall back
+        # to its basename if it is not under the title folder (or on another
+        # drive — os.path.relpath raises ValueError across Windows volumes).
+        try:
+            group_rel = os.path.relpath(folder, title_folder_path)
+            if group_rel == os.pardir or group_rel.startswith(os.pardir + os.sep):
+                group_rel = os.path.basename(folder)
+        except ValueError:
+            group_rel = os.path.basename(folder)
+        group_rel = _extras_rel_posix(group_rel)
+
+        # De-dup within this scan against any items the same group already
+        # collected (e.g. the same folder passed twice, or a basename collision).
+        prior = scanned.get(group_rel)
+        seen_sub = {_extras_rel_posix(it["sub_rel"]) for it in prior["items"]} if prior else set()
+
+        for root, dirs, files in os.walk(folder):
+            dirs[:] = [d for d in dirs if d not in _EXTRAS_EXCLUDE_DIRS]
+            for fn in sorted(files):
+                if not fn.lower().endswith(VIDEO_EXTENSIONS):
+                    continue
+                file_path = os.path.join(root, fn)
+                sub_rel = _extras_rel_posix(os.path.relpath(file_path, folder))
+                if sub_rel in seen_sub:
+                    continue
+                seen_sub.add(sub_rel)
+
+                short_id = generate_short_id(f"{title_id}::{group_rel}/{sub_rel}")
+                name_no_ext, ext = os.path.splitext(fn)
+                scanned.setdefault(group_rel, {"items": []})["items"].append({
+                    "filename": fn,
+                    "sub_rel": sub_rel,
+                    "short_id": short_id,
+                    "hash": calculate_file_hash(file_path),
+                    "status": "local_ready",
+                    "uploaded": False,
+                    "search_term": f"{name_no_ext} [{short_id}]{ext}",
+                    "tech_spec": get_tech_specs(file_path),
+                })
+
+    # Deterministic item order within every group (empty folders produce no group).
+    for group in scanned.values():
+        group["items"].sort(key=lambda it: it["sub_rel"])
+    return scanned
+
+
+def merge_extras_into_title(library, title_id, scanned):
+    """Additively / idempotently merge `scanned` (the output of
+    scan_extras_folders) into the title entry's extras.groups:
+
+      - a NEW group_rel  -> a new group, stamped with today's `added_date`;
+      - an EXISTING group -> items merged by normalized sub_rel:
+            * a new sub_rel is appended,
+            * an unchanged one (same hash) is a no-op,
+            * one whose hash CHANGED is updated and reset to the unblessed,
+              needs-re-push state (uploaded=False, status="local_ready", any
+              stale split_info / re_hashed dropped).
+
+    So adding Specials then Trailers later equals adding both at once, and
+    re-adding an unchanged group is a no-op. Mutates and returns `library`."""
+    entry = library.get(title_id)
+    if entry is None:
+        return library  # caller resolves title_id first; nothing to attach to
+
+    groups = entry.setdefault("extras", {}).setdefault("groups", {})
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    for group_rel, gdata in scanned.items():
+        if group_rel not in groups:
+            groups[group_rel] = {"added_date": today, "items": []}
+        target = groups[group_rel]
+        by_sub = {_extras_rel_posix(it["sub_rel"]): it for it in target["items"]}
+
+        for item in gdata.get("items", []):
+            key = _extras_rel_posix(item["sub_rel"])
+            existing = by_sub.get(key)
+            if existing is None:
+                target["items"].append(item)
+                by_sub[key] = item
+            elif existing.get("hash") != item.get("hash"):
+                # Bytes changed: refresh scan-derived fields and return the item
+                # to the unblessed / needs-re-push state — its cloud copy and any
+                # chunk hashes are now stale. Mirrors cmd_push clearing re_hashed
+                # so a later split-restore re-blesses for the NEW bytes rather
+                # than false-mismatching against a stale canonical hash.
+                existing["hash"] = item.get("hash")
+                existing["tech_spec"] = item.get("tech_spec")
+                existing["uploaded"] = False
+                existing["status"] = "local_ready"
+                existing.pop("split_info", None)
+                existing.pop("re_hashed", None)
+            # else: identical hash -> idempotent no-op.
+
+        target["items"].sort(key=lambda it: it["sub_rel"])
+
+    return library
 
 
 def cmd_prep_season(base_id, folder_path):

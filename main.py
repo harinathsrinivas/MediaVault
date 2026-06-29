@@ -3810,6 +3810,135 @@ def _extras_scan_merge_and_save(library, mid, extras):
     print(f"✅ Extras merged into {title_id}: {groups_str} ({total} total item{'s' if total != 1 else ''}).")
 
 
+def push_one_extra(library, title_id, group_rel, item, split_method, split_val, device_id=None):
+    """[IMP-D19 Step 3] Upload ONE extra item to its device, mirroring its on-disk
+    subfolder onto the phone, through the shared ``_upload_file`` core — so an extra
+    is pushed by byte-for-byte the SAME protocol (split -> hash -> ``.partial``+
+    atomic-rename+``mvcommon.retry`` -> delete chunk -> mvmeta sidecar) as main
+    content, and every future push fix applies to extras automatically.
+
+    The item's on-disk path is ``<title folder_path>/<group_rel>/<sub_rel>``; the
+    remote dir mirrors that file's FOLDER under ``REMOTE_ROOT`` (reusing cmd_push's
+    relpath->basename fallback for paths not under LOCAL_ROOT / on another volume).
+    O-1 resumable per file (no point-of-no-return): a half-pushed extra resumes on a
+    re-run. Mutates ``item`` (split_info / uploaded / status) and saves the library
+    via ``_upload_file``. Returns the upload success bool."""
+    title_entry = library.get(title_id, {})
+    title_folder = title_entry.get("folder_path", "")
+    # group_rel / sub_rel are stored POSIX-style; rebuild the native on-disk path.
+    group_parts = [p for p in group_rel.split("/") if p]
+    sub_parts = [p for p in item["sub_rel"].split("/") if p]
+    local_file_path = os.path.join(title_folder, *group_parts, *sub_parts)
+    local_folder = os.path.dirname(local_file_path)
+    short_id = item["short_id"]
+
+    print(f"\n   🎬 EXTRA: {group_rel}/{item['sub_rel']}")
+    if not os.path.exists(local_file_path):
+        print(f"   ❌ Extra source missing: {local_file_path}")
+        return False
+
+    # Remote dir mirrors the extra's on-disk folder (Specials/ , Extra/ , …).
+    try:
+        rel_path = os.path.relpath(local_folder, LOCAL_ROOT)
+    except Exception:
+        rel_path = os.path.basename(local_folder)
+    remote_target_dir = f"{REMOTE_ROOT}/{rel_path}".replace("\\", "/")
+    print(f"   > Target: {remote_target_dir}")
+    if device_id:
+        print(f"   > Device: {device_id}")
+    adb_base = ["adb", "-s", device_id] if device_id else ["adb"]
+    safe_remote_dir = remote_target_dir.replace("'", "'\\''")
+    try:
+        subprocess.run(adb_base + ["shell", "mkdir", "-p", f"'{safe_remote_dir}'"], check=True)
+    except Exception as e:
+        print(f"   ❌ ADB Connection Failed (extra). {e}")
+        return False
+
+    # Extras never redirect chunks to a temp volume (OD-1 is out of scope for v1),
+    # so base_dir == the extra's own folder. journal_split_info=False because an
+    # extra item is NOT a top-level library id (the journal's set_field inverse is
+    # library-keyed); its stale split_info after a pre-upload rollback is harmless —
+    # a re-run re-splits and overwrites it. resume_hint names the real resume cmd.
+    return _upload_file(
+        local_file_path, local_folder, local_folder, short_id, remote_target_dir,
+        adb_base, item, short_id, library,
+        split_method=split_method, split_val=split_val, chunk_range=None,
+        eager_rehash=False, temp_dir=None,
+        journal_split_info=False, run_consistency_warn=False,
+        resume_hint=f"push {title_id} --extras",
+    )
+
+
+def push_title_extras(library, title_id, extras_size, device_id, split_method=None, split_val=None):
+    """[IMP-D19 Step 3] Upload every not-yet-``uploaded`` extra of ``title_id``.
+
+    INDEPENDENT chunk size (Card B): use ``extras_size`` — a ``(method, val)`` tuple,
+    or ``('NONE', None)`` for whole-file — when given; when it is ``None``, INHERIT
+    the command's main split (``split_method``/``split_val``); if there is no main
+    split either, push the extras whole-file. Each pending item goes through
+    ``push_one_extra`` (the shared O-1 upload core). STOPS on the first failed item
+    so a shared ``_parts/`` (two extras in the same Specials/ folder) can never be
+    contaminated by a half-pushed leftover — the partial upload stays resumable
+    (re-run ``push <id> --extras``). Returns True iff every pending extra uploaded
+    (or there were none)."""
+    entry = library.get(title_id)
+    if not entry:
+        return True
+    groups = entry.get("extras", {}).get("groups", {})
+    if not groups:
+        return True
+
+    # Resolve the INDEPENDENT extras chunk size (default = inherit the main split).
+    if extras_size is None:
+        ex_method, ex_val = split_method, split_val      # inherit the main split
+    elif extras_size[0] == "NONE":
+        ex_method, ex_val = None, None                   # explicit whole-file
+    else:
+        ex_method, ex_val = extras_size                  # explicit independent split
+
+    pending = [(g_rel, item)
+               for g_rel, g in sorted(groups.items())
+               for item in g.get("items", [])
+               if not item.get("uploaded")]
+    if not pending:
+        print(f"   > ℹ️  All extras for {title_id} are already uploaded.")
+        return True
+
+    print(f"\n=== 🎬 EXTRAS UPLOAD: {title_id} ({len(pending)} pending) ===")
+    if ex_method and ex_val:
+        print(f"   > Extras chunk size: {ex_method} {ex_val}")
+    else:
+        print("   > Extras chunk size: whole-file (unchunked)")
+
+    for g_rel, item in pending:
+        if not push_one_extra(library, title_id, g_rel, item, ex_method, ex_val, device_id):
+            print(f"\n⚠️ Stopping extras upload at {g_rel}/{item.get('sub_rel')} (push incomplete).")
+            print(f"   > Already-uploaded extras are intact. Resume with: push {title_id} --extras")
+            return False
+
+    print(f"\n✅ Extras upload complete for {title_id}.")
+    return True
+
+
+def _push_extras_for(mid, extras, extras_size, device_id, split_method, split_val):
+    """[IMP-D19 Step 3] Push-family wiring helper: resolve ``mid`` to its title id,
+    optionally scan+merge any given ``extras`` folders (additive/idempotent), then
+    upload all pending extras with the command's main split as the inherit default.
+    Pass ``extras=None`` to skip the scan (e.g. cmd_add_extras already merged). Loads
+    and saves the library itself. Returns push_title_extras's success bool."""
+    library = load_library()
+    title_id = _extras_title_id(library, mid)
+    if not title_id:
+        if extras:
+            print(f"⚠️  Could not resolve a title entry for extras (id: {mid}).")
+        return False
+    if extras:
+        _extras_scan_merge_and_save(library, title_id, extras)
+        library = load_library()
+    return push_title_extras(library, title_id, extras_size, device_id,
+                             split_method=split_method, split_val=split_val)
+
+
 def cmd_prep_season(base_id, folder_path, extras=None, extras_size=None):
     print(f"=== BATCH PREP: {base_id} ===")
     folder_path = folder_path.strip('"').strip("'")
@@ -4038,6 +4167,336 @@ def _verify_chunk_hash(adb_base, remote_path, safe_path, expected_sha256):
         )
 
 
+def _upload_file(
+    local_file_path, local_folder, base_dir, short_id, remote_target_dir,
+    adb_base, entry, manual_id, library,
+    split_method=None, split_val=None, chunk_range=None,
+    eager_rehash=False, temp_dir=None,
+    journal_split_info=True, run_consistency_warn=True, resume_hint=None,
+):
+    """[IMP-D19 Step 3 — refactor-for-reuse] The single source of truth for pushing
+    ONE physical file (optionally split into chunks) to ``remote_target_dir``.
+
+    Used by BOTH cmd_push (the main-content leaf) AND push_one_extra (each extra
+    item), so the on-device upload PROTOCOL — split -> hash chunks -> upload to
+    ``<final>.partial`` -> atomic ``mv`` (wrapped in mvcommon.retry) -> delete the
+    local chunk -> write the per-file mvmeta sidecar — lives in exactly one place.
+
+    O-1, NO POINT-OF-NO-RETURN: the master file always survives, so chunks can be
+    re-split/re-pushed; this never calls journal.mark_point_of_no_return(). It opens
+    its own durable RollbackJournal scoped to ``(local_folder, manual_id)``, records
+    ONLY this-run split-artifact creations (so a resume ``_parts/`` is never
+    journalled or removed), and on:
+      - full success            -> writes mvmeta, flips entry uploaded=True /
+                                   status="onboarded", saves, commits the journal;
+      - partial (chunk_range)   -> commits, leaves the entry unflipped;
+      - post-upload failure      -> commits and prints the O-1 resume message (NO
+                                   rollback — the partial upload is resumable);
+      - pre-upload failure       -> rolls back ONLY this-run artifacts.
+
+    Mutates ``entry`` (split_info / re_hashed / uploaded / status) and saves
+    ``library``. ``entry`` is ``library[manual_id]`` for the main leaf, or the extras
+    item dict for an extra. Returns the bool the caller should return (True on
+    success incl. a chunk_range partial).
+
+    Extras-only knobs (defaults reproduce cmd_push BYTE-FOR-BYTE — E1 / change-gate):
+      journal_split_info   – journal the split_info field set (True for a library-id
+                             leaf; False for an extras item, which is not a top-level
+                             library id — a re-run re-splits and overwrites any stale
+                             split_info, so leaving it is harmless).
+      run_consistency_warn – run the IMP-D4 post-commit leaf consistency warning
+                             (main only; an extras item is not a leaf entry).
+      resume_hint          – command printed in the O-1 resume message (defaults to
+                             ``push <manual_id>``).
+    """
+    resume_hint = resume_hint or f"push {manual_id}"
+    parts_dir = os.path.join(base_dir, SPLIT_DIR_NAME)
+    checksum_dir = os.path.join(local_folder, CHECKSUM_DIR_NAME)
+    filename = os.path.basename(local_file_path)
+
+    files_to_upload_paths = []
+    chunk_metadata = []
+
+    # [ROLLBACK C] Open a durable journal for the pre-upload window. Record which
+    # split artifacts pre-existed so only this-run ones are ever journalled (a
+    # resume _parts/ gets no create_dir record and is never removed). NO PONR (O-1):
+    # a failure after some chunks uploaded is the resume-message case, not a rollback.
+    journal = RollbackJournal(local_folder, manual_id)
+    parts_preexisted = os.path.exists(parts_dir)
+    checksum_preexisted = os.path.exists(checksum_dir)
+    split_info_preexisted = "split_info" in entry
+    any_upload_done = False
+    # 1. CHECK FOR RESUME (Existing _parts folder)
+    if os.path.exists(parts_dir) and os.listdir(parts_dir):
+        files_to_upload_paths = sorted(
+            [os.path.join(parts_dir, f) for f in os.listdir(parts_dir) if f.endswith(".mkv")])
+        print(f"   > 🔄 Resuming {len(files_to_upload_paths)} chunks found in temp folder.")
+
+    # 2. NEW SPLIT LOGIC
+    elif split_method and split_val:
+        # Simple size check: If splitting by Size, check if file is smaller than target
+        should_split = True
+        if split_method in ["SIZE_MB", "SIZE_GB"]:
+            fsize_mb = os.path.getsize(local_file_path) / (1024 * 1024)
+            target_mb = float(split_val) if split_method == "SIZE_MB" else float(split_val) * 1024
+            if fsize_mb < target_mb:
+                print(
+                    f"   > File size ({fsize_mb:.0f}MB) is smaller than split limit ({target_mb:.0f}MB). Skipping split.")
+                should_split = False
+
+        if should_split:
+            # HARD DISK PRE-FLIGHT — STOP before splitting if there is no room. This
+            # is a READ-ONLY check BEFORE any makedirs/journal record, so nothing was
+            # created and there is NOTHING to roll back (a clean early return).
+            file_size = os.path.getsize(local_file_path)
+            check_dir = temp_dir if temp_dir else local_folder
+            if not _free_space_ok(check_dir, file_size, True, eager_rehash):
+                free, required, _short = _disk_shortfall(
+                    check_dir, file_size, True, eager_rehash)
+                print(f"❌ Not enough free space to split {manual_id}.")
+                print(f"   Need ~{human_readable_size(required)} free in {check_dir} "
+                      f"({'chunks + merge temp' if eager_rehash else 'chunks'} + buffer); "
+                      f"only {human_readable_size(free)} available.")
+                print("   Free up space, or pass a temp dir on another volume.")
+                if eager_rehash:
+                    print("   (Or drop the `rehash` token to halve the need — deferred re-hash uses 1X, not 2X.)")
+                return False
+            print(f"   > ✂️ Splitting...")
+            # [ROLLBACK C] Journal the dir creations (this run only) BEFORE makedirs.
+            if not parts_preexisted:
+                journal.record_create_dir(parts_dir)
+            if not checksum_preexisted:
+                journal.record_create_dir(checksum_dir)
+            os.makedirs(parts_dir, exist_ok=True)
+            os.makedirs(checksum_dir, exist_ok=True)
+
+            # Pass short_id so chunk names carry the UID ("<base> [<uid>].chunk.NNN.mkv").
+            files_to_upload_paths = split_video_file(local_file_path, parts_dir, split_method, split_val,
+                                                     file_id=short_id)
+            if not files_to_upload_paths:
+                # Split failed pre-any-upload — replay journalled inverses.
+                journal.rollback(library)
+                return False  # Stop if split failed
+
+            # Hash Chunks
+            for chunk_path in files_to_upload_paths:
+                c_name = os.path.basename(chunk_path)
+                c_hash = calculate_file_hash(chunk_path)
+                chunk_metadata.append({"filename": c_name, "hash": c_hash})
+                # Save sidecar
+                with open(os.path.join(checksum_dir, f"{c_name}.sha256"), 'w') as f: f.write(f"{c_hash} *{c_name}")
+
+            # Save split info IMMEDIATELY. A pre-any-upload rollback pops it ONLY when
+            # journalled (main leaf) AND it did not pre-exist (a prior interrupted push).
+            if journal_split_info and not split_info_preexisted:
+                journal.record_set_field(manual_id, "split_info", existed=False, prior=None)
+            entry["split_info"] = {
+                "is_split": True, "method": split_method, "val": split_val,
+                "total_chunks": len(files_to_upload_paths), "chunks": chunk_metadata
+            }
+            # RE-SPLIT REHASH RESET (new-split branch only): fresh chunks replaced the
+            # old split_info, so any stale canonical fields are dropped; clearing
+            # re_hashed means a re-push ends unblessed so the next split restore
+            # re-blesses for the NEW chunks. Writes the SAFE (unblessed) state -> no
+            # journalling needed (a push rollback leaving re_hashed=False is correct).
+            entry["re_hashed"] = False
+
+            # EAGER bless-at-push (only when requested AND a NEW split happened): merge
+            # the just-created chunks into a throwaway temp and stage the deterministic
+            # canonical hash for promotion at cmd_replace. Best-effort — ANY failure
+            # cleans up, warns, and continues as deferred. The push stays PONR-less.
+            if eager_rehash:
+                seed = short_id or manual_id
+                base = os.path.splitext(filename)[0]
+                rehash_tmp = os.path.join(base_dir, f"{base}.rehash_tmp.mkv")
+                try:
+                    print(f"   > 🧬 Eager canonical re-hash: merging {len(files_to_upload_paths)} chunks (seed={seed})...")
+                    merged_ok = merge_video_files(files_to_upload_paths, rehash_tmp, seed=seed)
+                    canonical = calculate_file_hash(rehash_tmp) if merged_ok else None
+                    if merged_ok and canonical:
+                        entry["split_info"]["merge_seed"] = seed
+                        entry["split_info"]["merge_tool"] = _current_merge_tool()
+                        entry["split_info"]["canonical_hash"] = canonical
+                        print(f"   > 🧬 Eager canonical hash staged (promotes at replace): {canonical}")
+                    else:
+                        print("   ⚠️ Eager re-hash did not produce a hash — continuing as deferred (will bless at first restore).")
+                except Exception as e:
+                    print(f"   ⚠️ Eager re-hash failed ({e}) — continuing as deferred (will bless at first restore).")
+                finally:
+                    if os.path.exists(rehash_tmp):
+                        try:
+                            os.remove(rehash_tmp)
+                        except Exception:
+                            pass
+
+            save_library(library)
+        else:
+            files_to_upload_paths = [local_file_path]
+    else:
+        # Standard Push
+        files_to_upload_paths = [local_file_path]
+
+    # 2.5 FILTER CHUNKS BY RANGE (IF REQUESTED) — AFTER splitting, BEFORE uploading.
+    if chunk_range and files_to_upload_paths:
+        try:
+            start, end = map(int, chunk_range.split('-'))
+            print(f"   > 🎯 Filter: Uploading chunks {start} to {end} only.")
+
+            filtered_files = []
+            for f in files_to_upload_paths:
+                # Extract chunk number from filename: .chunk.001.mkv
+                match = re.search(r'\.chunk\.(\d+)\.', os.path.basename(f))
+                if match:
+                    chunk_num = int(match.group(1))
+                    if start <= chunk_num <= end:
+                        filtered_files.append(f)
+                else:
+                    # Keep non-chunk files just in case
+                    filtered_files.append(f)
+
+            files_to_upload_paths = filtered_files
+            if not files_to_upload_paths:
+                print(f"   ⚠️ No chunks found in range {chunk_range}. (They might already be uploaded/deleted)")
+                return False
+        except ValueError:
+            print("❌ Invalid chunk range format. Use '1-4'.")
+            return False
+
+    # Build expected per-chunk hashes for optional post-push remote verification.
+    _chunk_hashes: dict = {}
+    if chunk_metadata:
+        _chunk_hashes = {c["filename"]: c["hash"] for c in chunk_metadata
+                         if c.get("hash")}
+    elif "split_info" in entry:
+        _chunk_hashes = {
+            c["filename"]: c["hash"]
+            for c in entry["split_info"].get("chunks", [])
+            if c.get("hash")
+        }
+
+    # 3. UPLOAD LOOP
+    all_success = True
+    for f in files_to_upload_paths:
+        local_fname = os.path.basename(f)
+
+        # Rename standard (non-chunk) single files on the remote: "<name> [<uid>]<ext>".
+        remote_fname = local_fname
+        if SPLIT_DIR_NAME not in f:  # This is a standard file, not a chunk
+            name, ext = os.path.splitext(local_fname)
+            remote_fname = f"{name} [{short_id}]{ext}"
+
+        print(f"     -> Pushing: {remote_fname}...", end=" ", flush=True)
+        try:
+            # Upload to "<final>.partial" first, then atomically rename only after the
+            # push succeeds. A mid-push death leaves a ".partial" Google Photos never
+            # indexes as a complete chunk; a resume re-pushes to ".partial".
+            remote_full_path = f"{remote_target_dir}/{remote_fname}"
+            remote_partial_path = remote_full_path + PARTIAL_SUFFIX
+            safe_partial = remote_partial_path.replace("'", "'\\''")
+            safe_final = remote_full_path.replace("'", "'\\''")
+
+            # [IMP-C2] Wrap push + atomic mv in mvcommon.retry() (3 attempts, 1/4/16s
+            # backoff). on_retry rm's the stale ".partial" before each re-attempt.
+            def _push_and_rename():
+                subprocess.run(adb_base + ["push", "-p", f, remote_partial_path], check=True)
+                subprocess.run(
+                    adb_base + ["shell", "mv", f"'{safe_partial}'", f"'{safe_final}'"],
+                    check=True,
+                )
+                # [IMP-C8] post-push remote hash verification (gated on PUSH_VERIFY_REMOTE).
+                if PUSH_VERIFY_REMOTE:
+                    expected = _chunk_hashes.get(local_fname)
+                    if expected:
+                        _verify_chunk_hash(adb_base, remote_full_path, safe_final, expected)
+
+            def _cleanup_and_log(attempt, exc):
+                print(f"⏳ Retry {attempt}/3 after {(1, 4, 16)[min(attempt - 1, 2)]}s (ADB push/verify failed)…")
+                subprocess.run(
+                    adb_base + ["shell", "rm", f"'{safe_partial}'"],
+                    check=False,
+                )
+
+            retry(
+                _push_and_rename,
+                attempts=3,
+                backoff=(1, 4, 16),
+                retry_on=(subprocess.CalledProcessError,),
+                on_retry=_cleanup_and_log,
+            )
+            print("✅")
+            # A chunk reached the device — past the pre-upload window. O-1: any later
+            # failure is the resume-message case, not a rollback.
+            any_upload_done = True
+
+            # DELETE LOCAL CHUNK after successful upload+rename (NOT a PONR — the chunk
+            # is reproducible from the surviving master via re-split). Safety: only
+            # delete files inside the SPLIT_DIR_NAME folder.
+            if SPLIT_DIR_NAME in f:
+                try:
+                    os.remove(f);
+                except:
+                    pass
+
+        except subprocess.CalledProcessError:
+            print("❌ FAIL (ADB Error)");
+            all_success = False;
+            break
+        except Exception as e:
+            print(f"❌ FAIL ({e})");
+            all_success = False;
+            break
+
+    if all_success:
+        # Cleanup temp dir if empty
+        if os.path.exists(parts_dir) and not os.listdir(parts_dir): os.rmdir(parts_dir)
+        # When chunks were redirected to temp_dir, the per-entry base_dir is now empty
+        # too — remove it ONLY when this run created it (guard on not parts_preexisted;
+        # base_dir != local_folder ensures local_folder is never touched).
+        if temp_dir and not parts_preexisted and base_dir != local_folder:
+            if os.path.isdir(base_dir) and not os.listdir(base_dir):
+                try:
+                    os.rmdir(base_dir)
+                except OSError:
+                    pass
+
+        # Only mark 'onboarded' if we uploaded ALL chunks (no range filter).
+        if not chunk_range:
+            # Best-effort remote disaster-recovery sidecar (a miss must NOT fail an
+            # otherwise-successful upload, so its return is ignored).
+            write_remote_mvmeta(adb_base, remote_target_dir, manual_id, entry)
+            entry["uploaded"] = True
+            entry["status"] = "onboarded"
+            save_library(library)
+            # [ROLLBACK C] Clean success — discard the journal.
+            journal.commit()
+            # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
+            if run_consistency_warn:
+                _warn_if_entry_inconsistent(entry, manual_id)
+            print("✅ SUCCESS.\n")
+            return True
+        else:
+            journal.commit()
+            if run_consistency_warn:
+                _warn_if_entry_inconsistent(entry, manual_id)
+            print(f"✅ Partial Upload Complete (Chunks {chunk_range}).\n")
+            return True
+    else:
+        # [ROLLBACK C] Push failed (O-1: NO PONR — the master survives).
+        if any_upload_done:
+            # Resume-message: leave the partial upload; keep local_ready/uploaded=False.
+            journal.commit()
+            print("❌ FAILED. Partial upload left in place (resumable).")
+            print(f"   > Entry stays local_ready / uploaded=False. Resume with: {resume_hint}\n")
+            return False
+        else:
+            # Pre-any-upload failure: replay this-run inverses (a resume _parts/ was
+            # never journalled, so it is preserved).
+            print("❌ FAILED before any chunk uploaded — rolling back this-run artifacts.")
+            journal.rollback(library)
+            print(f"   > Resume with: {resume_hint}\n")
+            return False
+
+
 def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, device_id=None, eager_rehash=False, temp_dir=None, extras=None, extras_size=None):
     print(f"--- PUSHING: {manual_id} ---")
     library = load_library()
@@ -4050,6 +4509,12 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
     # PARENT AWARENESS INFO
     if "parent_id" in entry:
         print(f"   > ℹ️  Part of Season: {entry['parent_id']}")
+
+    # IMP-D19 Step 3: `push <id> --extras` on an ALREADY-ARCHIVED main processes
+    # ONLY the extras — the dummied main leaf is never re-pushed (Card D).
+    if extras and entry.get("status") == "archived":
+        print("   > ℹ️  Main content already archived — processing extras only (main untouched).")
+        return _push_extras_for(manual_id, extras, extras_size, device_id, split_method, split_val)
 
     local_folder = entry['folder_path']
     filename = entry['filename']
@@ -4064,8 +4529,6 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
     if _tmperr:
         print(f"❌ {_tmperr}")
         return False
-    parts_dir = os.path.join(base_dir, SPLIT_DIR_NAME)
-    checksum_dir = os.path.join(local_folder, CHECKSUM_DIR_NAME)
 
     if not os.path.exists(local_file_path): print(f"❌ Source file missing."); return False
 
@@ -4092,353 +4555,26 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
         print(f"❌ Error: ADB Connection Failed. {e}");
         return False
 
-    files_to_upload_paths = []
-    chunk_metadata = []
+    # [REFACTOR-FOR-REUSE IMP-D19 Step 3] The per-file upload core (resume-detect →
+    # split → hash → .partial+rename+retry → delete → mvmeta → flip → journal
+    # commit/rollback + O-1 messaging) now lives in the shared _upload_file, called
+    # identically here for the main leaf and by push_one_extra for each extra. The
+    # main-content rollback contract (journal format/durability, NO PONR / O-1, the
+    # resume-message vs rollback split) is byte-for-byte unchanged (E1 / change-gate).
+    ok = _upload_file(
+        local_file_path, local_folder, base_dir, short_id, remote_target_dir,
+        adb_base, library[manual_id], manual_id, library,
+        split_method=split_method, split_val=split_val, chunk_range=chunk_range,
+        eager_rehash=eager_rehash, temp_dir=temp_dir,
+    )
 
-    # [ROLLBACK SPEC] cmd_push has NO rollback PONR (O-1). A push failure is
-    # RESUMABLE: the master survives, so chunks can always be re-split/re-pushed.
-    # On failure the wrapper emits the resume-message (leave the partial upload,
-    # entry stays local_ready/uploaded=False, print `push <id>`) — NOT a rollback.
-    # The chunk delete @858-862 below is resumable, NOT a PONR. The only artifacts
-    # a push rollback may remove are this-run _parts/checksums/split_info, and ONLY
-    # if created-this-run AND the failure is pre-any-upload. A pre-existing _parts/
-    # (the resume branch just below) MUST NEVER be deleted.
-    # [ROLLBACK C] Open a durable journal for the pre-upload window. Record which
-    # split artifacts pre-existed so only this-run ones are ever journalled (a
-    # resume _parts/ gets no create_dir record and is never removed).
-    journal = RollbackJournal(local_folder, manual_id)
-    parts_preexisted = os.path.exists(parts_dir)
-    checksum_preexisted = os.path.exists(checksum_dir)
-    split_info_preexisted = "split_info" in library.get(manual_id, {})
-    any_upload_done = False
-    # 1. CHECK FOR RESUME (Existing _parts folder)
-    if os.path.exists(parts_dir) and os.listdir(parts_dir):
-        files_to_upload_paths = sorted(
-            [os.path.join(parts_dir, f) for f in os.listdir(parts_dir) if f.endswith(".mkv")])
-        print(f"   > 🔄 Resuming {len(files_to_upload_paths)} chunks found in temp folder.")
+    # IMP-D19 Step 3: a DIRECT `push <id> --extras` uploads the title's extras
+    # (scan+merge any given folders first, then upload all pending) AFTER the main
+    # leaf is fully (non-range) onboarded. Independent chunk size; O-1 per file.
+    if ok and extras and not chunk_range:
+        _push_extras_for(manual_id, extras, extras_size, device_id, split_method, split_val)
 
-    # 2. NEW SPLIT LOGIC
-    elif split_method and split_val:
-        # Simple size check: If splitting by Size, check if file is smaller than target
-        should_split = True
-        if split_method in ["SIZE_MB", "SIZE_GB"]:
-            fsize_mb = os.path.getsize(local_file_path) / (1024 * 1024)
-            target_mb = float(split_val) if split_method == "SIZE_MB" else float(split_val) * 1024
-            if fsize_mb < target_mb:
-                print(
-                    f"   > File size ({fsize_mb:.0f}MB) is smaller than split limit ({target_mb:.0f}MB). Skipping split.")
-                should_split = False
-
-        if should_split:
-            # [SPLIT-HASH] HARD DISK PRE-FLIGHT (Step 4). STOP before splitting if
-            # local_folder can't hold what the split would create — never start and
-            # fail mid-split. Deferred needs 1X (chunks), eager 2X (chunks + the
-            # merge temp), plus a max(1%, 2GB) buffer. This is a READ-ONLY check
-            # (shutil.disk_usage) that runs BEFORE makedirs/journal records below, so
-            # nothing has been created and there is NOTHING to roll back — a clean
-            # early return like the chunk_range "no chunks" guard. (Step 5 may
-            # redirect the chunks to temp_dir — see the check_dir note below.) The
-            # resume branch above never reaches here, so an existing _parts/ skips the check.
-            file_size = os.path.getsize(local_file_path)
-            # [SPLIT-HASH] Step 5: stat the volume the chunks will ACTUALLY land
-            # on. base_dir = temp_dir/<safe-id> does NOT exist yet (makedirs runs
-            # below), so stat'ing it would raise FileNotFoundError → a false
-            # hard-stop. temp_dir is validated-existing by _parts_base and shares
-            # base_dir's volume (identical free bytes); with no temp_dir,
-            # check_dir == local_folder → byte-identical to today.
-            check_dir = temp_dir if temp_dir else local_folder
-            if not _free_space_ok(check_dir, file_size, True, eager_rehash):
-                free, required, _short = _disk_shortfall(
-                    check_dir, file_size, True, eager_rehash)
-                print(f"❌ Not enough free space to split {manual_id}.")
-                print(f"   Need ~{human_readable_size(required)} free in {check_dir} "
-                      f"({'chunks + merge temp' if eager_rehash else 'chunks'} + buffer); "
-                      f"only {human_readable_size(free)} available.")
-                print("   Free up space, or pass a temp dir on another volume.")
-                if eager_rehash:
-                    print("   (Or drop the `rehash` token to halve the need — deferred re-hash uses 1X, not 2X.)")
-                return False
-            print(f"   > ✂️ Splitting...")
-            # [ROLLBACK C] Journal the dir creations (this run only) BEFORE makedirs.
-            if not parts_preexisted:
-                journal.record_create_dir(parts_dir)
-            if not checksum_preexisted:
-                journal.record_create_dir(checksum_dir)
-            os.makedirs(parts_dir, exist_ok=True)
-            os.makedirs(checksum_dir, exist_ok=True)
-
-            # [UPDATED] Pass short_id to attach UID to chunk names
-            files_to_upload_paths = split_video_file(local_file_path, parts_dir, split_method, split_val,
-                                                     file_id=short_id)
-            if not files_to_upload_paths:
-                # [ROLLBACK C] Split failed pre-any-upload — replay journalled inverses.
-                journal.rollback(library)
-                return False  # Stop if split failed
-
-            # Hash Chunks
-            for chunk_path in files_to_upload_paths:
-                c_name = os.path.basename(chunk_path)
-                c_hash = calculate_file_hash(chunk_path)
-                chunk_metadata.append({"filename": c_name, "hash": c_hash})
-                # Save sidecar
-                with open(os.path.join(checksum_dir, f"{c_name}.sha256"), 'w') as f: f.write(f"{c_hash} *{c_name}")
-
-            # Save split info to library IMMEDIATELY
-            # [ROLLBACK SPEC] split_info is written HERE this run. A pre-any-upload
-            # rollback pops it ONLY if split_info_existed was False at entry (a prior
-            # interrupted push may have left it). _parts/ + checksums/ created just
-            # above (@719-720) are likewise removed only if created-this-run.
-            if not split_info_preexisted:
-                journal.record_set_field(manual_id, "split_info", existed=False, prior=None)
-            library[manual_id]["split_info"] = {
-                "is_split": True, "method": split_method, "val": split_val,
-                "total_chunks": len(files_to_upload_paths), "chunks": chunk_metadata
-            }
-            # [SPLIT-HASH] RE-SPLIT REHASH RESET (new-split branch ONLY; the resume
-            # branch above must NOT reset). Fresh chunks were just produced and the
-            # OLD split_info (which may have carried merge_seed/merge_tool/
-            # rehashed_at/canonical_hash for a prior, now-stale chunk set) was
-            # REPLACED by the dict above — so those canonical fields are naturally
-            # dropped. Clearing re_hashed too means a re-push of an already-blessed
-            # entry ends unblessed → the next split restore re-blesses for the NEW
-            # chunks instead of false-alarming a hash mismatch. A brand-new entry
-            # (re_hashed absent) just becomes explicitly False — a no-op.
-            # ROLLBACK: this writes the SAFE (unblessed) state, so it needs no
-            # journalling — a push rollback leaving re_hashed=False is correct.
-            library[manual_id]["re_hashed"] = False
-
-            # [SPLIT-HASH] EAGER bless-at-push. Only when requested AND a NEW split
-            # happened this run. Produces the deterministic canonical hash NOW (so a
-            # later split restore just verifies) by merging the just-created chunks
-            # into a throwaway temp and storing the hash as a TRANSIENT
-            # split_info["canonical_hash"] pending promotion at cmd_replace. This is
-            # best-effort: ANY failure cleans up, warns, writes NO canonical, and
-            # CONTINUES as deferred (re_hashed stays False) — never aborts an
-            # otherwise-successful push. The eager temp lives in split_info only,
-            # which is already journalled this-run for NEW entries (record_set_field
-            # above); no new rollback-relevant state is introduced and the push
-            # remains PONR-less (O-1).
-            if eager_rehash:
-                seed = entry.get("short_id") or manual_id
-                base = os.path.splitext(filename)[0]
-                # [SPLIT-HASH] Step 5: eager merge temp lives next to the chunks
-                # under base_dir (== local_folder when no temp_dir).
-                rehash_tmp = os.path.join(base_dir, f"{base}.rehash_tmp.mkv")
-                try:
-                    print(f"   > 🧬 Eager canonical re-hash: merging {len(files_to_upload_paths)} chunks (seed={seed})...")
-                    merged_ok = merge_video_files(files_to_upload_paths, rehash_tmp, seed=seed)
-                    canonical = calculate_file_hash(rehash_tmp) if merged_ok else None
-                    if merged_ok and canonical:
-                        library[manual_id]["split_info"]["merge_seed"] = seed
-                        library[manual_id]["split_info"]["merge_tool"] = _current_merge_tool()
-                        library[manual_id]["split_info"]["canonical_hash"] = canonical
-                        print(f"   > 🧬 Eager canonical hash staged (promotes at replace): {canonical}")
-                    else:
-                        print("   ⚠️ Eager re-hash did not produce a hash — continuing as deferred (will bless at first restore).")
-                except Exception as e:
-                    print(f"   ⚠️ Eager re-hash failed ({e}) — continuing as deferred (will bless at first restore).")
-                finally:
-                    if os.path.exists(rehash_tmp):
-                        try:
-                            os.remove(rehash_tmp)
-                        except Exception:
-                            pass
-
-            save_library(library)
-        else:
-            files_to_upload_paths = [local_file_path]
-    else:
-        # Standard Push
-        files_to_upload_paths = [local_file_path]
-
-    # [NEW] 2.5 FILTER CHUNKS BY RANGE (IF REQUESTED)
-    # This must happen AFTER splitting/hashing but BEFORE uploading
-    if chunk_range and files_to_upload_paths:
-        try:
-            start, end = map(int, chunk_range.split('-'))
-            print(f"   > 🎯 Filter: Uploading chunks {start} to {end} only.")
-
-            filtered_files = []
-            for f in files_to_upload_paths:
-                # Extract chunk number from filename: .chunk.001.mkv
-                match = re.search(r'\.chunk\.(\d+)\.', os.path.basename(f))
-                if match:
-                    chunk_num = int(match.group(1))
-                    if start <= chunk_num <= end:
-                        filtered_files.append(f)
-                else:
-                    # Keep non-chunk files just in case
-                    filtered_files.append(f)
-
-            files_to_upload_paths = filtered_files
-            if not files_to_upload_paths:
-                print(f"   ⚠️ No chunks found in range {chunk_range}. (They might already be uploaded/deleted)")
-                return False
-        except ValueError:
-            print("❌ Invalid chunk range format. Use '1-4'.")
-            return False
-
-    # [IMP-C8] Build expected per-chunk hashes (local_filename -> stored SHA-256)
-    # for optional post-push remote verification. Covers three cases:
-    #   - new split: chunk_metadata was just populated above
-    #   - resume (pre-existing _parts/): hashes already in library split_info
-    #   - single-file push: dict stays empty -> verification skipped (no stored hash)
-    _chunk_hashes: dict = {}
-    if chunk_metadata:
-        _chunk_hashes = {c["filename"]: c["hash"] for c in chunk_metadata
-                         if c.get("hash")}
-    elif "split_info" in library.get(manual_id, {}):
-        _chunk_hashes = {
-            c["filename"]: c["hash"]
-            for c in library[manual_id]["split_info"].get("chunks", [])
-            if c.get("hash")
-        }
-
-    # 3. UPLOAD LOOP
-    all_success = True
-    for f in files_to_upload_paths:
-        local_fname = os.path.basename(f)
-
-        # [UPDATED] File Renaming Logic for Standard Files
-        remote_fname = local_fname
-        if SPLIT_DIR_NAME not in f:  # This is a standard file, not a chunk
-            name, ext = os.path.splitext(local_fname)
-            # RENAME ON REMOTE: "MovieName [uid].mkv"
-            remote_fname = f"{name} [{short_id}]{ext}"
-
-        print(f"     -> Pushing: {remote_fname}...", end=" ", flush=True)
-        try:
-            # We construct the full remote path with the NEW name
-            remote_full_path = f"{remote_target_dir}/{remote_fname}"
-            # [PARTIAL+RENAME] Upload to "<final>.partial" first, then atomically
-            # rename to the final name only after the push succeeds. A mid-push
-            # death leaves a ".partial" remnant Google Photos never indexes as a
-            # complete chunk. Resume (Decision 1) re-pushes to ".partial", which
-            # overwrites any stale partial; no remote ls is needed.
-            remote_partial_path = remote_full_path + PARTIAL_SUFFIX
-            # Escape single quotes for both paths exactly like the mkdir path
-            # above ( ' -> '\'' ).
-            safe_partial = remote_partial_path.replace("'", "'\\''")
-            safe_final = remote_full_path.replace("'", "'\\''")
-
-            # [IMP-C2] Wrap the push + atomic mv in mvcommon.retry() so a
-            # transient ADB CalledProcessError (USB reseat, screen lock) gets up
-            # to 3 attempts with 1/4/16s backoff + jitter. on_retry prints one
-            # user-visible line and unconditionally rm's the stale ".partial"
-            # remnant before each re-attempt so the re-push never collides.
-            # retry() re-raises the last CalledProcessError after exhaustion, so
-            # the surrounding except below fires identically to before C2.
-            def _push_and_rename():
-                subprocess.run(adb_base + ["push", "-p", f, remote_partial_path], check=True)
-                subprocess.run(
-                    adb_base + ["shell", "mv", f"'{safe_partial}'", f"'{safe_final}'"],
-                    check=True,
-                )
-                # [IMP-C8] post-push remote hash verification (gated on PUSH_VERIFY_REMOTE).
-                # When False (default) this is byte-for-byte identical to pre-C8 behaviour.
-                # A mismatch raises CalledProcessError, which the surrounding retry()
-                # wrapper treats as a transient failure and re-runs push->mv->verify.
-                if PUSH_VERIFY_REMOTE:
-                    expected = _chunk_hashes.get(local_fname)
-                    if expected:
-                        _verify_chunk_hash(adb_base, remote_full_path, safe_final, expected)
-
-            def _cleanup_and_log(attempt, exc):
-                print(f"⏳ Retry {attempt}/3 after {(1, 4, 16)[min(attempt - 1, 2)]}s (ADB push/verify failed)…")
-                subprocess.run(
-                    adb_base + ["shell", "rm", f"'{safe_partial}'"],
-                    check=False,
-                )
-
-            retry(
-                _push_and_rename,
-                attempts=3,
-                backoff=(1, 4, 16),
-                retry_on=(subprocess.CalledProcessError,),
-                on_retry=_cleanup_and_log,
-            )
-            print("✅")
-            # [ROLLBACK C] A chunk reached the device — past the pre-upload window.
-            # O-1: any later failure is the resume-message case, not a rollback.
-            any_upload_done = True
-
-            # DELETE LOCAL CHUNK after successful upload+rename.
-            # The chunk is "done" only once renamed to its final name.
-            # Safety: Only delete if it's inside the SPLIT_DIR_NAME folder
-            # [ROLLBACK SPEC] This delete is NOT a PONR (O-1) — the deleted chunk is
-            # reproducible from the surviving master via re-split. A push failure
-            # after some chunks were uploaded+deleted is the resume-message case.
-            if SPLIT_DIR_NAME in f:
-                try:
-                    os.remove(f);
-                except:
-                    pass
-
-        except subprocess.CalledProcessError:
-            print("❌ FAIL (ADB Error)");
-            all_success = False;
-            break
-        except Exception as e:
-            print(f"❌ FAIL ({e})");
-            all_success = False;
-            break
-
-    if all_success:
-        # Cleanup temp dir if empty
-        if os.path.exists(parts_dir) and not os.listdir(parts_dir): os.rmdir(parts_dir)
-        # [SPLIT-HASH] Step 5: when chunks were redirected to temp_dir, the
-        # per-entry base_dir (temp_dir/<safe-id>) is now empty too — remove it so
-        # we leave no scratch dir behind. ONLY when this run created it (guard on
-        # not parts_preexisted): a pre-existing temp _parts/ must never be
-        # removed, and base_dir != local_folder ensures local_folder is never
-        # touched (temp_dir=None ⇒ base_dir == local_folder ⇒ skipped, identical
-        # to today).
-        if temp_dir and not parts_preexisted and base_dir != local_folder:
-            if os.path.isdir(base_dir) and not os.listdir(base_dir):
-                try:
-                    os.rmdir(base_dir)
-                except OSError:
-                    pass
-
-        # Only mark as 'onboarded' if we uploaded ALL chunks (no range filter)
-        if not chunk_range:
-            # Best-effort remote disaster-recovery sidecar. A sidecar miss must
-            # NOT fail a fully-successful chunk upload, so its return is ignored.
-            write_remote_mvmeta(adb_base, remote_target_dir, manual_id, library[manual_id])
-            library[manual_id]["uploaded"] = True
-            library[manual_id]["status"] = "onboarded"
-            save_library(library)
-            # [ROLLBACK C] Clean success — discard the journal.
-            journal.commit()
-            # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
-            _warn_if_entry_inconsistent(library[manual_id], manual_id)
-            print("✅ SUCCESS.\n")
-            # IMP-D19 Step 3: extras upload wired here
-            return True
-        else:
-            journal.commit()
-            # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
-            _warn_if_entry_inconsistent(library[manual_id], manual_id)
-            print(f"✅ Partial Upload Complete (Chunks {chunk_range}).\n")
-            return True
-    else:
-        # [ROLLBACK C] Push failed (O-1: NO PONR — the master survives).
-        if any_upload_done:
-            # Resume-message: leave the partial upload; keep local_ready/uploaded=False.
-            # A chunk reached the device, so the journalled this-run artifacts are now
-            # legitimately part of the resumable state — discard the journal, do NOT
-            # roll back.
-            journal.commit()
-            print("❌ FAILED. Partial upload left in place (resumable).")
-            print(f"   > Entry stays local_ready / uploaded=False. Resume with: push {manual_id}\n")
-            return False
-        else:
-            # Pre-any-upload failure: replay the journalled inverses (this-run
-            # _parts/checksums/split_info only — a resume _parts/ was never journalled).
-            print("❌ FAILED before any chunk uploaded — rolling back this-run artifacts.")
-            journal.rollback(library)
-            print(f"   > Resume with: push {manual_id}\n")
-            return False
+    return ok
 
 
 def _resolve_alias(lib, mid):
@@ -4726,7 +4862,10 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
             continue
         cmd_push(mid, split_method, split_val, device_id=device_id, eager_rehash=eager_rehash, temp_dir=temp_dir)
 
-    # IMP-D19 Step 3: extras upload wired here
+    # IMP-D19 Step 3: upload the group/season title's extras (scan+merge any given
+    # folders first), inheriting the main split as the default chunk size. O-1 per file.
+    if extras:
+        _push_extras_for(group_id, extras, extras_size, device_id, split_method, split_val)
 
 
 def cmd_replace(manual_id):
@@ -5936,7 +6075,10 @@ def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, de
         return
 
     print("\n✅✅✅ AUTO-PILOT COMPLETE: Movie is safely archived.")
-    # IMP-D19 Step 3/4: extras upload + replace wired here
+    # IMP-D19 Step 3: upload the movie's extras after the main is archived (Step 4
+    # will add the extras replace). Independent chunk size; O-1 resumable per file.
+    if extras:
+        _push_extras_for(manual_id, extras, extras_size, device_id, split_method, split_val)
 
 
 def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False, temp_dir=None, extras=None, extras_size=None):
@@ -6100,7 +6242,10 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
             return
 
     print("\n✅✅✅ SEASON AUTO-PILOT COMPLETE.")
-    # IMP-D19 Step 3/4: extras upload + replace wired here
+    # IMP-D19 Step 3: upload the season's extras after all episodes are archived
+    # (Step 4 will add the extras replace). Independent chunk size; O-1 per file.
+    if extras:
+        _push_extras_for(base_id, extras, extras_size, device_id, split_method, split_val)
 
 
 def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False):
@@ -6219,7 +6364,10 @@ def cmd_add_extras(title_id, folders, extras_size=None, device_id=None, no_repla
     if no_replace:
         print("   > no-replace: extras will be uploaded only (not dummied).")
 
-    # IMP-D19 Step 3/4: push + replace extras here
+    # IMP-D19 Step 3: upload the just-merged extras (Step 4 will add the replace
+    # unless `no_replace`). add_extras has no main split, so extras_size None =
+    # whole-file. The scan+merge already ran above, so pass extras=None (skip rescan).
+    _push_extras_for(real_title_id, None, extras_size, device_id, None, None)
 
 
 # ==========================================

@@ -11,15 +11,16 @@
   (`add_extras` cmd + `--extras`/`--extras-size` on prep/push family) · C = FLAG-ONLY (`--fetchExtras`, aliases
   `--fetch-extras`/`--extras`/`--extra`; no prompt; absent = no extras) · extras-size default = inherit main split ·
   D1 (full push→dummy→fetch→restore lifecycle) · E1 (additive rollback; main contract byte-for-byte unchanged).
-- **Last updated:** 2026-06-29 (Step 0 `415ae4b`, Step 1 `dccd993`, Step 2 `3d959a4`; Step 3 IN PROGRESS — candidate A
-  committed @ d892991, candidate B re-running; this is a mid-step resumability checkpoint).
+- **Last updated:** 2026-06-29 (Step 0 `415ae4b`, Step 1 `dccd993`, Step 2 `3d959a4`; Step 3 🚦 AT USER CHECKPOINT —
+  both candidates committed, judge recommends B, worktrees removed, DECISION.md committed).
 
 ## ▶ NEXT ACTION
-**Finish Step 3 multi-candidate, then STOP at the 🚦 user checkpoint.** Candidate A done (`__cand_a` @ d892991).
-Awaiting Candidate B (`__cand_b`) to finish + be committed; then run the **judge** → `.candidates/d19-step-3/DECISION.md`;
-then remove the worktrees (footgun-safe); then **STOP and present the judge's analysis to the USER to pick the winner**
-(do NOT auto-merge). Only after the user's pick: MERGE_CANDIDATE_WINNER → smoke gate → commit → archive/tag.
-Do NOT re-run the planner; do NOT re-open Cards A–E.
+**🚦 BLOCKED ON THE USER'S A/B PICK (Step 3 candidate checkpoint).** Judge recommends **Candidate B** (isolated
+`push_one_extra`, `cmd_push` untouched — wins the change-gate-critical blast-radius + rollback axes). Full analysis:
+`.candidates/d19-step-3/DECISION.md`. When the user picks: MERGE_CANDIDATE_WINNER the chosen `__cand_<a|b>` →
+`pytest -q` + smoke on the merged branch → mark Step 3 done + commit → ARCHIVE_CANDIDATES (tags under
+`candidates/imp_d19_extras/step-3/*`). Then Step 4 (extras replace/dummy). Do NOT re-run the planner; do NOT re-open
+Cards A–E. Do NOT auto-merge — the pick is the user's.
 
 ## Resume protocol (first thing a new session does)
 1. `git fetch && git checkout feature/imp_d19_extras` (or create it from `main` if it does not exist — first run).
@@ -34,7 +35,7 @@ Do NOT re-run the planner; do NOT re-open Cards A–E.
 | 0  | Scaffold + commit this execution journal | done | 415ae4b | n/a | plan + DECISIONS + journal committed onto the branch |
 | 1  | Extras data model + scan/merge/dedup core (A2 grouped) | done | dccd993 | smoke 72✓, schema-guard 2✓, self-check 8/8✓ | [model: opus] `_extras_title_id`/`scan_extras_folders`/`merge_extras_into_title` + ENTRY_TYPE_KEYS comment; `re_hashed` dropped (not True) on byte-change |
 | 2  | CLI parsing `--extras`/`--extras-size`/`--fetchExtras` + `add_extras` | done | (this commit) | cli-parsers 29✓, smoke 72✓ | [model: sonnet] `parse_extras_tokens`; 6 cmds + argv walkers; `cmd_add_extras` routed; `--fetchExtras`(+aliases) on fetch/fetch_restore; prep/prep_season/add_extras scan+merge; markers left for Steps 3/4/5. `--extras-size none`→`('NONE',None)` |
-| 3  | Extras upload phase (independent chunk size; resumable) | in_progress | — | A: suite 603✓ | [model: opus] **multi-candidate (2)** — A committed (`__cand_a` @ d892991); B re-running; judge + 🚦 checkpoint pending |
+| 3  | Extras upload phase (independent chunk size; resumable) | in_progress (🚦 AT CHECKPOINT) | — | A:603✓ B:push11+smoke72+sweep55✓ | [model: opus] **multi-candidate** — A `__cand_a`@d892991, B `__cand_b`@083d34a; **judge ⇒ B**; AWAITING USER's A/B pick before merge |
 | 4  | Extras replace (dummy) phase for reclaim | pending | — | — | [model: opus] rollback-adjacent (E1) |
 | 5  | Extras fetch (flag-only `--fetchExtras`, no prompt) | pending | — | — | [model: opus] |
 | 6  | Extras restore (merge+verify into recreated subfolder) | pending | — | — | [model: opus] |
@@ -55,23 +56,34 @@ Do NOT re-run the planner; do NOT re-open Cards A–E.
   `feature/imp_d19_extras__cand_a` @ **d892991** (+427/−180). Self-report: full suite **603 passed**, smoke 72,
   push tests 11, rollback matrix 63; confidence **high**. Honest caveat: journal lifecycle physically relocated into
   `_upload_file` (observable contract preserved, larger blast radius than B).
-- **Candidate B** (isolated `push_one_extra`, `cmd_push` untouched): RE-RUNNING (first attempt cut off by session
-  limit with no saved work; worktree was clean at base, re-dispatched). Not yet committed.
-- **Judge:** pending (runs after B commits). Chosen candidate: — (decided by the USER at the 🚦 checkpoint).
+- **Candidate B** (isolated `push_one_extra`, `cmd_push` byte-for-byte untouched bar a 2-line wire): DONE + committed →
+  branch `feature/imp_d19_extras__cand_b` @ **083d34a** (+398/−7). Self-report: push 11, smoke 72, retry/verify 13,
+  sweep 55; confidence **high**.
+- **Judge:** DONE → recommends **Candidate B**. Full analysis at `.candidates/d19-step-3/DECISION.md` (committed to the
+  feature branch for durability). Rationale: correctness ~tie; B wins criteria 2 (blast radius — `cmd_push` untouched)
+  and 3 (E1 rollback — zero new journal/PONR surface) decisively; A wins only criterion 4 (single-source-of-truth, the
+  lowest-weighted axis) by relocating the change-gated journal lifecycle into a shared `_upload_file`.
+- **Worktrees:** REMOVED after the judge (footgun-safe — they carry `.claude/agents/`); both candidate **branches**
+  persist (the real source), and `DECISION.md` is committed.
+- **Chosen candidate: — AWAITING USER'S PICK at the 🚦 checkpoint** (judge recommends B). On pick → MERGE_CANDIDATE_WINNER
+  the chosen `__cand_*` → run `pytest -q` + smoke on the merged feature branch → commit → archive/tag both candidates.
 - **🚦 CANDIDATE CHECKPOINT (task-specific, user-required):** after the judge writes `DECISION.md`, the orchestrator
   does NOT auto-merge. It STOPS, relays the judge's full analysis + recommendation to the user, and the user picks which
   candidate to merge. Only after the user's explicit choice is the winner merged + committed. (Overrides the default
   orchestrator auto-merge flow; see PLAN.md Step 3 🚦 bullet + "Checkpoint 0".)
 
 ## In-progress sub-state
-**Step 3 (multi-candidate) — in progress.** Candidate A is committed and durable on `feature/imp_d19_extras__cand_a`
-(@ d892991). Candidate B is re-running in worktree `.candidates/d19-step-3/B` (re-dispatched after a session-limit
-interruption that saved no work). The feature branch HEAD is still `3d959a4` (Step 2) — no candidate is merged yet.
-**Resume sequence if interrupted:** (1) if B's worktree has uncommitted work, finish/commit it via git-agent
-COMMIT_CANDIDATE (letter B, worktree `.candidates/d19-step-3/B`); if its worktree is clean at base, re-dispatch the
-Candidate-B executor; (2) run the judge → `.candidates/d19-step-3/DECISION.md`; (3) remove the worktrees (footgun-safe)
-keeping the candidate branches; (4) **STOP at the 🚦 user checkpoint** — present the judge's analysis, let the USER pick
-the winner; (5) only then MERGE_CANDIDATE_WINNER (the chosen `__cand_*` branch) → smoke gate → commit → archive/tag.
+**Step 3 (multi-candidate) — 🚦 AT THE USER CHECKPOINT.** Both candidates are committed + durable on their branches
+(`__cand_a`@d892991 refactor; `__cand_b`@083d34a isolated). The judge recommends **B**; `DECISION.md` is committed to
+the feature branch. The candidate worktrees have been removed (footgun-safe). The feature branch HEAD is the Step-3
+checkpoint commit — **no candidate is merged yet.**
+**Resume sequence if interrupted (waiting on the user's A/B decision):** (1) read `.candidates/d19-step-3/DECISION.md`
+(committed) for the full judge analysis; (2) once the USER picks A or B → git-agent MERGE_CANDIDATE_WINNER with
+winner_branch `feature/imp_d19_extras__cand_<a|b>`, decision_md_path `.candidates/d19-step-3/DECISION.md`; (3) run
+`pytest -q` + `pytest tests/smoke -q` on the merged feature branch (belt-and-suspenders, since the judge did not re-run
+the full suite himself); (4) commit / mark Step 3 done; (5) ARCHIVE_CANDIDATES — tag both branches under
+`candidates/imp_d19_extras/step-3/<letter>-chosen|rejected` (do NOT use the bare `candidates/step-3/*` namespace — it
+belongs to a prior task). Then proceed to Step 4.
 
 ## Blockers / human gates
 - **Gate (now):** awaiting user "go" to begin execution.

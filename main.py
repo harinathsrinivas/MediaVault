@@ -4038,6 +4038,239 @@ def _verify_chunk_hash(adb_base, remote_path, safe_path, expected_sha256):
         )
 
 
+# ==========================================
+#   IMP-D19 Step 3 — EXTRAS UPLOAD PHASE (isolated, O-1 resumable per file)
+# ==========================================
+# Candidate B = ISOLATED DUPLICATION. push_one_extra re-implements ONLY the
+# upload steps an extra needs — the .partial+rename+retry idiom, chunk hashing,
+# the mvmeta sidecar, the status flips — WITHOUT cmd_push's leaf-specific
+# complexity (no chunk_range, no eager re-hash, no temp_dir plumbing, and no
+# RollbackJournal/PONR). cmd_push is left byte-for-byte untouched except for the
+# one-line wire at its success marker, so the proven push/rollback path carries
+# zero new blast radius. The .partial+rename+retry idiom now appears twice; that
+# duplication is the deliberate, accepted tradeoff (Step 3 candidate B).
+#
+# ROLLBACK (E1, change-gate cleared): the extras upload is its OWN phase with NO
+# point-of-no-return. The master extra file always survives, so a half-pushed
+# extra is resumable on a plain re-run — exactly the O-1 contract cmd_push uses,
+# but kept entirely separate from the main-content journal. Nothing here touches
+# RollbackJournal, mark_point_of_no_return(), or the main O-1/O-2 split.
+
+
+def push_one_extra(library, title_id, group_rel, item, extras_method, extras_val, device_id=None):
+    """Upload ONE extra item to the device, mirroring cmd_push's per-file upload
+    protocol but standalone and stripped to the essentials.
+
+    On-disk path  = <title folder_path>/<group_rel>/<sub_rel>.
+    Remote dir    = REMOTE_ROOT/relpath(<extra's folder>, LOCAL_ROOT) — mirrors
+                    the Specials/Extra subfolder on the phone (same except->
+                    basename fallback as cmd_push).
+    Split         = extras_method/extras_val (already resolved by the caller; a
+                    falsy method => whole-file push, the ('NONE', None) sentinel).
+
+    Steps: optional split -> hash chunks -> persist chunk hashes into the item's
+    `split_info` (BEFORE upload, so a resume has them) -> per-chunk
+    `<final>.partial` upload + atomic `mv`, wrapped in mvcommon.retry -> delete
+    the local chunk -> best-effort `write_remote_mvmeta` sidecar -> flip the item
+    `uploaded=True`, `status="onboarded"`, and save.
+
+    O-1 resumable per file: NO point-of-no-return. The per-item chunk dir lives
+    at <extra folder>/<SPLIT_DIR_NAME>/<short_id> — nested under SPLIT_DIR_NAME so
+    scan_extras_folders (which prunes SPLIT_DIR_NAME) never re-scans leftover
+    chunks, and two extras sharing a folder never collide. A re-run with chunks
+    still present resumes them instead of re-splitting; the master never leaves
+    its path, so a failed item simply stays uploaded=False and is retried later.
+
+    Mutates `item` in place and saves `library` on success. Returns True iff the
+    extra fully uploaded."""
+    title_entry = library.get(title_id) or {}
+    title_folder = title_entry.get("folder_path", "")
+    short_id = item.get("short_id", "")
+    group_os = group_rel.replace("/", os.sep)
+    sub_os = item.get("sub_rel", "").replace("/", os.sep)
+    local_file_path = os.path.join(title_folder, group_os, sub_os)
+    extra_folder = os.path.dirname(local_file_path)
+
+    if not os.path.exists(local_file_path):
+        print(f"     ❌ Extra missing on disk, skipping: {local_file_path}")
+        return False
+
+    # Remote dir mirrors the extra's on-disk folder (reuse cmd_push's fallback).
+    try:
+        rel_path = os.path.relpath(extra_folder, LOCAL_ROOT)
+    except Exception:
+        rel_path = os.path.basename(extra_folder)
+    remote_target_dir = f"{REMOTE_ROOT}/{rel_path}".replace("\\", "/")
+
+    adb_base = ["adb", "-s", device_id] if device_id else ["adb"]
+    safe_remote_dir = remote_target_dir.replace("'", "'\\''")
+    try:
+        subprocess.run(adb_base + ["shell", "mkdir", "-p", f"'{safe_remote_dir}'"], check=True)
+    except Exception as e:
+        print(f"     ❌ ADB connection failed for extra {item.get('filename')}: {e}")
+        return False
+
+    parts_dir = os.path.join(extra_folder, SPLIT_DIR_NAME, short_id)
+    files_to_upload = []
+    is_split = False
+
+    # 1. RESUME — chunks for this item still on disk: re-push them (no re-split).
+    if os.path.isdir(parts_dir) and any(f.endswith(".mkv") for f in os.listdir(parts_dir)):
+        files_to_upload = sorted(
+            os.path.join(parts_dir, f) for f in os.listdir(parts_dir) if f.endswith(".mkv"))
+        is_split = True
+        print(f"     > 🔄 Resuming {len(files_to_upload)} extra chunk(s) for {item.get('filename')}.")
+    # 2. SPLIT — independent extras chunk size (size-under-target / no method => whole).
+    elif _will_split(os.path.getsize(local_file_path), extras_method, extras_val):
+        file_size = os.path.getsize(local_file_path)
+        if not _free_space_ok(extra_folder, file_size, True, False):
+            free, required, _short = _disk_shortfall(extra_folder, file_size, True, False)
+            print(f"     ❌ Not enough free space to split extra {item.get('filename')} "
+                  f"(need ~{human_readable_size(required)} in {extra_folder}, "
+                  f"have {human_readable_size(free)}).")
+            return False
+        os.makedirs(parts_dir, exist_ok=True)
+        files_to_upload = split_video_file(local_file_path, parts_dir, extras_method, extras_val, file_id=short_id)
+        if not files_to_upload:
+            print(f"     ❌ Split failed for extra {item.get('filename')}.")
+            return False
+        is_split = True
+        chunk_metadata = [{"filename": os.path.basename(p), "hash": calculate_file_hash(p)}
+                          for p in files_to_upload]
+        # Persist chunk hashes BEFORE upload so a resume already has them (O-1).
+        item["split_info"] = {
+            "is_split": True, "method": extras_method, "val": extras_val,
+            "total_chunks": len(files_to_upload), "chunks": chunk_metadata,
+        }
+        save_library(library)
+    # 3. WHOLE-FILE push.
+    else:
+        files_to_upload = [local_file_path]
+        item.pop("split_info", None)
+
+    # UPLOAD LOOP — the duplicated .partial+rename+retry idiom (deliberate, lean).
+    all_success = True
+    for f in files_to_upload:
+        local_fname = os.path.basename(f)
+        if is_split:
+            remote_fname = local_fname  # chunk name already carries [short_id]
+        else:
+            name, ext = os.path.splitext(local_fname)
+            remote_fname = f"{name} [{short_id}]{ext}"
+        remote_full_path = f"{remote_target_dir}/{remote_fname}"
+        remote_partial_path = remote_full_path + PARTIAL_SUFFIX
+        safe_partial = remote_partial_path.replace("'", "'\\''")
+        safe_final = remote_full_path.replace("'", "'\\''")
+        print(f"     -> Pushing extra: {remote_fname}...", end=" ", flush=True)
+
+        def _push_and_rename():
+            subprocess.run(adb_base + ["push", "-p", f, remote_partial_path], check=True)
+            subprocess.run(
+                adb_base + ["shell", "mv", f"'{safe_partial}'", f"'{safe_final}'"],
+                check=True,
+            )
+
+        def _cleanup_and_log(attempt, exc):
+            print(f"⏳ Retry {attempt}/3 after {(1, 4, 16)[min(attempt - 1, 2)]}s (ADB push failed)…")
+            subprocess.run(adb_base + ["shell", "rm", f"'{safe_partial}'"], check=False)
+
+        try:
+            retry(
+                _push_and_rename,
+                attempts=3,
+                backoff=(1, 4, 16),
+                retry_on=(subprocess.CalledProcessError,),
+                on_retry=_cleanup_and_log,
+            )
+            print("✅")
+        except subprocess.CalledProcessError:
+            print("❌ FAIL (ADB Error)")
+            all_success = False
+            break
+        except Exception as e:
+            print(f"❌ FAIL ({e})")
+            all_success = False
+            break
+
+        # Delete the local chunk after a successful upload+rename (resumable, NOT a PONR).
+        if is_split and SPLIT_DIR_NAME in f:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+    if not all_success:
+        print(f"     ❌ Extra {item.get('filename')} left partially uploaded "
+              f"(uploaded=False; re-run to resume).")
+        return False
+
+    # Best-effort: remove the now-empty per-item chunk dir.
+    if is_split and os.path.isdir(parts_dir) and not os.listdir(parts_dir):
+        try:
+            os.rmdir(parts_dir)
+        except OSError:
+            pass
+
+    # Disaster-recovery sidecar (best-effort — never fails the upload). Give it a
+    # folder_path so the mvmeta records where the extra restores to.
+    meta_entry = dict(item)
+    meta_entry["folder_path"] = extra_folder
+    write_remote_mvmeta(adb_base, remote_target_dir,
+                        f"{title_id}::{group_rel}/{item.get('sub_rel')}", meta_entry)
+
+    item["uploaded"] = True
+    item["status"] = "onboarded"
+    save_library(library)
+    return True
+
+
+def push_title_extras(library, title_id, extras_size, device_id=None, split_method=None, split_val=None):
+    """Upload every not-yet-uploaded extra item on `title_id` (all groups).
+
+    Independent chunk size (Card B):
+      - extras_size given (a parse_extras_tokens tuple) WINS:
+          ('NONE', None)                        -> whole-file push (no split)
+          ('SIZE_MB'|'SIZE_GB'|'COUNT', val)    -> that split
+      - extras_size is None -> INHERIT the command's main split
+          (split_method/split_val); if the command has no main split either,
+          extras are pushed whole-file.
+
+    Each item is pushed via push_one_extra (O-1 resumable per file). One bad/
+    missing extra does NOT block the rest — the item stays uploaded=False and is
+    retried on the next run. Returns True iff every processed item uploaded."""
+    if not title_id or title_id not in library:
+        print(f"⚠️  Could not resolve a title entry for extras upload (id: {title_id}).")
+        return False
+    groups = library[title_id].get("extras", {}).get("groups", {})
+    if not groups:
+        return True  # title carries no extras — nothing to do
+
+    if extras_size is None:
+        e_method, e_val = split_method, split_val          # inherit the main split
+    elif extras_size[0] == "NONE":
+        e_method, e_val = None, None                       # explicit whole-file
+    else:
+        e_method, e_val = extras_size[0], extras_size[1]    # explicit split
+
+    pending = [(g, it) for g in sorted(groups)
+               for it in groups[g].get("items", []) if not it.get("uploaded")]
+    if not pending:
+        print(f"   > ✅ All extras already uploaded for {title_id}.")
+        return True
+
+    print(f"\n=== 📎 UPLOADING {len(pending)} EXTRA(S) for {title_id} ===")
+    print(f"   > Extras split: {e_method} {e_val}" if (e_method and e_val)
+          else "   > Extras: whole-file (no split)")
+
+    ok = True
+    for group_rel, item in pending:
+        if not push_one_extra(library, title_id, group_rel, item, e_method, e_val, device_id=device_id):
+            ok = False
+    print(f"=== ✅ EXTRAS UPLOAD COMPLETE for {title_id} ===" if ok
+          else f"=== ⚠️  EXTRAS UPLOAD INCOMPLETE for {title_id} (re-run to resume) ===")
+    return ok
+
+
 def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, device_id=None, eager_rehash=False, temp_dir=None, extras=None, extras_size=None):
     print(f"--- PUSHING: {manual_id} ---")
     library = load_library()
@@ -4413,7 +4646,8 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
             _warn_if_entry_inconsistent(library[manual_id], manual_id)
             print("✅ SUCCESS.\n")
-            # IMP-D19 Step 3: extras upload wired here
+            if extras:
+                push_title_extras(library, _extras_title_id(library, manual_id), extras_size, device_id, split_method, split_val)
             return True
         else:
             journal.commit()
@@ -4726,7 +4960,15 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
             continue
         cmd_push(mid, split_method, split_val, device_id=device_id, eager_rehash=eager_rehash, temp_dir=temp_dir)
 
-    # IMP-D19 Step 3: extras upload wired here
+    # IMP-D19 Step 3: upload the season/title's extras after the episode loop.
+    # Reload — each per-episode cmd_push saved its own library updates, so the
+    # in-memory `library` above is stale; pushing extras off it would clobber
+    # the just-saved episode statuses.
+    if extras:
+        library = load_library()
+        ex_title_id = _extras_title_id(library, group_id) or (
+            _extras_title_id(library, target_ids[0]) if target_ids else None)
+        push_title_extras(library, ex_title_id, extras_size, device_id, split_method, split_val)
 
 
 def cmd_replace(manual_id):
@@ -5936,7 +6178,11 @@ def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, de
         return
 
     print("\n✅✅✅ AUTO-PILOT COMPLETE: Movie is safely archived.")
-    # IMP-D19 Step 3/4: extras upload + replace wired here
+    # IMP-D19 Step 3: upload the movie's extras (autopilot archives them too).
+    if extras:
+        library = load_library()
+        push_title_extras(library, _extras_title_id(library, manual_id), extras_size, device_id, split_method, split_val)
+    # IMP-D19 Step 4: extras replace (dummy) wired here
 
 
 def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False, temp_dir=None, extras=None, extras_size=None):
@@ -6100,7 +6346,11 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
             return
 
     print("\n✅✅✅ SEASON AUTO-PILOT COMPLETE.")
-    # IMP-D19 Step 3/4: extras upload + replace wired here
+    # IMP-D19 Step 3: upload the season's extras (autopilot archives them too).
+    if extras:
+        library = load_library()
+        push_title_extras(library, _extras_title_id(library, base_id), extras_size, device_id, split_method, split_val)
+    # IMP-D19 Step 4: extras replace (dummy) wired here
 
 
 def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False):
@@ -6219,7 +6469,10 @@ def cmd_add_extras(title_id, folders, extras_size=None, device_id=None, no_repla
     if no_replace:
         print("   > no-replace: extras will be uploaded only (not dummied).")
 
-    # IMP-D19 Step 3/4: push + replace extras here
+    # IMP-D19 Step 3: push the just-merged extras (no main split to inherit, so
+    # extras_size=None => whole-file unless --extras-size was given).
+    push_title_extras(library, real_title_id, extras_size, device_id)
+    # IMP-D19 Step 4: extras replace (dummy) wired here (unless no_replace)
 
 
 # ==========================================
@@ -8286,8 +8539,23 @@ if __name__ == "__main__":
                 i += 1
 
         _er_push = parse_extras_tokens(_et_push)
-        cmd_push(mid, method, val, c_range, device_id=resolve_device(dev), eager_rehash=eager, temp_dir=tdir,
-                 extras=_er_push["folders"] or None, extras_size=_er_push["extras_size"])
+        _extras_folders = _er_push["folders"] or None
+        _extras_size_val = _er_push["extras_size"]
+        _dev_push = resolve_device(dev)
+        # IMP-D19 (Card D): on an ALREADY-ARCHIVED main, `push <id> --extras`
+        # processes ONLY the extras — the dummied main must not be re-pushed.
+        # Handled here (not in cmd_push) so cmd_push stays byte-for-byte intact.
+        _skip_main = False
+        if _extras_folders:
+            _lib_probe = load_library()
+            if mid in _lib_probe and _resolve_alias(_lib_probe, mid)[1].get("status") == "archived":
+                print(f"ℹ️  {mid} main is archived — pushing extras only (main untouched).")
+                push_title_extras(_lib_probe, _extras_title_id(_lib_probe, mid),
+                                  _extras_size_val, _dev_push, method, val)
+                _skip_main = True
+        if not _skip_main:
+            cmd_push(mid, method, val, c_range, device_id=_dev_push, eager_rehash=eager, temp_dir=tdir,
+                     extras=_extras_folders, extras_size=_extras_size_val)
 
     elif cmd == "push_group":
         _pgg_all = sys.argv[2:]

@@ -484,7 +484,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
     `ARCHIVE_CANDIDATES`), run the smoke gate on the merged result, update PROGRESS.md, and commit. (Step 3 is the only
     multi-candidate step in this plan.)
 
-- [ ] 4. [model: opus] [effort: high] Extras replace (dummy) phase for space reclaim.
+- [x] 4. [model: opus] [effort: high] Extras replace (dummy) phase for space reclaim.
   - Files: `main.py` (new `replace_one_extra(...)` + `replace_title_extras(...)`; wiring into `cmd_replace`/
     `cmd_replace_group`/the autopilots/`add_extras`). Read `ROLLBACK_MECHANISM.md §10` first.
   - Details (assumes Card D = D1, Card E = E1): For each `uploaded` extra not yet `archived`, mirror `cmd_replace`'s

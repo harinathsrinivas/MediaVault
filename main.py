@@ -5093,6 +5093,11 @@ def cmd_replace(manual_id):
         # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
         _warn_if_entry_inconsistent(library[manual_id], manual_id)
         print(f"✅ Replaced/Archived: {manual_id}")
+        # IMP-D19 Step 4 (Card D1): dummy this title's uploaded extras too. The
+        # driver never raises (it self-handles + catches RollbackHardFail), so this
+        # one line cannot trip cmd_replace's except handlers above — the main
+        # journal/PONR/contract is byte-for-byte unchanged (Card E1).
+        replace_title_extras(library, _extras_title_id(library, manual_id))
         return True
     except RollbackHardFail:
         raise
@@ -5139,6 +5144,200 @@ def cmd_replace_group(group_id):
     print(f"   > Auto-replacing {len(target_ids)} items...")
     for mid in target_ids:
         cmd_replace(mid)
+
+    # IMP-D19 Step 4: explicit batch wire — dummy the title's extras after the
+    # episode loop (mirrors how cmd_push_group wires push_title_extras). Reload
+    # first: each per-episode cmd_replace saved its own updates and already
+    # archived these extras on the first child, so the in-memory `library` above
+    # is stale; the reload makes this an idempotent no-op (status=='archived'
+    # short-circuits replace_one_extra) rather than a wasteful re-dummy.
+    library = load_library()
+    ex_title_id = _extras_title_id(library, group_id) or (
+        _extras_title_id(library, target_ids[0]) if target_ids else None)
+    replace_title_extras(library, ex_title_id)
+
+
+# ==========================================
+#   IMP-D19 Step 4 — EXTRAS REPLACE (DUMMY) PHASE  (per-file PONR; additive E1)
+# ==========================================
+# replace_one_extra mirrors cmd_replace's atomic two-rename dummy swap EXACTLY —
+# the per-file point-of-no-return (mark_point_of_no_return fired right after the
+# original leaves its path), the eager-canonical-hash promotion, and the
+# RollbackHardFail(resume_cmd="fetch_restore <id> --fetchExtras") contract — but
+# scoped to ONE nested extras item, with its journal living in the extra's OWN
+# folder (e.g. …\Specials\). It REUSES the same RollbackJournal/PONR primitives as
+# the main-content path; it does NOT modify cmd_replace, whose journal/PONR/
+# contract stay byte-for-byte unchanged (Card E1 / ROLLBACK_MECHANISM.md §10).
+def replace_one_extra(library, title_id, group_rel, item):
+    """Replace ONE uploaded extra with a tiny video dummy to reclaim space — the
+    per-file mirror of cmd_replace (Card D1 lifecycle, Card E1 additive rollback).
+
+    The atomic two-rename swap, the per-file point-of-no-return
+    (mark_point_of_no_return fired right after the original leaves its path), the
+    eager-canonical-hash promotion, and the RollbackHardFail contract are
+    IDENTICAL to cmd_replace; only the target is a nested extras `item` and the
+    journal lives in the extra's OWN folder rather than a library leaf's. The
+    EXISTING cmd_replace contract is byte-for-byte untouched — this REUSES the same
+    RollbackJournal/PONR primitives, it does not modify the main-content path.
+
+    On-disk / restore path = <title folder_path>/<group_rel>/<sub_rel>.
+
+    Returns True on success (item -> status='archived', a dummy now on disk) or on
+    an already-archived no-op; False on a pre-PONR failure or a skip. Raises
+    RollbackHardFail on a post-PONR failure, naming the EXISTING
+    `fetch_restore <title_id> --fetchExtras` resume command (it exists from Step 2;
+    the bytes are safe in the cloud)."""
+    title_entry = library.get(title_id) or {}
+    title_folder = title_entry.get("folder_path", "")
+    group_os = group_rel.replace("/", os.sep)
+    sub_os = item.get("sub_rel", "").replace("/", os.sep)
+    original = os.path.join(title_folder, group_os, sub_os)
+    extra_folder = os.path.dirname(original)
+    filename = item.get("filename") or os.path.basename(original)
+    extra_id = f"{title_id}::{group_rel}/{item.get('sub_rel')}"
+
+    if not item.get("uploaded", False):
+        print(f"     ⚠️ Skipping extra {filename}: not uploaded.")
+        return False
+    if item.get("status") == "archived":
+        return True  # already a dummy — idempotent no-op
+    if not os.path.isdir(extra_folder):
+        # Folder gone — cannot journal there. Skip (defensive; never crash the batch).
+        print(f"     ⚠️ Skipping extra {filename}: its folder is missing ({extra_folder}).")
+        return False
+
+    ext = os.path.splitext(filename)[1]
+    # The dummy temp is the ONLY pre-PONR artifact (mirrors cmd_replace); the
+    # journal lives in the extra's own folder so `recover --scan` finds it there.
+    tmp_path = original + ".dummy_tmp" + ext
+    journal = RollbackJournal(extra_folder, extra_id)
+    journal.record_create_file(tmp_path)
+    if not make_video_dummy(tmp_path, ext):
+        print(f"     ❌ extras replace aborted — could not create dummy for {filename}")
+        journal.rollback(library)
+        return False
+
+    try:
+        tobedeleted = original + ".tobedeleted"
+
+        # STALE SWEEP: recover a prior interrupted run before touching anything.
+        if os.path.exists(tobedeleted):
+            try:
+                if os.path.exists(original):
+                    print(f"     ⚠️ Stale leftover — cleaning up {os.path.basename(tobedeleted)}")
+                    os.remove(tobedeleted)
+                else:
+                    print(f"     ⚠️ Recovered interrupted replace: restoring original from {os.path.basename(tobedeleted)}")
+                    os.rename(tobedeleted, original)
+                    print(f"     ❌ extras replace aborted — original restored. Please retry.")
+                    journal.rollback(library)  # pre-PONR — remove the dummy temp
+                    return False
+            except Exception as e:
+                print(f"     ⚠️ Could not clean stale leftover: {e}")
+
+        # Commit / point-of-no-return: rename original -> .tobedeleted.
+        if os.path.exists(original):
+            moved = False
+            for attempt in range(3):
+                try:
+                    os.chmod(original, stat.S_IWRITE)
+                    os.rename(original, tobedeleted)  # PONR: original leaves its path here
+                    journal.mark_point_of_no_return()
+                    moved = True
+                    break
+                except PermissionError:
+                    print(f"     ⚠️ File busy or locked. Retrying... ({attempt + 1}/3)")
+                    time.sleep(1)
+                except Exception as e:
+                    print(f"     ❌ Error removing extra file: {e}")
+                    journal.rollback(library)  # still pre-PONR — reversible
+                    return False
+            if not moved:
+                print(f"     ❌ PERMISSION DENIED: Could not replace extra {filename}")
+                print("        > Close any players/Plex scanning this file and try again.")
+                journal.rollback(library)  # pre-PONR — roll back the dummy temp
+                return False
+
+        # Make the dummy live, then drop the leftover (non-fatal).
+        os.rename(tmp_path, original)
+        if os.path.exists(tobedeleted):
+            try:
+                os.remove(tobedeleted)
+            except Exception as e:
+                print(f"     ⚠️ WARNING: Could not remove leftover {os.path.basename(tobedeleted)}: {e}.")
+
+        # PROMOTE-AT-REPLACE (identical to cmd_replace's eager-canonical promotion).
+        # A no-op for the lean extras push, which never stages a canonical_hash, but
+        # kept structurally identical so the two replace paths can never drift.
+        _split_info = item.get("split_info", {})
+        _staged = _split_info.get("canonical_hash")
+        if _staged and item.get("re_hashed") is not True:
+            item["hash"] = _staged
+            item["re_hashed"] = True
+            item["split_info"]["rehashed_at"] = _rehashed_at()
+            del item["split_info"]["canonical_hash"]
+            print(f"     > 🧬 Promoted eager canonical hash to extra truth (re_hashed=True).")
+
+        item["status"] = "archived"
+        save_library(library)
+        journal.commit()
+        print(f"     ✅ Archived extra: {filename}")
+        return True
+    except RollbackHardFail:
+        raise
+    except Exception as e:
+        if journal.crossed_ponr:
+            # At/after PONR — hard-fail naming the EXISTING fetch_restore --fetchExtras.
+            # The extra's journal (with its PONR marker) is left on disk for recovery.
+            print(f"     ❌ IRREVERSIBLE: extras replace failed after the commit point for {filename}.")
+            print(f"        > To recover the extras from the cloud: fetch_restore {title_id} --fetchExtras")
+            raise RollbackHardFail(
+                state=f"{extra_id} archived (original committed)",
+                reason=f"extras replace failed past the point-of-no-return: {e}",
+                resume_cmd=f"fetch_restore {title_id} --fetchExtras",
+            )
+        print(f"     ❌ extras replace failed (pre-commit): {e}")
+        journal.rollback(library)
+        return False
+
+
+def replace_title_extras(library, title_id):
+    """Replace (dummy) every uploaded-not-yet-archived extra on `title_id` — the
+    per-title driver, mirroring how cmd_replace_group drives cmd_replace.
+
+    A clean (silent) no-op when the title carries no extras or none are pending.
+    One bad/missing extra does not block the rest. A post-PONR RollbackHardFail
+    from replace_one_extra is caught HERE — exactly as cmd_prep_push_rep_season
+    catches cmd_replace's — its resume command printed, and the batch stops.
+    Crucially this driver NEVER raises (it only returns a bool), so a one-line
+    `replace_title_extras(...)` wired inside cmd_replace's try block cannot trigger
+    cmd_replace's except handlers: the main-content journal/PONR/contract stays
+    byte-for-byte unchanged (Card E1). Returns True iff every processed extra
+    archived (or there was nothing to do)."""
+    if not title_id or title_id not in library:
+        return True
+    groups = library[title_id].get("extras", {}).get("groups", {})
+    if not groups:
+        return True  # title carries no extras — nothing to reclaim
+    pending = [(g, it) for g in sorted(groups)
+               for it in groups[g].get("items", [])
+               if it.get("uploaded") and it.get("status") != "archived"]
+    if not pending:
+        return True  # nothing uploaded-but-unarchived — idempotent no-op (silent)
+
+    print(f"\n=== 📎 ARCHIVING {len(pending)} EXTRA(S) for {title_id} (reclaiming space) ===")
+    ok = True
+    for group_rel, item in pending:
+        try:
+            if not replace_one_extra(library, title_id, group_rel, item):
+                ok = False
+        except RollbackHardFail as hf:
+            print(f"\n❌ {hf.state} — {hf.reason}")
+            print(f"   > To recover the extras: {hf.resume_cmd}")
+            return False
+    print(f"=== ✅ EXTRAS ARCHIVED for {title_id} ===" if ok
+          else f"=== ⚠️  EXTRAS ARCHIVE INCOMPLETE for {title_id} (re-run to retry) ===")
+    return ok
 
 
 # ==========================================
@@ -6178,11 +6377,13 @@ def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, de
         return
 
     print("\n✅✅✅ AUTO-PILOT COMPLETE: Movie is safely archived.")
-    # IMP-D19 Step 3: upload the movie's extras (autopilot archives them too).
+    # IMP-D19 Step 3+4: upload THEN dummy the movie's extras (autopilot archives
+    # them too). push_title_extras mutates `library` in place (uploaded=True), so
+    # replace_title_extras on the same dict immediately sees the just-pushed items.
     if extras:
         library = load_library()
         push_title_extras(library, _extras_title_id(library, manual_id), extras_size, device_id, split_method, split_val)
-    # IMP-D19 Step 4: extras replace (dummy) wired here
+        replace_title_extras(library, _extras_title_id(library, manual_id))
 
 
 def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False, temp_dir=None, extras=None, extras_size=None):
@@ -6346,11 +6547,13 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
             return
 
     print("\n✅✅✅ SEASON AUTO-PILOT COMPLETE.")
-    # IMP-D19 Step 3: upload the season's extras (autopilot archives them too).
+    # IMP-D19 Step 3+4: upload THEN dummy the season's extras (autopilot archives
+    # them too). push_title_extras mutates `library` in place (uploaded=True), so
+    # replace_title_extras on the same dict immediately sees the just-pushed items.
     if extras:
         library = load_library()
         push_title_extras(library, _extras_title_id(library, base_id), extras_size, device_id, split_method, split_val)
-    # IMP-D19 Step 4: extras replace (dummy) wired here
+        replace_title_extras(library, _extras_title_id(library, base_id))
 
 
 def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False):
@@ -6443,11 +6646,11 @@ def cmd_add_extras(title_id, folders, extras_size=None, device_id=None, no_repla
       add_extras <title_id> "<folders>" [--extras-size <v|none>]
                  [device <id_or_name>] [no-replace]
 
-    Step 2 (this step): scan+merge the extras into the library, save, and
-    print a summary.  The `device_id`, `extras_size`, and `no_replace`
-    arguments are accepted and stored here so later steps can act on them.
-
-    # IMP-D19 Step 3/4: push + replace extras here
+    Full one-shot lifecycle (Card D1) WITHOUT touching main content (so it is the
+    safe path for an already-archived title whose main is a dummy):
+      1. scan+merge the extras into the title entry and save;
+      2. push the just-merged extras to the device (independent --extras-size);
+      3. dummy them to reclaim space — UNLESS `no-replace` keeps them upload-only.
     """
     print(f"=== ADD EXTRAS: {title_id} ===")
     library = load_library()
@@ -6472,7 +6675,11 @@ def cmd_add_extras(title_id, folders, extras_size=None, device_id=None, no_repla
     # IMP-D19 Step 3: push the just-merged extras (no main split to inherit, so
     # extras_size=None => whole-file unless --extras-size was given).
     push_title_extras(library, real_title_id, extras_size, device_id)
-    # IMP-D19 Step 4: extras replace (dummy) wired here (unless no_replace)
+    # IMP-D19 Step 4 (Card D1): dummy them too to reclaim space — UNLESS the user
+    # passed `no-replace` to keep the extras local (upload-only). push_title_extras
+    # mutated `library` in place, so replace_title_extras sees the uploaded items.
+    if not no_replace:
+        replace_title_extras(library, real_title_id)
 
 
 # ==========================================

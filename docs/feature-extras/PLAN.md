@@ -445,7 +445,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
     extras_size `("SIZE_MB","9900")`; the dispatch passes the kwargs through (covered in `test_cli_parsers.py`); existing
     parsers unaffected. `python -m pytest tests/test_cli_parsers.py tests/smoke -q` green.
 
-- [ ] 3. [model: opus] [effort: max] [candidates: 2] Extras upload phase (reuse the push primitives; independent chunk size; resumable).
+- [x] 3. [model: opus] [effort: max] [candidates: 2] Extras upload phase (reuse the push primitives; independent chunk size; resumable). — WON: Candidate B (user pick; cmd_push untouched); merged `fcd9e66`.
   - Files: `main.py` (new `push_one_extra(...)` + `push_title_extras(library, title_id, extras_size, device_id)`;
     wiring into `cmd_push`/`cmd_push_group`/`cmd_prep_push_rep`/`cmd_prep_push_rep_season`/`add_extras`). Read
     `docs/feature-auto-rollback/ROLLBACK_MECHANISM.md §10` first (change-gate).

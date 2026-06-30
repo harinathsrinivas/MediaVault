@@ -11,16 +11,17 @@
   (`add_extras` cmd + `--extras`/`--extras-size` on prep/push family) · C = FLAG-ONLY (`--fetchExtras`, aliases
   `--fetch-extras`/`--extras`/`--extra`; no prompt; absent = no extras) · extras-size default = inherit main split ·
   D1 (full push→dummy→fetch→restore lifecycle) · E1 (additive rollback; main contract byte-for-byte unchanged).
-- **Last updated:** 2026-06-29 (Step 0 `415ae4b`, Step 1 `dccd993`, Step 2 `3d959a4`; Step 3 🚦 AT USER CHECKPOINT —
-  both candidates committed, judge recommends B, worktrees removed, DECISION.md committed).
+- **Last updated:** 2026-06-29 (Steps 0–3 done: `415ae4b`/`dccd993`/`3d959a4`/`fcd9e66`; user picked Candidate B; full
+  suite 603✓). Step 4 next.
 
 ## ▶ NEXT ACTION
-**🚦 BLOCKED ON THE USER'S A/B PICK (Step 3 candidate checkpoint).** Judge recommends **Candidate B** (isolated
-`push_one_extra`, `cmd_push` untouched — wins the change-gate-critical blast-radius + rollback axes). Full analysis:
-`.candidates/d19-step-3/DECISION.md`. When the user picks: MERGE_CANDIDATE_WINNER the chosen `__cand_<a|b>` →
-`pytest -q` + smoke on the merged branch → mark Step 3 done + commit → ARCHIVE_CANDIDATES (tags under
-`candidates/imp_d19_extras/step-3/*`). Then Step 4 (extras replace/dummy). Do NOT re-run the planner; do NOT re-open
-Cards A–E. Do NOT auto-merge — the pick is the user's.
+**Step 4 — Extras replace (dummy) phase for space reclaim. [model: opus].** Implement `replace_one_extra` +
+`replace_title_extras` mirroring `cmd_replace`'s atomic two-rename + per-file PONR pattern (E1: existing `cmd_replace`
+contract byte-for-byte unchanged), wired into `cmd_replace`/`cmd_replace_group`/the autopilots/`add_extras` (unless
+`no-replace`). On post-PONR failure raise `RollbackHardFail(resume_cmd="fetch_restore <id> --fetchExtras")`. Read
+`docs/feature-auto-rollback/ROLLBACK_MECHANISM.md §10` first. Single-executor (no checkpoint). Also still pending for
+Step 3: ARCHIVE_CANDIDATES tags (`candidates/imp_d19_extras/step-3/B-chosen` + `A-rejected`) — do alongside the Step 3
+doc commit. Do NOT re-run the planner; do NOT re-open Cards A–E.
 
 ## Resume protocol (first thing a new session does)
 1. `git fetch && git checkout feature/imp_d19_extras` (or create it from `main` if it does not exist — first run).
@@ -35,7 +36,7 @@ Cards A–E. Do NOT auto-merge — the pick is the user's.
 | 0  | Scaffold + commit this execution journal | done | 415ae4b | n/a | plan + DECISIONS + journal committed onto the branch |
 | 1  | Extras data model + scan/merge/dedup core (A2 grouped) | done | dccd993 | smoke 72✓, schema-guard 2✓, self-check 8/8✓ | [model: opus] `_extras_title_id`/`scan_extras_folders`/`merge_extras_into_title` + ENTRY_TYPE_KEYS comment; `re_hashed` dropped (not True) on byte-change |
 | 2  | CLI parsing `--extras`/`--extras-size`/`--fetchExtras` + `add_extras` | done | (this commit) | cli-parsers 29✓, smoke 72✓ | [model: sonnet] `parse_extras_tokens`; 6 cmds + argv walkers; `cmd_add_extras` routed; `--fetchExtras`(+aliases) on fetch/fetch_restore; prep/prep_season/add_extras scan+merge; markers left for Steps 3/4/5. `--extras-size none`→`('NONE',None)` |
-| 3  | Extras upload phase (independent chunk size; resumable) | in_progress (🚦 AT CHECKPOINT) | — | A:603✓ B:push11+smoke72+sweep55✓ | [model: opus] **multi-candidate** — A `__cand_a`@d892991, B `__cand_b`@083d34a; **judge ⇒ B**; AWAITING USER's A/B pick before merge |
+| 3  | Extras upload phase (independent chunk size; resumable) | done | fcd9e66 | full suite 603✓ (post-merge) | [model: opus] **multi-candidate** — judge ⇒ B, **USER picked B**; `__cand_b` squash-merged (`push_one_extra`/`push_title_extras`, cmd_push untouched). DECISION.md @ aae6db6. To archive: tags `candidates/imp_d19_extras/step-3/B-chosen`+`A-rejected` |
 | 4  | Extras replace (dummy) phase for reclaim | pending | — | — | [model: opus] rollback-adjacent (E1) |
 | 5  | Extras fetch (flag-only `--fetchExtras`, no prompt) | pending | — | — | [model: opus] |
 | 6  | Extras restore (merge+verify into recreated subfolder) | pending | — | — | [model: opus] |
@@ -73,17 +74,10 @@ Cards A–E. Do NOT auto-merge — the pick is the user's.
   orchestrator auto-merge flow; see PLAN.md Step 3 🚦 bullet + "Checkpoint 0".)
 
 ## In-progress sub-state
-**Step 3 (multi-candidate) — 🚦 AT THE USER CHECKPOINT.** Both candidates are committed + durable on their branches
-(`__cand_a`@d892991 refactor; `__cand_b`@083d34a isolated). The judge recommends **B**; `DECISION.md` is committed to
-the feature branch. The candidate worktrees have been removed (footgun-safe). The feature branch HEAD is the Step-3
-checkpoint commit — **no candidate is merged yet.**
-**Resume sequence if interrupted (waiting on the user's A/B decision):** (1) read `.candidates/d19-step-3/DECISION.md`
-(committed) for the full judge analysis; (2) once the USER picks A or B → git-agent MERGE_CANDIDATE_WINNER with
-winner_branch `feature/imp_d19_extras__cand_<a|b>`, decision_md_path `.candidates/d19-step-3/DECISION.md`; (3) run
-`pytest -q` + `pytest tests/smoke -q` on the merged feature branch (belt-and-suspenders, since the judge did not re-run
-the full suite himself); (4) commit / mark Step 3 done; (5) ARCHIVE_CANDIDATES — tag both branches under
-`candidates/imp_d19_extras/step-3/<letter>-chosen|rejected` (do NOT use the bare `candidates/step-3/*` namespace — it
-belongs to a prior task). Then proceed to Step 4.
+_(Step 3 complete — candidate B merged `fcd9e66`, full suite 603✓; candidate branches pending archive-tag. Next: Step 4.)_
+
+**Note for a resuming session:** run `python -m pytest tests -q` (NOT bare `pytest -q` — there is no `testpaths`, so a
+bare invocation collects nothing). The full suite lives under `tests/`.
 
 ## Blockers / human gates
 - **Gate (now):** awaiting user "go" to begin execution.

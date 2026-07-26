@@ -3637,6 +3637,30 @@ def _extras_rel_posix(rel):
     return rel.replace(os.sep, "/")
 
 
+def _extras_item_paths(entry):
+    """Yield (group_rel, on_disk_path, item) for every extras item nested on
+    `entry`, across ALL groups (IMP-D19 Step 7 — the whole-library iterators'
+    "known files" seam).
+
+    on_disk_path = <title folder_path>/<group_rel>/<sub_rel>, composed with the
+    SAME posix→os.sep idiom push_one_extra / replace_one_extra /
+    restore_one_extra use, so every consumer agrees on one canonical location.
+
+    Safe on EVERY entry type: reads only the optional `extras` block plus
+    `folder_path` (present on both title shapes — season_map and movie leaf —
+    per ENTRY_TYPE_KEYS) and yields nothing when either is absent (e.g. a
+    multi_ep_alias). No leaf-only key is ever dereferenced."""
+    extras = entry.get("extras")
+    title_folder = entry.get("folder_path")
+    if not extras or not title_folder:
+        return
+    for group_rel, group in (extras.get("groups") or {}).items():
+        group_os = group_rel.replace("/", os.sep)
+        for item in group.get("items", []):
+            sub_os = (item.get("sub_rel") or "").replace("/", os.sep)
+            yield group_rel, os.path.join(title_folder, group_os, sub_os), item
+
+
 def _extras_title_id(library, mid):
     """Resolve `mid` to the id of the TITLE entry an extras block attaches to:
 
@@ -6560,6 +6584,13 @@ def cmd_scan_unprepped():
 
         known_paths = set()
         for entry in cat_lib.values():
+            # IMP-D19 Step 7: extras items ARE library content, nested on the
+            # TITLE entry (season_map or movie leaf) — add their on-disk paths
+            # BEFORE the physical-leaf type skip so extras attached to a
+            # season_map are "known" too and never mis-flagged UNPREPPED.
+            # Same normpath-lower normalization as the walk below.
+            for _grp, ex_path, _item in _extras_item_paths(entry):
+                known_paths.add(os.path.normpath(ex_path).lower())
             if entry.get("type") in ("season_map", "multi_ep_alias"): continue
             p = os.path.join(entry['folder_path'], entry['filename'])
             known_paths.add(os.path.normpath(p).lower())
@@ -7211,6 +7242,19 @@ def suggest_next_command(item):
     mid = item.get("id", "")
     path = item.get("path", "")
 
+    # IMP-D19 Step 7: a library EXTRAS item (the work dict carries the marker;
+    # `mid` is the TITLE id, `entry` the title entry). ONE uniform command
+    # covers every reclaimable extras state: re-running add_extras re-scans
+    # (idempotent no-op on unchanged bytes), pushes what is not yet uploaded,
+    # and (re-)dummies uploaded/restored items. (`replace <title_id>` would
+    # no-op on a season_map title, so it is NOT suggested here.)
+    group_rel = item.get("extras_group_rel")
+    if group_rel is not None and badge in _RECLAIMABLE_STATUS_BADGE.values():
+        group_folder = os.path.join(
+            (item.get("entry") or {}).get("folder_path", ""),
+            group_rel.replace("/", os.sep))
+        return f'python main.py add_extras {mid} "{group_folder}"'
+
     if badge == "UNPREPPED":
         return f'python main.py prep {mid} "{path}"'
     if badge == "LOCAL_NOT_PUSHED":
@@ -7303,7 +7347,9 @@ def collect_reclaimable():
     targeted pass over the library's physical leaves catches reclaimable
     entries whose on-disk file is still real but were not already produced by
     the walk. De-duped by normpath-lower so a library leaf and its on-disk file
-    yield exactly ONE row.
+    yield exactly ONE row. Library EXTRAS items (IMP-D19, nested on the title
+    entry) are classified by their OWN item status with the same badge set —
+    never UNPREPPED — and their rows suggest the `add_extras` resume command.
 
     Returns {"items": [...], "total_reclaimable_bytes": N,
              "total_reclaimable_human": "..."}. Strictly READ-ONLY.
@@ -7323,10 +7369,23 @@ def collect_reclaimable():
         key = os.path.normpath(os.path.join(fp, fn)).lower()
         known_paths[key] = (mid, entry)
 
+    # IMP-D19 Step 7: index library EXTRAS items too, so an extras file on disk
+    # is classified by ITS item status instead of mis-flagged UNPREPPED. Extras
+    # nest on the TITLE entry (season_map or movie leaf), so this iterates ALL
+    # entries for the extras block ONLY — _extras_item_paths dereferences no
+    # leaf-only key (season_map carries folder_path per ENTRY_TYPE_KEYS).
+    # normpath-lower(title folder/group_rel/sub_rel) -> (title_id, title entry,
+    # group_rel, composed path, item).
+    extras_paths = {}
+    for mid, entry in library.items():
+        for group_rel, ex_path, ex_item in _extras_item_paths(entry):
+            key = os.path.normpath(ex_path).lower()
+            extras_paths[key] = (mid, entry, group_rel, ex_path, ex_item)
+
     items = []
     seen = set()  # normpath-lower keys already emitted — single anti-double-count source.
 
-    def _add_item(norm_key, mid, entry, badge, path, size):
+    def _add_item(norm_key, mid, entry, badge, path, size, extras_group_rel=None):
         if norm_key in seen:
             return
         seen.add(norm_key)
@@ -7338,6 +7397,11 @@ def collect_reclaimable():
             "size_bytes": size,
             "entry": entry,  # internal — used by suggest_* below, dropped from the row
         }
+        if extras_group_rel is not None:
+            # Extras marker (IMP-D19): lets suggest_next_command emit the
+            # add_extras resume command. Internal only — the emitted row keeps
+            # the exact same key set as every other row.
+            work["extras_group_rel"] = extras_group_rel
         row = {
             "id": mid,
             "badge": badge,
@@ -7378,11 +7442,24 @@ def collect_reclaimable():
 
                 found = known_paths.get(norm_key)
                 if found is None:
+                    ex = extras_paths.get(norm_key)
+                    if ex is not None:
+                        # A library EXTRAS item (IMP-D19 Step 7) — NOT unprepped.
+                        # Badge by the ITEM's status: an extras item mirrors a
+                        # leaf's status vocabulary (local_ready / onboarded /
+                        # archived / restored_local, Card D1) and carries no
+                        # "type" key, so the shared classifier applies verbatim
+                        # (zero drift from how MAIN content classifies).
+                        ex_mid, ex_entry, ex_group, _ex_path, ex_item = ex
+                        badge = classify_entry_state(ex_item, on_disk_real)
+                        if badge and badge != "ARCHIVED":
+                            _add_item(norm_key, ex_mid, ex_entry, badge,
+                                      full_path, size, extras_group_rel=ex_group)
                     # Unknown to the library. classify_entry_state(None, ...) is
                     # always "UNPREPPED", but per the State table UNPREPPED is a
                     # RECLAIMABLE row only when the file is real — a dummy/tiny
                     # unknown file occupies no reclaimable space, so skip it.
-                    if on_disk_real:
+                    elif on_disk_real:
                         _add_item(norm_key, guess_manual_id(full_path), None,
                                   "UNPREPPED", full_path, size)
                 else:
@@ -7410,6 +7487,26 @@ def collect_reclaimable():
         badge = info["state"]
         if badge and badge != "ARCHIVED":
             _add_item(info["norm_key"], mid, entry, badge, info["path"], info["size_bytes"])
+
+    # ---- PASS 2b: extras items whose file is still real (IMP-D19 Step 7) ----
+    # The extras analog of PASS 2: catches reclaimable extras not already
+    # emitted from the walk (e.g. a category root absent above). Same status
+    # early-out as PASS 2; an absent/mis-composed path fails the stat and is
+    # skipped. De-duped via `seen`.
+    for norm_key, (ex_mid, ex_entry, ex_group, ex_path, ex_item) in extras_paths.items():
+        if norm_key in seen:
+            continue
+        if ex_item.get("status") not in _RECLAIMABLE_STATUS_BADGE:
+            continue
+        try:
+            size = os.path.getsize(ex_path)
+        except OSError:
+            continue
+        on_disk_real = size >= DUMMY_MAX_BYTES
+        badge = classify_entry_state(ex_item, on_disk_real)  # item mirrors leaf statuses
+        if badge and badge != "ARCHIVED":
+            _add_item(norm_key, ex_mid, ex_entry, badge, ex_path, size,
+                      extras_group_rel=ex_group)
 
     total_bytes = sum(it["size_bytes"] for it in items)
     return {

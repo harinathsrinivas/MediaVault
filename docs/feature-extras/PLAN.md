@@ -533,7 +533,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
     with a verified hash and `status="restored_local"`; the main `test_cmd_restore_quarantine` + smoke restore tests
     stay green.
 
-- [ ] 7. [model: fable] [effort: xhigh] Cross-command integrity: make the whole-library consumers extras-aware.
+- [x] 7. [model: fable] [effort: xhigh] Cross-command integrity: make the whole-library consumers extras-aware.
   - Files: `main.py` (`cmd_scan_unprepped` known_paths `5527-5531`, `collect_reclaimable` `6188`, `items_payload`
     `6386`, `build_tree` `6957`).
   - Details: After this feature, extras videos on disk ARE in the library (nested in the title's `extras` block) but the

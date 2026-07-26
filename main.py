@@ -141,6 +141,16 @@ CATEGORY_ROOTS = {
 # tech_spec, [split_info], [re_hashed]}, ... ]}}}, where group_rel is the extra
 # folder's path relative to the title's folder_path and sub_rel is the file's
 # path within that group (see scan_extras_folders / docs/feature-extras/DECISIONS.md).
+# Item lifecycle (mirrors a leaf's): `status` walks local_ready -> onboarded
+# (pushed) -> archived (dummied) -> restored_local (fetched back); `uploaded`
+# flips True at push and stays True across replace/restore (a re-scan that
+# finds CHANGED bytes resets the item to local_ready/uploaded=False). A split
+# item's `split_info` is {is_split, method, val, total_chunks, chunks:
+# [{filename, hash}, ...]} (written by push_one_extra), gaining
+# merge_seed/merge_tool/rehashed_at + item-level `re_hashed`: True when the
+# first restore blesses the merged hash (restore_one_extra) — the same
+# split_info vocabulary a main-content leaf uses. Authoritative in-code spec:
+# the EXTRAS DATA LAYER section below (grep "EXTRAS DATA LAYER").
 #
 # `required` = keys that distinguish the type and are always present; it is the
 # minimal set, not the exhaustive set (leaves also carry hash/metadata/etc.).

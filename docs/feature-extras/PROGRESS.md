@@ -15,17 +15,16 @@
   (`add_extras` cmd + `--extras`/`--extras-size` on prep/push family) · C = FLAG-ONLY (`--fetchExtras`, aliases
   `--fetch-extras`/`--extras`/`--extra`; no prompt; absent = no extras) · extras-size default = inherit main split ·
   D1 (full push→dummy→fetch→restore lifecycle) · E1 (additive rollback; main contract byte-for-byte unchanged).
-- **Last updated:** 2026-07-27 (Steps 0–7 done under v2 pace; 6+7 on executor-fable). Step 8 next (fable).
+- **Last updated:** 2026-07-27 (Steps 0–8 done; 6–8 on executor-fable under v2). Step 9 next (fable).
 
 ## ▶ NEXT ACTION
-**Step 8 — `ENTRY_TYPE_KEYS` doc + schema-guard round-trip coverage for an extras block. [model: fable] (v2).**
-Document the optional `extras` nested block (leaf + season_map) in the `ENTRY_TYPE_KEYS` comment exactly as
-`split_info`/`metadata` are described — NO new entry type, NO change to `required`/`physical` sets (guard's
-`NON_PHYSICAL_TYPES` assertion stays). Extend `tests/test_entry_schema_guard.py`: leaf AND season_map carrying a
-representative A2 extras block round-trip byte-for-byte through save/load; whole-library read commands
-(`scan_unprepped`, `local_status`, `sort`) complete without raising on an extras-bearing library. Note: Step 1 already
-added an extras paragraph to the comment — Step 8 verifies/completes it rather than duplicating. ⚠️ Pathspec commits
-ONLY (user's archiver files staged). Do NOT re-run the planner; do NOT re-open Cards A–E.
+**Step 9 — conftest fixture `sandbox_extras`. [model: fable] (v2).** Build ON TOP of `sandbox` (inherit the dual
+LIBRARY_* patch + the `C:\Media` hard-guard — do NOT DIY patching). Seed a title (movie leaf OR season_map) with an A2
+extras block (mirror Step 8's canonical `_extras_block()` shape: split item with chunks + whole items, realistic
+statuses) and create the real (>`DUMMY_MAX_BYTES`) extra files on disk under `Specials/` with stored hashes matching
+(use `make_video`). Yield title id, group/`sub_rel` pairs, on-disk paths, and the underlying `sandbox` dict. Read
+`docs/testing-strategy.md` first; document the fixture in its §4. ⚠️ Pathspec commits ONLY (user's archiver files
+staged). Do NOT re-run the planner; do NOT re-open Cards A–E.
 
 ## Resume protocol (first thing a new session does)
 1. `git fetch && git checkout feature/imp_d19_extras` (or create it from `main` if it does not exist — first run).
@@ -45,7 +44,7 @@ ONLY (user's archiver files staged). Do NOT re-run the planner; do NOT re-open C
 | 5  | Extras fetch (flag-only `--fetchExtras`, no prompt) | done | (this commit) | smoke+parsers 103✓, fetch-k 83✓ | [model: opus] synthetic leaf-shaped entries → `fetch_single_entry` verbatim; `build_extras_entries`/`resolve_title_extras` in mainfetch; `parse_fetch_args` → 3-tuple; staging `<title>/<group_rel>/restore/` (convention logged in STATUS.md for Step 6) |
 | 6  | Extras restore (merge+verify into recreated subfolder) | done | (this commit) | full 605✓, smoke 72✓, restore+smoke gate 81✓ | [model: fable] (v2) `restore_one_extra`/`restore_title_extras`; archived→restored_local; split blesses re_hashed; chunk-only quarantine (dummy never deleted on bad-chunk — R6 invariant); driver has NO status filter so Step-4 post-PONR resume heals; cmd_restore contract byte-for-byte (E1) |
 | 7  | Cross-command integrity (scan_unprepped/reclaim/items/tree) | done | (this commit) | full 605✓, smoke 72✓, gate 115✓, sanity 22/22✓ | [model: fable] (v2) `_extras_item_paths` helper; scan_unprepped known_paths + collect_reclaimable PASS 2b extras-aware (classify via shared classify_entry_state; suggest `add_extras`); items_payload/build_tree deliberately NOT touched (season_map rows never emitted — count would mislead); recover --scan + rename_folder confirmed no-change; extras-less output byte-identical |
-| 8  | `ENTRY_TYPE_KEYS` doc + schema-guard round-trip | pending | — | — | [model: opus] no new entry type |
+| 8  | `ENTRY_TYPE_KEYS` doc + schema-guard round-trip | done | (this commit) | guard 4✓, smoke 72✓, full 607✓ | [model: fable] (v2) +10 comment lines only (Steps 3–6 vocab: statuses, split_info shape, blessed-merge fields); canonical `_extras_block()` builder + 2 tripwire tests (round-trip byte-for-byte on leaf+season_map; read-commands incl. collect_reclaimable tolerate extras); no new type, required/physical untouched |
 | 9  | conftest `sandbox_extras` fixture | pending | — | — | [model: opus] binding hazard |
 | 10 | Unit/command tests `tests/test_extras.py` | pending | — | — | [model: sonnet] |
 | 11 | Smoke coverage (round-trip + alias sweep + not-flagged) | pending | — | — | [model: sonnet] |

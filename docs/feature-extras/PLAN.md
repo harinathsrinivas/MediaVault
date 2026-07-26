@@ -549,7 +549,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
     extras as unprepped; `collect_reclaimable` does not mis-badge them; every iterator completes without raising;
     `test_entry_schema_guard` (Step 8) green. opus: this is the cross-command risk the smoke gate exists for.
 
-- [ ] 8. [model: fable] [effort: xhigh] `ENTRY_TYPE_KEYS` doc + schema-guard round-trip coverage for an extras block.
+- [x] 8. [model: fable] [effort: xhigh] `ENTRY_TYPE_KEYS` doc + schema-guard round-trip coverage for an extras block.
   - Files: `main.py` (`ENTRY_TYPE_KEYS` comment `114-148`), `tests/test_entry_schema_guard.py`.
   - Details: Document the optional `extras` nested block (on leaf + season_map) in the `ENTRY_TYPE_KEYS` comment exactly
     as `split_info`/`metadata` are described — **no new entry type, no change to the `required` sets / `physical`

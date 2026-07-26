@@ -585,7 +585,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
     marking done.
   - Acceptance: `python -m pytest tests/test_extras.py -q` green.
 
-- [ ] 11. [model: opus] [effort: medium] Smoke coverage for extras (round-trip + alias-sweep + not-flagged).
+- [x] 11. [model: opus] [effort: medium] Smoke coverage for extras (round-trip + alias-sweep + not-flagged).
   - Files: `tests/smoke/test_smoke_all_commands.py`. Read `docs/testing-strategy.md` first.
   - Details: Add a `_seed_title_with_extras(sandbox, make_video)` helper (mirroring the existing `_seed_*` helpers)
     creating a season_map + 1 leaf episode + a 2-item `extras` block with real extra files under a `Specials/`

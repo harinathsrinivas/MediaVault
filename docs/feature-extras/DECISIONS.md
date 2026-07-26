@@ -41,7 +41,10 @@ entry["extras"] = {
 - **`sub_rel`** = the file's path **within that group** (just the filename for flat folders — both real samples are flat
   one level: Stranger Things `Specials\`, Death Note `Extra\`).
 - **`"groups"` wrapper** keeps an arbitrary folder name from ever colliding with a reserved key.
-- **Restore** recreates `<title folder_path>/<group_rel>/<sub_rel>` so Plex/Jellyfin/Emby keep recognizing the extras.
+- **Restore** recreates `<title folder_path>/<group_rel>/<sub_rel>` (restore-in-place is guaranteed).
+  *Rationale refinement (2026-07-27, Step 12 research):* server recognition depends on the folder NAME being in the
+  server's recognized extras list — `Specials`/`Extra` are NOT recognized by Jellyfin/Plex (Emby accepts `specials`);
+  see `improvements/JELLYFIN_SETUP_GUIDE.md` §3.6. The A2 decision itself is unaffected.
 - **De-dup / additive identity = per-group by normalized `sub_rel`.** Re-adding a group is a no-op for unchanged files;
   adding a new folder appends a new group; adding Specials then Trailers == adding both at once. A changed-byte file
   (hash differs) updates that item and resets `uploaded=false`.

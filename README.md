@@ -52,6 +52,9 @@ puts the file back where it was.
   restores **verify** against it and alarm on mismatch (without crossing the
   restore point-of-no-return). Use the `rehash` token at `push` to bless eagerly
   instead (canonical promoted into the entry at `replace`).
+- `add_extras` / `--extras` — give a title's bonus-content folders (`Specials\`,
+  `Extra\`, `Trailers\`) the very same lifecycle, with an independent chunk size and
+  an opt-in `--fetchExtras` on the way back. See "Archiving extras" below.
 
 ### Failure handling (auto-rollback)
 
@@ -187,17 +190,18 @@ help text and no `--help` flag; this table is the reference.
 
 | Subcommand             | Signature                                                                                                                           | Description                                                                                                                                            |
 | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `prep`                 | `prep [id] [filepath]`                                                                                                              | Index a new local file, compute SHA256, write sidecars                                                                                                 |
-| `prep_season`          | `prep_season [base_id] [folder]`                                                                                                    | Batch-prep an entire season folder                                                                                                                     |
-| `prep_push_rep`        | `prep_push_rep [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>]`                         | Full pipeline (prep -> push -> replace) for one file                                                                                                   |
-| `prep_push_rep_season` | `prep_push_rep_season [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>]` | Sequential full pipeline for a whole season                                                                                                            |
-| `push`                 | `push [id] [SIZE_MB/SIZE_GB/COUNT val] [chunks 1-4] [device <id_or_name>] [rehash] [tempdir <path>]`                                | Split and ADB-push to phone (`rehash` = eager canonical re-hash; `tempdir` = off-volume chunks)                                                        |
-| `push_group`           | `push_group [id] [SIZE_..] [episodes 1-3] [device <id_or_name>] [rehash] [tempdir <path>]`                                          | Push a season group                                                                                                                                    |
+| `prep`                 | `prep [id] [filepath] [--extras "<f1>;<f2>"] [--extras-size <v>]`                                                                   | Index a new local file, compute SHA256, write sidecars; `--extras` registers bonus folders (scan+hash only — never uploads)                            |
+| `prep_season`          | `prep_season [base_id] [folder] [--extras "<f1>;<f2>"] [--extras-size <v>]`                                                         | Batch-prep an entire season folder; `--extras` registers bonus folders onto the season                                                                  |
+| `prep_push_rep`        | `prep_push_rep [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | Full pipeline (prep -> push -> replace) for one file; `--extras` also pushes + dummies the title's registered extras            |
+| `prep_push_rep_season` | `prep_push_rep_season [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | Sequential full pipeline for a whole season; `--extras` also pushes + dummies the season's registered extras |
+| `push`                 | `push [id] [SIZE_MB/SIZE_GB/COUNT val] [chunks 1-4] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | Split and ADB-push to phone (`rehash` = eager canonical re-hash; `tempdir` = off-volume chunks); `--extras` also uploads the registered extras (extras only, if the main is already archived) |
+| `push_group`           | `push_group [id] [SIZE_..] [episodes 1-3] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | Push a season group; `--extras` also uploads the season's registered extras                                          |
+| `add_extras`           | `add_extras <title_id> "<f1>;<f2>" [--extras-size <v\|none>] [device <id_or_name>] [no-replace]`                                     | Attach bonus content (Specials/Trailers/Behind-the-Scenes) to an existing title and archive it in one shot: scan+hash -> push -> dummy, without touching the main content (`no-replace` = upload only) |
 | `replace`              | `replace [id]`                                                                                                                      | Swap original with a tiny valid video file placeholder (requires ffmpeg)                                                                               |
 | `replace_group`        | `replace_group [id]`                                                                                                                | Replace a season group                                                                                                                                 |
 | `repair_dummies`       | `repair_dummies [id_prefix]`                                                                                                        | Regenerate any archived-entry dummy on disk to the current 10 KB video spec (idempotent — re-runs are safe; atomic swap)                                            |
-| `fetch`                | `fetch [id] [episodes <range>]`                                                                                                     | Selenium-download from Google Photos                                                                                                                   |
-| `fetch_restore`        | `fetch_restore [id] [episodes <range>]`                                                                                             | Fetch then restore in one command                                                                                                                      |
+| `fetch`                | `fetch [id] [episodes <range>] [--fetchExtras]`                                                                                     | Selenium-download from Google Photos; `--fetchExtras` also downloads the title's archived extras (flag-only — never prompts)                            |
+| `fetch_restore`        | `fetch_restore [id] [episodes <range>] [--fetchExtras]`                                                                             | Fetch then restore in one command; `--fetchExtras` also fetches + restores the extras into their `Specials\`/`Extra\` subfolder                         |
 | `restore`              | `restore [id]`                                                                                                                      | Re-merge chunks, verify SHA256, place file back                                                                                                        |
 | `restore_group`        | `restore_group [id]`                                                                                                                | Restore a season group                                                                                                                                 |
 | `verify_restore`       | `verify_restore [id]`                                                                                                               | Dry-run hash check of restore/ folder contents                                                                                                         |
@@ -228,7 +232,7 @@ help text and no `--help` flag; this table is the reference.
 The Selenium fetcher can also be invoked directly:
 
 ```
-python mainfetch.py fetch <id> [episodes <range>]
+python mainfetch.py fetch <id> [episodes <range>] [--fetchExtras]
 ```
 
 `main.py fetch` is a thin wrapper that spawns exactly that command.
@@ -482,6 +486,82 @@ python main.py prep_push_rep_season tv-en-2024-show-s01 "C:\Media\Series\Show S0
 Aliases are edited in source (matching the hardcoded-config convention noted
 in [`ARCHITECTURE.md` §14](ARCHITECTURE.md)). An unknown alias falls through
 to ADB as a raw serial, so any serial works without registration.
+
+### Archiving extras (Specials / Trailers / Behind-the-Scenes)
+
+Bonus-content folders that sit **inside** a title's own folder — the
+`…\<Title>\Specials\`, `…\Extra\`, `…\Trailers\` layout — get the same
+push → dummy → fetch → restore lifecycle as main content (IMP-D19). They are stored in
+an optional nested `extras` block on the title entry (the season for a series/anime,
+the movie itself for a movie), **grouped per source folder**, and they are additive:
+add `Specials` now and `Trailers` later, in any order, and re-adding an unchanged
+folder is a no-op.
+
+**One-shot on an existing title — the common case (works even when the main content is
+already archived):**
+
+```
+python main.py add_extras ani-ja-2006-deathnote "C:\Media\Anime\Death Note {tmdb-13916}\Extra" --extras-size 9900mb
+```
+
+That scans the folder recursively for video files, hashes each one, pushes them to the
+phone, then replaces each with a tiny dummy to reclaim the space — **without touching
+the main episodes**. Add `no-replace` to upload only and keep the originals local. Two
+folders at once: `"…\Specials;…\Trailers"` (semicolon-separated; the folder list here is
+positional, not a `--extras` flag). `device <alias_or_serial>` works exactly as it does
+on `push` (see "Pinning a push to a specific phone" above — only `movies`, `series`, and
+`others` are registered aliases; anything else is passed to ADB as a raw serial).
+
+**Registering extras as part of prep, then uploading them:**
+
+```
+python main.py prep_season tv-en-2016-strangerthings-s01 "C:\Media\Series\...\Stranger.Things.S01... {tmdb-66732}" --extras "C:\Media\Series\...\Stranger.Things.S01... {tmdb-66732}\Specials"
+python main.py push_group tv-en-2016-strangerthings-s01 SIZE_MB 5000 device series --extras "C:\Media\Series\...\Stranger.Things.S01... {tmdb-66732}\Specials" --extras-size 9900mb
+```
+
+`prep` / `prep_season` only **register** extras (scan + hash + merge; prep never
+uploads). `--extras` on `push` / `push_group` / `prep_push_rep` /
+`prep_push_rep_season` is then the opt-in switch that uploads the extras already
+registered on that title — the two autopilots also dummy them afterwards. Those
+commands do **not** re-scan the paths you pass, so register with `prep --extras` first,
+or just use `add_extras`, which does the whole thing in one shot. A later `replace` /
+`replace_group` on the title also dummies its uploaded extras (no flag needed). The
+flag is repeatable as well as semicolon-separated: `--extras A --extras B`.
+
+**Independent chunk size.** `--extras-size` is separate from the main split: `none`
+(whole file), `9900mb`, `8gb`, or `SIZE_MB 9900` / `SIZE_GB 8` / `COUNT 4`. Omit it to
+inherit the command's own `SIZE_*` split; with no main split, extras go up whole. So
+main at `SIZE_MB 5000` with extras at `9900mb` — or unchunked — is a normal
+combination.
+
+**Getting them back — `--fetchExtras` (a flag, never a prompt):**
+
+```
+python main.py fetch_restore ani-ja-2006-deathnote --fetchExtras
+```
+
+Extras are fetched **only** when the flag is passed (aliases `--fetch-extras`,
+`--extras`, `--extra`); there is no interactive question anywhere, and without the flag
+a fetch behaves exactly as it did before. `episodes 1-3` filters only episodes —
+extras are all-or-nothing. Restore puts each file back at its original
+`…\<Title>\Specials\<file>` path, recreating the subfolder if it was deleted, and
+verifies the SHA256 (split extras are re-merged deterministically first). Note that the
+flag gates the **download**: anything already staged in a `restore/` folder is placed
+back by any successful `restore` / `restore_group` / `fetch_restore`, which is what
+lets an interrupted run heal itself on the next call.
+
+**Where extras show up.** `scan_unprepped` no longer reports registered extras as
+unprepped, and the `web` console's Disk Reclaim view lists a reclaimable extra with
+`add_extras` as its suggested command. Whether your **media server** lists them in a
+title's *Extras* row is a separate question decided by the folder NAME — `Specials` and
+`Extra` are not recognized extras-folder names on Jellyfin or Plex — so pick a
+recognized name (`extras`, `behind the scenes`, `trailers`, …) *before* registering the
+folder, because the stored group key is that relative path. Per-server lists and the
+`Season 00`-vs-extras distinction:
+[`improvements/JELLYFIN_SETUP_GUIDE.md`](improvements/JELLYFIN_SETUP_GUIDE.md) §3.6.
+Design notes and the locked decisions live in
+[`docs/feature-extras/`](docs/feature-extras/); the JSON shape is
+[`ARCHITECTURE.md` §6.3](ARCHITECTURE.md).
 
 ## Manual ID conventions
 

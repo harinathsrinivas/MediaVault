@@ -15,18 +15,18 @@
   (`add_extras` cmd + `--extras`/`--extras-size` on prep/push family) · C = FLAG-ONLY (`--fetchExtras`, aliases
   `--fetch-extras`/`--extras`/`--extra`; no prompt; absent = no extras) · extras-size default = inherit main split ·
   D1 (full push→dummy→fetch→restore lifecycle) · E1 (additive rollback; main contract byte-for-byte unchanged).
-- **Last updated:** 2026-07-27 (Steps 0–11 done; suite at 641, smoke 76). Step 12 next (opus).
+- **Last updated:** 2026-07-27 (Steps 0–12 done). Next: **Step 12b (fix)** then 13.
 
 ## ▶ NEXT ACTION
-**Step 12 — Architect: document the behavior change. [model: opus] (v2).** Surgical doc edits: `ARCHITECTURE.md` §5
-(new `--extras`/`--extras-size` on prep/push family + `add_extras` + `--fetchExtras` on fetch/fetch_restore), §6.3
-(the optional A2 grouped `extras` block — source of truth is the ENTRY_TYPE_KEYS comment finalized in Step 8 — shape,
-`group_rel`/`sub_rel` identity, statuses, independent chunking), cross-command-consumer note (scan/reclaim extras-
-aware). `README.md` CLI reference + "Archiving extras" workflow + `--fetchExtras` flag (NO prompt — flag-only) +
-`--extras-size`. `docs/README.md`: index `docs/feature-extras/`. `BEST_PRACTICES.md`: recommended on-disk extras
-layout. `improvements/JELLYFIN_SETUP_GUIDE.md`: restored `Specials`/`Extra` subfolders are recognized by media
-servers. Also document the Step-11 finding: staged extras restore unconditionally on cmd_restore success (Card C
-gates fetching). ⚠️ Pathspec commits ONLY. Do NOT re-run the planner; do NOT re-open Cards A–E.
+**Step 12b — FIX the autopilot `--extras` forwarding gap. [model: opus] (v2).** Step 12 found (file:line in its STATUS
+entry): `cmd_prep_push_rep` calls `cmd_prep(manual_id, filepath)` and `cmd_prep_push_rep_season` calls
+`cmd_prep_season(base_id, folder_path)` WITHOUT forwarding `extras`/`extras_size` — so on a brand-new title,
+`prep_push_rep(_season) … --extras "<folders>"` registers nothing and the trailing `push_title_extras`/
+`replace_title_extras` silently no-op. This contradicts PLAN Card B1 ("prep_push_rep/prep_push_rep_season:
+scan+merge then upload"). Fix: forward the two kwargs at both call sites; add a regression test (test_extras.py,
+(b)-family: fresh title + autopilot + --extras ⇒ extras registered AND pushed AND replaced); relax the two
+"register first" sentences Step 12 wrote in README/ARCHITECTURE to match the fixed behavior. Then Step 13 (tracking).
+⚠️ Pathspec commits ONLY. Do NOT re-run the planner; do NOT re-open Cards A–E.
 
 ## Resume protocol (first thing a new session does)
 1. `git fetch && git checkout feature/imp_d19_extras` (or create it from `main` if it does not exist — first run).
@@ -50,7 +50,7 @@ gates fetching). ⚠️ Pathspec commits ONLY. Do NOT re-run the planner; do NOT
 | 9  | conftest `sandbox_extras` fixture | done | (this commit) | full 607✓, smoke 72✓, proof 1✓ | [model: fable] (v2) movie leaf `mov-en-2024-extrasmovie` + `Specials` group ×2 real hash-matched files (>DUMMY_MAX_BYTES); zero DIY patching (composes `sandbox`); item formulas byte-match `scan_extras_folders` (re-scan = provable no-op); documented testing-strategy §4.9. ⚠️ Step-10 note: ~264KB extras can't truly split — stub `split_video_file` for the split path |
 | 10 | Unit/command tests `tests/test_extras.py` | done | (this commit) | 30✓ (4.2s), smoke 72✓, full 637✓, sensitivity 10/10✓ | [model: opus] (v2) all seven cases (a)–(g); split path via byte-slicer stubs of split/merge (Step-9 caveat honored, integrity asserted end-to-end); fetch seam pinned via pure `build_extras_entries` (harvester loop would busy-hang — documented); no lifecycle bugs found |
 | 11 | Smoke coverage (round-trip + alias sweep + not-flagged) | done | (this commit) | smoke 76✓ (+0.6s delta), full 641✓, probe 4/4✓ | [model: opus] (v2) season-shaped `_seed_title_with_extras`; 4 cases: round-trip (asserts `--fetchExtras` reaches mainfetch argv), not-unprepped, 2 alias-sweep; fetch simulated at FS seam. FINDING (documented, by-design): staged extras restore unconditionally on cmd_restore success — Card C gates FETCHING, not restore-of-staged |
-| 12 | Architect docs (ARCHITECTURE/README/...) | pending | — | — | [model: opus] |
+| 12 | Architect docs (ARCHITECTURE/README/...) | done | (this commit) | smoke 76✓; 24/24 CLI examples replayed thru real parsers | [model: opus] (v2) 5 docs updated (ARCH §5/§6.3/§12a-blockquote, README + workflow, docs index, B8, Jellyfin §3.6). DATA_REQUEST→web-verified: `Specials`/`Extra` NOT recognized extras names on Jellyfin/Plex (Emby: `specials` ok) — guide + B8 + README corrected; DECISIONS A2 rationale footnoted. FINDINGS: autopilots don't forward `--extras` to prep (fix = Step 12b); /api/items not extras-aware (OD-2, documented) |
 | 13 | Register IMP-D19 (tier file + PRIORITY.md + graph) | pending | — | — | [model: sonnet] |
 | 14 | Final verification + smoke gate (last) | pending | — | — | [model: sonnet] |
 

@@ -596,7 +596,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
     Never touch real `C:\Media`/`library_*.json`. Run `python -m pytest` and fix failures before marking done.
   - Acceptance: `python -m pytest tests/smoke -q` green in < ~30s including the new extras coverage.
 
-- [ ] 12. [model: opus] [effort: high] Architect: document the behavior change.
+- [x] 12. [model: opus] [effort: high] Architect: document the behavior change.
   - Files: `ARCHITECTURE.md`, `README.md`, `docs/README.md`, `BEST_PRACTICES.md`, `improvements/JELLYFIN_SETUP_GUIDE.md`.
   - Details (documented behavior change — keep edits surgical): `ARCHITECTURE.md` §5 (the new `--extras`/`--extras-size`
     options on prep/push family + the new `add_extras` command + `--fetchExtras` on fetch/fetch_restore), §6.3 (the new
@@ -737,7 +737,9 @@ options.
    `python main.py prep_push_rep_season tv-en-2016-strangerthings-s01 "...{tmdb-66732}" SIZE_MB 5000 --extras "...{tmdb-66732}\Specials" --extras-size 9900mb device series`
    → episodes split at 5000 MB, Specials at 9900 MB; both pushed + replaced (dummied).
 5. **Add 25 GB of extras to an ALREADY-ARCHIVED anime title, unchunked:**
-   `python main.py add_extras ani-ja-2006-deathnote "C:\Media\Anime\Classic\Death Note (Complete Series) [1080p] (Dual Audio) {tmdb-13916}\Extra" --extras-size 9900mb device anime`
+   `python main.py add_extras ani-ja-2006-deathnote "C:\Media\Anime\Classic\Death Note (Complete Series) [1080p] (Dual Audio) {tmdb-13916}\Extra" --extras-size 9900mb device <id_or_name>`
+   *(note: `anime` is NOT a registered device alias — `DEVICE_ALIASES` are `movies`/`series`/`others`; pass your anime
+   Pixel's id or name, or a registered alias — Step 12 finding)*
    → scans 19 files, splits the >9.9 GB ones, pushes to the anime Pixel, replaces each with a dummy (reclaims ~25 GB);
    the main episodes stay archived/untouched.
 6. **Fetch WITHOUT extras (default — no flag):**

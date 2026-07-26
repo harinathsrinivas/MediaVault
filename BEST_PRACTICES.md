@@ -207,6 +207,40 @@ library grows and *before* you delete local originals.
 - **Tracked as:** IMP-D18 (shipped); follow-ons IMP-X1 (replicate Others to a 2nd
   account) and OD-2 (an optional sports scraper, e.g. TheSportsDB) stay open.
 
+### B8. Keep extras in a subfolder **inside** the title folder — the IMP-D19 layout
+- **Decision (shipped, IMP-D19):** bonus content lives in a subfolder of the title's own
+  folder — `…\<Title> {tmdb-…}\Specials\`, `…\Extra\`, `…\Trailers\`, a sibling of the
+  season/episode files — never in a separate top-level tree. `--extras` / `add_extras`
+  stores each such folder as one **group** keyed by its path *relative* to the title
+  folder (`group_rel`), each file by its path *within* the group (`sub_rel`), and restore
+  recreates exactly that path.
+- **Why it compounds:** those relative keys are what make extras survive `rename_folder`
+  and `{tmdb-…}` stamping with zero rewriting (B5's sibling property), and they are what
+  lands a restored extra back at the exact path it was indexed from. Point `--extras` at a
+  folder *outside* the title folder and the group key silently falls back to the folder's
+  basename: the file still archives, but its restore path is no longer where it came from,
+  and two outside folders sharing a basename collide into one group. Fixing that later
+  means re-adding **and re-pushing** the group (upload cost — A4 scale in miniature).
+- **Also lock, while adding:** (a) name extras files meaningfully — MediaVault carries the
+  filename through verbatim, and a local extra is in practice labelled from its filename;
+  (b) `--extras-size` is independent of the main split but A1's rule still applies — use
+  `8 gb` / `9900mb`-class ceilings, never `10 gb` (Death Note's `Extra\` alone is ~25 GB,
+  so extras really do split); (c) archive extras *after* the main content is verified —
+  an extra is dummied by the same PONR-guarded `replace` path (A5 applies to it too).
+- **Media-server recognition — decide the folder NAME before you register (the real
+  compounding bit):** MediaVault faithfully archives and restores *any* folder name, but
+  whether a server shows those files in a title's **Extras** row depends entirely on the
+  name, and the two names this vault currently uses are **not** recognized ones —
+  `Specials` and `Extra` are absent from Jellyfin's and Plex's extras-folder lists (Emby
+  does accept `specials`). Use a recognized name (`extras`, `behind the scenes`,
+  `trailers`, …) and rename **before** running `add_extras` / `prep --extras`: the stored
+  `group_rel` IS that relative path, so renaming the folder afterwards orphans the group
+  (restore would recreate the old name) and re-registering means re-pushing. Full
+  per-server lists + the `Season 00`-vs-extras distinction:
+  `improvements/JELLYFIN_SETUP_GUIDE.md` §3.6.
+- **Tracked as:** IMP-D19 (shipped); locked decisions in
+  `docs/feature-extras/DECISIONS.md` (Cards A2/B/D1).
+
 ---
 
 ## C. 🟢 Fix-before-automating — operational gates the daemon depends on
@@ -253,7 +287,8 @@ real fetch — not Speedtest. That number decides whether fly-streaming UHD sust
 4. **Never delete an original until verified + replicated.** (A5)
 5. **Decide plain-vs-encrypted posture now** (gated on the X3 spike). (A6)
 6. **Enrich (trickplay/chapters/subs/intro) BEFORE archiving.** (B1/B2)
-7. **Freeze ID prefixes, chunk naming, and folder layout before populating.** (B3/B5)
+7. **Freeze ID prefixes, chunk naming, and folder layout before populating** — including
+   the in-title `Specials\`/`Extra\` placement for extras. (B3/B5/B8)
 8. **Back up `library_*.json` to git; keep `.mvmeta` sidecars self-sufficient.** (B6)
 9. **Land watch-state, session detection, grace periods, phone cleanup before unattended automation.** (C)
 10. **Measure Google's per-file download rate** to close the fly-streaming question. (E-Note)

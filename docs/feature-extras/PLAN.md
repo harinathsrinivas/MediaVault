@@ -561,7 +561,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
   - Acceptance: `python -m pytest tests/test_entry_schema_guard.py -q` green; the registry diff adds only the comment
     (no new type). opus per the testing rules (schema-guard correctness trap).
 
-- [ ] 9. [model: fable] [effort: xhigh] conftest fixture `sandbox_extras`.
+- [x] 9. [model: fable] [effort: xhigh] conftest fixture `sandbox_extras`.
   - Files: `tests/conftest.py`. Read `docs/testing-strategy.md` first.
   - Details: Add a `sandbox_extras` fixture built ON TOP OF `sandbox` (inheriting the dual LIBRARY_* patch + the
     `C:\Media` hard-guard). Seed a title (a movie leaf OR a season_map) with a nested `extras` block holding one group

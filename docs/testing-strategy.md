@@ -236,6 +236,45 @@ Run the guard test in isolation:
 pytest tests/test_entry_schema_guard.py -q
 ```
 
+### 4.9 `sandbox_extras` — extras-bearing movie title seed (IMP-D19)
+
+**File:** `tests/conftest.py`
+**Use for:** Tests that exercise the extras lifecycle (scan/merge,
+`push_title_extras`, `replace_title_extras`, `restore_title_extras`,
+`add_extras`, `--fetchExtras`) or any command that must tolerate an
+extras-bearing library.
+
+Extends `sandbox` (inheriting the dual LIBRARY_*/LOCAL_ROOT patch and the
+`C:\Media` hard-guard — it patches nothing itself). Seeds ONE movie-leaf title
+(`mov-en-2024-extrasmovie`, cmd_prep-faithful key set) into
+`library_movies.json` whose folder is `sandbox["media_dir"]`, carrying a nested
+`extras` block with one group `"Specials"` of two items in the pre-push state
+(`status="local_ready"`, `uploaded=False`), plus three REAL files on disk
+(`make_video`, each > `DUMMY_MAX_BYTES`): the movie's own main `.mkv` and the
+two extras under the `Specials/` subfolder — every stored `hash` matching the
+real bytes (the canonical `calculate_file_hash` sha256). Item fields mirror
+`scan_extras_folders` (same provenance as the canonical `_extras_block` in
+`tests/test_entry_schema_guard.py`); the disk layout matches
+`main._extras_item_paths`. The exact yield shape is documented in the fixture
+docstring. For a season_map-titled extras seed, see the smoke suite's
+`_seed_title_with_extras` helper (Step 11).
+
+```python
+def test_extras_push(sandbox_extras, mock_device):
+    # sandbox_extras["title_id"]   -> "mov-en-2024-extrasmovie" (movie leaf)
+    # sandbox_extras["media_dir"]  -> Path: title folder
+    # sandbox_extras["orig_path"]  -> Path: the movie's own main .mkv
+    # sandbox_extras["group_rel"]  -> "Specials"
+    # sandbox_extras["extras_dir"] -> Path: media_dir / "Specials"
+    # sandbox_extras["items"]      -> 2 dicts (sorted by sub_rel):
+    #                                 {"sub_rel","filename","path","hash","short_id"}
+    # sandbox_extras["sandbox"]    -> the underlying sandbox dict
+    library = mvcommon.load_library()
+    main.push_title_extras(library, sandbox_extras["title_id"], None)
+    # chunk/pushed names carry "[<short_id>]" — rglob("*.mkv") + filter by
+    # .name (never a bracketed pattern; see §8.1)
+```
+
 ---
 
 ## 5. Fixture selection decision tree

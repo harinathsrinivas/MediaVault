@@ -15,16 +15,18 @@
   (`add_extras` cmd + `--extras`/`--extras-size` on prep/push family) · C = FLAG-ONLY (`--fetchExtras`, aliases
   `--fetch-extras`/`--extras`/`--extra`; no prompt; absent = no extras) · extras-size default = inherit main split ·
   D1 (full push→dummy→fetch→restore lifecycle) · E1 (additive rollback; main contract byte-for-byte unchanged).
-- **Last updated:** 2026-07-27 (Steps 0–8 done; 6–8 on executor-fable under v2). Step 9 next (fable).
+- **Last updated:** 2026-07-27 (Steps 0–9 done; 6–9 on executor-fable under v2). Step 10 next (opus).
 
 ## ▶ NEXT ACTION
-**Step 9 — conftest fixture `sandbox_extras`. [model: fable] (v2).** Build ON TOP of `sandbox` (inherit the dual
-LIBRARY_* patch + the `C:\Media` hard-guard — do NOT DIY patching). Seed a title (movie leaf OR season_map) with an A2
-extras block (mirror Step 8's canonical `_extras_block()` shape: split item with chunks + whole items, realistic
-statuses) and create the real (>`DUMMY_MAX_BYTES`) extra files on disk under `Specials/` with stored hashes matching
-(use `make_video`). Yield title id, group/`sub_rel` pairs, on-disk paths, and the underlying `sandbox` dict. Read
-`docs/testing-strategy.md` first; document the fixture in its §4. ⚠️ Pathspec commits ONLY (user's archiver files
-staged). Do NOT re-run the planner; do NOT re-open Cards A–E.
+**Step 10 — Unit/command tests `tests/test_extras.py` (NEW). [model: opus] (v2).** Read `docs/testing-strategy.md`
+first (fixtures: `sandbox`/`sandbox_extras` §4.9; `mock_device` push; `fake_dummy` replace; `mock_fetch` fetch;
+`make_video`). Cover: (a) scan/merge/dedup idempotence (Specials-then-Trailers == both-at-once; re-add no-op;
+changed-byte resets uploaded + drops re_hashed); (b) extras push lands chunks on `mock_device` + flips uploaded +
+honors independent `--extras-size` (NOTE: fixture extras ~264KB can't truly split — stub `split_video_file` for the
+split path per Step 9's caveat); (c) replace → dummy + archived (`fake_dummy`); (d) restore re-merges into recreated
+`Specials/` with verified hash; (e) `parse_extras_tokens`; (f) `add_extras` on archived-main processes only extras;
+(g) `rename_folder` keeps extras valid. Never touch real `C:\Media`. ⚠️ Pathspec commits ONLY. Do NOT re-run the
+planner; do NOT re-open Cards A–E.
 
 ## Resume protocol (first thing a new session does)
 1. `git fetch && git checkout feature/imp_d19_extras` (or create it from `main` if it does not exist — first run).
@@ -45,7 +47,7 @@ staged). Do NOT re-run the planner; do NOT re-open Cards A–E.
 | 6  | Extras restore (merge+verify into recreated subfolder) | done | (this commit) | full 605✓, smoke 72✓, restore+smoke gate 81✓ | [model: fable] (v2) `restore_one_extra`/`restore_title_extras`; archived→restored_local; split blesses re_hashed; chunk-only quarantine (dummy never deleted on bad-chunk — R6 invariant); driver has NO status filter so Step-4 post-PONR resume heals; cmd_restore contract byte-for-byte (E1) |
 | 7  | Cross-command integrity (scan_unprepped/reclaim/items/tree) | done | (this commit) | full 605✓, smoke 72✓, gate 115✓, sanity 22/22✓ | [model: fable] (v2) `_extras_item_paths` helper; scan_unprepped known_paths + collect_reclaimable PASS 2b extras-aware (classify via shared classify_entry_state; suggest `add_extras`); items_payload/build_tree deliberately NOT touched (season_map rows never emitted — count would mislead); recover --scan + rename_folder confirmed no-change; extras-less output byte-identical |
 | 8  | `ENTRY_TYPE_KEYS` doc + schema-guard round-trip | done | (this commit) | guard 4✓, smoke 72✓, full 607✓ | [model: fable] (v2) +10 comment lines only (Steps 3–6 vocab: statuses, split_info shape, blessed-merge fields); canonical `_extras_block()` builder + 2 tripwire tests (round-trip byte-for-byte on leaf+season_map; read-commands incl. collect_reclaimable tolerate extras); no new type, required/physical untouched |
-| 9  | conftest `sandbox_extras` fixture | pending | — | — | [model: opus] binding hazard |
+| 9  | conftest `sandbox_extras` fixture | done | (this commit) | full 607✓, smoke 72✓, proof 1✓ | [model: fable] (v2) movie leaf `mov-en-2024-extrasmovie` + `Specials` group ×2 real hash-matched files (>DUMMY_MAX_BYTES); zero DIY patching (composes `sandbox`); item formulas byte-match `scan_extras_folders` (re-scan = provable no-op); documented testing-strategy §4.9. ⚠️ Step-10 note: ~264KB extras can't truly split — stub `split_video_file` for the split path |
 | 10 | Unit/command tests `tests/test_extras.py` | pending | — | — | [model: sonnet] |
 | 11 | Smoke coverage (round-trip + alias sweep + not-flagged) | pending | — | — | [model: sonnet] |
 | 12 | Architect docs (ARCHITECTURE/README/...) | pending | — | — | [model: opus] |

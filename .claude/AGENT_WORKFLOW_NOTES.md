@@ -45,3 +45,28 @@ The depth-1 limit was confirmed in practice across the A1 / C2 / C8 / auto-rollb
 2. **No silent handling of fundamental contradictions.** If any agent (or the main session) hits a fundamental capability gap or contradiction vs. the plan — a needed tool is unavailable, a planned approach is impossible, an instruction conflicts with a hard runtime limit — it must STOP and surface an explicit DECISION REQUEST to the user (what was expected, what differs, the options) instead of quietly degrading. The earlier inline fallback is exactly what this forbids. Mirrored in `CLAUDE.md`.
 
 Not changed: sub-agent nesting depth is a Claude Code runtime cap with **no project setting** — we don't attempt to configure one (the `orchestrator` already lists `Task` in its tools; the repo was never the blocker).
+
+## v2 agent set (2026-07-27): Fable tier + no-limits + richer context packaging
+
+With Fable 5 available (Max plan; the user has explicitly waived token/limit concerns for v2), a **v2 agent set** was added ALONGSIDE v1 — nothing in v1 was modified. Pre-change snapshot: `.claude/agent-backups/2026-07-27_pre-v2/`.
+
+**Invocation convention:** the user says which set to use when invoking the planner or orchestrator ("plan … v2", "use orchestrator v2"). A v2 plan carries `Framework: v2` directly under its `Suggested branch:` line; `Framework: v1` or no tag = v1. If the user's instruction and the plan tag conflict, ask. Never mix sets silently in one run.
+
+| Agent (v2)       | Model  | Effort | Role in v2                                                        |
+| :--------------- | :----- | :----- | :---------------------------------------------------------------- |
+| planner-v2       | fable  | max    | plans; may tag steps `[model: fable]`; no-limits candidate policy |
+| orchestrator-v2  | fable  | xhigh  | PLAYBOOK for the main session (depth-1 still applies — never spawn via Task); 8-block context packaging |
+| executor-fable   | fable  | xhigh  | complex/critical code + logic changes (NEW executor)              |
+| judge-v2         | fable  | xhigh  | candidate judging; diff-corroborated, user-facing DECISION.md     |
+| executor-opus    | opus   | max    | (reused from v1) normal code changes                              |
+| executor-sonnet  | sonnet | medium | (reused) very simple, mistake-proof jobs only                     |
+| executor-haiku   | haiku  | low    | (reused) trivial mechanics only                                   |
+| git-agent        | haiku  | low    | (reused, unchanged)                                               |
+| architect        | opus   | high   | (reused, unchanged)                                               |
+
+Headline v2 behaviors (full detail in each `*-v2.md` / `executor-fable.md`, which are THIN DELTA files — each reads its v1 counterpart as the base contract, so the base protocol has one source of truth):
+1. **Routing:** fable = complex/cross-cutting/contract- or rollback-adjacent work; opus = normal implementation; sonnet/haiku = only mistake-proof mechanics.
+2. **No-limits:** never downsize a model or trim verification to save tokens; multi-candidate wherever genuinely different approaches exist (quality guardrails and max-5 stay; the 0–2-per-plan cost budget does not); optional per-candidate models (`[candidate-model: fable|opus]`) for solution diversity.
+3. **8-block context packaging:** every dispatch carries WHOLE-TASK BRIEF / LOCKED DECISIONS / PRIOR-STEP DIGEST / THE STEP / DOWNSTREAM CONSUMERS / GUARDRAILS / VERIFICATION DUTIES / REPORTING+RESUMABILITY DUTIES — codifying (and tightening) the packaging proven on the IMP-D19 run.
+4. **Resumability journal is standard:** every v2 plan has a Step 0 scaffolding `docs/<feature>/PROGRESS.md`, updated + committed in the same commit as each step (pattern: `docs/feature-extras/PROGRESS.md`).
+5. **Registration reminder:** agent registration is fixed at session start — after adding/editing v2 files, a FRESH session is needed before the new names are spawnable. (Same-session workaround: dispatch `general-purpose` with a `model` override and paste the v2 contract into the prompt.)

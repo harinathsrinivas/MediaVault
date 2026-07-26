@@ -1,6 +1,9 @@
 # Task: Add an `--extras` option (Specials / Trailers / Behind-the-Scenes) end-to-end — IMP-D19
 
 Suggested branch: `feature/imp_d19_extras`
+Framework: v1 (Steps 0–5 planned + executed under the v1 agent set. A v2 set — Fable-tier, no-limits, richer context
+packaging — exists as of 2026-07-27 (`.claude/AGENT_WORKFLOW_NOTES.md` §v2); the user says "v1"/"v2" per run and may
+direct the remaining steps to run under v2.)
 
 > Canonical plan folder: `docs/feature-extras/` (root `/PLAN.md` is the gitignored live copy; the identical
 > tracked copy is `docs/feature-extras/PLAN.md`). The decisions log `docs/feature-extras/DECISIONS.md` will be

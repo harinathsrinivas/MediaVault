@@ -5,6 +5,10 @@
 > Claude account/machine — resumes from here. See PLAN.md §"Execution resumability" for the full protocol.
 
 - **Task:** IMP-D19 — add an `--extras` option (Specials / Trailers / Behind-the-Scenes) end-to-end.
+- **Framework:** v1 for Steps 0–5. A v2 agent set (Fable tier — `executor-fable`/`planner-v2`/`orchestrator-v2`/
+  `judge-v2`, no-limits policy, 8-block context packaging) was added 2026-07-27; see
+  `.claude/AGENT_WORKFLOW_NOTES.md` §v2. The user directs v1 vs v2 for the remaining steps; a resuming session should
+  check the latest user instruction (default remains v1 unless the user said v2).
 - **Branch:** `feature/imp_d19_extras` (NOT YET CREATED — see NEXT ACTION).
 - **Plan:** `docs/feature-extras/PLAN.md` · **Decisions (locked):** `docs/feature-extras/DECISIONS.md`.
 - **Locked decisions:** A2 (extras nested, grouped per source folder; group key = path relative to title) · B1

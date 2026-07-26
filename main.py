@@ -6001,6 +6001,9 @@ def cmd_restore(manual_id):
             # ---------------
 
             print(f"✅ SUCCESS: {filename} restored & re-indexed.")
+            # IMP-D19 Step 6: restore this title's fetched extras too (Card D1).
+            # The driver never raises and is silent when nothing is staged (E1).
+            restore_title_extras(library, _extras_title_id(library, manual_id))
             return True
 
     # B. STANDARD RESTORE
@@ -6047,6 +6050,9 @@ def cmd_restore(manual_id):
         # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
         _warn_if_entry_inconsistent(library[manual_id], manual_id)
         print(f"✅ SUCCESS: {filename} restored.")
+        # IMP-D19 Step 6: restore this title's fetched extras too (Card D1).
+        # The driver never raises and is silent when nothing is staged (E1).
+        restore_title_extras(library, _extras_title_id(library, manual_id))
         return True
 
 
@@ -6102,10 +6108,278 @@ def cmd_restore_group(group_id, episode_range=None):
         if cmd_restore(mid):
             count += 1
 
+    # IMP-D19 Step 6: explicit batch wire — restore the title's fetched extras
+    # after the episode loop (mirrors the Step-4 replace wire in
+    # cmd_replace_group). Reload first: each per-episode cmd_restore saved its
+    # own updates (and the first successful child already consumed the staged
+    # extras via its own success-path wire), so the in-memory `library` above is
+    # stale; the reload makes this an idempotent silent no-op rather than a
+    # double restore. It ALSO covers the extras-only case — every episode
+    # restore skipped (nothing staged for main content), so cmd_restore's
+    # success-path wire never fired, yet extras ARE staged.
+    library = load_library()
+    ex_title_id = _extras_title_id(library, group_id) or (
+        _extras_title_id(library, target_ids[0]) if target_ids else None)
+    restore_title_extras(library, ex_title_id)
+
     # [IMP-C18] On a 0-via-range run the warning above already explained the no-op;
     # skip the green "Complete" line so we don't celebrate restoring nothing.
     if not (empty_via_range and count == 0):
         print(f"\n=== Batch Restore Complete: {count} files restored. ===")
+    return count
+
+
+# ==========================================
+#   IMP-D19 Step 6 — EXTRAS RESTORE PHASE  (merge-to-temp + verify; additive E1)
+# ==========================================
+# restore_one_extra mirrors cmd_restore — the IMP-R6 merge-to-temp + verify/
+# bless + os.replace swap for a SPLIT extra (journal `create_reproducible` on the
+# temp; PONR crossed only after the swap + save, right before the chunk delete),
+# the C11 quarantine of a hash-mismatched file/chunk, and the standard
+# single-move path for a WHOLE file — but scoped to ONE nested extras item, with
+# its journal living in the extra's OWN folder (e.g. …\Specials\). It REUSES the
+# same RollbackJournal / merge_video_files / bless_or_verify_merged_hash /
+# quarantine_restore_file primitives as the main-content path; it does NOT
+# modify cmd_restore, whose journal/PONR/quarantine contract stays byte-for-byte
+# unchanged (Card E1 / ROLLBACK_MECHANISM.md §10).
+#
+# Staging convention (Step 5): fetch stages a whole-file extra as
+# <extra folder>/restore/<item filename> and a split extra as its chunk files
+# <extra folder>/restore/<split_info.chunks[i].filename>, where
+# <extra folder> = os.path.dirname(<title folder_path>/<group_rel>/<sub_rel>) —
+# for the flat real samples that is <title>\Specials\restore\. Because the
+# staging folder lives INSIDE the extra's subfolder, a fetched extra's
+# `Specials`/`Extra` subfolder exists again by restore time (Card D1 — the
+# extra is recreated in place, where Plex/Jellyfin expect it).
+def restore_one_extra(library, title_id, group_rel, item):
+    """Restore ONE fetched extra from its restore/ staging folder back to
+    <title folder_path>/<group_rel>/<sub_rel> — the per-file mirror of
+    cmd_restore (Card D1 lifecycle, Card E1 additive rollback).
+
+    SILENT no-op (returns False) when nothing is staged for this item, so the
+    unconditional wires on the cmd_restore / cmd_restore_group /
+    cmd_fetch_restore success paths add zero noise for unfetched extras.
+
+    SPLIT item (IMP-R6 pattern, as cmd_restore's split path): every chunk is
+    verified against split_info.chunks[i].hash (a bad chunk is quarantined like
+    cmd_restore's — restore/quarantine/<name>.<ts> — and the archived dummy at
+    the target is left UNTOUCHED); merge_video_files into a
+    <target>.merge_tmp<ext> sibling (journalled as create_reproducible);
+    bless_or_verify_merged_hash decides bless (first restore: the merged hash
+    BECOMES the canonical item hash, re_hashed=True + merge_seed/merge_tool/
+    rehashed_at stamped — so a later replace→fetch→restore cycle verifies) /
+    ok / mismatch (loud alarm, pre-PONR rollback, chunks kept); os.replace onto
+    the target ONLY after verify/bless passes; then status="restored_local",
+    save, PONR + commit, best-effort chunk cleanup.
+
+    WHOLE item (as cmd_restore's standard path — single move, no journal):
+    verified against the item `hash` directly (mismatch -> same quarantine),
+    then moved over the dummy; status="restored_local", save.
+
+    `uploaded` stays True throughout (the cloud copy still exists), so a later
+    replace cycle can re-dummy a restored_local extra. Mutates `item` in place
+    and saves `library` on success. Returns True iff the extra was restored."""
+    title_entry = library.get(title_id) or {}
+    title_folder = title_entry.get("folder_path", "")
+    group_os = group_rel.replace("/", os.sep)
+    sub_os = item.get("sub_rel", "").replace("/", os.sep)
+    target_path = os.path.join(title_folder, group_os, sub_os)
+    extra_folder = os.path.dirname(target_path)
+    restore_folder = os.path.join(extra_folder, RESTORE_DIR_NAME)
+    filename = item.get("filename") or os.path.basename(target_path)
+    extra_id = f"{title_id}::{group_rel}/{item.get('sub_rel')}"
+
+    if not os.path.isdir(restore_folder):
+        return False  # nothing fetched for this extra's folder — silent skip
+
+    # A. SPLIT RESTORE (mirror of cmd_restore's split path, IMP-R6 pattern)
+    if item.get("split_info") and item["split_info"].get("is_split"):
+        chunks_meta = item["split_info"]["chunks"]
+        chunk_paths = [os.path.join(restore_folder, c["filename"]) for c in chunks_meta]
+
+        staged = [p for p in chunk_paths if os.path.exists(p)]
+        if not staged:
+            return False  # none of this item's chunks fetched — silent skip
+        if len(staged) < len(chunk_paths):
+            print(f"     ⏭️  Skipping extra {filename}: incomplete chunks in restore/.")
+            return False
+
+        # Pre-merge per-chunk hash verification (mkvmerge is lenient and would
+        # silently fold a corrupt chunk into a bad merged file). Quarantine ONLY
+        # the offending chunk(s) — clean chunks stay in restore/ for a targeted
+        # re-fetch. Deliberately NO stale-target delete here (unlike the legacy
+        # line in cmd_restore's split path): the extras merge goes to a
+        # .merge_tmp sibling below, so target_path holds the archived DUMMY,
+        # which no failure path may remove (IMP-R6: never zero bytes at the path).
+        bad_chunks = []
+        for c in chunks_meta:
+            if calculate_file_hash(os.path.join(restore_folder, c["filename"])) != c["hash"]:
+                bad_chunks.append(c["filename"])
+        if bad_chunks:
+            for chunk_filename in bad_chunks:
+                try:
+                    q = quarantine_restore_file(restore_folder, chunk_filename)
+                    print(f"     ❌ Hash mismatch. Bad file quarantined at {q}. A fresh fetch will re-download.")
+                except Exception:
+                    print(f"     ❌ Error: Restore chunk hash mismatch ({chunk_filename})! Corrupt?")
+            return False
+
+        # Disk pre-check (pre-merge, pre-PONR — as cmd_restore's step 1c).
+        try:
+            merged_size = sum(os.path.getsize(p) for p in chunk_paths)
+        except Exception:
+            merged_size = item.get("tech_spec", {}).get("size_bytes", 0)
+        if not _free_space_ok(extra_folder, merged_size, will_split=True, eager=False):
+            free, required, _short = _disk_shortfall(
+                extra_folder, merged_size, will_split=True, eager=False)
+            print(f"     ❌ Not enough free space to re-merge extra {filename} "
+                  f"(need ~{human_readable_size(required)} in {extra_folder}, "
+                  f"have {human_readable_size(free)}). Chunks left in restore/.")
+            return False
+
+        # Deterministic merge into a TEMP sibling; the dummy at target_path is
+        # only ever replaced by a verified-good file (IMP-R6). Seed choice
+        # mirrors cmd_restore: reuse a previously-blessed seed, else the item's
+        # short_id (extra_id is the stable last-resort fallback).
+        seed = item["split_info"].get("merge_seed") or item.get("short_id") or extra_id
+        merge_root, merge_ext = os.path.splitext(target_path)
+        merge_tmp_path = f"{merge_root}.merge_tmp{merge_ext}"
+        journal = RollbackJournal(extra_folder, extra_id)
+        journal.record_create_reproducible(merge_tmp_path)
+        try:
+            try:
+                merged_ok = merge_video_files(chunk_paths, merge_tmp_path, seed=seed)
+            except Exception as e:
+                print(f"     ❌ Merge crashed: {e}")
+                merged_ok = False
+            if not merged_ok:
+                print(f"     ❌ Merge failed for extra {filename}. Chunks left in restore/ for re-merge.")
+                journal.rollback(library)  # removes the temp; the dummy is untouched
+                return False
+
+            new_hash = calculate_file_hash(merge_tmp_path)
+            # VERIFY-OR-BLESS — same pure helper, same three-way policy as
+            # cmd_restore; all mutations and journal calls stay HERE.
+            decision = bless_or_verify_merged_hash(item, new_hash)
+            if decision == "mismatch":
+                stored_tool = item.get("split_info", {}).get("merge_tool", "(unknown)")
+                print(f"     🛑 RESTORE HASH MISMATCH — canonical re-hash verification FAILED for extra {extra_id}")
+                print(f"        expected (stored canonical): {item.get('hash')}")
+                print(f"        actual   (this re-merge)   : {new_hash}")
+                print(f"        stored split_info.merge_tool: {stored_tool}; this run: {_current_merge_tool()}")
+                print("        Possible corruption or mkvmerge version drift. Chunks kept in restore/ for re-fetch.")
+                journal.rollback(library)
+                return False
+            if decision == "bless":
+                item["hash"] = new_hash
+                item["re_hashed"] = True
+                item["split_info"]["merge_seed"] = seed
+                item["split_info"]["merge_tool"] = _current_merge_tool()
+                item["split_info"]["rehashed_at"] = _rehashed_at()
+            # decision == "ok": already blessed and reproduced — leave untouched.
+
+            # Verify/bless passed → atomically swap the verified-good merged
+            # file into place (still pre-PONR; a failed swap keeps the dummy).
+            try:
+                os.replace(merge_tmp_path, target_path)
+            except Exception as e:
+                print(f"     ❌ Could not place the merged extra (target locked?): {e}")
+                print("        Dummy left intact in place; chunks kept in restore/ for retry.")
+                journal.rollback(library)
+                return False
+
+            item["status"] = "restored_local"
+            save_library(library)
+            # PONR placement mirrors cmd_restore: after the swap + save, right
+            # before the chunk delete (which is no longer rollback-eligible).
+            journal.mark_point_of_no_return()
+            journal.commit()
+        except Exception as e:
+            print(f"     ❌ extras restore failed: {e}")
+            if not journal.crossed_ponr:
+                journal.rollback(library)  # removes the temp; the dummy is untouched
+            return False
+
+        for p in chunk_paths:
+            try:
+                os.remove(p)
+            except Exception:
+                print(f"     ⚠️ Warning: Could not delete {os.path.basename(p)}")
+        if os.path.isdir(restore_folder) and not os.listdir(restore_folder):
+            try:
+                os.rmdir(restore_folder)
+            except OSError:
+                pass
+        print(f"     ✅ Restored extra: {filename}")
+        return True
+
+    # B. STANDARD (whole-file) RESTORE (mirror of cmd_restore's standard path)
+    source_path = os.path.join(restore_folder, filename)
+    if not os.path.exists(source_path):
+        return False  # not fetched — silent skip
+
+    if calculate_file_hash(source_path) != item.get("hash"):
+        try:
+            q = quarantine_restore_file(restore_folder, filename)
+            print(f"     ❌ Hash mismatch. Bad file quarantined at {q}. A fresh fetch will re-download.")
+        except Exception:
+            print(f"     ❌ Error: Restore file hash mismatch! Corrupt?")
+        return False
+
+    if os.path.exists(target_path):
+        try:
+            os.remove(target_path)
+        except Exception:
+            pass
+    try:
+        shutil.move(source_path, target_path)
+    except Exception as e:
+        print(f"     ❌ Error moving extra file: {e}")
+        return False
+
+    if os.path.isdir(restore_folder) and not os.listdir(restore_folder):
+        try:
+            os.rmdir(restore_folder)
+        except OSError:
+            pass
+
+    item["status"] = "restored_local"
+    save_library(library)
+    print(f"     ✅ Restored extra: {filename}")
+    return True
+
+
+def restore_title_extras(library, title_id):
+    """Restore every fetched extra on `title_id` (all groups) from its restore/
+    staging folder — the per-title driver, mirroring how cmd_restore_group
+    drives cmd_restore ("loop blindly — the per-file restore handles checks").
+
+    Selection is purely disk-driven (the plan's "each extra with downloaded
+    files in its restore/ folder"): every item is offered to restore_one_extra,
+    which silently skips anything not staged — so this driver is a clean silent
+    no-op when nothing was fetched, and the unconditional wires on the
+    cmd_restore / cmd_restore_group / cmd_fetch_restore success paths cost
+    nothing for extras-less titles. NEVER raises (restore_one_extra self-handles
+    its failure paths; the per-item guard here backstops the unexpected, e.g. a
+    Windows file lock during chunk hashing), so a one-line wire inside the host
+    commands cannot trip their handlers — the main-content restore contract
+    stays byte-for-byte unchanged (Card E1). Returns the number of extras
+    actually restored."""
+    if not title_id or title_id not in library:
+        return 0
+    groups = library[title_id].get("extras", {}).get("groups", {})
+    if not groups:
+        return 0  # title carries no extras — nothing to restore
+    count = 0
+    for group_rel in sorted(groups):
+        for item in groups[group_rel].get("items", []):
+            try:
+                if restore_one_extra(library, title_id, group_rel, item):
+                    count += 1
+            except Exception as e:
+                print(f"     ❌ extras restore failed for {item.get('filename')}: {e}")
+    if count:
+        print(f"=== ✅ {count} EXTRA(S) RESTORED for {title_id} ===")
     return count
 
 
@@ -6630,6 +6904,16 @@ def cmd_fetch_restore(manual_id, episode_range=None, fetch_extras=False):
     else:
         print(f"   > Single Item detected. Running Restore...")
         cmd_restore(manual_id)
+
+    # IMP-D19 Step 6: place any fetched extras back into their subfolders —
+    # only when --fetchExtras staged them (flag-only, Card C). Reload first: the
+    # restore phase above saved its own library updates. This explicit wire
+    # covers the extras-only run (nothing staged for main content, so the
+    # per-episode success wires never fired); when the per-episode/group wires
+    # already restored the extras it is an idempotent silent no-op.
+    if fetch_extras:
+        library = load_library()
+        restore_title_extras(library, _extras_title_id(library, manual_id))
 
     # [IMP-C18] Don't lie with a green banner over zero work: when a range was
     # supplied to a season_map and 0 items were restored (range selected nothing),

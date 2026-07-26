@@ -520,7 +520,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
     restore location; without the flag, extras are skipped (no prompt) and nothing blocks. Anime fetch routing for
     `ani-`/profile selection unchanged.
 
-- [ ] 6. [model: fable] [effort: xhigh] Extras restore (merge-to-temp + verify + place into the recreated subfolder).
+- [x] 6. [model: fable] [effort: xhigh] Extras restore (merge-to-temp + verify + place into the recreated subfolder).
   - Files: `main.py` (new `restore_one_extra(...)` + `restore_title_extras(...)`; wiring into `cmd_restore`/
     `cmd_restore_group`/`cmd_fetch_restore`).
   - Details (Card A = A2, Card E = E1): For each extra with downloaded files in its `restore/` folder: verify

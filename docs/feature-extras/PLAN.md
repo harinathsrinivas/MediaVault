@@ -498,7 +498,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
     item `status="archived"` (reclaiming space); the main `test_cmd_replace` + smoke replace tests stay green. opus:
     touches the replace/PONR pattern (rollback-adjacent).
 
-- [ ] 5. [model: opus] [effort: high] Extras fetch (queue from the extras block; the `--fetchExtras` flag — no prompt).
+- [x] 5. [model: opus] [effort: high] Extras fetch (queue from the extras block; the `--fetchExtras` flag — no prompt).
   - Files: `mainfetch.py` (`resolve_targets` `410` / a new extras-queue builder, `parse_fetch_args` `566`,
     `cmd_fetch_route` `517`), `main.py` (`cmd_dispatch_fetch` `5785`, `cmd_fetch_restore` `5826`).
   - Details (Card C = FLAG-ONLY, revised 2026-06-29): **No interactive prompt.** `fetch`/`fetch_restore` accept a

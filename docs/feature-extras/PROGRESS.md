@@ -11,15 +11,19 @@
   (`add_extras` cmd + `--extras`/`--extras-size` on prep/push family) · C = FLAG-ONLY (`--fetchExtras`, aliases
   `--fetch-extras`/`--extras`/`--extra`; no prompt; absent = no extras) · extras-size default = inherit main split ·
   D1 (full push→dummy→fetch→restore lifecycle) · E1 (additive rollback; main contract byte-for-byte unchanged).
-- **Last updated:** 2026-06-29 (Steps 0–4 done; Step 3 merged `fcd9e66` + finalized `7d12a04`; Step 4 committing). Step 5 next.
+- **Last updated:** 2026-07-27 (Steps 0–5 done; Step 5 sat uncommitted for ~a month after a session-limit cutoff — the
+  executor HAD finished + self-verified; orchestrator re-gated green on 2026-07-27 and committed). Step 6 next.
 
 ## ▶ NEXT ACTION
-**Step 5 — Extras fetch (flag-only `--fetchExtras`, no prompt). [model: opus].** In `mainfetch.py`: teach
-`parse_fetch_args` the `--fetchExtras` flag and build a download queue from the title's `extras` block (each item/chunk
-by `hash`, into a `restore/` folder under the EXTRA's destination so Step 6 can place it back into its
-`Specials`/`Extra` subfolder), fetched alongside main targets via the existing trigger_download/harvester/hash-match
-loop. In `main.py`: `cmd_dispatch_fetch` forwards the already-parsed `fetch_extras` flag to `mainfetch` argv (Step 2
-already parses it — NO prompt anywhere). `episodes N-M` filters only episodes; extras all-or-nothing. Single-executor.
+**Step 6 — Extras restore (merge-to-temp + verify + place into the recreated subfolder). [model: opus].** Implement
+`restore_one_extra`/`restore_title_extras` in `main.py`, wired into `cmd_restore`/`cmd_restore_group`/`cmd_fetch_restore`
+(when extras were fetched). MUST consume the Step-5 staging convention logged in STATUS.md (Step 5 entry, line ~321):
+staged files live at `<title>/<group_rel>/restore/` — whole-file extras named `item["filename"]`, split extras as the
+`split_info.chunks[i].filename` chunk names. Verify hashes → `merge_video_files` (if split) into `<target>.merge_tmp` →
+verify/bless → `os.replace` onto `<title>/<group_rel>/<sub_rel>` (IMP-R6 pattern) → `status="restored_local"`.
+Existing `cmd_restore` contract unchanged (E1). ⚠️ Working-tree caution: the user's personal `Master_Stream_Archiver*`/
+`MatchArchiver*` files are STAGED in the index but NOT part of IMP-D19 — every step commit MUST use explicit pathspec
+(`git commit -- <paths>`), NEVER `git add -A`, until the user decides what to do with them.
 Do NOT re-run the planner; do NOT re-open Cards A–E.
 
 ## Resume protocol (first thing a new session does)
@@ -37,7 +41,7 @@ Do NOT re-run the planner; do NOT re-open Cards A–E.
 | 2  | CLI parsing `--extras`/`--extras-size`/`--fetchExtras` + `add_extras` | done | (this commit) | cli-parsers 29✓, smoke 72✓ | [model: sonnet] `parse_extras_tokens`; 6 cmds + argv walkers; `cmd_add_extras` routed; `--fetchExtras`(+aliases) on fetch/fetch_restore; prep/prep_season/add_extras scan+merge; markers left for Steps 3/4/5. `--extras-size none`→`('NONE',None)` |
 | 3  | Extras upload phase (independent chunk size; resumable) | done | fcd9e66 | full suite 603✓ (post-merge) | [model: opus] **multi-candidate** — judge ⇒ B, **USER picked B**; `__cand_b` squash-merged (`push_one_extra`/`push_title_extras`, cmd_push untouched). DECISION.md @ aae6db6. To archive: tags `candidates/imp_d19_extras/step-3/B-chosen`+`A-rejected` |
 | 4  | Extras replace (dummy) phase for reclaim | done | (this commit) | replace+rollback+smoke 95✓ | [model: opus] `replace_one_extra`/`replace_title_extras`; mirrors cmd_replace PONR; driver catches per-file RollbackHardFail to isolate main except-handlers; cmd_replace byte-for-byte unchanged (E1 cleared) |
-| 5  | Extras fetch (flag-only `--fetchExtras`, no prompt) | pending | — | — | [model: opus] |
+| 5  | Extras fetch (flag-only `--fetchExtras`, no prompt) | done | (this commit) | smoke+parsers 103✓, fetch-k 83✓ | [model: opus] synthetic leaf-shaped entries → `fetch_single_entry` verbatim; `build_extras_entries`/`resolve_title_extras` in mainfetch; `parse_fetch_args` → 3-tuple; staging `<title>/<group_rel>/restore/` (convention logged in STATUS.md for Step 6) |
 | 6  | Extras restore (merge+verify into recreated subfolder) | pending | — | — | [model: opus] |
 | 7  | Cross-command integrity (scan_unprepped/reclaim/items/tree) | pending | — | — | [model: opus] PR#21 class |
 | 8  | `ENTRY_TYPE_KEYS` doc + schema-guard round-trip | pending | — | — | [model: opus] no new entry type |

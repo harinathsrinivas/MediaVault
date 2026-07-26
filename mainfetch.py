@@ -507,6 +507,85 @@ def build_download_queue(entries):
     return queue
 
 
+# ==========================================
+#   IMP-D19 Step 5 — EXTRAS FETCH QUEUE (Card C, flag-only)
+# ==========================================
+# The extras block (Card A2) lives on the TITLE entry — the season_map for a
+# series/anime/others id, the movie leaf for a movie — at
+#   entry["extras"]["groups"][<group_rel>]["items"][i]
+# with leaf-shaped fields {filename, sub_rel, hash, status, uploaded,
+# search_term, [split_info], ...}; an item's on-disk path is
+#   <title folder_path>/<group_rel>/<sub_rel>.
+#
+# We do NOT invent a new download mechanism: each cloud-resident extra is turned
+# into a synthetic leaf-shaped entry and run through the SAME fetch_single_entry
+# (build queue by hash -> trigger_download -> harvester -> hash-match -> move)
+# that main content uses. Because fetch_single_entry stages into
+# <entry folder_path>/restore/, a synthetic entry whose folder_path is the
+# extra's on-disk folder stages into <title folder_path>/<group_rel>/restore/ —
+# exactly the convention Step 6's extras restore reads from before placing the
+# merged/verified file back at <title folder_path>/<group_rel>/<sub_rel>.
+
+
+def build_extras_entries(title_entry):
+    """Flatten a title entry's extras.groups into synthetic leaf-shaped fetch
+    entries — one per CLOUD-RESIDENT (uploaded=True) extra item — that
+    fetch_single_entry / build_download_queue consume VERBATIM.
+
+    Each synthetic entry's `folder_path` is the extra's own on-disk folder
+    (os.path.dirname(<title folder_path>/<group_rel>/<sub_rel>)), so the proven
+    fetch loop stages its download into <that folder>/restore/. A WHOLE-file
+    extra carries the item `hash`; a SPLIT extra carries `split_info`
+    (is_split / chunks[{filename, hash}]) so each chunk is queued by hash —
+    identical to a split leaf. Items not yet uploaded are skipped (nothing to
+    fetch in the cloud). PURE: no library / browser / device I/O."""
+    title_folder = title_entry.get("folder_path", "")
+    groups = title_entry.get("extras", {}).get("groups", {})
+    entries = []
+    for group_rel in sorted(groups):
+        group_os = group_rel.replace("/", os.sep)
+        for item in groups[group_rel].get("items", []):
+            if not item.get("uploaded"):
+                continue  # not yet pushed -> not in the cloud -> nothing to fetch
+            sub_rel = item.get("sub_rel") or item.get("filename", "")
+            sub_os = sub_rel.replace("/", os.sep)
+            extra_folder = os.path.dirname(os.path.join(title_folder, group_os, sub_os))
+            entries.append({
+                "filename": item.get("filename"),
+                "folder_path": extra_folder,
+                "hash": item.get("hash"),
+                "search_term": item.get("search_term"),
+                "short_id": item.get("short_id"),
+                "split_info": item.get("split_info"),
+            })
+    return entries
+
+
+def resolve_title_extras(manual_id):
+    """Resolve `manual_id` to its TITLE entry and return that title's
+    cloud-resident extras as synthetic fetch entries (all groups), or [] if the
+    id is absent or carries no fetchable extras.
+
+    Title resolution mirrors main._extras_title_id: a season_map is its own
+    title; an episode leaf uses its parent_id season_map; a movie leaf is its own
+    title (multi_ep_alias whose primary is missing -> no title). PURE read — only
+    load_library; no browser / device side effects. (A second load_library here,
+    after resolve_targets', is the deliberate cost of leaving resolve_targets
+    byte-for-byte untouched; it only runs when --fetchExtras is set.)"""
+    lib = load_library()
+    if manual_id not in lib:
+        return []
+    real_id, entry = _resolve_alias(lib, manual_id)
+    if entry.get("type") == "multi_ep_alias":
+        return []
+    if entry.get("type") == "season_map":
+        title_entry = entry
+    else:
+        parent_id = entry.get("parent_id")
+        title_entry = lib[parent_id] if (parent_id and parent_id in lib) else entry
+    return build_extras_entries(title_entry)
+
+
 def profile_for_id(manual_id):
     for prefix, key in ID_PREFIX_PROFILE:
         if manual_id.startswith(prefix):
@@ -514,7 +593,7 @@ def profile_for_id(manual_id):
     return DEFAULT_PROFILE
 
 
-def cmd_fetch_route(manual_id, ep_range=None):
+def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False):
     print(f"--- FETCH ROUTER: {manual_id} ---")
 
     active_profile = profile_for_id(manual_id)
@@ -522,11 +601,18 @@ def cmd_fetch_route(manual_id, ep_range=None):
           f"({CHROME_PROFILES.get(active_profile, '?')})")
 
     targets = resolve_targets(manual_id, ep_range)
-    if not targets:
+    # [IMP-D19 Step 5, Card C — flag-only] When --fetchExtras is set, ALSO fetch
+    # the title's cloud-resident extras (ALL groups — the episode range filters
+    # only episodes; extras are all-or-nothing). Absent flag => no extras query,
+    # so this path is byte-for-byte today's behavior.
+    extra_entries = resolve_title_extras(manual_id) if fetch_extras else []
+    if not targets and not extra_entries:
         print("❌ No valid targets found.")
         return
 
     print(f"   > 📋 Processing {len(targets)} items...")
+    if extra_entries:
+        print(f"   > 📎 + {len(extra_entries)} extra(s) (--fetchExtras)")
 
     # [IMP-C17] Single-flight: only one interactive fetch batch may drive the
     # browser at a time (blocking=True polls then reclaims a stale/contended
@@ -542,6 +628,14 @@ def cmd_fetch_route(manual_id, ep_range=None):
 
             for entry in targets:
                 fetch_single_entry(driver, entry)
+
+            # [IMP-D19 Step 5] Extras fetch through the SAME proven mechanism:
+            # each synthetic extra entry stages into its own
+            # <title folder_path>/<group_rel>/restore/ folder.
+            if extra_entries:
+                print(f"\n=== 📎 FETCHING {len(extra_entries)} EXTRA(S) for {manual_id} ===")
+            for ex in extra_entries:
+                fetch_single_entry(driver, ex)
 
         except SessionExpiredError:
             # [IMP-C6] One logged-out detection aborts the whole batch loudly.
@@ -564,18 +658,35 @@ def cmd_fetch_route(manual_id, ep_range=None):
 
 
 def parse_fetch_args(argv):
-    """Pure parser for mainfetch CLI args. Takes full argv list, returns (mid, epr).
-    Prints usage and sys.exit(1) on bad invocation — no Selenium/browser side effects."""
+    """Pure parser for mainfetch CLI args. Takes full argv list, returns
+    (mid, epr, fetch_extras). Prints usage and sys.exit(1) on bad invocation —
+    no Selenium/browser side effects.
+
+    [IMP-D19 Step 5, Card C — flag-only] `--fetchExtras` (aliases
+    `--fetch-extras` / `--extras` / `--extra`) is a boolean flag forwarded
+    verbatim from main.py; when set, cmd_fetch_route ALSO fetches the title's
+    cloud-resident extras. There is no prompt — the flag is the sole gate, and
+    its absence reproduces today's main-content-only fetch byte-for-byte. The
+    flag and the `episodes <range>` pair may appear in any order after the id."""
     if len(argv) < 3 or argv[1] != "fetch":
-        print("Usage: fetch [id] [episodes] [range]")
+        print("Usage: fetch [id] [episodes] [range] [--fetchExtras]")
         sys.exit(1)
     mid = argv[2]
+    rest = argv[3:]
     epr = None
-    if len(argv) >= 5 and argv[3] == "episodes":
-        epr = argv[4]
-    return (mid, epr)
+    i = 0
+    while i < len(rest):
+        if rest[i] == "episodes" and i + 1 < len(rest):
+            epr = rest[i + 1]
+            i += 2
+            continue
+        i += 1
+    fetch_extras = any(
+        t in ("--fetchExtras", "--fetch-extras", "--extras", "--extra") for t in rest
+    )
+    return (mid, epr, fetch_extras)
 
 
 if __name__ == "__main__":
-    mid, epr = parse_fetch_args(sys.argv)
-    cmd_fetch_route(mid, epr)
+    mid, epr, fetch_extras = parse_fetch_args(sys.argv)
+    cmd_fetch_route(mid, epr, fetch_extras)

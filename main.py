@@ -6567,8 +6567,12 @@ def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False):
     else:
         print(f"   > 🚀 Dispatching Fetch...")
 
-    # IMP-D19 Step 5: fetch extras when fetch_extras
-    # (--fetchExtras forwarded to mainfetch in Step 5)
+    # IMP-D19 Step 5 (Card C — flag-only): forward --fetchExtras VERBATIM to the
+    # mainfetch subprocess. There is NO prompt anywhere — the flag is the sole
+    # gate. When it is absent the argv is byte-for-byte today's, so mainfetch
+    # never queues extras (existing main-content fetch behavior is unchanged).
+    if fetch_extras:
+        cmd.append("--fetchExtras")
 
     try:
         # Force the child's stdio to UTF-8 — a PIPEd child defaults to cp1252 on Windows and would crash printing mainfetch's emoji.

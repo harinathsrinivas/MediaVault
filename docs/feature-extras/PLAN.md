@@ -573,7 +573,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
   - Acceptance: a trivial test using `sandbox_extras` loads the library and finds the extras block + real files under
     tmp_path (not `C:\Media`). opus per the testing rules (conftest binding hazard).
 
-- [ ] 10. [model: opus] [effort: medium] Unit/command tests `tests/test_extras.py`.
+- [x] 10. [model: opus] [effort: medium] Unit/command tests `tests/test_extras.py`.
   - Files: `tests/test_extras.py` (NEW). Read `docs/testing-strategy.md` first (fixtures: `sandbox`/`sandbox_extras`
     for library I/O; `mock_device` for push; `fake_dummy` for replace; `mock_fetch` for fetch; `make_video`).
   - Details: Cover (a) scan/merge/dedup idempotence (add Specials then Trailers == both at once; re-add = no-op;

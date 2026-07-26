@@ -5,10 +5,10 @@
 > Claude account/machine — resumes from here. See PLAN.md §"Execution resumability" for the full protocol.
 
 - **Task:** IMP-D19 — add an `--extras` option (Specials / Trailers / Behind-the-Scenes) end-to-end.
-- **Framework:** v1 for Steps 0–5. A v2 agent set (Fable tier — `executor-fable`/`planner-v2`/`orchestrator-v2`/
-  `judge-v2`, no-limits policy, 8-block context packaging) was added 2026-07-27; see
-  `.claude/AGENT_WORKFLOW_NOTES.md` §v2. The user directs v1 vs v2 for the remaining steps; a resuming session should
-  check the latest user instruction (default remains v1 unless the user said v2).
+- **Framework:** v1 for Steps 0–5; **v2 for Steps 6–14 (user-directed 2026-07-27)** — orchestrate per
+  `.claude/agents/orchestrator-v2.md` (8-block dispatch packaging, no-limits), route 6/7/8/9 → executor-fable,
+  10/11/12 → executor-opus, 13/14 → executor-sonnet, judge-v2 if any judging arises, git-agent unchanged
+  (pathspec commits ONLY — user files staged). A resuming session continues under v2 for these steps.
 - **Branch:** `feature/imp_d19_extras` (NOT YET CREATED — see NEXT ACTION).
 - **Plan:** `docs/feature-extras/PLAN.md` · **Decisions (locked):** `docs/feature-extras/DECISIONS.md`.
 - **Locked decisions:** A2 (extras nested, grouped per source folder; group key = path relative to title) · B1
@@ -19,7 +19,7 @@
   executor HAD finished + self-verified; orchestrator re-gated green on 2026-07-27 and committed). Step 6 next.
 
 ## ▶ NEXT ACTION
-**Step 6 — Extras restore (merge-to-temp + verify + place into the recreated subfolder). [model: opus].** Implement
+**Step 6 — Extras restore (merge-to-temp + verify + place into the recreated subfolder). [model: fable] (v2).** Implement
 `restore_one_extra`/`restore_title_extras` in `main.py`, wired into `cmd_restore`/`cmd_restore_group`/`cmd_fetch_restore`
 (when extras were fetched). MUST consume the Step-5 staging convention logged in STATUS.md (Step 5 entry, line ~321):
 staged files live at `<title>/<group_rel>/restore/` — whole-file extras named `item["filename"]`, split extras as the

@@ -1,9 +1,11 @@
 # Task: Add an `--extras` option (Specials / Trailers / Behind-the-Scenes) end-to-end — IMP-D19
 
 Suggested branch: `feature/imp_d19_extras`
-Framework: v1 (Steps 0–5 planned + executed under the v1 agent set. A v2 set — Fable-tier, no-limits, richer context
-packaging — exists as of 2026-07-27 (`.claude/AGENT_WORKFLOW_NOTES.md` §v2); the user says "v1"/"v2" per run and may
-direct the remaining steps to run under v2.)
+Framework: v2 for Steps 6–14 (user-directed 2026-07-27; Steps 0–5 were planned + executed under v1). The remaining
+steps were RE-ASSIGNED per the v2 routing policy (`.claude/agents/planner-v2.md`): 6/7/8/9 → [model: fable] (rollback-
+adjacent restore, cross-cutting consumer integrity, ENTRY_TYPE_KEYS contract, conftest binding-hazard), 10/11 →
+[model: opus] (substantial test files are not mistake-proof), 12 opus / 13–14 sonnet unchanged. Orchestration follows
+`.claude/agents/orchestrator-v2.md` (8-block context packaging; no-limits policy; journal protocol).
 
 > Canonical plan folder: `docs/feature-extras/` (root `/PLAN.md` is the gitignored live copy; the identical
 > tracked copy is `docs/feature-extras/PLAN.md`). The decisions log `docs/feature-extras/DECISIONS.md` will be
@@ -389,7 +391,8 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
 
 ## Steps
 
-> Model/effort tags are advisory (executors run at their frontmatter effort; `opus`→max, `sonnet`→medium). Every
+> Model/effort tags are advisory (executors run at their frontmatter effort; `fable`→xhigh, `opus`→max,
+> `sonnet`→medium, `haiku`→low). Steps 6–14 run under Framework v2 (see the Framework line above). Every
 > code-touching step runs `python -m pytest tests/smoke -q` green BEFORE its commit. **After EVERY step, update + commit
 > `docs/feature-extras/PROGRESS.md` (status + completing SHA + test result) and tick the PLAN.md checkbox in the SAME
 > commit** (the resumability requirement above). The pipeline runs from the MAIN session (orchestrator.md as a playbook
@@ -517,7 +520,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
     restore location; without the flag, extras are skipped (no prompt) and nothing blocks. Anime fetch routing for
     `ani-`/profile selection unchanged.
 
-- [ ] 6. [model: opus] [effort: high] Extras restore (merge-to-temp + verify + place into the recreated subfolder).
+- [ ] 6. [model: fable] [effort: xhigh] Extras restore (merge-to-temp + verify + place into the recreated subfolder).
   - Files: `main.py` (new `restore_one_extra(...)` + `restore_title_extras(...)`; wiring into `cmd_restore`/
     `cmd_restore_group`/`cmd_fetch_restore`).
   - Details (Card A = A2, Card E = E1): For each extra with downloaded files in its `restore/` folder: verify
@@ -530,7 +533,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
     with a verified hash and `status="restored_local"`; the main `test_cmd_restore_quarantine` + smoke restore tests
     stay green.
 
-- [ ] 7. [model: opus] [effort: high] Cross-command integrity: make the whole-library consumers extras-aware.
+- [ ] 7. [model: fable] [effort: xhigh] Cross-command integrity: make the whole-library consumers extras-aware.
   - Files: `main.py` (`cmd_scan_unprepped` known_paths `5527-5531`, `collect_reclaimable` `6188`, `items_payload`
     `6386`, `build_tree` `6957`).
   - Details: After this feature, extras videos on disk ARE in the library (nested in the title's `extras` block) but the
@@ -546,7 +549,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
     extras as unprepped; `collect_reclaimable` does not mis-badge them; every iterator completes without raising;
     `test_entry_schema_guard` (Step 8) green. opus: this is the cross-command risk the smoke gate exists for.
 
-- [ ] 8. [model: opus] [effort: high] `ENTRY_TYPE_KEYS` doc + schema-guard round-trip coverage for an extras block.
+- [ ] 8. [model: fable] [effort: xhigh] `ENTRY_TYPE_KEYS` doc + schema-guard round-trip coverage for an extras block.
   - Files: `main.py` (`ENTRY_TYPE_KEYS` comment `114-148`), `tests/test_entry_schema_guard.py`.
   - Details: Document the optional `extras` nested block (on leaf + season_map) in the `ENTRY_TYPE_KEYS` comment exactly
     as `split_info`/`metadata` are described — **no new entry type, no change to the `required` sets / `physical`
@@ -558,7 +561,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
   - Acceptance: `python -m pytest tests/test_entry_schema_guard.py -q` green; the registry diff adds only the comment
     (no new type). opus per the testing rules (schema-guard correctness trap).
 
-- [ ] 9. [model: opus] [effort: high] conftest fixture `sandbox_extras`.
+- [ ] 9. [model: fable] [effort: xhigh] conftest fixture `sandbox_extras`.
   - Files: `tests/conftest.py`. Read `docs/testing-strategy.md` first.
   - Details: Add a `sandbox_extras` fixture built ON TOP OF `sandbox` (inheriting the dual LIBRARY_* patch + the
     `C:\Media` hard-guard). Seed a title (a movie leaf OR a season_map) with a nested `extras` block holding one group
@@ -570,7 +573,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
   - Acceptance: a trivial test using `sandbox_extras` loads the library and finds the extras block + real files under
     tmp_path (not `C:\Media`). opus per the testing rules (conftest binding hazard).
 
-- [ ] 10. [model: sonnet] [effort: medium] Unit/command tests `tests/test_extras.py`.
+- [ ] 10. [model: opus] [effort: medium] Unit/command tests `tests/test_extras.py`.
   - Files: `tests/test_extras.py` (NEW). Read `docs/testing-strategy.md` first (fixtures: `sandbox`/`sandbox_extras`
     for library I/O; `mock_device` for push; `fake_dummy` for replace; `mock_fetch` for fetch; `make_video`).
   - Details: Cover (a) scan/merge/dedup idempotence (add Specials then Trailers == both at once; re-add = no-op;
@@ -582,7 +585,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
     marking done.
   - Acceptance: `python -m pytest tests/test_extras.py -q` green.
 
-- [ ] 11. [model: sonnet] [effort: medium] Smoke coverage for extras (round-trip + alias-sweep + not-flagged).
+- [ ] 11. [model: opus] [effort: medium] Smoke coverage for extras (round-trip + alias-sweep + not-flagged).
   - Files: `tests/smoke/test_smoke_all_commands.py`. Read `docs/testing-strategy.md` first.
   - Details: Add a `_seed_title_with_extras(sandbox, make_video)` helper (mirroring the existing `_seed_*` helpers)
     creating a season_map + 1 leaf episode + a 2-item `extras` block with real extra files under a `Specials/`

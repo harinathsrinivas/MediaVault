@@ -15,17 +15,21 @@
   (`add_extras` cmd + `--extras`/`--extras-size` on prep/push family) · C = FLAG-ONLY (`--fetchExtras`, aliases
   `--fetch-extras`/`--extras`/`--extra`; no prompt; absent = no extras) · extras-size default = inherit main split ·
   D1 (full push→dummy→fetch→restore lifecycle) · E1 (additive rollback; main contract byte-for-byte unchanged).
-- **Last updated:** 2026-07-27 (Steps 0–12 done). Next: **Step 12b (fix)** then 13.
+- **Last updated:** 2026-07-27 (Steps 0–12b done; suite 644). Next: **🚦 USER DECISION on the dummy-clobber data-loss
+  finding (D19-B1)**, then Step 13.
 
 ## ▶ NEXT ACTION
-**Step 12b — FIX the autopilot `--extras` forwarding gap. [model: opus] (v2).** Step 12 found (file:line in its STATUS
-entry): `cmd_prep_push_rep` calls `cmd_prep(manual_id, filepath)` and `cmd_prep_push_rep_season` calls
-`cmd_prep_season(base_id, folder_path)` WITHOUT forwarding `extras`/`extras_size` — so on a brand-new title,
-`prep_push_rep(_season) … --extras "<folders>"` registers nothing and the trailing `push_title_extras`/
-`replace_title_extras` silently no-op. This contradicts PLAN Card B1 ("prep_push_rep/prep_push_rep_season:
-scan+merge then upload"). Fix: forward the two kwargs at both call sites; add a regression test (test_extras.py,
-(b)-family: fresh title + autopilot + --extras ⇒ extras registered AND pushed AND replaced); relax the two
-"register first" sentences Step 12 wrote in README/ARCHITECTURE to match the fixed behavior. Then Step 13 (tracking).
+**🚦 BLOCKED ON A USER DECISION — the dummy-clobber data-loss path (found by Step 12b; details in STATUS.md Step 12b
+§5).** `scan_extras_folders` has no `DUMMY_MAX_BYTES` guard: re-scanning an ALREADY-ARCHIVED extras group (e.g. re-run
+`prep_season --extras` then `push_group --extras`, or re-run `add_extras`, or the newly-fixed season autopilot) scans
+the ~10 KB dummies, the changed-hash merge branch resets items to `local_ready`/`uploaded=False` with the DUMMY's
+hash, and the next extras push uploads the dummy OVER the real cloud copy → the extra becomes unrecoverable (local
+real bytes are already gone). PRE-EXISTING (not caused by 12b's forwarding; movie autopilot immune via cmd_prep's
+cloud-bearing early-skip). Same bug class `main.py:989-1000` guards for main content — the extras core lacks that
+guard. Remedy options written up in STATUS.md §5: (1) scan-level dummy-size skip; (2) cloud-bearing guard in
+`merge_extras_into_title` mirroring cmd_prep's precedent; (3) upload-time guard in `push_one_extra`. USER picks:
+fix now in-branch as Step 12c (recommended; then no Band-0 entry needed) vs defer (then Step 13 must add a Band-0
+PRIORITY entry + NEXT pointer). After the decision: Step 13 (tracking) → 14 (verify) → PR.
 ⚠️ Pathspec commits ONLY. Do NOT re-run the planner; do NOT re-open Cards A–E.
 
 ## Resume protocol (first thing a new session does)
@@ -50,7 +54,8 @@ scan+merge then upload"). Fix: forward the two kwargs at both call sites; add a 
 | 9  | conftest `sandbox_extras` fixture | done | (this commit) | full 607✓, smoke 72✓, proof 1✓ | [model: fable] (v2) movie leaf `mov-en-2024-extrasmovie` + `Specials` group ×2 real hash-matched files (>DUMMY_MAX_BYTES); zero DIY patching (composes `sandbox`); item formulas byte-match `scan_extras_folders` (re-scan = provable no-op); documented testing-strategy §4.9. ⚠️ Step-10 note: ~264KB extras can't truly split — stub `split_video_file` for the split path |
 | 10 | Unit/command tests `tests/test_extras.py` | done | (this commit) | 30✓ (4.2s), smoke 72✓, full 637✓, sensitivity 10/10✓ | [model: opus] (v2) all seven cases (a)–(g); split path via byte-slicer stubs of split/merge (Step-9 caveat honored, integrity asserted end-to-end); fetch seam pinned via pure `build_extras_entries` (harvester loop would busy-hang — documented); no lifecycle bugs found |
 | 11 | Smoke coverage (round-trip + alias sweep + not-flagged) | done | (this commit) | smoke 76✓ (+0.6s delta), full 641✓, probe 4/4✓ | [model: opus] (v2) season-shaped `_seed_title_with_extras`; 4 cases: round-trip (asserts `--fetchExtras` reaches mainfetch argv), not-unprepped, 2 alias-sweep; fetch simulated at FS seam. FINDING (documented, by-design): staged extras restore unconditionally on cmd_restore success — Card C gates FETCHING, not restore-of-staged |
-| 12 | Architect docs (ARCHITECTURE/README/...) | done | (this commit) | smoke 76✓; 24/24 CLI examples replayed thru real parsers | [model: opus] (v2) 5 docs updated (ARCH §5/§6.3/§12a-blockquote, README + workflow, docs index, B8, Jellyfin §3.6). DATA_REQUEST→web-verified: `Specials`/`Extra` NOT recognized extras names on Jellyfin/Plex (Emby: `specials` ok) — guide + B8 + README corrected; DECISIONS A2 rationale footnoted. FINDINGS: autopilots don't forward `--extras` to prep (fix = Step 12b); /api/items not extras-aware (OD-2, documented) |
+| 12 | Architect docs (ARCHITECTURE/README/...) | done | 4548319 | smoke 76✓; 24/24 CLI examples replayed thru real parsers | [model: opus] (v2) 5 docs updated (ARCH §5/§6.3/§12a-blockquote, README + workflow, docs index, B8, Jellyfin §3.6). DATA_REQUEST→web-verified: `Specials`/`Extra` NOT recognized extras names on Jellyfin/Plex (Emby: `specials` ok) — guide + B8 + README corrected; DECISIONS A2 rationale footnoted. FINDINGS: autopilots don't forward `--extras` to prep (fix = Step 12b); /api/items not extras-aware (OD-2, documented) |
+| 12b | FIX: autopilots forward `--extras` to prep leg | done | (this commit) | extras 33✓, smoke 76✓, full 644✓, probe 2/2✓ | [model: opus] (v2) 2 call-site forward (`cmd_prep`/`cmd_prep_season` kwargs); 3 one-shot regression tests (movie + season + no-extras path); 2 doc sentences relaxed. ⚠️ NEW FINDING D19-B1 (pre-existing data-loss path): dummy-clobber on re-scan of archived group — 🚦 user decision pending (see NEXT ACTION) |
 | 13 | Register IMP-D19 (tier file + PRIORITY.md + graph) | pending | — | — | [model: sonnet] |
 | 14 | Final verification + smoke gate (last) | pending | — | — | [model: sonnet] |
 

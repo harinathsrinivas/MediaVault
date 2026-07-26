@@ -18,12 +18,17 @@ letter:
   (e) `parse_extras_tokens` parsing (locked Card B1 forms + the fail-fast paths)
   (f) `add_extras` on an archived-main title processes ONLY extras
   (g) `rename_folder` keeps extras valid (`group_rel`/`sub_rel` are relative)
+  (h) the two AUTOPILOTS with `--extras` — one-shot register -> push -> dummy on a
+      BRAND-NEW title, and the flag-gated no-extras path (Step 12b)
 
 Fixtures are the documented ones (docs/testing-strategy.md §4): `sandbox_extras`
 (§4.9, inheriting `sandbox`'s dual LIBRARY_*/LOCAL_ROOT patch and its C:\\Media
 hard-guard), `mock_device` (§4.4), `fake_dummy` (§4.3), `stub_tech_specs`,
-`make_video`. Nothing here touches real C:\\Media or real library_*.json — every
-path lives under the sandbox tmp_path.
+`make_video`. The (h) autopilot cases start from the BARE `sandbox` instead — the
+whole point is a title that does NOT pre-exist, so they let `cmd_prep` /
+`cmd_prep_season` create the entry (and the extras block) themselves. Nothing here
+touches real C:\\Media or real library_*.json — every path lives under the sandbox
+tmp_path.
 
 THREE deliberate boundary stubs keep the battery deterministic and fast:
   * `_install_fake_split` replaces `main.split_video_file`. The fixture extras are
@@ -899,6 +904,164 @@ def test_rename_folder_keeps_the_extras_block_valid(sandbox_extras):
         assert mvcommon.calculate_file_hash(path) == item["hash"]
         seen.append(os.path.relpath(path, new_folder).replace(os.sep, "/"))
     assert seen == ["Specials/BTS.mkv", "Specials/Trailer.mkv"]
+
+
+# ===========================================================================
+# (h) AUTOPILOTS — the one-shot promise on a BRAND-NEW title (Step 12b)
+#
+# These start from the BARE `sandbox` (not `sandbox_extras`): the title must NOT
+# already exist, because what is under test is whether the autopilots' PREP LEG
+# registers the `--extras` folders at all. Step 12's doc audit found that
+# `cmd_prep_push_rep` called `cmd_prep(manual_id, filepath)` and
+# `cmd_prep_push_rep_season` called `cmd_prep_season(base_id, folder_path)` WITHOUT
+# forwarding `extras`, so on a fresh title nothing was registered and the trailing
+# `push_title_extras` / `replace_title_extras` pair silently no-opped (an empty
+# `groups` dict returns success). Same proven recipe as the smoke autopilot cases
+# (tests/smoke/test_smoke_all_commands.py::test_prep_push_rep): whole-file pushes
+# need no `plenty_of_disk` because nothing splits.
+# ===========================================================================
+
+
+def test_movie_autopilot_registers_pushes_and_dummies_extras_on_a_fresh_title(
+        sandbox, make_video, stub_tech_specs, mock_device, fake_dummy):
+    """(h) `prep_push_rep <id> <file> --extras "<Specials>"` on a brand-new title is
+    a TRUE ONE-SHOT — no prior `prep --extras` / `add_extras` needed: the prep leg
+    REGISTERS the folder (scan+hash+merge), the extras phase UPLOADS it, and the
+    replace phase DUMMIES it, all in the same run. Asserts the whole promise on
+    observable state (library block, bytes on the fake device, bytes on disk) plus
+    the main content's own unchanged autopilot outcome, and pins the exact device
+    contents so a stray upload cannot hide."""
+    title_id = "mov-en-2024-autoextras"
+    media_dir = sandbox["media_dir"]
+    main_path = media_dir / "Auto.mkv"
+    _, main_hash = make_video(main_path, marker=b"AUTO-MAIN\n")
+
+    extras_dir = media_dir / "Specials"
+    extras_dir.mkdir()
+    originals, hashes = {}, {}
+    for fn, marker in [("BTS.mkv", b"AUTO-BTS\n"), ("Teaser.mkv", b"AUTO-TEASER\n")]:
+        _, hashes[fn] = make_video(extras_dir / fn, marker=marker)
+        originals[fn] = (extras_dir / fn).read_bytes()
+
+    main.cmd_prep_push_rep(title_id, str(main_path), extras=[str(extras_dir)],
+                           extras_size=("NONE", None))
+
+    entry = mvcommon.load_library()[title_id]
+
+    # (i) REGISTERED by the prep leg — the group exists ONLY if --extras was forwarded.
+    groups = entry.get("extras", {}).get("groups", {})
+    assert sorted(groups) == ["Specials"], \
+        f"the prep leg did not register the extras: {entry.get('extras')!r}"
+    items = groups["Specials"]["items"]
+    assert [it["sub_rel"] for it in items] == ["BTS.mkv", "Teaser.mkv"]
+    for it in items:
+        assert it["hash"] == hashes[it["filename"]], \
+            "the registered hash must be the REAL pre-dummy sha256 of the extra"
+
+    # (ii) PUSHED — the REAL (pre-dummy) bytes are on the device, under a remote
+    # folder mirroring Specials/, and NOTHING beyond the main file + the 2 extras.
+    on_device = _device_names(mock_device)
+    for it in items:
+        remote = _remote_name(it)
+        assert remote in on_device, f"{remote} not on device: {sorted(on_device)}"
+        assert on_device[remote].read_bytes() == originals[it["filename"]]
+        assert on_device[remote].parent.name == "Specials"
+    # _remote_name works on the title entry too (same filename/short_id keys, and
+    # cmd_push builds the whole-file remote name identically, main.py:4574).
+    assert set(on_device) == {_remote_name(entry)} | {_remote_name(it) for it in items}
+
+    # (iii) DUMMIED — every extra archived, a tiny dummy at its canonical path.
+    for _group, path, it in main._extras_item_paths(entry):
+        assert it["uploaded"] is True and it["status"] == "archived"
+        with open(path, "rb") as f:
+            assert f.read() == FAKE_DUMMY_BYTES
+
+    # The autopilot's MAIN promise is unchanged by the forwarding.
+    assert entry["status"] == "archived" and entry["uploaded"] is True
+    assert entry["hash"] == main_hash
+    assert main_path.read_bytes() == FAKE_DUMMY_BYTES
+
+
+def test_season_autopilot_registers_pushes_and_dummies_the_seasons_extras(
+        sandbox, make_video, stub_tech_specs, mock_device, fake_dummy):
+    """(h) The season variant of the same one-shot promise: the extras land on the
+    SEASON_MAP title (Card A2 — never on an episode leaf), are uploaded after the
+    episode loop and dummied, while every episode still ends `archived`. Also pins
+    that the scan happens EXACTLY ONCE per run: `cmd_prep_season` merges after its
+    episode loop and never passes `extras` down to the per-episode `cmd_prep`, so a
+    single group with a single item is the correct end state."""
+    base_id = "tv-en-2021-autoextras-s01"
+    season_dir = sandbox["local_root"] / "Series" / "AutoExtras S01"
+    season_dir.mkdir(parents=True)
+    for n in (1, 2):
+        make_video(season_dir / f"AUTO.S01E0{n}.mkv", marker=f"ep{n}".encode())
+
+    extras_dir = season_dir / "Specials"
+    extras_dir.mkdir()
+    bts = extras_dir / "BTS.mkv"
+    _, bts_hash = make_video(bts, marker=b"SEASON-BTS\n")
+    bts_original = bts.read_bytes()
+
+    main.cmd_prep_push_rep_season(base_id, str(season_dir),
+                                  extras=[str(extras_dir)],
+                                  extras_size=("NONE", None))
+
+    library = mvcommon.load_library()
+    season = library[base_id]
+    assert season["type"] == "season_map"
+
+    # (i) REGISTERED on the season_map by the prep_season leg.
+    groups = season.get("extras", {}).get("groups", {})
+    assert sorted(groups) == ["Specials"], \
+        f"the prep_season leg did not register the extras: {season.get('extras')!r}"
+    item, = groups["Specials"]["items"]      # exactly one item -> exactly one scan
+    assert item["sub_rel"] == "BTS.mkv" and item["hash"] == bts_hash
+
+    # Every episode is archived as before, and carries NO extras block of its own.
+    assert season["children"] == [f"{base_id}e01", f"{base_id}e02"]
+    for ep_id in season["children"]:
+        assert library[ep_id]["status"] == "archived"
+        assert "extras" not in library[ep_id]
+
+    # (ii) PUSHED — real bytes, remote folder mirrors Specials/.
+    on_device = _device_names(mock_device)
+    remote = _remote_name(item)
+    assert remote in on_device, f"{remote} not on device: {sorted(on_device)}"
+    assert on_device[remote].read_bytes() == bts_original
+    assert on_device[remote].parent.name == "Specials"
+
+    # (iii) DUMMIED.
+    assert item["uploaded"] is True and item["status"] == "archived"
+    assert bts.read_bytes() == FAKE_DUMMY_BYTES
+
+
+def test_autopilot_without_extras_leaves_bonus_content_completely_alone(
+        sandbox, make_video, stub_tech_specs, mock_device, fake_dummy):
+    """(h) The no-flag path is byte-for-byte the pre-Step-12b behavior: the
+    forwarding is FLAG-GATED (`cmd_prep`'s scan sits inside `if extras:`), so a
+    plain `prep_push_rep` run leaves a `Specials/` folder sitting next to the movie
+    completely untouched — no `extras` key on the entry, nothing extra on the
+    device, and the bonus files keep their real bytes."""
+    title_id = "mov-en-2024-noextras"
+    media_dir = sandbox["media_dir"]
+    main_path = media_dir / "Plain.mkv"
+    make_video(main_path, marker=b"PLAIN-MAIN\n")
+
+    extras_dir = media_dir / "Specials"
+    extras_dir.mkdir()
+    bonus = extras_dir / "BTS.mkv"
+    make_video(bonus, marker=b"UNREGISTERED-BTS\n")
+    bonus_original = bonus.read_bytes()
+
+    main.cmd_prep_push_rep(title_id, str(main_path))
+
+    entry = mvcommon.load_library()[title_id]
+    assert "extras" not in entry, "a no-flag autopilot run must not register anything"
+    assert entry["status"] == "archived"
+    assert set(_device_names(mock_device)) == {_remote_name(entry)}, \
+        "only the main content may reach the device without --extras"
+    assert bonus.read_bytes() == bonus_original
+    assert os.path.getsize(bonus) > main.DUMMY_MAX_BYTES, "the bonus file must NOT be dummied"
 
 
 def test_extras_push_still_works_after_a_folder_rename(sandbox_extras, mock_device):

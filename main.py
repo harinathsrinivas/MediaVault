@@ -6660,8 +6660,12 @@ def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, de
     print(f"=== 🚀 AUTO-PILOT: PREP -> PUSH -> REPLACE for {manual_id} ===")
 
     # 1. PREP
+    # IMP-D19 Step 12b: FORWARD --extras into the prep leg, so a brand-new title is
+    # a true one-shot — cmd_prep does the scan+merge (register), and the push+replace
+    # phase below then has an extras block to work on. Without this the trailing
+    # push_title_extras/replace_title_extras pair silently no-ops on a fresh title.
     print("\n>>> STEP 1: PREP")
-    if not cmd_prep(manual_id, filepath):
+    if not cmd_prep(manual_id, filepath, extras=extras, extras_size=extras_size):
         print("❌ Auto-Pilot Aborted: Prep failed.")
         return
 
@@ -6706,8 +6710,13 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
     print(f"=== 📺 SEASON AUTO-PILOT (SEQUENTIAL): PREP -> PUSH -> REPLACE for {base_id} ===")
 
     # 1. PREP SEASON
+    # IMP-D19 Step 12b: FORWARD --extras into the prep leg (same gap as the movie
+    # autopilot). cmd_prep_season scans+merges ONCE, onto the season_map, after its
+    # episode loop — the per-episode cmd_prep calls never receive `extras` — so this
+    # run registers the folders exactly once and the extras phase below can upload
+    # them.
     print("\n>>> STEP 1: PREP SEASON")
-    cmd_prep_season(base_id, folder_path)
+    cmd_prep_season(base_id, folder_path, extras=extras, extras_size=extras_size)
 
     # 2. IDENTIFY EPISODES TO PROCESS
     library = load_library()

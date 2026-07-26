@@ -520,13 +520,16 @@ python main.py push_group tv-en-2016-strangerthings-s01 SIZE_MB 5000 device seri
 ```
 
 `prep` / `prep_season` only **register** extras (scan + hash + merge; prep never
-uploads). `--extras` on `push` / `push_group` / `prep_push_rep` /
-`prep_push_rep_season` is then the opt-in switch that uploads the extras already
-registered on that title — the two autopilots also dummy them afterwards. Those
-commands do **not** re-scan the paths you pass, so register with `prep --extras` first,
-or just use `add_extras`, which does the whole thing in one shot. A later `replace` /
-`replace_group` on the title also dummies its uploaded extras (no flag needed). The
-flag is repeatable as well as semicolon-separated: `--extras A --extras B`.
+uploads). `--extras` on `push` / `push_group` is then the opt-in switch that uploads
+the extras already registered on that title; those two do **not** re-scan the paths you
+pass, so register with `prep --extras` first — or just use `add_extras`, which does the
+whole thing in one shot. The two autopilots are one-shot themselves: `prep_push_rep` /
+`prep_push_rep_season` pass `--extras` into their own prep leg, so a brand-new title is
+registered, uploaded **and** dummied in a single run (on a title whose main content is
+already pushed/archived, prep early-skips and registers nothing — `add_extras` is the
+command for that case). A later `replace` / `replace_group` on the title also dummies
+its uploaded extras (no flag needed). The flag is repeatable as well as
+semicolon-separated: `--extras A --extras B`.
 
 **Independent chunk size.** `--extras-size` is separate from the main split: `none`
 (whole file), `9900mb`, `8gb`, or `SIZE_MB 9900` / `SIZE_GB 8` / `COUNT 4`. Omit it to

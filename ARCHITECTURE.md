@@ -314,11 +314,16 @@ Brackets denote optional args; `[id]` is the manual library ID like
 > - **Register vs upload.** `prep` / `prep_season` *register* the folders — a
 >   recursive `VIDEO_EXTENSIONS` scan + SHA256 + MediaInfo, merged idempotently per
 >   group (`_extras_scan_merge_and_save`, `main.py:3823`) — and never upload. On
->   `push` / `push_group` / `prep_push_rep` / `prep_push_rep_season` the flag is the
->   opt-in switch for the extras **upload** phase (the two autopilots also dummy
->   afterwards) over the extras **already registered** on that title; those commands
+>   `push` / `push_group` the flag is purely the opt-in switch for the extras
+>   **upload** phase over the extras **already registered** on that title; those two
 >   do NOT re-scan the given paths, so register first with `prep --extras` — or use
->   `add_extras`, which scans, pushes and dummies in one shot.
+>   `add_extras`, which scans, pushes and dummies in one shot. The two autopilots
+>   `prep_push_rep` / `prep_push_rep_season` are one-shot: they FORWARD `--extras`
+>   into their prep leg (`cmd_prep` / `cmd_prep_season`, `main.py:6668` / `:6719`), so
+>   the same run registers, uploads AND dummies — no separate `prep --extras` needed
+>   on a fresh title. Their prep leg keeps `cmd_prep`'s cloud-bearing early-skip, so
+>   on an already-pushed/archived title nothing is registered (`add_extras` is the
+>   command for that case).
 > - **`--extras-size` / `-extras-size`** — independent extras chunking: `none`
 >   (whole-file), a size with unit (`9900mb`, `8gb`), or the triplet
 >   `SIZE_MB|SIZE_GB|COUNT <val>`. Omitted ⇒ **inherit the command's main split**;

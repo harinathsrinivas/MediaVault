@@ -3774,14 +3774,24 @@ def merge_extras_into_title(library, title_id, scanned):
 
       - a NEW group_rel  -> a new group, stamped with today's `added_date`;
       - an EXISTING group -> items merged by normalized sub_rel:
-            * a new sub_rel is appended,
+            * a new sub_rel is appended — UNLESS its file is dummy-sized
+              (tech_spec.size_bytes < DUMMY_MAX_BYTES): such a file can never be
+              pushed (push_one_extra refuses dummy uploads), so it is skipped
+              with a warning instead of registered as a forever-pending item,
             * an unchanged one (same hash) is a no-op,
             * one whose hash CHANGED is updated and reset to the unblessed,
               needs-re-push state (uploaded=False, status="local_ready", any
-              stale split_info / re_hashed dropped).
+              stale split_info / re_hashed dropped) — UNLESS the stored item is
+              CLOUD-BEARING (uploaded truthy or status in onboarded/archived/
+              restored_local) and the candidate is dummy-sized: that is a
+              re-scan over the dummy that replace left on disk (IMP-D19 Step
+              12c, D19-B1), and the item is kept exactly as stored, with a
+              warning.
 
     So adding Specials then Trailers later equals adding both at once, and
-    re-adding an unchanged group is a no-op. Mutates and returns `library`."""
+    re-adding an unchanged group is a no-op — including over an ARCHIVED group,
+    whose dummies on disk can no longer clobber the stored real hashes. Mutates
+    and returns `library`."""
     entry = library.get(title_id)
     if entry is None:
         return library  # caller resolves title_id first; nothing to attach to
@@ -3798,10 +3808,47 @@ def merge_extras_into_title(library, title_id, scanned):
         for item in gdata.get("items", []):
             key = _extras_rel_posix(item["sub_rel"])
             existing = by_sub.get(key)
+            # [IMP-D19 Step 12c / D19-B1] Dummy-sized candidate detection. The
+            # scan stamped tech_spec.size_bytes from the very file it hashed
+            # (get_tech_specs stats it; the same threshold cmd_prep:1004 and
+            # cmd_check use). None = size unknown (MediaInfo parse error).
+            cand_size = (item.get("tech_spec") or {}).get("size_bytes")
             if existing is None:
+                # Layer-1 NEW-item guard: never REGISTER a known dummy-sized
+                # file (e.g. --extras pointed at a folder of reclaim dummies).
+                # It could never be pushed anyway — push_one_extra refuses
+                # dummy-sized uploads (layer 2) — so registering it would only
+                # create a forever-failing pending item. An UNKNOWN size still
+                # registers: layer 2's own os.path.getsize is authoritative at
+                # push time, so a real file with a failed tech-scan stays usable.
+                if cand_size is not None and cand_size < DUMMY_MAX_BYTES:
+                    print(f"⚠️  Skipping extras file {group_rel}/{key}: dummy-sized "
+                          f"({cand_size:,} B < {DUMMY_MAX_BYTES:,} B) — looks like a "
+                          f"space-reclaim dummy, not registering it as an extra.")
+                    continue
                 target["items"].append(item)
                 by_sub[key] = item
             elif existing.get("hash") != item.get("hash"):
+                # [IMP-D19 Step 12c / D19-B1] Layer-1 CLOUD-BEARING guard — the
+                # extras analogue of cmd_prep's early-skip (main.py:984-1001).
+                # When the stored item already asserts a cloud copy (uploaded
+                # truthy OR status in the onboarded/archived/restored_local
+                # family) and the re-scanned file is dummy-sized, this is a
+                # re-scan OVER the dummy that the replace phase left on disk —
+                # NOT a re-master. Resetting would swap the REAL hash/split_info
+                # for the dummy's and the next push would upload the dummy OVER
+                # the real cloud copy (unrecoverable: the real local bytes were
+                # already reclaimed). Keep the item exactly as stored. An
+                # UNKNOWN size is treated as dummy-sized here — fail-safe
+                # toward no-clobber. A REAL-sized changed file (a genuine
+                # re-master) still resets below, exactly as before.
+                if (existing.get("uploaded") or existing.get("status") in
+                        ("onboarded", "archived", "restored_local")) and \
+                        (cand_size is None or cand_size < DUMMY_MAX_BYTES):
+                    print(f"⚠️  Skipping extras re-scan of {group_rel}/{key}: already "
+                          f"pushed/archived and the file on disk is dummy-sized — "
+                          f"refusing to clobber the cloud-bearing item (kept as stored).")
+                    continue
                 # Bytes changed: refresh scan-derived fields and return the item
                 # to the unblessed / needs-re-push state — its cloud copy and any
                 # chunk hashes are now stale. Mirrors cmd_push clearing re_hashed
@@ -4116,7 +4163,8 @@ def push_one_extra(library, title_id, group_rel, item, extras_method, extras_val
     its path, so a failed item simply stays uploaded=False and is retried later.
 
     Mutates `item` in place and saves `library` on success. Returns True iff the
-    extra fully uploaded."""
+    extra fully uploaded. A dummy-sized (< DUMMY_MAX_BYTES) local file is REFUSED
+    outright (IMP-D19 Step 12c / D19-B1 layer 2) — see the guard below."""
     title_entry = library.get(title_id) or {}
     title_folder = title_entry.get("folder_path", "")
     short_id = item.get("short_id", "")
@@ -4127,6 +4175,25 @@ def push_one_extra(library, title_id, group_rel, item, extras_method, extras_val
 
     if not os.path.exists(local_file_path):
         print(f"     ❌ Extra missing on disk, skipping: {local_file_path}")
+        return False
+
+    # [IMP-D19 Step 12c / D19-B1] Layer-2 backstop for EVERY caller: never
+    # upload a dummy-sized file as an extra. If a pending item's on-disk file is
+    # a dummy, the real bytes were already reclaimed — uploading would overwrite
+    # the REAL cloud copy with the dummy (unrecoverable). Same DUMMY_MAX_BYTES
+    # sniff as cmd_prep/cmd_check. Accepted consequence: a genuinely tiny real
+    # clip under the threshold cannot be pushed as an extra either (defense
+    # against unrecoverable loss outranks a sub-200 KB clip). The refusal keeps
+    # the missing-file semantics: this item stays uploaded=False, the batch
+    # continues with the rest.
+    local_size = os.path.getsize(local_file_path)
+    if local_size < DUMMY_MAX_BYTES:
+        print(f"     ❌ Refusing to push extra {item.get('filename')}: its on-disk file is "
+              f"dummy-sized ({local_size:,} B). Files under DUMMY_MAX_BYTES "
+              f"({DUMMY_MAX_BYTES:,} B = 200 KB) are treated as space-reclaim dummies "
+              f"and are never uploaded as extras.")
+        print(f"        > If the real file was reclaimed, recover it with: "
+              f"fetch_restore {title_id} --fetchExtras")
         return False
 
     # Remote dir mirrors the extra's on-disk folder (reuse cmd_push's fallback).

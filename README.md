@@ -495,7 +495,9 @@ push → dummy → fetch → restore lifecycle as main content (IMP-D19). They a
 an optional nested `extras` block on the title entry (the season for a series/anime,
 the movie itself for a movie), **grouped per source folder**, and they are additive:
 add `Specials` now and `Trailers` later, in any order, and re-adding an unchanged
-folder is a no-op.
+folder is a no-op. Re-running a scan over an **already-archived** group is safe too:
+a cloud-bearing extra is never clobbered by a dummy-sized re-scan, and a dummy-sized
+file (under 200 KB — a space-reclaim dummy) is never registered or pushed as an extra.
 
 **One-shot on an existing title — the common case (works even when the main content is
 already archived):**

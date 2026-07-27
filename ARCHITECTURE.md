@@ -937,7 +937,13 @@ section (`main.py:3616`); the locked shape is decision A2 in
   unchanged one (same hash) is a no-op, and a **changed-byte** one is refreshed and
   reset to the unblessed state (`uploaded=false`, `status="local_ready"`, stale
   `split_info`/`re_hashed` dropped). So adding `Specials` now and `Trailers` later
-  equals adding both at once.
+  equals adding both at once. **Layered dummy guard (Step 12c, D19-B1):** a
+  changed-hash candidate that is dummy-sized (`< DUMMY_MAX_BYTES`) can NOT reset a
+  cloud-bearing item (`uploaded` truthy or status onboarded/archived/restored_local —
+  the extras analogue of `cmd_prep`'s early-skip), and `push_one_extra` refuses to
+  upload ANY dummy-sized file, so re-scanning an archived group (re-run `add_extras`
+  / `prep_season --extras` / the season autopilot) never pushes a dummy over the
+  real cloud copy; a NEW dummy-sized file is skipped at registration with a warning.
 - **Lifecycle mirrors a leaf's.** `status` walks `local_ready` → `onboarded` (pushed) →
   `archived` (dummied) → `restored_local` (fetched back); `uploaded` flips true at push
   and STAYS true, so a `restored_local` extra can be re-dummied later. Every item is

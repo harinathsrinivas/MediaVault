@@ -15,22 +15,17 @@
   (`add_extras` cmd + `--extras`/`--extras-size` on prep/push family) · C = FLAG-ONLY (`--fetchExtras`, aliases
   `--fetch-extras`/`--extras`/`--extra`; no prompt; absent = no extras) · extras-size default = inherit main split ·
   D1 (full push→dummy→fetch→restore lifecycle) · E1 (additive rollback; main contract byte-for-byte unchanged).
-- **Last updated:** 2026-07-27 (Steps 0–12b done; suite 644). Next: **🚦 USER DECISION on the dummy-clobber data-loss
-  finding (D19-B1)**, then Step 13.
+- **Last updated:** 2026-07-27 (Steps 0–12c done; suite 648; D19-B1 FIXED via user-approved layered guard). Step 13 next (sonnet).
 
 ## ▶ NEXT ACTION
-**🚦 BLOCKED ON A USER DECISION — the dummy-clobber data-loss path (found by Step 12b; details in STATUS.md Step 12b
-§5).** `scan_extras_folders` has no `DUMMY_MAX_BYTES` guard: re-scanning an ALREADY-ARCHIVED extras group (e.g. re-run
-`prep_season --extras` then `push_group --extras`, or re-run `add_extras`, or the newly-fixed season autopilot) scans
-the ~10 KB dummies, the changed-hash merge branch resets items to `local_ready`/`uploaded=False` with the DUMMY's
-hash, and the next extras push uploads the dummy OVER the real cloud copy → the extra becomes unrecoverable (local
-real bytes are already gone). PRE-EXISTING (not caused by 12b's forwarding; movie autopilot immune via cmd_prep's
-cloud-bearing early-skip). Same bug class `main.py:989-1000` guards for main content — the extras core lacks that
-guard. Remedy options written up in STATUS.md §5: (1) scan-level dummy-size skip; (2) cloud-bearing guard in
-`merge_extras_into_title` mirroring cmd_prep's precedent; (3) upload-time guard in `push_one_extra`. USER picks:
-fix now in-branch as Step 12c (recommended; then no Band-0 entry needed) vs defer (then Step 13 must add a Band-0
-PRIORITY entry + NEXT pointer). After the decision: Step 13 (tracking) → 14 (verify) → PR.
-⚠️ Pathspec commits ONLY. Do NOT re-run the planner; do NOT re-open Cards A–E.
+**Step 13 — Register IMP-D19 (tier file + PRIORITY.md + priority graph). [model: sonnet] (v2).** Per the maintenance
+protocol at the bottom of PRIORITY.md, update ALL THREE together: `improvements/improvements_tierD.md` (add an
+`## IMP-D19` block in the D17/D18 shape; Status flipped to `done` — implementation IS complete on this branch),
+`improvements/PRIORITY.md` (IMP-D19 row → ✅ DONE, bump counts, keep the standing 👉 NEXT pointer), and
+`docs/priority-graph/priority-graph.html` (add `D19` node mirroring the existing tuple shape + edge to `E14`; keep
+the array valid JS). Mention in the tierD block: D19-B1 (dummy-clobber) found AND fixed in-branch (Step 12c layered
+guard); server-recognition facts (Jellyfin §3.6). Then Step 14 (final verification) → push → PR (Checkpoint 1 —
+STOP for the user's merge approval). ⚠️ Pathspec commits ONLY. Do NOT re-run the planner; do NOT re-open Cards A–E.
 
 ## Resume protocol (first thing a new session does)
 1. `git fetch && git checkout feature/imp_d19_extras` (or create it from `main` if it does not exist — first run).
@@ -55,7 +50,8 @@ PRIORITY entry + NEXT pointer). After the decision: Step 13 (tracking) → 14 (v
 | 10 | Unit/command tests `tests/test_extras.py` | done | (this commit) | 30✓ (4.2s), smoke 72✓, full 637✓, sensitivity 10/10✓ | [model: opus] (v2) all seven cases (a)–(g); split path via byte-slicer stubs of split/merge (Step-9 caveat honored, integrity asserted end-to-end); fetch seam pinned via pure `build_extras_entries` (harvester loop would busy-hang — documented); no lifecycle bugs found |
 | 11 | Smoke coverage (round-trip + alias sweep + not-flagged) | done | (this commit) | smoke 76✓ (+0.6s delta), full 641✓, probe 4/4✓ | [model: opus] (v2) season-shaped `_seed_title_with_extras`; 4 cases: round-trip (asserts `--fetchExtras` reaches mainfetch argv), not-unprepped, 2 alias-sweep; fetch simulated at FS seam. FINDING (documented, by-design): staged extras restore unconditionally on cmd_restore success — Card C gates FETCHING, not restore-of-staged |
 | 12 | Architect docs (ARCHITECTURE/README/...) | done | 4548319 | smoke 76✓; 24/24 CLI examples replayed thru real parsers | [model: opus] (v2) 5 docs updated (ARCH §5/§6.3/§12a-blockquote, README + workflow, docs index, B8, Jellyfin §3.6). DATA_REQUEST→web-verified: `Specials`/`Extra` NOT recognized extras names on Jellyfin/Plex (Emby: `specials` ok) — guide + B8 + README corrected; DECISIONS A2 rationale footnoted. FINDINGS: autopilots don't forward `--extras` to prep (fix = Step 12b); /api/items not extras-aware (OD-2, documented) |
-| 12b | FIX: autopilots forward `--extras` to prep leg | done | (this commit) | extras 33✓, smoke 76✓, full 644✓, probe 2/2✓ | [model: opus] (v2) 2 call-site forward (`cmd_prep`/`cmd_prep_season` kwargs); 3 one-shot regression tests (movie + season + no-extras path); 2 doc sentences relaxed. ⚠️ NEW FINDING D19-B1 (pre-existing data-loss path): dummy-clobber on re-scan of archived group — 🚦 user decision pending (see NEXT ACTION) |
+| 12b | FIX: autopilots forward `--extras` to prep leg | done | fd2722a | extras 33✓, smoke 76✓, full 644✓, probe 2/2✓ | [model: opus] (v2) 2 call-site forward (`cmd_prep`/`cmd_prep_season` kwargs); 3 one-shot regression tests; 2 doc sentences relaxed. ⚠️ Found D19-B1 (pre-existing data-loss path) → user chose the layered-guard fix (12c) |
+| 12c | FIX D19-B1: layered dummy-clobber guard (user-approved) | done | (this commit) | extras 37✓, smoke 76✓, full 648✓, disarm-probe 3/3✓ | [model: fable] (v2) Layer 1: merge cloud-bearing guard (cmd_prep:984 predicate; candidate size from scan-stamped tech_spec; unknown ⇒ protect); Layer 2: push_one_extra refuses <DUMMY_MAX_BYTES (200,000 B) with recovery cmd; new dummy-sized files not registered. Deviation accepted: strict `<` (codebase convention). **D19-B1: FIXED** |
 | 13 | Register IMP-D19 (tier file + PRIORITY.md + graph) | pending | — | — | [model: sonnet] |
 | 14 | Final verification + smoke gate (last) | pending | — | — | [model: sonnet] |
 

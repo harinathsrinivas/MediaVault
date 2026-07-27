@@ -20,6 +20,9 @@ letter:
   (g) `rename_folder` keeps extras valid (`group_rel`/`sub_rel` are relative)
   (h) the two AUTOPILOTS with `--extras` — one-shot register -> push -> dummy on a
       BRAND-NEW title, and the flag-gated no-extras path (Step 12b)
+  (i) the D19-B1 LAYERED GUARD (Step 12c) — a re-scan over an ARCHIVED group can
+      NOT clobber cloud-bearing items with dummy hashes, `push_one_extra` refuses
+      dummy-sized uploads, and a new dummy-sized file is never registered
 
 Fixtures are the documented ones (docs/testing-strategy.md §4): `sandbox_extras`
 (§4.9, inheriting `sandbox`'s dual LIBRARY_*/LOCAL_ROOT patch and its C:\\Media
@@ -1081,3 +1084,158 @@ def test_extras_push_still_works_after_a_folder_rename(sandbox_extras, mock_devi
         assert path.parent.parent.name == RENAMED
     for it in _items(mvcommon.load_library(), title_id):
         assert it["uploaded"] is True and it["status"] == "onboarded"
+
+
+# ===========================================================================
+# (i) D19-B1 LAYERED GUARD (Step 12c) — a re-scan over an archived group is SAFE
+#
+# The hazard (STATUS.md Step 12b §5): scan_extras_folders has no dummy-size
+# filter, so re-scanning an ALREADY-ARCHIVED group (re-run add_extras /
+# prep_season --extras + push_group --extras / the season autopilot) scans the
+# tiny dummies replace left on disk; pre-guard, merge_extras_into_title's
+# changed-hash branch then reset each item to local_ready/uploaded=False with
+# the DUMMY's hash (dropping split_info/re_hashed) and the next push uploaded
+# the dummy OVER the real cloud copy — unrecoverable, the real local bytes were
+# already reclaimed. Layer 1 (merge) keeps cloud-bearing items as stored when
+# the changed-hash candidate is dummy-sized (and refuses to register NEW
+# dummy-sized files); layer 2 (push_one_extra) refuses to upload any
+# dummy-sized file, whatever the caller.
+# ===========================================================================
+
+
+def test_rescan_over_an_archived_group_cannot_clobber_cloud_bearing_items(
+        sandbox_extras, mock_device, fake_dummy, plenty_of_disk,
+        stub_tech_specs, monkeypatch, capsys):
+    """(i) THE D19-B1 regression, at the core seam: split-push + replace an
+    extras group (dummies on disk, items archived/uploaded with the REAL hashes,
+    split_info and a re_hashed stamp), then re-scan+merge over the group. Every
+    stored field must survive byte-for-byte (hash / split_info / re_hashed /
+    status / uploaded), a protect-warning must name each file, and a follow-up
+    push must upload NOTHING (the device is bit-identical, sidecars included)."""
+    title_id = sandbox_extras["title_id"]
+    _install_fake_split(monkeypatch, n_chunks=2)
+
+    library = mvcommon.load_library()
+    assert main.push_title_extras(library, title_id, ("COUNT", "2")) is True
+    assert main.replace_title_extras(library, title_id) is True
+    # Stamp re_hashed as a restore-bless would (same shortcut as the (a)
+    # changed-bytes test), so the equality below also proves the guard keeps it.
+    library = mvcommon.load_library()
+    for it in _items(library, title_id):
+        it["re_hashed"] = True
+    mvcommon.save_library(library)
+
+    before = copy.deepcopy(mvcommon.load_library()[title_id]["extras"])
+    real_hashes = {it["filename"]: it["hash"] for it in sandbox_extras["items"]}
+    device_before = {str(p): p.read_bytes()
+                     for p in mock_device.rglob("*") if p.is_file()}
+    for it in sandbox_extras["items"]:      # precondition: dummies on disk
+        assert it["path"].read_bytes() == FAKE_DUMMY_BYTES
+
+    library = mvcommon.load_library()
+    main.merge_extras_into_title(library, title_id, main.scan_extras_folders(
+        [str(sandbox_extras["extras_dir"])], str(sandbox_extras["media_dir"]),
+        title_id))
+    mvcommon.save_library(library)
+
+    out = capsys.readouterr().out
+    assert "refusing to clobber" in out
+    assert "Specials/BTS.mkv" in out and "Specials/Trailer.mkv" in out
+
+    assert mvcommon.load_library()[title_id]["extras"] == before, \
+        "a dummy-sized re-scan must not change ANY stored field of the group"
+    for it in _items(mvcommon.load_library(), title_id):   # readable spot-checks
+        assert it["hash"] == real_hashes[it["filename"]]
+        assert it["status"] == "archived" and it["uploaded"] is True
+        assert it["split_info"]["is_split"] is True and it["re_hashed"] is True
+
+    library = mvcommon.load_library()
+    assert main.push_title_extras(library, title_id, ("NONE", None)) is True
+    assert {str(p): p.read_bytes()
+            for p in mock_device.rglob("*") if p.is_file()} == device_before, \
+        "nothing may be uploaded after a protected re-scan"
+
+
+def test_add_extras_rerun_over_an_archived_group_is_safe(
+        sandbox_extras, mock_device, fake_dummy, stub_tech_specs, capsys):
+    """(i) The documented user-facing entry to the D19-B1 hazard: re-running
+    `add_extras <id> "<Specials>"` after the group was archived. The re-scan is
+    protected (items stay archived with the REAL hashes), nothing new reaches
+    the device, and the dummies on disk stay dummies — the re-run is a safe,
+    warned no-op instead of a data-loss path."""
+    title_id = sandbox_extras["title_id"]
+    main.cmd_add_extras(title_id, [str(sandbox_extras["extras_dir"])],
+                        extras_size=("NONE", None))
+    for it in _items(mvcommon.load_library(), title_id):
+        assert it["status"] == "archived" and it["uploaded"] is True
+
+    before = copy.deepcopy(mvcommon.load_library()[title_id]["extras"])
+    device_before = {str(p): p.read_bytes()
+                     for p in mock_device.rglob("*") if p.is_file()}
+    capsys.readouterr()  # drop the first run's output
+
+    main.cmd_add_extras(title_id, [str(sandbox_extras["extras_dir"])],
+                        extras_size=("NONE", None))
+
+    out = capsys.readouterr().out
+    assert "refusing to clobber" in out
+    assert mvcommon.load_library()[title_id]["extras"] == before
+    assert {str(p): p.read_bytes()
+            for p in mock_device.rglob("*") if p.is_file()} == device_before
+    for it in sandbox_extras["items"]:
+        assert it["path"].read_bytes() == FAKE_DUMMY_BYTES, \
+            "the dummies must stay dummies (no re-upload, no re-dummy)"
+
+
+def test_push_refuses_a_dummy_sized_extra_and_continues_with_the_rest(
+        sandbox_extras, mock_device, capsys):
+    """(i) Layer-2 backstop in isolation: an item still local_ready whose
+    on-disk file is dummy-sized is REFUSED (loud, with the DUMMY_MAX_BYTES
+    threshold named) and no byte of it reaches the device; the batch continues —
+    its real-sized sibling uploads — and reports False, exactly the existing
+    missing-file failure semantics."""
+    title_id = sandbox_extras["title_id"]
+    bts, trailer = sandbox_extras["items"]
+    bts["path"].write_bytes(FAKE_DUMMY_BYTES)   # dummy-sized; item stays local_ready
+
+    library = mvcommon.load_library()
+    assert main.push_title_extras(library, title_id, ("NONE", None)) is False
+
+    out = capsys.readouterr().out
+    assert "Refusing to push extra BTS.mkv" in out
+    assert f"{main.DUMMY_MAX_BYTES:,} B" in out, \
+        "the refusal must state the actual DUMMY_MAX_BYTES threshold"
+
+    after = _by_sub_rel(mvcommon.load_library(), title_id)
+    assert after["BTS.mkv"]["uploaded"] is False
+    assert after["BTS.mkv"]["status"] == "local_ready"
+    assert after["Trailer.mkv"]["uploaded"] is True
+    assert after["Trailer.mkv"]["status"] == "onboarded"
+    assert set(_device_names(mock_device)) == {_remote_name(trailer)}, \
+        "no byte of the dummy-sized extra may reach the device"
+    assert len(list(mock_device.rglob("*.mvmeta.json"))) == 1, \
+        "no sidecar for the refused extra either"
+
+
+def test_merge_does_not_register_a_new_dummy_sized_file(
+        sandbox_extras, stub_tech_specs, capsys):
+    """(i) The NEW-item path of the layer-1 guard: a dummy-sized file whose
+    sub_rel is NOT yet registered (e.g. `--extras` pointed at a folder of
+    another title's reclaim dummies) is skipped with a warning instead of
+    registered — registering it would only create an item layer 2 refuses on
+    every push. The real-sized siblings' idempotent no-op is untouched."""
+    title_id = sandbox_extras["title_id"]
+    tiny = sandbox_extras["extras_dir"] / "Tiny.mkv"
+    tiny.write_bytes(FAKE_DUMMY_BYTES)
+
+    library = mvcommon.load_library()
+    before = copy.deepcopy(library[title_id]["extras"])
+    main.merge_extras_into_title(library, title_id, main.scan_extras_folders(
+        [str(sandbox_extras["extras_dir"])], str(sandbox_extras["media_dir"]),
+        title_id))
+
+    out = capsys.readouterr().out
+    assert "Skipping extras file Specials/Tiny.mkv" in out
+    assert library[title_id]["extras"] == before, \
+        "the dummy-sized file must not be registered; siblings stay a no-op"
+    assert "Tiny.mkv" not in _by_sub_rel(library, title_id)

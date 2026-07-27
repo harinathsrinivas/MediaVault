@@ -179,6 +179,7 @@ const TASKS = [
  ["D16","scan_reclaimable","D","done","done","Four-state reclaim scan behind web (feature/web_console)"],
  ["D17","crash-safe rename_folder","D","high","done","Cascading folder rename + folder_path rewrite, journaled (additive to rollback), hash-safe; enables the {tmdb-} token stamp"],
  ["D18","Others category (sports)","D","done","done","Shipped feature/imp_d18_others_category: 4th oth- category + library_others.json; season_map/leaf reuse (no new entry type, no rollback change); list-capable CATEGORY_ROOTS disk roots; enrich-skip; Others Chrome profile + Pixel; feeds E14 Others tab; follow-ons X1 (replicate) + OD-2 (sports scraper)"],
+ ["D19","extras option (Specials/Trailers/BTS)","D","done","done","Shipped feature/imp_d19_extras: --extras/--extras-size on prep/prep_season/push/push_group/prep_push_rep/prep_push_rep_season + new add_extras + flag-only --fetchExtras; grouped extras block on title entries (no new entry type, no rollback change — E1 additive reuse); found+fixed pre-existing dummy-clobber path (D19-B1); 37 unit tests + 4 smoke cases (suite 648/smoke 76); PR to main pending"],
  // E — integration
  ["E1","subtitle pre-extraction","E","med","todo","Subs survive archive; feed F7 grep"],
  ["E2","low-res preview variant","E","low","todo","Quick preview without full fetch"],
@@ -252,7 +253,7 @@ const TASKS = [
 /* dependency / flow edges [from,to] — major chains only */
 const EDGES = [
  ["A2","A4"],["A4","A5"],["A4","E12"],["A4","D1"],["A4","S2"],["A3","S2"],["E12","D16"],["E12","E14"],["A12","E14"],["E14","S2"],
- ["A2","D10"],["E3","U3"],["E3","D10"],["E3","D1"],["D4","D5"],["D17","E3"],["D18","E14"],
+ ["A2","D10"],["E3","U3"],["E3","D10"],["E3","D1"],["D4","D5"],["D17","E3"],["D18","E14"],["D19","E14"],
  ["S1","S2"],["S2","S3"],["S3","S4"],["S4","S5"],["S2","E9"],["S2","U2"],
  ["C6","S3"],["S4","U1"],["E4","S4"],["E4","S5"],["E5","S5"],["C1","S2"],
  ["R6","S3"],["G4","S2"],["G4","U5"],["G2","S7"],["S6","S8"],

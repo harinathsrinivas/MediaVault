@@ -15,17 +15,18 @@
   (`add_extras` cmd + `--extras`/`--extras-size` on prep/push family) · C = FLAG-ONLY (`--fetchExtras`, aliases
   `--fetch-extras`/`--extras`/`--extra`; no prompt; absent = no extras) · extras-size default = inherit main split ·
   D1 (full push→dummy→fetch→restore lifecycle) · E1 (additive rollback; main contract byte-for-byte unchanged).
-- **Last updated:** 2026-07-27 (Steps 0–12c done; suite 648; D19-B1 FIXED via user-approved layered guard). Step 13 next (sonnet).
+- **Last updated:** 2026-07-27 (Steps 0–13 done; Step 14 = final verification, run by the orchestrator). Then push →
+  PR (Checkpoint 1 — STOP for the user's merge approval).
 
 ## ▶ NEXT ACTION
-**Step 13 — Register IMP-D19 (tier file + PRIORITY.md + priority graph). [model: sonnet] (v2).** Per the maintenance
-protocol at the bottom of PRIORITY.md, update ALL THREE together: `improvements/improvements_tierD.md` (add an
-`## IMP-D19` block in the D17/D18 shape; Status flipped to `done` — implementation IS complete on this branch),
-`improvements/PRIORITY.md` (IMP-D19 row → ✅ DONE, bump counts, keep the standing 👉 NEXT pointer), and
-`docs/priority-graph/priority-graph.html` (add `D19` node mirroring the existing tuple shape + edge to `E14`; keep
-the array valid JS). Mention in the tierD block: D19-B1 (dummy-clobber) found AND fixed in-branch (Step 12c layered
-guard); server-recognition facts (Jellyfin §3.6). Then Step 14 (final verification) → push → PR (Checkpoint 1 —
-STOP for the user's merge approval). ⚠️ Pathspec commits ONLY. Do NOT re-run the planner; do NOT re-open Cards A–E.
+**Step 14 — Final verification (orchestrator-run), then Phase 3.** Run the PLAN.md Verification block: extras battery,
+schema guard, cli parsers, push/replace/restore selection, FULL suite, and `pytest tests/smoke -q` as the FINAL gate;
+plus the resume dry-run check (PROGRESS SHAs vs `git log`). All green ⇒ commit the Step-14 tick, git-agent
+PUSH_BRANCH (+ tags), CREATE_PR (title `feature: add --extras option (Specials/Trailers/Behind-the-Scenes) end-to-end
+— IMP-D19`; body = Claude summary FIRST, then `## Original task prompt` VERBATIM from PLAN.md, then the 🤖 trailer).
+**STOP at the PR — merging into main is Checkpoint 1 (user-gated); archiving the branch after merge is Checkpoint 2
+(user-gated).** ⚠️ Pathspec commits ONLY (user's archiver files still staged — they do NOT ship with the PR since
+only commits push).
 
 ## Resume protocol (first thing a new session does)
 1. `git fetch && git checkout feature/imp_d19_extras` (or create it from `main` if it does not exist — first run).
@@ -52,8 +53,8 @@ STOP for the user's merge approval). ⚠️ Pathspec commits ONLY. Do NOT re-run
 | 12 | Architect docs (ARCHITECTURE/README/...) | done | 4548319 | smoke 76✓; 24/24 CLI examples replayed thru real parsers | [model: opus] (v2) 5 docs updated (ARCH §5/§6.3/§12a-blockquote, README + workflow, docs index, B8, Jellyfin §3.6). DATA_REQUEST→web-verified: `Specials`/`Extra` NOT recognized extras names on Jellyfin/Plex (Emby: `specials` ok) — guide + B8 + README corrected; DECISIONS A2 rationale footnoted. FINDINGS: autopilots don't forward `--extras` to prep (fix = Step 12b); /api/items not extras-aware (OD-2, documented) |
 | 12b | FIX: autopilots forward `--extras` to prep leg | done | fd2722a | extras 33✓, smoke 76✓, full 644✓, probe 2/2✓ | [model: opus] (v2) 2 call-site forward (`cmd_prep`/`cmd_prep_season` kwargs); 3 one-shot regression tests; 2 doc sentences relaxed. ⚠️ Found D19-B1 (pre-existing data-loss path) → user chose the layered-guard fix (12c) |
 | 12c | FIX D19-B1: layered dummy-clobber guard (user-approved) | done | (this commit) | extras 37✓, smoke 76✓, full 648✓, disarm-probe 3/3✓ | [model: fable] (v2) Layer 1: merge cloud-bearing guard (cmd_prep:984 predicate; candidate size from scan-stamped tech_spec; unknown ⇒ protect); Layer 2: push_one_extra refuses <DUMMY_MAX_BYTES (200,000 B) with recovery cmd; new dummy-sized files not registered. Deviation accepted: strict `<` (codebase convention). **D19-B1: FIXED** |
-| 13 | Register IMP-D19 (tier file + PRIORITY.md + graph) | pending | — | — | [model: sonnet] |
-| 14 | Final verification + smoke gate (last) | pending | — | — | [model: sonnet] |
+| 13 | Register IMP-D19 (tier file + PRIORITY.md + graph) | done | (this commit) | smoke 76✓; graph 'D19'×3 | [model: sonnet] (v2) tierD block (done) + PRIORITY ✅ DONE (31→32, NEXT pointer unchanged: IMP-S1/S2) + graph node `["D19",…]` + edge `["D19","E14"]`; three-file consistency confirmed |
+| 14 | Final verification + smoke gate (last) | in_progress | — | — | executed by the ORCHESTRATOR directly (Phase-3 verification is the orchestrator's own duty; dispatching an agent to run pytest adds nothing) — full Verification block from PLAN.md |
 
 ## Multi-candidate tracking (Step 3)
 - **Namespace (task-unique — `step-3`/`step-03` are taken by prior tasks):** worktrees `.candidates/d19-step-3/A|B`;

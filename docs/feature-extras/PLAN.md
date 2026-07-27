@@ -610,7 +610,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
   - Acceptance: docs accurately describe the option, the JSON block, and the fetch flag; `docs/README.md` indexes the
     feature folder. opus: cross-file documented-behavior change.
 
-- [ ] 13. [model: sonnet] [effort: medium] Register IMP-D19 (tier file + PRIORITY.md + priority graph).
+- [x] 13. [model: sonnet] [effort: medium] Register IMP-D19 (tier file + PRIORITY.md + priority graph).
   - Files: `improvements/improvements_tierD.md`, `improvements/PRIORITY.md`, `docs/priority-graph/priority-graph.html`.
   - Details: Per the maintenance protocol at the bottom of PRIORITY.md, update all three together. tierD: add an
     `## IMP-D19: extras option (Specials/Trailers/Behind-the-Scenes archival)` block in the D17/D18 shape (Category

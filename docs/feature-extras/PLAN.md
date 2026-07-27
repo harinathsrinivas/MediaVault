@@ -623,7 +623,7 @@ would edit `.claude/agents/` and is therefore snapshot-gated + a separate user d
     the array valid JS.
   - Acceptance: IMP-D19 present + consistent in all three; the graph array stays valid.
 
-- [ ] 14. [model: sonnet] [effort: low] Final verification + smoke gate (the cross-command gate, last).
+- [x] 14. [model: sonnet] [effort: low] Final verification + smoke gate (the cross-command gate, last). — Run by the orchestrator (Phase 3): V1–V4 98✓, full 648✓, smoke 76✓, resume dry-run ✓.
   - Files: none (runs the suites).
   - Details: Run the Verification block below from the repo root using `python -m pytest`. Confirm the schema guard is
     green and added no new entry type. Fix any failure before the PR.

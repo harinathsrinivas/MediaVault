@@ -104,6 +104,7 @@ history only on archived branch tags — these folders are the readable record).
 | `feature-video-dummy/` | PRs #1/#3 (2026-05-28) — real video dummies | `PLAN.md`/`planv2.md`, `DECISION.md`, dummy-size test scripts |
 | `feature-adb-device-select/` | PR #2 (2026-05-28) — device pinning | `PLAN.md`, `STATUS.md` |
 | `feature-others-category/` | IMP-D18 (2026-06-28) — 4th "Others" content category (sports now; documentaries later) | `PLAN.md`, `step-02-save_library-DECISION.md` + `step-04-disk-walk-roots-DECISION.md` (the two multi-candidate judge decisions) |
+| `feature-extras/` | IMP-D19 (in flight on `feature/imp_d19_extras`, from 2026-06-29) — bonus content (`Specials\`/`Extra\`/`Trailers\`) gets the full push→dummy→fetch→restore lifecycle | `PLAN.md`, `DECISIONS.md` (locked Cards A–E: the A2 grouped JSON shape, the `--extras`/`--extras-size` CLI, flag-only `--fetchExtras`, the D1 full lifecycle, E1 additive rollback), `PROGRESS.md` (the per-step execution journal that makes the build cross-session resumable) |
 | `feature-fable-review/` | THIS review session | see §3 |
 
 ## 6. Agent-pipeline docs (`.claude/`)

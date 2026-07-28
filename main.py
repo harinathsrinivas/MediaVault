@@ -130,6 +130,28 @@ CATEGORY_ROOTS = {
 #                      No physical-file keys at all — dereferencing folder_path/
 #                      filename on it is the PR #21 crash class.
 #
+# OPTIONAL nested blocks add NO entry type and are in NO `required` set —
+# `metadata`/`tech_spec`/`split_info`/`parent_id` on a leaf, and (IMP-D19) an
+# `extras` block on a TITLE entry: the movie *leaf*, or the *season_map* for
+# series/anime/others. Exactly like `split_info`, `extras` just nests on an
+# existing entry and round-trips through save_library/load_library — it changes
+# no `required`/`physical` set and adds no type. Shape (Card A2 — grouped per
+# source folder): extras = {"groups": {"<group_rel>": {"added_date", "items":
+# [ {filename, sub_rel, short_id, hash, status, uploaded, search_term,
+# tech_spec, [split_info], [re_hashed]}, ... ]}}}, where group_rel is the extra
+# folder's path relative to the title's folder_path and sub_rel is the file's
+# path within that group (see scan_extras_folders / docs/feature-extras/DECISIONS.md).
+# Item lifecycle (mirrors a leaf's): `status` walks local_ready -> onboarded
+# (pushed) -> archived (dummied) -> restored_local (fetched back); `uploaded`
+# flips True at push and stays True across replace/restore (a re-scan that
+# finds CHANGED bytes resets the item to local_ready/uploaded=False). A split
+# item's `split_info` is {is_split, method, val, total_chunks, chunks:
+# [{filename, hash}, ...]} (written by push_one_extra), gaining
+# merge_seed/merge_tool/rehashed_at + item-level `re_hashed`: True when the
+# first restore blesses the merged hash (restore_one_extra) — the same
+# split_info vocabulary a main-content leaf uses. Authoritative in-code spec:
+# the EXTRAS DATA LAYER section below (grep "EXTRAS DATA LAYER").
+#
 # `required` = keys that distinguish the type and are always present; it is the
 # minimal set, not the exhaustive set (leaves also carry hash/metadata/etc.).
 # `physical` = "this entry owns a physical file on disk" (has folder_path AND
@@ -941,7 +963,7 @@ def cmd_recover(target=None, scan=False):
 #             CORE COMMANDS
 # ==========================================
 
-def cmd_prep(manual_id, filepath, parent_id=None):
+def cmd_prep(manual_id, filepath, parent_id=None, extras=None, extras_size=None):
     filepath = filepath.strip('"').strip("'")
     if not os.path.exists(filepath): print(f"❌ File not found: {filepath}"); return False
 
@@ -1087,6 +1109,9 @@ def cmd_prep(manual_id, filepath, parent_id=None):
         # [ROLLBACK C] Clean success — discard the journal.
         journal.commit()
         print(f"✅ Library Entry Created & Linked (Search Key: {default_search_term}).\n")
+        # IMP-D19: scan+merge extras if provided (prep never uploads)
+        if extras:
+            _extras_scan_merge_and_save(library, manual_id, extras)
         return True
     except Exception as e:
         # [ROLLBACK C] No PONR in prep — replay the journalled inverses.
@@ -3588,7 +3613,285 @@ def _rewrite_folder_path(folder_path, old_folder, new_folder):
     return os.path.normpath(os.path.join(new_folder, tail))
 
 
-def cmd_prep_season(base_id, folder_path):
+# ==========================================
+#   EXTRAS DATA LAYER (Specials / Trailers / …)
+# ==========================================
+# IMP-D19 — an "extras" block is an OPTIONAL nested field on the TITLE entry (the
+# season_map for series/anime/others, the movie leaf for movies) that carries
+# extra videos — a Specials / Trailers / Behind-the-Scenes subfolder — so they
+# run through the SAME push/replace/fetch/restore lifecycle as main content.
+#
+# Shape (Card A2 — GROUPED per source folder; docs/feature-extras/DECISIONS.md):
+#   entry["extras"] = {"groups": {
+#       "<group_rel>": {                    # extra folder path RELATIVE to the title folder
+#           "added_date": "YYYY-MM-DD",     # e.g. "Specials", "Extra", nested "Bonus/Trailers"
+#           "items": [ {filename, sub_rel, short_id, hash, status, uploaded,
+#                       search_term, tech_spec, [split_info], [re_hashed]}, ...]}}}
+# Each item mirrors a leaf's scan-derived fields. `sub_rel` is the file's path
+# WITHIN its group (just the filename when the group is flat). The "groups"
+# wrapper keeps an arbitrary folder name from ever colliding with a reserved key.
+# An item's on-disk / restore path = <title folder_path>/<group_rel>/<sub_rel>.
+# De-dup / additive identity = per group, by normalized `sub_rel`.
+
+# Internal folders never scanned as extras content (the *_DIR_NAME values are the
+# shared mvcommon constants; same idea as cmd_scan_unprepped's walk-excludes).
+_EXTRAS_EXCLUDE_DIRS = {SPLIT_DIR_NAME, CHECKSUM_DIR_NAME, RESTORE_DIR_NAME,
+                        ".git", ".idea", "__pycache__"}
+
+
+def _extras_rel_posix(rel):
+    """Normalize an os.path.relpath result to forward-slash form so a stored
+    group_rel/sub_rel is portable and the short_id seed is deterministic. The
+    realistic one-level-flat case (no separators) is unchanged; a nested spec
+    gains '/' separators."""
+    return rel.replace(os.sep, "/")
+
+
+def _extras_item_paths(entry):
+    """Yield (group_rel, on_disk_path, item) for every extras item nested on
+    `entry`, across ALL groups (IMP-D19 Step 7 — the whole-library iterators'
+    "known files" seam).
+
+    on_disk_path = <title folder_path>/<group_rel>/<sub_rel>, composed with the
+    SAME posix→os.sep idiom push_one_extra / replace_one_extra /
+    restore_one_extra use, so every consumer agrees on one canonical location.
+
+    Safe on EVERY entry type: reads only the optional `extras` block plus
+    `folder_path` (present on both title shapes — season_map and movie leaf —
+    per ENTRY_TYPE_KEYS) and yields nothing when either is absent (e.g. a
+    multi_ep_alias). No leaf-only key is ever dereferenced."""
+    extras = entry.get("extras")
+    title_folder = entry.get("folder_path")
+    if not extras or not title_folder:
+        return
+    for group_rel, group in (extras.get("groups") or {}).items():
+        group_os = group_rel.replace("/", os.sep)
+        for item in group.get("items", []):
+            sub_os = (item.get("sub_rel") or "").replace("/", os.sep)
+            yield group_rel, os.path.join(title_folder, group_os, sub_os), item
+
+
+def _extras_title_id(library, mid):
+    """Resolve `mid` to the id of the TITLE entry an extras block attaches to:
+
+      - season_map (series/anime/others) -> itself (it IS the title)
+      - episode leaf / multi_ep_alias     -> its parent_id season_map
+      - movie leaf (no usable parent)     -> itself
+
+    Returns the title id, or None if `mid` is absent or cannot resolve to a
+    title. Uses _resolve_alias (defined later, in the push/group region) to
+    follow a combined-episode alias one hop to its primary leaf first."""
+    if mid not in library:
+        return None
+    real_id, entry = _resolve_alias(library, mid)
+    if entry.get("type") == "multi_ep_alias":
+        return None  # alias whose primary is missing — no resolvable title
+    if entry.get("type") == "season_map":
+        return real_id
+    # Leaf: an episode (has a parent_id season_map) -> the parent; a movie -> itself.
+    parent_id = entry.get("parent_id")
+    if parent_id and parent_id in library:
+        return parent_id
+    return real_id
+
+
+def scan_extras_folders(folder_specs, title_folder_path, title_id):
+    """Recursively scan each extra folder for videos; return the scanned groups
+    keyed by group_rel: {group_rel: {"items": [item, ...]}}.
+
+    `folder_specs` is a LIST of folder paths (the caller has already `;`-split
+    and flattened the repeated --extras flag); a single string is tolerated.
+    Each folder spec becomes ONE group whose key is its path relative to the
+    title folder (group_rel), and every VIDEO_EXTENSIONS file inside it is
+    collected recursively as one item with sub_rel = the file's path within the
+    group. Each item is hashed (calculate_file_hash) and tech-scanned
+    (get_tech_specs); status="local_ready", uploaded=False. short_id is seeded
+    from title_id + group_rel + sub_rel (NOT the bare filename) so the same
+    basename in two groups never collides. PURE: no upload, no library/device
+    I/O (the .endswith match also catches the real `.mkv.mkv` double extension)."""
+    if isinstance(folder_specs, str):
+        folder_specs = [folder_specs]
+
+    scanned = {}
+    for raw in folder_specs:
+        spec = (raw or "").strip().strip('"').strip("'").strip()
+        if not spec:
+            continue
+        folder = os.path.abspath(spec)
+        if not os.path.isdir(folder):
+            print(f"⚠️  Extras folder not found, skipping: {folder}")
+            continue
+
+        # group_rel = the folder's path relative to the title folder. Fall back
+        # to its basename if it is not under the title folder (or on another
+        # drive — os.path.relpath raises ValueError across Windows volumes).
+        try:
+            group_rel = os.path.relpath(folder, title_folder_path)
+            if group_rel == os.pardir or group_rel.startswith(os.pardir + os.sep):
+                group_rel = os.path.basename(folder)
+        except ValueError:
+            group_rel = os.path.basename(folder)
+        group_rel = _extras_rel_posix(group_rel)
+
+        # De-dup within this scan against any items the same group already
+        # collected (e.g. the same folder passed twice, or a basename collision).
+        prior = scanned.get(group_rel)
+        seen_sub = {_extras_rel_posix(it["sub_rel"]) for it in prior["items"]} if prior else set()
+
+        for root, dirs, files in os.walk(folder):
+            dirs[:] = [d for d in dirs if d not in _EXTRAS_EXCLUDE_DIRS]
+            for fn in sorted(files):
+                if not fn.lower().endswith(VIDEO_EXTENSIONS):
+                    continue
+                file_path = os.path.join(root, fn)
+                sub_rel = _extras_rel_posix(os.path.relpath(file_path, folder))
+                if sub_rel in seen_sub:
+                    continue
+                seen_sub.add(sub_rel)
+
+                short_id = generate_short_id(f"{title_id}::{group_rel}/{sub_rel}")
+                name_no_ext, ext = os.path.splitext(fn)
+                scanned.setdefault(group_rel, {"items": []})["items"].append({
+                    "filename": fn,
+                    "sub_rel": sub_rel,
+                    "short_id": short_id,
+                    "hash": calculate_file_hash(file_path),
+                    "status": "local_ready",
+                    "uploaded": False,
+                    "search_term": f"{name_no_ext} [{short_id}]{ext}",
+                    "tech_spec": get_tech_specs(file_path),
+                })
+
+    # Deterministic item order within every group (empty folders produce no group).
+    for group in scanned.values():
+        group["items"].sort(key=lambda it: it["sub_rel"])
+    return scanned
+
+
+def merge_extras_into_title(library, title_id, scanned):
+    """Additively / idempotently merge `scanned` (the output of
+    scan_extras_folders) into the title entry's extras.groups:
+
+      - a NEW group_rel  -> a new group, stamped with today's `added_date`;
+      - an EXISTING group -> items merged by normalized sub_rel:
+            * a new sub_rel is appended — UNLESS its file is dummy-sized
+              (tech_spec.size_bytes < DUMMY_MAX_BYTES): such a file can never be
+              pushed (push_one_extra refuses dummy uploads), so it is skipped
+              with a warning instead of registered as a forever-pending item,
+            * an unchanged one (same hash) is a no-op,
+            * one whose hash CHANGED is updated and reset to the unblessed,
+              needs-re-push state (uploaded=False, status="local_ready", any
+              stale split_info / re_hashed dropped) — UNLESS the stored item is
+              CLOUD-BEARING (uploaded truthy or status in onboarded/archived/
+              restored_local) and the candidate is dummy-sized: that is a
+              re-scan over the dummy that replace left on disk (IMP-D19 Step
+              12c, D19-B1), and the item is kept exactly as stored, with a
+              warning.
+
+    So adding Specials then Trailers later equals adding both at once, and
+    re-adding an unchanged group is a no-op — including over an ARCHIVED group,
+    whose dummies on disk can no longer clobber the stored real hashes. Mutates
+    and returns `library`."""
+    entry = library.get(title_id)
+    if entry is None:
+        return library  # caller resolves title_id first; nothing to attach to
+
+    groups = entry.setdefault("extras", {}).setdefault("groups", {})
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    for group_rel, gdata in scanned.items():
+        if group_rel not in groups:
+            groups[group_rel] = {"added_date": today, "items": []}
+        target = groups[group_rel]
+        by_sub = {_extras_rel_posix(it["sub_rel"]): it for it in target["items"]}
+
+        for item in gdata.get("items", []):
+            key = _extras_rel_posix(item["sub_rel"])
+            existing = by_sub.get(key)
+            # [IMP-D19 Step 12c / D19-B1] Dummy-sized candidate detection. The
+            # scan stamped tech_spec.size_bytes from the very file it hashed
+            # (get_tech_specs stats it; the same threshold cmd_prep:1004 and
+            # cmd_check use). None = size unknown (MediaInfo parse error).
+            cand_size = (item.get("tech_spec") or {}).get("size_bytes")
+            if existing is None:
+                # Layer-1 NEW-item guard: never REGISTER a known dummy-sized
+                # file (e.g. --extras pointed at a folder of reclaim dummies).
+                # It could never be pushed anyway — push_one_extra refuses
+                # dummy-sized uploads (layer 2) — so registering it would only
+                # create a forever-failing pending item. An UNKNOWN size still
+                # registers: layer 2's own os.path.getsize is authoritative at
+                # push time, so a real file with a failed tech-scan stays usable.
+                if cand_size is not None and cand_size < DUMMY_MAX_BYTES:
+                    print(f"⚠️  Skipping extras file {group_rel}/{key}: dummy-sized "
+                          f"({cand_size:,} B < {DUMMY_MAX_BYTES:,} B) — looks like a "
+                          f"space-reclaim dummy, not registering it as an extra.")
+                    continue
+                target["items"].append(item)
+                by_sub[key] = item
+            elif existing.get("hash") != item.get("hash"):
+                # [IMP-D19 Step 12c / D19-B1] Layer-1 CLOUD-BEARING guard — the
+                # extras analogue of cmd_prep's early-skip (main.py:984-1001).
+                # When the stored item already asserts a cloud copy (uploaded
+                # truthy OR status in the onboarded/archived/restored_local
+                # family) and the re-scanned file is dummy-sized, this is a
+                # re-scan OVER the dummy that the replace phase left on disk —
+                # NOT a re-master. Resetting would swap the REAL hash/split_info
+                # for the dummy's and the next push would upload the dummy OVER
+                # the real cloud copy (unrecoverable: the real local bytes were
+                # already reclaimed). Keep the item exactly as stored. An
+                # UNKNOWN size is treated as dummy-sized here — fail-safe
+                # toward no-clobber. A REAL-sized changed file (a genuine
+                # re-master) still resets below, exactly as before.
+                if (existing.get("uploaded") or existing.get("status") in
+                        ("onboarded", "archived", "restored_local")) and \
+                        (cand_size is None or cand_size < DUMMY_MAX_BYTES):
+                    print(f"⚠️  Skipping extras re-scan of {group_rel}/{key}: already "
+                          f"pushed/archived and the file on disk is dummy-sized — "
+                          f"refusing to clobber the cloud-bearing item (kept as stored).")
+                    continue
+                # Bytes changed: refresh scan-derived fields and return the item
+                # to the unblessed / needs-re-push state — its cloud copy and any
+                # chunk hashes are now stale. Mirrors cmd_push clearing re_hashed
+                # so a later split-restore re-blesses for the NEW bytes rather
+                # than false-mismatching against a stale canonical hash.
+                existing["hash"] = item.get("hash")
+                existing["tech_spec"] = item.get("tech_spec")
+                existing["uploaded"] = False
+                existing["status"] = "local_ready"
+                existing.pop("split_info", None)
+                existing.pop("re_hashed", None)
+            # else: identical hash -> idempotent no-op.
+
+        target["items"].sort(key=lambda it: it["sub_rel"])
+
+    return library
+
+
+def _extras_scan_merge_and_save(library, mid, extras):
+    """Resolve `mid` to its title id, scan the extras folders, merge into the
+    library, save, and print a concise summary.  Called by cmd_prep /
+    cmd_prep_season / cmd_add_extras (prep-phase only — no upload)."""
+    title_id = _extras_title_id(library, mid)
+    if not title_id:
+        print(f"⚠️  Could not resolve a title entry for extras (id: {mid}) — skipping.")
+        return
+    title_entry = library.get(title_id, {})
+    title_folder = title_entry.get("folder_path", "")
+    scanned = scan_extras_folders(extras, title_folder, title_id)
+    if not scanned:
+        print("⚠️  No video files found in any extras folder — nothing merged.")
+        return
+    merge_extras_into_title(library, title_id, scanned)
+    save_library(library)
+    total = sum(len(g["items"]) for g in scanned.values())
+    groups_str = ", ".join(
+        f"{k} ({len(v['items'])} item{'s' if len(v['items']) != 1 else ''})"
+        for k, v in scanned.items()
+    )
+    print(f"✅ Extras merged into {title_id}: {groups_str} ({total} total item{'s' if total != 1 else ''}).")
+
+
+def cmd_prep_season(base_id, folder_path, extras=None, extras_size=None):
     print(f"=== BATCH PREP: {base_id} ===")
     folder_path = folder_path.strip('"').strip("'")
     if not os.path.exists(folder_path): print("❌ Folder not found."); return
@@ -3671,6 +3974,11 @@ def cmd_prep_season(base_id, folder_path):
             print(f"⚠️ Skipping {filename} (No episode number detected)")
 
     print(f"=== Batch Complete: Processed {count} episodes. ===")
+
+    # IMP-D19: scan+merge extras into the season_map after all episodes are prepped
+    if extras:
+        library = load_library()
+        _extras_scan_merge_and_save(library, base_id, extras)
 
 
 def cmd_check(manual_id):
@@ -3811,7 +4119,260 @@ def _verify_chunk_hash(adb_base, remote_path, safe_path, expected_sha256):
         )
 
 
-def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, device_id=None, eager_rehash=False, temp_dir=None):
+# ==========================================
+#   IMP-D19 Step 3 — EXTRAS UPLOAD PHASE (isolated, O-1 resumable per file)
+# ==========================================
+# Candidate B = ISOLATED DUPLICATION. push_one_extra re-implements ONLY the
+# upload steps an extra needs — the .partial+rename+retry idiom, chunk hashing,
+# the mvmeta sidecar, the status flips — WITHOUT cmd_push's leaf-specific
+# complexity (no chunk_range, no eager re-hash, no temp_dir plumbing, and no
+# RollbackJournal/PONR). cmd_push is left byte-for-byte untouched except for the
+# one-line wire at its success marker, so the proven push/rollback path carries
+# zero new blast radius. The .partial+rename+retry idiom now appears twice; that
+# duplication is the deliberate, accepted tradeoff (Step 3 candidate B).
+#
+# ROLLBACK (E1, change-gate cleared): the extras upload is its OWN phase with NO
+# point-of-no-return. The master extra file always survives, so a half-pushed
+# extra is resumable on a plain re-run — exactly the O-1 contract cmd_push uses,
+# but kept entirely separate from the main-content journal. Nothing here touches
+# RollbackJournal, mark_point_of_no_return(), or the main O-1/O-2 split.
+
+
+def push_one_extra(library, title_id, group_rel, item, extras_method, extras_val, device_id=None):
+    """Upload ONE extra item to the device, mirroring cmd_push's per-file upload
+    protocol but standalone and stripped to the essentials.
+
+    On-disk path  = <title folder_path>/<group_rel>/<sub_rel>.
+    Remote dir    = REMOTE_ROOT/relpath(<extra's folder>, LOCAL_ROOT) — mirrors
+                    the Specials/Extra subfolder on the phone (same except->
+                    basename fallback as cmd_push).
+    Split         = extras_method/extras_val (already resolved by the caller; a
+                    falsy method => whole-file push, the ('NONE', None) sentinel).
+
+    Steps: optional split -> hash chunks -> persist chunk hashes into the item's
+    `split_info` (BEFORE upload, so a resume has them) -> per-chunk
+    `<final>.partial` upload + atomic `mv`, wrapped in mvcommon.retry -> delete
+    the local chunk -> best-effort `write_remote_mvmeta` sidecar -> flip the item
+    `uploaded=True`, `status="onboarded"`, and save.
+
+    O-1 resumable per file: NO point-of-no-return. The per-item chunk dir lives
+    at <extra folder>/<SPLIT_DIR_NAME>/<short_id> — nested under SPLIT_DIR_NAME so
+    scan_extras_folders (which prunes SPLIT_DIR_NAME) never re-scans leftover
+    chunks, and two extras sharing a folder never collide. A re-run with chunks
+    still present resumes them instead of re-splitting; the master never leaves
+    its path, so a failed item simply stays uploaded=False and is retried later.
+
+    Mutates `item` in place and saves `library` on success. Returns True iff the
+    extra fully uploaded. A dummy-sized (< DUMMY_MAX_BYTES) local file is REFUSED
+    outright (IMP-D19 Step 12c / D19-B1 layer 2) — see the guard below."""
+    title_entry = library.get(title_id) or {}
+    title_folder = title_entry.get("folder_path", "")
+    short_id = item.get("short_id", "")
+    group_os = group_rel.replace("/", os.sep)
+    sub_os = item.get("sub_rel", "").replace("/", os.sep)
+    local_file_path = os.path.join(title_folder, group_os, sub_os)
+    extra_folder = os.path.dirname(local_file_path)
+
+    if not os.path.exists(local_file_path):
+        print(f"     ❌ Extra missing on disk, skipping: {local_file_path}")
+        return False
+
+    # [IMP-D19 Step 12c / D19-B1] Layer-2 backstop for EVERY caller: never
+    # upload a dummy-sized file as an extra. If a pending item's on-disk file is
+    # a dummy, the real bytes were already reclaimed — uploading would overwrite
+    # the REAL cloud copy with the dummy (unrecoverable). Same DUMMY_MAX_BYTES
+    # sniff as cmd_prep/cmd_check. Accepted consequence: a genuinely tiny real
+    # clip under the threshold cannot be pushed as an extra either (defense
+    # against unrecoverable loss outranks a sub-200 KB clip). The refusal keeps
+    # the missing-file semantics: this item stays uploaded=False, the batch
+    # continues with the rest.
+    local_size = os.path.getsize(local_file_path)
+    if local_size < DUMMY_MAX_BYTES:
+        print(f"     ❌ Refusing to push extra {item.get('filename')}: its on-disk file is "
+              f"dummy-sized ({local_size:,} B). Files under DUMMY_MAX_BYTES "
+              f"({DUMMY_MAX_BYTES:,} B = 200 KB) are treated as space-reclaim dummies "
+              f"and are never uploaded as extras.")
+        print(f"        > If the real file was reclaimed, recover it with: "
+              f"fetch_restore {title_id} --fetchExtras")
+        return False
+
+    # Remote dir mirrors the extra's on-disk folder (reuse cmd_push's fallback).
+    try:
+        rel_path = os.path.relpath(extra_folder, LOCAL_ROOT)
+    except Exception:
+        rel_path = os.path.basename(extra_folder)
+    remote_target_dir = f"{REMOTE_ROOT}/{rel_path}".replace("\\", "/")
+
+    adb_base = ["adb", "-s", device_id] if device_id else ["adb"]
+    safe_remote_dir = remote_target_dir.replace("'", "'\\''")
+    try:
+        subprocess.run(adb_base + ["shell", "mkdir", "-p", f"'{safe_remote_dir}'"], check=True)
+    except Exception as e:
+        print(f"     ❌ ADB connection failed for extra {item.get('filename')}: {e}")
+        return False
+
+    parts_dir = os.path.join(extra_folder, SPLIT_DIR_NAME, short_id)
+    files_to_upload = []
+    is_split = False
+
+    # 1. RESUME — chunks for this item still on disk: re-push them (no re-split).
+    if os.path.isdir(parts_dir) and any(f.endswith(".mkv") for f in os.listdir(parts_dir)):
+        files_to_upload = sorted(
+            os.path.join(parts_dir, f) for f in os.listdir(parts_dir) if f.endswith(".mkv"))
+        is_split = True
+        print(f"     > 🔄 Resuming {len(files_to_upload)} extra chunk(s) for {item.get('filename')}.")
+    # 2. SPLIT — independent extras chunk size (size-under-target / no method => whole).
+    elif _will_split(os.path.getsize(local_file_path), extras_method, extras_val):
+        file_size = os.path.getsize(local_file_path)
+        if not _free_space_ok(extra_folder, file_size, True, False):
+            free, required, _short = _disk_shortfall(extra_folder, file_size, True, False)
+            print(f"     ❌ Not enough free space to split extra {item.get('filename')} "
+                  f"(need ~{human_readable_size(required)} in {extra_folder}, "
+                  f"have {human_readable_size(free)}).")
+            return False
+        os.makedirs(parts_dir, exist_ok=True)
+        files_to_upload = split_video_file(local_file_path, parts_dir, extras_method, extras_val, file_id=short_id)
+        if not files_to_upload:
+            print(f"     ❌ Split failed for extra {item.get('filename')}.")
+            return False
+        is_split = True
+        chunk_metadata = [{"filename": os.path.basename(p), "hash": calculate_file_hash(p)}
+                          for p in files_to_upload]
+        # Persist chunk hashes BEFORE upload so a resume already has them (O-1).
+        item["split_info"] = {
+            "is_split": True, "method": extras_method, "val": extras_val,
+            "total_chunks": len(files_to_upload), "chunks": chunk_metadata,
+        }
+        save_library(library)
+    # 3. WHOLE-FILE push.
+    else:
+        files_to_upload = [local_file_path]
+        item.pop("split_info", None)
+
+    # UPLOAD LOOP — the duplicated .partial+rename+retry idiom (deliberate, lean).
+    all_success = True
+    for f in files_to_upload:
+        local_fname = os.path.basename(f)
+        if is_split:
+            remote_fname = local_fname  # chunk name already carries [short_id]
+        else:
+            name, ext = os.path.splitext(local_fname)
+            remote_fname = f"{name} [{short_id}]{ext}"
+        remote_full_path = f"{remote_target_dir}/{remote_fname}"
+        remote_partial_path = remote_full_path + PARTIAL_SUFFIX
+        safe_partial = remote_partial_path.replace("'", "'\\''")
+        safe_final = remote_full_path.replace("'", "'\\''")
+        print(f"     -> Pushing extra: {remote_fname}...", end=" ", flush=True)
+
+        def _push_and_rename():
+            subprocess.run(adb_base + ["push", "-p", f, remote_partial_path], check=True)
+            subprocess.run(
+                adb_base + ["shell", "mv", f"'{safe_partial}'", f"'{safe_final}'"],
+                check=True,
+            )
+
+        def _cleanup_and_log(attempt, exc):
+            print(f"⏳ Retry {attempt}/3 after {(1, 4, 16)[min(attempt - 1, 2)]}s (ADB push failed)…")
+            subprocess.run(adb_base + ["shell", "rm", f"'{safe_partial}'"], check=False)
+
+        try:
+            retry(
+                _push_and_rename,
+                attempts=3,
+                backoff=(1, 4, 16),
+                retry_on=(subprocess.CalledProcessError,),
+                on_retry=_cleanup_and_log,
+            )
+            print("✅")
+        except subprocess.CalledProcessError:
+            print("❌ FAIL (ADB Error)")
+            all_success = False
+            break
+        except Exception as e:
+            print(f"❌ FAIL ({e})")
+            all_success = False
+            break
+
+        # Delete the local chunk after a successful upload+rename (resumable, NOT a PONR).
+        if is_split and SPLIT_DIR_NAME in f:
+            try:
+                os.remove(f)
+            except OSError:
+                pass
+
+    if not all_success:
+        print(f"     ❌ Extra {item.get('filename')} left partially uploaded "
+              f"(uploaded=False; re-run to resume).")
+        return False
+
+    # Best-effort: remove the now-empty per-item chunk dir.
+    if is_split and os.path.isdir(parts_dir) and not os.listdir(parts_dir):
+        try:
+            os.rmdir(parts_dir)
+        except OSError:
+            pass
+
+    # Disaster-recovery sidecar (best-effort — never fails the upload). Give it a
+    # folder_path so the mvmeta records where the extra restores to.
+    meta_entry = dict(item)
+    meta_entry["folder_path"] = extra_folder
+    write_remote_mvmeta(adb_base, remote_target_dir,
+                        f"{title_id}::{group_rel}/{item.get('sub_rel')}", meta_entry)
+
+    item["uploaded"] = True
+    item["status"] = "onboarded"
+    save_library(library)
+    return True
+
+
+def push_title_extras(library, title_id, extras_size, device_id=None, split_method=None, split_val=None):
+    """Upload every not-yet-uploaded extra item on `title_id` (all groups).
+
+    Independent chunk size (Card B):
+      - extras_size given (a parse_extras_tokens tuple) WINS:
+          ('NONE', None)                        -> whole-file push (no split)
+          ('SIZE_MB'|'SIZE_GB'|'COUNT', val)    -> that split
+      - extras_size is None -> INHERIT the command's main split
+          (split_method/split_val); if the command has no main split either,
+          extras are pushed whole-file.
+
+    Each item is pushed via push_one_extra (O-1 resumable per file). One bad/
+    missing extra does NOT block the rest — the item stays uploaded=False and is
+    retried on the next run. Returns True iff every processed item uploaded."""
+    if not title_id or title_id not in library:
+        print(f"⚠️  Could not resolve a title entry for extras upload (id: {title_id}).")
+        return False
+    groups = library[title_id].get("extras", {}).get("groups", {})
+    if not groups:
+        return True  # title carries no extras — nothing to do
+
+    if extras_size is None:
+        e_method, e_val = split_method, split_val          # inherit the main split
+    elif extras_size[0] == "NONE":
+        e_method, e_val = None, None                       # explicit whole-file
+    else:
+        e_method, e_val = extras_size[0], extras_size[1]    # explicit split
+
+    pending = [(g, it) for g in sorted(groups)
+               for it in groups[g].get("items", []) if not it.get("uploaded")]
+    if not pending:
+        print(f"   > ✅ All extras already uploaded for {title_id}.")
+        return True
+
+    print(f"\n=== 📎 UPLOADING {len(pending)} EXTRA(S) for {title_id} ===")
+    print(f"   > Extras split: {e_method} {e_val}" if (e_method and e_val)
+          else "   > Extras: whole-file (no split)")
+
+    ok = True
+    for group_rel, item in pending:
+        if not push_one_extra(library, title_id, group_rel, item, e_method, e_val, device_id=device_id):
+            ok = False
+    print(f"=== ✅ EXTRAS UPLOAD COMPLETE for {title_id} ===" if ok
+          else f"=== ⚠️  EXTRAS UPLOAD INCOMPLETE for {title_id} (re-run to resume) ===")
+    return ok
+
+
+def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, device_id=None, eager_rehash=False, temp_dir=None, extras=None, extras_size=None):
     print(f"--- PUSHING: {manual_id} ---")
     library = load_library()
     if manual_id not in library: print(f"❌ ID not found."); return False
@@ -4186,6 +4747,8 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
             _warn_if_entry_inconsistent(library[manual_id], manual_id)
             print("✅ SUCCESS.\n")
+            if extras:
+                push_title_extras(library, _extras_title_id(library, manual_id), extras_size, device_id, split_method, split_val)
             return True
         else:
             journal.commit()
@@ -4231,6 +4794,95 @@ def _resolve_alias(lib, mid):
             return (mid, entry)
         return (primary_id, primary_entry)
     return (mid, entry)
+
+
+def _parse_extras_size_unit(size_str):
+    """Parse a compact size string like '9900mb' or '8gb' into the normalised
+    (method, val) tuple used by extras_size.
+
+      '9900mb'  ->  ('SIZE_MB', '9900')
+      '8gb'     ->  ('SIZE_GB', '8')
+
+    Returns None if the string does not match the expected pattern."""
+    m = re.match(r'^(\d+(?:\.\d+)?)\s*(mb|gb)$', size_str.lower().strip())
+    if not m:
+        return None
+    num = int(float(m.group(1)))
+    unit = m.group(2)
+    return ("SIZE_MB", str(num)) if unit == "mb" else ("SIZE_GB", str(num))
+
+
+def parse_extras_tokens(tokens):
+    """Parse ``--extras`` / ``-extras`` / ``--extras-size`` / ``-extras-size``
+    from a flat token list.
+
+    --extras <value>
+        value may be semicolon-separated paths; the flag is repeatable; all
+        paths are split on ``;``, stripped of surrounding quotes/whitespace,
+        and collected in a flat ordered list.
+
+    --extras-size <value>
+        Accepted forms:
+          'none'                -> ('NONE', None)
+          '9900mb' / '8gb'      -> ('SIZE_MB','9900') / ('SIZE_GB','8')
+          'SIZE_MB|SIZE_GB|COUNT <val>'  (triplet, consumes two tokens)
+
+    Unknown tokens are silently skipped (matches the existing parsers).
+    A value-taking flag with no following value prints an error and
+    calls sys.exit(1).
+
+    Returns: {'folders': [...], 'extras_size': <tuple or None>}
+
+    Acceptance:
+      parse_extras_tokens(['--extras','A;B','--extras','C',
+                           '--extras-size','9900mb'])
+      -> {'folders': ['A','B','C'], 'extras_size': ('SIZE_MB','9900')}
+    """
+    folders = []
+    extras_size = None
+
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok in ("--extras", "-extras"):
+            if i + 1 < len(tokens):
+                raw = tokens[i + 1]
+                for part in raw.split(";"):
+                    part = part.strip().strip('"').strip("'").strip()
+                    if part:
+                        folders.append(part)
+                i += 2
+            else:
+                print("❌ Error: Missing value for --extras")
+                sys.exit(1)
+        elif tok in ("--extras-size", "-extras-size"):
+            if i + 1 < len(tokens):
+                sv = tokens[i + 1]
+                if sv.lower() == "none":
+                    extras_size = ("NONE", None)
+                    i += 2
+                elif sv.upper() in ("SIZE_MB", "SIZE_GB", "COUNT"):
+                    # triplet form: --extras-size SIZE_MB 9900
+                    if i + 2 < len(tokens):
+                        extras_size = (sv.upper(), tokens[i + 2])
+                        i += 3
+                    else:
+                        print(f"❌ Error: Missing value for {sv}")
+                        sys.exit(1)
+                else:
+                    result = _parse_extras_size_unit(sv)
+                    if result is None:
+                        print(f"❌ Error: Unrecognized --extras-size value: {sv!r}")
+                        sys.exit(1)
+                    extras_size = result
+                    i += 2
+            else:
+                print("❌ Error: Missing value for --extras-size")
+                sys.exit(1)
+        else:
+            i += 1
+
+    return {"folders": folders, "extras_size": extras_size}
 
 
 def parse_push_group_args(args):
@@ -4296,7 +4948,7 @@ def parse_push_group_args(args):
     return (group_id, method, val, ep_range, dev, eager, tdir)
 
 
-def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False, temp_dir=None):
+def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False, temp_dir=None, extras=None, extras_size=None):
     print(f"=== BATCH PUSH GROUP: {group_id} ===")
     library = load_library()
     target_ids = []
@@ -4408,6 +5060,16 @@ def cmd_push_group(group_id, split_method=None, split_val=None, episode_range=No
             print(f"⏭️  Skipping {mid} (Already uploaded)")
             continue
         cmd_push(mid, split_method, split_val, device_id=device_id, eager_rehash=eager_rehash, temp_dir=temp_dir)
+
+    # IMP-D19 Step 3: upload the season/title's extras after the episode loop.
+    # Reload — each per-episode cmd_push saved its own library updates, so the
+    # in-memory `library` above is stale; pushing extras off it would clobber
+    # the just-saved episode statuses.
+    if extras:
+        library = load_library()
+        ex_title_id = _extras_title_id(library, group_id) or (
+            _extras_title_id(library, target_ids[0]) if target_ids else None)
+        push_title_extras(library, ex_title_id, extras_size, device_id, split_method, split_val)
 
 
 def cmd_replace(manual_id):
@@ -4532,6 +5194,11 @@ def cmd_replace(manual_id):
         # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
         _warn_if_entry_inconsistent(library[manual_id], manual_id)
         print(f"✅ Replaced/Archived: {manual_id}")
+        # IMP-D19 Step 4 (Card D1): dummy this title's uploaded extras too. The
+        # driver never raises (it self-handles + catches RollbackHardFail), so this
+        # one line cannot trip cmd_replace's except handlers above — the main
+        # journal/PONR/contract is byte-for-byte unchanged (Card E1).
+        replace_title_extras(library, _extras_title_id(library, manual_id))
         return True
     except RollbackHardFail:
         raise
@@ -4578,6 +5245,200 @@ def cmd_replace_group(group_id):
     print(f"   > Auto-replacing {len(target_ids)} items...")
     for mid in target_ids:
         cmd_replace(mid)
+
+    # IMP-D19 Step 4: explicit batch wire — dummy the title's extras after the
+    # episode loop (mirrors how cmd_push_group wires push_title_extras). Reload
+    # first: each per-episode cmd_replace saved its own updates and already
+    # archived these extras on the first child, so the in-memory `library` above
+    # is stale; the reload makes this an idempotent no-op (status=='archived'
+    # short-circuits replace_one_extra) rather than a wasteful re-dummy.
+    library = load_library()
+    ex_title_id = _extras_title_id(library, group_id) or (
+        _extras_title_id(library, target_ids[0]) if target_ids else None)
+    replace_title_extras(library, ex_title_id)
+
+
+# ==========================================
+#   IMP-D19 Step 4 — EXTRAS REPLACE (DUMMY) PHASE  (per-file PONR; additive E1)
+# ==========================================
+# replace_one_extra mirrors cmd_replace's atomic two-rename dummy swap EXACTLY —
+# the per-file point-of-no-return (mark_point_of_no_return fired right after the
+# original leaves its path), the eager-canonical-hash promotion, and the
+# RollbackHardFail(resume_cmd="fetch_restore <id> --fetchExtras") contract — but
+# scoped to ONE nested extras item, with its journal living in the extra's OWN
+# folder (e.g. …\Specials\). It REUSES the same RollbackJournal/PONR primitives as
+# the main-content path; it does NOT modify cmd_replace, whose journal/PONR/
+# contract stay byte-for-byte unchanged (Card E1 / ROLLBACK_MECHANISM.md §10).
+def replace_one_extra(library, title_id, group_rel, item):
+    """Replace ONE uploaded extra with a tiny video dummy to reclaim space — the
+    per-file mirror of cmd_replace (Card D1 lifecycle, Card E1 additive rollback).
+
+    The atomic two-rename swap, the per-file point-of-no-return
+    (mark_point_of_no_return fired right after the original leaves its path), the
+    eager-canonical-hash promotion, and the RollbackHardFail contract are
+    IDENTICAL to cmd_replace; only the target is a nested extras `item` and the
+    journal lives in the extra's OWN folder rather than a library leaf's. The
+    EXISTING cmd_replace contract is byte-for-byte untouched — this REUSES the same
+    RollbackJournal/PONR primitives, it does not modify the main-content path.
+
+    On-disk / restore path = <title folder_path>/<group_rel>/<sub_rel>.
+
+    Returns True on success (item -> status='archived', a dummy now on disk) or on
+    an already-archived no-op; False on a pre-PONR failure or a skip. Raises
+    RollbackHardFail on a post-PONR failure, naming the EXISTING
+    `fetch_restore <title_id> --fetchExtras` resume command (it exists from Step 2;
+    the bytes are safe in the cloud)."""
+    title_entry = library.get(title_id) or {}
+    title_folder = title_entry.get("folder_path", "")
+    group_os = group_rel.replace("/", os.sep)
+    sub_os = item.get("sub_rel", "").replace("/", os.sep)
+    original = os.path.join(title_folder, group_os, sub_os)
+    extra_folder = os.path.dirname(original)
+    filename = item.get("filename") or os.path.basename(original)
+    extra_id = f"{title_id}::{group_rel}/{item.get('sub_rel')}"
+
+    if not item.get("uploaded", False):
+        print(f"     ⚠️ Skipping extra {filename}: not uploaded.")
+        return False
+    if item.get("status") == "archived":
+        return True  # already a dummy — idempotent no-op
+    if not os.path.isdir(extra_folder):
+        # Folder gone — cannot journal there. Skip (defensive; never crash the batch).
+        print(f"     ⚠️ Skipping extra {filename}: its folder is missing ({extra_folder}).")
+        return False
+
+    ext = os.path.splitext(filename)[1]
+    # The dummy temp is the ONLY pre-PONR artifact (mirrors cmd_replace); the
+    # journal lives in the extra's own folder so `recover --scan` finds it there.
+    tmp_path = original + ".dummy_tmp" + ext
+    journal = RollbackJournal(extra_folder, extra_id)
+    journal.record_create_file(tmp_path)
+    if not make_video_dummy(tmp_path, ext):
+        print(f"     ❌ extras replace aborted — could not create dummy for {filename}")
+        journal.rollback(library)
+        return False
+
+    try:
+        tobedeleted = original + ".tobedeleted"
+
+        # STALE SWEEP: recover a prior interrupted run before touching anything.
+        if os.path.exists(tobedeleted):
+            try:
+                if os.path.exists(original):
+                    print(f"     ⚠️ Stale leftover — cleaning up {os.path.basename(tobedeleted)}")
+                    os.remove(tobedeleted)
+                else:
+                    print(f"     ⚠️ Recovered interrupted replace: restoring original from {os.path.basename(tobedeleted)}")
+                    os.rename(tobedeleted, original)
+                    print(f"     ❌ extras replace aborted — original restored. Please retry.")
+                    journal.rollback(library)  # pre-PONR — remove the dummy temp
+                    return False
+            except Exception as e:
+                print(f"     ⚠️ Could not clean stale leftover: {e}")
+
+        # Commit / point-of-no-return: rename original -> .tobedeleted.
+        if os.path.exists(original):
+            moved = False
+            for attempt in range(3):
+                try:
+                    os.chmod(original, stat.S_IWRITE)
+                    os.rename(original, tobedeleted)  # PONR: original leaves its path here
+                    journal.mark_point_of_no_return()
+                    moved = True
+                    break
+                except PermissionError:
+                    print(f"     ⚠️ File busy or locked. Retrying... ({attempt + 1}/3)")
+                    time.sleep(1)
+                except Exception as e:
+                    print(f"     ❌ Error removing extra file: {e}")
+                    journal.rollback(library)  # still pre-PONR — reversible
+                    return False
+            if not moved:
+                print(f"     ❌ PERMISSION DENIED: Could not replace extra {filename}")
+                print("        > Close any players/Plex scanning this file and try again.")
+                journal.rollback(library)  # pre-PONR — roll back the dummy temp
+                return False
+
+        # Make the dummy live, then drop the leftover (non-fatal).
+        os.rename(tmp_path, original)
+        if os.path.exists(tobedeleted):
+            try:
+                os.remove(tobedeleted)
+            except Exception as e:
+                print(f"     ⚠️ WARNING: Could not remove leftover {os.path.basename(tobedeleted)}: {e}.")
+
+        # PROMOTE-AT-REPLACE (identical to cmd_replace's eager-canonical promotion).
+        # A no-op for the lean extras push, which never stages a canonical_hash, but
+        # kept structurally identical so the two replace paths can never drift.
+        _split_info = item.get("split_info", {})
+        _staged = _split_info.get("canonical_hash")
+        if _staged and item.get("re_hashed") is not True:
+            item["hash"] = _staged
+            item["re_hashed"] = True
+            item["split_info"]["rehashed_at"] = _rehashed_at()
+            del item["split_info"]["canonical_hash"]
+            print(f"     > 🧬 Promoted eager canonical hash to extra truth (re_hashed=True).")
+
+        item["status"] = "archived"
+        save_library(library)
+        journal.commit()
+        print(f"     ✅ Archived extra: {filename}")
+        return True
+    except RollbackHardFail:
+        raise
+    except Exception as e:
+        if journal.crossed_ponr:
+            # At/after PONR — hard-fail naming the EXISTING fetch_restore --fetchExtras.
+            # The extra's journal (with its PONR marker) is left on disk for recovery.
+            print(f"     ❌ IRREVERSIBLE: extras replace failed after the commit point for {filename}.")
+            print(f"        > To recover the extras from the cloud: fetch_restore {title_id} --fetchExtras")
+            raise RollbackHardFail(
+                state=f"{extra_id} archived (original committed)",
+                reason=f"extras replace failed past the point-of-no-return: {e}",
+                resume_cmd=f"fetch_restore {title_id} --fetchExtras",
+            )
+        print(f"     ❌ extras replace failed (pre-commit): {e}")
+        journal.rollback(library)
+        return False
+
+
+def replace_title_extras(library, title_id):
+    """Replace (dummy) every uploaded-not-yet-archived extra on `title_id` — the
+    per-title driver, mirroring how cmd_replace_group drives cmd_replace.
+
+    A clean (silent) no-op when the title carries no extras or none are pending.
+    One bad/missing extra does not block the rest. A post-PONR RollbackHardFail
+    from replace_one_extra is caught HERE — exactly as cmd_prep_push_rep_season
+    catches cmd_replace's — its resume command printed, and the batch stops.
+    Crucially this driver NEVER raises (it only returns a bool), so a one-line
+    `replace_title_extras(...)` wired inside cmd_replace's try block cannot trigger
+    cmd_replace's except handlers: the main-content journal/PONR/contract stays
+    byte-for-byte unchanged (Card E1). Returns True iff every processed extra
+    archived (or there was nothing to do)."""
+    if not title_id or title_id not in library:
+        return True
+    groups = library[title_id].get("extras", {}).get("groups", {})
+    if not groups:
+        return True  # title carries no extras — nothing to reclaim
+    pending = [(g, it) for g in sorted(groups)
+               for it in groups[g].get("items", [])
+               if it.get("uploaded") and it.get("status") != "archived"]
+    if not pending:
+        return True  # nothing uploaded-but-unarchived — idempotent no-op (silent)
+
+    print(f"\n=== 📎 ARCHIVING {len(pending)} EXTRA(S) for {title_id} (reclaiming space) ===")
+    ok = True
+    for group_rel, item in pending:
+        try:
+            if not replace_one_extra(library, title_id, group_rel, item):
+                ok = False
+        except RollbackHardFail as hf:
+            print(f"\n❌ {hf.state} — {hf.reason}")
+            print(f"   > To recover the extras: {hf.resume_cmd}")
+            return False
+    print(f"=== ✅ EXTRAS ARCHIVED for {title_id} ===" if ok
+          else f"=== ⚠️  EXTRAS ARCHIVE INCOMPLETE for {title_id} (re-run to retry) ===")
+    return ok
 
 
 # ==========================================
@@ -5241,6 +6102,9 @@ def cmd_restore(manual_id):
             # ---------------
 
             print(f"✅ SUCCESS: {filename} restored & re-indexed.")
+            # IMP-D19 Step 6: restore this title's fetched extras too (Card D1).
+            # The driver never raises and is silent when nothing is staged (E1).
+            restore_title_extras(library, _extras_title_id(library, manual_id))
             return True
 
     # B. STANDARD RESTORE
@@ -5287,6 +6151,9 @@ def cmd_restore(manual_id):
         # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
         _warn_if_entry_inconsistent(library[manual_id], manual_id)
         print(f"✅ SUCCESS: {filename} restored.")
+        # IMP-D19 Step 6: restore this title's fetched extras too (Card D1).
+        # The driver never raises and is silent when nothing is staged (E1).
+        restore_title_extras(library, _extras_title_id(library, manual_id))
         return True
 
 
@@ -5342,10 +6209,278 @@ def cmd_restore_group(group_id, episode_range=None):
         if cmd_restore(mid):
             count += 1
 
+    # IMP-D19 Step 6: explicit batch wire — restore the title's fetched extras
+    # after the episode loop (mirrors the Step-4 replace wire in
+    # cmd_replace_group). Reload first: each per-episode cmd_restore saved its
+    # own updates (and the first successful child already consumed the staged
+    # extras via its own success-path wire), so the in-memory `library` above is
+    # stale; the reload makes this an idempotent silent no-op rather than a
+    # double restore. It ALSO covers the extras-only case — every episode
+    # restore skipped (nothing staged for main content), so cmd_restore's
+    # success-path wire never fired, yet extras ARE staged.
+    library = load_library()
+    ex_title_id = _extras_title_id(library, group_id) or (
+        _extras_title_id(library, target_ids[0]) if target_ids else None)
+    restore_title_extras(library, ex_title_id)
+
     # [IMP-C18] On a 0-via-range run the warning above already explained the no-op;
     # skip the green "Complete" line so we don't celebrate restoring nothing.
     if not (empty_via_range and count == 0):
         print(f"\n=== Batch Restore Complete: {count} files restored. ===")
+    return count
+
+
+# ==========================================
+#   IMP-D19 Step 6 — EXTRAS RESTORE PHASE  (merge-to-temp + verify; additive E1)
+# ==========================================
+# restore_one_extra mirrors cmd_restore — the IMP-R6 merge-to-temp + verify/
+# bless + os.replace swap for a SPLIT extra (journal `create_reproducible` on the
+# temp; PONR crossed only after the swap + save, right before the chunk delete),
+# the C11 quarantine of a hash-mismatched file/chunk, and the standard
+# single-move path for a WHOLE file — but scoped to ONE nested extras item, with
+# its journal living in the extra's OWN folder (e.g. …\Specials\). It REUSES the
+# same RollbackJournal / merge_video_files / bless_or_verify_merged_hash /
+# quarantine_restore_file primitives as the main-content path; it does NOT
+# modify cmd_restore, whose journal/PONR/quarantine contract stays byte-for-byte
+# unchanged (Card E1 / ROLLBACK_MECHANISM.md §10).
+#
+# Staging convention (Step 5): fetch stages a whole-file extra as
+# <extra folder>/restore/<item filename> and a split extra as its chunk files
+# <extra folder>/restore/<split_info.chunks[i].filename>, where
+# <extra folder> = os.path.dirname(<title folder_path>/<group_rel>/<sub_rel>) —
+# for the flat real samples that is <title>\Specials\restore\. Because the
+# staging folder lives INSIDE the extra's subfolder, a fetched extra's
+# `Specials`/`Extra` subfolder exists again by restore time (Card D1 — the
+# extra is recreated in place, where Plex/Jellyfin expect it).
+def restore_one_extra(library, title_id, group_rel, item):
+    """Restore ONE fetched extra from its restore/ staging folder back to
+    <title folder_path>/<group_rel>/<sub_rel> — the per-file mirror of
+    cmd_restore (Card D1 lifecycle, Card E1 additive rollback).
+
+    SILENT no-op (returns False) when nothing is staged for this item, so the
+    unconditional wires on the cmd_restore / cmd_restore_group /
+    cmd_fetch_restore success paths add zero noise for unfetched extras.
+
+    SPLIT item (IMP-R6 pattern, as cmd_restore's split path): every chunk is
+    verified against split_info.chunks[i].hash (a bad chunk is quarantined like
+    cmd_restore's — restore/quarantine/<name>.<ts> — and the archived dummy at
+    the target is left UNTOUCHED); merge_video_files into a
+    <target>.merge_tmp<ext> sibling (journalled as create_reproducible);
+    bless_or_verify_merged_hash decides bless (first restore: the merged hash
+    BECOMES the canonical item hash, re_hashed=True + merge_seed/merge_tool/
+    rehashed_at stamped — so a later replace→fetch→restore cycle verifies) /
+    ok / mismatch (loud alarm, pre-PONR rollback, chunks kept); os.replace onto
+    the target ONLY after verify/bless passes; then status="restored_local",
+    save, PONR + commit, best-effort chunk cleanup.
+
+    WHOLE item (as cmd_restore's standard path — single move, no journal):
+    verified against the item `hash` directly (mismatch -> same quarantine),
+    then moved over the dummy; status="restored_local", save.
+
+    `uploaded` stays True throughout (the cloud copy still exists), so a later
+    replace cycle can re-dummy a restored_local extra. Mutates `item` in place
+    and saves `library` on success. Returns True iff the extra was restored."""
+    title_entry = library.get(title_id) or {}
+    title_folder = title_entry.get("folder_path", "")
+    group_os = group_rel.replace("/", os.sep)
+    sub_os = item.get("sub_rel", "").replace("/", os.sep)
+    target_path = os.path.join(title_folder, group_os, sub_os)
+    extra_folder = os.path.dirname(target_path)
+    restore_folder = os.path.join(extra_folder, RESTORE_DIR_NAME)
+    filename = item.get("filename") or os.path.basename(target_path)
+    extra_id = f"{title_id}::{group_rel}/{item.get('sub_rel')}"
+
+    if not os.path.isdir(restore_folder):
+        return False  # nothing fetched for this extra's folder — silent skip
+
+    # A. SPLIT RESTORE (mirror of cmd_restore's split path, IMP-R6 pattern)
+    if item.get("split_info") and item["split_info"].get("is_split"):
+        chunks_meta = item["split_info"]["chunks"]
+        chunk_paths = [os.path.join(restore_folder, c["filename"]) for c in chunks_meta]
+
+        staged = [p for p in chunk_paths if os.path.exists(p)]
+        if not staged:
+            return False  # none of this item's chunks fetched — silent skip
+        if len(staged) < len(chunk_paths):
+            print(f"     ⏭️  Skipping extra {filename}: incomplete chunks in restore/.")
+            return False
+
+        # Pre-merge per-chunk hash verification (mkvmerge is lenient and would
+        # silently fold a corrupt chunk into a bad merged file). Quarantine ONLY
+        # the offending chunk(s) — clean chunks stay in restore/ for a targeted
+        # re-fetch. Deliberately NO stale-target delete here (unlike the legacy
+        # line in cmd_restore's split path): the extras merge goes to a
+        # .merge_tmp sibling below, so target_path holds the archived DUMMY,
+        # which no failure path may remove (IMP-R6: never zero bytes at the path).
+        bad_chunks = []
+        for c in chunks_meta:
+            if calculate_file_hash(os.path.join(restore_folder, c["filename"])) != c["hash"]:
+                bad_chunks.append(c["filename"])
+        if bad_chunks:
+            for chunk_filename in bad_chunks:
+                try:
+                    q = quarantine_restore_file(restore_folder, chunk_filename)
+                    print(f"     ❌ Hash mismatch. Bad file quarantined at {q}. A fresh fetch will re-download.")
+                except Exception:
+                    print(f"     ❌ Error: Restore chunk hash mismatch ({chunk_filename})! Corrupt?")
+            return False
+
+        # Disk pre-check (pre-merge, pre-PONR — as cmd_restore's step 1c).
+        try:
+            merged_size = sum(os.path.getsize(p) for p in chunk_paths)
+        except Exception:
+            merged_size = item.get("tech_spec", {}).get("size_bytes", 0)
+        if not _free_space_ok(extra_folder, merged_size, will_split=True, eager=False):
+            free, required, _short = _disk_shortfall(
+                extra_folder, merged_size, will_split=True, eager=False)
+            print(f"     ❌ Not enough free space to re-merge extra {filename} "
+                  f"(need ~{human_readable_size(required)} in {extra_folder}, "
+                  f"have {human_readable_size(free)}). Chunks left in restore/.")
+            return False
+
+        # Deterministic merge into a TEMP sibling; the dummy at target_path is
+        # only ever replaced by a verified-good file (IMP-R6). Seed choice
+        # mirrors cmd_restore: reuse a previously-blessed seed, else the item's
+        # short_id (extra_id is the stable last-resort fallback).
+        seed = item["split_info"].get("merge_seed") or item.get("short_id") or extra_id
+        merge_root, merge_ext = os.path.splitext(target_path)
+        merge_tmp_path = f"{merge_root}.merge_tmp{merge_ext}"
+        journal = RollbackJournal(extra_folder, extra_id)
+        journal.record_create_reproducible(merge_tmp_path)
+        try:
+            try:
+                merged_ok = merge_video_files(chunk_paths, merge_tmp_path, seed=seed)
+            except Exception as e:
+                print(f"     ❌ Merge crashed: {e}")
+                merged_ok = False
+            if not merged_ok:
+                print(f"     ❌ Merge failed for extra {filename}. Chunks left in restore/ for re-merge.")
+                journal.rollback(library)  # removes the temp; the dummy is untouched
+                return False
+
+            new_hash = calculate_file_hash(merge_tmp_path)
+            # VERIFY-OR-BLESS — same pure helper, same three-way policy as
+            # cmd_restore; all mutations and journal calls stay HERE.
+            decision = bless_or_verify_merged_hash(item, new_hash)
+            if decision == "mismatch":
+                stored_tool = item.get("split_info", {}).get("merge_tool", "(unknown)")
+                print(f"     🛑 RESTORE HASH MISMATCH — canonical re-hash verification FAILED for extra {extra_id}")
+                print(f"        expected (stored canonical): {item.get('hash')}")
+                print(f"        actual   (this re-merge)   : {new_hash}")
+                print(f"        stored split_info.merge_tool: {stored_tool}; this run: {_current_merge_tool()}")
+                print("        Possible corruption or mkvmerge version drift. Chunks kept in restore/ for re-fetch.")
+                journal.rollback(library)
+                return False
+            if decision == "bless":
+                item["hash"] = new_hash
+                item["re_hashed"] = True
+                item["split_info"]["merge_seed"] = seed
+                item["split_info"]["merge_tool"] = _current_merge_tool()
+                item["split_info"]["rehashed_at"] = _rehashed_at()
+            # decision == "ok": already blessed and reproduced — leave untouched.
+
+            # Verify/bless passed → atomically swap the verified-good merged
+            # file into place (still pre-PONR; a failed swap keeps the dummy).
+            try:
+                os.replace(merge_tmp_path, target_path)
+            except Exception as e:
+                print(f"     ❌ Could not place the merged extra (target locked?): {e}")
+                print("        Dummy left intact in place; chunks kept in restore/ for retry.")
+                journal.rollback(library)
+                return False
+
+            item["status"] = "restored_local"
+            save_library(library)
+            # PONR placement mirrors cmd_restore: after the swap + save, right
+            # before the chunk delete (which is no longer rollback-eligible).
+            journal.mark_point_of_no_return()
+            journal.commit()
+        except Exception as e:
+            print(f"     ❌ extras restore failed: {e}")
+            if not journal.crossed_ponr:
+                journal.rollback(library)  # removes the temp; the dummy is untouched
+            return False
+
+        for p in chunk_paths:
+            try:
+                os.remove(p)
+            except Exception:
+                print(f"     ⚠️ Warning: Could not delete {os.path.basename(p)}")
+        if os.path.isdir(restore_folder) and not os.listdir(restore_folder):
+            try:
+                os.rmdir(restore_folder)
+            except OSError:
+                pass
+        print(f"     ✅ Restored extra: {filename}")
+        return True
+
+    # B. STANDARD (whole-file) RESTORE (mirror of cmd_restore's standard path)
+    source_path = os.path.join(restore_folder, filename)
+    if not os.path.exists(source_path):
+        return False  # not fetched — silent skip
+
+    if calculate_file_hash(source_path) != item.get("hash"):
+        try:
+            q = quarantine_restore_file(restore_folder, filename)
+            print(f"     ❌ Hash mismatch. Bad file quarantined at {q}. A fresh fetch will re-download.")
+        except Exception:
+            print(f"     ❌ Error: Restore file hash mismatch! Corrupt?")
+        return False
+
+    if os.path.exists(target_path):
+        try:
+            os.remove(target_path)
+        except Exception:
+            pass
+    try:
+        shutil.move(source_path, target_path)
+    except Exception as e:
+        print(f"     ❌ Error moving extra file: {e}")
+        return False
+
+    if os.path.isdir(restore_folder) and not os.listdir(restore_folder):
+        try:
+            os.rmdir(restore_folder)
+        except OSError:
+            pass
+
+    item["status"] = "restored_local"
+    save_library(library)
+    print(f"     ✅ Restored extra: {filename}")
+    return True
+
+
+def restore_title_extras(library, title_id):
+    """Restore every fetched extra on `title_id` (all groups) from its restore/
+    staging folder — the per-title driver, mirroring how cmd_restore_group
+    drives cmd_restore ("loop blindly — the per-file restore handles checks").
+
+    Selection is purely disk-driven (the plan's "each extra with downloaded
+    files in its restore/ folder"): every item is offered to restore_one_extra,
+    which silently skips anything not staged — so this driver is a clean silent
+    no-op when nothing was fetched, and the unconditional wires on the
+    cmd_restore / cmd_restore_group / cmd_fetch_restore success paths cost
+    nothing for extras-less titles. NEVER raises (restore_one_extra self-handles
+    its failure paths; the per-item guard here backstops the unexpected, e.g. a
+    Windows file lock during chunk hashing), so a one-line wire inside the host
+    commands cannot trip their handlers — the main-content restore contract
+    stays byte-for-byte unchanged (Card E1). Returns the number of extras
+    actually restored."""
+    if not title_id or title_id not in library:
+        return 0
+    groups = library[title_id].get("extras", {}).get("groups", {})
+    if not groups:
+        return 0  # title carries no extras — nothing to restore
+    count = 0
+    for group_rel in sorted(groups):
+        for item in groups[group_rel].get("items", []):
+            try:
+                if restore_one_extra(library, title_id, group_rel, item):
+                    count += 1
+            except Exception as e:
+                print(f"     ❌ extras restore failed for {item.get('filename')}: {e}")
+    if count:
+        print(f"=== ✅ {count} EXTRA(S) RESTORED for {title_id} ===")
     return count
 
 
@@ -5526,6 +6661,13 @@ def cmd_scan_unprepped():
 
         known_paths = set()
         for entry in cat_lib.values():
+            # IMP-D19 Step 7: extras items ARE library content, nested on the
+            # TITLE entry (season_map or movie leaf) — add their on-disk paths
+            # BEFORE the physical-leaf type skip so extras attached to a
+            # season_map are "known" too and never mis-flagged UNPREPPED.
+            # Same normpath-lower normalization as the walk below.
+            for _grp, ex_path, _item in _extras_item_paths(entry):
+                known_paths.add(os.path.normpath(ex_path).lower())
             if entry.get("type") in ("season_map", "multi_ep_alias"): continue
             p = os.path.join(entry['folder_path'], entry['filename'])
             known_paths.add(os.path.normpath(p).lower())
@@ -5581,12 +6723,16 @@ def cmd_scan_unprepped():
         print("\n✅ All libraries are completely in sync.")
 
 
-def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, device_id=None, eager_rehash=False, temp_dir=None):
+def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, device_id=None, eager_rehash=False, temp_dir=None, extras=None, extras_size=None):
     print(f"=== 🚀 AUTO-PILOT: PREP -> PUSH -> REPLACE for {manual_id} ===")
 
     # 1. PREP
+    # IMP-D19 Step 12b: FORWARD --extras into the prep leg, so a brand-new title is
+    # a true one-shot — cmd_prep does the scan+merge (register), and the push+replace
+    # phase below then has an extras block to work on. Without this the trailing
+    # push_title_extras/replace_title_extras pair silently no-ops on a fresh title.
     print("\n>>> STEP 1: PREP")
-    if not cmd_prep(manual_id, filepath):
+    if not cmd_prep(manual_id, filepath, extras=extras, extras_size=extras_size):
         print("❌ Auto-Pilot Aborted: Prep failed.")
         return
 
@@ -5617,15 +6763,27 @@ def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, de
         return
 
     print("\n✅✅✅ AUTO-PILOT COMPLETE: Movie is safely archived.")
+    # IMP-D19 Step 3+4: upload THEN dummy the movie's extras (autopilot archives
+    # them too). push_title_extras mutates `library` in place (uploaded=True), so
+    # replace_title_extras on the same dict immediately sees the just-pushed items.
+    if extras:
+        library = load_library()
+        push_title_extras(library, _extras_title_id(library, manual_id), extras_size, device_id, split_method, split_val)
+        replace_title_extras(library, _extras_title_id(library, manual_id))
 
 
-def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False, temp_dir=None):
+def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=None, episode_range=None, device_id=None, eager_rehash=False, temp_dir=None, extras=None, extras_size=None):
     # [NEW] TV SERIES SEQUENTIAL AUTO-PILOT
     print(f"=== 📺 SEASON AUTO-PILOT (SEQUENTIAL): PREP -> PUSH -> REPLACE for {base_id} ===")
 
     # 1. PREP SEASON
+    # IMP-D19 Step 12b: FORWARD --extras into the prep leg (same gap as the movie
+    # autopilot). cmd_prep_season scans+merges ONCE, onto the season_map, after its
+    # episode loop — the per-episode cmd_prep calls never receive `extras` — so this
+    # run registers the folders exactly once and the extras phase below can upload
+    # them.
     print("\n>>> STEP 1: PREP SEASON")
-    cmd_prep_season(base_id, folder_path)
+    cmd_prep_season(base_id, folder_path, extras=extras, extras_size=extras_size)
 
     # 2. IDENTIFY EPISODES TO PROCESS
     library = load_library()
@@ -5780,9 +6938,16 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
             return
 
     print("\n✅✅✅ SEASON AUTO-PILOT COMPLETE.")
+    # IMP-D19 Step 3+4: upload THEN dummy the season's extras (autopilot archives
+    # them too). push_title_extras mutates `library` in place (uploaded=True), so
+    # replace_title_extras on the same dict immediately sees the just-pushed items.
+    if extras:
+        library = load_library()
+        push_title_extras(library, _extras_title_id(library, base_id), extras_size, device_id, split_method, split_val)
+        replace_title_extras(library, _extras_title_id(library, base_id))
 
 
-def cmd_dispatch_fetch(manual_id, episode_range=None):
+def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False):
     # This keeps main.py clean but still lets you run "main.py fetch"
     cmd = ["python", MAINFETCH_SCRIPT, "fetch", manual_id]
 
@@ -5792,6 +6957,13 @@ def cmd_dispatch_fetch(manual_id, episode_range=None):
         print(f"   > 🚀 Dispatching Batch Fetch for episodes {episode_range}...")
     else:
         print(f"   > 🚀 Dispatching Fetch...")
+
+    # IMP-D19 Step 5 (Card C — flag-only): forward --fetchExtras VERBATIM to the
+    # mainfetch subprocess. There is NO prompt anywhere — the flag is the sole
+    # gate. When it is absent the argv is byte-for-byte today's, so mainfetch
+    # never queues extras (existing main-content fetch behavior is unchanged).
+    if fetch_extras:
+        cmd.append("--fetchExtras")
 
     try:
         # Force the child's stdio to UTF-8 — a PIPEd child defaults to cp1252 on Windows and would crash printing mainfetch's emoji.
@@ -5823,12 +6995,13 @@ def cmd_dispatch_fetch(manual_id, episode_range=None):
         print(f"❌ Error running fetch script: {e}")
 
 
-def cmd_fetch_restore(manual_id, episode_range=None):
+def cmd_fetch_restore(manual_id, episode_range=None, fetch_extras=False):
     # [NEW] Automated Fetch -> Restore Pipeline
     print(f"=== 🔄 AUTO-PILOT: FETCH -> RESTORE for {manual_id} ===")
 
     # 1. FETCH
-    cmd_dispatch_fetch(manual_id, episode_range)
+    cmd_dispatch_fetch(manual_id, episode_range, fetch_extras=fetch_extras)
+    # IMP-D19 Step 5: fetch extras when fetch_extras (forwarded above to mainfetch)
 
     # 2. DETECT & RESTORE
     print("\n>>> STARTING RESTORE PHASE...")
@@ -5849,6 +7022,16 @@ def cmd_fetch_restore(manual_id, episode_range=None):
         print(f"   > Single Item detected. Running Restore...")
         cmd_restore(manual_id)
 
+    # IMP-D19 Step 6: place any fetched extras back into their subfolders —
+    # only when --fetchExtras staged them (flag-only, Card C). Reload first: the
+    # restore phase above saved its own library updates. This explicit wire
+    # covers the extras-only run (nothing staged for main content, so the
+    # per-episode success wires never fired); when the per-episode/group wires
+    # already restored the extras it is an idempotent silent no-op.
+    if fetch_extras:
+        library = load_library()
+        restore_title_extras(library, _extras_title_id(library, manual_id))
+
     # [IMP-C18] Don't lie with a green banner over zero work: when a range was
     # supplied to a season_map and 0 items were restored (range selected nothing),
     # suppress the ✅✅✅ banner and print a ⚠️ summary instead. Exit code unchanged
@@ -5859,6 +7042,49 @@ def cmd_fetch_restore(manual_id, episode_range=None):
               f"(range {episode_range} selected nothing).")
     else:
         print("\n✅✅✅ FETCH & RESTORE COMPLETE.")
+
+
+def cmd_add_extras(title_id, folders, extras_size=None, device_id=None, no_replace=False):
+    """Attach extras to an existing / archived / local-only title entry.
+
+    Syntax (from the CLI):
+      add_extras <title_id> "<folders>" [--extras-size <v|none>]
+                 [device <id_or_name>] [no-replace]
+
+    Full one-shot lifecycle (Card D1) WITHOUT touching main content (so it is the
+    safe path for an already-archived title whose main is a dummy):
+      1. scan+merge the extras into the title entry and save;
+      2. push the just-merged extras to the device (independent --extras-size);
+      3. dummy them to reclaim space — UNLESS `no-replace` keeps them upload-only.
+    """
+    print(f"=== ADD EXTRAS: {title_id} ===")
+    library = load_library()
+
+    # Resolve the title id and validate it exists.
+    real_title_id = _extras_title_id(library, title_id)
+    if not real_title_id:
+        print(f"❌ '{title_id}' not found in library or cannot be resolved to a title entry.")
+        return
+
+    # Scan+merge (prep-phase only — no upload in this step).
+    _extras_scan_merge_and_save(library, real_title_id, folders)
+
+    # Surface the stored intent for future steps.
+    if extras_size:
+        print(f"   > extras-size: {extras_size}")
+    if device_id:
+        print(f"   > device: {device_id}")
+    if no_replace:
+        print("   > no-replace: extras will be uploaded only (not dummied).")
+
+    # IMP-D19 Step 3: push the just-merged extras (no main split to inherit, so
+    # extras_size=None => whole-file unless --extras-size was given).
+    push_title_extras(library, real_title_id, extras_size, device_id)
+    # IMP-D19 Step 4 (Card D1): dummy them too to reclaim space — UNLESS the user
+    # passed `no-replace` to keep the extras local (upload-only). push_title_extras
+    # mutated `library` in place, so replace_title_extras sees the uploaded items.
+    if not no_replace:
+        replace_title_extras(library, real_title_id)
 
 
 # ==========================================
@@ -6102,6 +7328,19 @@ def suggest_next_command(item):
     mid = item.get("id", "")
     path = item.get("path", "")
 
+    # IMP-D19 Step 7: a library EXTRAS item (the work dict carries the marker;
+    # `mid` is the TITLE id, `entry` the title entry). ONE uniform command
+    # covers every reclaimable extras state: re-running add_extras re-scans
+    # (idempotent no-op on unchanged bytes), pushes what is not yet uploaded,
+    # and (re-)dummies uploaded/restored items. (`replace <title_id>` would
+    # no-op on a season_map title, so it is NOT suggested here.)
+    group_rel = item.get("extras_group_rel")
+    if group_rel is not None and badge in _RECLAIMABLE_STATUS_BADGE.values():
+        group_folder = os.path.join(
+            (item.get("entry") or {}).get("folder_path", ""),
+            group_rel.replace("/", os.sep))
+        return f'python main.py add_extras {mid} "{group_folder}"'
+
     if badge == "UNPREPPED":
         return f'python main.py prep {mid} "{path}"'
     if badge == "LOCAL_NOT_PUSHED":
@@ -6194,7 +7433,9 @@ def collect_reclaimable():
     targeted pass over the library's physical leaves catches reclaimable
     entries whose on-disk file is still real but were not already produced by
     the walk. De-duped by normpath-lower so a library leaf and its on-disk file
-    yield exactly ONE row.
+    yield exactly ONE row. Library EXTRAS items (IMP-D19, nested on the title
+    entry) are classified by their OWN item status with the same badge set —
+    never UNPREPPED — and their rows suggest the `add_extras` resume command.
 
     Returns {"items": [...], "total_reclaimable_bytes": N,
              "total_reclaimable_human": "..."}. Strictly READ-ONLY.
@@ -6214,10 +7455,23 @@ def collect_reclaimable():
         key = os.path.normpath(os.path.join(fp, fn)).lower()
         known_paths[key] = (mid, entry)
 
+    # IMP-D19 Step 7: index library EXTRAS items too, so an extras file on disk
+    # is classified by ITS item status instead of mis-flagged UNPREPPED. Extras
+    # nest on the TITLE entry (season_map or movie leaf), so this iterates ALL
+    # entries for the extras block ONLY — _extras_item_paths dereferences no
+    # leaf-only key (season_map carries folder_path per ENTRY_TYPE_KEYS).
+    # normpath-lower(title folder/group_rel/sub_rel) -> (title_id, title entry,
+    # group_rel, composed path, item).
+    extras_paths = {}
+    for mid, entry in library.items():
+        for group_rel, ex_path, ex_item in _extras_item_paths(entry):
+            key = os.path.normpath(ex_path).lower()
+            extras_paths[key] = (mid, entry, group_rel, ex_path, ex_item)
+
     items = []
     seen = set()  # normpath-lower keys already emitted — single anti-double-count source.
 
-    def _add_item(norm_key, mid, entry, badge, path, size):
+    def _add_item(norm_key, mid, entry, badge, path, size, extras_group_rel=None):
         if norm_key in seen:
             return
         seen.add(norm_key)
@@ -6229,6 +7483,11 @@ def collect_reclaimable():
             "size_bytes": size,
             "entry": entry,  # internal — used by suggest_* below, dropped from the row
         }
+        if extras_group_rel is not None:
+            # Extras marker (IMP-D19): lets suggest_next_command emit the
+            # add_extras resume command. Internal only — the emitted row keeps
+            # the exact same key set as every other row.
+            work["extras_group_rel"] = extras_group_rel
         row = {
             "id": mid,
             "badge": badge,
@@ -6269,11 +7528,24 @@ def collect_reclaimable():
 
                 found = known_paths.get(norm_key)
                 if found is None:
+                    ex = extras_paths.get(norm_key)
+                    if ex is not None:
+                        # A library EXTRAS item (IMP-D19 Step 7) — NOT unprepped.
+                        # Badge by the ITEM's status: an extras item mirrors a
+                        # leaf's status vocabulary (local_ready / onboarded /
+                        # archived / restored_local, Card D1) and carries no
+                        # "type" key, so the shared classifier applies verbatim
+                        # (zero drift from how MAIN content classifies).
+                        ex_mid, ex_entry, ex_group, _ex_path, ex_item = ex
+                        badge = classify_entry_state(ex_item, on_disk_real)
+                        if badge and badge != "ARCHIVED":
+                            _add_item(norm_key, ex_mid, ex_entry, badge,
+                                      full_path, size, extras_group_rel=ex_group)
                     # Unknown to the library. classify_entry_state(None, ...) is
                     # always "UNPREPPED", but per the State table UNPREPPED is a
                     # RECLAIMABLE row only when the file is real — a dummy/tiny
                     # unknown file occupies no reclaimable space, so skip it.
-                    if on_disk_real:
+                    elif on_disk_real:
                         _add_item(norm_key, guess_manual_id(full_path), None,
                                   "UNPREPPED", full_path, size)
                 else:
@@ -6301,6 +7573,26 @@ def collect_reclaimable():
         badge = info["state"]
         if badge and badge != "ARCHIVED":
             _add_item(info["norm_key"], mid, entry, badge, info["path"], info["size_bytes"])
+
+    # ---- PASS 2b: extras items whose file is still real (IMP-D19 Step 7) ----
+    # The extras analog of PASS 2: catches reclaimable extras not already
+    # emitted from the walk (e.g. a category root absent above). Same status
+    # early-out as PASS 2; an absent/mis-composed path fails the stat and is
+    # skipped. De-duped via `seen`.
+    for norm_key, (ex_mid, ex_entry, ex_group, ex_path, ex_item) in extras_paths.items():
+        if norm_key in seen:
+            continue
+        if ex_item.get("status") not in _RECLAIMABLE_STATUS_BADGE:
+            continue
+        try:
+            size = os.path.getsize(ex_path)
+        except OSError:
+            continue
+        on_disk_real = size >= DUMMY_MAX_BYTES
+        badge = classify_entry_state(ex_item, on_disk_real)  # item mirrors leaf statuses
+        if badge and badge != "ARCHIVED":
+            _add_item(norm_key, ex_mid, ex_entry, badge, ex_path, size,
+                      extras_group_rel=ex_group)
 
     total_bytes = sum(it["size_bytes"] for it in items)
     return {
@@ -7592,6 +8884,7 @@ if __name__ == "__main__":
         print("  fetch [id]")
         print("  recover [id|folder]  (or: recover --scan)")
         print("  rename_folder [id|folder] \"<NewName {tmdb-12345}>\"  — rename a show/season folder + rewrite every descendant folder_path (crash-safe, no rehash)")
+        print("  add_extras <title_id> \"<folders>\" [--extras-size <v|none>] [device <id>] [no-replace]  — attach extras (Specials/Trailers/BTS) to an existing title")
         print("  web [--port N] [--host H] [--no-browser] [--demo]  — Launch the local web operations console (Disk Reclaim view); --demo = SAFE build, all actions simulated")
         print("  token create [--label \"X\"] [--ttl 1h|8h|12h|1d|3d|7d|30d|never]  — Mint a web access token (default --ttl 7d)")
         print("  token list                                          — List minted web access tokens")
@@ -7601,10 +8894,30 @@ if __name__ == "__main__":
     cmd = sys.argv[1]
 
     if cmd == "prep":
-        if len(sys.argv) >= 4:
-            cmd_prep(sys.argv[2], " ".join(sys.argv[3:]))
+        if len(sys.argv) < 4:
+            print("❌ Usage: prep [id] [path] [--extras <folders>] [--extras-size <v>]")
         else:
-            print("❌ Usage: prep [id] [path]")
+            _mid = sys.argv[2]
+            _rest = sys.argv[3:]
+            _fp_parts, _et = [], []
+            _pi = 0
+            while _pi < len(_rest):
+                _a = _rest[_pi]
+                if _a in ("--extras", "-extras", "--extras-size", "-extras-size"):
+                    _et.append(_a)
+                    _pi += 1
+                    if _pi < len(_rest):
+                        _sv2 = _rest[_pi]
+                        _et.append(_sv2)
+                        _pi += 1
+                        if _a in ("--extras-size", "-extras-size") and _sv2.upper() in ("SIZE_MB", "SIZE_GB", "COUNT") and _pi < len(_rest):
+                            _et.append(_rest[_pi])
+                            _pi += 1
+                else:
+                    _fp_parts.append(_a)
+                    _pi += 1
+            _er = parse_extras_tokens(_et)
+            cmd_prep(_mid, " ".join(_fp_parts), extras=_er["folders"] or None, extras_size=_er["extras_size"])
 
     elif cmd == "prep_push_rep":
         if len(sys.argv) < 4:
@@ -7620,6 +8933,7 @@ if __name__ == "__main__":
         eager = False
         tdir = None
         filepath_parts = []
+        _et_ppr = []
 
         i = 0
         while i < len(rest):
@@ -7644,11 +8958,24 @@ if __name__ == "__main__":
                     tdir = rest[i + 1]
                     i += 2
                     continue
+            elif arg in ("--extras", "-extras", "--extras-size", "-extras-size"):
+                _et_ppr.append(arg)
+                i += 1
+                if i < len(rest):
+                    _sv3 = rest[i]
+                    _et_ppr.append(_sv3)
+                    i += 1
+                    if arg in ("--extras-size", "-extras-size") and _sv3.upper() in ("SIZE_MB", "SIZE_GB", "COUNT") and i < len(rest):
+                        _et_ppr.append(rest[i])
+                        i += 1
+                continue
             filepath_parts.append(arg)
             i += 1
 
         filepath = " ".join(filepath_parts)
-        cmd_prep_push_rep(mid, filepath, method, val, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir)
+        _er_ppr = parse_extras_tokens(_et_ppr)
+        cmd_prep_push_rep(mid, filepath, method, val, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
+                          extras=_er_ppr["folders"] or None, extras_size=_er_ppr["extras_size"])
 
     elif cmd == "prep_push_rep_season":
         if len(sys.argv) < 4:
@@ -7664,6 +8991,7 @@ if __name__ == "__main__":
         device_arg = None
         eager = False
         tdir = None
+        _et_pprs = []
 
         i = 0
         while i < len(args):
@@ -7693,11 +9021,24 @@ if __name__ == "__main__":
                     tdir = args[i + 1]
                     i += 2
                     continue
+            elif arg in ("--extras", "-extras", "--extras-size", "-extras-size"):
+                _et_pprs.append(arg)
+                i += 1
+                if i < len(args):
+                    _sv4 = args[i]
+                    _et_pprs.append(_sv4)
+                    i += 1
+                    if arg in ("--extras-size", "-extras-size") and _sv4.upper() in ("SIZE_MB", "SIZE_GB", "COUNT") and i < len(args):
+                        _et_pprs.append(args[i])
+                        i += 1
+                continue
             folder_parts.append(arg)
             i += 1
 
         folder_path = " ".join(folder_parts)
-        cmd_prep_push_rep_season(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir)
+        _er_pprs = parse_extras_tokens(_et_pprs)
+        cmd_prep_push_rep_season(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
+                                 extras=_er_pprs["folders"] or None, extras_size=_er_pprs["extras_size"])
 
     elif cmd == "set_search":
         if len(sys.argv) >= 4:
@@ -7755,10 +9096,30 @@ if __name__ == "__main__":
         cmd_fetch_trivia(positional, *rest)
 
     elif cmd == "prep_season":
-        if len(sys.argv) >= 4:
-            cmd_prep_season(sys.argv[2], " ".join(sys.argv[3:]))
+        if len(sys.argv) < 4:
+            print("❌ Usage: prep_season [base_id] [folder] [--extras <folders>] [--extras-size <v>]")
         else:
-            print("❌ Usage: prep_season [base_id] [folder]")
+            _ps_id = sys.argv[2]
+            _ps_rest = sys.argv[3:]
+            _ps_fp, _ps_et = [], []
+            _ps_i = 0
+            while _ps_i < len(_ps_rest):
+                _a = _ps_rest[_ps_i]
+                if _a in ("--extras", "-extras", "--extras-size", "-extras-size"):
+                    _ps_et.append(_a)
+                    _ps_i += 1
+                    if _ps_i < len(_ps_rest):
+                        _sv5 = _ps_rest[_ps_i]
+                        _ps_et.append(_sv5)
+                        _ps_i += 1
+                        if _a in ("--extras-size", "-extras-size") and _sv5.upper() in ("SIZE_MB", "SIZE_GB", "COUNT") and _ps_i < len(_ps_rest):
+                            _ps_et.append(_ps_rest[_ps_i])
+                            _ps_i += 1
+                else:
+                    _ps_fp.append(_a)
+                    _ps_i += 1
+            _er_ps = parse_extras_tokens(_ps_et)
+            cmd_prep_season(_ps_id, " ".join(_ps_fp), extras=_er_ps["folders"] or None, extras_size=_er_ps["extras_size"])
 
     elif cmd == "scan_unprepped":
         cmd_scan_unprepped()
@@ -7806,6 +9167,7 @@ if __name__ == "__main__":
         dev = None
         eager = False
         tdir = None
+        _et_push = []
 
         i = 1
         while i < len(args):
@@ -7841,14 +9203,61 @@ if __name__ == "__main__":
                 else:
                     print("❌ Error: Missing value for tempdir.")
                     sys.exit(1)
+            elif args[i] in ("--extras", "-extras", "--extras-size", "-extras-size"):
+                _et_push.append(args[i])
+                i += 1
+                if i < len(args):
+                    _sv6 = args[i]
+                    _et_push.append(_sv6)
+                    i += 1
+                    if args[i - 2] in ("--extras-size", "-extras-size") and _sv6.upper() in ("SIZE_MB", "SIZE_GB", "COUNT") and i < len(args):
+                        _et_push.append(args[i])
+                        i += 1
             else:
                 i += 1
 
-        cmd_push(mid, method, val, c_range, device_id=resolve_device(dev), eager_rehash=eager, temp_dir=tdir)
+        _er_push = parse_extras_tokens(_et_push)
+        _extras_folders = _er_push["folders"] or None
+        _extras_size_val = _er_push["extras_size"]
+        _dev_push = resolve_device(dev)
+        # IMP-D19 (Card D): on an ALREADY-ARCHIVED main, `push <id> --extras`
+        # processes ONLY the extras — the dummied main must not be re-pushed.
+        # Handled here (not in cmd_push) so cmd_push stays byte-for-byte intact.
+        _skip_main = False
+        if _extras_folders:
+            _lib_probe = load_library()
+            if mid in _lib_probe and _resolve_alias(_lib_probe, mid)[1].get("status") == "archived":
+                print(f"ℹ️  {mid} main is archived — pushing extras only (main untouched).")
+                push_title_extras(_lib_probe, _extras_title_id(_lib_probe, mid),
+                                  _extras_size_val, _dev_push, method, val)
+                _skip_main = True
+        if not _skip_main:
+            cmd_push(mid, method, val, c_range, device_id=_dev_push, eager_rehash=eager, temp_dir=tdir,
+                     extras=_extras_folders, extras_size=_extras_size_val)
 
     elif cmd == "push_group":
-        group_id, method, val, ep_range, dev, eager, tdir = parse_push_group_args(sys.argv[2:])
-        cmd_push_group(group_id, method, val, ep_range, device_id=resolve_device(dev), eager_rehash=eager, temp_dir=tdir)
+        _pgg_all = sys.argv[2:]
+        _et_pgg, _other_pgg = [], []
+        _pgg_i = 0
+        while _pgg_i < len(_pgg_all):
+            _a = _pgg_all[_pgg_i]
+            if _a in ("--extras", "-extras", "--extras-size", "-extras-size"):
+                _et_pgg.append(_a)
+                _pgg_i += 1
+                if _pgg_i < len(_pgg_all):
+                    _sv7 = _pgg_all[_pgg_i]
+                    _et_pgg.append(_sv7)
+                    _pgg_i += 1
+                    if _a in ("--extras-size", "-extras-size") and _sv7.upper() in ("SIZE_MB", "SIZE_GB", "COUNT") and _pgg_i < len(_pgg_all):
+                        _et_pgg.append(_pgg_all[_pgg_i])
+                        _pgg_i += 1
+            else:
+                _other_pgg.append(_a)
+                _pgg_i += 1
+        group_id, method, val, ep_range, dev, eager, tdir = parse_push_group_args(_other_pgg)
+        _er_pgg = parse_extras_tokens(_et_pgg)
+        cmd_push_group(group_id, method, val, ep_range, device_id=resolve_device(dev), eager_rehash=eager, temp_dir=tdir,
+                       extras=_er_pgg["folders"] or None, extras_size=_er_pgg["extras_size"])
 
     elif cmd == "sort":
         cmd_sort()
@@ -7869,30 +9278,82 @@ if __name__ == "__main__":
         else:
             print("❌ Usage: rename_folder [id|folder] \"<NewName {tmdb-12345}>\"")
 
+    elif cmd == "add_extras":
+        # add_extras <title_id> "<folders>" [--extras-size <v|none>] [device <id_or_name>] [no-replace]
+        if len(sys.argv) < 4:
+            print("❌ Usage: add_extras <title_id> \"<folders>\" [--extras-size <v|none>] [device <id>] [no-replace]")
+            sys.exit(1)
+        _ae_title_id = sys.argv[2]
+        # sys.argv[3] is the semicolon-separated folder list (positional)
+        _ae_folders = [f.strip().strip('"').strip("'").strip() for f in sys.argv[3].split(";") if f.strip()]
+        _ae_rest = sys.argv[4:]
+        # Parse device, no-replace, and extras-size from remaining tokens
+        _ae_dev = None
+        _ae_no_replace = False
+        _ae_et = []
+        _ae_i = 0
+        while _ae_i < len(_ae_rest):
+            _a = _ae_rest[_ae_i]
+            if _a == "device" and _ae_i + 1 < len(_ae_rest):
+                _ae_dev = _ae_rest[_ae_i + 1]
+                _ae_i += 2
+            elif _a == "no-replace":
+                _ae_no_replace = True
+                _ae_i += 1
+            elif _a in ("--extras-size", "-extras-size"):
+                _ae_et.append(_a)
+                _ae_i += 1
+                if _ae_i < len(_ae_rest):
+                    _sv_ae = _ae_rest[_ae_i]
+                    _ae_et.append(_sv_ae)
+                    _ae_i += 1
+                    if _sv_ae.upper() in ("SIZE_MB", "SIZE_GB", "COUNT") and _ae_i < len(_ae_rest):
+                        _ae_et.append(_ae_rest[_ae_i])
+                        _ae_i += 1
+            else:
+                _ae_i += 1
+        _er_ae = parse_extras_tokens(_ae_et)
+        cmd_add_extras(_ae_title_id, _ae_folders, extras_size=_er_ae["extras_size"],
+                       device_id=resolve_device(_ae_dev), no_replace=_ae_no_replace)
+
     elif cmd == "fetch":
         if len(sys.argv) < 3:
-            print("❌ Usage: fetch [id] [OPT: episodes 1-3]")
+            print("❌ Usage: fetch [id] [OPT: episodes 1-3] [--fetchExtras]")
             sys.exit(1)
 
         mid = sys.argv[2]
+        _fetch_tokens = sys.argv[3:]
+        _fetch_extras = any(t in ("--fetchExtras", "--fetch-extras", "--extras", "--extra") for t in _fetch_tokens)
+        # Scan tokens for "episodes <range>" regardless of position
         epr = None
-        if len(sys.argv) >= 5 and sys.argv[3] == "episodes":
-            epr = sys.argv[4]
+        _ft_i = 0
+        while _ft_i < len(_fetch_tokens):
+            if _fetch_tokens[_ft_i] == "episodes" and _ft_i + 1 < len(_fetch_tokens):
+                epr = _fetch_tokens[_ft_i + 1]
+                break
+            _ft_i += 1
 
-        cmd_dispatch_fetch(mid, epr)
+        cmd_dispatch_fetch(mid, epr, fetch_extras=_fetch_extras)
 
     elif cmd == "fetch_restore":
-        # [NEW] Usage: fetch_restore [id] [OPT: episodes 1-3]
+        # [NEW] Usage: fetch_restore [id] [OPT: episodes 1-3] [--fetchExtras]
         if len(sys.argv) < 3:
-            print("❌ Usage: fetch_restore [id] [OPT: episodes 1-3]")
+            print("❌ Usage: fetch_restore [id] [OPT: episodes 1-3] [--fetchExtras]")
             sys.exit(1)
 
         mid = sys.argv[2]
+        _fr_tokens = sys.argv[3:]
+        _fetch_extras = any(t in ("--fetchExtras", "--fetch-extras", "--extras", "--extra") for t in _fr_tokens)
+        # Scan tokens for "episodes <range>" regardless of position
         epr = None
-        if len(sys.argv) >= 5 and sys.argv[3] == "episodes":
-            epr = sys.argv[4]
+        _fr_i = 0
+        while _fr_i < len(_fr_tokens):
+            if _fr_tokens[_fr_i] == "episodes" and _fr_i + 1 < len(_fr_tokens):
+                epr = _fr_tokens[_fr_i + 1]
+                break
+            _fr_i += 1
 
-        cmd_fetch_restore(mid, epr)
+        cmd_fetch_restore(mid, epr, fetch_extras=_fetch_extras)
 
     elif cmd == "token":
         # Web access token management (IMP-E15): create / list / revoke.

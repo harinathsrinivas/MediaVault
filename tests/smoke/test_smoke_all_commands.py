@@ -233,6 +233,130 @@ def _seed_others_season(sandbox, make_video, *, uploaded=False):
 
 
 # ===========================================================================
+# IMP-D19 extras helpers (bonus-content folders: Specials/ , Extra/)
+# ===========================================================================
+
+EXTRAS_SEASON_ID = "tv-en-2021-smkx-s01"
+EXTRAS_EP_ID = f"{EXTRAS_SEASON_ID}e01"
+EXTRAS_GROUP_REL = "Specials"
+
+
+def _stored_extras(library, title_id, group_rel=EXTRAS_GROUP_REL):
+    """The stored item list of one extras group, in library order (mirrors
+    tests/test_extras.py's `_items` accessor)."""
+    return library[title_id]["extras"]["groups"][group_rel]["items"]
+
+
+def _extras_block_on_disk(title_dir, title_id, make_video):
+    """Create a real 2-file `Specials/` group on disk; return (extras_block, items).
+
+    ONE place owns the extras item field set for this suite (used by both
+    _seed_title_with_extras and the alias sweep). Field provenance =
+    scan_extras_folders (main.py:3754-3763), i.e. the same shape as conftest's
+    `sandbox_extras` (testing-strategy §4.9) and the canonical `_extras_block` in
+    tests/test_entry_schema_guard.py: sub_rel is the bare filename (flat group),
+    short_id = generate_short_id(f"{title_id}::{group_rel}/{sub_rel}"),
+    search_term = f"{name} [{short_id}]{ext}", items sorted by sub_rel, items in
+    the PRE-PUSH state (status="local_ready", uploaded=False) a fresh scan
+    produces. Every stored `hash` is the file's REAL sha256, so the
+    push/replace/restore hash verification the lifecycle performs is genuine, not
+    stubbed — the smoke's phases move the items forward from here.
+
+    Returns (extras_block, items):
+        extras_block - the Card A2 nested dict to assign to entry["extras"]
+        items        - [{"sub_rel","filename","path","hash","short_id"}, ...]
+    """
+    extras_dir = title_dir / EXTRAS_GROUP_REL
+    # Hard guard (mirrors conftest's sandbox_extras): every extras file this helper
+    # creates lives in the caller's temp sandbox — never real C:\Media.
+    assert "C:\\Media" not in str(extras_dir), \
+        f"extras seed must never touch real C:\\Media: {extras_dir}"
+    extras_dir.mkdir(parents=True, exist_ok=True)
+    items = []
+    for fn, marker in (("BTS.mkv", b"EXTRA-BTS\n"), ("Trailer.mkv", b"EXTRA-TRAILER\n")):
+        path = extras_dir / fn
+        _, file_hash = make_video(path, marker=marker)
+        items.append({"sub_rel": fn, "filename": fn, "path": path, "hash": file_hash,
+                      "short_id": _short(f"{title_id}::{EXTRAS_GROUP_REL}/{fn}")})
+    items.sort(key=lambda it: it["sub_rel"])   # canonical within-group order
+
+    def _item(it):
+        name, ext = os.path.splitext(it["filename"])
+        return {
+            "filename": it["filename"],
+            "sub_rel": it["sub_rel"],
+            "short_id": it["short_id"],
+            "hash": it["hash"],
+            "status": "local_ready",
+            "uploaded": False,
+            "search_term": f"{name} [{it['short_id']}]{ext}",
+            "tech_spec": {"resolution": "1080p", "size_bytes": os.path.getsize(it["path"])},
+        }
+
+    # added_date is merge_extras_into_title's new-group stamp; no code reads its
+    # value, so a fixed date keeps the seed deterministic.
+    block = {"groups": {EXTRAS_GROUP_REL: {"added_date": "2026-01-01",
+                                           "items": [_item(it) for it in items]}}}
+    return block, items
+
+
+def _seed_title_with_extras(sandbox, make_video):
+    """Seed a season_map TITLE carrying a 2-item extras group, plus 1 leaf episode.
+
+    The SEASON-shaped counterpart of conftest's movie-leaf `sandbox_extras`
+    (§4.9) — series is the common extras case, and the block nests on the
+    season_map (the TITLE), never on the episode leaf (Card A2).
+
+    Files go under LOCAL_ROOT/Series/ (NOT sandbox["media_dir"], which sits under
+    Movies/) so the disk WALKERS read them against the library file that actually
+    holds these entries — library_series.json for tv- ids. Same reasoning as
+    _seed_others_season's Sports placement; it is what makes the "extras are not
+    UNPREPPED" assertion meaningful instead of vacuous.
+
+        <LOCAL_ROOT>/Series/SMKX/SMKX.S01E01.mkv        <- the leaf episode
+        <LOCAL_ROOT>/Series/SMKX/Specials/BTS.mkv       <- extras item 1
+        <LOCAL_ROOT>/Series/SMKX/Specials/Trailer.mkv   <- extras item 2
+
+    Every file is real media (make_video > DUMMY_MAX_BYTES) with its real sha256
+    stored. The leaf is pre-push (local_ready / uploaded=False) so a test can
+    assert the extras lifecycle never touched the MAIN content (Card E1).
+
+    Returns dict(title_id, ep_id, title_dir, group_rel, extras_dir, ep_filename,
+                 ep_path, items=[{sub_rel, filename, path, hash, short_id}, ...]).
+    """
+    title_dir = sandbox["local_root"] / "Series" / "SMKX"
+    title_dir.mkdir(parents=True, exist_ok=True)
+
+    ep_filename = "SMKX.S01E01.mkv"
+    ep_path = title_dir / ep_filename
+    _, ep_hash = make_video(ep_path, marker=EXTRAS_EP_ID.encode())
+    ep_short = _short(EXTRAS_EP_ID)
+
+    extras_block, items = _extras_block_on_disk(title_dir, EXTRAS_SEASON_ID, make_video)
+    library = {
+        EXTRAS_SEASON_ID: {
+            "type": "season_map",
+            "folder_path": str(title_dir),
+            "total_episodes": 1,
+            "children": [EXTRAS_EP_ID],
+            "extras": extras_block,     # Card A2: extras nest on the TITLE entry
+        },
+        EXTRAS_EP_ID: {
+            "short_id": ep_short, "filename": ep_filename, "folder_path": str(title_dir),
+            "status": "local_ready", "uploaded": False,
+            "search_term": f"SMKX.S01E01 [{ep_short}].mkv",
+            "hash": ep_hash, "metadata": {"title": "SMKX", "year": 2021},
+            "tech_spec": {"resolution": "1080p", "size_bytes": os.path.getsize(ep_path)},
+            "parent_id": EXTRAS_SEASON_ID,
+        },
+    }
+    _write_all_libs(sandbox, library)
+    return {"title_id": EXTRAS_SEASON_ID, "ep_id": EXTRAS_EP_ID, "title_dir": title_dir,
+            "group_rel": EXTRAS_GROUP_REL, "extras_dir": title_dir / EXTRAS_GROUP_REL,
+            "ep_filename": ep_filename, "ep_path": ep_path, "items": items}
+
+
+# ===========================================================================
 # Group 1 — one fast smoke per command (+ major options)
 # ===========================================================================
 
@@ -1215,6 +1339,101 @@ class TestAliasSweep:
         lib = mvcommon.load_library()
         assert lib[sandbox_alias["alias_id"]]["type"] == "multi_ep_alias"
 
+    # -- IMP-D19: the sweep must ALSO survive an extras-bearing library --------
+    # Extras nest on the TITLE entry (here the season_map), and every
+    # whole-library iterator calls _extras_item_paths on EVERY entry — including
+    # the multi_ep_alias, which owns no folder_path — BEFORE the physical-leaf
+    # type skip. A regression there breaks every walker at once: precisely the
+    # "new nested shape silently breaks a distant command" class this sweep exists
+    # to catch. Both new tests keep the sweep contract: must not raise.
+
+    def _with_extras(self, sandbox_alias, make_video):
+        """Attach a real 2-item Specials/ group to the alias library's season_map.
+
+        The files land in <season folder>/Specials/ (under the sandbox Series
+        tree), so the category walkers see them against library_series.json —
+        the file that actually holds the BSG entries."""
+        library = mvcommon.load_library()
+        block, items = _extras_block_on_disk(
+            sandbox_alias["media_dir"], sandbox_alias["season_id"], make_video)
+        library[sandbox_alias["season_id"]]["extras"] = block
+        mvcommon.save_library(library)
+        return items
+
+    def test_iterators_with_extras_alias(self, sandbox_alias, make_video,
+                                         smoke_local_root, fake_dummy, capsys):
+        """Every whole-library iterator this sweep drives, re-driven over a library
+        holding BOTH a multi_ep_alias AND an extras block: none may raise, the
+        extras are never mis-flagged UNPREPPED (they ARE library content — IMP-D19
+        Step 7), and both nested shapes survive cmd_sort's library rewrite."""
+        items = self._with_extras(sandbox_alias, make_video)
+
+        main.cmd_scan_unprepped()
+        out = capsys.readouterr().out
+        for it in items:
+            assert it["filename"] not in out, (
+                f"extras item {it['filename']} mis-flagged UNPREPPED: {out!r}"
+            )
+
+        result = main.collect_reclaimable()
+        assert set(result) >= {"items", "total_reclaimable_bytes", "total_reclaimable_human"}
+        badges = {os.path.basename(r["path"]): r["badge"] for r in result["items"]}
+        for it in items:
+            assert badges.get(it["filename"]) == "LOCAL_NOT_PUSHED", (
+                f"extras must be badged by their ITEM status, not UNPREPPED; got {badges!r}"
+            )
+
+        assert set(main.items_payload()) >= {"items", "by_category"}
+        main.cmd_local_status()
+        main.cmd_local_status("40gb")
+        main.cmd_repair_dummies()
+        main.cmd_sort()
+        capsys.readouterr()
+
+        # Both nested structures survive the sort round-trip.
+        lib = mvcommon.load_library()
+        assert lib[sandbox_alias["alias_id"]]["type"] == "multi_ep_alias"
+        assert [it["sub_rel"] for it in _stored_extras(lib, sandbox_alias["season_id"])] == \
+               [it["sub_rel"] for it in items]
+
+    def test_single_id_commands_with_extras_alias(self, sandbox_alias, make_video,
+                                                  mock_device, fake_dummy, capsys):
+        """push / replace / fetch_restore given the ALIAS id over an extras-bearing
+        library. Each call does TWO resolutions off the same alias id: de-alias to
+        the primary leaf (main content) and _extras_title_id -> the season_map that
+        owns the extras. Asserts the extras' own top-level effects (on the device,
+        then dummied) and that the alias entry is never corrupted."""
+        season_id = sandbox_alias["season_id"]
+        alias_id = sandbox_alias["alias_id"]
+        items = self._with_extras(sandbox_alias, make_video)
+
+        # push <alias> --extras: the primary uploads AND the title's extras push.
+        assert main.cmd_push(
+            alias_id, extras=[str(sandbox_alias["media_dir"] / EXTRAS_GROUP_REL)]) is True
+        on_device = {f.name for f in mock_device.rglob("*.mkv")}  # never a "[id]" glob
+        for it in items:
+            base, ext = os.path.splitext(it["filename"])
+            assert f"{base} [{it['short_id']}]{ext}" in on_device, (
+                f"extras not pushed via the alias id; on device: {sorted(on_device)!r}"
+            )
+        lib = mvcommon.load_library()
+        assert all(it["uploaded"] is True for it in _stored_extras(lib, season_id))
+
+        # replace <alias>: the primary archives and so do the title's extras.
+        from conftest import FAKE_DUMMY_BYTES
+        assert main.cmd_replace(alias_id) is True
+        lib = mvcommon.load_library()
+        assert all(it["status"] == "archived" for it in _stored_extras(lib, season_id))
+        for it in items:
+            assert it["path"].read_bytes() == FAKE_DUMMY_BYTES
+
+        # fetch_restore <alias> --fetchExtras: nothing staged -> silent no-op.
+        main.cmd_fetch_restore(alias_id, fetch_extras=True)
+        capsys.readouterr()
+        lib = mvcommon.load_library()
+        assert lib[alias_id]["type"] == "multi_ep_alias"
+        assert all(it["status"] == "archived" for it in _stored_extras(lib, season_id))
+
 
 # ===========================================================================
 # Group 3 — IMP-D18 Others/Sports category smoke (oth- prefix)
@@ -1332,4 +1551,163 @@ class TestOthersCategory:
         oth_units = [u for u in units if u["key"].startswith("oth-")]
         assert len(oth_units) == 0, (
             f"_gather_enrich_units must exclude oth- entries; found: {oth_units!r}"
+        )
+
+
+# ===========================================================================
+# Group 4 — IMP-D19 EXTRAS smoke (bonus-content folders: Specials/ , Extra/)
+# Two smokes: the whole lifecycle round-trip, and the "extras are library
+# content, not unprepped files" integrity assertion. The extras × alias
+# interaction lives in TestAliasSweep (the anti-PR#21 gate).
+# ===========================================================================
+
+class TestExtras:
+    """Smoke coverage for the IMP-D19 extras lifecycle (season-shaped title).
+
+    Two orthogonal smokes (no crash + correct top-level effect):
+      1. round-trip     — add_extras (scan+merge -> push -> replace) under
+                          mock_device + fake_dummy, then fetch_restore
+                          --fetchExtras: the extras land on the fake device, get
+                          dummied locally, and come back hash-verified as
+                          restored_local, all WITHOUT touching the main content.
+      2. not-unprepped  — cmd_scan_unprepped and collect_reclaimable treat the
+                          nested extras as library content (IMP-D19 Step 7) while
+                          still reporting a genuinely unknown video that sits in
+                          the very same Specials/ folder.
+
+    FETCH LEG — how the external service is faked (and why): cmd_fetch_restore
+    spawns `python mainfetch.py fetch … --fetchExtras`, which mock_device
+    neutralizes (no browser, no real child). mainfetch's harvester loop is NEVER
+    driven here — a hash miss busy-waits for minutes, which would wreck the smoke
+    budget. Instead the download is simulated at the FILE-SYSTEM seam: the cloud
+    copies are read back off the fake device and staged into
+    <title>/Specials/restore/<item filename> — exactly where fetch_single_entry
+    puts them for an extras entry (mainfetch.build_extras_entries gives each
+    synthetic entry folder_path = the extra's own folder). The flag's own
+    contribution (flag-only forwarding, Card C) is asserted directly on the
+    spawned argv, so the smoke cannot pass if the forwarding is dropped.
+    """
+
+    # ---- round-trip -------------------------------------------------------
+    def test_extras_round_trip(self, sandbox, make_video, stub_tech_specs,
+                               mock_device, fake_dummy, monkeypatch, capsys):
+        """add_extras -> (push + replace) -> fetch_restore --fetchExtras over a
+        season_map title: every phase's top-level effect is asserted, and the
+        title's MAIN content is untouched throughout (Card E1)."""
+        from conftest import FAKE_DUMMY_BYTES
+        info = _seed_title_with_extras(sandbox, make_video)
+        originals = {it["filename"]: it["path"].read_bytes() for it in info["items"]}
+
+        # --- Phase 1: add_extras = scan+merge -> push -> replace (Card D1) -----
+        # The scan re-derives the SAME items (same sub_rel + same real hash), so
+        # the merge is the documented idempotent no-op and the command proceeds to
+        # push the extras whole-file (no --extras-size, no main split to inherit)
+        # and then dummy them.
+        main.cmd_add_extras(info["title_id"], [str(info["extras_dir"])])
+        capsys.readouterr()
+
+        # Effect 1: both extras reached the fake device under their UID-tagged
+        # names, byte-identical, in a remote folder mirroring Specials/.
+        on_device = {f.name: f for f in mock_device.rglob("*.mkv")}  # never a "[id]" glob
+        for it in info["items"]:
+            base, ext = os.path.splitext(it["filename"])
+            remote = f"{base} [{it['short_id']}]{ext}"
+            assert remote in on_device, f"{remote} not on device: {sorted(on_device)!r}"
+            assert on_device[remote].read_bytes() == originals[it["filename"]]
+            assert on_device[remote].parent.name == EXTRAS_GROUP_REL
+
+        # Effect 2: every item is uploaded+archived and its local file is a dummy.
+        lib = mvcommon.load_library()
+        stored = _stored_extras(lib, info["title_id"])
+        assert [it["status"] for it in stored] == ["archived", "archived"]
+        assert all(it["uploaded"] is True for it in stored)
+        for it in info["items"]:
+            assert it["path"].read_bytes() == FAKE_DUMMY_BYTES
+
+        # Effect 3: the MAIN content was never pushed, replaced, or re-statused.
+        assert lib[info["ep_id"]]["status"] == "local_ready"
+        assert lib[info["ep_id"]]["uploaded"] is False
+        assert info["ep_path"].read_bytes() != FAKE_DUMMY_BYTES
+        assert [n for n in on_device if n.startswith("SMKX.S01E01")] == []
+
+        # --- Phase 2: the FETCH leg, simulated at the file-system seam ---------
+        restore_dir = info["extras_dir"] / main.RESTORE_DIR_NAME
+        restore_dir.mkdir()
+        for it in info["items"]:
+            base, ext = os.path.splitext(it["filename"])
+            (restore_dir / it["filename"]).write_bytes(
+                on_device[f"{base} [{it['short_id']}]{ext}"].read_bytes())
+
+        # Record the argv of the (mock_device-neutralized) mainfetch subprocess:
+        # with the download faked above, the forwarded flag is the fetch leg's
+        # only observable effect, so assert it rather than assume it.
+        fetch_argv = []
+        neutralized_popen = main.subprocess.Popen
+
+        def _recording_popen(cmd, **kwargs):
+            fetch_argv.append(list(cmd))
+            return neutralized_popen(cmd, **kwargs)
+
+        monkeypatch.setattr(main.subprocess, "Popen", _recording_popen)
+
+        main.cmd_fetch_restore(info["title_id"], fetch_extras=True)
+        out = capsys.readouterr().out
+
+        # Effect 4: --fetchExtras was forwarded VERBATIM to mainfetch (Card C) and
+        # the pipeline completed (the main-content leg finds nothing staged and is
+        # skipped without crashing).
+        assert fetch_argv, "fetch_restore must dispatch the mainfetch subprocess"
+        assert "--fetchExtras" in fetch_argv[0], (
+            f"--fetchExtras must reach the mainfetch argv; got {fetch_argv[0]!r}"
+        )
+        assert "FETCH & RESTORE COMPLETE" in out
+
+        # Effect 5: the staged bytes are back at <title>/Specials/<sub_rel> and
+        # every item is restored_local (uploaded stays True — still in the cloud).
+        # restore_one_extra REFUSES a hash mismatch, so byte equality here means
+        # the push -> archive -> fetch -> restore round trip preserved the master.
+        lib = mvcommon.load_library()
+        restored = list(main._extras_item_paths(lib[info["title_id"]]))
+        assert len(restored) == 2, f"expected 2 extras items, got {restored!r}"
+        for _group, path, item in restored:
+            assert item["status"] == "restored_local" and item["uploaded"] is True
+            with open(path, "rb") as f:
+                assert f.read() == originals[item["filename"]]
+        assert not restore_dir.exists(), "the emptied restore/ staging folder is removed"
+
+    # ---- extras are library content, not unprepped files ------------------
+    def test_extras_are_not_flagged_unprepped(self, sandbox, make_video,
+                                              smoke_local_root, capsys):
+        """cmd_scan_unprepped must NOT list the extras (IMP-D19 Step 7 indexes them
+        as known paths) while a genuinely unknown video inside the SAME Specials/
+        folder still IS reported — proving the walker really looks into the group
+        folder, so the exclusion comes from library knowledge, not from skipping
+        the subfolder. collect_reclaimable (the web data layer's walker) gets the
+        same check: extras are badged by their ITEM status, never UNPREPPED."""
+        info = _seed_title_with_extras(sandbox, make_video)
+        stray = "Stray.Bonus.mkv"
+        make_video(info["extras_dir"] / stray)   # real bytes, unknown to the library
+
+        main.cmd_scan_unprepped()   # must not raise
+        out = capsys.readouterr().out
+        assert "SCANNING FOR UNPREPPED FILES" in out
+        assert stray in out, (
+            f"an unknown video inside Specials/ must still be reported: {out!r}"
+        )
+        for it in info["items"]:
+            assert it["filename"] not in out, (
+                f"extras item {it['filename']} must NOT be listed as unprepped: {out!r}"
+            )
+        assert info["ep_filename"] not in out  # the known leaf is not unprepped either
+
+        # Same integrity through the web data layer's walker.
+        result = main.collect_reclaimable()
+        capsys.readouterr()
+        badges = {os.path.basename(r["path"]): r["badge"] for r in result["items"]}
+        for it in info["items"]:
+            assert badges.get(it["filename"]) == "LOCAL_NOT_PUSHED", (
+                f"extras must be badged by their ITEM status; got {badges!r}"
+            )
+        assert badges.get(stray) == "UNPREPPED", (
+            f"the unknown video must classify UNPREPPED; got {badges!r}"
         )

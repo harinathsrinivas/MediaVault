@@ -103,6 +103,58 @@ Create four libraries (Dashboard → Libraries → Add Media Library):
 - Scheduled Tasks (Dashboard → Scheduled Tasks): set "Scan media library" to every 12 h (real-time
   monitoring + daemon refreshes do the timely work; the scheduled scan is just a safety net).
 
+### 3.6 Extras (MediaVault's `--extras` folders) — the folder NAME decides recognition
+
+MediaVault (IMP-D19) gives a title's bonus-content subfolder — `…\<Title>\Specials\`,
+`…\Extra\`, `…\Trailers\` — the full archive lifecycle, and **restores it in place**: an extras
+group is keyed by the folder's path *relative* to the title folder, so a fetched extra lands back
+at exactly the path it came from (`fetch_restore <id> --fetchExtras`). What MediaVault cannot do
+is make the media server *present* those files as extras — that depends entirely on the folder
+**name**, and ⚠️ **the two names this vault currently uses are not recognized extras names**:
+
+| Server | Extras subfolder names it recognizes (placed directly inside the movie / series / season folder) | `Specials` | `Extra` |
+|---|---|---|---|
+| **Jellyfin** (10.x media docs; same list on the movies and shows pages) | `behind the scenes`, `deleted scenes`, `interviews`, `scenes`, `samples`, `shorts`, `featurettes`, `clips`, `other`, `extras`, `trailers` (plus the non-video `theme-music`, `backdrops`) | ❌ not in the list | ❌ only the **plural** `extras` is listed |
+| **Emby** (Movie Naming article) | `extras`, `specials`, `shorts`, `scenes`, `featurettes`, `behind the scenes`, `deleted scenes`, `interviews`, `trailers` | ✅ recognized | ❌ not listed |
+| **Plex** (needs the **Local Media Assets** agent enabled for the library) | `Behind The Scenes`, `Deleted Scenes`, `Featurettes`, `Interviews`, `Scenes`, `Shorts`, `Trailers`, `Other` — or the per-file suffixes `-behindthescenes`, `-deleted`, `-featurette`, `-interview`, `-scene`, `-short`, `-trailer`, `-other` | ❌ | ❌ |
+
+The Jellyfin docs write these names lowercase and do **not** explicitly state that matching is
+case-insensitive — so mirror the documented lowercase form rather than relying on casing.
+
+**What to do about it:**
+
+1. **Rename the folder to a recognized name BEFORE registering it with MediaVault.** e.g. rename
+   `…\Death Note …\Extra` → `…\extras` (or `behind the scenes`), *then* run
+   `python main.py add_extras <title_id> "<…\extras>"`.
+2. **Never rename an extras folder after registering it.** The stored `group_rel` *is* that
+   relative path: renaming afterwards orphans the group (a restore would recreate the OLD folder
+   name, and the renamed files would show up in `scan_unprepped` as unknown). Rename first,
+   register second. Re-registering a renamed folder means re-uploading it.
+3. **A series `Specials` folder is a different concept from extras.** Jellyfin documents show
+   specials as **Season-0 episodes** in a `Season 00` folder inside the series folder; a folder
+   literally named `Specials` is documented as *neither* extras nor Season 0. So decide what those
+   videos are: episodes → move them into `Season 00`; bonus clips → use `extras` /
+   `behind the scenes`. (Either way MediaVault archives them the same; only the presentation
+   differs.)
+4. **An unrecognized folder name is not crisply documented on any of the three servers** — the
+   videos may simply be ignored, or picked up as separate items/episodes, depending on server and
+   library settings. Treat "unrecognized ⇒ will not appear in the Extras row" as the safe
+   expectation and check the library after the first scan.
+5. **Naming the files matters:** a local extra is in practice labelled from its filename (Jellyfin
+   describes non-parsable filename text becoming the stream title, but does not formally promise
+   it for extras), and MediaVault carries the filename through verbatim — so name them
+   meaningfully (`Behind the Scenes - Japanese Voice Cast.mkv`, not `extra1.mkv`).
+6. ⚠️ **Same dummy expectation as §3.1/§3.4:** an *archived* extra is a 10 KB / 2-second dummy
+   that probes as a valid (absurdly short) video. Keep it visible — it is the catalog entry;
+   `fetch_restore <id> --fetchExtras` brings the real bytes back and real-time monitoring flips
+   the tile.
+
+> **Sources / verify before relying on a name:** jellyfin.org media docs (movies + shows pages),
+> emby.media "Movie Naming" article, and Plex's *local files for trailers and extras* articles —
+> the Plex **movie** article was inaccessible at the time of writing, so the Plex list above is
+> corroborated from Plex naming documentation and search results rather than quoted verbatim.
+> Check your own server version's docs (and its library settings) before mass-renaming folders.
+
 ## 4. Users & devices (10 min)
 
 1. Admin user = you. Create additional profiles only if family members need separate watch states.

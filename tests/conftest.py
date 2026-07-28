@@ -269,6 +269,148 @@ def sandbox_alias(sandbox, tmp_path):
 
 
 @pytest.fixture()
+def sandbox_extras(sandbox, make_video, tmp_path):
+    """Sandbox library seeded with an extras-bearing MOVIE title (IMP-D19).
+
+    Built ON TOP OF the `sandbox` fixture — it inherits sandbox's dual LIBRARY_*
+    patch (BOTH mvcommon.LIBRARY_* AND main.LIBRARY_*, the IMP-A1 binding
+    hazard), the LOCAL_ROOT redirect, and the hard-guard against real
+    C:\\Media. This fixture patches NOTHING itself; it only creates files and
+    seeds the library via the real `mvcommon.save_library` (the "mov-" id
+    routes into library_movies.json).
+
+    Seeds ONE movie-leaf title whose folder is sandbox["media_dir"]
+    (tmp_path/Media/Movies/TestMovie):
+      - the movie's own main file `extras_movie.mkv` (make_video: real bytes
+        > DUMMY_MAX_BYTES; entry `hash` = its real sha256). The entry carries
+        cmd_prep's exact leaf key set (main.py:1090-1100): short_id / filename /
+        folder_path / status="local_ready" / uploaded=False / search_term /
+        hash / metadata / tech_spec — NO `type` key (a movie leaf is type-less).
+      - a nested `extras` block (Card A2) with ONE group "Specials" of TWO
+        items in the natural PRE-PUSH state (status="local_ready",
+        uploaded=False). Item fields mirror `scan_extras_folders` — the same
+        provenance as the canonical `_extras_block` in
+        tests/test_entry_schema_guard.py: sub_rel = bare filename (flat group),
+        short_id = generate_short_id(f"{title_id}::Specials/{sub_rel}"),
+        search_term = f"{name} [{short_id}]{ext}", items sorted by sub_rel.
+      - the two REAL extra files on disk at <media_dir>/Specials/<filename>
+        (make_video with distinct markers so the two files' bytes/hashes
+        differ; each > DUMMY_MAX_BYTES so they read as REAL media, not
+        dummies). Each item's stored `hash` is that file's real sha256 —
+        identical to mvcommon.calculate_file_hash's canonical digest. The disk
+        layout matches `main._extras_item_paths` (<title folder_path>/
+        <group_rel>/<sub_rel>), the composition every lifecycle phase shares.
+
+    Steps 10/11 drive the lifecycle forward from here (push -> onboarded,
+    replace -> archived, fetch_restore --fetchExtras -> restored_local).
+    Device-lookup NOTE: search_term / pushed chunk names contain
+    "[<short_id>]" — never rglob a bracketed pattern ("[...]" is a glob char
+    class, it silently matches nothing); rglob("*.mkv") and filter by .name
+    (docs/testing-strategy.md §8.1).
+
+    Yields a dict (EXACT shape — later tests code against this):
+        title_id   - str:  "mov-en-2024-extrasmovie" (the movie leaf id)
+        media_dir  - Path: the title folder (== sandbox["media_dir"])
+        orig_path  - Path: the movie's own main .mkv on disk
+        group_rel  - str:  "Specials" (the single group key)
+        extras_dir - Path: media_dir / "Specials" (the group folder on disk)
+        items      - list of 2 dicts in LIBRARY ORDER (sorted by sub_rel):
+                       {"sub_rel": str, "filename": str, "path": Path,
+                        "hash": str (sha256 hex), "short_id": str}
+        sandbox    - dict: the underlying sandbox fixture's dict (lib_* paths /
+                     media_dir / local_root)
+    """
+    title_id = "mov-en-2024-extrasmovie"
+    group_rel = "Specials"
+    media_dir = sandbox["media_dir"]
+
+    # The movie's own main file (real bytes, real hash).
+    main_filename = "extras_movie.mkv"
+    orig_path = media_dir / main_filename
+    _, main_hash = make_video(orig_path, marker=b"EXTRAS-MAIN-MOVIE\n")
+
+    # Two real extras under the Specials/ subfolder of the title folder — the
+    # exact on-disk location _extras_item_paths composes.
+    extras_dir = media_dir / group_rel
+    extras_dir.mkdir()
+    items = []
+    for fn, marker in [("BTS.mkv", b"EXTRA-BTS\n"), ("Trailer.mkv", b"EXTRA-TRAILER\n")]:
+        path = extras_dir / fn
+        _, file_hash = make_video(path, marker=marker)
+        items.append({
+            "sub_rel": fn,      # flat group -> sub_rel IS the filename
+            "filename": fn,
+            "path": path,
+            "hash": file_hash,  # sha256 of the real bytes (== calculate_file_hash)
+            "short_id": mvcommon.generate_short_id(f"{title_id}::{group_rel}/{fn}"),
+        })
+    items.sort(key=lambda it: it["sub_rel"])  # canonical within-group order
+
+    # Hard guard (mirrors sandbox_alias): every created file lives under
+    # tmp_path, never real C:\Media, and clears DUMMY_MAX_BYTES (real media).
+    tmp_resolved = tmp_path.resolve()
+    for p in (orig_path, *(it["path"] for it in items)):
+        rp = p.resolve()
+        assert tmp_resolved in rp.parents, f"fixture file escaped tmp_path: {p}"
+        assert "C:\\Media" not in str(rp), f"fixture file must never touch real C:\\Media: {p}"
+        assert os.path.getsize(p) > main.DUMMY_MAX_BYTES, f"fixture file must exceed DUMMY_MAX_BYTES: {p}"
+
+    def _extras_item(it):
+        # Field provenance = scan_extras_folders (main.py:3754-3763), with REAL
+        # on-disk hashes/sizes; tech_spec is the fixed stub shape sandbox_alias/
+        # stub_tech_specs use (no pymediainfo dependence).
+        n, e = os.path.splitext(it["filename"])
+        return {
+            "filename": it["filename"],
+            "sub_rel": it["sub_rel"],
+            "short_id": it["short_id"],
+            "hash": it["hash"],
+            "status": "local_ready",
+            "uploaded": False,
+            "search_term": f"{n} [{it['short_id']}]{e}",
+            "tech_spec": {"resolution": "1080p", "video_codec": "HEVC",
+                          "size_bytes": os.path.getsize(it["path"])},
+        }
+
+    from datetime import datetime as _dt
+    short_id = mvcommon.generate_short_id(title_id)
+    name_no_ext, ext = os.path.splitext(main_filename)
+    library = {
+        title_id: {
+            "short_id": short_id,
+            "filename": main_filename,
+            "folder_path": str(media_dir),
+            "status": "local_ready",
+            "uploaded": False,
+            "search_term": f"{name_no_ext} [{short_id}]{ext}",
+            "hash": main_hash,
+            "metadata": main.parse_metadata_from_id(title_id),
+            "tech_spec": {"resolution": "1080p", "video_codec": "HEVC",
+                          "size_bytes": os.path.getsize(orig_path)},
+            "extras": {"groups": {group_rel: {
+                # added_date is merge_extras_into_title's new-group stamp.
+                "added_date": _dt.now().strftime("%Y-%m-%d"),
+                "items": [_extras_item(it) for it in items],
+            }}},
+        }
+    }
+
+    # Seed via the real helper ("mov-" routes into library_movies.json; the
+    # other three files are written as {}). sandbox's hard-guard governs paths.
+    mvcommon.save_library(library)
+
+    yield {
+        "title_id": title_id,
+        "media_dir": media_dir,
+        "orig_path": orig_path,
+        "group_rel": group_rel,
+        "extras_dir": extras_dir,
+        "items": items,
+        "sandbox": sandbox,
+    }
+
+
+@pytest.fixture()
 def mock_device(tmp_path, monkeypatch):
     """
     Stateful fake Android device backed by tmp_path/device/.

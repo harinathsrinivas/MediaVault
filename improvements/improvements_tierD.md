@@ -420,3 +420,27 @@
 - Risk: medium — new-category plumbing touches `mvcommon`, `mainfetch`, `main` load/save paths, every whole-library walker, and the web API; the `ENTRY_TYPE_KEYS` guard + smoke gate catch regressions. No rollback-contract change (reuses existing season_map/leaf types).
 - If skipped: sports and future documentary content either pollutes the movies/series libraries (confusing stats + UI) or stays unarchived entirely — the vault misses a growing share of the user's media diet.
 - Status: **done** (`feature/imp_d18_others_category`, 2026-06-28)
+
+---
+
+## IMP-D19: extras option (Specials/Trailers/Behind-the-Scenes archival)
+
+- Category: other
+- Priority: high
+- Files: `main.py` (`--extras`/`--extras-size` on `prep`/`prep_season`/`push`/`push_group`/`prep_push_rep`/`prep_push_rep_season`; new `add_extras` command; flag-only `--fetchExtras` on `fetch`/`fetch_restore`; grouped `extras` block on title entries; `scan_unprepped`/`collect_reclaimable` extras-aware; `ENTRY_TYPE_KEYS` tripwires), `mvcommon.py`, `mainfetch.py` (extras leaf synthesis via `fetch_single_entry`), `tests/` (`sandbox_extras` fixture + 37 unit tests + 4 smoke cases)
+- Current behavior: Before this branch, MediaVault archives only the main video file for a title; Specials/Trailers/Behind-the-Scenes folders sitting alongside a movie or season have no archival path — the user has to manually decide whether to keep them local forever or lose them.
+- Proposed change (SHIPPED on `feature/imp_d19_extras`):
+  - `--extras`/`--extras-size` flags added to `prep`/`prep_season`/`push`/`push_group`/`prep_push_rep`/`prep_push_rep_season`; new `add_extras <id>` command for attaching extras to an already-archived title.
+  - Extras are recorded as a grouped `extras` block nested on the title's existing library entry — **no new `ENTRY_TYPE_KEYS` entry type**; whole-library iterators need no new alias/season_map branch, only the schema-guard tripwires that assert the block's shape.
+  - Independent chunking: extras split defaults to inherit the main entry's `--size`, but can be overridden per-call.
+  - Full push → dummy → fetch → restore lifecycle for extras reuses the existing rollback primitives **additively** (E1 contract preserved — main `cmd_push`/`cmd_replace`/`cmd_fetch`/`cmd_restore` contracts are byte-for-byte unchanged; no PONR/journal-format change).
+  - Flag-only `--fetchExtras` on `fetch`/`fetch_restore` fetches the extras block via synthetic leaf entries built on the fly by `fetch_single_entry` (no permanent extra library rows).
+  - `scan_unprepped` and `collect_reclaimable` (IMP-D16) made extras-aware so reclaim scans don't miss or double-count extras folders.
+  - In-flight find **D19-B1**: a pre-existing dummy-clobber data-loss path (re-scanning an archived group could overwrite a real dummy) was found and fixed in-branch via a layered guard — the merge step now skips cloud-bearing entries, and push refuses to write over an already-dummy-sized file. Also found+fixed: the autopilot scripts' missing `--extras` flag forwarding.
+  - Server-recognition facts were verified before writing the folder-naming guidance: `Specials`/`Extra` are NOT names Jellyfin/Plex recognize as extras folders — see `JELLYFIN_SETUP_GUIDE.md` §3.6 for the confirmed folder-name set.
+- Rationale: Closes a real content gap (trailers, behind-the-scenes, deleted scenes sitting unarchived next to every prepped title) without inventing a new entry type or touching the rollback contract — pure additive reuse of existing primitives.
+- Goal: Specials/Trailers/Behind-the-Scenes folders get the same push → dummy → fetch → restore lifecycle as main titles, end to end, with zero change to existing command contracts.
+- Effort estimate: medium-large
+- Risk: medium — new shared nested field (`extras`) touches every whole-library iterator; guarded by the `ENTRY_TYPE_KEYS` schema guard + smoke gate. No rollback-contract change (additive reuse only, per E1).
+- If skipped: Specials/Trailers/Behind-the-Scenes content keeps accumulating on local disk with no archival path, or gets manually deleted and lost.
+- Status: **done** (`feature/imp_d19_extras`; implementation complete — full suite 648 green, smoke 76; PR to `main` pending)

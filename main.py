@@ -3768,6 +3768,69 @@ def scan_extras_folders(folder_specs, title_folder_path, title_id):
     return scanned
 
 
+# [IMP-D20] Local checksum-sidecar parity for extras. Main content gets a
+# `uid` + `<short_id>.sha256` master sidecar at PREP time (cmd_prep, main.py
+# ~1029-1041) and per-chunk `checksums/<chunk>.sha256` sidecars at PUSH time
+# (cmd_push, main.py ~4500-4518) — the on-disk disaster-recovery record a
+# library can be rebuilt from if library_*.json is lost. IMP-D19's lean
+# push_one_extra deliberately shipped WITHOUT any of this (Step-3 bake-off,
+# Candidate B); this closes that gap for extras, mirroring format/naming
+# exactly. The chunk-sidecar half lives in push_one_extra (main.py, PUSH
+# region); the master-sidecar half lives here (register/merge time).
+def _extras_master_sidecar_path(title_folder, group_rel, item):
+    """The on-disk path for one extras item's master `<short_id>.sha256`
+    sidecar: `<title_folder>/<group_rel>/<dirname(sub_rel)>/<short_id>.sha256`
+    — the item's OWN directory, composed exactly like `_extras_item_paths`
+    (for the common flat-group case that's just the group folder itself, e.g.
+    `.../Specials/<short_id>.sha256`)."""
+    group_os = group_rel.replace("/", os.sep)
+    sub_os = (item.get("sub_rel") or "").replace("/", os.sep)
+    on_disk_path = os.path.join(title_folder, group_os, sub_os)
+    return os.path.join(os.path.dirname(on_disk_path), f"{item.get('short_id')}.sha256")
+
+
+def _write_extras_master_sidecar(title_folder, group_rel, item, overwrite=False):
+    """Best-effort write of one extras item's master `<short_id>.sha256`
+    sidecar — `f"{hash} *{filename}"`, no trailing newline, exactly cmd_prep's
+    format (main.py:1041) — using the item's STORED `hash`/`filename` (it never
+    re-hashes the file on disk). That is what makes this safe to call from the
+    D19-B1 skip path (main.py ~3845-3851): the on-disk file there is a dummy,
+    but the sidecar is written from the LIBRARY's stored (real) hash, so it
+    never encodes the dummy's bytes.
+
+    Deliberately writes NO `uid` file: cmd_prep's `uid` sidecar is
+    FOLDER-scoped (one leaf owns its whole folder exclusively), but one extras
+    GROUP folder (e.g. `Specials/`) holds MANY items sharing that folder —
+    there is no single id to stamp a folder-level `uid` with, so extras skip
+    it entirely (the per-item `<short_id>.sha256` is the only master sidecar).
+
+    `overwrite=False` (the default, used by the back-fill call sites): skip
+    silently if the sidecar already exists — IMP-D20's back-fill only repairs
+    a MISSING sidecar; it never rewrites one already present, since every
+    default-mode call site here is reached with a stored hash that has NOT
+    changed since any prior write (cheaper than a content-compare, and the
+    bytes would be identical anyway). `overwrite=True` (used only after a
+    genuine re-master changes the stored hash) always (re)writes, because the
+    short_id-keyed path is unchanged across a re-master, so a stale sidecar
+    from the OLD hash would otherwise survive under the new one.
+
+    Never raises — a sidecar failure must NEVER abort a scan/merge or a push,
+    exactly cmd_prep's contract (main.py:1042-1043)."""
+    item_hash = item.get("hash")
+    filename = item.get("filename")
+    short_id = item.get("short_id")
+    if not title_folder or not item_hash or not filename or not short_id:
+        return
+    sha_path = _extras_master_sidecar_path(title_folder, group_rel, item)
+    if not overwrite and os.path.exists(sha_path):
+        return
+    try:
+        with open(sha_path, 'w') as f:
+            f.write(f"{item_hash} *{filename}")
+    except Exception as e:
+        print(f"⚠️ Warning: Could not write extras sidecar file: {e}")
+
+
 def merge_extras_into_title(library, title_id, scanned):
     """Additively / idempotently merge `scanned` (the output of
     scan_extras_folders) into the title entry's extras.groups:
@@ -3795,6 +3858,12 @@ def merge_extras_into_title(library, title_id, scanned):
     entry = library.get(title_id)
     if entry is None:
         return library  # caller resolves title_id first; nothing to attach to
+
+    # [IMP-D20] title_folder anchors every master-sidecar path this function
+    # writes below (see _extras_master_sidecar_path). Both physical title
+    # shapes (movie leaf, series/anime/others season_map) carry folder_path
+    # per ENTRY_TYPE_KEYS.
+    title_folder = entry.get("folder_path", "")
 
     groups = entry.setdefault("extras", {}).setdefault("groups", {})
     today = datetime.now().strftime("%Y-%m-%d")
@@ -3828,6 +3897,8 @@ def merge_extras_into_title(library, title_id, scanned):
                     continue
                 target["items"].append(item)
                 by_sub[key] = item
+                # [IMP-D20] Master sidecar at register time (mirrors cmd_prep).
+                _write_extras_master_sidecar(title_folder, group_rel, item)
             elif existing.get("hash") != item.get("hash"):
                 # [IMP-D19 Step 12c / D19-B1] Layer-1 CLOUD-BEARING guard — the
                 # extras analogue of cmd_prep's early-skip (main.py:984-1001).
@@ -3848,6 +3919,13 @@ def merge_extras_into_title(library, title_id, scanned):
                     print(f"⚠️  Skipping extras re-scan of {group_rel}/{key}: already "
                           f"pushed/archived and the file on disk is dummy-sized — "
                           f"refusing to clobber the cloud-bearing item (kept as stored).")
+                    # [IMP-D20] Back-fill even though the item is protected/kept
+                    # exactly as stored: write-if-missing only, from the STORED
+                    # (real) hash — never the dummy on disk — so a lost/never-
+                    # written master sidecar for an already-archived extra is
+                    # still repaired by a re-run, and the D19-B1 skip above
+                    # cannot defeat it.
+                    _write_extras_master_sidecar(title_folder, group_rel, existing)
                     continue
                 # Bytes changed: refresh scan-derived fields and return the item
                 # to the unblessed / needs-re-push state — its cloud copy and any
@@ -3860,7 +3938,16 @@ def merge_extras_into_title(library, title_id, scanned):
                 existing["status"] = "local_ready"
                 existing.pop("split_info", None)
                 existing.pop("re_hashed", None)
-            # else: identical hash -> idempotent no-op.
+                # [IMP-D20] Genuine re-master: the short_id-keyed sidecar path is
+                # unchanged, so a prior sidecar (if any) now encodes the STALE
+                # hash — force-refresh it to the new stored hash.
+                _write_extras_master_sidecar(title_folder, group_rel, existing, overwrite=True)
+            else:
+                # [IMP-D20] identical hash -> idempotent no-op for the item's
+                # DATA, but still back-fill a MISSING master sidecar (never
+                # overwrites one already present) so a plain re-scan repairs a
+                # sidecar an older (pre-IMP-D20) run never wrote.
+                _write_extras_master_sidecar(title_folder, group_rel, existing)
 
         target["items"].sort(key=lambda it: it["sub_rel"])
 
@@ -4149,11 +4236,12 @@ def push_one_extra(library, title_id, group_rel, item, extras_method, extras_val
     Split         = extras_method/extras_val (already resolved by the caller; a
                     falsy method => whole-file push, the ('NONE', None) sentinel).
 
-    Steps: optional split -> hash chunks -> persist chunk hashes into the item's
-    `split_info` (BEFORE upload, so a resume has them) -> per-chunk
-    `<final>.partial` upload + atomic `mv`, wrapped in mvcommon.retry -> delete
-    the local chunk -> best-effort `write_remote_mvmeta` sidecar -> flip the item
-    `uploaded=True`, `status="onboarded"`, and save.
+    Steps: optional split -> hash chunks + write each chunk's local
+    `checksums/<chunk>.sha256` sidecar (IMP-D20, best-effort) -> persist chunk
+    hashes into the item's `split_info` (BEFORE upload, so a resume has them)
+    -> per-chunk `<final>.partial` upload + atomic `mv`, wrapped in
+    mvcommon.retry -> delete the local chunk -> best-effort `write_remote_mvmeta`
+    sidecar -> flip the item `uploaded=True`, `status="onboarded"`, and save.
 
     O-1 resumable per file: NO point-of-no-return. The per-item chunk dir lives
     at <extra folder>/<SPLIT_DIR_NAME>/<short_id> — nested under SPLIT_DIR_NAME so
@@ -4236,8 +4324,23 @@ def push_one_extra(library, title_id, group_rel, item, extras_method, extras_val
             print(f"     ❌ Split failed for extra {item.get('filename')}.")
             return False
         is_split = True
-        chunk_metadata = [{"filename": os.path.basename(p), "hash": calculate_file_hash(p)}
-                          for p in files_to_upload]
+        # [IMP-D20] Hash chunks + write each one's local checksum sidecar,
+        # mirroring cmd_push's chunk-hash loop (main.py ~4512-4518) — the
+        # sidecar write is wrapped (unlike cmd_push's) so a write failure can
+        # NEVER abort the extras push (guardrail: sidecar writes are always
+        # best-effort here).
+        checksum_dir = os.path.join(extra_folder, CHECKSUM_DIR_NAME)
+        os.makedirs(checksum_dir, exist_ok=True)
+        chunk_metadata = []
+        for p in files_to_upload:
+            c_name = os.path.basename(p)
+            c_hash = calculate_file_hash(p)
+            chunk_metadata.append({"filename": c_name, "hash": c_hash})
+            try:
+                with open(os.path.join(checksum_dir, f"{c_name}.sha256"), 'w') as cf:
+                    cf.write(f"{c_hash} *{c_name}")
+            except Exception as e:
+                print(f"⚠️ Warning: Could not write extras chunk sidecar: {e}")
         # Persist chunk hashes BEFORE upload so a resume already has them (O-1).
         item["split_info"] = {
             "is_split": True, "method": extras_method, "val": extras_val,

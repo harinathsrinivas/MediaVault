@@ -23,6 +23,10 @@ letter:
   (i) the D19-B1 LAYERED GUARD (Step 12c) — a re-scan over an ARCHIVED group can
       NOT clobber cloud-bearing items with dummy hashes, `push_one_extra` refuses
       dummy-sized uploads, and a new dummy-sized file is never registered
+  (j) IMP-D20 checksum-sidecar parity — the master `<short_id>.sha256` at
+      register time, chunk `checksums/*.sha256` at split-push time, the
+      write-if-missing back-fill (incl. through the D19-B1 skip path), and a
+      sidecar write failure never aborting a merge or a push
 
 Fixtures are the documented ones (docs/testing-strategy.md §4): `sandbox_extras`
 (§4.9, inheriting `sandbox`'s dual LIBRARY_*/LOCAL_ROOT patch and its C:\\Media
@@ -50,6 +54,7 @@ THREE deliberate boundary stubs keep the battery deterministic and fast:
 Device-name lookups always go through `_device_names` — never rglob a bracketed
 pattern, `[short_id]` is a glob character class (testing-strategy §8.1).
 """
+import builtins
 import copy
 import os
 import shutil
@@ -1238,4 +1243,258 @@ def test_merge_does_not_register_a_new_dummy_sized_file(
     assert "Skipping extras file Specials/Tiny.mkv" in out
     assert library[title_id]["extras"] == before, \
         "the dummy-sized file must not be registered; siblings stay a no-op"
+
+
+# ===========================================================================
+# (j) IMP-D20 — checksum-sidecar parity (master + chunk local sidecars)
+#
+# Main content writes THREE local disaster-recovery records at prep/push time
+# (cmd_prep's `uid` + `<short_id>.sha256`; cmd_push's per-chunk
+# `checksums/<chunk>.sha256`); IMP-D19's lean `push_one_extra` shipped without
+# ANY of them (Step-3 bake-off, Candidate B — flagged as a known follow-up in
+# the judge's DECISION.md). This closes the gap: a master
+# `<short_id>.sha256` at register/merge time (mirrors cmd_prep exactly, but no
+# `uid` — see `_write_extras_master_sidecar`'s docstring for why), and chunk
+# `checksums/*.sha256` at split-push time (mirrors cmd_push exactly). Both are
+# best-effort (a write failure warns and never aborts), and the master sidecar
+# BACK-FILLS a missing one from the STORED hash for an already-registered
+# item — including through the D19-B1 skip/continue path, which protects the
+# item's DATA but must not block the sidecar repair.
+# ===========================================================================
+
+
+def _break_sha256_writes(monkeypatch):
+    """Make any `open(path, 'w'[, ...])` targeting a `.sha256` path raise,
+    while every other `open` call (real video files, JSON, etc.) behaves
+    normally. Patches `main.open` — a module-global `open` binding wins name
+    resolution over the builtin for any `open(...)` call written literally
+    inside a `main.py` function (exactly the IMP-D20 sidecar writes under
+    test), and does NOT affect `mvcommon.calculate_file_hash`'s own `open`
+    call (a separate module's globals) or `conftest.make_video`'s (fixture
+    setup runs before this patch is installed in every test below)."""
+    real_open = builtins.open
+
+    def fake_open(path, mode="r", *args, **kwargs):
+        if str(path).endswith(".sha256") and "w" in mode:
+            raise PermissionError(f"simulated sidecar write failure: {path}")
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(main, "open", fake_open, raising=False)
+
+
+def test_merge_writes_the_master_sidecar_with_cmd_preps_exact_format(
+        sandbox_extras, stub_tech_specs, make_video):
+    """(j) Registering a NEW extra writes `<its own dir>/<short_id>.sha256`
+    with byte-for-byte cmd_prep's own sidecar format (`f"{hash} *{filename}"`,
+    NO trailing newline, main.py:1041) — in the item's own directory (the
+    flat real-world case: the group folder itself)."""
+    title_id = sandbox_extras["title_id"]
+    media_dir = sandbox_extras["media_dir"]
+    trailers = media_dir / "Trailers"
+    trailers.mkdir()
+    _, teaser_hash = make_video(trailers / "Teaser.mkv", marker=b"TEASER\n")
+
+    library = mvcommon.load_library()
+    main._extras_scan_merge_and_save(library, title_id, [str(trailers)])
+
+    item = _by_sub_rel(mvcommon.load_library(), title_id, "Trailers")["Teaser.mkv"]
+    sha_path = trailers / f"{item['short_id']}.sha256"
+    assert sha_path.exists()
+    assert sha_path.read_bytes() == f"{teaser_hash} *Teaser.mkv".encode(), \
+        "must be the exact cmd_prep sidecar format, no trailing newline"
+    uid_path = trailers / "uid"
+    assert not uid_path.exists(), \
+        "extras must NEVER get a folder-scoped uid file (one group holds many items)"
+
+
+def test_merge_back_fills_a_missing_sidecar_on_an_unchanged_rescan(
+        sandbox_extras, stub_tech_specs):
+    """(j) Back-fill, general case: re-scanning an UNCHANGED (never-pushed)
+    group creates any MISSING master sidecar from the stored hash — the
+    identical-hash no-op branch — without touching the item data at all."""
+    title_id = sandbox_extras["title_id"]
+    library = mvcommon.load_library()
+    before = copy.deepcopy(library[title_id]["extras"])
+
+    main.merge_extras_into_title(library, title_id, main.scan_extras_folders(
+        [str(sandbox_extras["extras_dir"])], str(sandbox_extras["media_dir"]),
+        title_id))
+
+    assert library[title_id]["extras"] == before, \
+        "an identical-hash re-scan must never change item data"
+    for it in sandbox_extras["items"]:
+        sha_path = sandbox_extras["extras_dir"] / f"{it['short_id']}.sha256"
+        assert sha_path.read_bytes() == f"{it['hash']} *{it['filename']}".encode()
+
+
+def test_merge_refreshes_a_stale_master_sidecar_on_a_genuine_remaster(
+        sandbox_extras, stub_tech_specs, make_video):
+    """(j) A genuine re-master (real changed bytes, NOT a dummy re-scan)
+    force-refreshes the master sidecar to the NEW hash: the short_id-keyed
+    sidecar path is unchanged across a re-master, so a stale sidecar
+    encoding the OLD hash must not survive."""
+    title_id = sandbox_extras["title_id"]
+    bts = sandbox_extras["items"][0]
+    assert bts["filename"] == "BTS.mkv"
+
+    library = mvcommon.load_library()
+    main.merge_extras_into_title(library, title_id, main.scan_extras_folders(
+        [str(sandbox_extras["extras_dir"])], str(sandbox_extras["media_dir"]),
+        title_id))
+    mvcommon.save_library(library)
+    sha_path = sandbox_extras["extras_dir"] / f"{bts['short_id']}.sha256"
+    assert sha_path.read_bytes() == f"{bts['hash']} *BTS.mkv".encode()
+
+    _, new_hash = make_video(bts["path"], marker=b"EXTRA-BTS-REENCODED\n")
+    assert new_hash != bts["hash"]
+    library = mvcommon.load_library()
+    main.merge_extras_into_title(library, title_id, main.scan_extras_folders(
+        [str(sandbox_extras["extras_dir"])], str(sandbox_extras["media_dir"]),
+        title_id))
+    mvcommon.save_library(library)
+
+    assert sha_path.read_bytes() == f"{new_hash} *BTS.mkv".encode(), \
+        "the sidecar must reflect the NEW stored hash, not the stale one"
+
+
+def test_split_push_writes_chunk_sidecars_under_checksums_dir(
+        sandbox_extras, mock_device, plenty_of_disk, monkeypatch):
+    """(j) A split extras push writes each chunk's local
+    `checksums/<chunk>.sha256` sidecar (mirrors cmd_push, main.py ~4518),
+    content matching the exact hash recorded in the item's `split_info`, and
+    the checksums/ dir is never picked up as a new extras item on a re-scan
+    (it is already excluded — `_EXTRAS_EXCLUDE_DIRS` — same as SPLIT_DIR_NAME)."""
+    title_id = sandbox_extras["title_id"]
+    _install_fake_split(monkeypatch, n_chunks=2)
+    library = mvcommon.load_library()
+
+    assert main.push_title_extras(library, title_id, ("COUNT", "2")) is True
+
+    checksum_dir = sandbox_extras["extras_dir"] / main.CHECKSUM_DIR_NAME
+    reloaded = mvcommon.load_library()
+    for it in _items(reloaded, title_id):
+        for chunk in it["split_info"]["chunks"]:
+            sha_path = checksum_dir / f"{chunk['filename']}.sha256"
+            assert sha_path.exists(), f"missing chunk sidecar: {sha_path}"
+            assert sha_path.read_bytes() == f"{chunk['hash']} *{chunk['filename']}".encode()
+
+    rescanned = main.scan_extras_folders(
+        [str(sandbox_extras["extras_dir"])], str(sandbox_extras["media_dir"]), title_id)
+    assert [it["sub_rel"] for it in rescanned["Specials"]["items"]] == \
+        ["BTS.mkv", "Trailer.mkv"], "the checksums/ dir must not surface as a new extras item"
+
+
+def test_add_extras_rerun_over_an_archived_group_backfills_missing_master_sidecars(
+        sandbox_extras, mock_device, fake_dummy, plenty_of_disk, stub_tech_specs, capsys):
+    """(j) THE D19-B1 interaction: an already-archived group whose master
+    sidecars were lost/deleted gets them RE-CREATED from the STORED (real)
+    hash on a plain re-scan — even though the on-disk files are now dummies
+    and the D19-B1 guard (main.py's "refusing to clobber" skip/continue)
+    refuses to touch the item's DATA. Proves the back-fill is not defeated by
+    that skip path, and that it never encodes the dummy's hash."""
+    title_id = sandbox_extras["title_id"]
+
+    # Register pass creates the master sidecars (the real, pre-push flow).
+    library = mvcommon.load_library()
+    main.merge_extras_into_title(library, title_id, main.scan_extras_folders(
+        [str(sandbox_extras["extras_dir"])], str(sandbox_extras["media_dir"]),
+        title_id))
+    mvcommon.save_library(library)
+    sidecar_paths = {it["filename"]: sandbox_extras["extras_dir"] / f"{it['short_id']}.sha256"
+                     for it in sandbox_extras["items"]}
+    for p in sidecar_paths.values():
+        assert p.exists()
+
+    # Push (whole-file) + replace -> archived, dummies on disk.
+    library = mvcommon.load_library()
+    assert main.push_title_extras(library, title_id, ("NONE", None)) is True
+    assert main.replace_title_extras(library, title_id) is True
+    for it in sandbox_extras["items"]:
+        assert it["path"].read_bytes() == FAKE_DUMMY_BYTES
+
+    # Simulate lost sidecars (accidental deletion / a pre-IMP-D20 archive).
+    for p in sidecar_paths.values():
+        p.unlink()
+
+    before = copy.deepcopy(mvcommon.load_library()[title_id]["extras"])
+    real_hashes = {it["filename"]: it["hash"] for it in sandbox_extras["items"]}
+
+    library = mvcommon.load_library()
+    main.merge_extras_into_title(library, title_id, main.scan_extras_folders(
+        [str(sandbox_extras["extras_dir"])], str(sandbox_extras["media_dir"]),
+        title_id))
+    mvcommon.save_library(library)
+
+    out = capsys.readouterr().out
+    assert "refusing to clobber" in out, "must have taken the D19-B1 skip path"
+
+    assert mvcommon.load_library()[title_id]["extras"] == before, \
+        "back-fill must not touch item data, even for a protected/archived item"
+    for it in sandbox_extras["items"]:
+        sha_path = sidecar_paths[it["filename"]]
+        assert sha_path.exists(), "the master sidecar must be re-created on re-scan"
+        assert sha_path.read_bytes() == f"{real_hashes[it['filename']]} *{it['filename']}".encode(), \
+            "the back-filled sidecar must encode the STORED (real) hash, never the dummy's"
+
+
+def test_sidecar_write_failure_does_not_abort_the_register(
+        sandbox_extras, stub_tech_specs, make_video, monkeypatch, capsys):
+    """(j) A master-sidecar write failure (e.g. a permission error) is
+    swallowed with a warning — the item is still registered/merged normally,
+    exactly cmd_prep's own best-effort contract for its sidecar writes."""
+    title_id = sandbox_extras["title_id"]
+    trailers = sandbox_extras["media_dir"] / "Trailers"
+    trailers.mkdir()
+    make_video(trailers / "Teaser.mkv", marker=b"TEASER\n")
+    _break_sha256_writes(monkeypatch)
+
+    library = mvcommon.load_library()
+    main._extras_scan_merge_and_save(library, title_id, [str(trailers)])
+
+    out = capsys.readouterr().out
+    assert "Could not write extras sidecar file" in out
+    short_id = mvcommon.generate_short_id(f"{title_id}::Trailers/Teaser.mkv")
+    assert not (trailers / f"{short_id}.sha256").exists()
+    groups = mvcommon.load_library()[title_id]["extras"]["groups"]
+    assert [it["sub_rel"] for it in groups["Trailers"]["items"]] == ["Teaser.mkv"], \
+        "the item must still be registered despite the sidecar failure"
+
+
+def test_chunk_sidecar_write_failure_does_not_abort_the_push(
+        sandbox_extras, mock_device, plenty_of_disk, monkeypatch):
+    """(j) A chunk-sidecar write failure during a split push is swallowed with
+    a warning — the push still completes (chunks land on device, item flips
+    to uploaded/onboarded)."""
+    title_id = sandbox_extras["title_id"]
+    _install_fake_split(monkeypatch, n_chunks=2)
+    _break_sha256_writes(monkeypatch)
+    library = mvcommon.load_library()
+
+    assert main.push_title_extras(library, title_id, ("COUNT", "2")) is True
+
+    checksum_dir = sandbox_extras["extras_dir"] / main.CHECKSUM_DIR_NAME
+    assert list(checksum_dir.glob("*.sha256")) == [], "no sidecar could be written"
+    on_device = _device_names(mock_device)
+    assert len([n for n in on_device if ".chunk." in n]) == 4, \
+        "the push itself must still complete despite the sidecar failure"
+    for it in _items(mvcommon.load_library(), title_id):
+        assert it["uploaded"] is True and it["status"] == "onboarded"
+
+
+def test_master_sidecars_do_not_pollute_a_rescan(sandbox_extras, stub_tech_specs):
+    """(j) `.sha256` is not a VIDEO_EXTENSIONS suffix, so a group folder that
+    now holds master sidecars produces NO new extras items on a re-scan."""
+    title_id = sandbox_extras["title_id"]
+    library = mvcommon.load_library()
+    main.merge_extras_into_title(library, title_id, main.scan_extras_folders(
+        [str(sandbox_extras["extras_dir"])], str(sandbox_extras["media_dir"]),
+        title_id))
+    mvcommon.save_library(library)
+    for it in sandbox_extras["items"]:
+        assert (sandbox_extras["extras_dir"] / f"{it['short_id']}.sha256").exists()
+
+    rescanned = main.scan_extras_folders(
+        [str(sandbox_extras["extras_dir"])], str(sandbox_extras["media_dir"]), title_id)
+    assert [it["sub_rel"] for it in rescanned["Specials"]["items"]] == \
+        ["BTS.mkv", "Trailer.mkv"], "no .sha256 sidecar may be picked up as a new extras item"
     assert "Tiny.mkv" not in _by_sub_rel(library, title_id)

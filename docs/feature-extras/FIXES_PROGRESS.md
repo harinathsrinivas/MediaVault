@@ -19,10 +19,12 @@ omitted the `--` and swept them into a commit; recovered via `git reset --soft H
 unpushed). Since then the orchestrator commits these directly rather than delegating.
 
 ## ▶ NEXT ACTION
-**All four items (IMP-D20, D3, A5, D4) are DONE, committed and pushed. Open the PR → then STOP at
-Checkpoint 1** (merging into `main` is user-gated; branch archival afterwards is Checkpoint 2).
-PR title: `fix(extras): checksum-sidecar parity + integrity-command coverage + push warning + resume-command flags — IMP-D20`.
-Nothing else on this branch is in flight. The deferred table below stays deferred unless the user says otherwise.
+**🚦 CHECKPOINT 1 — awaiting the user's merge approval on PR #43**
+(https://github.com/harinathsrinivas/MediaVault/pull/43). All four items (IMP-D20, D3, A5, D4) are
+done, committed, pushed and covered by the PR. Do NOT `gh pr merge` without explicit user approval.
+After merge, **Checkpoint 2** (annotated `archive/fix/imp_d20_extras_sidecars` tag + branch delete) is a
+separate user-gated step. Nothing on this branch is in flight; the deferred table below stays deferred
+unless the user says otherwise.
 
 ## Status
 | Item | Status | Commit | Tests | Notes |

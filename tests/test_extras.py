@@ -23,6 +23,19 @@ letter:
   (i) the D19-B1 LAYERED GUARD (Step 12c) — a re-scan over an ARCHIVED group can
       NOT clobber cloud-bearing items with dummy hashes, `push_one_extra` refuses
       dummy-sized uploads, and a new dummy-sized file is never registered
+  (j) IMP-D20 checksum-sidecar parity — the master `<short_id>.sha256` at
+      register time, chunk `checksums/*.sha256` at split-push time, the
+      write-if-missing back-fill (incl. through the D19-B1 skip path), and a
+      sidecar write failure never aborting a merge or a push
+  (k) IMP-D3/D4/A5 — extras parity audit fixes: `cmd_verify_library` /
+      `cmd_local_status` / `cmd_repair_dummies` / `cmd_check` /
+      `cmd_verify_restore` become extras-aware (a healthy archived extra is
+      NOT a violation; a missing dummy or a real file under an `archived`
+      item IS); `push`/`push_group` warn when an explicit `--extras` meets a
+      title with nothing registered, while `replace_group` on an extras-less
+      title stays silent; the season autopilot's printed resume command now
+      carries `--extras`/`--extras-size` (correctly quoted for a path with
+      spaces) and is BYTE-IDENTICAL to before when neither was supplied
 
 Fixtures are the documented ones (docs/testing-strategy.md §4): `sandbox_extras`
 (§4.9, inheriting `sandbox`'s dual LIBRARY_*/LOCAL_ROOT patch and its C:\\Media
@@ -50,6 +63,7 @@ THREE deliberate boundary stubs keep the battery deterministic and fast:
 Device-name lookups always go through `_device_names` — never rglob a bracketed
 pattern, `[short_id]` is a glob character class (testing-strategy §8.1).
 """
+import builtins
 import copy
 import os
 import shutil
@@ -1238,4 +1252,650 @@ def test_merge_does_not_register_a_new_dummy_sized_file(
     assert "Skipping extras file Specials/Tiny.mkv" in out
     assert library[title_id]["extras"] == before, \
         "the dummy-sized file must not be registered; siblings stay a no-op"
+
+
+# ===========================================================================
+# (j) IMP-D20 — checksum-sidecar parity (master + chunk local sidecars)
+#
+# Main content writes THREE local disaster-recovery records at prep/push time
+# (cmd_prep's `uid` + `<short_id>.sha256`; cmd_push's per-chunk
+# `checksums/<chunk>.sha256`); IMP-D19's lean `push_one_extra` shipped without
+# ANY of them (Step-3 bake-off, Candidate B — flagged as a known follow-up in
+# the judge's DECISION.md). This closes the gap: a master
+# `<short_id>.sha256` at register/merge time (mirrors cmd_prep exactly, but no
+# `uid` — see `_write_extras_master_sidecar`'s docstring for why), and chunk
+# `checksums/*.sha256` at split-push time (mirrors cmd_push exactly). Both are
+# best-effort (a write failure warns and never aborts), and the master sidecar
+# BACK-FILLS a missing one from the STORED hash for an already-registered
+# item — including through the D19-B1 skip/continue path, which protects the
+# item's DATA but must not block the sidecar repair.
+# ===========================================================================
+
+
+def _break_sha256_writes(monkeypatch):
+    """Make any `open(path, 'w'[, ...])` targeting a `.sha256` path raise,
+    while every other `open` call (real video files, JSON, etc.) behaves
+    normally. Patches `main.open` — a module-global `open` binding wins name
+    resolution over the builtin for any `open(...)` call written literally
+    inside a `main.py` function (exactly the IMP-D20 sidecar writes under
+    test), and does NOT affect `mvcommon.calculate_file_hash`'s own `open`
+    call (a separate module's globals) or `conftest.make_video`'s (fixture
+    setup runs before this patch is installed in every test below)."""
+    real_open = builtins.open
+
+    def fake_open(path, mode="r", *args, **kwargs):
+        if str(path).endswith(".sha256") and "w" in mode:
+            raise PermissionError(f"simulated sidecar write failure: {path}")
+        return real_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(main, "open", fake_open, raising=False)
+
+
+def test_merge_writes_the_master_sidecar_with_cmd_preps_exact_format(
+        sandbox_extras, stub_tech_specs, make_video):
+    """(j) Registering a NEW extra writes `<its own dir>/<short_id>.sha256`
+    with byte-for-byte cmd_prep's own sidecar format (`f"{hash} *{filename}"`,
+    NO trailing newline, main.py:1041) — in the item's own directory (the
+    flat real-world case: the group folder itself)."""
+    title_id = sandbox_extras["title_id"]
+    media_dir = sandbox_extras["media_dir"]
+    trailers = media_dir / "Trailers"
+    trailers.mkdir()
+    _, teaser_hash = make_video(trailers / "Teaser.mkv", marker=b"TEASER\n")
+
+    library = mvcommon.load_library()
+    main._extras_scan_merge_and_save(library, title_id, [str(trailers)])
+
+    item = _by_sub_rel(mvcommon.load_library(), title_id, "Trailers")["Teaser.mkv"]
+    sha_path = trailers / f"{item['short_id']}.sha256"
+    assert sha_path.exists()
+    assert sha_path.read_bytes() == f"{teaser_hash} *Teaser.mkv".encode(), \
+        "must be the exact cmd_prep sidecar format, no trailing newline"
+    uid_path = trailers / "uid"
+    assert not uid_path.exists(), \
+        "extras must NEVER get a folder-scoped uid file (one group holds many items)"
+
+
+def test_merge_back_fills_a_missing_sidecar_on_an_unchanged_rescan(
+        sandbox_extras, stub_tech_specs):
+    """(j) Back-fill, general case: re-scanning an UNCHANGED (never-pushed)
+    group creates any MISSING master sidecar from the stored hash — the
+    identical-hash no-op branch — without touching the item data at all."""
+    title_id = sandbox_extras["title_id"]
+    library = mvcommon.load_library()
+    before = copy.deepcopy(library[title_id]["extras"])
+
+    main.merge_extras_into_title(library, title_id, main.scan_extras_folders(
+        [str(sandbox_extras["extras_dir"])], str(sandbox_extras["media_dir"]),
+        title_id))
+
+    assert library[title_id]["extras"] == before, \
+        "an identical-hash re-scan must never change item data"
+    for it in sandbox_extras["items"]:
+        sha_path = sandbox_extras["extras_dir"] / f"{it['short_id']}.sha256"
+        assert sha_path.read_bytes() == f"{it['hash']} *{it['filename']}".encode()
+
+
+def test_merge_refreshes_a_stale_master_sidecar_on_a_genuine_remaster(
+        sandbox_extras, stub_tech_specs, make_video):
+    """(j) A genuine re-master (real changed bytes, NOT a dummy re-scan)
+    force-refreshes the master sidecar to the NEW hash: the short_id-keyed
+    sidecar path is unchanged across a re-master, so a stale sidecar
+    encoding the OLD hash must not survive."""
+    title_id = sandbox_extras["title_id"]
+    bts = sandbox_extras["items"][0]
+    assert bts["filename"] == "BTS.mkv"
+
+    library = mvcommon.load_library()
+    main.merge_extras_into_title(library, title_id, main.scan_extras_folders(
+        [str(sandbox_extras["extras_dir"])], str(sandbox_extras["media_dir"]),
+        title_id))
+    mvcommon.save_library(library)
+    sha_path = sandbox_extras["extras_dir"] / f"{bts['short_id']}.sha256"
+    assert sha_path.read_bytes() == f"{bts['hash']} *BTS.mkv".encode()
+
+    _, new_hash = make_video(bts["path"], marker=b"EXTRA-BTS-REENCODED\n")
+    assert new_hash != bts["hash"]
+    library = mvcommon.load_library()
+    main.merge_extras_into_title(library, title_id, main.scan_extras_folders(
+        [str(sandbox_extras["extras_dir"])], str(sandbox_extras["media_dir"]),
+        title_id))
+    mvcommon.save_library(library)
+
+    assert sha_path.read_bytes() == f"{new_hash} *BTS.mkv".encode(), \
+        "the sidecar must reflect the NEW stored hash, not the stale one"
+
+
+def test_split_push_writes_chunk_sidecars_under_checksums_dir(
+        sandbox_extras, mock_device, plenty_of_disk, monkeypatch):
+    """(j) A split extras push writes each chunk's local
+    `checksums/<chunk>.sha256` sidecar (mirrors cmd_push, main.py ~4518),
+    content matching the exact hash recorded in the item's `split_info`, and
+    the checksums/ dir is never picked up as a new extras item on a re-scan
+    (it is already excluded — `_EXTRAS_EXCLUDE_DIRS` — same as SPLIT_DIR_NAME)."""
+    title_id = sandbox_extras["title_id"]
+    _install_fake_split(monkeypatch, n_chunks=2)
+    library = mvcommon.load_library()
+
+    assert main.push_title_extras(library, title_id, ("COUNT", "2")) is True
+
+    checksum_dir = sandbox_extras["extras_dir"] / main.CHECKSUM_DIR_NAME
+    reloaded = mvcommon.load_library()
+    for it in _items(reloaded, title_id):
+        for chunk in it["split_info"]["chunks"]:
+            sha_path = checksum_dir / f"{chunk['filename']}.sha256"
+            assert sha_path.exists(), f"missing chunk sidecar: {sha_path}"
+            assert sha_path.read_bytes() == f"{chunk['hash']} *{chunk['filename']}".encode()
+
+    rescanned = main.scan_extras_folders(
+        [str(sandbox_extras["extras_dir"])], str(sandbox_extras["media_dir"]), title_id)
+    assert [it["sub_rel"] for it in rescanned["Specials"]["items"]] == \
+        ["BTS.mkv", "Trailer.mkv"], "the checksums/ dir must not surface as a new extras item"
+
+
+def test_add_extras_rerun_over_an_archived_group_backfills_missing_master_sidecars(
+        sandbox_extras, mock_device, fake_dummy, plenty_of_disk, stub_tech_specs, capsys):
+    """(j) THE D19-B1 interaction: an already-archived group whose master
+    sidecars were lost/deleted gets them RE-CREATED from the STORED (real)
+    hash on a plain re-scan — even though the on-disk files are now dummies
+    and the D19-B1 guard (main.py's "refusing to clobber" skip/continue)
+    refuses to touch the item's DATA. Proves the back-fill is not defeated by
+    that skip path, and that it never encodes the dummy's hash."""
+    title_id = sandbox_extras["title_id"]
+
+    # Register pass creates the master sidecars (the real, pre-push flow).
+    library = mvcommon.load_library()
+    main.merge_extras_into_title(library, title_id, main.scan_extras_folders(
+        [str(sandbox_extras["extras_dir"])], str(sandbox_extras["media_dir"]),
+        title_id))
+    mvcommon.save_library(library)
+    sidecar_paths = {it["filename"]: sandbox_extras["extras_dir"] / f"{it['short_id']}.sha256"
+                     for it in sandbox_extras["items"]}
+    for p in sidecar_paths.values():
+        assert p.exists()
+
+    # Push (whole-file) + replace -> archived, dummies on disk.
+    library = mvcommon.load_library()
+    assert main.push_title_extras(library, title_id, ("NONE", None)) is True
+    assert main.replace_title_extras(library, title_id) is True
+    for it in sandbox_extras["items"]:
+        assert it["path"].read_bytes() == FAKE_DUMMY_BYTES
+
+    # Simulate lost sidecars (accidental deletion / a pre-IMP-D20 archive).
+    for p in sidecar_paths.values():
+        p.unlink()
+
+    before = copy.deepcopy(mvcommon.load_library()[title_id]["extras"])
+    real_hashes = {it["filename"]: it["hash"] for it in sandbox_extras["items"]}
+
+    library = mvcommon.load_library()
+    main.merge_extras_into_title(library, title_id, main.scan_extras_folders(
+        [str(sandbox_extras["extras_dir"])], str(sandbox_extras["media_dir"]),
+        title_id))
+    mvcommon.save_library(library)
+
+    out = capsys.readouterr().out
+    assert "refusing to clobber" in out, "must have taken the D19-B1 skip path"
+
+    assert mvcommon.load_library()[title_id]["extras"] == before, \
+        "back-fill must not touch item data, even for a protected/archived item"
+    for it in sandbox_extras["items"]:
+        sha_path = sidecar_paths[it["filename"]]
+        assert sha_path.exists(), "the master sidecar must be re-created on re-scan"
+        assert sha_path.read_bytes() == f"{real_hashes[it['filename']]} *{it['filename']}".encode(), \
+            "the back-filled sidecar must encode the STORED (real) hash, never the dummy's"
+
+
+def test_sidecar_write_failure_does_not_abort_the_register(
+        sandbox_extras, stub_tech_specs, make_video, monkeypatch, capsys):
+    """(j) A master-sidecar write failure (e.g. a permission error) is
+    swallowed with a warning — the item is still registered/merged normally,
+    exactly cmd_prep's own best-effort contract for its sidecar writes."""
+    title_id = sandbox_extras["title_id"]
+    trailers = sandbox_extras["media_dir"] / "Trailers"
+    trailers.mkdir()
+    make_video(trailers / "Teaser.mkv", marker=b"TEASER\n")
+    _break_sha256_writes(monkeypatch)
+
+    library = mvcommon.load_library()
+    main._extras_scan_merge_and_save(library, title_id, [str(trailers)])
+
+    out = capsys.readouterr().out
+    assert "Could not write extras sidecar file" in out
+    short_id = mvcommon.generate_short_id(f"{title_id}::Trailers/Teaser.mkv")
+    assert not (trailers / f"{short_id}.sha256").exists()
+    groups = mvcommon.load_library()[title_id]["extras"]["groups"]
+    assert [it["sub_rel"] for it in groups["Trailers"]["items"]] == ["Teaser.mkv"], \
+        "the item must still be registered despite the sidecar failure"
+
+
+def test_chunk_sidecar_write_failure_does_not_abort_the_push(
+        sandbox_extras, mock_device, plenty_of_disk, monkeypatch):
+    """(j) A chunk-sidecar write failure during a split push is swallowed with
+    a warning — the push still completes (chunks land on device, item flips
+    to uploaded/onboarded)."""
+    title_id = sandbox_extras["title_id"]
+    _install_fake_split(monkeypatch, n_chunks=2)
+    _break_sha256_writes(monkeypatch)
+    library = mvcommon.load_library()
+
+    assert main.push_title_extras(library, title_id, ("COUNT", "2")) is True
+
+    checksum_dir = sandbox_extras["extras_dir"] / main.CHECKSUM_DIR_NAME
+    assert list(checksum_dir.glob("*.sha256")) == [], "no sidecar could be written"
+    on_device = _device_names(mock_device)
+    assert len([n for n in on_device if ".chunk." in n]) == 4, \
+        "the push itself must still complete despite the sidecar failure"
+    for it in _items(mvcommon.load_library(), title_id):
+        assert it["uploaded"] is True and it["status"] == "onboarded"
+
+
+def test_master_sidecars_do_not_pollute_a_rescan(sandbox_extras, stub_tech_specs):
+    """(j) `.sha256` is not a VIDEO_EXTENSIONS suffix, so a group folder that
+    now holds master sidecars produces NO new extras items on a re-scan."""
+    title_id = sandbox_extras["title_id"]
+    library = mvcommon.load_library()
+    main.merge_extras_into_title(library, title_id, main.scan_extras_folders(
+        [str(sandbox_extras["extras_dir"])], str(sandbox_extras["media_dir"]),
+        title_id))
+    mvcommon.save_library(library)
+    for it in sandbox_extras["items"]:
+        assert (sandbox_extras["extras_dir"] / f"{it['short_id']}.sha256").exists()
+
+    rescanned = main.scan_extras_folders(
+        [str(sandbox_extras["extras_dir"])], str(sandbox_extras["media_dir"]), title_id)
+    assert [it["sub_rel"] for it in rescanned["Specials"]["items"]] == \
+        ["BTS.mkv", "Trailer.mkv"], "no .sha256 sidecar may be picked up as a new extras item"
     assert "Tiny.mkv" not in _by_sub_rel(library, title_id)
+
+
+# ===========================================================================
+# (k) IMP-D3/D4/A5 — extras parity audit fixes
+#
+# D3: cmd_verify_library / cmd_local_status / cmd_repair_dummies / cmd_check /
+#     cmd_verify_restore become extras-aware. D4 (the season autopilot resume
+#     command) is intentionally NOT covered here — see the executor's report
+#     (rollback change-gate: STOP-and-surface, not silently implemented).
+# A5: push / push_group warn when an explicit --extras meets a title with no
+#     registered extras; the pre-existing replace_group silent no-op on an
+#     extras-less title is pinned as a regression guard.
+# ===========================================================================
+
+
+def test_verify_library_healthy_archived_extra_is_not_a_violation(
+        sandbox_extras, mock_device, fake_dummy, capsys):
+    """(k) D3: a properly-archived extra (uploaded, dummy on disk, status
+    archived) must NEVER be reported as a violation — the exact live-data
+    shape Stranger Things' 2 already-archived extras are in."""
+    title_id = sandbox_extras["title_id"]
+    library = mvcommon.load_library()
+    assert main.push_title_extras(library, title_id, ("NONE", None)) is True
+    assert main.replace_title_extras(library, title_id) is True
+
+    result = main.cmd_verify_library()
+    out = capsys.readouterr().out
+
+    assert result is True
+    assert "EXTRAS INTEGRITY MISMATCH" not in out
+    assert "No extras integrity mismatches found" in out
+    assert "extras: scanned 2, OK 2, MISMATCH 0" in out
+
+
+def test_verify_library_missing_extras_dummy_is_a_violation(
+        sandbox_extras, mock_device, fake_dummy, capsys):
+    """(k) D3: an archived extra whose dummy was deleted off disk (the exact
+    "dummy deleted" scenario named in the dispatch) must be reported — and
+    must flip the overall result to False, not just the report text."""
+    title_id = sandbox_extras["title_id"]
+    library = mvcommon.load_library()
+    assert main.push_title_extras(library, title_id, ("NONE", None)) is True
+    assert main.replace_title_extras(library, title_id) is True
+
+    bts_path = sandbox_extras["items"][0]["path"]
+    os.remove(bts_path)
+
+    result = main.cmd_verify_library()
+    out = capsys.readouterr().out
+
+    assert result is False
+    assert "EXTRAS INTEGRITY MISMATCH" in out
+    assert title_id in out
+    assert "Specials/BTS.mkv" in out
+    assert "archived_missing" in out
+
+
+def test_verify_library_real_file_under_archived_extras_item_is_a_violation(
+        sandbox_extras, mock_device, fake_dummy, make_video, capsys):
+    """(k) D3: a REAL file sitting under an item the library thinks is
+    archived (dummy expected) is exactly the other live-data failure mode the
+    dispatch calls out — must be flagged, must flip the return to False."""
+    title_id = sandbox_extras["title_id"]
+    library = mvcommon.load_library()
+    assert main.push_title_extras(library, title_id, ("NONE", None)) is True
+    assert main.replace_title_extras(library, title_id) is True
+
+    bts_path = sandbox_extras["items"][0]["path"]
+    make_video(bts_path, marker=b"SOMEHOW-REAL-AGAIN\n")
+
+    result = main.cmd_verify_library()
+    out = capsys.readouterr().out
+
+    assert result is False
+    assert "archived_real" in out
+
+
+def test_local_status_lists_pending_extras_and_counts_them_in_the_total(
+        sandbox_extras, capsys):
+    """(k) D3: pending (not-yet-uploaded) extras must appear in BOTH the row
+    list (clearly labelled) and the total pending count/size — today they are
+    invisible, making the number wrong for extras-bearing titles. The Tip
+    section must hint `push <id> --extras "<folder>"` for an extras row
+    (never a bare `push <id>`, which would silently no-op — A5), collapsed to
+    ONE line per group even though 2 items are pending in it."""
+    title_id = sandbox_extras["title_id"]
+    extras_dir = str(sandbox_extras["extras_dir"])
+
+    main.cmd_local_status("999gb")
+    out = capsys.readouterr().out
+
+    assert "[extras] Specials/BTS.mkv" in out
+    assert "[extras] Specials/Trailer.mkv" in out
+    assert "Total Pending: 3 files" in out  # main (unpushed) + 2 extras
+
+    tip_lines = [l for l in out.splitlines() if l.strip().startswith("python main.py push")]
+    bare = [l for l in tip_lines if "--extras" not in l]
+    extras_tips = [l for l in tip_lines if "--extras" in l]
+    assert len(bare) == 1 and title_id in bare[0]
+    assert len(extras_tips) == 1, f"extras tip must collapse to ONE line per group: {tip_lines}"
+    assert f'--extras "{extras_dir}"' in extras_tips[0]
+
+
+def test_repair_dummies_regenerates_a_corrupted_extras_dummy(
+        sandbox_extras, mock_device, fake_dummy):
+    """(k) D3: cmd_repair_dummies gets an extras equivalent — an archived
+    extra whose on-disk dummy is corrupted/wrong-shaped is regenerated via the
+    SAME make_video_dummy + os.replace swap the main-content path uses, while
+    the title's main content is untouched (Card E1)."""
+    title_id = sandbox_extras["title_id"]
+    library = mvcommon.load_library()
+    assert main.push_title_extras(library, title_id, ("NONE", None)) is True
+    assert main.replace_title_extras(library, title_id) is True
+    short_id_before = mvcommon.load_library()[title_id]["short_id"]
+
+    bts_path = sandbox_extras["items"][0]["path"]
+    bts_path.write_bytes(b"CORRUPTED-DUMMY-STUB")
+    assert bts_path.read_bytes() != FAKE_DUMMY_BYTES
+
+    main.cmd_repair_dummies()
+
+    assert bts_path.read_bytes() == FAKE_DUMMY_BYTES
+    for it in sandbox_extras["items"]:
+        assert it["path"].read_bytes() == FAKE_DUMMY_BYTES
+    assert mvcommon.load_library()[title_id]["short_id"] == short_id_before  # main entry untouched
+    assert os.path.getsize(sandbox_extras["orig_path"]) > main.DUMMY_MAX_BYTES
+
+
+def test_repair_dummies_reports_a_missing_archived_extra_without_fabricating_one(
+        sandbox_extras, mock_device, fake_dummy, capsys):
+    """(k) D3: mirrors the main-content contract exactly — a MISSING archived
+    file is reported and skipped, never fabricated from nothing. The sibling
+    (present, wrong-shaped) extra IS still regenerated in the same run."""
+    title_id = sandbox_extras["title_id"]
+    library = mvcommon.load_library()
+    assert main.push_title_extras(library, title_id, ("NONE", None)) is True
+    assert main.replace_title_extras(library, title_id) is True
+
+    bts_path = sandbox_extras["items"][0]["path"]
+    os.remove(bts_path)
+
+    main.cmd_repair_dummies()
+    out = capsys.readouterr().out
+
+    assert not os.path.exists(bts_path), "a missing extras dummy must never be fabricated"
+    assert "Missing" in out and "Specials/BTS.mkv" in out
+    assert "scanned 2, regenerated 1" in out and "missing 1" in out
+
+
+def test_check_verifies_pushed_extras_and_flags_a_corrupted_one(
+        sandbox_extras, mock_device, make_video, capsys):
+    """(k) D3: cmd_check hash-verifies a title's extras too (D19 Step 4/6
+    precedent: checking any leaf of a title also touches the title's
+    extras)."""
+    title_id = sandbox_extras["title_id"]
+    library = mvcommon.load_library()
+    assert main.push_title_extras(library, title_id, ("NONE", None)) is True
+
+    main.cmd_check(title_id)
+    out = capsys.readouterr().out
+    assert f"[extras: {title_id} / Specials/BTS.mkv] PASS" in out
+    assert f"[extras: {title_id} / Specials/Trailer.mkv] PASS" in out
+
+    make_video(sandbox_extras["items"][0]["path"], marker=b"CORRUPTED-ON-DISK\n")
+
+    main.cmd_check(title_id)
+    out = capsys.readouterr().out
+    assert f"[extras: {title_id} / Specials/BTS.mkv] FAIL" in out
+    assert f"[extras: {title_id} / Specials/Trailer.mkv] PASS" in out
+
+
+def test_check_does_not_false_alarm_on_archived_extras_dummies(
+        sandbox_extras, mock_device, fake_dummy, capsys):
+    """(k) D3: an archived extra's on-disk file is a DUMMY by design —
+    cmd_check must skip it entirely rather than hash-comparing the dummy
+    bytes against the real stored hash (which would always FAIL and alarm on
+    perfectly healthy live data)."""
+    title_id = sandbox_extras["title_id"]
+    library = mvcommon.load_library()
+    assert main.push_title_extras(library, title_id, ("NONE", None)) is True
+    assert main.replace_title_extras(library, title_id) is True
+
+    main.cmd_check(title_id)
+    out = capsys.readouterr().out
+    assert "[extras:" not in out, f"archived extras must be silently skipped, not false-alarmed: {out}"
+
+
+def test_verify_restore_validates_staged_extras_and_flags_corruption(
+        sandbox_extras, mock_device, fake_dummy, capsys):
+    """(k) D3: cmd_verify_restore's dry-run gets an extras equivalent — a
+    correctly-staged file verifies, a corrupted one is flagged, and BOTH
+    share the same group restore/ folder (the real fetch-leg shape)."""
+    title_id = sandbox_extras["title_id"]
+    originals = {it["filename"]: it["path"].read_bytes() for it in sandbox_extras["items"]}
+
+    library = mvcommon.load_library()
+    assert main.push_title_extras(library, title_id, ("NONE", None)) is True
+    assert main.replace_title_extras(library, title_id) is True
+
+    bts, trailer = sandbox_extras["items"]
+    restore_dir = _stage_for_restore(sandbox_extras["extras_dir"], {})
+    with open(os.path.join(restore_dir, bts["filename"]), "wb") as f:
+        f.write(originals[bts["filename"]])          # correct bytes
+    with open(os.path.join(restore_dir, trailer["filename"]), "wb") as f:
+        f.write(b"CORRUPTED-STAGED-BYTES")            # wrong bytes
+
+    main.cmd_verify_restore(title_id)
+    out = capsys.readouterr().out
+
+    assert f"[extras: {title_id} / Specials/BTS.mkv] SUCCESS" in out
+    assert f"[extras: {title_id} / Specials/Trailer.mkv] FAILURE" in out
+
+
+def test_verify_restore_is_silent_when_nothing_is_staged(
+        sandbox_extras, mock_device, fake_dummy, capsys):
+    """(k) D3: unlike the main leaf's OWN targeted restore/ check (whose
+    absence is an error), an extras item with NOTHING staged is normal and
+    must be completely silent — most extras never have anything staged."""
+    title_id = sandbox_extras["title_id"]
+    library = mvcommon.load_library()
+    assert main.push_title_extras(library, title_id, ("NONE", None)) is True
+    assert main.replace_title_extras(library, title_id) is True
+
+    main.cmd_verify_restore(title_id)
+    out = capsys.readouterr().out
+
+    assert "[extras:" not in out
+
+
+def test_verify_restore_validates_a_staged_split_extra(
+        sandbox_extras, mock_device, fake_dummy, plenty_of_disk, monkeypatch, capsys):
+    """(k) D3: the split half of the same contract — cmd_verify_restore checks
+    each staged chunk against split_info.chunks[i].hash."""
+    title_id = sandbox_extras["title_id"]
+    _install_fake_split(monkeypatch, n_chunks=2)
+
+    library = mvcommon.load_library()
+    assert main.push_title_extras(library, title_id, ("COUNT", "2")) is True
+
+    on_device = _device_names(mock_device)
+    library = mvcommon.load_library()
+    bts = _by_sub_rel(library, title_id)["BTS.mkv"]
+    chunk_names = [c["filename"] for c in bts["split_info"]["chunks"]]
+    _stage_for_restore(sandbox_extras["extras_dir"], {n: on_device[n] for n in chunk_names})
+
+    main.cmd_verify_restore(title_id)
+    out = capsys.readouterr().out
+
+    assert f"[extras: {title_id} / Specials/BTS.mkv] Detected Split File (2 chunks)." in out
+    for n in chunk_names:
+        assert f"✅ Verified: {n}" in out
+    assert f"[extras: {title_id} / Specials/BTS.mkv] SUCCESS: All chunks verified." in out
+
+
+def test_push_with_explicit_extras_on_a_title_with_none_registered_warns(
+        sandbox_extras, mock_device, capsys):
+    """(k) A5: `push <id> --extras "<folder>"` on a title that carries NO
+    registered extras (cmd_push never scans the folder value — it is a pure
+    boolean gate) must NOT look like a silently-successful push while
+    archiving nothing. The main content still pushes normally; the user is
+    additionally warned with the exact remedy command."""
+    title_id = sandbox_extras["title_id"]
+    library = mvcommon.load_library()
+    del library[title_id]["extras"]
+    mvcommon.save_library(library)
+
+    result = main.cmd_push(title_id, extras=[str(sandbox_extras["extras_dir"])])
+    out = capsys.readouterr().out
+
+    assert result is True, "the main push itself must still succeed"
+    assert "no registered extras" in out
+    assert f'add_extras {title_id} "<folders>"' in out
+    on_device = _device_names(mock_device)
+    assert not any(n.startswith("BTS") or n.startswith("Trailer") for n in on_device), \
+        "nothing must actually be uploaded for the never-registered extras"
+
+
+def test_push_group_with_explicit_extras_on_a_title_with_none_registered_warns(
+        sandbox_alias, mock_device, capsys):
+    """(k) A5: the same warning fires from cmd_push_group's own explicit
+    --extras call site (its only caller is the CLI dispatch, so `extras`
+    truthy there is always a genuine user request too)."""
+    season_id = sandbox_alias["season_id"]
+    never_registered = str(sandbox_alias["media_dir"] / "NeverScanned")
+
+    main.cmd_push_group(season_id, extras=[never_registered])
+    out = capsys.readouterr().out
+
+    assert "no registered extras" in out
+    assert f'add_extras {season_id} "<folders>"' in out
+
+
+def test_replace_group_on_an_extras_less_title_stays_silent(
+        sandbox_alias, mock_device, fake_dummy, capsys):
+    """(k) A5 guardrail: replace_group's UNCONDITIONAL replace_title_extras
+    wire (D19 Step 4) must stay a silent no-op on an extras-less title — this
+    call site must NEVER gain a warning (a bare replace never claims to have
+    processed extras, so there is nothing to warn about)."""
+    season_id = sandbox_alias["season_id"]
+    primary_id = sandbox_alias["primary_id"]
+
+    main.cmd_push(primary_id)
+    capsys.readouterr()  # discard the push output
+
+    main.cmd_replace_group(season_id)
+    out = capsys.readouterr().out
+
+    assert "extras" not in out.lower()
+
+
+def test_season_resume_command_carries_extras_flags_correctly_quoted(
+        sandbox, make_video, mock_device, fake_dummy, monkeypatch, capsys):
+    """(k) D4: the season autopilot's printed resume command must NOT silently
+    drop --extras/--extras-size — a user who copy-pastes it would otherwise
+    finish the season while leaving the extras un-pushed, with no warning. The
+    folder name deliberately contains a SPACE (real user data: "...\\Stranger
+    Things\\...") to prove the reconstructed --extras token survives quoting
+    as ONE argv token."""
+    base_id = "tv-en-2021-resumeextras-s01"
+    season_dir = sandbox["local_root"] / "Series" / "Stranger Things S01"
+    season_dir.mkdir(parents=True)
+    for n in (1, 2):
+        make_video(season_dir / f"ST.S01E0{n}.mkv", marker=f"ep{n}".encode())
+
+    extras_dir = season_dir / "Specials"
+    extras_dir.mkdir()
+    make_video(extras_dir / "BTS.mkv", marker=b"BTS\n")
+
+    ep2_id = f"{base_id}e02"
+    real_cmd_push = main.cmd_push
+
+    def _fake_push(mid, *a, **kw):
+        # Episode 1 pushes for real (against mock_device); episode 2 "fails"
+        # cleanly so the season stops mid-run and prints the resume line.
+        if mid == ep2_id:
+            return False
+        return real_cmd_push(mid, *a, **kw)
+
+    monkeypatch.setattr(main, "cmd_push", _fake_push)
+
+    main.cmd_prep_push_rep_season(
+        base_id, str(season_dir),
+        extras=[str(extras_dir)], extras_size=("SIZE_MB", "700"),
+        device_id="fakeserial",
+    )
+    out = capsys.readouterr().out
+
+    lines = [l for l in out.splitlines() if "Resume the rest of the season:" in l]
+    assert len(lines) == 1, out
+    resume_line = lines[0]
+
+    assert f'prep_push_rep_season {base_id} "{season_dir}"' in resume_line
+    assert "episodes 02-02" in resume_line
+    assert "device fakeserial" in resume_line
+    assert f'--extras "{extras_dir}"' in resume_line, resume_line
+    assert "--extras-size SIZE_MB 700" in resume_line
+
+
+def test_season_resume_command_unchanged_without_extras(
+        sandbox, make_video, mock_device, fake_dummy, monkeypatch, capsys):
+    """(k) D4 change-gate regression guard: when a season run has NO extras,
+    the resume command's format must be BYTE-IDENTICAL to before this fix —
+    no --extras/--extras-size tokens appear, and every pre-existing field
+    (id/folder/episodes/device) is in the exact same order/format as today."""
+    base_id = "tv-en-2021-resumeplain-s01"
+    season_dir = sandbox["local_root"] / "Series" / "PlainShow S01"
+    season_dir.mkdir(parents=True)
+    for n in (1, 2):
+        make_video(season_dir / f"PL.S01E0{n}.mkv", marker=f"ep{n}".encode())
+
+    ep2_id = f"{base_id}e02"
+    real_cmd_push = main.cmd_push
+
+    def _fake_push(mid, *a, **kw):
+        if mid == ep2_id:
+            return False
+        return real_cmd_push(mid, *a, **kw)
+
+    monkeypatch.setattr(main, "cmd_push", _fake_push)
+
+    main.cmd_prep_push_rep_season(base_id, str(season_dir), device_id="fakeserial")
+    out = capsys.readouterr().out
+
+    lines = [l for l in out.splitlines() if "Resume the rest of the season:" in l]
+    assert len(lines) == 1, out
+    resume_line = lines[0]
+
+    assert resume_line == (
+        f'   > Resume the rest of the season: prep_push_rep_season {base_id} "{season_dir}" '
+        f'episodes 02-02 device fakeserial'
+    )
+    assert "--extras" not in resume_line

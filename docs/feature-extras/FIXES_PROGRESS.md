@@ -19,10 +19,10 @@ omitted the `--` and swept them into a commit; recovered via `git reset --soft H
 unpushed). Since then the orchestrator commits these directly rather than delegating.
 
 ## ▶ NEXT ACTION
-**D4 — carry `--extras` / `--extras-size` into the season autopilot's printed resume command.**
-USER-APPROVED at the rollback change-gate on 2026-08-17 (the function is "the season resume-range
-messaging", a change-gated surface per CLAUDE.md; approval was given after being shown exactly what
-differs). Purely additive to the printed string. After D4: open the PR for the branch (Checkpoint 1).
+**All four items (IMP-D20, D3, A5, D4) are DONE, committed and pushed. Open the PR → then STOP at
+Checkpoint 1** (merging into `main` is user-gated; branch archival afterwards is Checkpoint 2).
+PR title: `fix(extras): checksum-sidecar parity + integrity-command coverage + push warning + resume-command flags — IMP-D20`.
+Nothing else on this branch is in flight. The deferred table below stays deferred unless the user says otherwise.
 
 ## Status
 | Item | Status | Commit | Tests | Notes |
@@ -30,7 +30,7 @@ differs). Purely additive to the printed string. After D4: open the PR for the b
 | **IMP-D20** — extras checksum-sidecar parity | done | `e995ec8` | extras 45✓ smoke 76✓ full 656✓ | master `<short_id>.sha256` at register + `checksums/` chunk sidecars at push + idempotent back-fill that survives the D19-B1 skip. Closes judge `DECISION.md` follow-up #2 |
 | **D3** — integrity commands extras-aware | done | `64fc8fa` | extras 59✓ smoke 76✓ full 670✓ | `verify_library`, `check`, `repair_dummies`, `verify_restore`, `local_status`. Reuses `_disk_shape`/`_status_disk_violation` verbatim. Live-verified on the REAL library: `extras: scanned 2, OK 2, MISMATCH 0` (no false positives on the user's archived Stranger Things extras) |
 | **A5** — `push --extras` silent no-op | done | `64fc8fa` | (same run) | `_push_title_extras_or_warn` at the 3 call sites where `--extras` is provably explicit; `push_title_extras` untouched so `replace_group` on an extras-less title stays silent |
-| **D4** — resume command drops extras | **in_progress** | — | — | Approved at the change-gate. Additive only: 2 `if` blocks appended after the existing `device` line in `_season_resume_cmd` (nested in `cmd_prep_push_rep_season`). Untouched: range math, O-1 mechanism, PONR, journal, `RollbackHardFail`. No existing test pins the current string (grepped, zero hits) |
+| **D4** — resume command drops extras | done | `2eb6d94` | extras 61✓ smoke 76✓ full 672✓ | Approved at the change-gate 2026-08-17 after being shown exactly what differs. Additive only: 2 `if` blocks appended after the existing `device` line in `_season_resume_cmd`. Untouched: range math, `.5`-episode handling, split/device reproduction, O-1 mechanism, PONR, journal, `RollbackHardFail`. **Change-gate regression pin added**: `test_season_resume_command_unchanged_without_extras` asserts the extras-less resume line is byte-for-byte the pre-existing format |
 
 ## Deferred — audit findings the user explicitly left for later
 Do NOT fix these without a new instruction; they were consciously deferred.

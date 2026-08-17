@@ -33,7 +33,9 @@ letter:
       NOT a violation; a missing dummy or a real file under an `archived`
       item IS); `push`/`push_group` warn when an explicit `--extras` meets a
       title with nothing registered, while `replace_group` on an extras-less
-      title stays silent
+      title stays silent; the season autopilot's printed resume command now
+      carries `--extras`/`--extras-size` (correctly quoted for a path with
+      spaces) and is BYTE-IDENTICAL to before when neither was supplied
 
 Fixtures are the documented ones (docs/testing-strategy.md §4): `sandbox_extras`
 (§4.9, inheriting `sandbox`'s dual LIBRARY_*/LOCAL_ROOT patch and its C:\\Media
@@ -1813,3 +1815,87 @@ def test_replace_group_on_an_extras_less_title_stays_silent(
     out = capsys.readouterr().out
 
     assert "extras" not in out.lower()
+
+
+def test_season_resume_command_carries_extras_flags_correctly_quoted(
+        sandbox, make_video, mock_device, fake_dummy, monkeypatch, capsys):
+    """(k) D4: the season autopilot's printed resume command must NOT silently
+    drop --extras/--extras-size — a user who copy-pastes it would otherwise
+    finish the season while leaving the extras un-pushed, with no warning. The
+    folder name deliberately contains a SPACE (real user data: "...\\Stranger
+    Things\\...") to prove the reconstructed --extras token survives quoting
+    as ONE argv token."""
+    base_id = "tv-en-2021-resumeextras-s01"
+    season_dir = sandbox["local_root"] / "Series" / "Stranger Things S01"
+    season_dir.mkdir(parents=True)
+    for n in (1, 2):
+        make_video(season_dir / f"ST.S01E0{n}.mkv", marker=f"ep{n}".encode())
+
+    extras_dir = season_dir / "Specials"
+    extras_dir.mkdir()
+    make_video(extras_dir / "BTS.mkv", marker=b"BTS\n")
+
+    ep2_id = f"{base_id}e02"
+    real_cmd_push = main.cmd_push
+
+    def _fake_push(mid, *a, **kw):
+        # Episode 1 pushes for real (against mock_device); episode 2 "fails"
+        # cleanly so the season stops mid-run and prints the resume line.
+        if mid == ep2_id:
+            return False
+        return real_cmd_push(mid, *a, **kw)
+
+    monkeypatch.setattr(main, "cmd_push", _fake_push)
+
+    main.cmd_prep_push_rep_season(
+        base_id, str(season_dir),
+        extras=[str(extras_dir)], extras_size=("SIZE_MB", "700"),
+        device_id="fakeserial",
+    )
+    out = capsys.readouterr().out
+
+    lines = [l for l in out.splitlines() if "Resume the rest of the season:" in l]
+    assert len(lines) == 1, out
+    resume_line = lines[0]
+
+    assert f'prep_push_rep_season {base_id} "{season_dir}"' in resume_line
+    assert "episodes 02-02" in resume_line
+    assert "device fakeserial" in resume_line
+    assert f'--extras "{extras_dir}"' in resume_line, resume_line
+    assert "--extras-size SIZE_MB 700" in resume_line
+
+
+def test_season_resume_command_unchanged_without_extras(
+        sandbox, make_video, mock_device, fake_dummy, monkeypatch, capsys):
+    """(k) D4 change-gate regression guard: when a season run has NO extras,
+    the resume command's format must be BYTE-IDENTICAL to before this fix —
+    no --extras/--extras-size tokens appear, and every pre-existing field
+    (id/folder/episodes/device) is in the exact same order/format as today."""
+    base_id = "tv-en-2021-resumeplain-s01"
+    season_dir = sandbox["local_root"] / "Series" / "PlainShow S01"
+    season_dir.mkdir(parents=True)
+    for n in (1, 2):
+        make_video(season_dir / f"PL.S01E0{n}.mkv", marker=f"ep{n}".encode())
+
+    ep2_id = f"{base_id}e02"
+    real_cmd_push = main.cmd_push
+
+    def _fake_push(mid, *a, **kw):
+        if mid == ep2_id:
+            return False
+        return real_cmd_push(mid, *a, **kw)
+
+    monkeypatch.setattr(main, "cmd_push", _fake_push)
+
+    main.cmd_prep_push_rep_season(base_id, str(season_dir), device_id="fakeserial")
+    out = capsys.readouterr().out
+
+    lines = [l for l in out.splitlines() if "Resume the rest of the season:" in l]
+    assert len(lines) == 1, out
+    resume_line = lines[0]
+
+    assert resume_line == (
+        f'   > Resume the rest of the season: prep_push_rep_season {base_id} "{season_dir}" '
+        f'episodes 02-02 device fakeserial'
+    )
+    assert "--extras" not in resume_line

@@ -7185,7 +7185,10 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
         """[ROLLBACK C] Reconstruct the resume command from the failing episode to
         the end of the (range-filtered) target_ids. Reproduces split_method/
         split_val/device_id/episode_range; handles .5 episodes. Messaging only
-        (C1 not merged → no progress file)."""
+        (C1 not merged → no progress file).
+        IMP-D4: also reproduces --extras/--extras-size when the run had them —
+        the season's extras still need pushing after a resume, and the printed
+        command must not silently drop them."""
         remaining = target_ids[failing_idx:]
         ep_nums = []
         for rid in remaining:
@@ -7204,6 +7207,12 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
             parts.append(f"episodes {ep_nums[0]}-{ep_nums[-1]}")
         if device_id:
             parts.append(f"device {device_id}")
+        if extras:
+            extras_joined = ";".join(extras)
+            parts.append(f'--extras "{extras_joined}"')
+        if extras_size:
+            e_method, e_val = extras_size
+            parts.append("--extras-size none" if e_method == "NONE" else f"--extras-size {e_method} {e_val}")
         return " ".join(parts)
 
     # [SPLIT-HASH] HARD DISK PRE-FLIGHT (Step 4). Episodes run SEQUENTIALLY with

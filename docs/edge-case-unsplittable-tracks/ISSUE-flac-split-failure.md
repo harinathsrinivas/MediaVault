@@ -66,30 +66,35 @@ At ~631 MB of a 62 556 971 814-byte file, the offending track is **~1 %** of the
 
 ## 3. Why the operator saw nothing useful
 
-This is the part worth fixing. `split_video_file` destroys the diagnosis twice over:
+> ✅ **Fixed by IMP-C19 (`1af16a3`).** This section records the state at the time of the incident. See
+> [`CODE-GAPS.md`](CODE-GAPS.md) Gap 1 for what shipped.
+
+At the time, `split_video_file` destroyed the diagnosis twice over:
 
 ```python
-# main.py:312-320
+# as it stood on 2026-08-24, before IMP-C19
     try:
         # Added stderr capture to output real error messages
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        chunks = sorted([os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".mkv")])
-        print(f"   > Done. Generated {len(chunks)} parts.")
-        return chunks
+        ...
     except subprocess.CalledProcessError as e:
         print(f"❌ Error running mkvmerge for splitting: {e}");
         return []
 ```
 
-| Loss | Where | Detail |
-|---|---|---|
-| **1. Wrong stream discarded** | `main.py:314` | mkvmerge writes its `Error:` lines to **stdout**, not stderr. `stdout=subprocess.DEVNULL` throws them away. |
-| **2. Captured stream never printed** | `main.py:318-320` | The handler prints `{e}` — the `CalledProcessError` repr, i.e. argv + exit code. `e.stderr` (which was captured, and was empty here anyway) is never shown. |
+| Loss | Detail |
+|---|---|
+| **1. Wrong stream discarded** | mkvmerge writes its `Error:` lines to **stdout**, not stderr. `stdout=subprocess.DEVNULL` threw them away. |
+| **2. Captured stream never printed** | The handler printed `{e}` — the `CalledProcessError` repr, i.e. argv + exit code. `e.stderr` (which *was* captured, and was empty here anyway) was never shown. |
 
-The comment at `main.py:313` — *"Added stderr capture to output real error messages"* — describes an
-intention that the code does not carry out. Confirmed empirically: running the same command through
+The comment — *"Added stderr capture to output real error messages"* — described an intention the code
+did not carry out. Confirmed empirically at the time: running the same command through
 `subprocess.run(..., capture_output=True)` puts the `Error:` line in `r.stdout` and leaves `r.stderr`
 empty.
+
+Both streams are now captured and echoed through `_print_mkvmerge_failure()` (`main.py:291`), from the
+split path at `main.py:388` and the merge path at `main.py:418`. The same failure today prints
+mkvmerge's own sentence naming track 4.
 
 ## 4. Red herrings — already ruled out, do not re-investigate
 
@@ -97,7 +102,7 @@ empty.
 
 The `-o` path in the failing argv reads `...A Tale of Two Sisters (2003) {{tmdb-4552}}\_parts\...` while the
 input path reads `{tmdb-4552}`. That asymmetry is **deliberate** — it is the libfmt escape installed at
-`main.py:304-310` and applied at `main.py:310`:
+`main.py:372-378` and applied at `main.py:378`:
 
 ```python
 mkv_out = output_pattern.replace("{", "{{").replace("}", "}}")
@@ -117,7 +122,7 @@ must NOT be added to plain merges, per `merge_video_files`.
 
 ### 4b. Not a disk-space failure
 
-The `_free_space_ok` pre-flight at `main.py:4643` passed, and it was right to: C: had ≈70.5 GiB free
+The `_free_space_ok` pre-flight at `main.py:4715` passed, and it was right to: C: had ≈70.5 GiB free
 against a 58.26 GiB source needing 1X for a deferred split. mkvmerge also failed *instantly*, before
 opening any output file — a space failure would surface partway through chunk N.
 
@@ -145,10 +150,11 @@ This is **not** a one-file oddity:
 - **Any** source carrying a FLAC track hits it. Lossless-wrapped European dub tracks (ita / ger / fre) are
   routine on BluRay REMUX releases, so the population of affected files in a media library is
   non-trivial and grows with every REMUX added.
-- **It always fails late and expensively.** `prep` runs first and completes: deep tech-spec scan plus a
-  whole-file SHA-256 of — in this case — 58 GiB. All of that work is done, then thrown away by the
-  rollback, before the split even attempts to start. The cheap check (reading the track list) happens
-  nowhere.
+- **It used to fail late and expensively.** `prep` runs first and completes: deep tech-spec scan plus a
+  whole-file SHA-256 of — in this case — 58 GiB. All of that work was done, then thrown away by the
+  rollback, before the split even attempted to start, because the cheap check (reading the track list)
+  happened nowhere. IMP-C20 (`e2b799c`) now performs exactly that check in `cmd_push` before splitting;
+  the waste that remains is the `prep` scan preceding it.
 - **Every split entry point is affected**, since they all funnel into `split_video_file`: `push`,
   `push_group`, `prep_push_rep`, `prep_push_rep_season`.
 - **No workaround exists inside mkvmerge.** All six split modes refuse identically — see
@@ -163,15 +169,22 @@ This is **not** a one-file oddity:
 
 | Layer | Status |
 |---|---|
-| **This file** | Remuxed with track 4 converted FLAC → WavPack (lossless, splittable), then archived normally. Procedure and verification: [`RUNBOOK-remux-before-split.md`](RUNBOOK-remux-before-split.md). |
-| **MediaVault code** | ❌ Not yet fixed. Three tiers proposed — surface mkvmerge's real output, pre-flight the track list before `prep`, auto-remux unsplittable tracks. See [`CODE-GAPS.md`](CODE-GAPS.md). |
+| **This file** | ✅ Remuxed with track 4 converted FLAC → WavPack (lossless, splittable), then archived normally. Procedure and verification: [`RUNBOOK-remux-before-split.md`](RUNBOOK-remux-before-split.md). |
+| **Diagnosis gap** | ✅ Closed by **IMP-C19** (`1af16a3`) — mkvmerge's own `Error:` line is now printed by both `split_video_file` and `merge_video_files`. Tests: `tests/test_mkvmerge_error_surfacing.py`. |
+| **Late-failure gap** | ✅ Closed by **IMP-C20** (`e2b799c`) — `cmd_push` probes the track list with `mkvmerge -J` and refuses up front, naming the track. Tests: `tests/test_unsplittable_preflight.py`. |
+| **Assisted remux** | ⏸️ Open, and **opt-in only** by user decision — MediaVault must never convert or drop a track on its own. [`CODE-GAPS.md`](CODE-GAPS.md) Gap 3. |
 
 ## 8. How to recognise this failure in future
 
-Any `❌ Error running mkvmerge for splitting: … returned non-zero exit status 2` with **no other detail**.
-Until [`CODE-GAPS.md`](CODE-GAPS.md) tier 1 lands, recover the real message by re-running the argv by hand
-and reading **stdout**:
+Since IMP-C19 the failure explains itself: mkvmerge's
+`Error: The track ID N … cannot be split.` is printed under the `❌` line. Since IMP-C20 you will
+usually not reach the split at all — `cmd_push` refuses first and names the track.
+
+To check a source before starting anything:
 
 ```powershell
 & "C:\Program Files\MKVToolNix\mkvmerge.exe" -J "<source.mkv>"     # cheap: list tracks, look for A_FLAC
 ```
+
+On an older build without IMP-C19, recover the real message by re-running the argv by hand and reading
+**stdout** rather than stderr.

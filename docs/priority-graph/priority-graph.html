@@ -111,7 +111,7 @@
   <a class="open" id="p-open" href="#" target="_blank" rel="noopener">Open task in tier file →</a>
 </div>
 
-<div class="footer">Generated 2026-06-27 · updated 2026-08-24 (C19/C20 done, R10 open — change-gated) · keep in sync with <code>PRIORITY.md</code> (see its maintenance protocol) · ~117 tasks</div>
+<div class="footer">Generated 2026-06-27 · updated 2026-08-24 (C19/C20 done, R10 open — change-gated) · keep in sync with <code>PRIORITY.md</code> (see its maintenance protocol) · 123 tasks</div>
 
 <script>
 /* ───────────────────────── TASK DATA — keep in sync with PRIORITY.md + improvements_tier*.md ─────────────────────────
@@ -161,7 +161,7 @@ const TASKS = [
  ["C17","fetch-session keep-alive","C","done","done","feature/fetch_session_keepalive: shared SessionExpiredError+check_session_alive (satisfies C6); daily warm_profiles.py keep-alive + Task Scheduler + Windows toast; single-flight fetch_session_lock"],
  ["C18","anime range-filter bug","C","done","done","Fixed fix/imp_c18_episode_range: shared mvcommon.episode_num_from_id (prefix-strip + anchored ^[eExX]?…) routes all 5 range-filter sites; glued …-s0202 now parses to ep 2 not 202; 0-via-range warns + suppresses the false COMPLETE banner"],
  ["C19","surface mkvmerge's real error","C","done","done","Fixed fix/imp_c19_c20_split_diagnostics (1af16a3): mkvmerge writes Error: to STDOUT, which split_video_file sent to DEVNULL while never printing the stderr it did capture — every split failure was a bare exit status 2 after a 62GB prep. Both split_video_file and merge_video_files now capture both streams and echo the reason (2026-08-24)"],
- ["C20","unsplittable-track pre-flight","C","done","done","Fixed fix/imp_c19_c20_split_diagnostics (e2b799c): mkvmerge cannot --split a FLAC track in ANY split mode; cmd_push now probes with mkvmerge -J and refuses up front, naming the track + runbook. Detect-and-stop ONLY — never converts or drops a track (user decision) (2026-08-24)"],
+ ["C20","unsplittable-track pre-flight","C","done","done","Fixed fix/imp_c19_c20_split_diagnostics (e2b799c): mkvmerge cannot --split a FLAC track in ANY split mode; both auto-pilots now probe with mkvmerge -J BEFORE their prep leg (and cmd_push again before the split), refusing up front and naming the track + runbook — gating only at push still wasted prep's deep scan + whole-file hash (follow-up 1b1a899). Detect-and-stop ONLY — never converts or drops a track (user decision) (2026-08-24)"],
  // D — commands
  ["D1","library_stats","D","high","todo","At-a-glance archive state; first thing a UI needs"],
  ["D2","fuzzy find","D","med","todo","Kill ID-recall friction/typos"],

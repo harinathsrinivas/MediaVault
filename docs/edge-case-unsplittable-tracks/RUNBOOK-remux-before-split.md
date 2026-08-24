@@ -13,11 +13,24 @@
 ## 1. Detect — before `prep`, not after
 
 `mkvmerge` cannot split a file containing certain audio codecs. It fails the
-whole `--split` run with exit status **2** and writes the reason to **stdout**
-(which `split_video_file` currently discards — see [`CODE-GAPS.md`](CODE-GAPS.md)
-Gap 1). There is no partial output; nothing is written.
+whole `--split` run with exit status **2** and writes the reason to **stdout**.
+There is no partial output; nothing is written.
 
-Run this **before** `prep`, on any file you intend to split:
+Since **IMP-C20** (`e2b799c`) `cmd_push` performs this detection for you: it
+probes the track list with `mkvmerge -J` before splitting and refuses up front,
+naming the offending track and pointing back at this runbook. And since
+**IMP-C19** (`1af16a3`) mkvmerge's own `Error:` line is printed rather than
+discarded, so even a split that does start explains itself if it fails.
+
+Since the IMP-C20 follow-up (`1b1a899`) both auto-pilots — `prep_push_rep` and
+`prep_push_rep_season` — run the same probe **before their prep leg**, so the
+refusal now lands before the deep scan and whole-file hash, not after. The
+season variant probes every episode in the folder, because `cmd_prep_season`
+hashes the whole season before the first push. `cmd_push` keeps its own check
+as the backstop for a plain `push` on an already-prepped entry.
+
+You therefore no longer *have* to detect this yourself. It is still useful when
+you are deciding what to do with a new file before touching MediaVault at all:
 
 ```
 mkvmerge -J "<file>"
@@ -27,11 +40,13 @@ Look at every `codec_id` in the `tracks` array. If any of them is on the ❌ lis
 in [`CODEC-SPLIT-MATRIX.md`](CODEC-SPLIT-MATRIX.md) — today that means
 **`A_FLAC`** — the split will fail.
 
-**Why before `prep` and not just "let it fail":** `prep` runs a deep tech-spec
-scan and a whole-file SHA-256 before `push` ever calls the splitter. On the
-62 GB incident file that was a long scan thrown away, and the auto-rollback then
-correctly reverted the library entry and the `uid` / `<short_id>.sha256`
-sidecars, so the whole thing had to be redone from scratch.
+**Why this ordering matters (the original failure):** `prep` runs a deep
+tech-spec scan and a whole-file SHA-256 before `push` ever calls the splitter.
+On the 62 GB incident file that was a long scan thrown away, and the
+auto-rollback then correctly reverted the library entry and the `uid` /
+`<short_id>.sha256` sidecars, so the whole thing had to be redone from scratch.
+The first IMP-C20 commit only gated at `push`, which did not fix that — the
+follow-up moved the gate ahead of `prep`, which is what actually closes it.
 
 A one-liner for the common case:
 
@@ -162,7 +177,7 @@ Only after (a), (b) and (c) look right do you delete the original.
 
 **You cannot hold the original, the remux, and the chunks at the same time.**
 Each is ~1X the file size, and `cmd_push`'s `_free_space_ok` preflight
-(`main.py:4643`) will hard-stop the split if the volume cannot take another 1X
+(`main.py:4715`) will hard-stop the split if the volume cannot take another 1X
 plus a `max(1%, 2 GB)` buffer.
 
 Numbers from the incident machine on 2026-08-24 — source **62,556,971,814 B**,

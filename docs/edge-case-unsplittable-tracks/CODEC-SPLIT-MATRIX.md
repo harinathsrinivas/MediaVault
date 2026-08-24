@@ -31,7 +31,7 @@ An unsplittable-track failure is **exit 2** with `Error: The track ID <N> … ca
 Do not confuse it with:
 
 - **exit 3** — `fmt::v11::format_error: argument not found`, the libfmt brace bug handled by the escape at
-  `main.py:304-310`. Different failure, different cause. See [`ISSUE-flac-split-failure.md` §4a](ISSUE-flac-split-failure.md).
+  `main.py:372-378`. Different failure, different cause. See [`ISSUE-flac-split-failure.md` §4a](ISSUE-flac-split-failure.md).
 - **exit 2** with `Error: The type of file … could not be recognized` — a broken/invalid input, not a split
   limitation. This is exactly what the failed TrueHD encode produced.
 
@@ -57,8 +57,9 @@ There is no mkvmerge flag that overrides it. The only remedies are to **convert*
 ## 3. Reproducing this table
 
 Run this after any MKVToolNix upgrade to refresh the matrix. It builds a throwaway MKV per codec and
-reports rc + the first `Error:` line — **read stdout, not stderr**, which is the same trap that hid the
-original incident (`main.py:314`).
+reports rc + the first `Error:` line — **read stdout, not stderr**. Reading the wrong stream is the trap
+that hid the original incident; in `main.py` itself that is fixed (IMP-C19, `1af16a3`), but any ad-hoc
+script like the one below has to get it right on its own.
 
 ```python
 import subprocess, os, glob, tempfile

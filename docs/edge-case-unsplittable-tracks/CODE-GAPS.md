@@ -1,11 +1,17 @@
 # Code Gaps — what the unsplittable-track incident exposed
 
-> **Status: NOT implemented. NOT registered as IMP tasks.** Nothing in this
-> document has been built, and no `IMP-XN` code has been assigned to any of it.
-> Registering these would mean a tier-file entry plus the
-> [`improvements/PRIORITY.md`](../../improvements/PRIORITY.md) +
-> [`priority-graph.html`](../priority-graph/priority-graph.html) update that
-> [`CLAUDE.md`](../../CLAUDE.md) requires — that decision is still open.
+> **Status as of 2026-08-24 — registered, two of three shipped.**
+>
+> | Gap | Code | State |
+> |---|---|---|
+> | 1 — split failure undiagnosable | **IMP-C19** | ✅ done — `1af16a3` |
+> | 2 — no unsplittable-track preflight | **IMP-C20** | ✅ done — `e2b799c` |
+> | 3 — assisted remux | **IMP-C20**'s follow-on | ⏸️ open, deliberately **opt-in only** (see below) |
+>
+> A fourth, unrelated bug surfaced during the same archival run — a transient lock
+> on the rollback journal during `cmd_replace`'s point-of-no-return write — and is
+> tracked separately as **IMP-R10**. It is **not fixed** and its fix is
+> change-gated: [`../edge-case-replace-ponr-journal-lock/README.md`](../edge-case-replace-ponr-journal-lock/README.md).
 >
 > Written 2026-08-24 from the `mov-kor-2003-ataleoftwosisters` incident.
 > Background: [`ISSUE-flac-split-failure.md`](ISSUE-flac-split-failure.md) ·
@@ -14,74 +20,102 @@
 
 ---
 
-## Gap 1 — the split failure is undiagnosable
+## Gap 1 — the split failure was undiagnosable — ✅ IMP-C19 (`1af16a3`)
 
-**Severity: high. Effort: two lines.** This is the gap that turned a one-line
+**Severity was: high. Effort: two lines.** This is the gap that turned a one-line
 explanation into a multi-hour investigation.
 
-`mkvmerge` writes its `Error:` lines to **stdout**, not stderr. `split_video_file`
-sends stdout to `DEVNULL` and captures a stderr that is then never read:
+**What was wrong.** `mkvmerge` writes its `Error:` lines to **stdout**, not stderr.
+`split_video_file` sent stdout to `DEVNULL` and captured a stderr that was then
+never read:
 
 ```python
-# main.py:313-320
+# as it stood before IMP-C19
         # Added stderr capture to output real error messages
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        chunks = sorted([os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".mkv")])
-        print(f"   > Done. Generated {len(chunks)} parts.")
-        return chunks
+        ...
     except subprocess.CalledProcessError as e:
         print(f"❌ Error running mkvmerge for splitting: {e}");
         return []
 ```
 
-Three defects stacked:
-
-1. `main.py:314` — `stdout=subprocess.DEVNULL` discards the only stream that
-   carries the diagnosis.
-2. `main.py:318-320` — the handler prints the `CalledProcessError` repr (argv +
-   exit code) and never touches the captured `e.stderr`.
-3. `main.py:313` — the comment claims the opposite of what the code does.
-
-Net effect for the operator: `returned non-zero exit status 2` and nothing else.
-The message that was thrown away was
+Three defects stacked: `stdout=subprocess.DEVNULL` discarded the only stream
+carrying the diagnosis; the handler printed the `CalledProcessError` repr (argv +
+exit code) and never touched the captured `e.stderr`; and the comment claimed the
+opposite of what the code did. Net effect for the operator:
+`returned non-zero exit status 2` and nothing else. The message thrown away was
 `Error: The track ID 4 from the file '…' cannot be split. Splitting tracks of this type is not supported.`
 
-**`merge_video_files` has the identical defect, and it is worse there.**
-`main.py:342` is `subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)` —
-stdout discarded and stderr not even captured — with the handler at
-`main.py:345-347` printing only the repr. A merge failure happens during
-**restore**, i.e. when the local master is already a dummy and the chunks are
-the only copy. That is the single worst moment in the system to be blind.
+`merge_video_files` had the identical defect and it was worse there — stdout
+discarded and stderr not even captured. A merge failure happens during
+**restore**, i.e. when the local master is already a dummy and the chunks are the
+only copy. That is the single worst moment in the system to be blind.
 
-**Fix:** capture both streams (`capture_output=True`) and echo them on failure,
-in both functions. Keep the happy path silent.
+**What shipped.** Both call sites now run mkvmerge with
+`stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True` and, on
+`CalledProcessError`, hand the exception to the new `_print_mkvmerge_failure(e)`
+helper (`main.py:291`), called at `main.py:388` (split) and `main.py:418`
+(merge). The helper prints every `Error:`/`Warning:` line found in either stream
+and falls back to the last three non-blank lines when mkvmerge died without one —
+which is what the libfmt exit-3 crash does (`terminate called … format_error`).
+Bytes streams are decoded defensively so reporting can never raise on top of the
+failure it is reporting. Happy paths are untouched: nothing extra is printed when
+mkvmerge exits 0.
+
+**Tests:** `tests/test_mkvmerge_error_surfacing.py` — 5 cases, including the
+libfmt tail fallback and the bytes-stream guard.
 
 ---
 
-## Gap 2 — no preflight for unsplittable tracks
+## Gap 2 — no preflight for unsplittable tracks — ✅ IMP-C20 (`e2b799c`)
 
-**Severity: medium. Effort: small.**
+**Severity was: medium. Effort: small.**
 
-Nothing checks whether the source *can* be split before the pipeline commits to
-splitting it. The failure therefore lands in `push`, after `prep` has already
-spent a deep tech-spec scan and a whole-file SHA-256 on a 62 GB file — all of
-which auto-rollback then correctly discards.
+**What was wrong.** Nothing checked whether the source *could* be split before the
+pipeline committed to splitting it. The failure therefore landed in `push`, after
+`prep` had already spent a deep tech-spec scan and a whole-file SHA-256 on a 62 GB
+file — all of which auto-rollback then correctly discarded.
 
-**Fix:** scan with `mkvmerge -J` and hard-stop if any track's `codec_id` is on
-the unsplittable list (see [`CODEC-SPLIT-MATRIX.md`](CODEC-SPLIT-MATRIX.md)),
-with a message that names the track and points at the runbook:
+**What shipped.** A conservative registry and a header-only probe:
+
+- `UNSPLITTABLE_CODEC_IDS = {"A_FLAC"}` (`main.py:249`) — **measured entries only**.
+  A false positive would block a legitimate archive, whereas a miss now merely
+  costs the legible post-IMP-C19 error at split time. TrueHD is suspected but
+  untested and deliberately stays out until measured
+  ([`CODEC-SPLIT-MATRIX.md`](CODEC-SPLIT-MATRIX.md) §1).
+- `find_unsplittable_tracks(input_path)` (`main.py:252`) — runs `mkvmerge -J` and
+  returns `[(track_id, codec_id, language), …]`. Returns `[]` on **any** probe
+  failure (missing binary, unreadable file, unparseable JSON): a probe that cannot
+  run must never block an archive on its own.
+- The call site (`main.py:4735`) sits immediately before `> ✂️ Splitting...`,
+  alongside the existing `_free_space_ok` preflight (`main.py:4715`) — read-only,
+  **before** any `makedirs` or journal record, so the abort is a clean early return
+  with nothing to roll back. The tests assert zero journal records at abort. The
+  resume branch never reaches it, so a pre-existing `_parts/` is unaffected.
+
+What the operator now sees instead of a bare exit code:
 
 ```
-❌ Track 4 (A_FLAC, ita) cannot be split by mkvmerge.
-   See docs/edge-case-unsplittable-tracks/RUNBOOK-remux-before-split.md
+❌ Cannot split mov-kor-2003-ataleoftwosisters — mkvmerge cannot split these tracks:
+     • track 4 (A_FLAC, ita)
+   Remux the track to a splittable codec first — WavPack is lossless
+   and splits fine; dropping the track also works if you don't want it.
+   Runbook: docs/edge-case-unsplittable-tracks/RUNBOOK-remux-before-split.md
 ```
 
-**Where:** alongside the existing `_free_space_ok` preflight in `cmd_push`
-(`main.py:4643`). That call site is the established pattern for this shape of
-check — a read-only test that runs **before** any `makedirs` or journal record,
-so it is a clean early return with nothing to roll back, exactly as the
-`[SPLIT-HASH] HARD DISK PRE-FLIGHT` comment block describes. Ideally the same
-check also runs at `prep` time so the scan is never wasted.
+It names the track and hands over the procedure. It does **not** convert or drop
+anything — see Gap 3.
+
+**Tests:** `tests/test_unsplittable_preflight.py` — 7 cases, including the
+clean-early-return assertions and a guard that the registry stays conservative.
+
+**Closed by the follow-up (`1b1a899`).** The first IMP-C20 commit gated only at
+`push`, which still let `prep_push_rep` spend its deep scan and whole-file hash
+first — the exact waste this gap was about. Both auto-pilots now run
+`refuse_if_unsplittable()` before their prep leg (`main.py:7181` and
+`main.py:7244`), the season variant across every episode in the folder, and
+`cmd_push` keeps its check (`main.py:4735`) as the backstop for a plain `push`
+on an already-prepped entry. Both gates no-op when no split was requested.
 
 ---
 
@@ -100,7 +134,8 @@ Status: scoped down by user decision, 2026-08-24.**
 > types — e.g. `push <id> SIZE_MB 6000 --remux-unsplittable=wavpack` — with no
 > default-on behaviour, no config flag that silently arms it, and no fallback path
 > that reaches for it when a split fails. Absent the flag, the correct behaviour is
-> Gap 2: stop, name the track, print the command, and let the operator run it.
+> what IMP-C20 now ships: stop, name the track, print the runbook, and let the
+> operator decide.
 
 Scoped that way, the feature is: when the operator passes the flag, transcode
 **only** the named track into a temp file, split that, and record the substitution
@@ -133,7 +168,8 @@ up alone:**
 ## Applies to all three
 
 - **Smoke gate.** `pytest tests/smoke -q` must be green before any of these
-  ship, and before committing any code-touching step.
+  ship, and before committing any code-touching step. IMP-C19 and IMP-C20 each
+  cleared it (76/76) plus the full suite (683/683) before commit.
 - **`ENTRY_TYPE_KEYS` guard.** Gap 3 adds fields to `split_info`; if that
   introduces or renames a shared data-field name, `main.py`'s `ENTRY_TYPE_KEYS`
   registry and `tests/test_entry_schema_guard.py` must be updated in the same
@@ -144,5 +180,7 @@ up alone:**
   and [`docs/feature-auto-rollback/ROLLBACK_MECHANISM.md`](../feature-auto-rollback/ROLLBACK_MECHANISM.md)
   §10 before starting.
 
-Gaps 1 and 2 are independent of each other and of Gap 3, and can ship separately
-in either order. Gap 1 is the highest value per line of code in the set.
+Gaps 1 and 2 were independent of each other and of Gap 3, and shipped separately
+in that order (`1af16a3`, then `e2b799c`). Gap 1 was the highest value per line of
+code in the set. Gap 3 remains open and is gated on the user's opt-in decision
+above; IMP-R10 remains open and is gated on the rollback change-gate.

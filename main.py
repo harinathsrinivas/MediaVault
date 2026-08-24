@@ -269,6 +269,25 @@ def find_unsplittable_tracks(input_path):
             if t.get("properties", {}).get("codec_id") in UNSPLITTABLE_CODEC_IDS]
 
 
+def refuse_if_unsplittable(input_path, label):
+    """[IMP-C20] Shared gate: print the refusal and return True when `input_path`
+    carries a track mkvmerge cannot split. Callers abort on True.
+
+    Used both by cmd_push (immediately before the split) and by the autopilots
+    BEFORE their prep leg — the prep leg is the expensive one (deep scan +
+    whole-file hash), so refusing only at push time would still burn it."""
+    bad = find_unsplittable_tracks(input_path)
+    if not bad:
+        return False
+    print(f"❌ Cannot split {label} — mkvmerge cannot split these tracks:")
+    for tid, codec, lang in bad:
+        print(f"     • track {tid} ({codec}, {lang})")
+    print("   Remux the track to a splittable codec first — WavPack is lossless")
+    print("   and splits fine; dropping the track also works if you don't want it.")
+    print("   Runbook: docs/edge-case-unsplittable-tracks/RUNBOOK-remux-before-split.md")
+    return True
+
+
 def _print_mkvmerge_failure(e):
     """[IMP-C19] Echo mkvmerge's own diagnosis after a non-zero exit.
 
@@ -4713,14 +4732,7 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             # clean early return. MediaVault deliberately does NOT convert or drop the
             # track itself: that is an irreversible quality decision about what becomes
             # the only surviving copy, and it stays the operator's to make.
-            unsplittable = find_unsplittable_tracks(local_file_path)
-            if unsplittable:
-                print(f"❌ Cannot split {manual_id} — mkvmerge cannot split these tracks:")
-                for tid, codec, lang in unsplittable:
-                    print(f"     • track {tid} ({codec}, {lang})")
-                print("   Remux the track to a splittable codec first — WavPack is lossless")
-                print("   and splits fine; dropping the track also works if you don't want it.")
-                print("   Runbook: docs/edge-case-unsplittable-tracks/RUNBOOK-remux-before-split.md")
+            if refuse_if_unsplittable(local_file_path, manual_id):
                 return False
             print(f"   > ✂️ Splitting...")
             # [ROLLBACK C] Journal the dir creations (this run only) BEFORE makedirs.
@@ -7162,6 +7174,14 @@ def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, de
     # a true one-shot — cmd_prep does the scan+merge (register), and the push+replace
     # phase below then has an extras block to work on. Without this the trailing
     # push_title_extras/replace_title_extras pair silently no-ops on a fresh title.
+    # [IMP-C20] Gate BEFORE prep, not just before the split. cmd_push refuses a
+    # file mkvmerge cannot split, but by then STEP 1 has already deep-scanned and
+    # whole-file hashed the master — 62 GB of wasted work on the incident file.
+    # Only meaningful when a split was actually requested.
+    if split_method and split_val and refuse_if_unsplittable(filepath, manual_id):
+        print("   Nothing was prepped — the library is untouched.")
+        return
+
     print("\n>>> STEP 1: PREP")
     if not cmd_prep(manual_id, filepath, extras=extras, extras_size=extras_size):
         print("❌ Auto-Pilot Aborted: Prep failed.")
@@ -7213,6 +7233,20 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
     # episode loop — the per-episode cmd_prep calls never receive `extras` — so this
     # run registers the folders exactly once and the extras phase below can upload
     # them.
+    # [IMP-C20] Same pre-prep gate, across the whole season. cmd_prep_season
+    # scans+hashes EVERY episode before the first push runs, so one unsplittable
+    # episode would otherwise waste the entire season's prep. The enumeration
+    # mirrors cmd_prep_season's exactly so the two cannot disagree.
+    if split_method and split_val:
+        blocked = False
+        for fn in sorted([f for f in os.listdir(folder_path)
+                          if f.lower().endswith(VIDEO_EXTENSIONS)]):
+            if refuse_if_unsplittable(os.path.join(folder_path, fn), fn):
+                blocked = True
+        if blocked:
+            print("   Nothing was prepped — the library is untouched.")
+            return
+
     print("\n>>> STEP 1: PREP SEASON")
     cmd_prep_season(base_id, folder_path, extras=extras, extras_size=extras_size)
 

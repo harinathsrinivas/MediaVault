@@ -5,9 +5,13 @@ refuses it (see `docs/edge-case-unsplittable-tracks/CODEC-SPLIT-MATRIX.md`).
 Before this preflight the failure landed at split time, i.e. AFTER prep had
 deep-scanned and whole-file hashed the master (62 GB on the incident file).
 
-`cmd_push` now probes with `mkvmerge -J` first and returns cleanly, naming the
-offending track. It deliberately does NOT convert or drop the track — that is
-an irreversible quality decision reserved for the operator.
+Both autopilots (`prep_push_rep`, `prep_push_rep_season`) now probe with
+`mkvmerge -J` BEFORE their prep leg, and `cmd_push` probes again before the
+split itself. Gating only at push time would be too late — prep is the leg that
+spends the deep scan and the whole-file hash.
+
+It deliberately does NOT convert or drop the track — that is an irreversible
+quality decision reserved for the operator.
 
 CI-safe: no real mkvmerge needed.
 """
@@ -150,3 +154,71 @@ def test_clean_file_still_splits(sandbox, sandbox_entry, mock_device, monkeypatc
     main.cmd_push(sandbox_entry["entry_id"], "SIZE_MB", "1")
 
     assert calls, "the split must still be attempted when the probe finds nothing"
+
+
+# --------------------------------------------------------------------------
+# the autopilots — the gate must fire BEFORE the expensive prep leg
+# --------------------------------------------------------------------------
+
+def test_autopilot_refuses_before_prep(tmp_path, monkeypatch, capsys):
+    """cmd_push alone is too late: prep_push_rep deep-scans and whole-file hashes
+    the master at STEP 1, so refusing at push time still burns it (62 GB on the
+    incident file). The gate must precede prep entirely."""
+    src = tmp_path / "movie.mkv"
+    src.write_bytes(THREE_MB)
+    monkeypatch.setattr(main, "find_unsplittable_tracks", lambda p: [(4, "A_FLAC", "ita")])
+    called = []
+    monkeypatch.setattr(main, "cmd_prep", lambda *a, **k: called.append("prep") or True)
+    monkeypatch.setattr(main, "cmd_push", lambda *a, **k: called.append("push") or True)
+
+    main.cmd_prep_push_rep("mov-x", str(src), "SIZE_MB", "1")
+
+    assert called == [], "neither prep nor push may run"
+    out = capsys.readouterr().out
+    assert "track 4" in out and "A_FLAC" in out
+    assert "Nothing was prepped" in out
+
+
+def test_autopilot_not_gated_when_no_split_requested(tmp_path, monkeypatch):
+    """An unsplittable track is only a problem if we intend to split. A plain
+    unsplit archive of the same file is perfectly fine and must not be blocked."""
+    src = tmp_path / "movie.mkv"
+    src.write_bytes(THREE_MB)
+    probed = []
+    monkeypatch.setattr(main, "find_unsplittable_tracks",
+                        lambda p: probed.append(p) or [(4, "A_FLAC", "ita")])
+    called = []
+    monkeypatch.setattr(main, "cmd_prep", lambda *a, **k: called.append("prep") or False)
+
+    main.cmd_prep_push_rep("mov-x", str(src))
+
+    assert called == ["prep"], "no split requested -> the gate must not fire"
+    assert probed == [], "and it should not even probe"
+
+
+def test_season_autopilot_refuses_before_prep_season(tmp_path, monkeypatch, capsys):
+    """cmd_prep_season hashes EVERY episode before the first push, so one bad
+    episode would waste the whole season's prep."""
+    folder = tmp_path / "Season 01"
+    folder.mkdir()
+    (folder / "ep01.mkv").write_bytes(THREE_MB)
+    (folder / "ep02.mkv").write_bytes(THREE_MB)
+    (folder / "notes.txt").write_text("ignored")
+
+    seen = []
+
+    def _probe(path):
+        seen.append(path)
+        return [(4, "A_FLAC", "ita")] if path.endswith("ep02.mkv") else []
+
+    monkeypatch.setattr(main, "find_unsplittable_tracks", _probe)
+    called = []
+    monkeypatch.setattr(main, "cmd_prep_season", lambda *a, **k: called.append("prep_season"))
+
+    main.cmd_prep_push_rep_season("tv-x-s01", str(folder), "SIZE_MB", "1")
+
+    assert called == [], "prep_season must not run"
+    assert len(seen) == 2, f"both episodes probed, non-video skipped: {seen}"
+    out = capsys.readouterr().out
+    assert "ep02.mkv" in out, "the offending episode must be named"
+    assert "Nothing was prepped" in out

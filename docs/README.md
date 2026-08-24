@@ -107,6 +107,17 @@ history only on archived branch tags — these folders are the readable record).
 | `feature-extras/` | IMP-D19 (in flight on `feature/imp_d19_extras`, from 2026-06-29) — bonus content (`Specials\`/`Extra\`/`Trailers\`) gets the full push→dummy→fetch→restore lifecycle | `PLAN.md`, `DECISIONS.md` (locked Cards A–E: the A2 grouped JSON shape, the `--extras`/`--extras-size` CLI, flag-only `--fetchExtras`, the D1 full lifecycle, E1 additive rollback), `PROGRESS.md` (the per-step execution journal that makes the build cross-session resumable) |
 | `feature-fable-review/` | THIS review session | see §3 |
 
+## 5b. Operational edge-case dossiers (`docs/edge-case-*/`)
+
+Real archival runs that failed in ways worth remembering — an external tool's limitation, a
+media-format quirk, or a genuine MediaVault bug that only a live 60 GB run surfaces. Each folder
+records the incident, the measured facts, the recovery procedure, and any code gap left open.
+
+| Folder | Edge case | Key files |
+|---|---|---|
+| [`edge-case-unsplittable-tracks/`](edge-case-unsplittable-tracks/README.md) | 2026-08-24 — **`mkvmerge` cannot `--split` a FLAC track**; the real error is discarded by `split_video_file`, so it surfaces as a bare `exit status 2` *after* a full prep. Fix: remux the track to WavPack (lossless, splittable) first | `README.md`, `ISSUE-flac-split-failure.md`, `CODEC-SPLIT-MATRIX.md` (measured per-codec + per-split-mode tables), `RUNBOOK-remux-before-split.md`, `CODE-GAPS.md` (3 unimplemented tiers) |
+| [`edge-case-replace-ponr-journal-lock/`](edge-case-replace-ponr-journal-lock/README.md) | 2026-08-24 — **a transient lock on `.mediavault_txn.json` during `cmd_replace`'s PONR write is misread as a locked media file** and retried as though the master rename had not happened, ending in a spurious `IRREVERSIBLE` banner. No data loss — the two-rename pattern, the C9 stale sweep and `recover` self-healed it. Proposed fix is **change-gated** (`mark_point_of_no_return()` placement) | `README.md` (incident, root cause, the 4-step recovery procedure, gated fix proposal) |
+
 ## 6. Agent-pipeline docs (`.claude/`)
 
 `agents/*.md` (8 agent definitions: planner, orchestrator, executors ×3, git-agent, judge,

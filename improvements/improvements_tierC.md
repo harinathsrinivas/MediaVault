@@ -341,3 +341,37 @@
 - Workaround until fixed: fetch per-episode by full child id (`python main.py fetch_restore ani-ja-2013-kurokosbasketball-s0202`), or use the glued numbers as the range (`episodes 202-203`) — the latter RELIES on the bug and will stop working once it is fixed.
 - If skipped: every range-based anime season fetch/restore for the `sSSEE` ID format silently no-ops while reporting success — users believe episodes were fetched/restored when nothing happened, and only notice later when the files are missing.
 - Status: done (fix/imp_c18_episode_range — shared mvcommon.episode_num_from_id (prefix-strip + anchored ^[eExX]?(\d+(?:\.\d+)?)$) routes all 5 range-filter sites so glued sSSEE ids like …-s0202 parse to episode 2 not 202; 0-via-range now warns + suppresses the false ✅✅✅ auto-pilot banner; tests in tests/test_episode_range_filter.py + smoke sSSEE cases)
+
+---
+
+## IMP-C19: mkvmerge failures are undiagnosable — its error text is discarded
+
+- Category: bug
+- Priority: high (Band 0 — a failure with no recoverable cause, after expensive work)
+- Files: `main.py` — `split_video_file` (the `subprocess.run` + `CalledProcessError` handler), `merge_video_files` (same defect) · found 2026-08-24 archiving `mov-kor-2003-ataleoftwosisters`
+- Current behavior: mkvmerge writes its `Error:` / `Warning:` lines to **stdout**, not stderr. `split_video_file` ran it with `stdout=subprocess.DEVNULL` and, although it passed `stderr=subprocess.PIPE`, the handler printed only `f"...: {e}"` — the `CalledProcessError` repr — and never touched `e.stderr`. The diagnosis was therefore destroyed twice over, and a real archival run surfaced as nothing but `Command '[...]' returned non-zero exit status 2`, *after* prep had already deep-scanned and whole-file hashed a 62 GB master. The in-code comment claimed the opposite ("Added stderr capture to output real error messages"). `merge_video_files` had the same defect with no stderr capture at all — worse, because a merge failure happens during **restore**, when the chunks are the only surviving copy.
+- Proposed change: capture both streams at both call sites and echo mkvmerge's own diagnosis on failure via one shared helper — the named `Error:`/`Warning:` lines, falling back to the output tail when mkvmerge dies without one (the libfmt exit-3 crash prints only `terminate called ... fmt::v11::format_error`). Success paths print nothing new.
+- Rationale: without this, every mkvmerge-side failure — unsplittable codec, permissions, disk, corrupt input — is indistinguishable at the console. The 2026-08-24 incident cost a full 62 GB prep plus a manual re-run of the command by hand just to read the one line mkvmerge had already printed.
+- Goal: any non-zero mkvmerge exit prints the reason mkvmerge gave.
+- Effort estimate: small
+- Risk: low — reporting-only; no behavior change on success.
+- If skipped: every future mkvmerge failure costs a manual reproduction to learn its cause.
+- Status: done (fix/imp_c19_c20_split_diagnostics, commit `1af16a3` — `_print_mkvmerge_failure()` helper wired into both `split_video_file` and `merge_video_files`; both now capture stdout+stderr with `text=True`; tests in `tests/test_mkvmerge_error_surfacing.py` (5 cases incl. the libfmt tail fallback and a bytes-stream guard); smoke 76/76, suite 683/683). Incident: `docs/edge-case-unsplittable-tracks/`.
+
+---
+
+## IMP-C20: no pre-flight for tracks mkvmerge cannot split (FLAC) — fails after a full prep
+
+- Category: bug
+- Priority: high (Band 0 — wastes an entire prep, and recurs on a whole class of sources)
+- Files: `main.py` — `cmd_push` (the split branch, alongside the `_free_space_ok` pre-flight) · found 2026-08-24
+- Current behavior: mkvmerge **cannot** `--split` a file containing a FLAC audio track, and refuses identically across every split mode — `size:`, `duration:`, `timestamps:`, `parts:`, `chapters:`, `frames:` (all six measured; see `docs/edge-case-unsplittable-tracks/CODEC-SPLIT-MATRIX.md`). The refusal lives in the FLAC packetizer, so no flag overrides it and no alternative split strategy exists. `cmd_push` discovered this only when the split ran — after `prep` had deep-scanned and hashed the master. On the incident file (62.5 GB, Italian FLAC dub in a DV P7 BD remux) that was a fully wasted run, rolled back cleanly but repeated on every retry. Neither of the tempting escapes is available: an unsplit push exceeds the ~10 GB Google Photos per-video cap, and raw byte-splitting produces fragments Photos will not ingest — chunks must stay valid playable MKVs.
+- Proposed change: probe with a header-only `mkvmerge -J` before splitting; if any track's codec id is on a measured unsplittable list, stop and name the track(s) plus the runbook path. Place it with the existing `_free_space_ok` check — read-only, before `makedirs`/journal records, so it is a clean pre-PONR early return with nothing to roll back. The resume branch (existing `_parts/`) never reaches it.
+- **Deliberately NOT auto-fixed** (user decision, 2026-08-24): MediaVault must never convert or drop a track on its own. A codec change is permanent and irreversible against what becomes the only surviving copy once `replace` swaps in the dummy. The command tells the operator what to do; the operator decides what and when. Assisted remux, if ever built, is explicit opt-in only — see `docs/edge-case-unsplittable-tracks/CODE-GAPS.md` Gap 3.
+- Rationale: the failure is deterministic and detectable from the file header in milliseconds, but was only discovered after the most expensive step in the pipeline.
+- Goal: a file with an unsplittable track is refused before `prep` work is spent, naming the track and the fix.
+- Effort estimate: small
+- Risk: low — a false positive would block a legitimate archive, so the registry stays conservative (only measured codecs; a probe failure returns empty rather than blocking).
+- If skipped: every FLAC-bearing source — common on European remuxes with lossless-wrapped dubs — burns a full prep before failing.
+- Follow-up (not done): the group/season pre-flights (`cmd_push_group`, `cmd_prep_push_rep_season`) still only pre-check disk space, so a batch learns about an unsplittable track at that item's turn rather than up front. Adding the probe to the batch pre-flight would surface it for the whole run.
+- Status: done (fix/imp_c19_c20_split_diagnostics, commit `e2b799c` — `UNSPLITTABLE_CODEC_IDS = {"A_FLAC"}` + `find_unsplittable_tracks()` probe + `cmd_push` early return; TrueHD suspected but deliberately excluded as unmeasured; tests in `tests/test_unsplittable_preflight.py` (7 cases, incl. asserting zero journal records at abort); smoke 76/76, suite 683/683). Incident + measured matrix: `docs/edge-case-unsplittable-tracks/`.

@@ -111,7 +111,7 @@
   <a class="open" id="p-open" href="#" target="_blank" rel="noopener">Open task in tier file →</a>
 </div>
 
-<div class="footer">Generated 2026-06-27 · keep in sync with <code>PRIORITY.md</code> (see its maintenance protocol) · ~114 tasks</div>
+<div class="footer">Generated 2026-06-27 · updated 2026-08-24 (C19/C20 done, R10 open — change-gated) · keep in sync with <code>PRIORITY.md</code> (see its maintenance protocol) · ~117 tasks</div>
 
 <script>
 /* ───────────────────────── TASK DATA — keep in sync with PRIORITY.md + improvements_tier*.md ─────────────────────────
@@ -160,6 +160,8 @@ const TASKS = [
  ["C16","anime fetch profile","C","done","done","Fixed fix/anime_fetch_profile: 3rd Chrome profile anime->ChromeProfile_Anime; data-driven mainfetch.ID_PREFIX_PROFILE + profile_for_id(); ani-* routes anime account (was series); external config deferred to IMP-A5"],
  ["C17","fetch-session keep-alive","C","done","done","feature/fetch_session_keepalive: shared SessionExpiredError+check_session_alive (satisfies C6); daily warm_profiles.py keep-alive + Task Scheduler + Windows toast; single-flight fetch_session_lock"],
  ["C18","anime range-filter bug","C","done","done","Fixed fix/imp_c18_episode_range: shared mvcommon.episode_num_from_id (prefix-strip + anchored ^[eExX]?…) routes all 5 range-filter sites; glued …-s0202 now parses to ep 2 not 202; 0-via-range warns + suppresses the false COMPLETE banner"],
+ ["C19","surface mkvmerge's real error","C","done","done","Fixed fix/imp_c19_c20_split_diagnostics (1af16a3): mkvmerge writes Error: to STDOUT, which split_video_file sent to DEVNULL while never printing the stderr it did capture — every split failure was a bare exit status 2 after a 62GB prep. Both split_video_file and merge_video_files now capture both streams and echo the reason (2026-08-24)"],
+ ["C20","unsplittable-track pre-flight","C","done","done","Fixed fix/imp_c19_c20_split_diagnostics (e2b799c): mkvmerge cannot --split a FLAC track in ANY split mode; cmd_push now probes with mkvmerge -J and refuses up front, naming the track + runbook. Detect-and-stop ONLY — never converts or drops a track (user decision) (2026-08-24)"],
  // D — commands
  ["D1","library_stats","D","high","todo","At-a-glance archive state; first thing a UI needs"],
  ["D2","fuzzy find","D","med","todo","Kill ID-recall friction/typos"],
@@ -228,6 +230,7 @@ const TASKS = [
  ["R7","crash-re-run auto-recovers the journal","R","done","done","RollbackJournal.__init__ auto-recovers pre-PONR leftover; preserves post-PONR leftover timestamped (IMP-R7, 2026-06-27)"],
  ["R8","journal eager temp","R","low","decision","Eager rehash temp unjournalled (disk leak on crash)"],
  ["R9","prep_season alias journaling","R","low","decision","Alias block mutates outside the journal"],
+ ["R10","PONR journal-lock misread as locked media","R","high","decision","A transient lock on .mediavault_txn.json during cmd_replace's PONR write is caught by the retry loop meant for a locked MEDIA file → retries an already-successful rename → spurious IRREVERSIBLE, and the handler advises fetch_restore (62GB re-download) while the master sits locally as .tobedeleted. No data loss (two-rename + C9 sweep + recover). CHANGE-GATED: touches mark_point_of_no_return() placement (2026-08-24)"],
  // S — streaming / daemon
  ["S1","Jellyfin stand-up","S","high","todo","ZERO code, immediate couch value — do anytime"],
  ["S2","mvdaemon service","S","high","todo","The one new component the end goal needs"],
@@ -258,7 +261,7 @@ const EDGES = [
  ["C6","S3"],["S4","U1"],["E4","S4"],["E4","S5"],["E5","S5"],["C1","S2"],
  ["R6","S3"],["G4","S2"],["G4","U5"],["G2","S7"],["S6","S8"],
  ["E7","X1"],["F3","X1"],["X1","X2"],["X1","X4"],["X1","X5"],["X3","F1"],
- ["C12","B7"],["E1","F7"],["U3","U2"],["C16","X1"],["C16","S3"],["C17","C6"],["C16","C17"],["E14","E15"],["A5","E15"],["E14","E16"],["E3","E16"],
+ ["C12","B7"],["E1","F7"],["U3","U2"],["C16","X1"],["C16","S3"],["C17","C6"],["C16","C17"],["C19","C20"],["E14","E15"],["A5","E15"],["E14","E16"],["E3","E16"],
 ];
 
 const PRI={crit:{c:"#ff2d55",r:140,size:30,lbl:"Critical / decision"},high:{c:"#ff9f0a",r:300,size:22,lbl:"High"},

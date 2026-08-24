@@ -240,6 +240,35 @@ def parse_metadata_from_id(manual_id):
 # ==========================================
 #         SPLIT & MERGE LOGIC
 # ==========================================
+# [IMP-C20] Matroska codec IDs mkvmerge refuses to `--split`. MEASURED, never
+# guessed — every entry has a row in
+# `docs/edge-case-unsplittable-tracks/CODEC-SPLIT-MATRIX.md`. Keep this list
+# CONSERVATIVE: a false positive blocks a legitimate archive, whereas a miss now
+# only costs the (clear, post-IMP-C19) mkvmerge error at split time. TrueHD is a
+# suspected member but is deliberately absent — it has not been measured.
+UNSPLITTABLE_CODEC_IDS = {"A_FLAC"}
+
+
+def find_unsplittable_tracks(input_path):
+    """[IMP-C20] Return [(track_id, codec_id, language), ...] for tracks mkvmerge
+    cannot `--split`, via a header-only `mkvmerge -J` probe.
+
+    Returns [] when the file is fine AND when identification fails for any reason
+    (missing binary, unreadable file, unparseable JSON) — a probe failure must
+    never block an archive on its own. The split itself still reports, now legibly.
+    """
+    try:
+        r = subprocess.run([MKVMERGE_PATH, "-J", input_path],
+                           capture_output=True, text=True, check=True)
+        tracks = json.loads(r.stdout).get("tracks", [])
+    except Exception:
+        return []
+    return [(t.get("id"), t["properties"].get("codec_id"),
+             t["properties"].get("language") or "und")
+            for t in tracks
+            if t.get("properties", {}).get("codec_id") in UNSPLITTABLE_CODEC_IDS]
+
+
 def _print_mkvmerge_failure(e):
     """[IMP-C19] Echo mkvmerge's own diagnosis after a non-zero exit.
 
@@ -4674,6 +4703,24 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
                 print("   Free up space, or pass a temp dir on another volume.")
                 if eager_rehash:
                     print("   (Or drop the `rehash` token to halve the need — deferred re-hash uses 1X, not 2X.)")
+                return False
+            # [IMP-C20] UNSPLITTABLE-TRACK PRE-FLIGHT. mkvmerge refuses to split a
+            # file containing certain codecs (FLAC today) and fails the ENTIRE run —
+            # historically only after prep had already deep-scanned and whole-file
+            # hashed the master. Stop here instead, name the track, and hand the
+            # operator the fix. Like the free-space check above this is READ-ONLY and
+            # runs BEFORE makedirs/journal, so nothing exists yet to roll back — a
+            # clean early return. MediaVault deliberately does NOT convert or drop the
+            # track itself: that is an irreversible quality decision about what becomes
+            # the only surviving copy, and it stays the operator's to make.
+            unsplittable = find_unsplittable_tracks(local_file_path)
+            if unsplittable:
+                print(f"❌ Cannot split {manual_id} — mkvmerge cannot split these tracks:")
+                for tid, codec, lang in unsplittable:
+                    print(f"     • track {tid} ({codec}, {lang})")
+                print("   Remux the track to a splittable codec first — WavPack is lossless")
+                print("   and splits fine; dropping the track also works if you don't want it.")
+                print("   Runbook: docs/edge-case-unsplittable-tracks/RUNBOOK-remux-before-split.md")
                 return False
             print(f"   > ✂️ Splitting...")
             # [ROLLBACK C] Journal the dir creations (this run only) BEFORE makedirs.

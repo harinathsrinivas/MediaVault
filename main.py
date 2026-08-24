@@ -240,6 +240,26 @@ def parse_metadata_from_id(manual_id):
 # ==========================================
 #         SPLIT & MERGE LOGIC
 # ==========================================
+def _print_mkvmerge_failure(e):
+    """[IMP-C19] Echo mkvmerge's own diagnosis after a non-zero exit.
+
+    mkvmerge writes its `Error:`/`Warning:` lines to STDOUT, not stderr (stderr
+    carries only hard crashes, e.g. the libfmt `format_error`). Discarding stdout
+    is what reduced the 2026-08-24 FLAC-split failure to a bare `exit status 2`
+    with no way to tell that track 4 was simply unsplittable — see
+    `docs/edge-case-unsplittable-tracks/`. Prints the named Error/Warning lines,
+    falling back to the tail of the output when mkvmerge died without one."""
+    lines = []
+    for stream in (e.stdout, e.stderr):
+        if stream:
+            if isinstance(stream, bytes):
+                stream = stream.decode("utf-8", "replace")
+            lines += [l.rstrip() for l in stream.splitlines() if l.strip()]
+    named = [l for l in lines if l.startswith(("Error", "Warning"))]
+    for line in (named or lines[-3:]):
+        print(f"   > {line}")
+
+
 def split_video_file(input_path, output_dir, method, value_str, file_id=""):
     import math  # Needed for ceil calculation
 
@@ -310,13 +330,14 @@ def split_video_file(input_path, output_dir, method, value_str, file_id=""):
     mkv_out = output_pattern.replace("{", "{{").replace("}", "}}")
     cmd = [MKVMERGE_PATH, "-o", mkv_out, "--split", f"size:{split_arg}", input_path]
     try:
-        # Added stderr capture to output real error messages
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        # [IMP-C19] Capture BOTH streams — mkvmerge reports its errors on stdout.
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         chunks = sorted([os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".mkv")])
         print(f"   > Done. Generated {len(chunks)} parts.")
         return chunks
     except subprocess.CalledProcessError as e:
         print(f"❌ Error running mkvmerge for splitting: {e}");
+        _print_mkvmerge_failure(e)
         return []
     except FileNotFoundError:
         print(f"❌ Error: mkvmerge not found at {MKVMERGE_PATH}");
@@ -339,11 +360,14 @@ def merge_video_files(chunk_paths, output_path, seed=None):
         cmd.append(f"+{chunk}")
 
     try:
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+        # [IMP-C19] Capture BOTH streams — a merge failure happens during restore,
+        # when the chunks are the only copy, so the reason must not be discarded.
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         print("   > Merge Complete.")
         return True
     except subprocess.CalledProcessError as e:
         print(f"❌ Error merging: {e}");
+        _print_mkvmerge_failure(e)
         return False
     except FileNotFoundError:
         print(f"❌ Error: mkvmerge not found.");

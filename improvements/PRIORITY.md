@@ -9,7 +9,7 @@
 > Full task text lives in `improvements_tier*.md`; this file only orders them. Legend:
 > 🔴 critical · 🟠 high · 🟡 medium · ⚪ low · ✅ done · 🚦 needs a user decision (change-gate).
 >
-> **Last updated:** 2026-07-27 (IMP-D19 extras option — **done** on `feature/imp_d19_extras`: `--extras`/`--extras-size` on prep/prep_season/push/push_group/prep_push_rep/prep_push_rep_season, new `add_extras`, flag-only `--fetchExtras` on fetch/fetch_restore, grouped `extras` block on title entries (no new entry type), full push→dummy→fetch→restore lifecycle reusing rollback primitives additively (E1), 37 unit tests + 4 smoke cases (suite 648/smoke 76); PR to `main` pending. Earlier: IMP-D18 Others/sports content category — **done** on `feature/imp_d18_others_category`: 4th `oth-` category — `library_others.json`, season_map/leaf reuse, list-capable disk roots via `CATEGORY_ROOTS`, enrichment-skip, Others Chrome profile + Pixel. Earlier: IMP-R6 restore-merge temp-stage + IMP-R7 crash-re-run auto-recover — both done on `feature/imp_r6_r7_restore_journal_crashsafe`. IMP-E16 — UI dossier + /api/detail + EXA auto-resolve + grid + palette + parallax hero + lazy-load perf — on `feature/imp_e16_ui_wow`. Phase 5 IMP-E3/U3/D17 — TMDB enrich + rename_folder + /api/media-image + real posters/titles in SPA. IMP-E14 fully done. IMP-D17 done. IMP-E15 done.)
+> **Last updated:** 2026-08-24 (**IMP-C19 + IMP-C20 done** on `fix/imp_c19_c20_split_diagnostics` — mkvmerge's real error is no longer discarded, and `cmd_push` now refuses a file carrying a track mkvmerge cannot split (FLAC) *before* prep spends a deep scan + whole-file hash. **IMP-R10 opened and left pending by user decision** — a transient lock on the journal during `cmd_replace`'s PONR write is misread as a locked media file and reports a spurious IRREVERSIBLE; change-gated, so it needs a decision before any code moves. Both incidents are written up under `docs/edge-case-*/`. Earlier: IMP-D19 extras option — **done** on `feature/imp_d19_extras`: `--extras`/`--extras-size` on prep/prep_season/push/push_group/prep_push_rep/prep_push_rep_season, new `add_extras`, flag-only `--fetchExtras` on fetch/fetch_restore, grouped `extras` block on title entries (no new entry type), full push→dummy→fetch→restore lifecycle reusing rollback primitives additively (E1), 37 unit tests + 4 smoke cases (suite 648/smoke 76); PR to `main` pending. Earlier: IMP-D18 Others/sports content category — **done** on `feature/imp_d18_others_category`: 4th `oth-` category — `library_others.json`, season_map/leaf reuse, list-capable disk roots via `CATEGORY_ROOTS`, enrichment-skip, Others Chrome profile + Pixel. Earlier: IMP-R6 restore-merge temp-stage + IMP-R7 crash-re-run auto-recover — both done on `feature/imp_r6_r7_restore_journal_crashsafe`. IMP-E16 — UI dossier + /api/detail + EXA auto-resolve + grid + palette + parallax hero + lazy-load perf — on `feature/imp_e16_ui_wow`. Phase 5 IMP-E3/U3/D17 — TMDB enrich + rename_folder + /api/media-image + real posters/titles in SPA. IMP-E14 fully done. IMP-D17 done. IMP-E15 done.)
 
 ---
 
@@ -18,8 +18,8 @@
 > **IMP-D18 is done** (4th "Others"/sports content category) on `feature/imp_d18_others_category` — PR to `main` pending. It creates two follow-ons: **IMP-X1** (replicate the Others account's chunks to a 2nd Google account — the same CSAM-ban single-point-of-failure applies to the 4th account) and the open **OD-2** question (whether to ever add a sports metadata scraper, e.g. TheSportsDB; today it's filename-as-title, no scraper). IMP-S1/S2 remain the headline next.
 
 **IMP-R6 + IMP-R7 done** (crash-safety fixes — restore merge-to-temp + journal auto-recovery on re-run
-— on `feature/imp_r6_r7_restore_journal_crashsafe`). **Band 0 is now clear** (no remaining decision-gated
-critical items). **Phase 5 done** (IMP-E3 partial / IMP-U3 partial / IMP-D17 done). **IMP-E14 fully done**.
+— on `feature/imp_r6_r7_restore_journal_crashsafe`). **Band 0 is NOT clear as of 2026-08-24** — **IMP-R10** is open and change-gated
+(see below); the user has deferred the fix but the decision is still outstanding. **Phase 5 done** (IMP-E3 partial / IMP-U3 partial / IMP-D17 done). **IMP-E14 fully done**.
 **IMP-E15 done**.
 
 **Recommended next starts (pick one or run in parallel):**
@@ -32,14 +32,19 @@ critical items). **Phase 5 done** (IMP-E3 partial / IMP-U3 partial / IMP-D17 don
 
 **Headline NEXT: IMP-S1** (zero code, do anytime — Jellyfin is the couch surface the vault is being built for).
 
+> ⚠️ **Band 0 has one open item again (2026-08-24): IMP-R10.** It is blocked on a *decision*, not on work — the fix touches `mark_point_of_no_return()` placement and is change-gated. The user deferred it ("can fix later"), so IMP-S1 remains the actionable next start, but R10 outranks everything here the moment the gate is answered. Its sibling bugs from the same incident, IMP-C19 and IMP-C20, are done.
+
 ---
 
 ## 🔴 BAND 0 — CRITICAL: bugs that break / data-integrity decisions (do first)
 
-**Band 0 is clear** — all decision-gated critical items are done.
+**One open item: IMP-R10** (change-gated). The user deferred the fix on 2026-08-24 ("document more - can fix later"), so it is documented in full and waiting on a change-gate decision — not on implementation capacity.
 
 | # | Task | Why it's critical | Risk to fix | Gate |
 |---|---|---|---|---|
+| 1 | 🚦 **IMP-R10** | a transient lock on `.mediavault_txn.json` during `cmd_replace`'s PONR write is caught by the retry loop meant for a locked *media* file → spurious `IRREVERSIBLE`, and the handler advises `fetch_restore` (a 62 GB re-download) while the master sits on local disk as `.tobedeleted` | **gated** — touches `mark_point_of_no_return()` placement | 🚦 **needs a user decision** (`CLAUDE.md` change-gate); documented in `docs/edge-case-replace-ponr-journal-lock/` |
+| ✅ | ✅ **IMP-C19** | mkvmerge's `Error:` lines go to stdout, which `split_video_file` sent to DEVNULL → every split failure was an uninterpretable `exit status 2`, after a 62 GB prep | low | done — `1af16a3`, both split + merge call sites |
+| ✅ | ✅ **IMP-C20** | no pre-flight for tracks mkvmerge cannot split (FLAC) → a whole class of sources burned a full prep before failing | low | done — `e2b799c` + `1b1a899` (gate moved ahead of prep in both auto-pilots); detect-and-stop only, never auto-converts |
 | ✅ | ✅ **IMP-R6** | failed restore-merge leaves NO file at the path → title disappears from every media server | medium | done — merge-to-temp + os.replace on verify (option a) |
 | ✅ | ✅ **IMP-R7** | re-running a command after a crash silently destroys the leftover recovery journal → orphaned artifacts | medium | done — auto-recover pre-PONR leftover on journal-open (option b) |
 | ✅ | ✅ **IMP-D4 (partial)** | 107 legacy text-dummy entries hand-reconciled (all verified in Google Photos); `verify_library` status-to-disk invariant + pipeline post-conditions now guard against recurrence — see `docs/feature-legacy-reconcile/REPORT.md` | low | done |
@@ -100,7 +105,8 @@ Moonshots: `F1`–`F9`. Research-only: `G3`,`G5`,`H2`,`A6`.
 `E15` (mobile + Tailscale + admin-minted token auth) ·
 `D17` (rename_folder — crash-safe cascading folder rename + `{tmdb-…}` token stamp) ·
 `D18` (4th "Others"/sports content category — `oth-` prefix + `library_others.json`; season_map/leaf reuse, no new entry type, no rollback change; list-capable disk roots via `CATEGORY_ROOTS`; enrichment-skip; Others Chrome profile + Pixel; web Others tab populated — `feature/imp_d18_others_category`) ·
-`D19` (extras option — Specials/Trailers/Behind-the-Scenes archival; `--extras`/`--extras-size` + `add_extras` + flag-only `--fetchExtras`; grouped `extras` block on title entries, no new entry type, no rollback change (E1 additive reuse); 37 unit tests + 4 smoke cases — `feature/imp_d19_extras`).
+`D19` (extras option — Specials/Trailers/Behind-the-Scenes archival; `--extras`/`--extras-size` + `add_extras` + flag-only `--fetchExtras`; grouped `extras` block on title entries, no new entry type, no rollback change (E1 additive reuse); 37 unit tests + 4 smoke cases — `feature/imp_d19_extras`) ·
+`C19` (surface mkvmerge's real error — both split + merge call sites capture stdout+stderr and echo the reason; mkvmerge reports on STDOUT, which was being DEVNULL'd) · `C20` (pre-flight for tracks mkvmerge cannot split — `mkvmerge -J` probe refuses a FLAC-bearing file before prep spends a deep scan + whole-file hash; detect-and-stop only, never auto-converts — `fix/imp_c19_c20_split_diagnostics`).
 
 ---
 

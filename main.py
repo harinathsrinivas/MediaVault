@@ -240,6 +240,74 @@ def parse_metadata_from_id(manual_id):
 # ==========================================
 #         SPLIT & MERGE LOGIC
 # ==========================================
+# [IMP-C20] Matroska codec IDs mkvmerge refuses to `--split`. MEASURED, never
+# guessed — every entry has a row in
+# `docs/edge-case-unsplittable-tracks/CODEC-SPLIT-MATRIX.md`. Keep this list
+# CONSERVATIVE: a false positive blocks a legitimate archive, whereas a miss now
+# only costs the (clear, post-IMP-C19) mkvmerge error at split time. TrueHD is a
+# suspected member but is deliberately absent — it has not been measured.
+UNSPLITTABLE_CODEC_IDS = {"A_FLAC"}
+
+
+def find_unsplittable_tracks(input_path):
+    """[IMP-C20] Return [(track_id, codec_id, language), ...] for tracks mkvmerge
+    cannot `--split`, via a header-only `mkvmerge -J` probe.
+
+    Returns [] when the file is fine AND when identification fails for any reason
+    (missing binary, unreadable file, unparseable JSON) — a probe failure must
+    never block an archive on its own. The split itself still reports, now legibly.
+    """
+    try:
+        r = subprocess.run([MKVMERGE_PATH, "-J", input_path],
+                           capture_output=True, text=True, check=True)
+        tracks = json.loads(r.stdout).get("tracks", [])
+    except Exception:
+        return []
+    return [(t.get("id"), t["properties"].get("codec_id"),
+             t["properties"].get("language") or "und")
+            for t in tracks
+            if t.get("properties", {}).get("codec_id") in UNSPLITTABLE_CODEC_IDS]
+
+
+def refuse_if_unsplittable(input_path, label):
+    """[IMP-C20] Shared gate: print the refusal and return True when `input_path`
+    carries a track mkvmerge cannot split. Callers abort on True.
+
+    Used both by cmd_push (immediately before the split) and by the autopilots
+    BEFORE their prep leg — the prep leg is the expensive one (deep scan +
+    whole-file hash), so refusing only at push time would still burn it."""
+    bad = find_unsplittable_tracks(input_path)
+    if not bad:
+        return False
+    print(f"❌ Cannot split {label} — mkvmerge cannot split these tracks:")
+    for tid, codec, lang in bad:
+        print(f"     • track {tid} ({codec}, {lang})")
+    print("   Remux the track to a splittable codec first — WavPack is lossless")
+    print("   and splits fine; dropping the track also works if you don't want it.")
+    print("   Runbook: docs/edge-case-unsplittable-tracks/RUNBOOK-remux-before-split.md")
+    return True
+
+
+def _print_mkvmerge_failure(e):
+    """[IMP-C19] Echo mkvmerge's own diagnosis after a non-zero exit.
+
+    mkvmerge writes its `Error:`/`Warning:` lines to STDOUT, not stderr (stderr
+    carries only hard crashes, e.g. the libfmt `format_error`). Discarding stdout
+    is what reduced the 2026-08-24 FLAC-split failure to a bare `exit status 2`
+    with no way to tell that track 4 was simply unsplittable — see
+    `docs/edge-case-unsplittable-tracks/`. Prints the named Error/Warning lines,
+    falling back to the tail of the output when mkvmerge died without one."""
+    lines = []
+    for stream in (e.stdout, e.stderr):
+        if stream:
+            if isinstance(stream, bytes):
+                stream = stream.decode("utf-8", "replace")
+            lines += [l.rstrip() for l in stream.splitlines() if l.strip()]
+    named = [l for l in lines if l.startswith(("Error", "Warning"))]
+    for line in (named or lines[-3:]):
+        print(f"   > {line}")
+
+
 def split_video_file(input_path, output_dir, method, value_str, file_id=""):
     import math  # Needed for ceil calculation
 
@@ -310,13 +378,14 @@ def split_video_file(input_path, output_dir, method, value_str, file_id=""):
     mkv_out = output_pattern.replace("{", "{{").replace("}", "}}")
     cmd = [MKVMERGE_PATH, "-o", mkv_out, "--split", f"size:{split_arg}", input_path]
     try:
-        # Added stderr capture to output real error messages
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        # [IMP-C19] Capture BOTH streams — mkvmerge reports its errors on stdout.
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         chunks = sorted([os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".mkv")])
         print(f"   > Done. Generated {len(chunks)} parts.")
         return chunks
     except subprocess.CalledProcessError as e:
         print(f"❌ Error running mkvmerge for splitting: {e}");
+        _print_mkvmerge_failure(e)
         return []
     except FileNotFoundError:
         print(f"❌ Error: mkvmerge not found at {MKVMERGE_PATH}");
@@ -339,11 +408,14 @@ def merge_video_files(chunk_paths, output_path, seed=None):
         cmd.append(f"+{chunk}")
 
     try:
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+        # [IMP-C19] Capture BOTH streams — a merge failure happens during restore,
+        # when the chunks are the only copy, so the reason must not be discarded.
+        subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         print("   > Merge Complete.")
         return True
     except subprocess.CalledProcessError as e:
         print(f"❌ Error merging: {e}");
+        _print_mkvmerge_failure(e)
         return False
     except FileNotFoundError:
         print(f"❌ Error: mkvmerge not found.");
@@ -4651,6 +4723,17 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
                 if eager_rehash:
                     print("   (Or drop the `rehash` token to halve the need — deferred re-hash uses 1X, not 2X.)")
                 return False
+            # [IMP-C20] UNSPLITTABLE-TRACK PRE-FLIGHT. mkvmerge refuses to split a
+            # file containing certain codecs (FLAC today) and fails the ENTIRE run —
+            # historically only after prep had already deep-scanned and whole-file
+            # hashed the master. Stop here instead, name the track, and hand the
+            # operator the fix. Like the free-space check above this is READ-ONLY and
+            # runs BEFORE makedirs/journal, so nothing exists yet to roll back — a
+            # clean early return. MediaVault deliberately does NOT convert or drop the
+            # track itself: that is an irreversible quality decision about what becomes
+            # the only surviving copy, and it stays the operator's to make.
+            if refuse_if_unsplittable(local_file_path, manual_id):
+                return False
             print(f"   > ✂️ Splitting...")
             # [ROLLBACK C] Journal the dir creations (this run only) BEFORE makedirs.
             if not parts_preexisted:
@@ -7091,6 +7174,14 @@ def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, de
     # a true one-shot — cmd_prep does the scan+merge (register), and the push+replace
     # phase below then has an extras block to work on. Without this the trailing
     # push_title_extras/replace_title_extras pair silently no-ops on a fresh title.
+    # [IMP-C20] Gate BEFORE prep, not just before the split. cmd_push refuses a
+    # file mkvmerge cannot split, but by then STEP 1 has already deep-scanned and
+    # whole-file hashed the master — 62 GB of wasted work on the incident file.
+    # Only meaningful when a split was actually requested.
+    if split_method and split_val and refuse_if_unsplittable(filepath, manual_id):
+        print("   Nothing was prepped — the library is untouched.")
+        return
+
     print("\n>>> STEP 1: PREP")
     if not cmd_prep(manual_id, filepath, extras=extras, extras_size=extras_size):
         print("❌ Auto-Pilot Aborted: Prep failed.")
@@ -7142,6 +7233,20 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
     # episode loop — the per-episode cmd_prep calls never receive `extras` — so this
     # run registers the folders exactly once and the extras phase below can upload
     # them.
+    # [IMP-C20] Same pre-prep gate, across the whole season. cmd_prep_season
+    # scans+hashes EVERY episode before the first push runs, so one unsplittable
+    # episode would otherwise waste the entire season's prep. The enumeration
+    # mirrors cmd_prep_season's exactly so the two cannot disagree.
+    if split_method and split_val:
+        blocked = False
+        for fn in sorted([f for f in os.listdir(folder_path)
+                          if f.lower().endswith(VIDEO_EXTENSIONS)]):
+            if refuse_if_unsplittable(os.path.join(folder_path, fn), fn):
+                blocked = True
+        if blocked:
+            print("   Nothing was prepped — the library is untouched.")
+            return
+
     print("\n>>> STEP 1: PREP SEASON")
     cmd_prep_season(base_id, folder_path, extras=extras, extras_size=extras_size)
 

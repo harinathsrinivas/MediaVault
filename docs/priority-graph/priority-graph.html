@@ -111,7 +111,7 @@
   <a class="open" id="p-open" href="#" target="_blank" rel="noopener">Open task in tier file →</a>
 </div>
 
-<div class="footer">Generated 2026-06-27 · updated 2026-08-24 (C19/C20 done, R10 open — change-gated) · keep in sync with <code>PRIORITY.md</code> (see its maintenance protocol) · 123 tasks</div>
+<div class="footer">Generated 2026-06-27 · updated 2026-08-25 (C19/C20/C21 done, R10 open — change-gated) · keep in sync with <code>PRIORITY.md</code> (see its maintenance protocol) · 124 tasks</div>
 
 <script>
 /* ───────────────────────── TASK DATA — keep in sync with PRIORITY.md + improvements_tier*.md ─────────────────────────
@@ -162,6 +162,7 @@ const TASKS = [
  ["C18","anime range-filter bug","C","done","done","Fixed fix/imp_c18_episode_range: shared mvcommon.episode_num_from_id (prefix-strip + anchored ^[eExX]?…) routes all 5 range-filter sites; glued …-s0202 now parses to ep 2 not 202; 0-via-range warns + suppresses the false COMPLETE banner"],
  ["C19","surface mkvmerge's real error","C","done","done","Fixed fix/imp_c19_c20_split_diagnostics (1af16a3): mkvmerge writes Error: to STDOUT, which split_video_file sent to DEVNULL while never printing the stderr it did capture — every split failure was a bare exit status 2 after a 62GB prep. Both split_video_file and merge_video_files now capture both streams and echo the reason (2026-08-24)"],
  ["C20","unsplittable-track pre-flight","C","done","done","Fixed fix/imp_c19_c20_split_diagnostics (e2b799c): mkvmerge cannot --split a FLAC track in ANY split mode; both auto-pilots now probe with mkvmerge -J BEFORE their prep leg (and cmd_push again before the split), refusing up front and naming the track + runbook — gating only at push still wasted prep's deep scan + whole-file hash (follow-up 1b1a899). Detect-and-stop ONLY — never converts or drops a track (user decision) (2026-08-24)"],
+ ["C21","manual remux tool (tools/remux_unsplittable.py)","C","done","done","Shipped feature/imp_c21_remux_unsplittable: the FIX for a file mkvmerge cannot split, kept separate from the pipeline by user decision. Dry run unless --run; never overwrites or deletes; computes the -c:a:N audio index rather than assuming it; verifies DV record + duration (+ optional per-stream checksums). MediaVault never invokes it — guard-tested (2026-08-25)"],
  // D — commands
  ["D1","library_stats","D","high","todo","At-a-glance archive state; first thing a UI needs"],
  ["D2","fuzzy find","D","med","todo","Kill ID-recall friction/typos"],
@@ -261,7 +262,7 @@ const EDGES = [
  ["C6","S3"],["S4","U1"],["E4","S4"],["E4","S5"],["E5","S5"],["C1","S2"],
  ["R6","S3"],["G4","S2"],["G4","U5"],["G2","S7"],["S6","S8"],
  ["E7","X1"],["F3","X1"],["X1","X2"],["X1","X4"],["X1","X5"],["X3","F1"],
- ["C12","B7"],["E1","F7"],["U3","U2"],["C16","X1"],["C16","S3"],["C17","C6"],["C16","C17"],["C19","C20"],["E14","E15"],["A5","E15"],["E14","E16"],["E3","E16"],
+ ["C12","B7"],["E1","F7"],["U3","U2"],["C16","X1"],["C16","S3"],["C17","C6"],["C16","C17"],["C19","C20"],["C20","C21"],["E14","E15"],["A5","E15"],["E14","E16"],["E3","E16"],
 ];
 
 const PRI={crit:{c:"#ff2d55",r:140,size:30,lbl:"Critical / decision"},high:{c:"#ff9f0a",r:300,size:22,lbl:"High"},

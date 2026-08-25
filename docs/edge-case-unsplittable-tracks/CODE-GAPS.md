@@ -119,10 +119,42 @@ on an already-prepped entry. Both gates no-op when no split was requested.
 
 ---
 
-## Gap 3 — opt-in assisted remux (NOT automatic)
+## Gap 3 — assisted remux — ✅ RESOLVED as a separate manual tool (IMP-C21)
 
-**Severity: low (quality-of-life). Effort: real feature.
-Status: scoped down by user decision, 2026-08-24.**
+**Status: shipped 2026-08-25 as `tools/remux_unsplittable.py`, on `feature/imp_c21_remux_unsplittable`.
+Resolved *more* conservatively than the opt-in flag sketched below.**
+
+> The fix did not land inside the pipeline at all. Per the user's 2026-08-25
+> instruction — *"keep it separate. do not call it automatically if any issues.
+> I will do that manually after checking each case error by error"* — it is a
+> standalone script MediaVault never invokes:
+>
+> - not imported by `main.py` / `mainfetch.py` / `mvcommon.py`, not wired to any
+>   command, not offered as an automatic remedy. `tests/test_remux_unsplittable.py`
+>   asserts none of those modules even mention it, so the automatic-conversion line
+>   cannot be crossed by accident later.
+> - **dry run unless `--run`** — prints the offending track, the plan, the exact
+>   ffmpeg argv and the disk arithmetic, then stops.
+> - never overwrites, never deletes; the delete/rename swap stays with the operator.
+> - computes the `-c:a:N` audio index instead of assuming it (on the incident file
+>   the FLAC track is overall stream 4 but audio index 3 — the overall index would
+>   have hit a subtitle, and `1` the DTS-HD MA main track).
+> - verifies stream count, duration drift and the Dolby Vision configuration record;
+>   `--verify-streams` adds per-stream checksums, comparing the converted track as
+>   decoded PCM.
+> - `wavpack` (default) / `pcm` / `drop`. **No lossy targets** — it will not quietly
+>   degrade audio.
+>
+> **The `push <id> --remux-unsplittable=wavpack` flag below was NOT built**, and on
+> reflection should not be without a fresh decision: a flag on `push` still puts an
+> irreversible codec change one typo away from a long unattended run. The separate
+> tool keeps the decision, the inspection and the execution in one deliberate place.
+
+The original framing of this gap — an *automatic* remux triggered by detection —
+was rejected outright on 2026-08-24. Retained below for the record, because the
+design questions it raises still apply to anything that ever moves this in-pipeline.
+
+### Original sketch (not built)
 
 > ⚠️ **User decision (2026-08-24): MediaVault must never convert or drop a track on
 > its own.** The original framing of this gap was an *automatic* remux triggered by

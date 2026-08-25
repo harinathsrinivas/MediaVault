@@ -38,9 +38,10 @@ That leaves exactly one lever: the unsplittable track itself has to change.
 |---|---|
 | This file (`mov-kor-2003-ataleoftwosisters`) | ✅ Fixed operationally — remuxed FLAC → WavPack, verified, archived. |
 | Diagnosis (**IMP-C19**, `1af16a3`) | ✅ Shipped. mkvmerge's own `Error:` line is printed by `split_video_file` *and* `merge_video_files`. `tests/test_mkvmerge_error_surfacing.py`. |
-| Pre-flight (**IMP-C20**, `e2b799c`) | ✅ Shipped. `cmd_push` refuses before splitting and names the track. `tests/test_unsplittable_preflight.py`. |
-| Assisted remux (Gap 3) | ⏸️ Open — **opt-in only** by user decision; MediaVault must never convert or drop a track on its own. [`CODE-GAPS.md`](CODE-GAPS.md). |
+| Pre-flight (**IMP-C20**, `e2b799c` + `1b1a899`) | ✅ Shipped. Both auto-pilots refuse **before their prep leg**, and `cmd_push` again before the split. `tests/test_unsplittable_preflight.py`. |
+| The fix itself (**IMP-C21**) | ✅ Shipped as `tools/remux_unsplittable.py` — a **separate manual tool** MediaVault never invokes (guard-tested), dry-run by default, never destructive. [`CODE-GAPS.md`](CODE-GAPS.md) Gap 3. |
 | **IMP-R10** — PONR journal-lock race | ⏸️ Open and **change-gated**. A separate bug from the same archival run: [`../edge-case-replace-ponr-journal-lock/README.md`](../edge-case-replace-ponr-journal-lock/README.md). |
 
-The next FLAC-bearing source is now caught at `push` before the split, with the track named. The
-remaining waste is the `prep` scan that precedes it.
+The next FLAC-bearing source is caught **before `prep`** runs, with the track named — no scan or hash
+is spent. Fixing it is then one inspectable command you run yourself:
+`python tools/remux_unsplittable.py "<file>"` to look, `--run` to do it.

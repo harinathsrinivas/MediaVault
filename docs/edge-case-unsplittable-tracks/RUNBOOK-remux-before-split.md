@@ -56,6 +56,29 @@ mkvmerge -J "<file>" | python -c "import json,sys; [print(t['id'], t['type'], t[
 
 ---
 
+### The tool (IMP-C21) — `tools/remux_unsplittable.py`
+
+Since 2026-08-25 the whole procedure below is packaged as a standalone script.
+**MediaVault never runs it** — that is the point; you run it, one file at a time:
+
+```
+python tools/remux_unsplittable.py "<file.mkv>"                  # inspect: names the track,
+                                                           # prints the exact ffmpeg argv
+                                                           # and the disk arithmetic
+python tools/remux_unsplittable.py "<file.mkv>" --run            # do it (wavpack, lossless)
+python tools/remux_unsplittable.py "<file.mkv>" --run --verify-streams   # + per-stream checksums
+python tools/remux_unsplittable.py "<file.mkv>" --codec drop --run       # drop the track instead
+```
+
+It is a **dry run unless you pass `--run`**, never overwrites or deletes anything,
+computes the `-c:a:N` index for you (§3's trap), and verifies the result before
+telling you it succeeded. The swap — delete original, rename remux into place —
+it deliberately leaves to you, because of §6.
+
+The manual procedure below is still the reference, and still what you want when a
+file needs something the tool refuses to guess at: more than one unsplittable
+track, a lossy target, or any case you'd rather drive by hand.
+
 ## 2. Decide — what the offending track becomes
 
 | Option | When | Cost |

@@ -376,3 +376,26 @@
 - Follow-up (DONE, commit `1b1a899`): the first commit gated only at `push`, which still let `prep_push_rep` spend its deep scan + whole-file hash first — the exact waste this task was about. Both auto-pilots now gate BEFORE their prep leg via a shared `refuse_if_unsplittable()`; the season variant probes every episode because `cmd_prep_season` hashes the whole season before the first push. Both no-op when no split was requested.
 - Follow-up (still not done): `cmd_push_group` pre-checks disk space only, so a group push still learns about an unsplittable member at that item's turn.
 - Status: done (fix/imp_c19_c20_split_diagnostics, commits `e2b799c` + `1b1a899` — `UNSPLITTABLE_CODEC_IDS = {"A_FLAC"}` + `find_unsplittable_tracks()` probe + shared `refuse_if_unsplittable()` gating `cmd_push` AND both auto-pilots ahead of prep; TrueHD suspected but deliberately excluded as unmeasured; tests in `tests/test_unsplittable_preflight.py` (10 cases, incl. asserting zero journal records at abort and that the gate precedes prep); suite 686/686). Incident + measured matrix: `docs/edge-case-unsplittable-tracks/`.
+
+---
+
+## IMP-C21: `tools/remux_unsplittable.py` — the manual fix for a file mkvmerge cannot split
+
+- Category: tooling
+- Priority: medium
+- Files: `tools/remux_unsplittable.py` (new, in `tools/` beside `warm_profiles.py` — standalone; imports `main` only for `resolve_ffmpeg`/`find_unsplittable_tracks`/`UNSPLITTABLE_CODEC_IDS` so tool and pre-flight cannot disagree) · added 2026-08-25
+- Context: IMP-C20 made MediaVault *detect* an unsplittable track and refuse, deliberately without fixing it. This is the fix, delivered as a separate manual tool per the user's standing decision (2026-08-24: *"I dont want to auto convert some track to a lower quality one, or skip that. I want control of deciding what and when to do so"*, and 2026-08-25: *"keep it separate. do not call it automatically if any issues. I will do that manually after checking each case error by error"*).
+- Behavior:
+  - **Nothing in MediaVault invokes it.** It is not imported by `main.py`/`mainfetch.py`/`mvcommon.py`, not wired to any command, and not offered as an automatic remedy. A guard test asserts none of those modules so much as mention it.
+  - **Dry run unless `--run`.** The default prints the offending track, the plan, the exact ffmpeg argv and the disk arithmetic, then stops — so each case can be inspected before committing to it.
+  - **Never destructive.** Writes `<name>.remux.mkv` (or `--out`), refuses to overwrite an existing output, and never touches the original. The delete/rename swap is left to the operator, with the runbook's disk-space sequencing quoted back.
+  - **Computes the `-c:a:N` index** rather than assuming it. On the incident file the FLAC track is overall stream 4 but audio index 3; using the overall index would have transcoded a subtitle, and `1` would have destroyed the DTS-HD MA main track.
+  - **Verifies after remuxing**: stream count, duration drift, and the Dolby Vision configuration record (so a DV P7 remux that silently lost its RPU cannot pass); `--verify-streams` adds a per-stream checksum pass, comparing the converted track as decoded PCM.
+  - **Refuses to guess**: more than one unsplittable track (that is several separate decisions), or a mkvmerge/ffprobe disagreement about what sits at that index.
+  - `--codec wavpack` (default, lossless) / `pcm` (lossless, universal, several GB larger) / `drop`. **No lossy targets** — the tool will not quietly degrade audio; that stays a manual ffmpeg decision.
+- Rationale: the remux recipe was verified end-to-end during the 2026-08-24 incident but lived only as prose in the runbook, where the `-c:a:N` index trap is easy to get wrong and the mistake is silent and irreversible.
+- Goal: one command per file, inspectable before it runs, that produces a verified splittable master without MediaVault ever making the quality decision.
+- Effort estimate: small
+- Risk: low — a standalone script; no MediaVault code path changed (`main.py` is untouched on this branch).
+- If skipped: every FLAC-bearing source is a hand-built ffmpeg invocation with a silent-corruption trap in the middle of it.
+- Status: done (feature/imp_c21_remux_unsplittable — dry-run-by-default CLI + computed audio-index mapping + DV/duration/stream verification; 11 tests in `tests/test_remux_unsplittable.py` incl. the "MediaVault never invokes this tool" guard; smoke 76/76, suite 697/697; exercised end-to-end against real ffmpeg+mkvmerge — the source refused to split, the remux split cleanly, and all streams verified MATCH incl. decoded PCM on the converted track).

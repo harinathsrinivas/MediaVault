@@ -444,3 +444,43 @@
 - Risk: medium — new shared nested field (`extras`) touches every whole-library iterator; guarded by the `ENTRY_TYPE_KEYS` schema guard + smoke gate. No rollback-contract change (additive reuse only, per E1).
 - If skipped: Specials/Trailers/Behind-the-Scenes content keeps accumulating on local disk with no archival path, or gets manually deleted and lost.
 - Status: **done** (`feature/imp_d19_extras`; implementation complete — full suite 648 green, smoke 76; PR to `main` pending)
+
+---
+
+## IMP-D20: extras checksum-sidecar parity + integrity-command coverage + push warning + resume-command flags
+
+- Category: other
+- Priority: high
+- Files: `main.py` (`_extras_master_sidecar_path`/`_write_extras_master_sidecar` + four call sites in `merge_extras_into_title`; `push_one_extra`'s chunk-sidecar write; `cmd_verify_library`/`cmd_check`/`cmd_repair_dummies`/`cmd_verify_restore`/`cmd_local_status` made extras-aware via `_disk_shape`/`_status_disk_violation`; new `_push_title_extras_or_warn` wrapper at three call sites; `_season_resume_cmd` extras flags), `tests/test_extras.py`
+- Current behavior (pre-fix): extras wrote no local `.sha256` disaster-recovery sidecars while main content writes both a master `<short_id>.sha256` and per-chunk `checksums/*.sha256` — a real parity gap hit live on the user's Stranger Things archive. The integrity commands (`verify_library`, `check`, `repair_dummies`, `verify_restore`, `local_status`) had no awareness of the `extras` block at all. `push --extras` against a title with nothing registered silently reported success instead of naming the fix (`add_extras`). The season autopilot's printed "Resume the rest of the season" command dropped `--extras`/`--extras-size`, so resuming a failed season silently lost the extras flags.
+- Proposed change (SHIPPED, bundled under one PR):
+  - Register-time master sidecar `<short_id>.sha256` (write-if-missing by default, `overwrite=True` only on a genuine re-master) at four call sites in `merge_extras_into_title`, including the D19-B1 "refusing to clobber" skip branch — so an already-archived group's sidecar is repaired by a re-scan without touching the protected item's stored data.
+  - Push-time chunk sidecars: `push_one_extra`'s SPLIT branch writes `checksums/<chunk>.sha256` alongside the existing `split_info` chunk-hash loop (best-effort, wrapped so a sidecar write failure can never abort a push).
+  - `verify_library`/`check`/`repair_dummies`/`verify_restore`/`local_status` made extras-aware, reusing `_disk_shape`/`_status_disk_violation` verbatim — a healthy archived extra is NOT a violation; a missing dummy or a real file under an `archived` item IS.
+  - `push`/`push_group`/the already-archived-main branch of the `push` CLI dispatch now warn (naming `add_extras` as the remedy) when an explicit `--extras` meets a title with nothing registered, via the new `_push_title_extras_or_warn` wrapper; `replace_group` and the autopilots (whose own prep/scan leg already explains a no-extras title) stay silent — `push_title_extras` itself is untouched.
+  - The season autopilot's printed resume command now carries `--extras "<folder(s)>"`/`--extras-size <...>` (correctly quoted for a folder path containing spaces) — user-approved at the rollback change-gate since it touches the change-gated season resume-range messaging; byte-for-byte unchanged when neither flag was supplied (regression-pinned).
+- Rationale: closes a real disaster-recovery parity gap (extras had no local checksums to cross-check a suspect chunk against) plus a cluster of integrity/UX gaps found while auditing it (tracked informally as D3/A5/D4 in the post-D19 fix journal, `docs/feature-extras/FIXES_PROGRESS.md` — those are audit-finding labels local to that journal, unrelated to the formal `IMP-D3`/`IMP-D4` task codes above). All additive: no rollback-contract change, no new `ENTRY_TYPE_KEYS` entry type.
+- Goal: extras carry the same local disaster-recovery record and integrity-command coverage as main content, with no silent no-ops on a mistyped `--extras` and no dropped flags on a season resume.
+- Effort estimate: medium
+- Risk: low — additive sidecar writes (best-effort, wrapped) + read-only integrity-command extensions; the one change-gated piece (the season resume command) was explicitly user-approved before implementation.
+- If skipped: extras remain a disaster-recovery blind spot, integrity commands keep missing (or misreporting) extras state, `push --extras` on an unregistered title stays a silent no-op, and a failed season run silently drops its extras flags on the printed resume command.
+- Status: **done** (`fix/imp_d20_extras_sidecars`, PR #43, squash `f40e952`) — shipped to `main` but never previously registered in this file / `PRIORITY.md` / the priority graph; backfilled by IMP-D21's dispatch.
+
+---
+
+## IMP-D21: extras split-failure hardening (unsplittable-track pre-flight parity + partial-chunk cleanup)
+
+- Category: other
+- Priority: high
+- Files: `main.py` (`push_one_extra`), `tests/test_extras.py`
+- Current behavior (pre-fix): IMP-C19/C20/C21 (shipped in parallel, after IMP-D20) added `refuse_if_unsplittable()` — a read-only pre-flight that refuses to start a split on a file carrying a track mkvmerge cannot split (FLAC) — and wired it into the three main-content call sites (`cmd_push`, `cmd_prep_push_rep`, the season pre-scan). It was never wired into the extras push, so extras were the one remaining path that still charged into a doomed split. Separately, `split_video_file` returns `[]` on a `subprocess.CalledProcessError` without deleting any chunks mkvmerge had already written before dying; in `push_one_extra` this was a genuine data-loss chain (tracked as audit finding D1 in `docs/feature-extras/FIXES_PROGRESS.md`, deferred at IMP-D20 time): a partially-split extra's leftover chunks were never cleaned up, `split_info` is only ever written on success, so the next run's RESUME branch treated the partial chunks as the authoritative set, uploaded them, and flipped the item to `uploaded=True`/`status="onboarded"` with NO `split_info` — an unrecoverable whole-file-by-hash fetch that does not exist in the cloud.
+- Proposed change (SHIPPED):
+  - `push_one_extra`'s SPLIT branch now calls `refuse_if_unsplittable(local_file_path, label)` after the free-space check and before `os.makedirs(parts_dir, ...)` — a clean early return, mirroring `cmd_push`'s own gate exactly (nothing exists yet to roll back). `label = f"{title_id}::{group_rel}/{sub_rel}"` — the same identifier `write_remote_mvmeta` already uses — so a season-batch run can tell which extra, on which title, was refused.
+  - On a failed split, the per-item parts dir (`<extra folder>/_parts/<short_id>`) is removed — but ONLY when THIS run created it (`parts_preexisted`, snapshotted up front, mirroring `cmd_push`'s own idiom of only journalling/rolling-back a freshly-created dir); a pre-existing dir is left untouched, conservatively matching `cmd_push`.
+  - No change to `split_video_file`, `cmd_push`/`cmd_prep`/`cmd_replace`/`cmd_restore`, `RollbackJournal`, or any point-of-no-return — `push_one_extra` remains deliberately journal-less (O-1 per-file resumable), the original Step-3 design.
+- Rationale: extras must not be the one push path exempt from the unsplittable-track pre-flight, and a failed split must never leave chunks a later run can silently promote to "uploaded" without the `split_info` a restore needs — both are data-loss/wasted-work shapes the main-content path is already immune to.
+- Goal: an extras split failure, for either reason, is always a clean, resumable no-op — nothing partial survives to poison the next run.
+- Effort estimate: small
+- Risk: low — both fixes are either read-only-then-early-return or delete-only-what-this-run-created; the no-split (whole-file) path is unchanged (confirmed by the full pre-existing test suite passing unmodified).
+- If skipped: the moment any extras push splits (`--extras-size` below a file's size), an unsplittable-track file burns the free-space check for nothing, and any mkvmerge crash mid-split leaves a landmine that silently corrupts the next run's upload state — unrecoverable without manual journal/library surgery.
+- Status: **done** (`fix/imp_d21_extras_split_hardening`)

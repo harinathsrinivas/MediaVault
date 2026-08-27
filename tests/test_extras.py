@@ -527,6 +527,138 @@ def test_push_of_an_already_uploaded_group_is_a_silent_success(
     assert {n: p.read_bytes() for n, p in _device_names(mock_device).items()} == first
 
 
+# ---------------------------------------------------------------------------
+# (b) IMP-D21 — split-failure hardening: pre-flight parity + D1 cleanup
+# ---------------------------------------------------------------------------
+
+
+def test_push_refuses_before_creating_anything_when_extra_is_unsplittable(
+        sandbox_extras, mock_device, plenty_of_disk, monkeypatch, capsys):
+    """(b) IMP-D21 pre-flight parity: `push_one_extra` now gates on
+    `refuse_if_unsplittable` exactly like `cmd_push` does — after the
+    free-space check, before `os.makedirs(parts_dir, ...)`. An extra whose
+    file reports an unsplittable track is refused with nothing created and
+    nothing pushed (a clean early return, nothing to roll back)."""
+    title_id = sandbox_extras["title_id"]
+    group_rel = sandbox_extras["group_rel"]
+    before = sorted(p.name for p in sandbox_extras["extras_dir"].iterdir())
+
+    monkeypatch.setattr(main, "find_unsplittable_tracks", lambda path: [(4, "A_FLAC", "ita")])
+
+    library = mvcommon.load_library()
+    assert main.push_title_extras(library, title_id, ("COUNT", "2"),
+                                  split_method=None, split_val=None) is False
+
+    out = capsys.readouterr().out
+    assert "track 4" in out and "A_FLAC" in out, f"the offending track must be named:\n{out}"
+    assert "RUNBOOK-remux-before-split" in out, "the operator needs the fix procedure"
+    assert title_id in out and group_rel in out, \
+        "the label should identify which title/group/item was refused"
+
+    parts_root = sandbox_extras["extras_dir"] / main.SPLIT_DIR_NAME
+    assert not parts_root.exists(), "_parts must not be created for a refused split"
+    assert sorted(p.name for p in sandbox_extras["extras_dir"].iterdir()) == before, \
+        "nothing new may appear in the group folder"
+    # The `adb mkdir -p` for the remote group folder runs earlier in
+    # push_one_extra than this gate (pre-existing, unrelated to IMP-D21) — an
+    # empty remote dir is expected. No FILE may reach the device.
+    assert list(mock_device.rglob("*.mkv")) == [], "no chunk/file may reach the device"
+    assert list(mock_device.rglob("*.mvmeta.json")) == [], "no mvmeta sidecar may be written"
+
+    reloaded = _by_sub_rel(mvcommon.load_library(), title_id)
+    for it in sandbox_extras["items"]:
+        assert reloaded[it["sub_rel"]]["uploaded"] is False
+        assert "split_info" not in reloaded[it["sub_rel"]]
+
+
+def test_split_failure_after_partial_chunk_is_cleaned_up_and_never_resumed(
+        sandbox_extras, mock_device, plenty_of_disk, monkeypatch):
+    """(b) IMP-D21 / D1 regression: mkvmerge can die AFTER writing some chunks
+    (`subprocess.CalledProcessError`). `split_video_file` returns `[]` in that
+    case but never deleted what it had already written, and `split_info` is
+    only ever set on success — so (pre-fix) the RESUME branch on the very next
+    run would treat the leftover chunk as authoritative, upload it, and flip
+    the item to uploaded=True/status="onboarded" with NO split_info: an
+    unrecoverable whole-file-by-hash fetch that does not exist in the cloud.
+    This must now be impossible: the per-item parts dir is removed on a failed
+    split, so a re-run goes back through the SPLIT branch (never RESUME) and
+    the item never reaches uploaded=True without split_info."""
+    title_id = sandbox_extras["title_id"]
+
+    def fake_split_dies_after_one_chunk(input_path, output_dir, method, value_str, file_id=""):
+        os.makedirs(output_dir, exist_ok=True)
+        # mkvmerge wrote ONE chunk before dying — split_video_file's real
+        # on-CalledProcessError shape (chunk(s) already on disk, [] returned).
+        partial = os.path.join(output_dir, f"partial [{file_id}].chunk.001.mkv")
+        with open(partial, "wb") as f:
+            f.write(b"PARTIAL-CHUNK-BYTES")
+        return []
+
+    monkeypatch.setattr(main, "split_video_file", fake_split_dies_after_one_chunk)
+
+    library = mvcommon.load_library()
+    assert main.push_title_extras(library, title_id, ("COUNT", "2"),
+                                  split_method=None, split_val=None) is False
+
+    parts_root = sandbox_extras["extras_dir"] / main.SPLIT_DIR_NAME
+    assert list(parts_root.rglob("*.mkv")) == [], \
+        "the poisoned partial chunk must be gone — nothing left to resume"
+    for it in sandbox_extras["items"]:
+        item_parts_dir = parts_root / it["short_id"]
+        assert not item_parts_dir.exists(), f"per-item parts dir must be removed: {item_parts_dir}"
+
+    after_run_1 = _by_sub_rel(mvcommon.load_library(), title_id)
+    for it in sandbox_extras["items"]:
+        assert after_run_1[it["sub_rel"]]["uploaded"] is False
+        assert "split_info" not in after_run_1[it["sub_rel"]], \
+            "the data-loss shape (uploaded without split_info) must be impossible"
+
+    # Re-run: the SAME broken split stub is still installed, so the failure
+    # repeats — but it must repeat CLEANLY, never inheriting the prior
+    # partial chunk as if it were the resumable, authoritative set.
+    library = mvcommon.load_library()
+    assert main.push_title_extras(library, title_id, ("COUNT", "2"),
+                                  split_method=None, split_val=None) is False
+
+    after_run_2 = _by_sub_rel(mvcommon.load_library(), title_id)
+    for it in sandbox_extras["items"]:
+        entry = after_run_2[it["sub_rel"]]
+        assert not (entry["uploaded"] is True and "split_info" not in entry), \
+            "the data-loss shape (uploaded=True with no split_info) must remain impossible"
+        assert entry["uploaded"] is False
+    assert list(mock_device.rglob("*.mkv")) == [], \
+        "the poisoned chunk must never reach the device across re-runs"
+    assert list(parts_root.rglob("*.mkv")) == [], "still nothing left to resume after re-run"
+
+
+def test_clean_extra_still_splits_normally_after_the_new_preflight(
+        sandbox_extras, mock_device, plenty_of_disk, monkeypatch):
+    """(b) IMP-D21 control: a file with nothing unsplittable is unaffected by
+    the new pre-flight gate — the split, chunk upload, `split_info`, and chunk
+    sidecars all still happen exactly as before (a successful split is
+    unchanged by this hardening)."""
+    title_id = sandbox_extras["title_id"]
+    probed = []
+    monkeypatch.setattr(main, "find_unsplittable_tracks",
+                        lambda path: probed.append(path) or [])
+    calls = _install_fake_split(monkeypatch, n_chunks=2)
+
+    library = mvcommon.load_library()
+    assert main.push_title_extras(library, title_id, ("COUNT", "2"),
+                                  split_method=None, split_val=None) is True
+
+    assert len(probed) == 2, "the new gate must probe EVERY split extra"
+    assert calls, "the split must still be attempted when the probe finds nothing"
+
+    checksum_dir = sandbox_extras["extras_dir"] / main.CHECKSUM_DIR_NAME
+    for it in _items(mvcommon.load_library(), title_id):
+        info = it["split_info"]
+        assert info["is_split"] is True and info["total_chunks"] == 2
+        assert it["uploaded"] is True and it["status"] == "onboarded"
+    assert list(checksum_dir.glob("*.sha256")), "chunk sidecars must still be written"
+    assert len([n for n in _device_names(mock_device) if ".chunk." in n]) == 4
+
+
 # ===========================================================================
 # (c) REPLACE — dummy swap + status archived (fake_dummy)
 # ===========================================================================

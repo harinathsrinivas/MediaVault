@@ -4399,6 +4399,11 @@ def push_one_extra(library, title_id, group_rel, item, extras_method, extras_val
         return False
 
     parts_dir = os.path.join(extra_folder, SPLIT_DIR_NAME, short_id)
+    # [IMP-D21] Snapshot BEFORE any branch below runs — mirrors cmd_push's own
+    # parts_preexisted (main.py ~4675), computed up front for the same reason:
+    # a failed split must only clean up what THIS run created (see the D1 fix
+    # below); a directory that already existed is left untouched.
+    parts_preexisted = os.path.isdir(parts_dir)
     files_to_upload = []
     is_split = False
 
@@ -4417,10 +4422,40 @@ def push_one_extra(library, title_id, group_rel, item, extras_method, extras_val
                   f"(need ~{human_readable_size(required)} in {extra_folder}, "
                   f"have {human_readable_size(free)}).")
             return False
+        # [IMP-D21] UNSPLITTABLE-TRACK PRE-FLIGHT — mirrors cmd_push's own gate
+        # (main.py ~4735) so extras are no longer the one push path that still
+        # charges into a doomed split. Like the free-space check above, this is
+        # READ-ONLY and runs BEFORE makedirs, so nothing exists yet to roll
+        # back — a clean early return. MediaVault deliberately does NOT convert
+        # or drop the track itself: that irreversible quality decision stays
+        # the operator's to make. Label = title::group/sub_rel (the same
+        # identifier write_remote_mvmeta uses below) so a season-batch run can
+        # tell which extra, on which title, was refused.
+        extra_label = f"{title_id}::{group_rel}/{item.get('sub_rel')}"
+        if refuse_if_unsplittable(local_file_path, extra_label):
+            return False
         os.makedirs(parts_dir, exist_ok=True)
         files_to_upload = split_video_file(local_file_path, parts_dir, extras_method, extras_val, file_id=short_id)
         if not files_to_upload:
             print(f"     ❌ Split failed for extra {item.get('filename')}.")
+            # [IMP-D21 / D1] mkvmerge can die AFTER writing some chunks
+            # (subprocess.CalledProcessError); split_video_file returns [] but
+            # never deletes what it already wrote, and split_info is only ever
+            # set below on SUCCESS. Left alone, the RESUME branch above would
+            # treat those partial chunks as authoritative on the very next
+            # run, upload them, and flip uploaded=True/status="onboarded" with
+            # NO split_info — build_extras_entries then queues an unrecoverable
+            # whole-file-by-hash fetch that does not exist in the cloud. Mirror
+            # cmd_push's own parts_preexisted idiom (it journals
+            # record_create_dir(parts_dir) and rolls back on this exact
+            # failure): only remove what THIS run created. A directory that
+            # already existed before this call is left untouched, conservative
+            # to match cmd_push (which also never journals a pre-existing dir).
+            if not parts_preexisted:
+                try:
+                    shutil.rmtree(parts_dir)
+                except OSError:
+                    pass
             return False
         is_split = True
         # [IMP-D20] Hash chunks + write each one's local checksum sidecar,

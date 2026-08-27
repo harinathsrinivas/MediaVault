@@ -5,11 +5,11 @@
 > durable trace. A fresh session — even on another Claude account — resumes from this file + `git log`.
 > Companion to `PROGRESS.md` (the IMP-D19 build journal, now complete).
 
-- **Branch:** `fix/imp_d20_extras_sidecars` (pushed; base `ffda336` = IMP-D19 merge on `main`).
+- **Branches:** `fix/imp_d20_extras_sidecars` (MERGED to main as `f40e952`, PR #43 — archival pending) → `fix/imp_d21_extras_split_hardening` (current; base `242d4a7`, which also carries the parallel IMP-C19/C20/C21 unsplittable-track work).
 - **Origin of the work:** the user hit a live parity gap (extras wrote no `.sha256` sidecars), which
   triggered a full extras-vs-main-content parity audit. The audit's findings are D1–D11 + A5.
 - **Framework:** v2 (`.claude/agents/orchestrator-v2.md` playbook; executor-fable for complex work).
-- **Last updated:** 2026-08-17.
+- **Last updated:** 2026-08-18 (IMP-D21: D1 fixed + C19/C20 pre-flight parity for extras).
 
 ## ⚠️ Standing hazard for EVERY commit on this repo
 The user's personal `Master_Stream_Archiver*.py` / `MatchArchiver*.py` files are **STAGED but
@@ -19,12 +19,10 @@ omitted the `--` and swept them into a commit; recovered via `git reset --soft H
 unpushed). Since then the orchestrator commits these directly rather than delegating.
 
 ## ▶ NEXT ACTION
-**🚦 CHECKPOINT 1 — awaiting the user's merge approval on PR #43**
-(https://github.com/harinathsrinivas/MediaVault/pull/43). All four items (IMP-D20, D3, A5, D4) are
-done, committed, pushed and covered by the PR. Do NOT `gh pr merge` without explicit user approval.
-After merge, **Checkpoint 2** (annotated `archive/fix/imp_d20_extras_sidecars` tag + branch delete) is a
-separate user-gated step. Nothing on this branch is in flight; the deferred table below stays deferred
-unless the user says otherwise.
+**🚦 CHECKPOINT 1 — awaiting the user's merge approval on the IMP-D21 PR** (branch
+`fix/imp_d21_extras_split_hardening`). D1 is now FIXED there, together with a pre-flight parity gap
+that the parallel IMP-C19/C20/C21 work opened. Also still pending: **Checkpoint 2** archival of the
+already-merged `fix/imp_d20_extras_sidecars` branch (annotated tag + delete) — never done.
 
 ## Status
 | Item | Status | Commit | Tests | Notes |
@@ -33,12 +31,13 @@ unless the user says otherwise.
 | **D3** — integrity commands extras-aware | done | `64fc8fa` | extras 59✓ smoke 76✓ full 670✓ | `verify_library`, `check`, `repair_dummies`, `verify_restore`, `local_status`. Reuses `_disk_shape`/`_status_disk_violation` verbatim. Live-verified on the REAL library: `extras: scanned 2, OK 2, MISMATCH 0` (no false positives on the user's archived Stranger Things extras) |
 | **A5** — `push --extras` silent no-op | done | `64fc8fa` | (same run) | `_push_title_extras_or_warn` at the 3 call sites where `--extras` is provably explicit; `push_title_extras` untouched so `replace_group` on an extras-less title stays silent |
 | **D4** — resume command drops extras | done | `33eb523` | extras 61✓ smoke 76✓ full 672✓ | Approved at the change-gate 2026-08-17 after being shown exactly what differs. Additive only: 2 `if` blocks appended after the existing `device` line in `_season_resume_cmd`. Untouched: range math, `.5`-episode handling, split/device reproduction, O-1 mechanism, PONR, journal, `RollbackHardFail`. **Change-gate regression pin added**: `test_season_resume_command_unchanged_without_extras` asserts the extras-less resume line is byte-for-byte the pre-existing format |
+| **IMP-D21** — extras split-failure hardening | done | (see PR) | extras 64✓ smoke 76✓ full 700✓ | `refuse_if_unsplittable` pre-flight parity in `push_one_extra` + partial-chunk cleanup on split failure (closes D1). Also retro-registered **IMP-D20** in tierD/PRIORITY/graph — it shipped to main but was never tracked |
 
 ## Deferred — audit findings the user explicitly left for later
 Do NOT fix these without a new instruction; they were consciously deferred.
 | # | Finding | Severity | Note |
 |---|---|---|---|
-| **D1** | `push_one_extra` has no rollback journal → a split that fails partway leaves chunks; the next run's RESUME branch uploads those partial chunks and flips `uploaded=True` **without `split_info`**, so a later fetch asks for a whole file that isn't in the cloud | **HIGH — data loss** | **Only reachable when a split actually occurs.** `_will_split` is False when the chunk size ≥ the file, so omitting `--extras-size` (or using `9900mb` with files < 9.9 GB) cannot trigger it. Fix = delete the parts dir on split failure, mirroring `cmd_push` |
+| ~~**D1**~~ | **FIXED in IMP-D21** (branch `fix/imp_d21_extras_split_hardening`): a failed split now removes any partial chunk dir it created, so the RESUME branch can never inherit partial chunks and flip `uploaded=True` with no `split_info`. Also closed alongside it: `push_one_extra` now calls `refuse_if_unsplittable()` before `makedirs` — the parity gap the parallel IMP-C19/C20 work left open for extras (main content got the pre-flight, extras did not). | ~~HIGH — data loss~~ RESOLVED | Suite 700 green; regression test asserts the data-loss shape is unreachable |
 | D2 | No `tempdir` redirect for extras (this is OD-1, deferred at plan time) | High if splitting | Also the main trigger for D1 |
 | D5 | `replace_title_extras` catches only `RollbackHardFail`, so another error escapes into `cmd_replace` post-PONR → false "❌ IRREVERSIBLE" on a main file that archived fine. Its docstring wrongly claims it never raises | Medium | Fix = also catch `Exception` per item, as `restore_title_extras` does |
 | D6 | `cmd_prep`'s extras call sits inside the try AFTER `journal.commit()` → an extras failure rolls back the just-created library entry | Medium-low | Fix = move it out of the try |
@@ -53,7 +52,7 @@ MISSING on disk (surfaced by the live `verify_library` run — pre-existing, not
 And `DEVICE_ALIASES["others"]` is still the literal `<NEW_PIXEL_SERIAL>` placeholder (IMP-D18 prereq).
 
 ## Resume protocol (what a fresh session does FIRST)
-1. `git fetch && git checkout fix/imp_d20_extras_sidecars`; read this file + `git log --oneline main..HEAD`.
+1. `git fetch && git checkout <the branch named above as current>`; read this file + `git log --oneline main..HEAD`.
 2. Reconcile the Status table's SHAs against `git log`. On disagreement, trust git.
 3. If an item is `in_progress`, check the working tree (`git diff --stat`) — a crashed agent's EDITS
    SURVIVE in the tree even when its transcript is gone. Inspect the diff before re-dispatching, so

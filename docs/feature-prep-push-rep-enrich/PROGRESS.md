@@ -109,6 +109,24 @@ not a live bug — every callee (`_resolve_unit`, `_resolve_unit_by_id`, `_exa_r
 of exactly the duplication-drift risk criterion 5 warns about, on day one of the duplicate's
 existence. **Restore the wrapper.**
 
+### 🔁 STANDING MAINTENANCE OBLIGATION created by choosing candidate A
+
+Candidate A's isolation strategy means `_enrich_after_archive` **duplicates** logic that also
+lives in `cmd_enrich_metadata`. The judge found one drift instance (the missing defensive
+wrapper) and it was fixed pre-merge — but the duplication itself remains, by design:
+
+| Duplicated in `_enrich_after_archive` | Mirrors in `cmd_enrich_metadata` |
+|---|---|
+| resolve waterfall (preset → search → EXA fallback) + its defensive `try/except` | base `main.py:~2487-2507` |
+| apply block (tmdb_id / title / year / overview write loop) | base `main.py:~2572-2591` |
+| the "no TMDB API key" guard | its own early bail |
+
+**Whenever `cmd_enrich_metadata`'s resolve or apply logic changes, `_enrich_after_archive` must
+be updated in lockstep.** This was the accepted cost of the user's Step 1 pick (blast radius
+over DRY); candidate B's branch — which has zero duplication — is preserved as a tag if the
+trade is ever revisited. **Step 7 must document this obligation in `ARCHITECTURE.md`** so it is
+discoverable outside this journal.
+
 ### 🔻 Carried-forward defect found by candidate A (plan bug, not an implementation bug)
 
 For a **SHOW**, `<director>` will usually be EMPTY: the plan specified `_tmdb_directors_from_crew`,

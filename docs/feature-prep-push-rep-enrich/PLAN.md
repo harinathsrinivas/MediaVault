@@ -705,7 +705,7 @@ session. Before dispatching the FIRST `[model: fable]` step in any session:
     a helper exists, or by temporarily instrumenting; do NOT run this against a real
     library).
 
-- [ ] 4. [model: opus] [effort: high] Movie-command tests — `tests/test_prep_push_rep_enrich.py`.
+- [x] 4. [model: opus] [effort: high] Movie-command tests — `tests/test_prep_push_rep_enrich.py`.
   - Depends on: Step 1 (and indirectly Step 3, if any test drives argv parsing rather than
     calling `cmd_prep_push_rep_enrich` directly — prefer direct calls, matching
     `test_baseline_happy_path.py`'s and the smoke suite's own convention of calling `main.cmd_*`
@@ -782,7 +782,7 @@ session. Before dispatching the FIRST `[model: fable]` step in any session:
     silent drift); `python -m pytest tests/test_enrich_metadata.py -q` still green (proves
     Step 1's chosen candidate did not regress the existing suite).
 
-- [ ] 5. [model: opus] [effort: high] Season-command tests — `tests/test_prep_push_rep_season_enrich.py`.
+- [x] 5. [model: opus] [effort: high] Season-command tests — `tests/test_prep_push_rep_season_enrich.py`.
   - Depends on: Step 2.
   - Consumed by: Step 9.
   - Establishes convention: **REVISED 2026-08-28 (Decision 6's added scope) — TWO new

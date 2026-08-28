@@ -54,8 +54,29 @@ never `git add -A`, never a bare `git commit`.
 
 ## ▶ NEXT ACTION
 
-**Steps 4 + 5** — `[model: opus]`, dispatched IN PARALLEL (they write to different files:
-`tests/test_prep_push_rep_enrich.py` vs `tests/test_prep_push_rep_season_enrich.py`).
+**Step 6** — `[model: opus]`. Smoke-suite coverage in `tests/smoke/test_smoke_all_commands.py`.
+
+**Steps 4 + 5 outcome:** both done, dispatched in parallel (different files, no conflict).
+Full suite now **768 passed** (720 → +21 movie, +27 season). Both files pure-append — the 7 and 10
+pre-existing tests are byte-untouched and still collect first in their original order.
+
+### 📋 Two PLAN-vs-IMPLEMENTATION deviations found by Step 5 — plan inaccuracies, NOT code bugs
+Both are pre-existing, unmodified `main.py` behaviour. The tests pin the REAL contract rather than
+working around it, and the test file documents them as D-A / D-B.
+
+- **D-A — flat layout, artifact row 3.** PLAN.md says the season-images endpoint "IS still called …
+  but its result is DISCARDED." It is in fact **never called**: `_download_unit_images`
+  short-circuits on `if os.path.exists(dest): … continue` BEFORE the
+  `/tv/{id}/season/{n}/images` GET. Strictly better (one fewer round trip), identical user-visible
+  outcome. Test asserts the endpoint is never hit AND the "kept" line prints.
+- **D-B — LOCAL-ALWAYS-WINS, artifact row 7.** PLAN.md lists `tvshow.nfo` among the
+  local-always-wins rows. `_write_nfo` documents the OPPOSITE and always has — *"Overwrites an
+  existing file (NFOs are regenerable metadata)."* Artwork rows 1/3/4 are pinned as
+  local-always-wins; row 7's real contract is pinned separately by `test_nfo_is_regenerated_not_kept`.
+
+**Fixture-hygiene finding (not a product bug):** apostrophes must stay out of fixture folder names
+— `main.py` escapes `'` as `'''` for the adb `mv` but pushes the raw path, while `mock_device`
+only does `.strip("'")`, so they disagree and the push "fails".
 
 ### ⚠️ Step 3 parser caveat — Step 4/5 test authors MUST know this
 A bare `-tmdbid` / `-tvdbid` with **no following token** falls through to the path parts rather
@@ -209,8 +230,8 @@ substitution in the Step table below.
 | 1 | fable | **2 candidates** | **done** | `d1660a8` (squash of `…__cand_a` @ `5178e8f`) | **post-merge: smoke 76/76 · full 710/710** | Core enrich-composition + `cmd_prep_push_rep_enrich`; also owns the `_write_nfo` element-set extension (excluded from judging — identical in both candidates). **Sub-state:** worktrees `.candidates/imp-d22-step-1/{A,B}`, branches `…__cand_a` / `…__cand_b`. Candidates run SEQUENTIALLY (A, then B), then `judge-v2`. See "Step 1 candidate progress" below. |
 | 2 | fable | single | **done** | (this commit) | **full 720/720 (+10) · smoke 76/76** | `cmd_prep_push_rep_season_enrich` + `_season_run_target_ids` on candidate A's merged `_enrich_after_archive` pattern. Single-executor **by design** (the plan reasons re-forking the same A-vs-B decision for the season case is not genuine differentiation). **Also carries the `<director>`-for-shows fix** (see below). Works in the MAIN checkout — no worktree. |
 | 3 | opus | single | **done** | (this commit) | full 720/720 · smoke 76/76 · cli_parsers 31/31 | Two new `elif` blocks, 205 lines, PURE INSERTION. Zero-diff proved by AST/byte comparison: both dispatcher blocks + both autopilot functions + `ENTRY_TYPE_KEYS` all identical to `main`. |
-| 4 | opus | single | pending | — | — | Movie tests |
-| 5 | opus | single | pending | — | — | Season tests (both folder layouts + `tvshow.nfo`) |
+| 4 | opus | single | **done** | (this commit) | **28/28** (was 7, +21) · smoke 76/76 | Pure append (0 deletions verified). 14 regression tests over every existing `prep_push_rep` permutation + a byte-for-byte console pin. **Negative control run:** mutated the implementation → 12 tests failed → reverted byte-identically, proving the oracles are not vacuous. |
+| 5 | opus | single | **done** | (this commit) | **37/37** (was 10, +27) · smoke 76/76 | Pure append (0 deletions verified). 12 regression ids + the 15-test artifact inventory across BOTH folder layouts. Fake TMDB image bytes encode their own source URL, so every artwork assertion is a **provenance** assertion. |
 | 6 | opus | single | pending | — | — | Smoke-suite coverage |
 | 7 | opus | single | pending | — | — | Architect docs |
 | 8 | sonnet | single | pending | — | — | Register IMP-D22 + PRIORITY.md + priority-graph |

@@ -2370,16 +2370,28 @@ def _exa_resolve_tmdb_id(title, year, kind):
     return fallback_id
 
 
-def _write_nfo(folder, kind, title, year, tmdb_id, overview="", vote_average=None):
+def _write_nfo(folder, kind, title, year, tmdb_id, overview="", vote_average=None, api_key=None):
     """Write a Kodi/Jellyfin-compatible NFO file into *folder*.
 
     For a movie (kind="movie") writes ``movie.nfo`` with a ``<movie>`` root.
     For a show (kind="show") writes ``tvshow.nfo`` with a ``<tvshow>`` root.
     Uses stdlib xml.etree.ElementTree so all text is properly XML-escaped.
 
-    NEVER raises — any IO/permission failure is printed as a warning so the
-    caller's enrich run is never blocked by an NFO write error.  Overwrites an
-    existing file (NFOs are regenerable metadata).
+    `title`/`year`/`overview`/`vote_average` are the ALREADY-resolved
+    confident-match fields (no extra call needed). When `api_key` is given
+    (IMP-D22), a richer element set is filled via a small number of EXTRA
+    (cached) TMDB calls: `<imdbid>` + a second `<uniqueid type="imdb">` (via
+    `_resolve_imdb_id`), `<genre>`, `<runtime>`, `<premiered>`, `<studio>`
+    (movie: production companies; show: networks), `<director>`, and
+    `<actor><name>` entries — via the detail + credits endpoints. Every added
+    element is OPTIONAL and is omitted cleanly when TMDB has no value, a
+    lookup fails, or `api_key` is falsy. `<tvdbid>` is NEVER emitted — no
+    TVDB source exists (Decision 1).
+
+    NEVER raises — any IO/permission failure, OR a failure while fetching the
+    extended element set, is printed as a warning so the caller's enrich run
+    is never blocked; the NFO is still written with whatever was resolved.
+    Overwrites an existing file (NFOs are regenerable metadata).
     """
     import xml.etree.ElementTree as ET
 
@@ -2396,6 +2408,56 @@ def _write_nfo(folder, kind, title, year, tmdb_id, overview="", vote_average=Non
     uid_el.set("type", "tmdb")
     uid_el.set("default", "true")
     uid_el.text = str(tmdb_id)
+    ET.SubElement(root, "tmdbid").text = str(tmdb_id)
+
+    # --- Extended element set (IMP-D22). title/year/overview/rating above are
+    #     already in the confident-match payload; everything below needs an
+    #     EXTRA TMDB call. Best-effort: any lookup failure here degrades to a
+    #     printed warning and a still-written (smaller) NFO — the write below
+    #     always happens.
+    if api_key:
+        try:
+            imdb_id = _resolve_imdb_id(tmdb_id, kind, api_key)
+            if imdb_id:
+                imdb_uid = ET.SubElement(root, "uniqueid")
+                imdb_uid.set("type", "imdb")
+                imdb_uid.text = imdb_id
+                ET.SubElement(root, "imdbid").text = imdb_id
+
+            if kind == "movie":
+                detail = _tmdb_get(f"{TMDB_API_ROOT}/movie/{tmdb_id}", {}, api_key)
+                credits = _tmdb_get(f"{TMDB_API_ROOT}/movie/{tmdb_id}/credits", {}, api_key)
+            else:
+                detail = _tmdb_get(f"{TMDB_API_ROOT}/tv/{tmdb_id}", {}, api_key)
+                credits = _tmdb_get(f"{TMDB_API_ROOT}/tv/{tmdb_id}/credits", {}, api_key)
+
+            if isinstance(detail, dict):
+                for genre in _tmdb_genre_names(detail.get("genres")):
+                    ET.SubElement(root, "genre").text = genre
+                if kind == "movie":
+                    runtime = detail.get("runtime")
+                    premiered = detail.get("release_date")
+                    studios = _tmdb_company_names(detail.get("production_companies"))
+                else:
+                    run_times = detail.get("episode_run_time")
+                    runtime = run_times[0] if isinstance(run_times, list) and run_times else None
+                    premiered = detail.get("first_air_date")
+                    studios = _tmdb_network_names(detail.get("networks"))
+                if runtime is not None:
+                    ET.SubElement(root, "runtime").text = str(runtime)
+                if premiered:
+                    ET.SubElement(root, "premiered").text = str(premiered)
+                for studio in studios:
+                    ET.SubElement(root, "studio").text = studio
+
+            if isinstance(credits, dict):
+                for director in _tmdb_directors_from_crew(credits):
+                    ET.SubElement(root, "director").text = director
+                for cast_member in _tmdb_cast_names(credits):
+                    actor_el = ET.SubElement(root, "actor")
+                    ET.SubElement(actor_el, "name").text = cast_member["name"]
+        except Exception as exc:
+            print(f"     ⚠️  NFO metadata enrichment failed ({exc}) — writing a smaller NFO.")
 
     tree = ET.ElementTree(root)
     ET.indent(tree, space="  ")  # pretty-print (Python 3.9+)
@@ -2409,7 +2471,7 @@ def _write_nfo(folder, kind, title, year, tmdb_id, overview="", vote_average=Non
         print(f"     ⚠️  NFO write failed ({nfo_path}): {exc} — enrich continues.")
 
 
-def cmd_enrich_metadata(arg=None, *flags):
+def cmd_enrich_metadata(arg=None, *flags, confirm_rename=None):
     """Local-first TMDB backfill (SHOW-CENTRIC, IMP-E3/U3/D17 — Phase 5 step 5.4).
 
     Usage: enrich_metadata [id_or_prefix] [--apply] [--library movies|series|anime]
@@ -2425,6 +2487,13 @@ def cmd_enrich_metadata(arg=None, *flags):
     tmdb_id, which is then VALIDATED by a real by-id details fetch before anything is
     written (confident-only — never an unvalidated guess). --no-web keeps the pure
     TMDB-API behaviour. Any other flag is ignored.
+
+    `confirm_rename` (keyword-only, INTERNAL/programmatic use only — NOT a CLI
+    flag) lets a caller like `cmd_prep_push_rep_enrich` (IMP-D22) gate the
+    folder-token rename behind a confirmation callback `confirm(old, new) ->
+    bool`. Every existing caller (the CLI dispatcher, every existing test)
+    omits it, so it defaults to None and the stamp stays unconditional —
+    unchanged from today.
     """
     # Fold a flag-shaped positional (e.g. a direct `cmd_enrich_metadata("--apply")`
     # with no id) into the flags list so --apply/--library are honoured no matter
@@ -2592,15 +2661,24 @@ def cmd_enrich_metadata(arg=None, *flags):
 
         # 2) stamp the {tmdb-…} token ONCE on the show/movie folder (paths only —
         #    cmd_rename_folder is journaled + hash-safe; reused exactly as-is).
+        # IMP-D22: `confirm_rename`, when given, gates the stamp behind a
+        # confirmation callback (folder rename UX for the *_enrich autopilots).
+        # Every existing caller leaves it None, which short-circuits to the
+        # unconditional stamp above — today's behaviour, unchanged.
         if will_stamp:
             new_name = f"{base_name} {{tmdb-{tmdb_id}}}"
-            ok = cmd_rename_folder(folder, new_name)
-            if ok:
-                n_stamped += 1
-                # The folder moved; recompute season folders for the image step.
-                new_folder = os.path.join(os.path.dirname(os.path.normpath(folder)), new_name)
-                unit = _retarget_unit_folders(unit, folder, new_folder)
-                folder = new_folder
+            new_folder_full = os.path.join(os.path.dirname(os.path.normpath(folder)), new_name)
+            do_stamp = True if confirm_rename is None else confirm_rename(folder, new_folder_full)
+            if do_stamp:
+                ok = cmd_rename_folder(folder, new_name)
+                if ok:
+                    n_stamped += 1
+                    # The folder moved; recompute season folders for the image step.
+                    new_folder = new_folder_full
+                    unit = _retarget_unit_folders(unit, folder, new_folder)
+                    folder = new_folder
+            else:
+                print("     ⏭️  folder rename declined — run rename_folder later to add the token.")
 
         # 3) download images — LOCAL ALWAYS WINS (skip any that already exist).
         if image_base is None:
@@ -2629,6 +2707,7 @@ def cmd_enrich_metadata(arg=None, *flags):
                 tmdb_id=tmdb_id,
                 overview=res.get("overview", ""),
                 vote_average=res.get("vote_average"),
+                api_key=api_key,
             )
 
     # --- ambiguous report (always printed; the user resolves via set_tmdb) ---
@@ -7456,6 +7535,125 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
         replace_title_extras(library, _extras_title_id(library, base_id))
 
 
+# ===========================================================================
+#   cmd_prep_push_rep_enrich — movie autopilot + enrich (IMP-D22, Step 1).
+#
+# Composes the UNTOUCHED cmd_prep_push_rep archive with an enrich leg: once the
+# archive completes, optionally preset metadata.tmdb_id from a CLI-supplied
+# -tmdbid (cmd_set_tmdb — no title search needed), then runs
+# cmd_enrich_metadata --apply with the folder-token rename gated behind a
+# confirmation (Decision 2: resolve+prompt ONCE, after the archive; Decision 3:
+# --yes/--no-rename/TTY-detection, defaulting to NOT renaming when
+# non-interactive). An enrich-leg failure WARNS and continues (Decision 7) —
+# the return value reflects only whether the archive itself completed.
+# ===========================================================================
+
+def _refuse_tvdbid(tvdb_id):
+    """Refuse a `-tvdbid` request before anything runs (Decision 1, LOCKED):
+    MediaVault is TMDB-only. A TVDB id is a DIFFERENT numbering space from a
+    TMDB id — writing it into metadata.tmdb_id would silently fetch a
+    different title's artwork, and no TVDB client exists to validate one.
+    Returns True (refused — the caller must return False immediately, without
+    calling cmd_prep_push_rep) when `tvdb_id` is not None, else False."""
+    if tvdb_id is not None:
+        print("❌ -tvdbid is not supported: MediaVault is TMDB-only for movies, series, and anime")
+        print("   (no TVDB client exists, and a TVDB id is a DIFFERENT numbering space from a TMDB")
+        print("   id — writing it into metadata.tmdb_id would silently corrupt the entry / fetch the")
+        print("   wrong title's artwork). Look the title up on themoviedb.org and pass -tmdbid <id>.")
+        return True
+    return False
+
+
+def _make_rename_confirm(choice, note=None):
+    """Return a `confirm(old_folder, new_folder) -> bool` callback implementing
+    Decision 3 (LOCKED): explicit --yes/--no-rename flags plus
+    `sys.stdin.isatty()` detection, defaulting to "do NOT rename" whenever the
+    session is non-interactive (so pytest / the smoke suite / a cron call
+    never blocks on `input()`). `choice` is one of "ask" (interactive prompt
+    when a TTY is attached, else auto-"no"), "yes" (from CLI --yes — auto-
+    confirm), or "no" (from CLI --no-rename — auto-decline). `note`, when
+    given, is printed as an extra context line before the prompt/decision
+    (used by the season variant to flag the show/season-folder-are-the-same-
+    folder case)."""
+    def _confirm(old_folder, new_folder):
+        print(f'   > "{old_folder}" will be changed to "{new_folder}"')
+        if note:
+            print(f"   > {note}")
+        if choice == "yes":
+            print("     > auto-confirmed (--yes).")
+            return True
+        if choice == "no":
+            print("     > auto-declined (--no-rename) — leaving the folder as-is.")
+            return False
+        if not sys.stdin.isatty():
+            print("     > non-interactive session — defaulting to NOT renaming "
+                  "(pass --yes to auto-confirm, or run rename_folder yourself later).")
+            return False
+        answer = input("     > Rename this folder now? [y/N]: ").strip().lower()
+        return answer in ("y", "yes")
+    return _confirm
+
+
+def cmd_prep_push_rep_enrich(manual_id, filepath, split_method=None, split_val=None,
+                               device_id=None, eager_rehash=False, temp_dir=None,
+                               extras=None, extras_size=None,
+                               tmdb_id=None, tvdb_id=None,
+                               write_nfo=False,  # Decision 4 (2026-08-28, LOCKED): OFF
+                                                  # by default; kept a one-line flip (this
+                                                  # value + its Step-3 dispatcher mirror)
+                                                  # in case a future ruling changes it.
+                                                  # The NFO CONTENT enrichment below is
+                                                  # independent of this default.
+                               no_web=False,
+                               rename_choice="ask"):
+    """Movie auto-pilot: PREP -> PUSH -> REPLACE (the UNTOUCHED cmd_prep_push_rep),
+    then — only once the archive has completed — an enrich leg: optionally
+    preset metadata.tmdb_id from `tmdb_id` (cmd_set_tmdb, no title search),
+    then cmd_enrich_metadata --apply, with the folder-token rename gated
+    behind a confirmation (`rename_choice`).
+
+    Returns True once the archive itself completed (regardless of whether the
+    enrich leg fully succeeded — warn-and-continue). Returns False if the archive
+    did not complete (enrich is then skipped entirely) or if -tvdbid was supplied
+    (refused before anything runs)."""
+    if _refuse_tvdbid(tvdb_id):
+        return False
+
+    cmd_prep_push_rep(manual_id, filepath, split_method, split_val,
+                       device_id=device_id, eager_rehash=eager_rehash, temp_dir=temp_dir,
+                       extras=extras, extras_size=extras_size)
+
+    library = load_library()
+    if manual_id not in library:
+        print("⚠️  Enrich skipped: prep did not create a library entry.")
+        return False
+    real_id, entry = _resolve_alias(library, manual_id)
+    status = entry.get("status")
+    if status != "archived":
+        print(f"⚠️  Enrich skipped: {real_id} is not archived yet (status={status!r}).")
+        print(f"   > Once the archive finishes: enrich_metadata {real_id} --apply")
+        print("   > Or simply re-run this same command.")
+        return False
+
+    if tmdb_id is not None:
+        cmd_set_tmdb(real_id, tmdb_id)
+
+    gate = _make_rename_confirm(rename_choice)
+    flags = ["--apply"]
+    if write_nfo:
+        flags.append("--nfo")
+    if no_web:
+        flags.append("--no-web")
+    try:
+        cmd_enrich_metadata(real_id, *flags, confirm_rename=gate)
+    except RollbackHardFail as hf:
+        print(f"⚠️  Enrich folder rename left incomplete: {hf.state} — {hf.reason}")
+        print(f"   > To finish it: {hf.resume_cmd}")
+
+    print("\n✅✅✅ AUTO-PILOT COMPLETE (archive + enrich).")
+    return True
+
+
 def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False):
     # This keeps main.py clean but still lets you run "main.py fetch"
     cmd = ["python", MAINFETCH_SCRIPT, "fetch", manual_id]
@@ -8437,6 +8635,19 @@ def _tmdb_network_names(networks):
     for n in networks or []:
         if isinstance(n, dict):
             name = n.get("name")
+            if name:
+                out.append(name)
+    return out
+
+
+def _tmdb_company_names(companies):
+    """List of company `name` strings from a TMDB movie `production_companies`
+    array (IMP-D22 NFO `<studio>` element), mirroring `_tmdb_genre_names`/
+    `_tmdb_network_names`'s exact shape. [] when missing/empty/malformed."""
+    out = []
+    for c in companies or []:
+        if isinstance(c, dict):
+            name = c.get("name")
             if name:
                 out.append(name)
     return out

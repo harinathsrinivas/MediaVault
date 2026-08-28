@@ -968,6 +968,9 @@ def test_nfo_movie_written_on_apply_with_flag(sandbox, patch_tmdb, capsys):
     assert uid.get("type") == "tmdb"
     assert uid.get("default") == "true"
     assert uid.text == "1003159"
+    # Decision 1 (LOCKED): no TVDB source exists — <tvdbid> must NEVER be emitted.
+    assert root.find("tvdbid") is None
+    assert "<tvdbid>" not in nfo_path.read_text(encoding="utf-8")
 
     out = capsys.readouterr().out
     assert "movie.nfo" in out
@@ -1005,6 +1008,9 @@ def test_nfo_show_written_on_apply_with_flag(sandbox, patch_tmdb, capsys):
     assert uid.get("type") == "tmdb"
     assert uid.get("default") == "true"
     assert uid.text == "2316"
+    # Decision 1 (LOCKED): no TVDB source exists — <tvdbid> must NEVER be emitted.
+    assert root.find("tvdbid") is None
+    assert "<tvdbid>" not in nfo_path.read_text(encoding="utf-8")
 
     # No per-season NFO files.
     assert not (stamped_show / "Season 01" / "tvshow.nfo").exists()
@@ -1099,6 +1105,147 @@ def test_nfo_write_failure_warns_but_enrich_still_completes(sandbox, patch_tmdb,
     # Note: the folder may be renamed; search by key (it's stable).
     entry = lib.get("mov-en-2025-f1")
     assert entry is not None and entry.get("metadata", {}).get("tmdb_id") == 1003159
+
+
+def test_nfo_extended_elements_populated_when_tmdb_detail_available(sandbox, patch_tmdb, monkeypatch, capsys):
+    """IMP-D22: when the by-id detail + credits calls return real TMDB data, the
+    extended NFO element set is populated (imdbid/uniqueid-imdb/genre/runtime/
+    premiered/studio/director/actor) — and <tvdbid> is NEVER emitted (Decision 1,
+    LOCKED — no TVDB source exists). title/year/plot/rating/tmdbid need NO extra
+    call (already in the confident-match search payload); imdbid/genre/runtime/
+    premiered/studio/director/actor each need the extra detail(+credits) call
+    this test wires up."""
+    import xml.etree.ElementTree as ET
+    _empty_libs(sandbox)
+    folder, fp, h = _seed_movie(sandbox, "mov-en-2025-f1", "F1")
+    movie_detail = {
+        "id": 1003159, "title": "F1", "release_date": "2025-01-01",
+        "runtime": 155, "imdb_id": "tt1234567",
+        "genres": [{"id": 1, "name": "Action"}, {"id": 2, "name": "Drama"}],
+        "production_companies": [{"id": 10, "name": "Apple Studios"}],
+        "poster_path": "/poster.jpg", "backdrop_path": "/backdrop.jpg",
+        "overview": "Racing film.", "vote_average": 7.1,
+    }
+    credits_payload = {
+        "cast": [{"name": "Brad Pitt", "character": "Sonny"}],
+        "crew": [{"name": "Joseph Kosinski", "job": "Director"}],
+    }
+    # Resolve via the ordinary title SEARCH (title/year/overview/rating come
+    # from the search result, NOT the by-id detail below); the by-id detail
+    # table only serves the NFO's own EXTRA lookups (_resolve_imdb_id + the
+    # detail call inside _write_nfo).
+    fake = patch_tmdb(FakeTMDB(
+        search={"f1": [_movie_result_with_meta(1003159, "F1", 2025,
+                                                overview="Racing film.", vote_average=7.1)]},
+        movie_by_id={1003159: movie_detail},
+    ))
+
+    # FakeTMDB has no /credits endpoint of its own (falls through to an empty
+    # 200); layer ONE extra route for it on top of the installed fake.
+    def _with_credits(url, params=None, headers=None, timeout=None, **kwargs):
+        if url == f"{main.TMDB_API_ROOT}/movie/1003159/credits":
+            class _CreditsResp:
+                status_code = 200
+                def json(self_inner):
+                    return credits_payload
+            return _CreditsResp()
+        return fake.get(url, params=params, headers=headers, timeout=timeout, **kwargs)
+    monkeypatch.setattr(main.requests, "get", _with_credits)
+
+    main.cmd_enrich_metadata("mov-en-2025-f1", "--apply", "--nfo")
+
+    new_folder = folder.parent / "F1 {tmdb-1003159}"
+    nfo_path = new_folder / "movie.nfo"
+    assert nfo_path.exists()
+    root = ET.parse(str(nfo_path)).getroot()
+
+    assert root.find("tmdbid").text == "1003159"
+    assert root.find("imdbid").text == "tt1234567"
+    uids = root.findall("uniqueid")
+    assert {u.get("type") for u in uids} == {"tmdb", "imdb"}
+    assert [g.text for g in root.findall("genre")] == ["Action", "Drama"]
+    assert root.find("runtime").text == "155"
+    assert root.find("premiered").text == "2025-01-01"
+    assert [s.text for s in root.findall("studio")] == ["Apple Studios"]
+    assert root.find("director").text == "Joseph Kosinski"
+    actors = root.findall("actor")
+    assert len(actors) == 1
+    assert actors[0].find("name").text == "Brad Pitt"
+
+    # Decision 1 (LOCKED): no TVDB source exists — <tvdbid> must NEVER appear.
+    assert root.find("tvdbid") is None
+    assert "<tvdbid>" not in nfo_path.read_text(encoding="utf-8")
+
+
+# ===========================================================================
+# `confirm_rename` keyword-only hook (IMP-D22 Candidate B — internal/
+# programmatic use only, NOT a CLI flag). Every EXISTING caller (the CLI
+# dispatcher + every test above this section) omits it, so it is always None
+# for them — PROVABLY unchanged behaviour via short-circuit.
+# ===========================================================================
+
+def test_confirm_rename_omitted_still_stamps_unconditionally(sandbox, patch_tmdb, capsys):
+    """IMP-D22 short-circuit guarantee: calling cmd_enrich_metadata WITHOUT
+    `confirm_rename` stamps the folder token UNCONDITIONALLY, exactly as
+    before the parameter existed — proving every existing caller (the CLI
+    dispatcher, every other test in this file) is provably unaffected."""
+    _empty_libs(sandbox)
+    folder, fp, h = _seed_movie(sandbox, "mov-en-2025-shortcircuit", "Shortcircuit")
+    patch_tmdb(FakeTMDB(search={"shortcircuit": [_movie_result(4242, "Shortcircuit", 2025)]}))
+
+    main.cmd_enrich_metadata("mov-en-2025-shortcircuit", "--apply")  # no confirm_rename kwarg
+
+    new_folder = folder.parent / "Shortcircuit {tmdb-4242}"
+    assert not folder.exists()
+    assert new_folder.is_dir(), "confirm_rename=None must short-circuit to an unconditional stamp"
+    lib = mvcommon.load_library()
+    assert lib["mov-en-2025-shortcircuit"]["metadata"]["tmdb_id"] == 4242
+
+
+def test_confirm_rename_callback_can_decline_the_stamp(sandbox, patch_tmdb, capsys):
+    """A `confirm_rename` callback returning False declines the folder rename —
+    tmdb_id still writes (additive), the folder keeps its name, and the decline
+    is printed."""
+    _empty_libs(sandbox)
+    folder, fp, h = _seed_movie(sandbox, "mov-en-2025-declineit", "Declineit")
+    patch_tmdb(FakeTMDB(search={"declineit": [_movie_result(5151, "Declineit", 2025)]}))
+
+    calls = []
+    def _decline(old_folder, new_folder):
+        calls.append((old_folder, new_folder))
+        return False
+
+    main.cmd_enrich_metadata("mov-en-2025-declineit", "--apply", confirm_rename=_decline)
+
+    assert len(calls) == 1
+    assert folder.exists(), "a declined rename must leave the folder in place"
+    lib = mvcommon.load_library()
+    assert lib["mov-en-2025-declineit"]["metadata"]["tmdb_id"] == 5151
+    assert main._norm_path(lib["mov-en-2025-declineit"]["folder_path"]) == main._norm_path(str(folder))
+    out = capsys.readouterr().out
+    assert "rename declined" in out
+
+
+def test_confirm_rename_callback_can_confirm_the_stamp(sandbox, patch_tmdb, capsys):
+    """A `confirm_rename` callback returning True stamps exactly as the
+    unconditional path would, and is invoked with the (old, new) full paths."""
+    _empty_libs(sandbox)
+    folder, fp, h = _seed_movie(sandbox, "mov-en-2025-confirmit", "Confirmit")
+    patch_tmdb(FakeTMDB(search={"confirmit": [_movie_result(6161, "Confirmit", 2025)]}))
+
+    calls = []
+    def _confirm(old_folder, new_folder):
+        calls.append((old_folder, new_folder))
+        return True
+
+    main.cmd_enrich_metadata("mov-en-2025-confirmit", "--apply", confirm_rename=_confirm)
+
+    new_folder = folder.parent / "Confirmit {tmdb-6161}"
+    assert not folder.exists()
+    assert new_folder.is_dir()
+    assert len(calls) == 1
+    assert main._norm_path(calls[0][0]) == main._norm_path(str(folder))
+    assert main._norm_path(calls[0][1]) == main._norm_path(str(new_folder))
 
 
 # ===========================================================================

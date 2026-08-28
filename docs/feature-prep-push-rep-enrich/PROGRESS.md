@@ -67,6 +67,31 @@ for flat/root-level layouts.
 `docs/feature-prep-push-rep-enrich/decisions/` — `.candidates/` is gitignored, so they were copied
 into tracked docs; the record of WHY A won must outlive the worktrees.
 
+## Step 2 — crash record + resume guidance (2026-08-28 14:13)
+
+**Step 2's executor died mid-work on a session rate limit** (HTTP 429, "resets 2pm
+Asia/Singapore"), while starting sub-task 4b (the `<director>`-for-shows fix). It had NOT yet
+touched `cmd_prep_push_rep_season_enrich` or `_season_run_target_ids` at all.
+
+**Partial work found and DELIBERATELY REVERTED.** `git diff` showed 6 insertions / 3 deletions,
+entirely inside `_write_nfo`'s DOCSTRING — describing the `<director>` fix without the code change
+having been made. Leaving it would have left the source documenting behaviour that does not exist,
+so `git checkout -- main.py` was run. Nothing of substance was lost; the tree is clean at
+`b53b906`. **Re-dispatch Step 2 from scratch.**
+
+**Worth preserving from the dead run — its `<director>` design choice was correct** and the
+re-dispatch should reuse it: for `kind != "movie"`, source `<director>` from the DETAILS payload's
+`created_by` array via `_tmdb_created_by_names`, because a SHOW has no series-level crew
+"Director" job. The MOVIE path stays on `_tmdb_directors_from_crew` off the credits payload.
+
+**Non-issue, recorded so it is not re-investigated:** a stale planner agent (dispatched ~5h
+earlier, resumed late) reported a "documentation regression" claiming Step 1's plan text had lost
+its `_write_nfo` assignment. **This was FALSE** — verified directly: Step 1 spans PLAN.md lines
+316-555, contains 8 `_write_nfo` mentions, and its `Files` line correctly assigns `_write_nfo` +
+`_tmdb_company_names` with the excluded-from-judging note; root and tracked copies are identical.
+That agent's edits never landed and nothing needed undoing. It appears to have made a
+too-small-window reading error from stale context.
+
 ## Step 1 candidate progress
 
 | Cand | Branch | Worktree | Commit | Status | Tests |

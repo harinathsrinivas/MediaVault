@@ -58,6 +58,65 @@ never `git add -A`, never a bare `git commit`.
 `cmd_prep_push_rep_enrich`, and the `_write_nfo` element-set extension (D4). Two candidate
 worktrees under `.candidates/imp-d22-step-1/{A,B}`, judged by `judge-v2`.
 
+## Step 1 candidate progress
+
+| Cand | Branch | Worktree | Commit | Status | Tests |
+|---|---|---|---|---|---|
+| A (isolated) | `…__cand_a` | `.candidates/imp-d22-step-1/A` | `143f58e` | **done** | enrich 48/48 · smoke 76/76 · full 709/709 · schema-guard 4/4 |
+| B (hooked) | `…__cand_b` | `.candidates/imp-d22-step-1/B` | `7ca55a8` | **done** | enrich 49/49 · new-cmd 9/9 · smoke 76/76 · full 713/713 |
+
+Both branch from the parent at `404e294` — **B must NOT see A's work**; independence is what
+makes the judge's comparison meaningful.
+
+### Orchestrator's independent verification of candidate A (not taken on trust)
+
+- Autopilot bodies: **purely additive**, 269-line insertion with zero deletions in that region.
+- `raise RollbackHardFail(` sites: **still exactly 3** — no new PONR. Change-gate honoured.
+- `<tvdbid>`: **never emitted** — all 7 occurrences are docstrings, comments, or the refusal text.
+- `test_enrich_metadata.py`: **zero existing tests modified** (3 appended).
+
+**Design win the plan did not anticipate.** The plan expected existing NFO assertions would need
+updating for the richer element set. A avoided that by gating the new fields behind an
+`api_key=None` default — a caller that passes no key gets byte-identical old behaviour, while
+`cmd_enrich_metadata --nfo` (which does pass one) gets the richer output. Exactly the deliberate
+change D4 wanted, with zero test churn.
+
+**⚠️ Reporting discrepancy — MUST be given to the judge verbatim.** A's summary claims *"Zero
+lines of `cmd_enrich_metadata` touched"*, but the diff adds ONE line inside it: `api_key=api_key,`
+at the `_write_nfo` call site (hunk `@@ -2629,6 +2696,7 @@`). A disclosed this in its file list
+and then contradicted it in its summary. **Correct reading: that line is a consequence of the
+SHARED, non-judged `_write_nfo` extension — candidate B will need the identical line — so it does
+NOT erode A's "isolated" differentiator.** The judge must be told this precisely, or it will
+either penalise A for a false claim or credit it with a literal "zero" that is not true.
+
+### Judge verdict (2026-08-28) — `judge-v2`, written to `.candidates/imp-d22-step-1/DECISION.md`
+
+**Winner: Candidate A**, on criterion 3 (blast radius). Criteria 1/2/4 are ties; criterion 5
+(DRY, where B wins clearly) is a tiebreaker only and is never reached. A touches ZERO lines of
+existing `cmd_enrich_metadata` logic; B deletes and rewrites 8 lines inside that load-bearing
+function (behaviour-preserving, but shared code A structurally cannot regress).
+
+The judge re-ran every suite in both worktrees and read both diffs hunk by hunk; all reported
+numbers matched. It confirmed the A self-report discrepancy independently, and correctly treated
+the `api_key=api_key,` line as excluded shared NFO work (B has the identical line) — not crediting
+A with a literal "zero", not penalising it as a code defect, but noting the inaccurate self-report.
+
+**🔻 REAL DEFECT IN THE WINNER — must be fixed before or at merge.** A's `_enrich_after_archive`
+does NOT reproduce the `try: … except Exception: n_skipped += 1; continue` defensive wrapper that
+surrounds the resolve waterfall in the original (base `main.py:2487-2507`). Latent robustness gap,
+not a live bug — every callee (`_resolve_unit`, `_resolve_unit_by_id`, `_exa_resolve_tmdb_id`,
+`_tmdb_get`) is explicitly documented "NEVER raises". But it is a first, already-realised instance
+of exactly the duplication-drift risk criterion 5 warns about, on day one of the duplicate's
+existence. **Restore the wrapper.**
+
+### 🔻 Carried-forward defect found by candidate A (plan bug, not an implementation bug)
+
+For a **SHOW**, `<director>` will usually be EMPTY: the plan specified `_tmdb_directors_from_crew`,
+but TMDB carries show creators in `created_by` (i.e. `_tmdb_created_by_names`), not as a crew
+"Director" at show level. Candidate A followed the plan as written rather than silently improving
+it, and surfaced the issue — the right call. Only manifests for shows, so **fix it in Step 2 (the
+season command)**. Do not let it be lost.
+
 ## Blockers / human gates
 
 | Gate | What | Status |

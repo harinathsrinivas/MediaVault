@@ -170,7 +170,7 @@ substitution in the Step table below.
 |---|---|---|---|---|---|---|
 | 0 | *orchestrator* | single | **done** | `5ba35fe` + `c33f4d2` | n/a | Performed by the orchestrator directly, as Step 0's own text permits (the fable-probe sub-step *must* be — executors cannot spawn Tasks). Fable probed OK ×2; `PLAN.md`, `DECISIONS.md`, `PROGRESS.md` scaffolded under `docs/feature-prep-push-rep-enrich/`. |
 | 1 | fable | **2 candidates** | **done** | `d1660a8` (squash of `…__cand_a` @ `5178e8f`) | **post-merge: smoke 76/76 · full 710/710** | Core enrich-composition + `cmd_prep_push_rep_enrich`; also owns the `_write_nfo` element-set extension (excluded from judging — identical in both candidates). **Sub-state:** worktrees `.candidates/imp-d22-step-1/{A,B}`, branches `…__cand_a` / `…__cand_b`. Candidates run SEQUENTIALLY (A, then B), then `judge-v2`. See "Step 1 candidate progress" below. |
-| 2 | fable | single | pending | — | — | `cmd_prep_push_rep_season_enrich` on Step 1's winning mechanism |
+| 2 | fable | single | **in_progress** | — | pre-step: smoke 76/76 · full 710/710 | `cmd_prep_push_rep_season_enrich` + `_season_run_target_ids` on candidate A's merged `_enrich_after_archive` pattern. Single-executor **by design** (the plan reasons re-forking the same A-vs-B decision for the season case is not genuine differentiation). **Also carries the `<director>`-for-shows fix** (see below). Works in the MAIN checkout — no worktree. |
 | 3 | opus | single | pending | — | — | CLI dispatcher wiring |
 | 4 | opus | single | pending | — | — | Movie tests |
 | 5 | opus | single | pending | — | — | Season tests (both folder layouts + `tvshow.nfo`) |

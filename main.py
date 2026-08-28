@@ -9917,6 +9917,8 @@ if __name__ == "__main__":
         print("  prep [id] [filepath]")
         print("  prep_push_rep [id] [filepath] [optional: SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>]")
         print("  prep_push_rep_season [id] [folder] [optional: SIZE..] [OPT: episodes] [device <id_or_name>] [rehash] [tempdir <path>]")
+        print("  prep_push_rep_enrich [id] [filepath] [SIZE_GB/SIZE_MB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>] [-tmdbid <id>] [--yes|--no-rename] [--nfo] [--no-web]  — archive then TMDB-enrich; no id -> auto-resolve exactly like enrich_metadata")
+        print("  prep_push_rep_season_enrich [id] [folder] [SIZE_GB/SIZE_MB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [-tmdbid <id>] [--yes|--no-rename] [--nfo] [--no-web]  — season autopilot, then show-centric enrich")
         print("  fetch_restore [id] [OPT: episodes 1-3]")  # [NEW]
         print("  set_search [id] [term]")
         print("  set_poster [id] [url]")
@@ -10097,6 +10099,203 @@ if __name__ == "__main__":
         _er_pprs = parse_extras_tokens(_et_pprs)
         cmd_prep_push_rep_season(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
                                  extras=_er_pprs["folders"] or None, extras_size=_er_pprs["extras_size"])
+
+    elif cmd == "prep_push_rep_enrich":
+        # IMP-D22 — same token walk as `prep_push_rep` above (SIZE_*/COUNT, device,
+        # rehash, tempdir, --extras/--extras-size), plus the enrich-only flags. The
+        # existing block is deliberately untouched: this is a separate sibling.
+        if len(sys.argv) < 4:
+            print("❌ Usage: prep_push_rep_enrich [id] [filepath] [optional: SIZE_MB/COUNT val] [device <id_or_name>] [-tmdbid <id>] [--yes|--no-rename] [--nfo] [--no-web]")
+            sys.exit(1)
+
+        mid = sys.argv[2]
+        rest = sys.argv[3:]
+
+        method = None
+        val = None
+        device_arg = None
+        eager = False
+        tdir = None
+        filepath_parts = []
+        _et_ppre = []
+        cli_tmdb_id = None
+        cli_tvdb_id = None
+        write_nfo_flag = False   # Decision 4: --nfo is OFF by default.
+        no_web_flag = False
+        rename_choice = "ask"    # Decision 3: --yes -> "yes", --no-rename -> "no".
+
+        i = 0
+        while i < len(rest):
+            arg = rest[i]
+            if arg in ["SIZE_MB", "SIZE_GB", "COUNT"]:
+                if i + 1 < len(rest):
+                    method = arg
+                    val = rest[i + 1]
+                    i += 2
+                    continue
+            elif arg == "device":
+                if i + 1 < len(rest):
+                    device_arg = rest[i + 1]
+                    i += 2
+                    continue
+            elif arg == "rehash":
+                eager = True
+                i += 1
+                continue
+            elif arg == "tempdir":
+                if i + 1 < len(rest):
+                    tdir = rest[i + 1]
+                    i += 2
+                    continue
+            elif arg in ("--extras", "-extras", "--extras-size", "-extras-size"):
+                _et_ppre.append(arg)
+                i += 1
+                if i < len(rest):
+                    _sv8 = rest[i]
+                    _et_ppre.append(_sv8)
+                    i += 1
+                    if arg in ("--extras-size", "-extras-size") and _sv8.upper() in ("SIZE_MB", "SIZE_GB", "COUNT") and i < len(rest):
+                        _et_ppre.append(rest[i])
+                        i += 1
+                continue
+            elif arg in ("-tmdbid", "--tmdbid"):
+                if i + 1 < len(rest):
+                    cli_tmdb_id = rest[i + 1]
+                    i += 2
+                    continue
+            elif arg in ("-tvdbid", "--tvdbid"):
+                # Decision 1: PARSED here, REFUSED at runtime by the command
+                # itself (_refuse_tvdbid) — the parser never decides policy.
+                if i + 1 < len(rest):
+                    cli_tvdb_id = rest[i + 1]
+                    i += 2
+                    continue
+            elif arg == "--yes":
+                rename_choice = "yes"
+                i += 1
+                continue
+            elif arg == "--no-rename":
+                rename_choice = "no"
+                i += 1
+                continue
+            elif arg == "--nfo":
+                write_nfo_flag = True
+                i += 1
+                continue
+            elif arg == "--no-web":
+                no_web_flag = True
+                i += 1
+                continue
+            filepath_parts.append(arg)
+            i += 1
+
+        filepath = " ".join(filepath_parts)
+        _er_ppre = parse_extras_tokens(_et_ppre)
+        cmd_prep_push_rep_enrich(mid, filepath, method, val, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
+                                 extras=_er_ppre["folders"] or None, extras_size=_er_ppre["extras_size"],
+                                 tmdb_id=cli_tmdb_id, tvdb_id=cli_tvdb_id,
+                                 write_nfo=write_nfo_flag, no_web=no_web_flag, rename_choice=rename_choice)
+
+    elif cmd == "prep_push_rep_season_enrich":
+        # IMP-D22 — same token walk as `prep_push_rep_season` above (SIZE_*/COUNT,
+        # episodes, device, rehash, tempdir, --extras/--extras-size), plus the
+        # enrich-only flags. The existing block is deliberately untouched.
+        if len(sys.argv) < 4:
+            print("❌ Usage: prep_push_rep_season_enrich [id] [folder] [optional: SIZE..] [OPT: episodes <range>] [device <id_or_name>] [-tmdbid <id>] [--yes|--no-rename] [--nfo] [--no-web]")
+            sys.exit(1)
+
+        group_id = sys.argv[2]
+        args = sys.argv[3:]
+        folder_parts = []
+        method = None
+        val = None
+        ep_range = None
+        device_arg = None
+        eager = False
+        tdir = None
+        _et_pprse = []
+        cli_tmdb_id = None
+        cli_tvdb_id = None
+        write_nfo_flag = False   # Decision 4: --nfo is OFF by default.
+        no_web_flag = False
+        rename_choice = "ask"    # Decision 3: --yes -> "yes", --no-rename -> "no".
+
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg in ["SIZE_MB", "SIZE_GB", "COUNT"]:
+                if i + 1 < len(args):
+                    method = arg
+                    val = args[i + 1]
+                    i += 2
+                    continue
+            elif arg == "episodes":
+                if i + 1 < len(args):
+                    ep_range = args[i + 1]
+                    i += 2
+                    continue
+            elif arg == "device":
+                if i + 1 < len(args):
+                    device_arg = args[i + 1]
+                    i += 2
+                    continue
+            elif arg == "rehash":
+                eager = True
+                i += 1
+                continue
+            elif arg == "tempdir":
+                if i + 1 < len(args):
+                    tdir = args[i + 1]
+                    i += 2
+                    continue
+            elif arg in ("--extras", "-extras", "--extras-size", "-extras-size"):
+                _et_pprse.append(arg)
+                i += 1
+                if i < len(args):
+                    _sv9 = args[i]
+                    _et_pprse.append(_sv9)
+                    i += 1
+                    if arg in ("--extras-size", "-extras-size") and _sv9.upper() in ("SIZE_MB", "SIZE_GB", "COUNT") and i < len(args):
+                        _et_pprse.append(args[i])
+                        i += 1
+                continue
+            elif arg in ("-tmdbid", "--tmdbid"):
+                if i + 1 < len(args):
+                    cli_tmdb_id = args[i + 1]
+                    i += 2
+                    continue
+            elif arg in ("-tvdbid", "--tvdbid"):
+                # Decision 1: PARSED here, REFUSED at runtime by the command
+                # itself (_refuse_tvdbid) — the parser never decides policy.
+                if i + 1 < len(args):
+                    cli_tvdb_id = args[i + 1]
+                    i += 2
+                    continue
+            elif arg == "--yes":
+                rename_choice = "yes"
+                i += 1
+                continue
+            elif arg == "--no-rename":
+                rename_choice = "no"
+                i += 1
+                continue
+            elif arg == "--nfo":
+                write_nfo_flag = True
+                i += 1
+                continue
+            elif arg == "--no-web":
+                no_web_flag = True
+                i += 1
+                continue
+            folder_parts.append(arg)
+            i += 1
+
+        folder_path = " ".join(folder_parts)
+        _er_pprse = parse_extras_tokens(_et_pprse)
+        cmd_prep_push_rep_season_enrich(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
+                                        extras=_er_pprse["folders"] or None, extras_size=_er_pprse["extras_size"],
+                                        tmdb_id=cli_tmdb_id, tvdb_id=cli_tvdb_id,
+                                        write_nfo=write_nfo_flag, no_web=no_web_flag, rename_choice=rename_choice)
 
     elif cmd == "set_search":
         if len(sys.argv) >= 4:

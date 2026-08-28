@@ -54,7 +54,16 @@ never `git add -A`, never a bare `git commit`.
 
 ## ▶ NEXT ACTION
 
-**Step 3** — `[model: opus]`. CLI dispatcher wiring for BOTH new commands.
+**Steps 4 + 5** — `[model: opus]`, dispatched IN PARALLEL (they write to different files:
+`tests/test_prep_push_rep_enrich.py` vs `tests/test_prep_push_rep_season_enrich.py`).
+
+### ⚠️ Step 3 parser caveat — Step 4/5 test authors MUST know this
+A bare `-tmdbid` / `-tvdbid` with **no following token** falls through to the path parts rather
+than setting the value. This deliberately mirrors the guard shape (`if i + 1 < len(rest)`) that
+the pre-existing `device` / `tempdir` / `SIZE_*` arms already use — Step 3 was told to mirror
+token-for-token, and the executor rejected deviating. **Consequence: a test asserting that a bare
+`-tvdbid` (no id) triggers `_refuse_tvdbid()` would FAIL** — the token just joins the filepath and
+prep then fails file-not-found, writing nothing. Harmless, but do not write that test.
 
 **Step 2 outcome:** done. `cmd_prep_push_rep_season_enrich` + `_season_run_target_ids` landed;
 the `<director>`-for-shows defect is CLOSED (real code + docstring together this time —
@@ -199,7 +208,7 @@ substitution in the Step table below.
 | 0 | *orchestrator* | single | **done** | `5ba35fe` + `c33f4d2` | n/a | Performed by the orchestrator directly, as Step 0's own text permits (the fable-probe sub-step *must* be — executors cannot spawn Tasks). Fable probed OK ×2; `PLAN.md`, `DECISIONS.md`, `PROGRESS.md` scaffolded under `docs/feature-prep-push-rep-enrich/`. |
 | 1 | fable | **2 candidates** | **done** | `d1660a8` (squash of `…__cand_a` @ `5178e8f`) | **post-merge: smoke 76/76 · full 710/710** | Core enrich-composition + `cmd_prep_push_rep_enrich`; also owns the `_write_nfo` element-set extension (excluded from judging — identical in both candidates). **Sub-state:** worktrees `.candidates/imp-d22-step-1/{A,B}`, branches `…__cand_a` / `…__cand_b`. Candidates run SEQUENTIALLY (A, then B), then `judge-v2`. See "Step 1 candidate progress" below. |
 | 2 | fable | single | **done** | (this commit) | **full 720/720 (+10) · smoke 76/76** | `cmd_prep_push_rep_season_enrich` + `_season_run_target_ids` on candidate A's merged `_enrich_after_archive` pattern. Single-executor **by design** (the plan reasons re-forking the same A-vs-B decision for the season case is not genuine differentiation). **Also carries the `<director>`-for-shows fix** (see below). Works in the MAIN checkout — no worktree. |
-| 3 | opus | single | pending | — | — | CLI dispatcher wiring |
+| 3 | opus | single | **done** | (this commit) | full 720/720 · smoke 76/76 · cli_parsers 31/31 | Two new `elif` blocks, 205 lines, PURE INSERTION. Zero-diff proved by AST/byte comparison: both dispatcher blocks + both autopilot functions + `ENTRY_TYPE_KEYS` all identical to `main`. |
 | 4 | opus | single | pending | — | — | Movie tests |
 | 5 | opus | single | pending | — | — | Season tests (both folder layouts + `tvshow.nfo`) |
 | 6 | opus | single | pending | — | — | Smoke-suite coverage |

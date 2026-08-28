@@ -655,7 +655,7 @@ session. Before dispatching the FIRST `[model: fable]` step in any session:
     per the multi-candidate quality rules, so this step is intentionally NOT multi-candidate
     despite the no-limits policy).
 
-- [ ] 3. [model: opus] [effort: high] CLI dispatcher wiring for both new commands.
+- [x] 3. [model: opus] [effort: high] CLI dispatcher wiring for both new commands.
   - Depends on: Step 1 (movie function signature), Step 2 (season function signature).
   - Consumed by: Step 4/5's tests may invoke either via direct function call OR via this
     dispatcher; Step 6 (smoke) exercises the dispatcher indirectly through `main.cmd_*`

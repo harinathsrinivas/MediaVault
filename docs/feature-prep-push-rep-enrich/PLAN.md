@@ -313,7 +313,7 @@ session. Before dispatching the FIRST `[model: fable]` step in any session:
     on the new branch; the Fable-probe result is recorded in PROGRESS.md; `git status` clean
     apart from the pre-existing staged `Master_Stream_Archiver*`/`MatchArchiver*` hazard.
 
-- [ ] 1. [model: fable] [effort: xhigh] [candidates: 2] Core enrich-composition mechanism + `cmd_prep_push_rep_enrich` (movie command).
+- [x] 1. [model: fable] [effort: xhigh] [candidates: 2] Core enrich-composition mechanism + `cmd_prep_push_rep_enrich` (movie command).
   - Depends on: Step 0 (branch exists).
   - Consumed by: Step 2 (reuses whichever candidate wins, applied to the season case), Step 3
     (CLI wiring — depends on the EXACT function signature below), Step 4 (tests), Step 7

@@ -54,9 +54,18 @@ never `git add -A`, never a bare `git commit`.
 
 ## ▶ NEXT ACTION
 
-**Step 1** — `[model: fable]` `[candidates: 2]`. Core enrich-composition mechanism +
-`cmd_prep_push_rep_enrich`, and the `_write_nfo` element-set extension (D4). Two candidate
-worktrees under `.candidates/imp-d22-step-1/{A,B}`, judged by `judge-v2`.
+**Step 2** — `[model: fable]` single-executor. `cmd_prep_push_rep_season_enrich`, built on
+candidate A's now-merged isolated pattern (`_enrich_after_archive`). Step 2 MUST also carry the
+two items flagged below: the **`<director>`-for-shows plan defect** (shows-only, so it lands
+naturally here) and D6's season scoping rules — scope by `base_id`, preset the id on an episode
+leaf (since `cmd_set_tmdb` refuses a `season_map`), and suppress the "parent of the season" note
+for flat/root-level layouts.
+
+**Step 1 outcome:** candidate **A** won (judge verdict + explicit user confirmation), merged as
+`d1660a8` after the user-required pre-merge fix. Post-merge gate green: **smoke 76/76, full
+710/710**. The judge decision and BOTH candidates' critiques are preserved under
+`docs/feature-prep-push-rep-enrich/decisions/` — `.candidates/` is gitignored, so they were copied
+into tracked docs; the record of WHY A won must outlive the worktrees.
 
 ## Step 1 candidate progress
 
@@ -160,7 +169,7 @@ substitution in the Step table below.
 | Step | Model | Mode | Status | Commit | Tests | Notes |
 |---|---|---|---|---|---|---|
 | 0 | *orchestrator* | single | **done** | `5ba35fe` + `c33f4d2` | n/a | Performed by the orchestrator directly, as Step 0's own text permits (the fable-probe sub-step *must* be — executors cannot spawn Tasks). Fable probed OK ×2; `PLAN.md`, `DECISIONS.md`, `PROGRESS.md` scaffolded under `docs/feature-prep-push-rep-enrich/`. |
-| 1 | fable | **2 candidates** | **in_progress** | — | baseline smoke 76/76 ✓ | Core enrich-composition + `cmd_prep_push_rep_enrich`; also owns the `_write_nfo` element-set extension (excluded from judging — identical in both candidates). **Sub-state:** worktrees `.candidates/imp-d22-step-1/{A,B}`, branches `…__cand_a` / `…__cand_b`. Candidates run SEQUENTIALLY (A, then B), then `judge-v2`. See "Step 1 candidate progress" below. |
+| 1 | fable | **2 candidates** | **done** | `d1660a8` (squash of `…__cand_a` @ `5178e8f`) | **post-merge: smoke 76/76 · full 710/710** | Core enrich-composition + `cmd_prep_push_rep_enrich`; also owns the `_write_nfo` element-set extension (excluded from judging — identical in both candidates). **Sub-state:** worktrees `.candidates/imp-d22-step-1/{A,B}`, branches `…__cand_a` / `…__cand_b`. Candidates run SEQUENTIALLY (A, then B), then `judge-v2`. See "Step 1 candidate progress" below. |
 | 2 | fable | single | pending | — | — | `cmd_prep_push_rep_season_enrich` on Step 1's winning mechanism |
 | 3 | opus | single | pending | — | — | CLI dispatcher wiring |
 | 4 | opus | single | pending | — | — | Movie tests |

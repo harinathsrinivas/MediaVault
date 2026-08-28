@@ -334,3 +334,46 @@ def test_no_tmdb_api_key_warns_and_skips_enrich_but_archive_still_completes(
     # but nothing further (title/year/overview/rename/images) since the
     # resolve step never ran.
     assert entry["metadata"]["tmdb_id"] == TMDB_ID
+
+
+# ---------------------------------------------------------------------------
+# Extra: a resolver that RAISES is swallowed by `_enrich_after_archive`'s
+# defensive try/except — the same belt-and-braces wrapper `cmd_enrich_metadata`
+# puts around this identical waterfall (main.py:~2487-2507). The resolvers all
+# document "NEVER raises", so this guards against a future regression in them;
+# `cmd_prep_push_rep_enrich` catches ONLY `RollbackHardFail`, so without the
+# wrapper a plain `RuntimeError` would escape the ENTIRE command *after* the
+# archive leg had already succeeded — exactly what Decision 7 forbids.
+# ---------------------------------------------------------------------------
+
+def test_resolver_exception_is_caught_warns_and_does_not_propagate(
+        sandbox, make_video, stub_tech_specs, mock_device, fake_dummy,
+        patch_tmdb_by_id, monkeypatch, capsys):
+    path, _ = _archive(sandbox, make_video)
+    # requests.get is patched too, so a stray call can never reach the network.
+    patch_tmdb_by_id(_FakeTMDBById(TMDB_ID, _movie_details(TMDB_ID)))
+
+    def _boom(unit, api_key):
+        raise RuntimeError("simulated resolver blow-up")
+
+    # No tmdb_id preset is passed, so the waterfall takes the search branch and
+    # `_resolve_unit` is the resolver that runs (and raises).
+    monkeypatch.setattr(main, "_resolve_unit", _boom)
+
+    result = main.cmd_prep_push_rep_enrich(MOVIE_ID, str(path), rename_choice="yes")
+
+    assert result is True, "the archive completed — a resolver crash must not flip this to False"
+    out = capsys.readouterr().out
+    assert "TMDB error — enrich skipped" in out
+    assert "simulated resolver blow-up" in out, "the exception detail is surfaced to the user"
+    assert "AUTO-PILOT COMPLETE (archive + enrich)" in out
+
+    # The archive stands; nothing enrich-side was written or renamed.
+    lib = mvcommon.load_library()
+    entry = lib[MOVIE_ID]
+    assert entry["status"] == "archived"
+    assert "tmdb_id" not in entry.get("metadata", {})
+    folder = sandbox["media_dir"]
+    assert entry["folder_path"] == str(folder), "a failed resolve must never rename the folder"
+    assert folder.is_dir()
+    assert not (folder / "poster.jpg").exists()

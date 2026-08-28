@@ -7637,18 +7637,27 @@ def _enrich_after_archive(real_id, write_nfo, no_web, gate):
 
     web_fallback = (not no_web) and bool(mvcommon.exa_api_key())
     preset_id = _unit_preset_tmdb_id(unit, library)
-    if preset_id:
-        print(f"   ↳ {label}: using preset tmdb_id={preset_id} (manual) — fetching by id, no search.")
-        res = _resolve_unit_by_id(unit, preset_id, api_key)
-    else:
-        res = _resolve_unit(unit, api_key)
-        if web_fallback and res["status"] in ("none", "ambiguous"):
-            exa_id = _exa_resolve_tmdb_id(unit["title"], unit["year"], unit["kind"])
-            if exa_id is not None:
-                by_id = _resolve_unit_by_id(unit, exa_id, api_key)
-                if by_id.get("status") == "confident":
-                    print(f"   ↳ {label}: resolved via web search: tmdb_id={exa_id}")
-                    res = by_id
+    # MIRRORS the defensive try/except wrapping this SAME resolve waterfall in
+    # cmd_enrich_metadata (main.py:~2487-2507) — keep the two in sync. Adapted
+    # to the single-unit context: warn-and-RETURN instead of `continue`, and no
+    # n_skipped counter. An escaping resolver error here would abort a run whose
+    # archive leg has ALREADY completed, which Decision 7 forbids.
+    try:
+        if preset_id:
+            print(f"   ↳ {label}: using preset tmdb_id={preset_id} (manual) — fetching by id, no search.")
+            res = _resolve_unit_by_id(unit, preset_id, api_key)
+        else:
+            res = _resolve_unit(unit, api_key)
+            if web_fallback and res["status"] in ("none", "ambiguous"):
+                exa_id = _exa_resolve_tmdb_id(unit["title"], unit["year"], unit["kind"])
+                if exa_id is not None:
+                    by_id = _resolve_unit_by_id(unit, exa_id, api_key)
+                    if by_id.get("status") == "confident":
+                        print(f"   ↳ {label}: resolved via web search: tmdb_id={exa_id}")
+                        res = by_id
+    except Exception as e:  # defensive — resolvers already swallow, but never crash the run
+        print(f"⏭️  {label}: TMDB error — enrich skipped ({e}).")
+        return
 
     if res["status"] == "error":
         print(f"⏭️  {label}: TMDB error — enrich skipped.")

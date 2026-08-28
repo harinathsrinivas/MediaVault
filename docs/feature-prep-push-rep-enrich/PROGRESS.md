@@ -54,7 +54,18 @@ never `git add -A`, never a bare `git commit`.
 
 ## ▶ NEXT ACTION
 
-Finish the PLAN.md NFO residuals (planner dispatch in flight), then run **Step 0**.
+**Step 1** — `[model: fable]` `[candidates: 2]`. Core enrich-composition mechanism +
+`cmd_prep_push_rep_enrich`, and the `_write_nfo` element-set extension (D4). Two candidate
+worktrees under `.candidates/imp-d22-step-1/{A,B}`, judged by `judge-v2`.
+
+## Blockers / human gates
+
+| Gate | What | Status |
+|---|---|---|
+| **Checkpoint 1** | Merging the PR into `main`. **Human-gated — never `gh pr merge` without the user's explicit approval.** The run STOPS at PR creation. | not reached |
+| **Checkpoint 2** | Archiving the merged branch (annotated `archive/<branch>` tag, then delete local+remote). Human-gated, separate from Checkpoint 1. | not reached |
+| **Stash restore** | `git stash pop --index` returning the user's 10 archiver files to their exact prior state. Owed at end of run — see the CRITICAL section above. | **OUTSTANDING** |
+| Step 1 candidate pick | PLAN.md marks Step 1 multi-candidate; if the user wants the final say over `judge-v2`, surface both candidates rather than auto-merging. | not reached |
 
 ## Fable reachability (Step 0 standing rule)
 
@@ -71,7 +82,7 @@ substitution in the Step table below.
 
 | Step | Model | Mode | Status | Commit | Tests | Notes |
 |---|---|---|---|---|---|---|
-| 0 | sonnet | single | pending | — | — | Fable probe + scaffold `docs/feature-prep-push-rep-enrich/`. **PROGRESS.md already exists (this file) — EXTEND it, never replace.** |
+| 0 | *orchestrator* | single | **done** | (this commit) | n/a | Performed by the orchestrator directly, as Step 0's own text permits (the fable-probe sub-step *must* be — executors cannot spawn Tasks). Fable probed OK ×2; `PLAN.md`, `DECISIONS.md`, `PROGRESS.md` scaffolded under `docs/feature-prep-push-rep-enrich/`. |
 | 1 | fable | **2 candidates** | pending | — | — | Core enrich-composition + `cmd_prep_push_rep_enrich`; also owns the `_write_nfo` element-set extension |
 | 2 | fable | single | pending | — | — | `cmd_prep_push_rep_season_enrich` on Step 1's winning mechanism |
 | 3 | opus | single | pending | — | — | CLI dispatcher wiring |
@@ -92,7 +103,14 @@ substitution in the Step table below.
   labels at PLAN.md ~223/~294/~1075; Step 5 missing `tvshow.nfo` assertions; Step 7 missing the
   richer-NFO docs). No code was written, no step ran, PLAN.md was NOT corrupted.
 - **2026-08-28** — Resumed after the limit reset. Fable re-probed OK. Planner re-dispatched to
-  close the 5 residuals. This journal created as the first durable artifact of the run.
+  close the 5 residuals. This journal created as the first durable artifact of the run
+  (commit `5ba35fe`).
+- **2026-08-28** — Planner closed all 5 residuals and *flagged a 6th it deliberately did not
+  touch* (PLAN.md line 509: Step 2's `write_nfo=False` comment still read `PROVISIONAL`, which
+  contradicted Step 1's `LOCKED` at line 327). The orchestrator fixed that one line. No stale
+  `PROVISIONAL` labels remain — the two surviving hits are the prose "no longer provisional".
+- **2026-08-28** — **Step 0 done.** Plan copied to `docs/feature-prep-push-rep-enrich/PLAN.md`
+  (1393 lines); `DECISIONS.md` written with all 7 rulings LOCKED plus the standing guardrails.
 
 ## Resume protocol (what a fresh session — or a different Claude account — does FIRST)
 

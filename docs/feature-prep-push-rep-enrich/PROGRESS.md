@@ -11,7 +11,7 @@
 - **Orchestrator model:** Opus 5 @ max effort (user-chosen 2026-08-28; the v2 playbook prefers
   Fable for the driving session — the user was told and elected to proceed on Opus 5. Executors
   still route per the plan, so Steps 1/2 land on `executor-fable` regardless).
-- **Last updated:** 2026-08-28.
+- **Last updated:** 2026-08-29.
 
 ## 🔴 CRITICAL — the user's personal files are PARKED IN A STASH
 
@@ -54,12 +54,15 @@ never `git add -A`, never a bare `git commit`.
 
 ## ▶ NEXT ACTION
 
-**Step 2** — `[model: fable]` single-executor. `cmd_prep_push_rep_season_enrich`, built on
-candidate A's now-merged isolated pattern (`_enrich_after_archive`). Step 2 MUST also carry the
-two items flagged below: the **`<director>`-for-shows plan defect** (shows-only, so it lands
-naturally here) and D6's season scoping rules — scope by `base_id`, preset the id on an episode
-leaf (since `cmd_set_tmdb` refuses a `season_map`), and suppress the "parent of the season" note
-for flat/root-level layouts.
+**Step 3** — `[model: opus]`. CLI dispatcher wiring for BOTH new commands.
+
+**Step 2 outcome:** done. `cmd_prep_push_rep_season_enrich` + `_season_run_target_ids` landed;
+the `<director>`-for-shows defect is CLOSED (real code + docstring together this time —
+`_tmdb_created_by_names(detail)` for shows, `_tmdb_directors_from_crew` kept for movies).
+Verified by the orchestrator: full 720/720 (+10 new), smoke 76/76, `raise RollbackHardFail(`
+still exactly 3, both autopilots zero-diff. Took THREE dispatches — the first two executors died
+on rate limits (the first mid-docstring, reverted; the second before touching main.py); the third
+completed the work and died only while appending to STATUS.md, so all code and tests survived.
 
 **Step 1 outcome:** candidate **A** won (judge verdict + explicit user confirmation), merged as
 `d1660a8` after the user-required pre-merge fix. Post-merge gate green: **smoke 76/76, full
@@ -195,7 +198,7 @@ substitution in the Step table below.
 |---|---|---|---|---|---|---|
 | 0 | *orchestrator* | single | **done** | `5ba35fe` + `c33f4d2` | n/a | Performed by the orchestrator directly, as Step 0's own text permits (the fable-probe sub-step *must* be — executors cannot spawn Tasks). Fable probed OK ×2; `PLAN.md`, `DECISIONS.md`, `PROGRESS.md` scaffolded under `docs/feature-prep-push-rep-enrich/`. |
 | 1 | fable | **2 candidates** | **done** | `d1660a8` (squash of `…__cand_a` @ `5178e8f`) | **post-merge: smoke 76/76 · full 710/710** | Core enrich-composition + `cmd_prep_push_rep_enrich`; also owns the `_write_nfo` element-set extension (excluded from judging — identical in both candidates). **Sub-state:** worktrees `.candidates/imp-d22-step-1/{A,B}`, branches `…__cand_a` / `…__cand_b`. Candidates run SEQUENTIALLY (A, then B), then `judge-v2`. See "Step 1 candidate progress" below. |
-| 2 | fable | single | **in_progress** | — | pre-step: smoke 76/76 · full 710/710 | `cmd_prep_push_rep_season_enrich` + `_season_run_target_ids` on candidate A's merged `_enrich_after_archive` pattern. Single-executor **by design** (the plan reasons re-forking the same A-vs-B decision for the season case is not genuine differentiation). **Also carries the `<director>`-for-shows fix** (see below). Works in the MAIN checkout — no worktree. |
+| 2 | fable | single | **done** | (this commit) | **full 720/720 (+10) · smoke 76/76** | `cmd_prep_push_rep_season_enrich` + `_season_run_target_ids` on candidate A's merged `_enrich_after_archive` pattern. Single-executor **by design** (the plan reasons re-forking the same A-vs-B decision for the season case is not genuine differentiation). **Also carries the `<director>`-for-shows fix** (see below). Works in the MAIN checkout — no worktree. |
 | 3 | opus | single | pending | — | — | CLI dispatcher wiring |
 | 4 | opus | single | pending | — | — | Movie tests |
 | 5 | opus | single | pending | — | — | Season tests (both folder layouts + `tvshow.nfo`) |

@@ -2382,8 +2382,14 @@ def _write_nfo(folder, kind, title, year, tmdb_id, overview="", vote_average=Non
     `api_key` is given (IMP-D22, Decision 4): a plain <tmdbid>; <imdbid> +
     <uniqueid type="imdb"> via the existing `_resolve_imdb_id`; <genre>;
     <runtime>; <premiered>; <studio> (movie: production companies via
-    `_tmdb_company_names`; show: `_tmdb_network_names`); <director> via
-    `_tmdb_directors_from_crew`; and <actor><name>…</name></actor> entries via
+    `_tmdb_company_names`; show: `_tmdb_network_names`); <director> — for a
+    MOVIE, `_tmdb_directors_from_crew` off the movie credits payload's crew
+    (job=='Director'); for a SHOW (kind != "movie"), `_tmdb_created_by_names`
+    off the TV DETAILS payload's `created_by` array instead (IMP-D22 fix,
+    2026-08-28) — TMDB carries a series' creators there, NOT as series-level
+    crew with job=='Director' (that is always empty for a show), so sourcing
+    a show's <director> from the credits payload silently wrote nothing; and
+    <actor><name>…</name></actor> entries via
     `_tmdb_cast_names`. Every added element is OPTIONAL — omitted cleanly when
     `api_key` is falsy or TMDB has no value (a failed/None lookup omits the
     element rather than writing an empty one). `<tvdbid>` is NEVER emitted —
@@ -2453,9 +2459,21 @@ def _write_nfo(folder, kind, title, year, tmdb_id, overview="", vote_average=Non
                 for studio in studios:
                     ET.SubElement(root, "studio").text = studio
 
+            if kind == "movie":
+                if isinstance(credits, dict):
+                    for director in _tmdb_directors_from_crew(credits):
+                        ET.SubElement(root, "director").text = director
+            else:
+                # SHOWS (IMP-D22 fix, 2026-08-28): TMDB carries a series'
+                # creators in the DETAILS payload's `created_by` array, NOT as
+                # series-level crew with job=='Director' (that is always empty
+                # for a show) — sourcing from `credits` here silently wrote
+                # nothing. `detail` is the same /tv/{id} payload fetched above.
+                if isinstance(detail, dict):
+                    for director in _tmdb_created_by_names(detail):
+                        ET.SubElement(root, "director").text = director
+
             if isinstance(credits, dict):
-                for director in _tmdb_directors_from_crew(credits):
-                    ET.SubElement(root, "director").text = director
                 for cast_member in _tmdb_cast_names(credits):
                     actor_el = ET.SubElement(root, "actor")
                     ET.SubElement(actor_el, "name").text = cast_member["name"]
@@ -7786,6 +7804,184 @@ def cmd_prep_push_rep_enrich(manual_id, filepath, split_method=None, split_val=N
     gate = _make_rename_confirm(rename_choice)
     try:
         _enrich_after_archive(real_id, write_nfo, no_web, gate)
+    except RollbackHardFail as hf:
+        # Decision 7: a post-PONR rename failure warns and continues — the
+        # archive already succeeded, so this never re-raises nor returns False.
+        print(f"⚠️  Enrich folder rename left incomplete: {hf.state} — {hf.reason}")
+        print(f"   > To finish it: {hf.resume_cmd}")
+
+    print("\n✅✅✅ AUTO-PILOT COMPLETE (archive + enrich).")
+    return True
+
+
+# ===========================================================================
+#   cmd_prep_push_rep_season_enrich — series autopilot + enrich (IMP-D22 Step 2).
+#
+# Same shape as `cmd_prep_push_rep_enrich` above (archive first, enrich only
+# once the archive is confirmed complete), built on the SAME Candidate-A
+# mechanism (`_enrich_after_archive` reused verbatim — this is NOT a third
+# copy of the enrich waterfall). Two things differ from the movie case
+# (Decision 6, revised 2026-08-28 after a live-library audit):
+#   1. "Archived" must be checked against THIS RUN'S actual targets — a
+#      season run can be `episode_range`-scoped, so `_season_run_target_ids`
+#      reconstructs the exact target-id list `cmd_prep_push_rep_season`
+#      computes internally (that function does not expose it).
+#   2. Enrich is scoped by `base_id` directly (NOT a derived show id) and the
+#      folder-rename confirmation note is conditional on whether the season
+#      folder and the show folder are actually different paths — see the two
+#      "Why harder" findings in docs/feature-prep-push-rep-enrich/DECISIONS.md.
+# ===========================================================================
+
+def _season_run_target_ids(library, base_id, episode_range):
+    """The ordered, de-aliased list of episode ids THIS season run targeted
+    (whole season, or the `episode_range` subset) — or `[]` when `base_id` is
+    missing from `library` or `episode_range` is an invalid string.
+
+    Mirrors `cmd_prep_push_rep_season`'s own STEP 2 target-id derivation
+    verbatim (main.py:~7362-7387, grep "^def cmd_prep_push_rep_season\\b" to
+    re-locate) — keep in sync; that function does not expose this list so it
+    must be reconstructed identically here. An invalid `episode_range` means
+    `cmd_prep_push_rep_season` itself already printed "❌ Invalid range." and
+    processed NOTHING, so this helper degrading to "nothing to check" (`[]`)
+    is correct, not a new failure mode."""
+    if base_id not in library:
+        return []
+    target_ids = library[base_id]["children"]
+
+    if episode_range:
+        try:
+            start, end = map(float, episode_range.split('-'))
+        except ValueError:
+            return []
+        filtered_ids = []
+        for mid in target_ids:
+            ep_num = episode_num_from_id(mid, base_id)
+            if ep_num is not None and start <= ep_num <= end:
+                filtered_ids.append(mid)
+        target_ids = filtered_ids
+
+    # De-alias: collapse multi_ep_alias ids to their primaries; dedup order-preserving.
+    seen = set()
+    dealiased = []
+    for mid in target_ids:
+        real_id, _ = _resolve_alias(library, mid)
+        if real_id not in seen:
+            seen.add(real_id)
+            dealiased.append(real_id)
+    return dealiased
+
+
+def cmd_prep_push_rep_season_enrich(base_id, folder_path, split_method=None, split_val=None,
+                                      episode_range=None, device_id=None, eager_rehash=False,
+                                      temp_dir=None, extras=None, extras_size=None,
+                                      tmdb_id=None, tvdb_id=None,
+                                      write_nfo=False,  # Decision 4 (2026-08-28, LOCKED): OFF by
+                                                         # default — same one-line-flip contract
+                                                         # as `cmd_prep_push_rep_enrich`'s signature.
+                                      no_web=False,
+                                      rename_choice="ask"):
+    """Season autopilot: archive (prep -> push -> replace, EXACTLY
+    `cmd_prep_push_rep_season`, every argument forwarded unmodified) THEN
+    enrich the season THIS RUN actually completed (IMP-D22 Step 2). `tmdb_id`
+    presets the TMDB id via `cmd_set_tmdb` on the first episode LEAF under
+    `base_id` (a season_map cannot itself carry `metadata.tmdb_id` —
+    `cmd_set_tmdb` refuses a season_map container, so the preset lands on a
+    child leaf instead); `tvdb_id` is REFUSED outright (Decision 1 —
+    MediaVault is TMDB-only).
+
+    `cmd_prep_push_rep_season` owns its OWN internal `_season_resume_cmd`
+    closure, which prints the mid-loop-failure resume command exactly as
+    today (rollback-adjacent per CLAUDE.md's change-gate) — this function
+    does NOT touch, call, or reimplement it; a season archive failure's
+    resume messaging is completely unchanged by this command's existence.
+
+    Enrich is scoped DIRECTLY by `base_id` (Decision 6, revised 2026-08-28) —
+    NOT a derived show id: the user's real per-season-year id convention
+    ('tv-en-2022-peakyblinders-s06' vs '…-2019-…-s05') means every season
+    already lands in its own separate `_gather_enrich_units` bucket, so
+    deriving a show id buys nothing and would only risk reaching an unrelated
+    sibling season's preset. Reuses `_enrich_after_archive` UNCHANGED (Step
+    1's isolated enrich leg) by passing `base_id` in the same
+    `id_or_prefix=<this unit's own id>` slot the movie command passes its own
+    `real_id` — no enrich logic is duplicated a third time.
+
+    The folder-rename confirmation note is CONDITIONAL ("Why harder" reason
+    1): it names the parent-show-folder relationship only when the resolved
+    unit folder actually DIFFERS from the season_map's own `folder_path` (the
+    classic `<Show>/Season NN/` layout); for the dominant flat/root-level
+    layout (season folder == show folder, 46 of the user's real shows) the
+    note is omitted — printing it there would be factually wrong.
+
+    Returns True once THIS RUN'S actual targets (`_season_run_target_ids`,
+    range-scoped when `episode_range` is given) all show `status ==
+    "archived"` — regardless of whether the enrich leg fully succeeded
+    (warn-and-continue, Decision 7). Returns False if this run's targets
+    never fully archived, or if -tvdbid was supplied (refused before
+    anything runs)."""
+    if tvdb_id is not None:
+        return _refuse_tvdbid()
+
+    # --- archive phase: exactly cmd_prep_push_rep_season, every argument
+    # forwarded, matching the existing dispatcher's own call shape (positional
+    # `episode_range` in the same slot). Its return value is not inspected —
+    # completion is checked below via the library's post-run status, exactly
+    # like the movie command does.
+    cmd_prep_push_rep_season(base_id, folder_path, split_method, split_val,
+                              episode_range, device_id=device_id, eager_rehash=eager_rehash,
+                              temp_dir=temp_dir, extras=extras, extras_size=extras_size)
+
+    library = load_library()
+    target_ids = _season_run_target_ids(library, base_id, episode_range)
+    if not target_ids:
+        print("⚠️  nothing was archived this run — enrich skipped.")
+        return False
+    for tid in target_ids:
+        status = library.get(tid, {}).get("status")
+        if status != "archived":
+            print(f"⚠️  {tid} is not archived yet (status={status!r}) — enrich skipped.")
+            return False
+
+    # Preset the CLI-supplied tmdb_id EXACTLY as a user would type
+    # `set_tmdb <id> <tmdb_id>` — but `cmd_set_tmdb` refuses a season_map, so
+    # land it on the FIRST child of base_id that resolves (via `_resolve_alias`)
+    # to a real LEAF (has a `filename`), never on base_id itself.
+    if tmdb_id is not None:
+        children = library.get(base_id, {}).get("children", [])
+        leaf_id = None
+        for cid in children:
+            try:
+                real_cid, target = _resolve_alias(library, cid)
+            except KeyError:
+                continue
+            if isinstance(target, dict) and "filename" in target:
+                leaf_id = real_cid
+                break
+        if leaf_id:
+            cmd_set_tmdb(leaf_id, tmdb_id)
+        else:
+            # Should not happen post-completion-check (target_ids was non-empty
+            # above) — degrade gracefully instead of crashing; the normal
+            # search waterfall inside _enrich_after_archive still runs.
+            print(f"⚠️  {base_id} has no episode leaf to preset tmdb_id on — "
+                  f"skipping preset (the normal search waterfall will still run).")
+
+    # Confirmation gate note — CONDITIONAL ("Why harder" reason 1): only
+    # mention the SHOW folder when it actually differs from the season's own
+    # folder_path. This peeks at `_gather_enrich_units` here (a second,
+    # read-only call — `_enrich_after_archive` below makes its own); both
+    # calls are pure and side-effect-free, so the duplication is harmless.
+    units = _gather_enrich_units(library, id_or_prefix=base_id)
+    unit_folder = units[0].get("folder") if units else None
+    season_folder = library.get(base_id, {}).get("folder_path")
+    if unit_folder and season_folder and _norm_path(unit_folder) != _norm_path(season_folder):
+        gate = _make_rename_confirm(
+            rename_choice,
+            note="(this is the SHOW folder — the parent of the season you just archived)")
+    else:
+        gate = _make_rename_confirm(rename_choice)
+
+    try:
+        _enrich_after_archive(base_id, write_nfo, no_web, gate)
     except RollbackHardFail as hf:
         # Decision 7: a post-PONR rename failure warns and continues — the
         # archive already succeeded, so this never re-raises nor returns False.

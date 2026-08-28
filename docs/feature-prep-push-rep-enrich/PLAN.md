@@ -552,7 +552,7 @@ session. Before dispatching the FIRST `[model: fable]` step in any session:
       with the new command composing `cmd_set_tmdb` + `cmd_enrich_metadata(..., "--apply",
       confirm_rename=gate)` directly — zero duplicated resolve/apply logic.
 
-- [ ] 2. [model: fable] [effort: xhigh] `cmd_prep_push_rep_season_enrich` (season command), built on Step 1's winning mechanism.
+- [x] 2. [model: fable] [effort: xhigh] `cmd_prep_push_rep_season_enrich` (season command), built on Step 1's winning mechanism.
   - Depends on: Step 1 (reuses its chosen candidate's internal pattern verbatim — do not
     re-open that design fork; apply the SAME strategy to the show-centric case).
   - Consumed by: Step 3 (CLI wiring), Step 5 (tests), Step 7 (docs).

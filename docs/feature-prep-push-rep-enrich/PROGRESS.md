@@ -82,7 +82,7 @@ substitution in the Step table below.
 
 | Step | Model | Mode | Status | Commit | Tests | Notes |
 |---|---|---|---|---|---|---|
-| 0 | *orchestrator* | single | **done** | (this commit) | n/a | Performed by the orchestrator directly, as Step 0's own text permits (the fable-probe sub-step *must* be — executors cannot spawn Tasks). Fable probed OK ×2; `PLAN.md`, `DECISIONS.md`, `PROGRESS.md` scaffolded under `docs/feature-prep-push-rep-enrich/`. |
+| 0 | *orchestrator* | single | **done** | `5ba35fe` + `c33f4d2` | n/a | Performed by the orchestrator directly, as Step 0's own text permits (the fable-probe sub-step *must* be — executors cannot spawn Tasks). Fable probed OK ×2; `PLAN.md`, `DECISIONS.md`, `PROGRESS.md` scaffolded under `docs/feature-prep-push-rep-enrich/`. |
 | 1 | fable | **2 candidates** | pending | — | — | Core enrich-composition + `cmd_prep_push_rep_enrich`; also owns the `_write_nfo` element-set extension |
 | 2 | fable | single | pending | — | — | `cmd_prep_push_rep_season_enrich` on Step 1's winning mechanism |
 | 3 | opus | single | pending | — | — | CLI dispatcher wiring |
@@ -109,8 +109,18 @@ substitution in the Step table below.
   touch* (PLAN.md line 509: Step 2's `write_nfo=False` comment still read `PROVISIONAL`, which
   contradicted Step 1's `LOCKED` at line 327). The orchestrator fixed that one line. No stale
   `PROVISIONAL` labels remain — the two surviving hits are the prose "no longer provisional".
-- **2026-08-28** — **Step 0 done.** Plan copied to `docs/feature-prep-push-rep-enrich/PLAN.md`
-  (1393 lines); `DECISIONS.md` written with all 7 rulings LOCKED plus the standing guardrails.
+- **2026-08-28** — **Step 0 done** (`c33f4d2`). Plan copied to
+  `docs/feature-prep-push-rep-enrich/PLAN.md` (1393 lines); `DECISIONS.md` written with all 7
+  rulings LOCKED plus the standing guardrails. Three files, tree clean, stash untouched.
+- **2026-08-28** — **PLANNING GAP caught during Step 1 dispatch prep, before any executor ran.**
+  Decision 4's block claimed *"Step 1 ... now owns the `_write_nfo` extension"*, but Step 1's
+  `Files` line and `Details` never specced it — both `_write_nfo` mentions inside Step 1 merely
+  *call* it. The richer-NFO element set (plain `<tmdbid>`, `<imdbid>` + `<uniqueid type="imdb">`
+  via `_resolve_imdb_id`, genre, runtime, premiered, studio, director/actors; `<tvdbid>` NEVER)
+  was therefore assigned to **no step**, while Steps 4/5/7 already test and document it. Left
+  unfixed this would have burned both Fable candidate runs on an incomplete spec. Planner
+  re-dispatched to fold the extension into Step 1's Files/Details/Acceptance and to mark it
+  **excluded from judging** (identical work in both candidates — not part of the A-vs-B fork).
 
 ## Resume protocol (what a fresh session — or a different Claude account — does FIRST)
 

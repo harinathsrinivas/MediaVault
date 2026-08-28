@@ -349,7 +349,12 @@ session. Before dispatching the FIRST `[model: fable]` step in any session:
   - Files: `main.py` (new: `cmd_prep_push_rep_enrich`, `_refuse_tvdbid`,
     `_make_rename_confirm`; Candidate B additionally edits `cmd_enrich_metadata`'s signature
     + one `if will_stamp:` block, both at main.py:~2412-2648 — grep `"^def cmd_enrich_metadata"`
-    to confirm).
+    to confirm. ALSO MODIFIED, identically by BOTH candidates — orthogonal to the A-vs-B
+    fork, excluded from judging (see Judge criteria): `_write_nfo` (main.py:2373, grep
+    `"^def _write_nfo"` to confirm) for the NFO element-set extension below; new helper
+    `_tmdb_company_names`, added next to `_tmdb_genre_names`/`_tmdb_network_names`
+    (main.py:~8366, already earmarked here by Files affected and Step 7), for a movie's
+    `<studio>`).
   - Details:
     - **`-tvdbid` refusal** (`_refuse_tvdbid()`): if `tvdb_id is not None`, print (exact
       wording, both candidates MUST match so tests can assert a stable substring):
@@ -436,6 +441,50 @@ session. Before dispatching the FIRST `[model: fable]` step in any session:
       `flags = ["--apply"]; write_nfo and flags.append("--nfo"); no_web and
       flags.append("--no-web"); cmd_enrich_metadata(real_id, *flags, confirm_rename=gate)`.
       Zero duplicated resolve/apply logic.
+    - **NFO element-set extension (BOTH candidates, identical work — not a judging
+      axis)**: extend `_write_nfo(folder, kind, title, year, tmdb_id, overview="",
+      vote_average=None, api_key=None)` (main.py:2373; new `api_key` kwarg, threaded
+      from the SAME `api_key` already in scope at the existing call site,
+      main.py:~2624) to emit, in addition to today's `title`/`year`/`plot`/`rating`/
+      `<uniqueid type="tmdb" default="true">`:
+      - a plain `<tmdbid>` element alongside the existing `<uniqueid>` (the Fringe
+        example's form — Kodi accepts both; see Decision 4).
+      - `<imdbid>` AND `<uniqueid type="imdb">`, resolved via the EXISTING
+        `_resolve_imdb_id(tmdb_id, kind, api_key)` (main.py:2672, already used by
+        `cmd_refresh_online`) — movie -> `GET /3/movie/{id}`.`imdb_id`, tv ->
+        `GET /3/tv/{id}/external_ids`.`imdb_id`; both funnel through the cached,
+        None-on-failure `_tmdb_get` (main.py:1348).
+      - `<genre>` (one element each) via `_tmdb_genre_names` (main.py:8366).
+      - `<runtime>`, `<premiered>`.
+      - `<studio>` — movie: production companies via the NEW small helper
+        `_tmdb_company_names` (Files line above), mirroring `_tmdb_genre_names`/
+        `_tmdb_network_names`'s exact shape; show: the EXISTING `_tmdb_network_names`
+        (main.py:8433).
+      - `<director>` via `_tmdb_directors_from_crew` (main.py:8395) and
+        `<actor><name>…</name></actor>` entries via `_tmdb_cast_names`
+        (main.py:8378). (All main.py line numbers above verified this session —
+        grep `"^def <name>"` to reconfirm; do not trust a number alone.)
+      - **`<tvdbid>` MUST NEVER be emitted** (Decision 1 — no TVDB source; a
+        fabricated one is exactly the silent-corruption class Decision 1 refuses).
+      - **Every added element is OPTIONAL** — omitted cleanly when TMDB has no value
+        or `api_key` is falsy; a failed/None lookup omits the element rather than
+        writing an empty one.
+      - **`_write_nfo`'s existing "NEVER raises" contract is preserved verbatim**
+        (main.py:2380-2382) — any lookup/IO failure degrades to a printed warning
+        and a still-written (smaller) NFO.
+      - State explicitly **which fields need an EXTRA TMDB call vs. which are
+        already in the confident-match payload**: `title`/`year`/`overview`/
+        `vote_average` are already in `res` (today's existing call params,
+        unchanged); `imdbid` needs ONE extra call (`_resolve_imdb_id`);
+        `genre`/`runtime`/`studio`/`director`/`actor` need the detail(+credits)
+        endpoint(s) — prefer the already-cached `_tmdb_get` path over any new,
+        uncached fetch.
+      - Shared-helper consequence: this ALSO changes `cmd_enrich_metadata --nfo`'s
+        existing output (`_write_nfo` is one shared function, reused verbatim by
+        both callers) — deliberate and desirable, explicitly carved OUT of the
+        "existing behaviour byte-for-byte unchanged" guarantee (which covers the
+        autopilots and archive pipeline, NOT `_write_nfo`'s element set — see Files
+        affected).
     - `_make_rename_confirm(choice, note=None)` returns a callable
       `confirm(old_folder, new_folder) -> bool`. Its body (identical regardless of which
       candidate wins — shared code):
@@ -475,15 +524,22 @@ session. Before dispatching the FIRST `[model: fable]` step in any session:
     raised from a monkeypatched `cmd_rename_folder` is caught and printed, and the function
     still returns `True`. (4) zero new `RollbackJournal`/PONR/journal-format touches (grep
     the diff for `RollbackJournal(`, `mark_point_of_no_return`, `TXN_JOURNAL_NAME` — none
-    outside the untouched existing call sites). Each candidate self-reports these 4 checks
-    in its `CRITIQUE.md`.
+    outside the untouched existing call sites). (5) `tests/test_enrich_metadata.py`'s
+    EXISTING NFO assertions must be reviewed; if any pin today's minimal element set — this
+    is the one narrow, deliberate exception to (2)'s "UNMODIFIED" (only NFO-content
+    assertions may change, nothing else in the file) — they must be updated IN THIS STEP
+    (not deferred to Step 4/5/7), and the full suite must be green afterward. Also assert
+    `<tvdbid>` never appears in ANY generated NFO (`movie.nfo` or `tvshow.nfo`). Each
+    candidate self-reports all 5 checks in its `CRITIQUE.md`.
   - Judge criteria (ranked): (1) fidelity — `test_enrich_metadata.py` unmodified-and-green,
     and `cmd_prep_push_rep`/`cmd_prep_push_rep_season` provably zero-diff; (2) rollback
     change-gate compliance — no new journal/PONR/RollbackHardFail-class touch; (3) blast
     radius / surgical-changes — lines of EXISTING code touched (0 for A; the small, provably
     short-circuit-safe diff for B); (4) correctness on every scenario in Acceptance; (5)
     maintainability / DRY (duplication-drift risk for A vs. shared-logic for B) — lowest
-    weight, a tiebreaker only.
+    weight, a tiebreaker only. The NFO element-set extension specified above is IDENTICAL
+    in both candidates (shared, non-forked work) and is therefore EXCLUDED from judging
+    entirely — the judge compares ONLY the enrich-composition mechanism (the A-vs-B fork).
   - Candidate approaches:
     - A: Fully isolated reimplementation that never calls `cmd_enrich_metadata`'s apply
       path — reuses only the already-standalone low-level primitives

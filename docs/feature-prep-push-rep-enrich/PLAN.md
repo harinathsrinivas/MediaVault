@@ -1035,7 +1035,7 @@ session. Before dispatching the FIRST `[model: fable]` step in any session:
     docs/priority-graph/priority-graph.html` all >= 1; no other task's row/status
     accidentally altered (diff review).
 
-- [ ] 9. [model: opus] [effort: medium] Final verification + smoke gate (last).
+- [x] 9. [model: opus] [effort: medium] Final verification + smoke gate (last).
   - Depends on: Steps 0-8 all `done`.
   - Consumed by: Phase 3 finalize (push, PR, Checkpoint 1).
   - Details: **Normally performed by the ORCHESTRATOR directly, not dispatched** — mirrors

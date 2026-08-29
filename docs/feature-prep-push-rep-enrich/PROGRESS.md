@@ -54,8 +54,24 @@ never `git add -A`, never a bare `git commit`.
 
 ## ▶ NEXT ACTION
 
-**Step 9** — final verification gate (full suite + smoke together), then push, then the PR.
-**STOP at Checkpoint 1** — merging to `main` is the user's call. Then restore `stash@{0}`.
+**🚦 CHECKPOINT 1 — awaiting the user's merge approval on PR #47.**
+https://github.com/harinathsrinivas/MediaVault/pull/47 — OPEN, not merged. Do NOT `gh pr merge`
+without the user's explicit go-ahead. After merge, **Checkpoint 2** (archive the branch with an
+annotated `archive/<branch>` tag, then delete local+remote) is a SEPARATE human gate.
+
+**ALL 10 STEPS DONE.** Branch pushed (15 commits). Final gate: full **772/772**, smoke **80/80**.
+
+### ✅ Stash restore COMPLETE — obligation discharged
+`git stash pop --index` ran; all 10 archiver files are back, **byte-identical** to their pre-stash
+originals (verified with `cmp` against the independent scratchpad backup).
+
+**⚠️ Non-obvious hazard, recorded for next time:** the stash round-trip SILENTLY CONVERTED all 10
+files CRLF → LF (this repo's `.gitattributes` is `* text=auto eol=lf`). Git warns at stash time and
+the warning is easy to miss. The files were restored byte-exactly from the independent backup, NOT
+from the stash. Consequence: two files now show `AM` rather than `A ` — `git diff --numstat` is
+EMPTY for them, so this is line-ending bookkeeping only, zero content difference, and a later
+commit normalises to LF regardless. **If you ever park these files again, keep an independent
+byte-level backup — the stash alone does not round-trip them faithfully on this repo.**
 
 ### Rate-limit crash #4 (2026-08-29) — all three parallel agents died mid-flight
 Steps 6/7/8 were dispatched in parallel; all three hit `session limit · resets 8am`. Salvage:
@@ -247,7 +263,7 @@ substitution in the Step table below.
 | 6 | opus | single | **done** | (this commit) | **smoke 76 → 80** (+1.96s, 17.03s total — well inside the ~30s budget) | +222 lines, 0 deletions. `_forbid_input` patches `input()` to RAISE while deliberately NOT patching `isatty()` — the guard under test — so a regression fails in ms instead of hanging every future PR. |
 | 7 | opus + sonnet | single | **done** | `8019f4d` + (this commit) | n/a (docs) | `ARCHITECTURE.md` (opus, all 7 required topics incl. the duplication-sync obligation + TMDB-for-everything convention); `README.md` command-table rows + a combined-autopilot section + the convention; `docs/README.md` feature-index row. The README half correctly wrote "in flight", NOT "shipped" — it checked `git log` and saw the branch is unmerged. |
 | 8 | sonnet | single | **done** | (this commit) | n/a (docs) | All three tracking files updated and mutually consistent: tierD `## IMP-D22` entry, PRIORITY.md (Last updated 2026-08-29, DONE list, new NEXT pointer), priority-graph.html (node + `D21→D22`/`E3→D22` edges, count 126→127). |
-| 9 | opus | single | pending | — | — | Final verification + smoke gate |
+| 9 | *orchestrator* | single | **done** | (this commit) | **full 772/772 · smoke 80/80 (27.6s)** | Final gate run directly by the orchestrator. Guardrail audit: `raise RollbackHardFail(` = 3, `ENTRY_TYPE_KEYS` untouched, `<tvdbid>` never emitted, exactly ONE real `input()` (TTY-gated). |
 
 ## Run history (append-only — every interruption recorded)
 

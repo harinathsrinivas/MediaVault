@@ -194,6 +194,8 @@ help text and no `--help` flag; this table is the reference.
 | `prep_season`          | `prep_season [base_id] [folder] [--extras "<f1>;<f2>"] [--extras-size <v>]`                                                         | Batch-prep an entire season folder; `--extras` registers bonus folders onto the season                                                                  |
 | `prep_push_rep`        | `prep_push_rep [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | Full pipeline (prep -> push -> replace) for one file; `--extras` also pushes + dummies the title's registered extras            |
 | `prep_push_rep_season` | `prep_push_rep_season [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | Sequential full pipeline for a whole season; `--extras` also pushes + dummies the season's registered extras |
+| `prep_push_rep_enrich` | `prep_push_rep_enrich [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>] [-tmdbid <id>] [--yes\|--no-rename] [--nfo] [--no-web]` | `prep_push_rep`, then TMDB-enrich the result (IMP-D22); no `-tmdbid` -> same auto-resolve waterfall as `enrich_metadata`; `-tvdbid` is refused (TMDB-only) |
+| `prep_push_rep_season_enrich` | `prep_push_rep_season_enrich [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>] [-tmdbid <id>] [--yes\|--no-rename] [--nfo] [--no-web]` | `prep_push_rep_season`, then TMDB-enrich the season THIS RUN archived (IMP-D22) |
 | `push`                 | `push [id] [SIZE_MB/SIZE_GB/COUNT val] [chunks 1-4] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | Split and ADB-push to phone (`rehash` = eager canonical re-hash; `tempdir` = off-volume chunks); `--extras` also uploads the registered extras (extras only, if the main is already archived) |
 | `push_group`           | `push_group [id] [SIZE_..] [episodes 1-3] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | Push a season group; `--extras` also uploads the season's registered extras                                          |
 | `add_extras`           | `add_extras <title_id> "<f1>;<f2>" [--extras-size <v\|none>] [device <id_or_name>] [no-replace]`                                     | Attach bonus content (Specials/Trailers/Behind-the-Scenes) to an existing title and archive it in one shot: scan+hash -> push -> dummy, without touching the main content (`no-replace` = upload only) |
@@ -411,6 +413,47 @@ a candidate TMDB id from the result, and validates it with a TMDB by-id fetch.
 This resolves concatenated slugs and regional/translated titles that the TMDB
 search API misses. Pass `--no-web` to disable the EXA leg and stay purely local.
 Set `exa.api_key` in `mvconfig.json` to enable it.
+
+**TMDB-for-everything.** Movies, series, AND anime all resolve exclusively
+against TMDB — `metadata.tmdb_id` is the only provider-id field a leaf carries,
+and the folder token is always `{tmdb-12345}`, never `{tvdb-...}`. MediaVault
+has no TVDB or AniDB client (see ARCHITECTURE.md §6.3a for the one known
+placeholder-only exception, unrelated to any real lookup).
+
+### Combined archive + enrich (`prep_push_rep_enrich` / `prep_push_rep_season_enrich`)
+
+`prep_push_rep_enrich` (movie) and `prep_push_rep_season_enrich` (series/anime)
+fold `enrich_metadata` into the existing archive autopilots (IMP-D22): archive
+EXACTLY as `prep_push_rep`/`prep_push_rep_season` already does, then — once
+the archive is confirmed `archived` — enrich the result. If the enrich leg
+fails, the command still reports the archive succeeded (enrich is best-effort
+and never undoes an archive).
+
+- `-tmdbid <id>` presets the TMDB id directly (skips the title search), exactly
+  as running `set_tmdb <id> <tmdb_id>` would. With no `-tmdbid`, resolution
+  falls back to the same TMDB-search / EXA-web-search auto-resolve waterfall
+  `enrich_metadata` uses.
+- `-tvdbid <id>` is **refused outright** — nothing runs at all (no archive, no
+  enrich). MediaVault is TMDB-only (see "TMDB-for-everything" above); a TVDB
+  id is a different numbering space and would fetch the wrong title's artwork.
+- The `{tmdb-...}` folder rename is resolved and confirmed **once**,
+  immediately after the archive completes. `--yes` auto-confirms it,
+  `--no-rename` auto-declines it (archive + enrich still happen either way —
+  run `rename_folder` later if needed). With neither flag, a non-interactive
+  session (script/cron/CI) always defaults to NOT renaming.
+- `--nfo` writes `movie.nfo` / `tvshow.nfo` (OFF by default, same as
+  `enrich_metadata --nfo`) with a richer element set than before: `<imdbid>` +
+  `<uniqueid type="imdb">`, a plain `<tmdbid>`, `<genre>`, `<runtime>`,
+  `<premiered>`, `<studio>`, `<director>`, `<actor>` — never `<tvdbid>`. This
+  is the same `_write_nfo` function `enrich_metadata --nfo` uses, so its
+  output gets the same richer elements too.
+- `--no-web` disables the EXA web-search fallback, same as `enrich_metadata`.
+
+```
+python main.py prep_push_rep_enrich mov-en-2016-theautopsyofjanedoe "C:\Media\Movies\English\Horror\The Autopsy of Jane Doe (2016) {tmdb-397243}\The.Autopsy.of.Jane.Doe.2016.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-FraMeSToR.mkv" SIZE_GB 8 -tmdbid 397243 --yes
+python main.py prep_push_rep_enrich mov-en-2016-theautopsyofjanedoe "C:\Media\Movies\English\Horror\The Autopsy of Jane Doe (2016)\file.mkv" SIZE_GB 8            # no id -> auto-resolve
+python main.py prep_push_rep_season_enrich tv-en-2017-dark-s01 "C:\Media\Series\English\Dark\Dark Season 01 (2017)" SIZE_GB 8 -tmdbid 70523 --no-rename --nfo
+```
 
 ### Online ratings and trivia (IMP-E16)
 

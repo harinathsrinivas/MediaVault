@@ -1711,3 +1711,225 @@ class TestExtras:
         assert badges.get(stray) == "UNPREPPED", (
             f"the unknown video must classify UNPREPPED; got {badges!r}"
         )
+
+
+# ===========================================================================
+# Group 4 — IMP-D22 archive+enrich autopilots (cmd_prep_push_rep_enrich /
+# cmd_prep_push_rep_season_enrich).
+#
+# SMOKE SCOPE ONLY: "the command runs end-to-end, produces its top-level
+# effect, and does not break its neighbours". The exhaustive behaviour matrix
+# (every flag, every warn-and-continue boundary, the NFO element set, the EXA
+# fallback, the archive-regression pins) lives in
+# tests/test_prep_push_rep_enrich.py + tests/test_prep_push_rep_season_enrich.py.
+#
+# THE HAZARD THIS GROUP EXISTS TO GUARD: `_make_rename_confirm("ask")`
+# (main.py, grep "^def _make_rename_confirm") holds the ONLY input() call in
+# the entire codebase. It is reached solely when `sys.stdin.isatty()` is True —
+# False under pytest — so a smoke run can never block on it. `_forbid_input`
+# below turns that implicit guarantee into an EXPLICIT, fast-failing one: if a
+# future change ever reaches the prompt, this gate fails in milliseconds
+# instead of hanging every future PR forever.
+#
+# TMDB: the shared `mock_tmdb` fixture (no network can escape, caches
+# redirected, EXA sealed off) is used as-is; `_serve_tmdb_details` layers the
+# two by-id DETAILS endpoints on top of it, because a preset `-tmdbid` resolves
+# via `_resolve_unit_by_id` (GET /3/{movie,tv}/{id}) — an endpoint MockTMDB
+# answers with its generic `{}` fallback.
+# ===========================================================================
+
+ENRICH_MOVIE_ID = "mov-en-2024-autoenrich"
+ENRICH_TMDB_ID = 424242
+
+# /3/movie/{id} DETAILS — the exact shape `_resolve_unit_by_id` reads for a
+# movie unit (title / release_date / poster_path / backdrop_path).
+_ENRICH_MOVIE_DETAILS = {
+    "id": ENRICH_TMDB_ID, "title": "Auto Enrich", "release_date": "2024-03-15",
+    "poster_path": "/smoke_poster.jpg", "backdrop_path": "/smoke_backdrop.jpg",
+    "overview": "A movie about testing the enrich autopilot.", "vote_average": 7.7,
+}
+# /3/tv/{id} DETAILS — same, for a show unit (name / first_air_date).
+_ENRICH_SHOW_DETAILS = {
+    "id": ENRICH_TMDB_ID, "name": "SMK", "first_air_date": "2020-01-01",
+    "poster_path": "/smoke_poster.jpg", "backdrop_path": "/smoke_backdrop.jpg",
+    "overview": "A show about testing the enrich autopilot.", "vote_average": 8.2,
+}
+
+
+def _empty_libs(sandbox):
+    """Start from three empty library files (the prep-from-scratch precondition
+    the per-command prep smokes above set up inline)."""
+    for p in (sandbox["lib_movies"], sandbox["lib_series"], sandbox["lib_anime"]):
+        p.write_text("{}", encoding="utf-8")
+
+
+def _forbid_input(monkeypatch):
+    """Make the codebase's ONE input() call a FAILURE rather than a HANG.
+
+    Deliberately does NOT patch `sys.stdin.isatty` — that is the very guard
+    being verified (patching it would defeat it). Under pytest isatty() is
+    already False, so `_make_rename_confirm("ask")` auto-declines and this
+    stub is never reached; it only fires if that guard ever regresses.
+    """
+    def _boom(*a, **k):
+        raise AssertionError(
+            "the smoke gate must never reach input(): _make_rename_confirm's "
+            "prompt is guarded by sys.stdin.isatty(); reaching it would block "
+            "the pre-PR gate for every future change")
+    monkeypatch.setattr("builtins.input", _boom)
+
+
+def _serve_tmdb_details(monkeypatch, mock_tmdb, details):
+    """Layer by-id DETAILS endpoints on top of the shared `mock_tmdb` backend.
+
+    `details` maps a URL suffix ("/movie/424242") to its payload. Everything
+    else — /search/*, /configuration, image bytes, /season/…/images,
+    /episode/…/images — DELEGATES to the fixture, so the fixture's "no real
+    network call can escape" guarantee is preserved unchanged (main.requests.get
+    is still fully replaced, and the delegate is the only other handler).
+    """
+    from conftest import _MockTMDBResp   # the fixture's own response stand-in
+    base_get = mock_tmdb.get
+
+    def get(url, params=None, headers=None, timeout=None, **kwargs):
+        for suffix, payload in details.items():
+            if url.endswith(suffix):
+                mock_tmdb.calls.append((url, dict(params or {})))
+                return _MockTMDBResp(200, json_data=payload)
+        return base_get(url, params=params, headers=headers, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(main.requests, "get", get)
+    return mock_tmdb
+
+
+class TestPrepPushRepEnrich:
+    """Smoke coverage for the IMP-D22 archive+enrich autopilots.
+
+    Four cases, all fast (the archive legs run against mock_device/fake_dummy,
+    the TMDB leg against mock_tmdb — no real adb, no ffmpeg, no network):
+      1. movie round trip   — archived + tmdb_id stamped on the entry + folder
+                              token + poster on disk.
+      2. movie, rename flags at their DEFAULT — the non-interactive path:
+                              returns (does not hang), folder left unrenamed,
+                              metadata.tmdb_id still written.
+      3. season             — a 1-episode season through the season autopilot;
+                              the SHOW folder gets the {tmdb-…} token.
+      4. -tvdbid refusal    — both commands refuse before anything runs
+                              (no TMDB call, nothing prepped).
+    """
+
+    # ---- 1. movie: full archive -> preset -> resolve-by-id -> stamp ---------
+    def test_prep_push_rep_enrich_movie_round_trip(
+            self, sandbox, make_video, stub_tech_specs, mock_device, fake_dummy,
+            mock_tmdb, monkeypatch, capsys):
+        """`-tmdbid` + `--yes`: the movie ends ARCHIVED, carries the tmdb_id,
+        its folder gets the {tmdb-…} token and a poster lands inside it."""
+        _empty_libs(sandbox)
+        _forbid_input(monkeypatch)
+        _serve_tmdb_details(monkeypatch, mock_tmdb,
+                            {f"/movie/{ENRICH_TMDB_ID}": _ENRICH_MOVIE_DETAILS})
+        folder = sandbox["media_dir"]
+        path, _h = make_video(folder / "AutoEnrich.mkv")
+
+        result = main.cmd_prep_push_rep_enrich(
+            ENRICH_MOVIE_ID, str(path), tmdb_id=ENRICH_TMDB_ID, rename_choice="yes")
+
+        assert result is True
+        out = capsys.readouterr().out
+        assert "AUTO-PILOT COMPLETE (archive + enrich)" in out
+
+        lib = mvcommon.load_library()
+        entry = lib[ENRICH_MOVIE_ID]
+        assert entry["status"] == "archived"          # archive leg completed
+        assert entry["metadata"]["tmdb_id"] == ENRICH_TMDB_ID   # enrich leg applied
+
+        stamped = folder.parent / f"{folder.name} {{tmdb-{ENRICH_TMDB_ID}}}"
+        assert stamped.is_dir() and not folder.exists()
+        assert entry["folder_path"] == str(stamped)
+        assert (stamped / "poster.jpg").stat().st_size > 0
+
+    # ---- 2. movie, DEFAULT rename flags: never interactive, never hangs -----
+    def test_prep_push_rep_enrich_default_is_non_interactive_no_hang(
+            self, sandbox, make_video, stub_tech_specs, mock_device, fake_dummy,
+            mock_tmdb, monkeypatch, capsys):
+        """No `--yes` / `--no-rename`: `rename_choice` stays "ask", which under a
+        non-TTY session (every pytest / cron / script run) auto-declines instead
+        of prompting. THE smoke-hang risk — `_forbid_input` makes a regression
+        fail fast here rather than block the gate."""
+        _empty_libs(sandbox)
+        _forbid_input(monkeypatch)
+        _serve_tmdb_details(monkeypatch, mock_tmdb,
+                            {f"/movie/{ENRICH_TMDB_ID}": _ENRICH_MOVIE_DETAILS})
+        folder = sandbox["media_dir"]
+        path, _h = make_video(folder / "AutoEnrich.mkv")
+
+        result = main.cmd_prep_push_rep_enrich(
+            ENRICH_MOVIE_ID, str(path), tmdb_id=ENRICH_TMDB_ID)  # <- defaults
+
+        assert result is True   # returning at all is half the assertion
+        out = capsys.readouterr().out
+        assert "non-interactive session" in out
+
+        lib = mvcommon.load_library()
+        entry = lib[ENRICH_MOVIE_ID]
+        assert entry["status"] == "archived"
+        # tmdb_id still written — the rename decision does not gate the metadata.
+        assert entry["metadata"]["tmdb_id"] == ENRICH_TMDB_ID
+        assert folder.is_dir(), "the non-interactive default must NOT rename"
+        assert entry["folder_path"] == str(folder)
+        assert not (folder.parent / f"{folder.name} {{tmdb-{ENRICH_TMDB_ID}}}").exists()
+
+    # ---- 3. season: the SHOW folder gets the token --------------------------
+    def test_prep_push_rep_season_enrich_stamps_show_folder(
+            self, sandbox, make_video, stub_tech_specs, mock_device, fake_dummy,
+            mock_tmdb, monkeypatch, capsys):
+        """A 1-episode season through the season autopilot: the episode ends
+        ARCHIVED and the SHOW folder (== the season folder in this flat layout,
+        the dominant real-library shape) carries the {tmdb-…} token."""
+        _empty_libs(sandbox)
+        _forbid_input(monkeypatch)
+        _serve_tmdb_details(monkeypatch, mock_tmdb,
+                            {f"/tv/{ENRICH_TMDB_ID}": _ENRICH_SHOW_DETAILS})
+        series_root = sandbox["local_root"] / "Series"
+        season_dir = series_root / "SMK.S01.2020"
+        season_dir.mkdir(parents=True, exist_ok=True)
+        make_video(season_dir / "SMK.S01E01.mkv", marker=b"e1")
+
+        result = main.cmd_prep_push_rep_season_enrich(
+            SEASON_ID, str(season_dir), tmdb_id=ENRICH_TMDB_ID, rename_choice="yes")
+
+        assert result is True
+        out = capsys.readouterr().out
+        assert "AUTO-PILOT COMPLETE (archive + enrich)" in out
+
+        lib = mvcommon.load_library()
+        assert lib[EP1_ID]["status"] == "archived"
+        assert lib[EP1_ID]["metadata"]["tmdb_id"] == ENRICH_TMDB_ID
+
+        stamped = series_root / f"SMK.S01.2020 {{tmdb-{ENRICH_TMDB_ID}}}"
+        assert stamped.is_dir() and not season_dir.exists()
+        assert lib[SEASON_ID]["folder_path"] == str(stamped)
+        assert lib[EP1_ID]["folder_path"] == str(stamped)
+        # The token must land on the show folder itself, never on the Series root.
+        assert series_root.is_dir(), "the Series tree root must never be renamed"
+
+    # ---- 4. -tvdbid: refused before anything runs (no TMDB call at all) -----
+    def test_prep_push_rep_enrich_tvdbid_refused(self, sandbox, make_video, capsys):
+        """Decision 1: MediaVault is TMDB-only. BOTH commands refuse `-tvdbid`
+        up front — nothing is prepped, pushed or replaced (note this case takes
+        no device/dummy/TMDB fixture at all: it cannot need one)."""
+        _empty_libs(sandbox)
+        folder = sandbox["media_dir"]
+        path, _h = make_video(folder / "NoTvdb.mkv")
+
+        assert main.cmd_prep_push_rep_enrich(
+            ENRICH_MOVIE_ID, str(path), tvdb_id=123456) is False
+        assert main.cmd_prep_push_rep_season_enrich(
+            SEASON_ID, str(folder), tvdb_id=123456) is False
+
+        out = capsys.readouterr().out
+        assert out.count("-tvdbid is not supported") == 2
+
+        assert mvcommon.load_library() == {}, "nothing may be prepped on a refusal"
+        assert os.path.isfile(path) and os.path.getsize(path) > main.DUMMY_MAX_BYTES, \
+            "the source file must be untouched (not dummied)"

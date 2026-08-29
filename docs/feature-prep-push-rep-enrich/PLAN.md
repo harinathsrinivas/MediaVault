@@ -893,7 +893,7 @@ session. Before dispatching the FIRST `[model: fable]` step in any session:
     tests/test_set_tmdb.py -q` still green (proves `_show_folder_of`/`_gather_enrich_units`/
     `cmd_set_tmdb`/`cmd_rename_folder` — all reused, none modified — still behave).
 
-- [ ] 6. [model: opus] [effort: high] Smoke-suite coverage — `tests/smoke/test_smoke_all_commands.py`.
+- [x] 6. [model: opus] [effort: high] Smoke-suite coverage — `tests/smoke/test_smoke_all_commands.py`.
   - Depends on: Steps 1-3 (both commands + CLI wiring exist).
   - Consumed by: Step 9's mandatory final `pytest tests/smoke -q` gate; every future PR's
     pre-merge smoke gate per `CLAUDE.md`.
@@ -920,7 +920,7 @@ session. Before dispatching the FIRST `[model: fable]` step in any session:
     `docs/feature-extras/PROGRESS.md` records "smoke 76✓ (+0.6s delta)" for its own smoke
     step); zero pre-existing smoke tests changed.
 
-- [ ] 7. [model: opus] [effort: high] Architect docs — `ARCHITECTURE.md`, `README.md`, `docs/README.md`.
+- [x] 7. [model: opus] [effort: high] Architect docs — `ARCHITECTURE.md`, `README.md`, `docs/README.md`.
   - Depends on: Steps 1-6 complete (docs describe the SHIPPED, tested behaviour, not a plan).
   - Consumed by: any future session/agent reading these docs (including a future planner);
     Step 8's PRIORITY.md/tier entries cross-reference these doc locations.

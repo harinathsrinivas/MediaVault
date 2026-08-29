@@ -81,7 +81,7 @@
 
 <header>
   <div class="brand">Media<span>Vault</span> · Priority Graph</div>
-  <div class="next">⚡ Next: <b>IMP-S1 / IMP-S2</b>&nbsp;<span style="color:#9fb0d6">Jellyfin stand-up + mvdaemon (Phase 5 done; E14/E15/D17/D18 complete)</span>&nbsp;·&nbsp;<a href="../../improvements/PRIORITY.md">full list →</a></div>
+  <div class="next">⚡ Next: <b>_has_tmdb_token re.IGNORECASE fix</b>&nbsp;<span style="color:#9fb0d6">then IMP-S1 / IMP-S2 (Jellyfin stand-up + mvdaemon; D19-D22 complete)</span>&nbsp;·&nbsp;<a href="../../improvements/PRIORITY.md">full list →</a></div>
   <div class="grow"></div>
   <input id="search" placeholder="search tasks…  (Enter to focus)">
 </header>
@@ -111,7 +111,7 @@
   <a class="open" id="p-open" href="#" target="_blank" rel="noopener">Open task in tier file →</a>
 </div>
 
-<div class="footer">Generated 2026-06-27 · updated 2026-08-27 (D21 done — extras split-failure hardening; D20 backfilled — shipped on main via PR #43 but never previously tracked here; R10 still open — change-gated) · keep in sync with <code>PRIORITY.md</code> (see its maintenance protocol) · 126 tasks</div>
+<div class="footer">Generated 2026-06-27 · updated 2026-08-29 (D22 done — prep_push_rep(_season)_enrich; surfaced follow-on bug: _has_tmdb_token missing re.IGNORECASE; earlier: D21 done — extras split-failure hardening; D20 backfilled — shipped on main via PR #43 but never previously tracked here; R10 still open — change-gated) · keep in sync with <code>PRIORITY.md</code> (see its maintenance protocol) · 127 tasks</div>
 
 <script>
 /* ───────────────────────── TASK DATA — keep in sync with PRIORITY.md + improvements_tier*.md ─────────────────────────
@@ -185,6 +185,7 @@ const TASKS = [
  ["D19","extras option (Specials/Trailers/BTS)","D","done","done","Shipped feature/imp_d19_extras: --extras/--extras-size on prep/prep_season/push/push_group/prep_push_rep/prep_push_rep_season + new add_extras + flag-only --fetchExtras; grouped extras block on title entries (no new entry type, no rollback change — E1 additive reuse); found+fixed pre-existing dummy-clobber path (D19-B1); 37 unit tests + 4 smoke cases (suite 648/smoke 76); PR to main pending"],
  ["D20","extras checksum-sidecar parity + integrity coverage","D","done","done","Shipped fix/imp_d20_extras_sidecars, PR #43, squash f40e952: master + per-chunk .sha256 sidecars at register/push time; verify_library/check/repair_dummies/verify_restore/local_status made extras-aware; push --extras no-op warning (names add_extras); season-autopilot resume command carries --extras/--extras-size. Bundles audit findings D3/A5/D4 from docs/feature-extras/FIXES_PROGRESS.md. Backfilled into this graph by IMP-D21 — shipped to main but never previously tracked here"],
  ["D21","extras split-failure hardening","D","done","done","Shipped fix/imp_d21_extras_split_hardening: push_one_extra's SPLIT branch now gates on refuse_if_unsplittable before makedirs (parity with cmd_push/the two autopilots, closing the gap the parallel C19/C20/C21 work left open for extras); a failed split removes any partial chunk it wrote so the next run's RESUME branch can never inherit it and silently flip uploaded=True with no split_info (closes audit finding D1, docs/feature-extras/FIXES_PROGRESS.md)"],
+ ["D22","prep_push_rep(_season)_enrich","D","done","done","Shipped feature/imp_d22_prep_push_rep_enrich: prep_push_rep_enrich (movie) + prep_push_rep_season_enrich (series) wrap the untouched (provably zero-diff) cmd_prep_push_rep/cmd_prep_push_rep_season then enrich via TMDB; -tmdbid skips search, else auto-resolve waterfall (TMDB search -> wordninja -> EXA); -tvdbid refused outright (TMDB-only); {tmdb-} rename gated behind --yes/--no-rename confirmation; richer opt-in .nfo (imdbid/genre/runtime/premiered/studio/director/actor, never tvdbid); no new PONR, ENTRY_TYPE_KEYS untouched; 65 new tests, suite 768/smoke 76+. Surfaced follow-on bug: _has_tmdb_token missing re.IGNORECASE"],
  // E — integration
  ["E1","subtitle pre-extraction","E","med","todo","Subs survive archive; feed F7 grep"],
  ["E2","low-res preview variant","E","low","todo","Quick preview without full fetch"],
@@ -259,7 +260,7 @@ const TASKS = [
 /* dependency / flow edges [from,to] — major chains only */
 const EDGES = [
  ["A2","A4"],["A4","A5"],["A4","E12"],["A4","D1"],["A4","S2"],["A3","S2"],["E12","D16"],["E12","E14"],["A12","E14"],["E14","S2"],
- ["A2","D10"],["E3","U3"],["E3","D10"],["E3","D1"],["D4","D5"],["D17","E3"],["D18","E14"],["D19","E14"],["D19","D20"],["D20","D21"],["C20","D21"],
+ ["A2","D10"],["E3","U3"],["E3","D10"],["E3","D1"],["D4","D5"],["D17","E3"],["D18","E14"],["D19","E14"],["D19","D20"],["D20","D21"],["C20","D21"],["D21","D22"],["E3","D22"],
  ["S1","S2"],["S2","S3"],["S3","S4"],["S4","S5"],["S2","E9"],["S2","U2"],
  ["C6","S3"],["S4","U1"],["E4","S4"],["E4","S5"],["E5","S5"],["C1","S2"],
  ["R6","S3"],["G4","S2"],["G4","U5"],["G2","S7"],["S6","S8"],

@@ -999,7 +999,7 @@ session. Before dispatching the FIRST `[model: fable]` step in any session:
     (re-read the merged code before writing, do not describe the PLAN's intent if the
     winning candidate ended up differing in some print-wording detail).
 
-- [ ] 8. [model: sonnet] [effort: medium] Register IMP-D22 — `improvements/improvements_tierD.md`, `improvements/PRIORITY.md`, `docs/priority-graph/priority-graph.html`.
+- [x] 8. [model: sonnet] [effort: medium] Register IMP-D22 — `improvements/improvements_tierD.md`, `improvements/PRIORITY.md`, `docs/priority-graph/priority-graph.html`.
   - Depends on: Steps 1-7 complete and green (registered as `done`, never as `pending` —
     per the task's explicit instruction).
   - Consumed by: any future prioritization pass; the priority-graph visual.

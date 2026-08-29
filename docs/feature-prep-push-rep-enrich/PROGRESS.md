@@ -54,7 +54,19 @@ never `git add -A`, never a bare `git commit`.
 
 ## ▶ NEXT ACTION
 
-**Step 6** — `[model: opus]`. Smoke-suite coverage in `tests/smoke/test_smoke_all_commands.py`.
+**Step 6** (smoke coverage — NOT STARTED, full re-dispatch) and **Step 7-remainder**
+(`README.md` + `docs/README.md` only — `ARCHITECTURE.md` is already done and committed).
+
+### Rate-limit crash #4 (2026-08-29) — all three parallel agents died mid-flight
+Steps 6/7/8 were dispatched in parallel; all three hit `session limit · resets 8am`. Salvage:
+- **Step 8 — COMPLETE.** All three tracking files landed, verified mutually consistent. It also
+  independently chose the next-task pointer (the `_has_tmdb_token` `re.IGNORECASE` bug) with sound
+  justification: an active correctness bug outranks the two bigger optimisation follow-ons.
+- **Step 7 — PARTIAL.** `ARCHITECTURE.md` complete (170 lines, all 7 required topics verified by
+  grep). `README.md` / `docs/README.md` never started.
+- **Step 6 — NOTHING WRITTEN.** Needs a clean re-dispatch.
+One agent reported aborting a bash redirect mid-edit; the priority-graph HTML was inspected
+afterwards and is intact (balanced script tags, valid arrays, D22 node present).
 
 **Steps 4 + 5 outcome:** both done, dispatched in parallel (different files, no conflict).
 Full suite now **768 passed** (720 → +21 movie, +27 season). Both files pure-append — the 7 and 10
@@ -233,8 +245,8 @@ substitution in the Step table below.
 | 4 | opus | single | **done** | (this commit) | **28/28** (was 7, +21) · smoke 76/76 | Pure append (0 deletions verified). 14 regression tests over every existing `prep_push_rep` permutation + a byte-for-byte console pin. **Negative control run:** mutated the implementation → 12 tests failed → reverted byte-identically, proving the oracles are not vacuous. |
 | 5 | opus | single | **done** | (this commit) | **37/37** (was 10, +27) · smoke 76/76 | Pure append (0 deletions verified). 12 regression ids + the 15-test artifact inventory across BOTH folder layouts. Fake TMDB image bytes encode their own source URL, so every artwork assertion is a **provenance** assertion. |
 | 6 | opus | single | pending | — | — | Smoke-suite coverage |
-| 7 | opus | single | pending | — | — | Architect docs |
-| 8 | sonnet | single | pending | — | — | Register IMP-D22 + PRIORITY.md + priority-graph |
+| 7 | opus | single | **partial** | (this commit) | n/a (docs) | `ARCHITECTURE.md` DONE — all 7 required topics verified present (incl. the duplication-sync obligation and the TMDB-for-everything convention). **REMAINING: `README.md` + `docs/README.md` (never started).** |
+| 8 | sonnet | single | **done** | (this commit) | n/a (docs) | All three tracking files updated and mutually consistent: tierD `## IMP-D22` entry, PRIORITY.md (Last updated 2026-08-29, DONE list, new NEXT pointer), priority-graph.html (node + `D21→D22`/`E3→D22` edges, count 126→127). |
 | 9 | opus | single | pending | — | — | Final verification + smoke gate |
 
 ## Run history (append-only — every interruption recorded)

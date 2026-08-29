@@ -153,6 +153,50 @@ its `_write_nfo` assignment. **This was FALSE** — verified directly: Step 1 sp
 That agent's edits never landed and nothing needed undoing. It appears to have made a
 too-small-window reading error from stale context.
 
+## Post-PR test-coverage closure (2026-08-29) — three gaps found AFTER PR #47 opened
+
+The user asked how the CLI edge cases had been missed. Investigation found three genuine gaps —
+**cause was the orchestrator's step briefs, not the executors**:
+1. Step 3's Acceptance specified MANUAL checks ("`python main.py` prints the usage lines") instead
+   of automated ones; its thorough parse harness was scratchpad-only *by design*.
+2. The Step 4/5 briefs said tests "may invoke either via direct function call OR via this
+   dispatcher" — optional, so both chose direct calls. **argv → kwargs was never pinned.**
+3. The plan's artifact inventory was written around movies/series only, so nobody specified
+   `ani-` / `oth-` scenarios and nobody wrote them.
+
+**Closed by `tests/test_prep_push_rep_enrich_cli.py` (NEW, 102 cases) + GROUP C in the season file
+(+3).** Full suite **772 → 877**; smoke stays 80.
+- CLI suite technique: `ast` → locate `if __name__ == "__main__":` → exec ONLY that node with every
+  `cmd_*` swapped for recorders; calls normalised via `inspect.signature().bind().apply_defaults()`
+  because `split_method`/`split_val`/`episode_range` arrive POSITIONALLY. Includes regression pins
+  that the OLD `prep_push_rep`/`prep_push_rep_season` blocks still parse identically.
+- **Non-vacuity proven by mutation:** three mutated in-memory copies of `main.py` (`--yes`→`no`,
+  dropped `--tmdbid` alias, flipped `write_nfo` default) each broke exactly the owning test.
+- **Real-library isolation proven by measurement**, not assertion: `library_*.json` mtimes captured
+  immediately before/after running only the two new files were byte-identical.
+
+### 🔴 FINDING — anime per-episode enrichment NEVER lands (PRE-EXISTING, not IMP-D22)
+Two parsers disagree on the anime id shape. Verified directly:
+```
+_episode_se_of('ani-ja-2015-kurokosbasketball-s0324')  -> (3, 324)   # WRONG - swallows the -s03 digits
+mvcommon.episode_num_from_id(same id, parent)          -> 24.0       # correct
+```
+`_episode_se_of` (`main.py:1725`) recovers the anime episode from bare trailing digits
+(`_ANIME_EP_TAIL_RE = r"(\d{1,4})$"`). Consequences for the user's 145 anime entries: the still is
+requested at `/tv/{id}/season/3/episode/**324**/images` so no `-thumb.jpg` is written, and
+`_apply_episode_overviews` finds no episode 324 so **no per-episode `overview`/`episode_title` is
+ever backfilled**. For the other real shape (`ani-ja-2013-attackontitan01`, no `-sNN` on the
+parent) `_episode_se_of` returns `None`, so per-season posters AND per-episode data are skipped.
+**Shared with `enrich_metadata` — NOT introduced by this feature.** Behaviour is PINNED by tests
+with explicit "pre-existing limitation" docstrings, so a future fix is a deliberate, visible change.
+
+Two minor findings, both pinned: a valueless `--extras`/`--extras-size` calls `sys.exit(1)` while
+every other valueless value-flag falls through into the path string; and `-tmdbid 550` arrives as
+the STRING `"550"`, which `cmd_set_tmdb` coerces to int (both paths converge).
+
+**Residual gap:** anime/Others remain unexercised for the MOVIE command (file-scope limit of that
+dispatch) — worth a follow-up in `tests/test_prep_push_rep_enrich.py`.
+
 ## Step 1 candidate progress
 
 | Cand | Branch | Worktree | Commit | Status | Tests |

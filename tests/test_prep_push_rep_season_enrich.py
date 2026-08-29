@@ -1743,3 +1743,316 @@ def test_default_rename_choice_is_non_interactive_and_does_not_rename(
     assert (season_dir / "poster.jpg").exists(), "artwork still lands in the un-stamped folder"
     lib = mvcommon.load_library()
     assert lib[f"{base_id}e01"]["metadata"]["tmdb_id"] == TMDB_ID
+
+
+# ===========================================================================
+#   GROUP C — the two library categories the IMP-D22 suite never exercised:
+#   ANIME (`ani-`) and OTHERS/sports (`oth-`).
+#
+#   Both are driven END-TO-END through `cmd_prep_push_rep_season_enrich` with
+#   the SAME hermetic fixtures Groups A/B use (sandbox / make_video /
+#   stub_tech_specs / mock_device / fake_dummy + a canned TMDB), so no real
+#   C:\Media path and no real library_*.json is ever reachable.
+#
+#   ANIME uses the two REAL id shapes from this user's library, which behave
+#   DIFFERENTLY and are therefore both covered:
+#     (i)  season-suffixed base -> the episode is GLUED onto the season tag
+#          (`ani-ja-2015-kurokosbasketball-s03` + "24" -> `…-s0324`)
+#     (ii) suffix-less base     -> the episode is glued onto the slug
+#          (`ani-ja-2013-attackontitan` + "01" -> `…attackontitan01`)
+#   `cmd_prep_season`'s anime branch builds BOTH as `f"{base_id}{ep_num}"`
+#   (main.py:4193) — there is no `e` separator, unlike TV/Others.
+#
+#   OTHERS is the deliberate IMP-D18 EXCLUSION: `_gather_enrich_units` skips
+#   every `oth-` id (main.py:~2013 — sports is not on TMDB), so the archive
+#   succeeds and the enrich leg warns-and-skips.
+# ===========================================================================
+
+def _tv_search_hit(tmdb_id, name, year, popularity=90.0):
+    """A `/search/tv` RESULT row (not a details payload).
+
+    `_resolve_unit` reads the matched row directly — id / name /
+    first_air_date / poster_path / backdrop_path / overview — and
+    `_download_unit_images` takes poster_path + backdrop_path from that same
+    row, so a search-resolved run never needs `/tv/{id}` at all."""
+    return {
+        "id": tmdb_id, "name": name, "first_air_date": f"{year}-04-06",
+        "popularity": popularity,
+        "poster_path": "/showposter.jpg", "backdrop_path": "/showbackdrop.jpg",
+        "overview": f"The show synopsis for {name}.",
+    }
+
+
+class _NoTMDBTraffic:
+    """A `requests.get` stand-in that FAILS the test if it is ever called.
+
+    Used by the Others case: an `oth-` run must make ZERO TMDB requests — the
+    unit gather returns nothing, so the enrich leg bails before any resolve.
+    Recording-and-asserting would also work, but hard-failing pinpoints the
+    exact call site in the traceback."""
+
+    def __init__(self):
+        self.calls = []
+
+    def get(self, url, params=None, headers=None, timeout=None, **kwargs):
+        self.calls.append(url)
+        raise AssertionError(
+            f"an oth- (Others/sports) run must never reach TMDB — got GET {url}")
+
+
+# --- C1: ANIME, season-suffixed base id (`…-s03` + "24" -> `…-s0324`) -------
+
+def test_anime_glued_season_episode_ids_archive_and_enrich_via_tv_endpoints(
+        sandbox, make_video, stub_tech_specs, mock_device, fake_dummy,
+        patch_tmdb_by_id, capsys):
+    """An `ani-` season archives and enriches through the TMDB **TV** endpoints
+    exactly like a series: `_gather_enrich_units` buckets it as a `show`, the
+    preset id resolves via `/tv/{id}` (never `/movie/…`, never `/search/…`),
+    the `{tmdb-…}` token stamps the PARENT show folder, and show + per-season
+    artwork lands.
+
+    ALSO PINS A REAL LIMITATION (pre-existing, shared with `enrich_metadata` —
+    NOT introduced by IMP-D22). `_episode_se_of` (main.py:1725) recovers an
+    anime episode number from the id's BARE TRAILING DIGITS, which for a
+    season-suffixed base swallows the season digits too:
+        `ani-ja-2015-kurokosbasketball-s0324` -> (season 3, episode **324**)
+    (`mvcommon.episode_num_from_id`, which strips the base_id prefix first,
+    correctly reports 24). Consequence, asserted below: the per-episode still
+    is requested for episode 324, the canned still seeded at the CORRECT
+    episode 24 is never fetched, no `-thumb.jpg` is written, and
+    `_apply_episode_overviews` finds no episode 324 so no per-episode overview
+    / episode_title is written. The run still completes and the show-level
+    enrichment is intact — this test pins the ACTUAL behaviour so a future fix
+    to `_ANIME_EP_TAIL_RE` is a deliberate, visible change."""
+    base_id = "ani-ja-2015-kurokosbasketball-s03"
+    show_dir = sandbox["local_root"] / "Anime" / "Kurokos Basketball"
+    season_dir = show_dir / "Season 03"
+    filenames = ["[SubGrp] Kurokos Basketball - 24 [1080p].mkv",
+                 "[SubGrp] Kurokos Basketball - 25 [1080p].mkv"]
+    _seed_episodes(season_dir, make_video, filenames)
+
+    TMDB_ID = 45999
+    fake = patch_tmdb_by_id(_FakeTMDBSeriesFull(
+        TMDB_ID,
+        _tv_details_full(TMDB_ID, "Kurokos Basketball", 2015),
+        season_posters={3: [{"file_path": "/aniseason3.jpg"}]},
+        # Seeded at the CORRECT episode numbers on purpose — the assertions
+        # below prove the code asks for 324/325 instead and never reaches these.
+        episode_stills={(3, 24): [{"file_path": "/anistill24.jpg"}],
+                        (3, 25): [{"file_path": "/anistill25.jpg"}]},
+        season_episodes={3: [{"episode_number": 24, "name": "Ep 24", "overview": "Ep 24 synopsis."},
+                             {"episode_number": 25, "name": "Ep 25", "overview": "Ep 25 synopsis."}]},
+    ))
+
+    assert main.cmd_prep_push_rep_season_enrich(
+        base_id, str(season_dir), tmdb_id=TMDB_ID, rename_choice="yes") is True
+
+    out = capsys.readouterr().out
+    assert "AUTO-PILOT COMPLETE (archive + enrich)" in out
+    assert "this is the SHOW folder" in out, "nested anime layout -> the note applies"
+
+    lib = mvcommon.load_library()
+    ep24, ep25 = f"{base_id}24", f"{base_id}25"
+
+    # --- the anime id shape cmd_prep_season actually produced (glued, no "e") --
+    assert sorted(lib[base_id]["children"]) == [ep24, ep25]
+    assert lib[base_id]["type"] == "season_map"
+
+    # --- archive leg: both episodes fully archived + dummied + on the device ---
+    stamped_show = show_dir.parent / f"Kurokos Basketball {{tmdb-{TMDB_ID}}}"
+    stamped_season = stamped_show / "Season 03"
+    assert stamped_show.is_dir() and not show_dir.exists()
+    assert stamped_season.is_dir(), "the season subfolder moves WITH the show folder"
+    for eid, fn in zip((ep24, ep25), filenames):
+        entry = lib[eid]
+        assert entry["status"] == "archived" and entry["uploaded"] is True
+        assert entry["folder_path"] == str(stamped_season)
+        assert (stamped_season / fn).read_bytes() == FAKE_DUMMY_BYTES
+    assert len(_device_names(mock_device)) == 2, sorted(_device_names(mock_device))
+
+    # --- enrich leg: TV endpoints only, resolved strictly by id ----------------
+    assert main._gather_enrich_units(lib, id_or_prefix=base_id)[0]["kind"] == "show", \
+        "an ani- season must bucket as a SHOW so the TV endpoints are used"
+    assert any(u.endswith(f"/tv/{TMDB_ID}") for u in fake.urls), fake.urls
+    assert not any("/movie/" in u for u in fake.urls), fake.urls
+    assert not any("/search/" in u for u in fake.urls), "a preset id must never search"
+
+    # tmdb_id on BOTH leaves AND the season_map (every id in the unit).
+    assert lib[base_id]["metadata"]["tmdb_id"] == TMDB_ID
+    assert lib[ep24]["metadata"]["tmdb_id"] == TMDB_ID
+    assert lib[ep25]["metadata"]["tmdb_id"] == TMDB_ID
+    assert lib[ep24]["metadata"]["title"] == "Kurokos Basketball"
+    assert lib[ep24]["metadata"]["year"] == 2015
+
+    # --- artwork: show poster/fanart on the stamped show folder, season poster
+    #     on the season folder (proves /tv/{id}/season/3/images was used) -------
+    assert (stamped_show / "poster.jpg").read_bytes() == _expect_img("w342", "/showposter.jpg")
+    assert (stamped_show / "fanart.jpg").read_bytes() == _expect_img("w780", "/showbackdrop.jpg")
+    assert (stamped_season / "poster.jpg").read_bytes() == _expect_img("w342", "/aniseason3.jpg")
+
+    # --- THE PINNED LIMITATION: the trailing-digit episode parse -------------
+    assert main._episode_se_of(ep24, lib[ep24]) == (3, 324), \
+        "pre-existing: the season digits are absorbed into the episode number"
+    assert mvcommon.episode_num_from_id(ep24, base_id) == 24.0, \
+        "…while the base-relative parser gets it right — the two disagree"
+    assert any(u.endswith(f"/tv/{TMDB_ID}/season/3/episode/324/images") for u in fake.urls), \
+        f"the still is requested for the WRONG episode number: {fake.urls}"
+    assert not any(u.endswith(f"/tv/{TMDB_ID}/season/3/episode/24/images") for u in fake.urls), \
+        "the correct episode number is never requested"
+    assert "no episode still for S03E324" in out
+    for fn in filenames:
+        thumb = os.path.splitext(fn)[0] + "-thumb.jpg"
+        assert not (stamped_season / thumb).exists(), \
+            "no per-episode still lands for a season-suffixed anime id"
+    for eid in (ep24, ep25):
+        assert "episode_title" not in lib[eid]["metadata"], \
+            "no per-episode overview/title is backfilled for this id shape"
+        assert lib[eid]["metadata"]["overview"] == \
+            _tv_details_full(TMDB_ID, "Kurokos Basketball", 2015)["overview"], \
+            "the leaves keep the SHOW overview (the episode one is never found)"
+
+
+# --- C2: ANIME, suffix-less base id (`…attackontitan` + "01") --------------
+
+def test_anime_without_a_season_suffix_resolves_through_search_tv(
+        sandbox, make_video, stub_tech_specs, mock_device, fake_dummy,
+        patch_tmdb_by_id, capsys):
+    """The OTHER real anime id shape — a base id with NO `-sNN` tag, episodes
+    glued straight onto the slug (`ani-ja-2013-attackontitan01`) — archives and
+    enriches with NO preset id, proving the SEARCH waterfall routes anime to
+    `/search/tv` (a series), never `/search/movie`.
+
+    Also pins the second half of the `_episode_se_of` story: with no `-sNN` on
+    the parent, `_season_number_of` yields None, so the helper returns None and
+    BOTH per-season and per-episode artwork are skipped entirely (no `/season/`
+    and no `/episode/` request is ever made). Show-level poster/fanart still
+    land, and the flat layout means the token stamps THIS folder with the
+    parent-show note suppressed."""
+    base_id = "ani-ja-2013-attackontitan"
+    season_dir = sandbox["local_root"] / "Anime" / "Attack on Titan"
+    filenames = ["[SubGrp] Attack on Titan - 01 [1080p].mkv",
+                 "[SubGrp] Attack on Titan - 02 [1080p].mkv"]
+    _seed_episodes(season_dir, make_video, filenames)
+
+    TMDB_ID = 1429
+    # The humanized query for this id is the bare slug "attackontitan"
+    # (_humanize_id_title strips ani/ja/2013); TMDB normalisation drops spaces,
+    # so "Attack on Titan" scores a 1.0 title match, and the id year (2013)
+    # corroborates -> CONFIDENT.
+    fake = patch_tmdb_by_id(_FakeTMDBSeriesFull(
+        TMDB_ID,
+        _tv_details_full(TMDB_ID, "Attack on Titan", 2013),
+        search={"attackontitan": [_tv_search_hit(TMDB_ID, "Attack on Titan", 2013)]},
+    ))
+
+    assert main.cmd_prep_push_rep_season_enrich(
+        base_id, str(season_dir), rename_choice="yes") is True
+
+    out = capsys.readouterr().out
+    assert "AUTO-PILOT COMPLETE (archive + enrich)" in out
+    assert "this is the SHOW folder" not in out, \
+        "flat layout: the show folder IS the season folder -> note suppressed"
+
+    lib = mvcommon.load_library()
+    ep1, ep2 = f"{base_id}01", f"{base_id}02"
+    assert sorted(lib[base_id]["children"]) == [ep1, ep2]
+
+    # --- resolved via the TV SEARCH endpoint, never the movie one -------------
+    assert any("/search/tv" in u for u in fake.urls), fake.urls
+    assert not any("/search/movie" in u for u in fake.urls), fake.urls
+    assert not any("/season/" in u for u in fake.urls), \
+        "a suffix-less anime base has no season number -> no season/episode calls"
+    assert not any("/episode/" in u for u in fake.urls), fake.urls
+
+    # --- archive + stamp on THIS folder (flat layout) -------------------------
+    stamped = season_dir.parent / f"Attack on Titan {{tmdb-{TMDB_ID}}}"
+    assert stamped.is_dir() and not season_dir.exists()
+    for eid, fn in zip((ep1, ep2), filenames):
+        assert lib[eid]["status"] == "archived" and lib[eid]["uploaded"] is True
+        assert lib[eid]["folder_path"] == str(stamped)
+        assert (stamped / fn).read_bytes() == FAKE_DUMMY_BYTES
+        assert lib[eid]["metadata"]["tmdb_id"] == TMDB_ID
+    assert lib[base_id]["metadata"]["tmdb_id"] == TMDB_ID
+    assert len(_device_names(mock_device)) == 2
+
+    # --- show artwork only; no episode thumbs (the pinned limitation) ---------
+    assert (stamped / "poster.jpg").read_bytes() == _expect_img("w342", "/showposter.jpg")
+    assert (stamped / "fanart.jpg").read_bytes() == _expect_img("w780", "/showbackdrop.jpg")
+    assert main._episode_se_of(ep1, lib[ep1]) is None, \
+        "no -sNN on the parent -> no (season, episode) pair at all"
+    for fn in filenames:
+        assert not (stamped / (os.path.splitext(fn)[0] + "-thumb.jpg")).exists()
+
+
+# --- C3: OTHERS (`oth-`) — archives, but enrich is DELIBERATELY skipped -----
+
+def test_others_season_archives_but_enrich_is_skipped(
+        sandbox, make_video, stub_tech_specs, mock_device, fake_dummy,
+        patch_tmdb_by_id, capsys):
+    """IMP-D18's deliberate exclusion, pinned end-to-end on the new command.
+
+    Sports/Others is not on TMDB, so `_gather_enrich_units` skips every `oth-`
+    id (main.py:~2013). Through `cmd_prep_push_rep_season_enrich` that means:
+    the ARCHIVE leg succeeds normally (every half prepped, pushed, replaced by
+    a dummy, and reported complete), and the ENRICH leg warns
+    "no enrich unit found for … — skipped" and does nothing — no TMDB request
+    at all, no `metadata.tmdb_id`, no `{tmdb-…}` folder rename, no artwork.
+    The command still returns True and prints the completion banner, because
+    Decision 7 says a skipped enrich never fails a completed archive."""
+    import json  # local (this file is append-only; matches the in-test
+                 # `import hashlib` precedent in GROUP A above)
+
+    base_id = "oth-football-2026-fifaworldcup-s01"
+    season_dir = sandbox["local_root"] / "Sports" / "Football" / "FIFA World Cup 2026"
+    filenames = [
+        "2026-06-22 - Spain vs Saudi Arabia - First Half - Group Stage [2160p UHD].mkv",
+        "2026-06-22 - Spain vs Saudi Arabia - Second Half - Group Stage [2160p UHD].mkv",
+    ]
+    _seed_episodes(season_dir, make_video, filenames)
+
+    # A TMDB key IS configured (so the enrich leg gets past its api-key guard and
+    # actually reaches the unit gather), but ANY request hard-fails the test.
+    fake = patch_tmdb_by_id(_NoTMDBTraffic())
+
+    assert main.cmd_prep_push_rep_season_enrich(
+        base_id, str(season_dir), rename_choice="yes") is True
+
+    out = capsys.readouterr().out
+    ep1, ep2 = f"{base_id}e01", f"{base_id}e02"
+
+    # --- the enrich leg was SKIPPED, and said so ------------------------------
+    assert f"no enrich unit found for {base_id}" in out
+    assert "AUTO-PILOT COMPLETE (archive + enrich)" in out, \
+        "a skipped enrich must NOT stop the command reporting archive success"
+    assert fake.calls == [], "no TMDB request may be made for an oth- run"
+
+    lib = mvcommon.load_library()
+    assert main._gather_enrich_units(lib, id_or_prefix=base_id) == [], \
+        "IMP-D18: oth- ids are excluded from enrich units at the source"
+
+    # --- the ARCHIVE leg nonetheless completed in full ------------------------
+    assert lib[base_id]["type"] == "season_map"
+    assert sorted(lib[base_id]["children"]) == [ep1, ep2], \
+        "Others episodes are numbered by sorted-filename position (e01, e02)"
+    for eid, fn in zip((ep1, ep2), filenames):
+        entry = lib[eid]
+        assert entry["status"] == "archived" and entry["uploaded"] is True
+        assert entry["folder_path"] == str(season_dir)
+        assert (season_dir / fn).read_bytes() == FAKE_DUMMY_BYTES
+    assert len(_device_names(mock_device)) == 2, sorted(_device_names(mock_device))
+
+    # --- NOTHING was enriched: no tmdb_id, no rename, no artwork --------------
+    for eid in (base_id, ep1, ep2):
+        assert "tmdb_id" not in (lib[eid].get("metadata") or {}), \
+            f"{eid} must never receive a TMDB id"
+    assert season_dir.is_dir(), "the real Sports folder must NOT be renamed"
+    assert [p.name for p in season_dir.parent.iterdir()] == ["FIFA World Cup 2026"], \
+        "no {tmdb-…}-stamped sibling folder may appear"
+    assert not (season_dir / "poster.jpg").exists()
+    assert not (season_dir / "fanart.jpg").exists()
+
+    # --- and the entries routed to library_others.json only ------------------
+    others = json.loads(sandbox["lib_others"].read_text(encoding="utf-8"))
+    assert set(others) == {base_id, ep1, ep2}
+    for lib_path in ("lib_movies", "lib_series", "lib_anime"):
+        assert json.loads(sandbox[lib_path].read_text(encoding="utf-8")) == {}

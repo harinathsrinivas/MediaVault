@@ -1102,6 +1102,120 @@ def test_nfo_write_failure_warns_but_enrich_still_completes(sandbox, patch_tmdb,
 
 
 # ===========================================================================
+# NFO richer element set (IMP-D22, Decision 4) — every added element OPTIONAL,
+# <tvdbid> NEVER emitted (Decision 1). Shared/non-forked work (identical in
+# both IMP-D22 candidates); these tests are pure ADDITIONS — no existing
+# assertion above needed updating (none pinned the pre-D22 minimal set).
+# ===========================================================================
+
+def test_nfo_movie_richer_fields_populate_when_available(sandbox, patch_tmdb, capsys):
+    """--apply --nfo on a movie resolved BY A PRESET ID (so the by-id details
+    payload can carry the extra TMDB fields): the richer element set populates
+    from that SAME payload (imdbid/genre/runtime/premiered/studio), cast/
+    director gracefully OMIT (no credits payload supplied), and <tvdbid> is
+    NEVER emitted."""
+    import xml.etree.ElementTree as ET
+    _empty_libs(sandbox)
+    folder, fp, h = _seed_movie(sandbox, "mov-en-2025-f1", "F1")
+    lib = mvcommon.load_library()
+    lib["mov-en-2025-f1"].setdefault("metadata", {})["tmdb_id"] = 1003159
+    mvcommon.save_library(lib)
+    rich_details = {
+        "id": 1003159, "title": "F1", "release_date": "2025-05-01",
+        "poster_path": "/poster.jpg", "backdrop_path": "/backdrop.jpg",
+        "overview": "Racing film.", "vote_average": 7.1,
+        "imdb_id": "tt1234567",
+        "genres": [{"id": 1, "name": "Action"}, {"id": 2, "name": "Drama"}],
+        "runtime": 145,
+        "production_companies": [{"id": 10, "name": "Apex Films"}],
+    }
+    patch_tmdb(FakeTMDB(movie_by_id={1003159: rich_details}))
+
+    main.cmd_enrich_metadata("mov-en-2025-f1", "--apply", "--nfo")
+
+    new_folder = folder.parent / "F1 {tmdb-1003159}"
+    nfo_path = new_folder / "movie.nfo"
+    assert nfo_path.exists()
+    root = ET.parse(str(nfo_path)).getroot()
+
+    assert root.find("tmdbid").text == "1003159"
+    assert root.find("imdbid").text == "tt1234567"
+    imdb_uids = [u for u in root.findall("uniqueid") if u.get("type") == "imdb"]
+    assert len(imdb_uids) == 1 and imdb_uids[0].text == "tt1234567"
+    assert [g.text for g in root.findall("genre")] == ["Action", "Drama"]
+    assert root.find("runtime").text == "145"
+    assert root.find("premiered").text == "2025-05-01"
+    assert [s.text for s in root.findall("studio")] == ["Apex Films"]
+
+    # No credits payload was supplied -> cast/director gracefully OMITTED.
+    assert root.find("director") is None
+    assert root.findall("actor") == []
+
+    # <tvdbid> is NEVER emitted (Decision 1 — MediaVault is TMDB-only).
+    assert root.find("tvdbid") is None
+
+
+def test_nfo_movie_omits_richer_fields_gracefully_without_detail_data(sandbox, patch_tmdb, capsys):
+    """--apply --nfo on a movie resolved by TITLE SEARCH (no by-id details, no
+    credits payload available): every richer element is cleanly OMITTED —
+    the base title/year/plot/rating/uniqueid(tmdb)/tmdbid fields are still
+    written — and <tvdbid> is NEVER emitted."""
+    import xml.etree.ElementTree as ET
+    _empty_libs(sandbox)
+    folder, fp, h = _seed_movie(sandbox, "mov-en-2025-f1", "F1")
+    patch_tmdb(FakeTMDB(search={"f1": [
+        _movie_result_with_meta(1003159, "F1", 2025, overview="Racing film.", vote_average=7.1)
+    ]}))
+
+    main.cmd_enrich_metadata("mov-en-2025-f1", "--apply", "--nfo")
+
+    new_folder = folder.parent / "F1 {tmdb-1003159}"
+    root = ET.parse(str(new_folder / "movie.nfo")).getroot()
+
+    # Base fields (pre-D22) still present, plus the always-on plain <tmdbid>.
+    assert root.find("title").text == "F1"
+    assert root.find("tmdbid").text == "1003159"
+
+    # Every richer element gracefully OMITTED — no genre/runtime/premiered/
+    # studio/director/actor/imdbid data is available from a title-search match.
+    assert root.find("imdbid") is None
+    assert [u.get("type") for u in root.findall("uniqueid")] == ["tmdb"]
+    assert root.findall("genre") == []
+    assert root.find("runtime") is None
+    assert root.find("premiered") is None
+    assert root.findall("studio") == []
+    assert root.find("director") is None
+    assert root.findall("actor") == []
+
+    # <tvdbid> is NEVER emitted (Decision 1 — MediaVault is TMDB-only).
+    assert root.find("tvdbid") is None
+
+
+def test_nfo_show_never_emits_tvdbid(sandbox, patch_tmdb, capsys):
+    """--apply --nfo on a confident SHOW never emits <tvdbid> either (the
+    Fringe-folder shape in Decision 4's spec has one; MediaVault deliberately
+    never writes it — no TVDB client exists, Decision 1)."""
+    import xml.etree.ElementTree as ET
+    _empty_libs(sandbox)
+    show = _seed_two_season_show(sandbox)
+    patch_tmdb(FakeTMDB(
+        search={"the office": [
+            _tv_result_with_meta(2316, "The Office", 2005,
+                                 overview="Mockumentary comedy.", vote_average=8.9)
+        ]},
+        season_images={(2316, 1): [], (2316, 2): []},
+    ))
+
+    main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply", "--nfo")
+
+    stamped_show = show["show_root"].parent / "The Office {tmdb-2316}"
+    root = ET.parse(str(stamped_show / "tvshow.nfo")).getroot()
+
+    assert root.find("tmdbid").text == "2316"
+    assert root.find("tvdbid") is None
+
+
+# ===========================================================================
 # Per-episode TMDB stills (IMP-E3/U3/D17, Phase 5 — episode-thumbnail waterfall).
 #
 # On a confident show --apply, enrich downloads each episode's best still as

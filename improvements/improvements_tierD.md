@@ -484,3 +484,26 @@
 - Risk: low — both fixes are either read-only-then-early-return or delete-only-what-this-run-created; the no-split (whole-file) path is unchanged (confirmed by the full pre-existing test suite passing unmodified).
 - If skipped: the moment any extras push splits (`--extras-size` below a file's size), an unsplittable-track file burns the free-space check for nothing, and any mkvmerge crash mid-split leaves a landmine that silently corrupts the next run's upload state — unrecoverable without manual journal/library surgery.
 - Status: **done** (`fix/imp_d21_extras_split_hardening`)
+
+---
+
+## IMP-D22: `prep_push_rep_enrich` / `prep_push_rep_season_enrich` — archive + TMDB enrichment in one command
+
+- Category: other
+- Priority: high
+- Files: `main.py` (`cmd_prep_push_rep_enrich`, `cmd_prep_push_rep_season_enrich`, `_refuse_tvdbid`, `_make_rename_confirm`, `_enrich_after_archive`, `_season_run_target_ids`, `_tmdb_company_names`, an extended `_write_nfo`, two new CLI dispatcher blocks), `tests/test_prep_push_rep_enrich.py` (28 tests), `tests/test_prep_push_rep_season_enrich.py` (37 tests), smoke coverage
+- Current behavior (pre-fix): `prep_push_rep`/`prep_push_rep_season` archive a title or season end-to-end but leave metadata enrichment (TMDB id resolution, `{tmdb-…}` folder rename, `.nfo` generation) as a fully separate, manually-run step — every archived title needed a second command invocation to pick up posters/fanart/rich metadata, and the two steps could silently drift out of sync.
+- Proposed change (SHIPPED):
+  - New `prep_push_rep_enrich` (movie) and `prep_push_rep_season_enrich` (series) wrap the untouched `cmd_prep_push_rep`/`cmd_prep_push_rep_season` autopilots — the archive leg is byte-for-byte unchanged (verified by AST/byte comparison) — then run enrichment via the new `_enrich_after_archive` helper.
+  - `-tmdbid <id>` skips the title search entirely; omitting it falls back to the existing auto-resolve waterfall (TMDB search → wordninja variants → EXA web fallback).
+  - `-tvdbid` is refused outright by `_refuse_tvdbid` — MediaVault is TMDB-only; a TVDB id is a different numbering space and would fetch the wrong title's artwork.
+  - The `{tmdb-…}` folder-token rename is gated behind a user confirmation via `_make_rename_confirm`: `--yes` proceeds, `--no-rename` skips, and a non-interactive session defaults to no (never renames unattended).
+  - `--nfo` stays off by default but now emits a much richer element set via the extended `_write_nfo` (`<imdbid>`, `<genre>`, `<runtime>`, `<premiered>`, `<studio>` via the new `_tmdb_company_names`, `<director>`, `<actor>`) — never `<tvdbid>`, consistent with the TMDB-only stance.
+  - Season enrichment resolves its per-episode/season target ids via the new `_season_run_target_ids`, reusing the same resolve-and-confirm flow per season run.
+  - No change to `cmd_prep_push_rep`/`cmd_prep_push_rep_season` themselves, no new PONR, `RollbackHardFail` sites unchanged at 3, `ENTRY_TYPE_KEYS` untouched.
+- Rationale: folds a manual two-step workflow (archive, then separately enrich) into one command while keeping the archive path provably unchanged and never renaming a folder or writing a TVDB id without an explicit opt-in.
+- Goal: a single command call to fully archive AND enrich a movie or season, with the same auto-resolve waterfall and confirmation gates the manual enrichment flow already uses.
+- Effort estimate: medium-large
+- Risk: low — additive wrapper commands only; both existing autopilots are provably zero-diff (AST/byte comparison), no PONR/rollback-contract change, `ENTRY_TYPE_KEYS` untouched. Full suite 768 passed (65 new tests), smoke 76+.
+- If skipped: archiving and enrichment stay two separate manual steps that can silently drift apart, and a newly-archived title has no rich `.nfo`/poster data until a second command is remembered and run.
+- Status: **done** (`feature/imp_d22_prep_push_rep_enrich`)

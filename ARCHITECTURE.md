@@ -228,6 +228,8 @@ Brackets denote optional args; `[id]` is the manual library ID like
 | `prep_season` | `prep_season [base_id] [folder] [--extras "<f1>;<f2>"] [--extras-size <v>]` | `cmd_prep_season` — batch-prep an entire season folder; `--extras` registers bonus folders onto the `season_map` title |
 | `prep_push_rep` | `prep_push_rep [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | `cmd_prep_push_rep` — full pipeline on one movie; with `--extras` it also pushes AND dummies the title's registered extras after the main content |
 | `prep_push_rep_season` | `prep_push_rep_season [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | `cmd_prep_push_rep_season` — sequential pipeline for a season; with `--extras` it also pushes AND dummies the season's registered extras after the episode loop |
+| `prep_push_rep_enrich` | `prep_push_rep_enrich [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>] [-tmdbid <id>] [--yes\|--no-rename] [--nfo] [--no-web]` | `cmd_prep_push_rep_enrich` (IMP-D22) — calls `cmd_prep_push_rep` **unmodified**, then TMDB-enriches the just-archived movie; `-tmdbid` presets the id via `cmd_set_tmdb` (no title search), no id ⇒ the same resolve waterfall `enrich_metadata` uses; `-tvdbid` is REFUSED before anything runs (§6.3a); the `{tmdb-…}` folder rename is confirmation-gated (`--yes` = auto-confirm, `--no-rename` = auto-decline, non-interactive ⇒ do not rename) |
+| `prep_push_rep_season_enrich` | `prep_push_rep_season_enrich [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>] [-tmdbid <id>] [--yes\|--no-rename] [--nfo] [--no-web]` | `cmd_prep_push_rep_season_enrich` (IMP-D22) — same, over `cmd_prep_push_rep_season` **unmodified**; enrich runs only once every id THIS RUN targeted (range-scoped when `episodes` is given) reads `status == "archived"`, and is scoped by the season's OWN `base_id`, so `-tmdbid` is the primary per-season mechanism (§6.3a) |
 | `fetch_restore` | `fetch_restore [id] [OPT: episodes <range>] [--fetchExtras]` | `cmd_fetch_restore` — dispatch fetch then restore; `--fetchExtras` also fetches the title's cloud-resident extras (flag-only, no prompt) |
 | `set_search` | `set_search [id] [term]` | `cmd_set_search` |
 | `set_poster` | `set_poster [id] [url]` | `cmd_set_poster` |
@@ -972,6 +974,39 @@ section (`main.py:3616`); the locked shape is decision A2 in
 
 ### 6.3a TMDB enrichment conventions (Phase 5 — IMP-E3 / IMP-D17)
 
+**TMDB-for-everything (no TVDB / AniDB client exists).** MediaVault resolves
+**movies, series AND anime exclusively against TMDB**. There is no TVDB client,
+no AniDB client, and no HTTP call to any provider other than TMDB (plus OMDb for
+ratings and EXA/GROQ for the web fallback and trivia) anywhere in the codebase —
+series and anime go through the TMDB *TV* endpoints (`/3/search/tv`,
+`/3/tv/{id}`, `/3/tv/{id}/credits`, `/3/tv/{id}/external_ids`,
+`/3/tv/{id}/season/{n}`, `/3/tv/{id}/season/{n}/episode/{m}`), exactly as movies
+go through `/3/search/movie` and `/3/movie/{id}`. Consequences that follow from
+this and are relied on everywhere:
+- `metadata.tmdb_id` is the **only** provider-id field a leaf ever carries. No
+  `tvdb_id` / `anidb_id` field exists in any schema (§6.3) and none is ever
+  written.
+- The folder token is `{tmdb-…}` for **every** category — `enrich_metadata`
+  stamps it with no branch on `unit["kind"]`, so a series folder looks like
+  `Dark Season 01 (2017) {tmdb-70523}`, never `{tvdb-…}`.
+- A TVDB id is a **different numbering space** from a TMDB id. Writing one into
+  `metadata.tmdb_id` would make `_resolve_unit_by_id` fetch a *different title*
+  and download its artwork — silent library corruption with no error. This is
+  why `prep_push_rep_enrich` / `prep_push_rep_season_enrich` **refuse** a
+  `-tvdbid` argument outright (`_refuse_tvdbid`, `main.py`), before the archive
+  runs, rather than accepting and best-effort-converting it (IMP-D22 Decision 1).
+
+> **The one apparent contradiction — it is not one.** `suggest_target_folder`
+> (`main.py`, web console) proposes a `{tvdb-000000}` **placeholder string** in
+> the suggested folder name for a NEW (unprepped) series/anime item. It is a
+> user-editable placeholder in a suggestion box: nothing is looked up, nothing is
+> renamed, and no `tvdb` value is ever stored. It predates the enricher (decided
+> under IMP-E12, `docs/feature-web-console/DECISIONS.md`) and is pinned by
+> `tests/test_web_datafns.py`. Do **not** read it as evidence of a TVDB
+> convention, and do not "fix" it as part of enrichment work. If TVDB/AniDB
+> integration is ever added (IMP-E3/U3 breadth, PRIORITY.md Band 1), *this
+> paragraph* is the statement that changes.
+
 **`{tmdb-<id>}` folder token** (Plex/Emby/Jellyfin standard). `enrich_metadata`
 stamps a `{tmdb-<id>}` suffix onto the show's top-level folder exactly once via
 `rename_folder` — e.g. `Death Note (Complete Series)` →
@@ -998,15 +1033,76 @@ overwrites an existing file. Security: only `poster.jpg` / `fanart.jpg` are
 served; the resolved path is `realpath`-contained under `LOCAL_ROOT`; the path is
 derived entirely from the library entry (no user traversal).
 
+**Two series folder layouts — the flat one is the common case.** `_show_folder_of`
+(`main.py`) picks the folder the `{tmdb-…}` token is stamped onto and the show
+artwork is written into, from a show's distinct season folders. It has three
+branches, and the third is NOT a corner case:
+1. **≥2 season folders** → `os.path.commonpath` — the parent is the show folder.
+2. **1 season folder with a season-shaped basename** (`Season 04`, `S04`,
+   `Season_4`) → climb to its PARENT (the classic `<Show>/Season NN/` layout,
+   e.g. `Dark Season 01 (2017) {tmdb-70523}`).
+3. **1 season folder that is NOT season-shaped** → that folder already IS the
+   show folder. This is a flat release folder holding the episodes directly
+   (e.g. `Peaky.Blinders.S06.2022… {tmdb-60574}`, `Devs.S01.2020.2160p.WEB.HDR
+   {tmdb-81349}`) and a 2026-08-28 audit of the live library found it to be the
+   **dominant real-world shape — 46 of the user's shows**.
+
+In case 3 the show folder and the season folder are the SAME path, so the
+show-level poster write and the per-season poster write target the identical
+file: the show `poster.jpg` is written first and the season poster is then
+correctly skipped as already-present ("kept"). That is graceful degradation by
+design — not an error, not a second download, not a duplicate. Both layouts are
+first-class scenarios and are exercised end-to-end by IMP-D22
+(`tests/test_prep_push_rep_season_enrich.py`). Case 3 is also why
+`cmd_prep_push_rep_season_enrich` **suppresses** its "this is the SHOW folder —
+the parent of the season you just archived" rename note there: the resolved unit
+folder equals the `season_map`'s own `folder_path`, so the note would be
+factually wrong.
+
 **wordninja runtime dependency.** `enrich_metadata`'s slug splitter imports
 `wordninja` for concatenated-slug decomposition (e.g. `kurokosbasketball` →
 `kuroko's basketball`). Imported via `try/except`; if absent the multi-variant
 query degrades to the raw slug only.
 
-**NFO emission (`--nfo` flag).** `enrich_metadata --nfo` writes
-`movie.nfo` / `tvshow.nfo` next to the media with Kodi/Jellyfin-compatible XML
-(`title`, `year`, `plot`, `rating`, `<uniqueid type="tmdb">`). `.nfo` is NOT in
+**NFO emission (`--nfo` flag).** `enrich_metadata --nfo` — and, since IMP-D22,
+`prep_push_rep_enrich --nfo` / `prep_push_rep_season_enrich --nfo` — writes
+`movie.nfo` / `tvshow.nfo` next to the media with Kodi/Jellyfin-compatible XML,
+via the single shared `_write_nfo` (`main.py`). `.nfo` is NOT in
 `VIDEO_EXTENSIONS` so it is invisible to `scan_unprepped` and the push pipeline.
+`--nfo` is **OFF by default on all three commands** (a 2026-08-28 scan of the
+live library found zero `movie.nfo`/`tvshow.nfo` files across all 173 library
+folders — off-by-default matches actual usage).
+
+Elements emitted (IMP-D22 Decision 4 extended the set; the first four plus the
+tmdb ids are unconditional, everything below them is written only when an
+`api_key` is passed AND TMDB actually has a value — a missing value **omits the
+element** rather than writing an empty one):
+
+| Element | Source |
+|---|---|
+| `<title>` `<year>` `<plot>` `<rating>` | the already-resolved TMDB result (`rating` only when `vote_average` is not `None`) |
+| `<uniqueid type="tmdb" default="true">` **and** plain `<tmdbid>` | the resolved `tmdb_id`; the plain element is what the user's own reference NFOs carry |
+| `<imdbid>` **and** `<uniqueid type="imdb">` | `_resolve_imdb_id` — `/3/movie/{id}.imdb_id` for a movie, `/3/tv/{id}/external_ids.imdb_id` for a show; both omitted together when it returns `None` |
+| `<genre>` (repeatable) | `_tmdb_genre_names(detail["genres"])` |
+| `<runtime>` | movie: `detail["runtime"]`; show: first entry of `detail["episode_run_time"]` |
+| `<premiered>` | movie: `release_date`; show: `first_air_date` |
+| `<studio>` (repeatable) | movie: `_tmdb_company_names(production_companies)`; show: `_tmdb_network_names(networks)` |
+| `<director>` (≤3) | movie: `_tmdb_directors_from_crew(credits)` (`job == "Director"`); **show: `_tmdb_created_by_names(detail)` — TMDB carries a series' creators in the `/3/tv/{id}` payload's `created_by` array, NOT as series-level crew (which is always empty for a show), so reading a show's director from `credits` silently wrote nothing** |
+| `<actor><name>` (≤8) | `_tmdb_cast_names(credits)` |
+
+**`<tvdbid>` is NEVER emitted**, at any tier, for any kind — there is no TVDB
+source in this codebase to derive a correct one from (see the TMDB-for-everything
+paragraph at the top of this section), and fabricating one is exactly the
+silent-corruption class that convention refuses. Tests assert its absence.
+
+`_write_nfo`'s **"NEVER raises"** contract is unchanged: the whole enrichment
+block is wrapped, so a TMDB/network failure degrades to the base NFO with a
+printed warning, and an IO/permission failure on the write itself is likewise a
+warning. Because `_write_nfo` is one shared function, the richer element set
+**also changes `enrich_metadata --nfo`'s existing output** — that is a
+deliberate, desirable extension, NOT a regression, and it is explicitly carved
+out of IMP-D22's "existing behaviour byte-for-byte unchanged" guarantee (which
+covers the autopilots and the archive pipeline, not `_write_nfo`'s element set).
 
 **`rename_folder` + rollback contract (cross-ref §12a).** `rename_folder` uses
 the existing `RollbackJournal` (journal written in the parent directory of the
@@ -1031,6 +1127,74 @@ enriching it would mis-match a title, stamp a wrong `metadata.tmdb_id`, rename
 the real Sports folder with a bogus `{tmdb-…}` token, and download wrong artwork.
 The guard is unconditional (one place covers all three commands), so even a
 no-arg whole-library `enrich_metadata` run is safe.
+
+**Combined archive + enrich autopilots (IMP-D22).** `prep_push_rep_enrich` and
+`prep_push_rep_season_enrich` fold enrichment into the two archive autopilots.
+Each one calls the existing `cmd_prep_push_rep` / `cmd_prep_push_rep_season`
+with **every argument forwarded unmodified** (those two functions are byte-for-byte
+untouched by IMP-D22), then runs an enrich leg over the just-archived unit.
+Shape, in order:
+
+1. **`-tvdbid` refusal** — if a `tvdb_id` was supplied, `_refuse_tvdbid()` prints
+   the reason and returns `False` immediately: no archive, no enrich, nothing
+   touches disk (see TMDB-for-everything, top of this section).
+2. **Archive** — the untouched autopilot runs.
+3. **Completion check** — the movie command requires the entry to exist and read
+   `status == "archived"`; the season command reconstructs *this run's* target-id
+   list with `_season_run_target_ids` (honouring `episode_range`) and requires
+   every one of them to be `archived`. Anything short of that prints a warning
+   and skips the enrich leg, returning `False`.
+4. **`-tmdbid` preset** — passed through `cmd_set_tmdb` exactly as a user would
+   type it, so the resolve waterfall short-circuits into a fetch-by-id with no
+   title search. `cmd_set_tmdb` refuses a `season_map`, so the season command
+   lands the preset on the first episode LEAF under `base_id` instead.
+5. **Enrich** — `_enrich_after_archive` resolves, applies, gates the folder
+   rename, downloads artwork, applies episode overviews (shows) and optionally
+   writes the NFO.
+
+Two behaviours worth knowing:
+
+- **The rename is confirmation-gated** (`_make_rename_confirm`). `--yes`
+  auto-confirms, `--no-rename` auto-declines, and with neither flag the prompt is
+  reached **only** when `sys.stdin.isatty()` is true — any script, cron job, CI
+  run or the smoke suite falls through to "do not rename". That `input()` call is
+  the **only one in the entire codebase**; the CLI is otherwise fully
+  non-interactive, and keeping it unreachable off a TTY is what stops it hanging
+  the smoke gate. Declining is never destructive — the metadata is still written
+  and `rename_folder` can be run later.
+- **The season variant scopes its enrich by the season's OWN `base_id`**, not by
+  a derived show id. The real id convention embeds a per-season year
+  (`tv-en-2022-peakyblinders-s06` vs `tv-en-2019-peakyblinders-s05`) and
+  `_show_id_of` strips only the trailing `-sNN`, so sibling seasons already land
+  in **separate** `_gather_enrich_units` buckets. A sibling season's
+  `metadata.tmdb_id` preset is therefore NOT auto-discovered, which makes
+  `-tmdbid` the primary per-season mechanism. The upside is a small blast radius:
+  a season run cannot reach another season.
+
+An enrich-leg failure **warns and continues** — the archive already succeeded, so
+no TMDB miss, ambiguous match, missing API key or post-PONR `RollbackHardFail`
+from the rename is allowed to turn a completed archive into a failure. The return
+value reflects the ARCHIVE only; the enrich leg reports through prints.
+
+> **🔁 STANDING SYNC OBLIGATION — `_enrich_after_archive` duplicates
+> `cmd_enrich_metadata`.** IMP-D22 Step 1 was a two-way bake-off and the user
+> chose the **isolated** candidate: `_enrich_after_archive` (`main.py`) is a
+> deliberate, self-contained copy of three pieces of `cmd_enrich_metadata` —
+> (a) the per-unit **resolve waterfall** (preset id → `_resolve_unit` search →
+> EXA `_exa_resolve_tmdb_id` fallback) *including* its defensive `try/except`,
+> (b) the **apply block** (the `tmdb_id` / `title` / `year` / `overview` write
+> loop over `unit["ids"]`, with the `_title_is_id_shaped` guard), and (c) the
+> **"no TMDB API key" guard**. It calls `cmd_enrich_metadata` zero times, so a
+> change there does NOT propagate.
+>
+> **Whenever `cmd_enrich_metadata`'s resolve or apply logic changes,
+> `_enrich_after_archive` MUST be updated in lockstep.** Nothing enforces this
+> mechanically. Blast-radius safety (the existing bulk command cannot be broken
+> by this feature) was traded for DRY, knowingly. The rejected zero-duplication
+> alternative — which refactored the shared logic out of `cmd_enrich_metadata` —
+> is preserved verbatim as the git tag
+> `candidates/imp-d22/step-1/b-rejected` if the trade is ever revisited.
+> Rationale: `docs/feature-prep-push-rep-enrich/DECISIONS.md`.
 
 ### 6.4 Status state machine
 

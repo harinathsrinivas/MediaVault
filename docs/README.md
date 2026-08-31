@@ -105,6 +105,7 @@ history only on archived branch tags — these folders are the readable record).
 | `feature-adb-device-select/` | PR #2 (2026-05-28) — device pinning | `PLAN.md`, `STATUS.md` |
 | `feature-others-category/` | IMP-D18 (2026-06-28) — 4th "Others" content category (sports now; documentaries later) | `PLAN.md`, `step-02-save_library-DECISION.md` + `step-04-disk-walk-roots-DECISION.md` (the two multi-candidate judge decisions) |
 | `feature-extras/` | IMP-D19 (in flight on `feature/imp_d19_extras`, from 2026-06-29) — bonus content (`Specials\`/`Extra\`/`Trailers\`) gets the full push→dummy→fetch→restore lifecycle | `PLAN.md`, `DECISIONS.md` (locked Cards A–E: the A2 grouped JSON shape, the `--extras`/`--extras-size` CLI, flag-only `--fetchExtras`, the D1 full lifecycle, E1 additive rollback), `PROGRESS.md` (the per-step execution journal that makes the build cross-session resumable) |
+| `feature-prep-push-rep-enrich/` | IMP-D22 (in flight on `feature/imp_d22_prep_push_rep_enrich`, as of 2026-08-29) — combined prep_push_rep(_season)+enrich autopilot | `PLAN.md`, `DECISIONS.md` (locked: -tvdbid refusal, apply-late confirmation gate, command naming, NFO default off, warn-and-continue), `PROGRESS.md` |
 | `feature-fable-review/` | THIS review session | see §3 |
 
 ## 5b. Operational edge-case dossiers (`docs/edge-case-*/`)

@@ -1686,8 +1686,16 @@ def _download_to(url, dest_path):
 
 def _has_tmdb_token(name):
     """True if a folder leaf name already carries a `{tmdb-…}` token (idempotency
-    guard — we stamp the token at most once per show/movie folder)."""
-    return re.search(r"\{tmdb-[^}]+\}", name or "") is not None
+    guard — we stamp the token at most once per show/movie folder).
+
+    CASE-INSENSITIVE (IMP-C23). Plex/Emby/Jellyfin treat the provider token
+    case-insensitively and real folders in the wild use `{TMDB-69590}`; without
+    the flag such a folder read as "no token" and the next enrich/rename pass
+    appended a SECOND one (`… {TMDB-69590} {tmdb-69590}`). Kept deliberately in
+    lockstep with `_PROVIDER_TOKEN_RE` (the artwork-inheritance resolver's copy),
+    which has always been `re.IGNORECASE` — the two are the same predicate and
+    must not drift apart again."""
+    return re.search(r"\{tmdb-[^}]+\}", name or "", re.IGNORECASE) is not None
 
 
 _SEASON_ID_RE = re.compile(r"-s(\d+)$", re.IGNORECASE)

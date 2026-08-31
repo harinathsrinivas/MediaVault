@@ -81,7 +81,7 @@
 
 <header>
   <div class="brand">Media<span>Vault</span> · Priority Graph</div>
-  <div class="next">⚡ Next: <b>_has_tmdb_token re.IGNORECASE fix</b>&nbsp;<span style="color:#9fb0d6">then IMP-S1 / IMP-S2 (Jellyfin stand-up + mvdaemon; D19-D22 complete)</span>&nbsp;·&nbsp;<a href="../../improvements/PRIORITY.md">full list →</a></div>
+  <div class="next">⚡ Next: <b>IMP-C22 (anime per-episode enrichment fix)</b>&nbsp;<span style="color:#9fb0d6">then IMP-S1 / IMP-S2 (Jellyfin stand-up + mvdaemon; D19-D22 + C23 complete)</span>&nbsp;·&nbsp;<a href="../../improvements/PRIORITY.md">full list →</a></div>
   <div class="grow"></div>
   <input id="search" placeholder="search tasks…  (Enter to focus)">
 </header>
@@ -111,7 +111,7 @@
   <a class="open" id="p-open" href="#" target="_blank" rel="noopener">Open task in tier file →</a>
 </div>
 
-<div class="footer">Generated 2026-06-27 · updated 2026-08-29 (C22 registered — anime per-episode enrichment parser drift, a 4th copy of the C18 episode-number parser that never got wired to the shared mvcommon.episode_num_from_id; pending, Band 0; earlier: D22 done — prep_push_rep(_season)_enrich; surfaced follow-on bug: _has_tmdb_token missing re.IGNORECASE; D21 done — extras split-failure hardening; D20 backfilled — shipped on main via PR #43 but never previously tracked here; R10 still open — change-gated) · keep in sync with <code>PRIORITY.md</code> (see its maintenance protocol) · 128 tasks</div>
+<div class="footer">Generated 2026-06-27 · updated 2026-08-31 (C23 done — _has_tmdb_token missing re.IGNORECASE, third instance of the drift-between-duplicated-parsers class also seen in C18/C22; fixed on fix/imp_c23_has_tmdb_token_ignorecase; NEXT pointer now C22 — anime per-episode enrichment parser drift, a 4th copy of the C18 episode-number parser that never got wired to the shared mvcommon.episode_num_from_id; pending, Band 0; earlier: D22 done — prep_push_rep(_season)_enrich; D21 done — extras split-failure hardening; D20 backfilled — shipped on main via PR #43 but never previously tracked here; R10 still open — change-gated) · keep in sync with <code>PRIORITY.md</code> (see its maintenance protocol) · 129 tasks</div>
 
 <script>
 /* ───────────────────────── TASK DATA — keep in sync with PRIORITY.md + improvements_tier*.md ─────────────────────────
@@ -164,6 +164,7 @@ const TASKS = [
  ["C20","unsplittable-track pre-flight","C","done","done","Fixed fix/imp_c19_c20_split_diagnostics (e2b799c): mkvmerge cannot --split a FLAC track in ANY split mode; both auto-pilots now probe with mkvmerge -J BEFORE their prep leg (and cmd_push again before the split), refusing up front and naming the track + runbook — gating only at push still wasted prep's deep scan + whole-file hash (follow-up 1b1a899). Detect-and-stop ONLY — never converts or drops a track (user decision) (2026-08-24)"],
  ["C21","manual remux tool (tools/remux_unsplittable.py)","C","done","done","Shipped feature/imp_c21_remux_unsplittable: the FIX for a file mkvmerge cannot split, kept separate from the pipeline by user decision. Dry run unless --run; never overwrites or deletes; computes the -c:a:N audio index rather than assuming it; verifies DV record + duration (+ optional per-stream checksums). MediaVault never invokes it — guard-tested (2026-08-25)"],
  ["C22","anime per-episode enrichment parser drift","C","high","todo","_episode_se_of (main.py ~line 1725) mis-parses season-glued anime ids off bare trailing digits instead of delegating to mvcommon.episode_num_from_id, the shared helper IMP-C18 introduced for exactly this drift — a 4th copy that never got wired in. Silent, no error: per-episode stills + overview/title backfill never land for either real anime id shape (145 affected entries); show-level enrichment appears to succeed. Open question: Shape-B's default season when the parent has no -sNN. Found 2026-08-29 during IMP-D22 test coverage; pre-existing, not introduced by D22"],
+ ["C23","_has_tmdb_token missing re.IGNORECASE","C","done","done","Fixed fix/imp_c23_has_tmdb_token_ignorecase: _has_tmdb_token (main.py) lacked re.IGNORECASE so an uppercase/mixed-case {TMDB-...} folder token (the user has one real folder, Run (2002) {TMDB-69590}) read as no-token, letting cmd_enrich_metadata append a SECOND token on the next enrich/rename pass. Sibling _PROVIDER_TOKEN_RE was always case-insensitive — third instance of the drift-between-duplicated-parsers class also seen in IMP-C18/IMP-C22. Added re.IGNORECASE + a drift-pin test asserting the two predicates agree; 10 new tests, smoke 80/80. Surfaced by IMP-D22"],
  // D — commands
  ["D1","library_stats","D","high","todo","At-a-glance archive state; first thing a UI needs"],
  ["D2","fuzzy find","D","med","todo","Kill ID-recall friction/typos"],
@@ -266,7 +267,7 @@ const EDGES = [
  ["C6","S3"],["S4","U1"],["E4","S4"],["E4","S5"],["E5","S5"],["C1","S2"],
  ["R6","S3"],["G4","S2"],["G4","U5"],["G2","S7"],["S6","S8"],
  ["E7","X1"],["F3","X1"],["X1","X2"],["X1","X4"],["X1","X5"],["X3","F1"],
- ["C12","B7"],["E1","F7"],["U3","U2"],["C16","X1"],["C16","S3"],["C17","C6"],["C16","C17"],["C19","C20"],["C20","C21"],["E14","E15"],["A5","E15"],["E14","E16"],["E3","E16"],["C18","C22"],["D22","C22"],
+ ["C12","B7"],["E1","F7"],["U3","U2"],["C16","X1"],["C16","S3"],["C17","C6"],["C16","C17"],["C19","C20"],["C20","C21"],["E14","E15"],["A5","E15"],["E14","E16"],["E3","E16"],["C18","C22"],["D22","C22"],["C18","C23"],["D22","C23"],
 ];
 
 const PRI={crit:{c:"#ff2d55",r:140,size:30,lbl:"Critical / decision"},high:{c:"#ff9f0a",r:300,size:22,lbl:"High"},

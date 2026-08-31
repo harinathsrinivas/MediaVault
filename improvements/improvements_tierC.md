@@ -419,3 +419,33 @@
 - Risk: low-medium — narrows/corrects parsing only; the Shape-B season-default decision needs sign-off since it changes behavior for ids that today return `None` (no-op) to instead attempting enrichment under an assumed season.
 - If skipped: every anime entry (145 in this user's library) silently never gets per-episode stills or overview/title backfill from the enrichment commands, while show-level enrichment appears to succeed — easy to miss.
 - Status: pending
+
+---
+
+## IMP-C23: `_has_tmdb_token` missing `re.IGNORECASE` — an uppercase `{TMDB-…}` folder token reads as "no token" and gets a SECOND token appended
+
+- Category: bug
+- Priority: high (was Band 0)
+- Files: `main.py` — `_has_tmdb_token` (grep `"^def _has_tmdb_token"`). Sibling `_PROVIDER_TOKEN_RE` (grep `_PROVIDER_TOKEN_RE = `), used by the artwork-inheritance resolver to find the show folder, has ALWAYS been `re.IGNORECASE` — the two predicates are over the same token and had silently diverged.
+- Current behavior (before fix): `_has_tmdb_token` was `return re.search(r"\{tmdb-[^}]+\}", name or "") is not None` — no flags. Measured before the fix:
+  ```
+  False  'Run (2002) {TMDB-69590}'      <- the user's REAL folder
+  True   'Drishyam 3 (2026) {tmdb-847742}'
+  False  'X {TmDb-1}'
+  ```
+  Consequence: the idempotency guard failed on any uppercase/mixed-case token, so `cmd_enrich_metadata` computed `will_stamp=True` on an already-stamped folder and the next enrich/rename pass appended a second token — `Run (2002) … {TMDB-69590} {tmdb-69590}`. The user has exactly one real folder in this shape.
+- Root cause: DRIFT between two copies of the same predicate over the same token. **This is the same drift-between-duplicated-parsers class as IMP-C18 and IMP-C22 — cross-reference both explicitly**; this is now the third instance in this codebase, which is the interesting pattern worth recording.
+- Fix applied: added `re.IGNORECASE` to `_has_tmdb_token`'s `re.search`, plus a docstring stating it is kept deliberately in lockstep with `_PROVIDER_TOKEN_RE`.
+- Verified after the fix: all three shapes above return `True`; `'No token here'`, `''`, `None` and `'{tvdb-123}'` still return `False` (not over-eager).
+- Tests added (in `tests/test_enrich_metadata.py`, 10 new cases, all green):
+  - `test_has_tmdb_token_is_case_insensitive` (4 parametrized shapes incl. the real `{TMDB-69590}`)
+  - `test_has_tmdb_token_still_false_without_a_tmdb_token` (5 negative cases)
+  - `test_has_tmdb_token_agrees_with_provider_token_re` — a drift pin: asserts the two predicates agree over 7 names, so a future edit to either one fails the suite. This is the guard that prevents a 4th recurrence.
+- Rationale: silent idempotency-guard failure that corrupts folder names by double-stamping the TMDB token, with no error surfaced.
+- Goal: `_has_tmdb_token` agrees with `_PROVIDER_TOKEN_RE` on case, permanently pinned by a drift test.
+- Effort estimate: small
+- Risk: low — single-flag fix plus tests; no behavior change for lowercase tokens.
+- If skipped: any uppercase/mixed-case `{TMDB-…}` folder keeps accumulating a second token on every enrich/rename pass.
+- Surfaced by: IMP-D22 (the enrich-autopilot work) — it was the `👉 SUGGESTED NEXT TASK` pointer in PRIORITY.md.
+- Gates: smoke 80/80; `test_enrich_metadata` + `test_rename_folder` + `test_set_tmdb` 74/74.
+- Status: done (fix/imp_c23_has_tmdb_token_ignorecase)

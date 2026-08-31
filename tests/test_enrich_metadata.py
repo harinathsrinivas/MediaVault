@@ -1784,3 +1784,41 @@ def test_exa_resolve_caches_response_idempotent(monkeypatch, tmp_path):
     assert main._exa_resolve_tmdb_id("Sathuranga Vettai", 2014, "movie") == 281992
     assert main._exa_resolve_tmdb_id("Sathuranga Vettai", 2014, "movie") == 281992  # cache hit
     assert n["posts"] == 1, "the second identical call must be served from the disk cache"
+
+
+# ---------------------------------------------------------------------------
+# IMP-C23 — `_has_tmdb_token` is CASE-INSENSITIVE.
+#
+# Real folders in the wild carry an uppercase token (the user's own
+# `Run (2002)  - 4K SDR - (DD+5.1 - 192Kbps & AAC)  {TMDB-69590}`). Before the
+# fix `_has_tmdb_token` had no `re.IGNORECASE`, so such a folder read as "no
+# token" and the next enrich/rename pass appended a SECOND one. Its sibling
+# predicate `_PROVIDER_TOKEN_RE` (the artwork-inheritance resolver) has always
+# been case-insensitive; the two had drifted.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", [
+    "Run (2002) {TMDB-69590}",          # the real-world uppercase shape
+    "Drishyam 3 (2026) {tmdb-847742}",  # lowercase (already worked)
+    "X {TmDb-1}",                       # mixed case
+    "Dark Season 01 (2017) {TMDB-70523}",
+])
+def test_has_tmdb_token_is_case_insensitive(name):
+    assert main._has_tmdb_token(name) is True
+
+
+@pytest.mark.parametrize("name", ["No token here", "", None, "Movie (2020)", "{tvdb-123}"])
+def test_has_tmdb_token_still_false_without_a_tmdb_token(name):
+    """The fix must not make the predicate over-eager: a name with no `{tmdb-…}`
+    (including a `{tvdb-…}` token, which this project never writes) stays False."""
+    assert main._has_tmdb_token(name) is False
+
+
+def test_has_tmdb_token_agrees_with_provider_token_re():
+    """Regression pin for the DRIFT that caused IMP-C23: `_has_tmdb_token` and
+    `_PROVIDER_TOKEN_RE` are the same predicate over the same token and must
+    stay in lockstep. If a future edit changes one, this fails."""
+    for name in ["Run (2002) {TMDB-69590}", "a {tmdb-1}", "X {TmDb-1}",
+                 "none", "", "{tvdb-9}", "Show (1993) {tmdb-4087}"]:
+        assert bool(main._has_tmdb_token(name)) is bool(
+            main._PROVIDER_TOKEN_RE.search(name or "")), name

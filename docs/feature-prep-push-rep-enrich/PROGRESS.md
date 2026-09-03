@@ -54,10 +54,23 @@ never `git add -A`, never a bare `git commit`.
 
 ## ▶ NEXT ACTION
 
-**🚦 CHECKPOINT 1 — awaiting the user's merge approval on PR #47.**
-https://github.com/harinathsrinivas/MediaVault/pull/47 — OPEN, not merged. Do NOT `gh pr merge`
-without the user's explicit go-ahead. After merge, **Checkpoint 2** (archive the branch with an
-annotated `archive/<branch>` tag, then delete local+remote) is a SEPARATE human gate.
+**✅ COMPLETE — nothing outstanding on this feature.**
+
+Both human gates were passed with the user's explicit approval on 2026-08-31:
+- **Checkpoint 1** — PR #47 squash-merged to `main` as `e5e94aa`.
+- **Checkpoint 2** — branch archived as annotated tag
+  `archive/feature/imp_d22_prep_push_rep_enrich` (tag verified to point at the branch tip `6ab533f`
+  *before* deletion), then deleted local + remote.
+
+Candidate branches survive as tags `candidates/imp-d22/step-1/{a-chosen,b-rejected}`.
+
+**Post-merge follow-ons this feature surfaced** (all tracked, none blocking):
+- **IMP-C23** — `_has_tmdb_token` missing `re.IGNORECASE`. ✅ done, PR #48 → `abc2333`.
+- **IMP-C22** — anime per-episode enrichment never lands (145 entries). Open, Band 0.
+- **IMP-D23** — prep re-hashes an already-prepped `local_ready` entry on resume. Open.
+- Three unregistered CLI papercuts — see `docs/feature-library-concurrency/SESSION_HANDOFF.md` §3.
+
+Operational reference for using the feature: **`docs/OPERATIONS_QA.md`**.
 
 **ALL 10 STEPS DONE.** Branch pushed (15 commits). Final gate: full **772/772**, smoke **80/80**.
 

@@ -32,6 +32,23 @@ If any agent — or the main session — hits a **fundamental capability gap or 
 
 **Priority list is load-bearing — keep it current.** `improvements/PRIORITY.md` is the single source of truth for "what to do next" (critical bugs first, a `👉 SUGGESTED NEXT TASK` pointer, five priority bands), and `docs/priority-graph/priority-graph.html` is its interactive visual twin. **Whenever you add, complete, or re-prioritize a task, update BOTH** (and the task's tier file) in the same change — the maintenance protocol is at the bottom of `improvements/PRIORITY.md`. A new bug that breaks something goes into PRIORITY.md Band 0 and is a candidate for the NEXT pointer.
 
+## Operations Q&A — keep it current
+
+[`docs/OPERATIONS_QA.md`](docs/OPERATIONS_QA.md) is the **living reference of practical "how do I
+actually do this" answers**, built from real questions asked during real archiving sessions. It sits
+alongside `README.md` (what commands exist) and `ARCHITECTURE.md` (how it's built) and answers the
+third question: **how to operate it, and what has actually bitten.**
+
+**Whenever the user asks a practical operational question — "how do I…", "why did this happen",
+"which command should I use" — and you give a verified answer, add it to that file** under the right
+section, and bump its `Last updated`. Verify every claim against the code or the live library before
+writing it (cite `main.py:NNNN` where useful); never write from memory. If the answer turns out to be
+"that's a bug", name the IMP code, or register one if it doesn't exist. The maintenance protocol is
+at the bottom of the file.
+
+This matters because these answers are otherwise lost in chat scrollback and re-derived (often
+differently) in the next session.
+
 ## Cross-command integrity + smoke gate
 
 A change to one feature must never silently break another command. Two mechanisms enforce this:

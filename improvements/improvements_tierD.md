@@ -506,7 +506,7 @@
 - Effort estimate: medium-large
 - Risk: low — additive wrapper commands only; both existing autopilots are provably zero-diff (AST/byte comparison), no PONR/rollback-contract change, `ENTRY_TYPE_KEYS` untouched. Full suite 768 passed (65 new tests), smoke 76+.
 - If skipped: archiving and enrichment stay two separate manual steps that can silently drift apart, and a newly-archived title has no rich `.nfo`/poster data until a second command is remembered and run.
-- Status: **done** (`feature/imp_d22_prep_push_rep_enrich`)
+- Status: **done** — merged to `main` via PR #47 as squash commit `e5e94aa` (2026-08-31). Branch archived as tag `archive/feature/imp_d22_prep_push_rep_enrich` and deleted. Step 1 ran as a two-way bake-off; the rejected zero-duplication candidate is preserved at tag `candidates/imp-d22/step-1/b-rejected`, with the judge decision + both critiques in `docs/feature-prep-push-rep-enrich/decisions/`. Final gate: full suite 772 passed, smoke 80. **Standing obligation (also in `ARCHITECTURE.md`): `_enrich_after_archive` duplicates `cmd_enrich_metadata`'s resolve waterfall, apply block and API-key guard — keep them in lockstep.** Follow-ons it surfaced: IMP-C23 (done), IMP-C22 and IMP-D23 (open).
 
 ---
 

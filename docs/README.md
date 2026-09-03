@@ -25,6 +25,7 @@
 |---|---|
 | [`README.md`](../README.md) | User-facing overview: what MediaVault does, install, full CLI reference table, ID conventions, layout |
 | [`ARCHITECTURE.md`](../ARCHITECTURE.md) | Definitive engineering reference (~2000 lines, 19 sections). Read before changing `main.py`/`mainfetch.py` |
+| [`docs/OPERATIONS_QA.md`](OPERATIONS_QA.md) | **How to actually operate it, and what has bitten** — the third question, after "what commands exist" (README) and "how is it built" (ARCHITECTURE). A living Q&A built from real archiving sessions: enrichment workflow, the show-year ID rule, `rehash`/`tempdir` disk arithmetic, CLI traps, resuming a failed push, and the never-run-two-mutating-commands rule. **Every session appends verified answers here** (CLAUDE.md rule) |
 | [`ARCHITECTURE_GRAPH.md`](../ARCHITECTURE_GRAPH.md) | The architecture as 7 Mermaid graph views (system, lifecycle, state machine, ER model, rollback flow, fetch sequence, seam map) |
 | [`BEST_PRACTICES.md`](../BEST_PRACTICES.md) | Compounding decisions: choices to lock now (chunk size, DV/HDR verification, multi-account replication, enrich-before-archive, automation gates) that are cheap today and expensive to fix once the library scales / the daemon automates |
 | [`CLAUDE.md`](../CLAUDE.md) | Session rules for AI-assisted work: gates, change-gate, keep-PRIORITY-current rule, pipeline notes |
@@ -105,7 +106,8 @@ history only on archived branch tags — these folders are the readable record).
 | `feature-adb-device-select/` | PR #2 (2026-05-28) — device pinning | `PLAN.md`, `STATUS.md` |
 | `feature-others-category/` | IMP-D18 (2026-06-28) — 4th "Others" content category (sports now; documentaries later) | `PLAN.md`, `step-02-save_library-DECISION.md` + `step-04-disk-walk-roots-DECISION.md` (the two multi-candidate judge decisions) |
 | `feature-extras/` | IMP-D19 (in flight on `feature/imp_d19_extras`, from 2026-06-29) — bonus content (`Specials\`/`Extra\`/`Trailers\`) gets the full push→dummy→fetch→restore lifecycle | `PLAN.md`, `DECISIONS.md` (locked Cards A–E: the A2 grouped JSON shape, the `--extras`/`--extras-size` CLI, flag-only `--fetchExtras`, the D1 full lifecycle, E1 additive rollback), `PROGRESS.md` (the per-step execution journal that makes the build cross-session resumable) |
-| `feature-prep-push-rep-enrich/` | IMP-D22 (in flight on `feature/imp_d22_prep_push_rep_enrich`, as of 2026-08-29) — combined prep_push_rep(_season)+enrich autopilot | `PLAN.md`, `DECISIONS.md` (locked: -tvdbid refusal, apply-late confirmation gate, command naming, NFO default off, warn-and-continue), `PROGRESS.md` |
+| `feature-prep-push-rep-enrich/` | IMP-D22 (**merged** to `main` via PR #47 → `e5e94aa`, 2026-08-31) — combined prep_push_rep(_season)+enrich autopilot | `PLAN.md`, `DECISIONS.md` (locked: -tvdbid refusal, apply-late confirmation gate, command naming, NFO default off, warn-and-continue), `PROGRESS.md`, `decisions/` (Step 1 bake-off: judge verdict + both candidates' critiques) |
+| `feature-library-concurrency/` | IMP-C24 + IMP-D23 (**planning only**, opened 2026-09-03) — concurrent library writes silently lose updates (no lock; `save_library` rewrites all four files from a merged dict), and prep re-hashes an already-prepped entry on resume | `PLAN.md` (options analysis + recommendation, change-gated), `SESSION_HANDOFF.md` (**read first** — the full incident scenario, standing hazards, open work) |
 | `feature-fable-review/` | THIS review session | see §3 |
 
 ## 5b. Operational edge-case dossiers (`docs/edge-case-*/`)

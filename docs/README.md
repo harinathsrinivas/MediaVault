@@ -7,6 +7,12 @@
 
 ## 0. Start here (new session / new agent orientation order)
 
+> **Fastest path:** read [`ONBOARDING.md`](ONBOARDING.md) first — a single self-contained
+> "how the components interact" guide (data model, lifecycle, rollback/PONR safety, identity,
+> split/hash/rehash, fetch/restore, web console, end-goal, guardrails, cross-harness note) that
+> summarizes the full docs below and flags what is stale. Then follow the numbered order below for
+> the authoritative detail.
+
 1. [`/CLAUDE.md`](../CLAUDE.md) — project rules: PR conventions pointer, **human merge gates**, the
    **auto-rollback change-gate**, the **keep-PRIORITY.md-current rule**, agent-pipeline execution model.
 2. [`improvements/PRIORITY.md`](../improvements/PRIORITY.md) — **what to do next** (critical bugs first, suggested-next pointer).
@@ -24,7 +30,8 @@
 | File | What it is |
 |---|---|
 | [`README.md`](../README.md) | User-facing overview: what MediaVault does, install, full CLI reference table, ID conventions, layout |
-| [`ARCHITECTURE.md`](../ARCHITECTURE.md) | Definitive engineering reference (~2000 lines, 19 sections). Read before changing `main.py`/`mainfetch.py` |
+| [`ONBOARDING.md`](ONBOARDING.md) | **Read-first component-interaction guide** for a brand-new session: data model, lifecycle, rollback/PONR, identity, split/hash/rehash, fetch/restore, web console, end-goal, guardrails, and a DeepSeek-Harness-vs-Claude note. Summarizes the rest; flags stale ARCHITECTURE line numbers + uncommitted/parallel files |
+| [`ARCHITECTURE.md`](../ARCHITECTURE.md) | Definitive engineering reference (19 sections). Read before changing `main.py`/`mainfetch.py` |
 | [`docs/OPERATIONS_QA.md`](OPERATIONS_QA.md) | **How to actually operate it, and what has bitten** — the third question, after "what commands exist" (README) and "how is it built" (ARCHITECTURE). A living Q&A built from real archiving sessions: enrichment workflow, the show-year ID rule, `rehash`/`tempdir` disk arithmetic, CLI traps, resuming a failed push, and the never-run-two-mutating-commands rule. **Every session appends verified answers here** (CLAUDE.md rule) |
 | [`ARCHITECTURE_GRAPH.md`](../ARCHITECTURE_GRAPH.md) | The architecture as 7 Mermaid graph views (system, lifecycle, state machine, ER model, rollback flow, fetch sequence, seam map) |
 | [`BEST_PRACTICES.md`](../BEST_PRACTICES.md) | Compounding decisions: choices to lock now (chunk size, DV/HDR verification, multi-account replication, enrich-before-archive, automation gates) that are cheap today and expensive to fix once the library scales / the daemon automates |

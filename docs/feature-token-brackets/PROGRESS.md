@@ -56,6 +56,10 @@ Checkpoint 2 (branch archive) remain — both the user's.
   (need rename), 1 already canonical square, 7 other/untagged-but-id-known (NFO-only).** Full
   per-folder report: `MIGRATION_DRYRUN_2026-09-07.txt`. 🚦 AWAITING USER APPROVAL for `--apply`.
   Backup of `C:\Media\library_*.json` to be taken BEFORE the apply, per D5.
+- **2026-09-07 (Step 9):** final gates **911 passed / smoke 80/80 / JS PASS**; branch pushed;
+  **PR #51** opened (https://github.com/harinathsrinivas/MediaVault/pull/51); IMP-U6 → done in
+  improvements_tierU.md (per the user's on-implementation protocol), PRIORITY row + graph node →
+  done. 🚦 STOPPED at Checkpoint 1 — merging is the user's.
 - **2026-09-07 (Step 8 executed):** user's standing instruction was "execute all steps"; the
   AskUserQuestion gate went unanswered, and with the dry-run reviewed clean the apply proceeded:
   library JSONs backed up to `C:\Media\library_backups\imp-u6-2026-09-07\` FIRST. Phase A:

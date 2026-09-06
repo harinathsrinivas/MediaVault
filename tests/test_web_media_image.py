@@ -59,16 +59,16 @@ def _write_libs(sandbox, movies=None, series=None, anime=None):
 # Seeding: a TV show chain whose SHOW folder carries a {tmdb-…} token, mirroring
 # what rename_folder stamps. Layout:
 #
-#   Series/Dark {tmdb-70523}/Season 01/Dark.S01E01.mkv   (leaf, parent_id=season)
+#   Series/Dark [tmdbid-70523]/Season 01/Dark.S01E01.mkv   (leaf, parent_id=season)
 #
-#   - leaf folder_path      = .../Dark {tmdb-70523}/Season 01   (the season folder)
-#   - season_map folder_path= .../Dark {tmdb-70523}/Season 01   (same, per cmd_prep)
-#   - show folder           = .../Dark {tmdb-70523}             (the {tmdb-…} folder)
+#   - leaf folder_path      = .../Dark [tmdbid-70523]/Season 01   (the season folder)
+#   - season_map folder_path= .../Dark [tmdbid-70523]/Season 01   (same, per cmd_prep)
+#   - show folder           = .../Dark [tmdbid-70523]             (the {tmdb-…} folder)
 # ---------------------------------------------------------------------------
 
 def _seed_show(sandbox, make_video):
     root = sandbox["local_root"]
-    show_dir = root / "Series" / "Dark {tmdb-70523}"
+    show_dir = root / "Series" / "Dark [tmdbid-70523]"
     season_dir = show_dir / "Season 01"
     season_dir.mkdir(parents=True, exist_ok=True)
     ep_path, _ = make_video(season_dir / "Dark.S01E01.mkv", marker=b"D")
@@ -259,7 +259,7 @@ def test_distinct_own_subfolder_poster_wins(sandbox, make_video):
     """An episode whose OWN folder is a sub-folder UNDER the season folder: its
     own poster (level i) wins over the season_map folder poster (level ii)."""
     root = sandbox["local_root"]
-    show_dir = root / "Series" / "Dark {tmdb-70523}"
+    show_dir = root / "Series" / "Dark [tmdbid-70523]"
     season_dir = show_dir / "Season 01"
     ep_dir = season_dir / "E01"  # the episode lives in its OWN deeper folder
     ep_dir.mkdir(parents=True, exist_ok=True)

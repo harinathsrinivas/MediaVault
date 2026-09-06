@@ -175,7 +175,7 @@ def _seed_movie(sandbox, make_video, *, with_tmdb=True):
     with_tmdb=False -> a movie with NO tmdb_id. Returns the id."""
     root = sandbox["local_root"]
     mid = "mov-en-2010-inception"
-    folder = root / "Movies" / ("Inception {tmdb-27205}" if with_tmdb else "Inception")
+    folder = root / "Movies" / ("Inception [tmdbid-27205]" if with_tmdb else "Inception")
     folder.mkdir(parents=True, exist_ok=True)
     make_video(folder / "Inception.2010.mkv", marker=b"M")
     meta = {"title": "Inception", "year": 2010}
@@ -197,7 +197,7 @@ def _seed_episode(sandbox, make_video):
     The show tmdb_id is stamped on the EPISODE leaf (as enrich does). Returns
     (episode_id, season_id)."""
     root = sandbox["local_root"]
-    show_dir = root / "Series" / "The Office {tmdb-2316}"
+    show_dir = root / "Series" / "The Office [tmdbid-2316]"
     season_dir = show_dir / "Season 01"
     season_dir.mkdir(parents=True, exist_ok=True)
     make_video(season_dir / "The.Office.S01E01.mkv", marker=b"E")
@@ -223,7 +223,7 @@ def _seed_show(sandbox, make_video):
     kind resolves to 'tv'. A flat series entry (no season suffix) suffices for the
     kind logic. Returns the id."""
     root = sandbox["local_root"]
-    show_dir = root / "Series" / "The Office {tmdb-2316}"
+    show_dir = root / "Series" / "The Office [tmdbid-2316]"
     show_dir.mkdir(parents=True, exist_ok=True)
     make_video(show_dir / "The.Office.mkv", marker=b"S")
     show_id = "tv-en-2005-the-office"  # NO -sNNeMM -> kind tv

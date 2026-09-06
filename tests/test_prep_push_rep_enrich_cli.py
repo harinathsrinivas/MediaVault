@@ -229,8 +229,8 @@ def expected_kwargs(cmd, **overrides):
     if _HAS_EPISODES[cmd]:
         exp["episode_range"] = None
     if _IS_ENRICH[cmd]:
-        exp.update({"tmdb_id": None, "tvdb_id": None,
-                    "write_nfo": False, "no_web": False, "rename_choice": "ask"})
+        exp.update({"tmdb_id": None, "tvdb_id": None, "write_nfo": False,
+                    "no_web": False, "no_nfo": False, "rename_choice": "ask"})
     exp.update(overrides)
     return exp
 
@@ -421,6 +421,12 @@ def test_rename_choice_defaults_to_ask_when_neither_flag_is_given(cmd):
 @pytest.mark.parametrize("cmd", BOTH_NEW)
 def test_nfo_flag_turns_nfo_writing_on(cmd):
     assert_argv(cmd, ["--nfo"], write_nfo=True)
+
+
+@pytest.mark.parametrize("cmd", BOTH_NEW)
+def test_no_nfo_flag_opts_out_of_the_stamp_time_nfo(cmd):
+    """IMP-U6 (D6): `--no-nfo` suppresses the default stamp-time NFO write."""
+    assert_argv(cmd, ["--no-nfo"], no_nfo=True)
 
 
 @pytest.mark.parametrize("cmd", BOTH_NEW)

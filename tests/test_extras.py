@@ -1028,7 +1028,7 @@ def test_add_extras_on_an_unknown_id_is_a_clean_refusal(sandbox_extras, capsys):
 # (g) rename_folder — extras paths are RELATIVE, so nothing to rewrite
 # ===========================================================================
 
-RENAMED = "TestMovie {tmdb-4242}"
+RENAMED = "TestMovie [tmdbid-4242]"
 
 
 def test_rename_folder_keeps_the_extras_block_valid(sandbox_extras):

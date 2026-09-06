@@ -383,7 +383,7 @@ def _seed_two_movies_one_with_poster(sandbox, make_video):
     Returns the two ids."""
     root = sandbox["local_root"]
 
-    with_dir = root / "Movies" / "Inception {tmdb-27205}"
+    with_dir = root / "Movies" / "Inception [tmdbid-27205]"
     with_dir.mkdir(parents=True, exist_ok=True)
     make_video(with_dir / "Inception.2010.mkv", marker=b"P")
     # A real poster.jpg directly in the folder (resolve_artwork_path level i wins).
@@ -461,7 +461,7 @@ def test_poster_available_false_when_poster_removed(sandbox, make_video):
     assert first[with_id]["poster_available"] is True
 
     # Remove the poster on disk; the next payload must report False (no caching).
-    poster = sandbox["local_root"] / "Movies" / "Inception {tmdb-27205}" / "poster.jpg"
+    poster = sandbox["local_root"] / "Movies" / "Inception [tmdbid-27205]" / "poster.jpg"
     poster.unlink()
 
     second = {it["id"]: it for it in main.items_payload()["items"]}
@@ -513,7 +513,7 @@ def _seed_overview_fixtures(sandbox, make_video):
     root = sandbox["local_root"]
 
     # Movie WITH an in-folder fanart.jpg + an overview.
-    bd_dir = root / "Movies" / "Inception {tmdb-27205}"
+    bd_dir = root / "Movies" / "Inception [tmdbid-27205]"
     bd_dir.mkdir(parents=True, exist_ok=True)
     make_video(bd_dir / "Inception.2010.mkv", marker=b"B")
     (bd_dir / "fanart.jpg").write_bytes(b"\xff\xd8\xff\xe0FAKE-FANART\xff\xd9")
@@ -526,7 +526,7 @@ def _seed_overview_fixtures(sandbox, make_video):
     plain_id = "mov-en-2011-plain"
 
     # Series episode under a {tmdb-…} show folder carrying a SHOW-level fanart.jpg.
-    show_dir = root / "Series" / "The Office {tmdb-2316}"
+    show_dir = root / "Series" / "The Office [tmdbid-2316]"
     season_dir = show_dir / "Season 01"
     season_dir.mkdir(parents=True, exist_ok=True)
     (show_dir / "fanart.jpg").write_bytes(b"\xff\xd8\xff\xe0SHOW-FANART\xff\xd9")
@@ -605,7 +605,7 @@ def test_backdrop_available_false_when_fanart_removed(sandbox, make_video):
     first = {it["id"]: it for it in main.items_payload()["items"]}
     assert first[bd_id]["backdrop_available"] is True
 
-    (sandbox["local_root"] / "Movies" / "Inception {tmdb-27205}" / "fanart.jpg").unlink()
+    (sandbox["local_root"] / "Movies" / "Inception [tmdbid-27205]" / "fanart.jpg").unlink()
 
     second = {it["id"]: it for it in main.items_payload()["items"]}
     assert second[bd_id]["backdrop_available"] is False
@@ -677,7 +677,7 @@ def _seed_archived_with_tech(sandbox, make_video):
     Returns (with_tech_id, no_tech_id)."""
     root = sandbox["local_root"]
 
-    with_dir = root / "Movies" / "Interstellar {tmdb-157336}"
+    with_dir = root / "Movies" / "Interstellar [tmdbid-157336]"
     with_dir.mkdir(parents=True, exist_ok=True)
     with_path = with_dir / (
         "Interstellar.2014.iMAX.UHD.2160p.REMUX.Hybrid.HDR10.DV.P8.MULTi."

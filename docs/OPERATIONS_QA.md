@@ -11,7 +11,7 @@
 > **Maintenance:** when a question is asked and answered in any Claude session, add it here.
 > See the protocol at the bottom.
 
-**Last updated:** 2026-09-03
+**Last updated:** 2026-09-07 (IMP-U6 — `[tmdbid-…]` token convention, NFO-at-stamp default, migration tool + Plex NFO-agent setup)
 
 ---
 
@@ -146,22 +146,41 @@ Real example of both, in this library:
 So this is correct and recommended:
 ```
 IDs      tv-en-1994-friends-s02      ← show year
-Folders  Friends Season 02 (1995) {tmdb-1668}   ← real air year, purely cosmetic to the code
+Folders  Friends Season 02 (1995) [tmdbid-1668]   ← real air year, purely cosmetic to the code
 ```
 
 ### Folder layout
 
 ```
-Friends (1994) {tmdb-1668}\
-  Friends Season 01 (1994) {tmdb-1668}\
-  Friends Season 02 (1995) {tmdb-1668}\
+Friends (1994) [tmdbid-1668]\
+  Friends Season 01 (1994) [tmdbid-1668]\
+  Friends Season 02 (1995) [tmdbid-1668]\
 ```
 
 - Season numbering starts at **01** (00 is the Specials convention; MediaVault uses `--extras` instead).
-- The `{tmdb-…}` token on season folders is redundant but harmless.
-- **A malformed token breaks detection** — `tmdb-1668}` (missing `{`) won't match, and enrich will
+- The token on season folders is redundant but harmless (since IMP-U6 the season-inheritance
+  artwork walk accepts a provider token on ANY ancestor shape — `[tmdbid-…]`, `[tvdbid-…]`,
+  or the legacy curly form).
+- **A malformed token breaks detection** — `tmdbid-1668]` (missing `[`) won't match, and enrich will
   append a second token.
-- Case no longer matters (`{TMDB-…}` works) as of **IMP-C23**.
+- Case no longer matters (`{TMDB-…}` legacy and `[TmDbId-…]` square both match) as of **IMP-C23** +
+  **IMP-U6**.
+- **Legacy curly folders (`{tmdb-1668}`) are still recognized but never re-stamped.** Convert them
+  once with `python tools/migrate_token_brackets.py` (dry-run first, then `--apply` — it renames via
+  the journal-backed `rename_folder`, strictly sequentially, and backfills the NFO sidecar).
+
+### One-time Plex setup so the token pins there too (IMP-U6)
+
+Jellyfin and Emby read `[tmdbid-…]` straight from the folder name. **Plex** ignores square-bracket
+tags as match hints — it pins the id from the `movie.nfo` / `tvshow.nfo` sidecar that enrich now
+writes into every stamped folder (IMP-U6, D6). To switch Plex onto it (Plex Media Server **1.43+**):
+
+1. Settings → **Metadata Agents** → add an agent that uses the **Plex NFO agent** (optionally
+   stacked on the Plex Movie agent) for your movie/TV libraries — see
+   [support.plex.tv/articles/using-nfo-metadata-files-with-plex](https://support.plex.tv/articles/using-nfo-metadata-files-with-plex/).
+2. Re-scan the library after running the token migration; spot-check a few titles.
+
+Until that switch, Plex simply matches by name+year (reliable; the id tag was always optional there).
 
 ### There is no "series map" entry
 
@@ -218,7 +237,7 @@ The directory must already exist. Not needed if the source file already sits on 
 | `-tmdbid` / `-tvdbid` | ✅ | ✅ |
 | `-extras` / `-extras-size` | ✅ | ✅ |
 | **`--nfo`** | ❌ | ✅ |
-| **`--yes` / `--no-rename` / `--no-web`** | ❌ | ✅ |
+| **`--yes` / `--no-rename` / `--no-web` / `--no-nfo`** | ❌ | ✅ |
 
 **An unrecognised token is silently absorbed into the file path.** Typing `-nfo` produces:
 ```

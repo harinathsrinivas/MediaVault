@@ -1016,7 +1016,7 @@ class TestEachCommand:
         folder_path for every library entry that lives under it. No rehash."""
         info = _seed_single(sandbox, make_video)
         old_folder = info["folder"]
-        new_name = old_folder.name + " {tmdb-99901}"  # stamp a token
+        new_name = old_folder.name + " [tmdbid-99901]"  # stamp a token
 
         result = main.cmd_rename_folder(info["id"], new_name)
         assert result is True
@@ -1038,7 +1038,7 @@ class TestEachCommand:
         all children (primary + alias) have their folder_path updated correctly.
         No multi_ep_alias corruption; alias still has type == multi_ep_alias."""
         old_media = sandbox_alias["media_dir"]
-        new_name = old_media.name + " {tmdb-1984}"
+        new_name = old_media.name + " [tmdbid-1984]"
 
         result = main.cmd_rename_folder(sandbox_alias["season_id"], new_name)
         assert result is True
@@ -1314,7 +1314,7 @@ class TestAliasSweep:
         """rename_folder over an alias-bearing season: folder renamed, primary's
         folder_path updated, alias 3-key shape preserved (no folder_path on alias)."""
         old_media = sandbox_alias["media_dir"]
-        new_name = old_media.name + " {tmdb-1984}"
+        new_name = old_media.name + " [tmdbid-1984]"
         result = main.cmd_rename_folder(sandbox_alias["season_id"], new_name)
         assert result is True
         # The renamed folder must exist and the old one must not.
@@ -1843,7 +1843,7 @@ class TestPrepPushRepEnrich:
         assert entry["status"] == "archived"          # archive leg completed
         assert entry["metadata"]["tmdb_id"] == ENRICH_TMDB_ID   # enrich leg applied
 
-        stamped = folder.parent / f"{folder.name} {{tmdb-{ENRICH_TMDB_ID}}}"
+        stamped = folder.parent / f"{folder.name} [tmdbid-{ENRICH_TMDB_ID}]"
         assert stamped.is_dir() and not folder.exists()
         assert entry["folder_path"] == str(stamped)
         assert (stamped / "poster.jpg").stat().st_size > 0
@@ -1877,7 +1877,7 @@ class TestPrepPushRepEnrich:
         assert entry["metadata"]["tmdb_id"] == ENRICH_TMDB_ID
         assert folder.is_dir(), "the non-interactive default must NOT rename"
         assert entry["folder_path"] == str(folder)
-        assert not (folder.parent / f"{folder.name} {{tmdb-{ENRICH_TMDB_ID}}}").exists()
+        assert not (folder.parent / f"{folder.name} [tmdbid-{ENRICH_TMDB_ID}]").exists()
 
     # ---- 3. season: the SHOW folder gets the token --------------------------
     def test_prep_push_rep_season_enrich_stamps_show_folder(
@@ -1906,7 +1906,7 @@ class TestPrepPushRepEnrich:
         assert lib[EP1_ID]["status"] == "archived"
         assert lib[EP1_ID]["metadata"]["tmdb_id"] == ENRICH_TMDB_ID
 
-        stamped = series_root / f"SMK.S01.2020 {{tmdb-{ENRICH_TMDB_ID}}}"
+        stamped = series_root / f"SMK.S01.2020 [tmdbid-{ENRICH_TMDB_ID}]"
         assert stamped.is_dir() and not season_dir.exists()
         assert lib[SEASON_ID]["folder_path"] == str(stamped)
         assert lib[EP1_ID]["folder_path"] == str(stamped)

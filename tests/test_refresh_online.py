@@ -301,7 +301,7 @@ def _seed_show_two_episodes(sandbox, make_video, *, tmdb_id=2316):
     """Seed a season_map + TWO episode leaves of one show, all carrying the SAME
     show tmdb_id (as enrich stamps). Returns the show tmdb_id."""
     root = sandbox["local_root"]
-    season_dir = root / "Series" / "The Office {tmdb-2316}" / "Season 01"
+    season_dir = root / "Series" / "The Office [tmdbid-2316]" / "Season 01"
     season_dir.mkdir(parents=True, exist_ok=True)
     make_video(season_dir / "The.Office.S01E01.mkv", marker=b"1")
     make_video(season_dir / "The.Office.S01E02.mkv", marker=b"2")
@@ -326,7 +326,7 @@ def _seed_show_two_episodes(sandbox, make_video, *, tmdb_id=2316):
 
 def _seed_movie(sandbox, make_video, *, tmdb_id=27205):
     root = sandbox["local_root"]
-    folder = root / "Movies" / "Inception {tmdb-27205}"
+    folder = root / "Movies" / "Inception [tmdbid-27205]"
     folder.mkdir(parents=True, exist_ok=True)
     make_video(folder / "Inception.2010.mkv", marker=b"M")
     mid = "mov-en-2010-inception"

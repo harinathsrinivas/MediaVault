@@ -3,13 +3,13 @@
 
 `cmd_enrich_metadata` reads the ids already in the library, asks TMDB by
 title+year, and — only with `--apply` — writes `metadata.tmdb_id`, stamps the
-`{tmdb-<id>}` folder token (once per show/movie, via `cmd_rename_folder`), and
+`[tmdbid-<id>]` folder token (once per show/movie, via `cmd_rename_folder`), and
 downloads poster.jpg / fanart.jpg (+ per-season posters) WITHOUT fetching any
 media. These tests assert the LOCKED behaviours:
 
   - DRY-RUN (default) writes NOTHING (no tmdb_id, no rename, no images);
   - --apply writes metadata.tmdb_id on the show's season_maps + episode leaves,
-    stamps the {tmdb-…} token on the SHOW folder exactly ONCE, and downloads
+    stamps the [tmdbid-…] token on the SHOW folder exactly ONCE, and downloads
     poster.jpg ONLY when absent (a seeded local poster.jpg is NEVER overwritten);
   - a series resolves SHOW-CENTRICally: 2 seasons share ONE TMDB resolve and ONE
     folder-token stamp on the show folder; per-season posters land in each season;
@@ -339,7 +339,7 @@ def test_dry_run_writes_nothing(sandbox, patch_tmdb, capsys):
 
 def test_apply_movie_writes_tmdb_id_stamps_token_and_downloads(sandbox, patch_tmdb, capsys):
     """--apply on a confident movie: writes metadata.tmdb_id, renames the folder to
-    carry the {tmdb-…} token (once), and downloads poster.jpg + fanart.jpg. The
+    carry the [tmdbid-…] token (once), and downloads poster.jpg + fanart.jpg. The
     media file's bytes + stored hash are UNCHANGED (no rehash, no media fetch)."""
     _empty_libs(sandbox)
     folder, fp, orig_hash = _seed_movie(sandbox, "mov-en-2025-f1", "F1")
@@ -358,7 +358,7 @@ def test_apply_movie_writes_tmdb_id_stamps_token_and_downloads(sandbox, patch_tm
     assert lib["mov-en-2025-f1"]["metadata"]["year"] == 2025
 
     # 2) folder renamed exactly once to carry the token; file carried along.
-    new_folder = folder.parent / "F1 {tmdb-1003159}"
+    new_folder = folder.parent / "F1 [tmdbid-1003159]"
     assert not folder.exists()
     assert new_folder.is_dir()
     assert main._norm_path(lib["mov-en-2025-f1"]["folder_path"]) == main._norm_path(str(new_folder))
@@ -415,7 +415,7 @@ def test_apply_never_overwrites_local_poster(sandbox, patch_tmdb, capsys):
 
     main.cmd_enrich_metadata("mov-en-2025-f1", "--apply")
 
-    new_folder = folder.parent / "F1 {tmdb-1003159}"
+    new_folder = folder.parent / "F1 [tmdbid-1003159]"
     # The user's poster moved with the folder and is byte-for-byte preserved.
     assert (new_folder / "poster.jpg").read_bytes() == local_poster_bytes
     # Fanart was absent locally -> it WAS downloaded.
@@ -425,7 +425,7 @@ def test_apply_never_overwrites_local_poster(sandbox, patch_tmdb, capsys):
 
 
 def test_show_centric_two_seasons_one_resolve_one_stamp(sandbox, patch_tmdb, capsys):
-    """SHOW-CENTRIC core: a 2-season series resolves ONCE and the {tmdb-…} token is
+    """SHOW-CENTRIC core: a 2-season series resolves ONCE and the [tmdbid-…] token is
     stamped ONCE on the SHOW folder (not per season). tmdb_id lands on BOTH
     season_maps AND both episode leaves; per-season posters land in each season."""
     _empty_libs(sandbox)
@@ -450,14 +450,14 @@ def test_show_centric_two_seasons_one_resolve_one_stamp(sandbox, patch_tmdb, cap
         assert lib[eid].get("metadata", {}).get("tmdb_id") == 2316, eid
 
     # The SHOW folder (parent of the Season NN dirs) was stamped exactly once.
-    stamped = show["show_root"].parent / "The Office {tmdb-2316}"
+    stamped = show["show_root"].parent / "The Office [tmdbid-2316]"
     assert not show["show_root"].exists()
     assert stamped.is_dir()
     # Both season subfolders still exist UNDER the stamped show folder, untouched names.
     assert (stamped / "Season 01").is_dir()
     assert (stamped / "Season 02").is_dir()
     # Season folders are NOT separately tokenized (one stamp, on the show).
-    assert not (stamped / "Season 01 {tmdb-2316}").exists()
+    assert not (stamped / "Season 01 [tmdbid-2316]").exists()
 
     # Per-season posters landed in each season folder.
     assert (stamped / "Season 01" / "poster.jpg").read_bytes() == FAKE_JPG
@@ -491,7 +491,7 @@ def test_ambiguous_match_is_listed_not_written(sandbox, patch_tmdb, capsys):
     # Nothing written: no tmdb_id, no rename, no poster.
     assert mvcommon.load_library() == before
     assert folder.exists()
-    assert not (folder.parent / "The Thing {tmdb-1091}").exists()
+    assert not (folder.parent / "The Thing [tmdbid-1091]").exists()
     assert not (folder / "poster.jpg").exists()
 
 
@@ -519,12 +519,12 @@ def test_tmdb_error_on_one_unit_is_skipped_without_corruption(sandbox, patch_tmd
     assert f_err.exists()
     # The healthy unit applied normally.
     assert lib["mov-en-2025-f1"]["metadata"]["tmdb_id"] == 1003159
-    assert (f_ok.parent / "F1 {tmdb-1003159}").is_dir()
+    assert (f_ok.parent / "F1 [tmdbid-1003159]").is_dir()
 
 
 def test_idempotent_rerun_does_not_double_stamp(sandbox, patch_tmdb, capsys):
     """A second --apply over an already-stamped show is a no-op for the folder
-    token (the {tmdb-…} token is detected and the rename is skipped).
+    token (the provider token is detected and the rename is skipped).
 
     The FIRST run has no preset id, so it SEARCHES and writes metadata.tmdb_id.
     The SECOND run now finds that id preset on the leaf, so it resolves BY ID
@@ -540,16 +540,16 @@ def test_idempotent_rerun_does_not_double_stamp(sandbox, patch_tmdb, capsys):
 
     main.cmd_enrich_metadata("mov-en-2025-f1", "--apply")
     capsys.readouterr()  # drain first-run output
-    new_folder = folder.parent / "F1 {tmdb-1003159}"
+    new_folder = folder.parent / "F1 [tmdbid-1003159]"
     assert new_folder.is_dir()
 
     # Second run: the folder already carries the token -> no second rename, no crash.
     main.cmd_enrich_metadata("mov-en-2025-f1", "--apply")
     out = capsys.readouterr().out
-    assert "already has a {tmdb-…} token" in out
+    assert "already has a provider id token" in out
     # Still exactly one stamped folder; no double-token folder created.
     assert new_folder.is_dir()
-    assert not (folder.parent / "F1 {tmdb-1003159} {tmdb-1003159}").exists()
+    assert not (folder.parent / "F1 [tmdbid-1003159] [tmdbid-1003159]").exists()
 
 
 def test_no_media_fetch_subprocess_or_popen(sandbox, patch_tmdb, monkeypatch):
@@ -703,7 +703,7 @@ def test_ambiguous_no_confident_lists_and_writes_nothing(sandbox, patch_tmdb):
 
     after = mvcommon.load_library()
     assert after == before, "a non-confident match must write NOTHING"
-    assert not (folder.parent / "Some Obscure Film {tmdb-11}").exists()
+    assert not (folder.parent / "Some Obscure Film [tmdbid-11]").exists()
 
 
 def test_pick_match_prefers_full_title_over_obscure_substring():
@@ -744,7 +744,7 @@ def _tv_details(tmdb_id, name, year, overview="A great show.", vote_average=8.2)
 def test_apply_movie_with_preset_id_fetches_by_id_not_search(sandbox, patch_tmdb, capsys):
     """A movie whose metadata.tmdb_id is already set (via set_tmdb) is resolved BY
     THAT ID on --apply: enrich GETs /3/movie/{id} (NOT /search/movie), writes the
-    by-id title/year, stamps the {tmdb-…} token, and downloads art — with NO search
+    by-id title/year, stamps the [tmdbid-…] token, and downloads art — with NO search
     call at all (the user explicitly chose this id)."""
     _empty_libs(sandbox)
     folder, fp, orig_hash = _seed_movie(sandbox, "mov-en-2099-f1", "F1")
@@ -777,7 +777,7 @@ def test_apply_movie_with_preset_id_fetches_by_id_not_search(sandbox, patch_tmdb
     assert meta["year"] == 2025
 
     # Token stamped + art downloaded into the renamed folder (full treatment).
-    new_folder = folder.parent / "F1 {tmdb-1003159}"
+    new_folder = folder.parent / "F1 [tmdbid-1003159]"
     assert new_folder.is_dir() and not folder.exists()
     assert (new_folder / "poster.jpg").read_bytes() == FAKE_JPG
     assert (new_folder / "fanart.jpg").read_bytes() == FAKE_JPG
@@ -823,7 +823,7 @@ def test_apply_show_with_preset_id_fetches_by_id_not_search(sandbox, patch_tmdb,
         assert lib[eid].get("metadata", {}).get("tmdb_id") == 2316, eid
 
     # ONE stamp on the show folder; season subfolders intact underneath.
-    stamped = show["show_root"].parent / "The Office {tmdb-2316}"
+    stamped = show["show_root"].parent / "The Office [tmdbid-2316]"
     assert stamped.is_dir() and not show["show_root"].exists()
     assert (stamped / "Season 01").is_dir() and (stamped / "Season 02").is_dir()
 
@@ -862,7 +862,7 @@ def test_dry_run_with_preset_id_prints_by_id_intent_writes_nothing(sandbox, patc
     # Nothing changed on disk.
     assert mvcommon.load_library() == before
     assert folder.exists()
-    assert not (folder.parent / "F1 {tmdb-1003159}").exists()
+    assert not (folder.parent / "F1 [tmdbid-1003159]").exists()
     assert not (folder / "poster.jpg").exists()
 
 
@@ -894,23 +894,27 @@ def test_preset_id_by_id_fetch_failure_is_skipped_no_search_fallback(sandbox, pa
     # Library untouched: no rename, original folder + hash intact.
     assert mvcommon.load_library() == before
     assert folder.exists()
-    assert not (folder.parent / "F1 {tmdb-1003159}").exists()
+    assert not (folder.parent / "F1 [tmdbid-1003159]").exists()
 
 
 def test_no_preset_id_still_searches(sandbox, patch_tmdb, capsys):
     """Guard: with NO preset id the existing title-SEARCH path is unchanged — enrich
-    issues a /search/movie and does NOT attempt any by-id details call."""
+    issues a /search/movie and does NOT attempt any by-id details call during
+    RESOLUTION. (Since IMP-U6/D6 a later by-id /movie/{id} + /credits call MAY
+    appear from the default stamp-time NFO's imdb/genre enrichment — the search
+    must still come FIRST, and no 'using preset' line may print.)"""
     _empty_libs(sandbox)
     folder, fp, h = _seed_movie(sandbox, "mov-en-2025-f1", "F1")
     fake = patch_tmdb(FakeTMDB(search={"f1": [_movie_result(1003159, "F1", 2025)]}))
 
     main.cmd_enrich_metadata("mov-en-2025-f1", "--apply")
 
-    assert any("/search/movie" in u for u, _ in fake.calls), "no preset id -> must search"
-    # No by-id details call (a bare /movie/{digits} with nothing after).
+    call_urls = [u for u, _ in fake.calls]
+    assert any("/search/movie" in u for u in call_urls), "no preset id -> must search"
+    search_idx = next(i for i, u in enumerate(call_urls) if "/search/movie" in u)
     assert not any(
         u.rstrip("/").split("/")[-1].isdigit() and u.rstrip("/").split("/")[-2] == "movie"
-        for u, _ in fake.calls), "no preset id -> must NOT fetch by id"
+        for u in call_urls[:search_idx]), "no preset id -> must NOT fetch by id before searching"
     assert "using preset tmdb_id" not in capsys.readouterr().out
     # Sanity: the search path still applied normally.
     assert mvcommon.load_library()["mov-en-2025-f1"]["metadata"]["tmdb_id"] == 1003159
@@ -951,7 +955,7 @@ def test_nfo_movie_written_on_apply_with_flag(sandbox, patch_tmdb, capsys):
     main.cmd_enrich_metadata("mov-en-2025-f1", "--apply", "--nfo")
 
     # After the confident apply the folder was renamed to include {tmdb-…}.
-    new_folder = folder.parent / "F1 {tmdb-1003159}"
+    new_folder = folder.parent / "F1 [tmdbid-1003159]"
     nfo_path = new_folder / "movie.nfo"
     assert nfo_path.exists(), "movie.nfo must be written after --apply --nfo on a movie"
 
@@ -990,7 +994,7 @@ def test_nfo_show_written_on_apply_with_flag(sandbox, patch_tmdb, capsys):
     main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply", "--nfo")
 
     # Show folder was renamed.
-    stamped_show = show["show_root"].parent / "The Office {tmdb-2316}"
+    stamped_show = show["show_root"].parent / "The Office [tmdbid-2316]"
     nfo_path = stamped_show / "tvshow.nfo"
     assert nfo_path.exists(), "tvshow.nfo must be written in the show folder"
 
@@ -1014,19 +1018,21 @@ def test_nfo_show_written_on_apply_with_flag(sandbox, patch_tmdb, capsys):
     assert "tvshow.nfo" in out
 
 
-def test_nfo_not_written_without_flag(sandbox, patch_tmdb, capsys):
-    """Without --nfo, no NFO file is ever written (--apply alone, or dry-run alone)."""
+def test_nfo_written_by_default_on_stamp(sandbox, patch_tmdb, capsys):
+    """IMP-U6 (D6): a stamping --apply writes the NFO by DEFAULT (no flag needed) —
+    Plex's NFO agent pins the id from it. (--no-nfo opts out — covered in
+    tests/test_token_brackets.py.)"""
     _empty_libs(sandbox)
     folder, fp, h = _seed_movie(sandbox, "mov-en-2025-f1", "F1")
     patch_tmdb(FakeTMDB(search={"f1": [
         _movie_result_with_meta(1003159, "F1", 2025)
     ]}))
 
-    main.cmd_enrich_metadata("mov-en-2025-f1", "--apply")  # no --nfo
+    main.cmd_enrich_metadata("mov-en-2025-f1", "--apply")  # no --nfo flag needed
 
-    new_folder = folder.parent / "F1 {tmdb-1003159}"
-    assert not (new_folder / "movie.nfo").exists(), "movie.nfo must NOT be written without --nfo"
-    assert not (folder / "movie.nfo").exists()
+    new_folder = folder.parent / "F1 [tmdbid-1003159]"
+    assert new_folder.is_dir()
+    assert (new_folder / "movie.nfo").exists(), "the stamp-time NFO (D6 default) must exist"
 
 
 def test_nfo_not_written_in_dry_run(sandbox, patch_tmdb, capsys):
@@ -1041,7 +1047,7 @@ def test_nfo_not_written_in_dry_run(sandbox, patch_tmdb, capsys):
 
     # Dry-run: folder not renamed, no NFO anywhere.
     assert not (folder / "movie.nfo").exists()
-    assert not (folder.parent / "F1 {tmdb-1003159}" / "movie.nfo").exists()
+    assert not (folder.parent / "F1 [tmdbid-1003159]" / "movie.nfo").exists()
     out = capsys.readouterr().out
     assert "DRY-RUN" in out
 
@@ -1133,7 +1139,7 @@ def test_nfo_movie_richer_fields_populate_when_available(sandbox, patch_tmdb, ca
 
     main.cmd_enrich_metadata("mov-en-2025-f1", "--apply", "--nfo")
 
-    new_folder = folder.parent / "F1 {tmdb-1003159}"
+    new_folder = folder.parent / "F1 [tmdbid-1003159]"
     nfo_path = new_folder / "movie.nfo"
     assert nfo_path.exists()
     root = ET.parse(str(nfo_path)).getroot()
@@ -1169,7 +1175,7 @@ def test_nfo_movie_omits_richer_fields_gracefully_without_detail_data(sandbox, p
 
     main.cmd_enrich_metadata("mov-en-2025-f1", "--apply", "--nfo")
 
-    new_folder = folder.parent / "F1 {tmdb-1003159}"
+    new_folder = folder.parent / "F1 [tmdbid-1003159]"
     root = ET.parse(str(new_folder / "movie.nfo")).getroot()
 
     # Base fields (pre-D22) still present, plus the always-on plain <tmdbid>.
@@ -1208,7 +1214,7 @@ def test_nfo_show_never_emits_tvdbid(sandbox, patch_tmdb, capsys):
 
     main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply", "--nfo")
 
-    stamped_show = show["show_root"].parent / "The Office {tmdb-2316}"
+    stamped_show = show["show_root"].parent / "The Office [tmdbid-2316]"
     root = ET.parse(str(stamped_show / "tvshow.nfo")).getroot()
 
     assert root.find("tmdbid").text == "2316"
@@ -1246,7 +1252,7 @@ def test_apply_show_downloads_per_episode_stills(sandbox, patch_tmdb, capsys):
     main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply")
 
     lib = mvcommon.load_library()
-    stamped = show["show_root"].parent / "The Office {tmdb-2316}"
+    stamped = show["show_root"].parent / "The Office [tmdbid-2316]"
 
     # Each episode's still landed next to its (moved) video file as <basename>-thumb.jpg.
     for ep_id, season_dir_name in ((show["ep1"], "Season 01"), (show["ep2"], "Season 02")):
@@ -1319,7 +1325,7 @@ def test_apply_never_overwrites_existing_episode_still(sandbox, patch_tmdb, caps
     main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply")
 
     lib = mvcommon.load_library()
-    stamped = show["show_root"].parent / "The Office {tmdb-2316}"
+    stamped = show["show_root"].parent / "The Office [tmdbid-2316]"
 
     # Episode 1's hand-picked still moved with the folder and is byte-for-byte preserved.
     ep1_thumb = stamped / "Season 01" / _thumb_name(ep1_fname)
@@ -1352,7 +1358,7 @@ def test_apply_episode_still_failure_falls_back_silently(sandbox, patch_tmdb, ca
     main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply")  # must NOT crash
 
     lib = mvcommon.load_library()
-    stamped = show["show_root"].parent / "The Office {tmdb-2316}"
+    stamped = show["show_root"].parent / "The Office [tmdbid-2316]"
 
     # Episode 1's still downloaded; episode 2's still is ABSENT (failed -> skipped).
     ep1_fname = lib[show["ep1"]]["filename"]
@@ -1378,7 +1384,7 @@ def test_apply_episode_empty_stills_falls_back_silently(sandbox, patch_tmdb, cap
     main.cmd_enrich_metadata("tv-en-2005-the-office", "--apply")  # must NOT crash
 
     lib = mvcommon.load_library()
-    stamped = show["show_root"].parent / "The Office {tmdb-2316}"
+    stamped = show["show_root"].parent / "The Office [tmdbid-2316]"
     for ep_id, season_dir_name in ((show["ep1"], "Season 01"), (show["ep2"], "Season 02")):
         fname = lib[ep_id]["filename"]
         assert not (stamped / season_dir_name / _thumb_name(fname)).exists()
@@ -1623,7 +1629,7 @@ def _exa_response(*urls):
 
 def test_api_miss_then_exa_fallback_resolves_confident(sandbox, patch_tmdb, monkeypatch, capsys):
     """API search MISSES (none) -> EXA fallback returns an id -> by-id VALIDATION ->
-    CONFIDENT: tmdb_id + the real (validated) title/year written and the {tmdb-…} token
+    CONFIDENT: tmdb_id + the real (validated) title/year written and the [tmdbid-…] token
     stamped. Proves the waterfall ORDER: the TMDB title-search runs FIRST, THEN EXA,
     THEN the by-id validation fetch."""
     _empty_libs(sandbox)
@@ -1658,7 +1664,7 @@ def test_api_miss_then_exa_fallback_resolves_confident(sandbox, patch_tmdb, monk
     assert meta["tmdb_id"] == 38637
     assert meta["title"] == "Vaaranam Aayiram"
     assert meta["year"] == 2008
-    assert (folder.parent / "Vaaranam Aayiram {tmdb-38637}").is_dir()
+    assert (folder.parent / "Vaaranam Aayiram [tmdbid-38637]").is_dir()
     assert not folder.exists()
 
 
@@ -1787,38 +1793,68 @@ def test_exa_resolve_caches_response_idempotent(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# IMP-C23 — `_has_tmdb_token` is CASE-INSENSITIVE.
+# IMP-C23 — `_has_tmdb_token` is CASE-INSENSITIVE (generalized by IMP-U6).
 #
 # Real folders in the wild carry an uppercase token (the user's own
 # `Run (2002)  - 4K SDR - (DD+5.1 - 192Kbps & AAC)  {TMDB-69590}`). Before the
 # fix `_has_tmdb_token` had no `re.IGNORECASE`, so such a folder read as "no
-# token" and the next enrich/rename pass appended a SECOND one. Its sibling
-# predicate `_PROVIDER_TOKEN_RE` (the artwork-inheritance resolver) has always
-# been case-insensitive; the two had drifted.
+# token" and the next enrich/rename pass appended a SECOND one. IMP-U6 widened
+# the predicate to BOTH shapes: the canonical square `[tmdbid-…]` (D1) and the
+# legacy curly `{tmdb-…}` / `{TMDB-…}`, which D3 keeps recognized forever so a
+# pre-migration folder can never be double-stamped.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("name", [
-    "Run (2002) {TMDB-69590}",          # the real-world uppercase shape
-    "Drishyam 3 (2026) {tmdb-847742}",  # lowercase (already worked)
+    "Run (2002) {TMDB-69590}",          # the real-world uppercase LEGACY shape
+    "Drishyam 3 (2026) {tmdb-847742}",  # lowercase legacy curly (already worked)
     "X {TmDb-1}",                       # mixed case
     "Dark Season 01 (2017) {TMDB-70523}",
+    "Inception (2010) [tmdbid-27205]",  # IMP-U6 canonical square form
+    "X [TmDbId-1]",                     # square, mixed case
 ])
 def test_has_tmdb_token_is_case_insensitive(name):
     assert main._has_tmdb_token(name) is True
 
 
-@pytest.mark.parametrize("name", ["No token here", "", None, "Movie (2020)", "{tvdb-123}"])
+@pytest.mark.parametrize("name", [
+    "No token here", "", None, "Movie (2020)",
+    "{tvdb-123}", "[tvdbid-123]",       # other providers: not a TMDB token, either shape
+])
 def test_has_tmdb_token_still_false_without_a_tmdb_token(name):
-    """The fix must not make the predicate over-eager: a name with no `{tmdb-…}`
-    (including a `{tvdb-…}` token, which this project never writes) stays False."""
+    """The fix must not make the predicate over-eager: a name with no tmdb
+    token — including a tvdb token in either shape, which this project never
+    STAMPS — stays False."""
     assert main._has_tmdb_token(name) is False
 
 
-def test_has_tmdb_token_agrees_with_provider_token_re():
+def test_has_tmdb_token_agrees_with_tmdb_token_re():
     """Regression pin for the DRIFT that caused IMP-C23: `_has_tmdb_token` and
-    `_PROVIDER_TOKEN_RE` are the same predicate over the same token and must
-    stay in lockstep. If a future edit changes one, this fails."""
+    the module-level `_TMDB_TOKEN_RE` are the same predicate and must stay in
+    lockstep. If a future edit changes one, this fails."""
     for name in ["Run (2002) {TMDB-69590}", "a {tmdb-1}", "X {TmDb-1}",
-                 "none", "", "{tvdb-9}", "Show (1993) {tmdb-4087}"]:
+                 "Inception (2010) [tmdbid-27205]", "X [TmDbId-9]",
+                 "none", "", "{tvdb-9}", "[tvdbid-9]", "Show (1993) {tmdb-4087}"]:
         assert bool(main._has_tmdb_token(name)) is bool(
+            main._TMDB_TOKEN_RE.search(name or "")), name
+
+
+def test_has_provider_token_agrees_with_provider_token_re():
+    """IMP-U6 pin: `_has_provider_token` and `_PROVIDER_TOKEN_RE` are the same
+    ANY-provider / any-shape predicate (the artwork walk's) and must not drift."""
+    for name in ["Run (2002) {TMDB-69590}", "a {tvdb-1}", "X [tmdbid-1]",
+                 "Y [TVDBID-334824]", "Z [IMDBID-tt123]", "none", "", "plain",
+                 "{imdb-tt9}", "Show (1993) {tmdb-4087}"]:
+        assert bool(main._has_provider_token(name)) is bool(
             main._PROVIDER_TOKEN_RE.search(name or "")), name
+
+
+def test_format_and_strip_tmdb_token():
+    """IMP-U6: the ONE stamp formatter + the strip helper used by the migration
+    tool and re-stamp flows."""
+    assert main.format_tmdb_token(603692) == "[tmdbid-603692]"
+    assert main.format_tmdb_token("70523") == "[tmdbid-70523]"
+    assert main.strip_tmdb_tokens("Dark (2017) [tmdbid-70523]") == "Dark (2017)"
+    assert main.strip_tmdb_tokens("Run (2002) {TMDB-69590}") == "Run (2002)"
+    assert main.strip_tmdb_tokens("A [tmdbid-1] B [tmdbid-2]") == "A B"
+    assert main.strip_tmdb_tokens("No token") == "No token"
+    assert main.strip_tmdb_tokens(None) == ""

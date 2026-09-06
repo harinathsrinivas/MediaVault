@@ -563,9 +563,9 @@ export function buildCard(item) {
           " placeholder"
       );
       folderNote.textContent =
-        "New-item suggestion — edit the {" +
+        "New-item suggestion — edit the [" +
         (sf.editable_provider_field || "provider") +
-        "-…} id before creating.";
+        "id-…] id before creating.";
       folderNote.classList.add("editable");
     } else {
       folderInput.disabled = true;

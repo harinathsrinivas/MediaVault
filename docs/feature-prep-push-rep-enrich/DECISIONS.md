@@ -192,3 +192,19 @@ completed; the enrich leg reports via prints, exactly like `_push_title_extras_o
 - **Commit hazard:** the user's personal `Master_Stream_Archiver*.py` / `MatchArchiver*.py` files
   are parked in `stash@{0}` for this run (see `PROGRESS.md`). While stashed the tree is clean and
   `git-agent` is safe. If the stash is ever restored mid-run, revert to explicit-pathspec commits.
+
+---
+
+## ADDENDUM 2026-09-07 (IMP-U6 — supersedes parts of D1/D4 above, no history rewritten)
+
+- **D1 (the curly `{tmdb-…}` stamp) is superseded**: since IMP-U6 the stamp is the
+  Jellyfin/Emby-native square form `[tmdbid-<id>]` (user-ruled D1 in
+  `docs/feature-token-brackets/DECISIONS.md`). The legacy curly shape stays RECOGNIZED forever
+  (D3 there) so pre-IMP-U6 folders are never double-stamped, and
+  `tools/migrate_token_brackets.py` converts them.
+- **D4's NFO context changes**: the stamp now writes the NFO **by default** (D6) — `--nfo`
+  remains the force-even-without-a-stamp flag and `--no-nfo` opts out. `_write_nfo` gained a
+  NEVER-overwrite guard (a local .nfo always wins), reversing the old "NFOs are regenerable"
+  overwrite behavior documented above.
+- The `-tvdbid` refusal, the confirmation gate, the richer NFO element set, and the
+  never-`<tvdbid>` rule are all UNCHANGED.

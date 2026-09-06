@@ -117,7 +117,7 @@ const RECLAIM_PAYLOAD = {
       path: "C:/Media/Movies/English/RealMovie (2024)/Sample/Sample.mkv",
       size_bytes: 300_000_000,
       suggested_command: 'python main.py prep mov-en-0000-sample "C:/.../Sample/Sample.mkv"',
-      suggested_folder: { applies: true, folder: "Movies/English/Sample {tmdb-?}" },
+      suggested_folder: { applies: true, folder: "Movies/English/Sample [tmdbid-?]" },
       guessed: true,
     },
   ],

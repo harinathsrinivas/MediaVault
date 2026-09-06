@@ -82,7 +82,7 @@ def test_renames_folder_and_rewrites_season_map_and_leaves(sandbox_alias):
     the episode leaf get their folder_path re-pointed to the new folder."""
     sandbox = sandbox_alias["sandbox"]
     old_folder = sandbox_alias["media_dir"]  # …\Series\BSG\Season 04
-    new_name = "Season 04 {tmdb-12345}"
+    new_name = "Season 04 [tmdbid-12345]"
     new_folder = old_folder.parent / new_name
 
     result = main.cmd_rename_folder(sandbox_alias["season_id"], new_name)
@@ -125,7 +125,7 @@ def test_archived_dummy_rename_is_hash_safe(sandbox):
     stored `hash` is byte-identical afterwards (no rehash) and the dummy + its
     sidecar move with the folder."""
     entry_id, folder, dummy, recorded_hash = _seed_archived_movie(sandbox)
-    new_name = "DarkMovie {tmdb-70523}"
+    new_name = "DarkMovie [tmdbid-70523]"
     new_folder = folder.parent / new_name
 
     result = main.cmd_rename_folder(entry_id, new_name)
@@ -160,7 +160,7 @@ def test_post_ponr_failure_is_recoverable(sandbox_alias, monkeypatch):
     sandbox = sandbox_alias["sandbox"]
     old_folder = sandbox_alias["media_dir"]
     parent_dir = old_folder.parent
-    new_name = "Season 04 {tmdb-12345}"
+    new_name = "Season 04 [tmdbid-12345]"
     new_folder = parent_dir / new_name
 
     # Kill save_library on its FIRST call (which happens post-PONR, after os.rename).
@@ -218,7 +218,7 @@ def test_pre_ponr_failure_rolls_back(sandbox_alias, monkeypatch):
     sandbox = sandbox_alias["sandbox"]
     old_folder = sandbox_alias["media_dir"]
     parent_dir = old_folder.parent
-    new_name = "Season 04 {tmdb-12345}"
+    new_name = "Season 04 [tmdbid-12345]"
 
     def boom_rename(src, dst):
         raise OSError("simulated directory rename failure (pre-PONR)")
@@ -243,7 +243,7 @@ def test_multi_ep_alias_is_left_untouched(sandbox_alias):
     """The combined-episode alias under the renamed folder is never given a
     folder_path; its exact 3-key schema is preserved (PR#21 crash class avoided)."""
     sandbox = sandbox_alias["sandbox"]
-    new_name = "Season 04 {tmdb-12345}"
+    new_name = "Season 04 [tmdbid-12345]"
 
     result = main.cmd_rename_folder(sandbox_alias["season_id"], new_name)
     assert result is True
@@ -266,7 +266,7 @@ def test_refuses_when_new_folder_exists(sandbox_alias, capsys):
     sandbox = sandbox_alias["sandbox"]
     old_folder = sandbox_alias["media_dir"]
     parent_dir = old_folder.parent
-    new_name = "Season 04 {tmdb-12345}"
+    new_name = "Season 04 [tmdbid-12345]"
     # Pre-create the collision target.
     (parent_dir / new_name).mkdir()
 
@@ -286,7 +286,7 @@ def test_refuses_when_new_folder_exists(sandbox_alias, capsys):
 def test_refuses_unknown_id_and_missing_folder(sandbox, capsys):
     """An id not in the library and not a real path is refused with a clear message."""
     _empty(sandbox)
-    result = main.cmd_rename_folder("mov-does-not-exist-xyz", "Whatever {tmdb-1}")
+    result = main.cmd_rename_folder("mov-does-not-exist-xyz", "Whatever [tmdbid-1]")
     assert result is False
     out = capsys.readouterr().out
     assert "No such folder" in out

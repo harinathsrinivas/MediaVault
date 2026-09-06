@@ -148,7 +148,8 @@ class TestGuessManualId:
 # ---------------------------------------------------------------------------
 
 class TestSuggestTargetFolder:
-    """Cover movie vs series/anime curly-brace shape and in-library applies=False."""
+    """Cover the unified [tmdbid-…] bracket placeholder (IMP-U6, D2 — movies AND
+    series/anime) and in-library applies=False."""
 
     def _make_item(self, mid, entry=None, path=""):
         """Build a minimal item dict for suggest_target_folder."""
@@ -159,29 +160,32 @@ class TestSuggestTargetFolder:
         item = self._make_item("mov-en-2024-darkriver")
         result = main.suggest_target_folder(item)
         assert result["applies"] is True
-        assert "{tmdb-" in result["folder"], f"Expected {{tmdb-…}} in folder, got: {result['folder']}"
+        assert "[tmdbid-" in result["folder"], f"Expected [tmdbid-…] in folder, got: {result['folder']}"
         assert result["provider_tag"] is not None
         assert result["editable_provider_field"] == "tmdb"
 
-    def test_new_series_has_tvdb_placeholder(self):
+    def test_new_series_has_tmdb_placeholder(self):
+        """IMP-U6 (D2): series suggestions unify on TMDB — the old {tvdb-…}
+        placeholder invited an id MediaVault can never stamp or use."""
         item = self._make_item("tv-en-2017-dark-s01e01")
         result = main.suggest_target_folder(item)
         assert result["applies"] is True
-        assert "{tvdb-" in result["folder"], f"Expected {{tvdb-…}} in folder, got: {result['folder']}"
+        assert "[tmdbid-" in result["folder"], f"Expected [tmdbid-…] in folder, got: {result['folder']}"
         assert result["provider_tag"] is not None
-        assert result["editable_provider_field"] == "tvdb"
+        assert result["editable_provider_field"] == "tmdb"
 
-    def test_new_anime_has_tvdb_placeholder(self):
+    def test_new_anime_has_tmdb_placeholder(self):
+        """IMP-U6 (D2): anime suggestions unify on TMDB too."""
         item = self._make_item("ani-en-2006-deathnote07")
         result = main.suggest_target_folder(item)
         assert result["applies"] is True
-        assert "{tvdb-" in result["folder"], f"Expected {{tvdb-…}} in folder, got: {result['folder']}"
-        assert result["editable_provider_field"] == "tvdb"
+        assert "[tmdbid-" in result["folder"], f"Expected [tmdbid-…] in folder, got: {result['folder']}"
+        assert result["editable_provider_field"] == "tmdb"
 
     def test_in_library_item_applies_false(self):
         """Existing in-library item -> applies=False, provider_tag=None, editable_provider_field=None."""
         entry = {"status": "onboarded", "uploaded": True,
-                 "folder_path": r"C:\Media\Movies\English\Action\SomeMovie (2023) [tmdb-12345]",
+                 "folder_path": r"C:\Media\Movies\English\Action\SomeMovie (2023) [tmdbid-12345]",
                  "filename": "SomeMovie.mkv"}
         item = self._make_item("mov-en-2023-somemovie", entry=entry)
         result = main.suggest_target_folder(item)

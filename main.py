@@ -171,6 +171,72 @@ ENTRY_TYPE_KEYS = {
 
 
 # ==========================================
+#    PROVIDER FOLDER TOKENS (IMP-U6, D1/D2/D3)
+# ==========================================
+# The provider-id token stamped onto show/movie FOLDER names. IMP-U6 ruled
+# (docs/feature-token-brackets/DECISIONS.md): the stamped form is the
+# Jellyfin/Emby-native square bracket `[tmdbid-<id>]` (D1); the legacy
+# Plex-style curly `{tmdb-…}` / `{TMDB-…}` (pre-IMP-U6 folders) stays
+# RECOGNIZED forever so a legacy folder can never be double-stamped (D3).
+# ALL token regexes live in this one block (the IMP-C23 anti-drift rule) and
+# drift-pin tests assert the predicates agree with them.
+#
+#   DETECTION (either shape, case-insensitive):
+#     _TMDB_TOKEN_RE       tmdb tokens, both shapes   -> _has_tmdb_token()
+#     _PROVIDER_TOKEN_RE   any provider, both shapes  -> _has_provider_token()
+#                          (the artwork walk: a `[tvdbid-…]` show folder
+#                           satisfies the season-inheritance climb)
+#   STAMP (D1): format_tmdb_token() -> "[tmdbid-<id>]" — the ONE formatter;
+#   no stamp site may inline a `{tmdb-…}` f-string again.
+TMDB_TOKEN_SQUARE_RE = re.compile(r"\[tmdbid-[^\]]+\]", re.IGNORECASE)
+TMDB_TOKEN_CURLY_RE = re.compile(r"\{tmdb-[^\}]+\}", re.IGNORECASE)
+PROVIDER_TOKEN_SQUARE_RE = re.compile(r"\[(?:tmdbid|tvdbid|imdbid)-[^\]]+\]", re.IGNORECASE)
+PROVIDER_TOKEN_CURLY_RE = re.compile(r"\{(?:tmdb|tvdb|imdb)-[^\}]+\}", re.IGNORECASE)
+_TMDB_TOKEN_RE = re.compile(
+    r"(?:\[tmdbid-[^\]]+\]|\{tmdb-[^\}]+\})", re.IGNORECASE
+)
+# Kept name — the artwork season-inheritance resolver's predicate (any
+# provider, either shape). Historically tmdb-curly-only; IMP-U6 widened it.
+_PROVIDER_TOKEN_RE = re.compile(
+    r"(?:\[(?:tmdbid|tvdbid|imdbid)-[^\]]+\]|\{(?:tmdb|tvdb|imdb)-[^\}]+\})",
+    re.IGNORECASE,
+)
+
+
+def _has_tmdb_token(name):
+    """True if a folder leaf name already carries a tmdb provider token in
+    EITHER shape — the canonical square `[tmdbid-…]` (IMP-U6, D1) or the legacy
+    curly `{tmdb-…}` / `{TMDB-…}` (pre-IMP-U6 folders; kept recognized forever
+    so a legacy folder is never double-stamped, D3).
+
+    CASE-INSENSITIVE (IMP-C23). Kept deliberately in lockstep with
+    `_TMDB_TOKEN_RE` above (the same predicate; a drift-pin test asserts it);
+    `_PROVIDER_TOKEN_RE` is the ANY-provider superset the artwork walk uses."""
+    return _TMDB_TOKEN_RE.search(name or "") is not None
+
+
+def _has_provider_token(name):
+    """True if a folder leaf name carries ANY provider token (tmdbid / tvdbid /
+    imdbid) in either the square `[prov-…]` or the legacy curly `{prov-…}`
+    shape. The artwork season-inheritance walk uses this so a `[tvdbid-…]`-only
+    show folder also satisfies the climb (it previously did not)."""
+    return _PROVIDER_TOKEN_RE.search(name or "") is not None
+
+
+def format_tmdb_token(tmdb_id):
+    """The ONE stamp formatter (IMP-U6, D1): the canonical `[tmdbid-<id>]`
+    token. Every stamp site must go through this helper."""
+    return f"[tmdbid-{tmdb_id}]"
+
+
+def strip_tmdb_tokens(name):
+    """Remove every tmdb token (either shape) from a leaf name and tidy the
+    whitespace. Used by tools/migrate_token_brackets.py and re-stamp flows."""
+    stripped = _TMDB_TOKEN_RE.sub("", name or "")
+    return re.sub(r"\s{2,}", " ", stripped).strip()
+
+
+# ==========================================
 #               UTILITIES
 # ==========================================
 # load_library, save_library, generate_short_id, calculate_file_hash,
@@ -370,11 +436,14 @@ def split_video_file(input_path, output_dir, method, value_str, file_id=""):
 
     # Command Execution.
     # mkvmerge v97 formats the --split output name via libfmt, so any literal `{`/`}`
-    # in the path (e.g. a `{tmdb-12345}` Plex/Emby/Jellyfin folder token) is read as a
-    # format field and mkvmerge dies with `fmt::format_error: argument not found`
-    # (exit 3). Escape them as `{{`/`}}` for the -o arg ONLY — mkvmerge renders them
-    # back to single braces and writes to the real folder. (A plain merge -o is taken
-    # literally and must NOT be escaped — see merge_video_files; verified mkvmerge v97.)
+    # in the path is read as a format field and mkvmerge dies with
+    # `fmt::format_error: argument not found` (exit 3). The canonical provider
+    # token is now the BRACKET form `[tmdbid-…]` (IMP-U6), which needs no escaping
+    # and matches the chunk names' existing literal `[`/`]`; the escape stays for
+    # legacy `{tmdb-…}` folder names and any other literal brace. Escape for the
+    # -o arg ONLY — mkvmerge renders `{{` back to `{` and writes to the real
+    # folder. (A plain merge -o is taken literally and must NOT be escaped — see
+    # merge_video_files; verified mkvmerge v97.)
     mkv_out = output_pattern.replace("{", "{{").replace("}", "}}")
     cmd = [MKVMERGE_PATH, "-o", mkv_out, "--split", f"size:{split_arg}", input_path]
     try:
@@ -1287,11 +1356,13 @@ def cmd_set_tmdb(manual_id, tmdb_id):
 # ==========================================
 # `cmd_enrich_metadata` is a LOCAL-FIRST TMDB backfill: it reads the ids already
 # in the library, asks TMDB (themoviedb.org) for the matching show/movie, and —
-# only with --apply — writes `metadata.tmdb_id`, stamps the Plex/Emby/Jellyfin
-# `{tmdb-<id>}` token on the SHOW/MOVIE folder (via cmd_rename_folder), and
-# downloads poster.jpg / fanart.jpg (+ per-season posters) WITHOUT EVER fetching
-# media bytes. It is SHOW-CENTRIC (user-confirmed design C): every season + every
-# episode of one show resolves ONCE and the folder token is stamped ONCE.
+# only with --apply — writes `metadata.tmdb_id`, stamps the provider
+# `[tmdbid-<id>]` token on the SHOW/MOVIE folder (via cmd_rename_folder; IMP-U6 —
+# legacy folders carrying the old `{tmdb-…}` curly form are recognized, never
+# re-stamped), and downloads poster.jpg / fanart.jpg (+ per-season posters)
+# WITHOUT EVER fetching media bytes. It is SHOW-CENTRIC (user-confirmed design
+# C): every season + every episode of one show resolves ONCE and the folder
+# token is stamped ONCE.
 #
 # Locked behaviours (do not relax without the user):
 #   * DRY-RUN by default; --apply is required to write anything.
@@ -1684,20 +1755,6 @@ def _download_to(url, dest_path):
         return False
 
 
-def _has_tmdb_token(name):
-    """True if a folder leaf name already carries a `{tmdb-…}` token (idempotency
-    guard — we stamp the token at most once per show/movie folder).
-
-    CASE-INSENSITIVE (IMP-C23). Plex/Emby/Jellyfin treat the provider token
-    case-insensitively and real folders in the wild use `{TMDB-69590}`; without
-    the flag such a folder read as "no token" and the next enrich/rename pass
-    appended a SECOND one (`… {TMDB-69590} {tmdb-69590}`). Kept deliberately in
-    lockstep with `_PROVIDER_TOKEN_RE` (the artwork-inheritance resolver's copy),
-    which has always been `re.IGNORECASE` — the two are the same predicate and
-    must not drift apart again."""
-    return re.search(r"\{tmdb-[^}]+\}", name or "", re.IGNORECASE) is not None
-
-
 _SEASON_ID_RE = re.compile(r"-s(\d+)$", re.IGNORECASE)
 
 
@@ -1813,7 +1870,8 @@ def _season_episode_meta(season_details):
 
 
 def _show_folder_of(season_folders):
-    """The on-disk SHOW folder that the `{tmdb-…}` token is stamped onto, given the
+    """The on-disk SHOW folder that the provider token (`[tmdbid-…]` / legacy
+    `{tmdb-…}`) is stamped onto, given the
     distinct season folders of one show.
 
     Layout assumption (Plex/Emby/Jellyfin standard, matched by the project's own
@@ -2021,7 +2079,7 @@ def _gather_enrich_units(library, id_or_prefix=None, library_filter=None):
         if cat == "other":
             # IMP-D18: Others/sports is not on TMDB/OMDb. Never enrich it — enriching
             # would mis-tag (wrong tmdb_id), rename the real Sports folder via a bogus
-            # {tmdb-…} token, and fetch wrong posters. One skip here covers
+            # provider token, and fetch wrong posters. One skip here covers
             # enrich_metadata / refresh_online / fetch_trivia (all gather via this fn).
             continue
 
@@ -2406,13 +2464,21 @@ def _write_nfo(folder, kind, title, year, tmdb_id, overview="", vote_average=Non
 
     NEVER raises — any IO/permission failure, OR any TMDB-enrichment failure,
     is printed as a warning so the caller's enrich run is never blocked by an
-    NFO write error. Overwrites an existing file (NFOs are regenerable
-    metadata).
+    NFO write error. NEVER overwrites an existing NFO (IMP-U6, D6): a local
+    .nfo always wins — the same rule enrich applies to poster/fanart — so a
+    hand-tuned or previously-written NFO is never clobbered by a re-stamp or
+    re-run; delete it to regenerate.
     """
     import xml.etree.ElementTree as ET
 
     tag = "movie" if kind == "movie" else "tvshow"
     nfo_name = "movie.nfo" if kind == "movie" else "tvshow.nfo"
+    nfo_path = os.path.join(folder, nfo_name)
+    # IMP-U6 (D6): checked BEFORE the optional TMDB enrichment fetches so an
+    # existing NFO costs zero network calls.
+    if os.path.exists(nfo_path):
+        print(f"     📄 {nfo_name} already exists — kept (never overwritten).")
+        return
 
     root = ET.Element(tag)
     ET.SubElement(root, "title").text = title or ""
@@ -2492,7 +2558,6 @@ def _write_nfo(folder, kind, title, year, tmdb_id, overview="", vote_average=Non
 
     tree = ET.ElementTree(root)
     ET.indent(tree, space="  ")  # pretty-print (Python 3.9+)
-    nfo_path = os.path.join(folder, nfo_name)
     try:
         with open(nfo_path, "w", encoding="utf-8") as fh:
             fh.write('<?xml version="1.0" encoding="UTF-8"?>\n')
@@ -2506,7 +2571,7 @@ def cmd_enrich_metadata(arg=None, *flags):
     """Local-first TMDB backfill (SHOW-CENTRIC, IMP-E3/U3/D17 — Phase 5 step 5.4).
 
     Usage: enrich_metadata [id_or_prefix] [--apply] [--library movies|series|anime]
-            [--nfo] [--no-web]
+            [--nfo] [--no-nfo] [--no-web]
     DRY-RUN by default (prints what WOULD happen, writes nothing). --apply performs
     it. --nfo (only honoured when combined with --apply) writes a Kodi/Jellyfin-
     compatible movie.nfo / tvshow.nfo alongside the poster on a confident match
@@ -2532,6 +2597,7 @@ def cmd_enrich_metadata(arg=None, *flags):
     apply = "--apply" in flist
     write_nfo = "--nfo" in flist
     no_web = "--no-web" in flist
+    no_nfo = "--no-nfo" in flist
     library_filter = None
     if "--library" in flist:
         i = flist.index("--library")
@@ -2635,9 +2701,9 @@ def cmd_enrich_metadata(arg=None, *flags):
         will_stamp = bool(folder) and not _has_tmdb_token(base_name)
         if will_stamp:
             print(f"     {'would stamp' if not apply else 'stamping'} folder token: "
-                  f"{base_name} -> {base_name} {{tmdb-{tmdb_id}}}")
+                  f"{base_name} -> {base_name} {format_tmdb_token(tmdb_id)}")
         elif folder:
-            print(f"     folder already has a {{tmdb-…}} token — skip stamp ({base_name}).")
+            print(f"     folder already has a provider id token — skip stamp ({base_name}).")
         print(f"     {'would write' if not apply else 'writing'} metadata.tmdb_id on "
               f"{len(unit['ids'])} entr(y/ies).")
         print(f"     {'would download' if not apply else 'downloading'} up to "
@@ -2683,10 +2749,10 @@ def cmd_enrich_metadata(arg=None, *flags):
                 meta["overview"] = tmdb_overview
         save_library(live)
 
-        # 2) stamp the {tmdb-…} token ONCE on the show/movie folder (paths only —
+        # 2) stamp the provider token ONCE on the show/movie folder (paths only —
         #    cmd_rename_folder is journaled + hash-safe; reused exactly as-is).
         if will_stamp:
-            new_name = f"{base_name} {{tmdb-{tmdb_id}}}"
+            new_name = f"{base_name} {format_tmdb_token(tmdb_id)}"
             ok = cmd_rename_folder(folder, new_name)
             if ok:
                 n_stamped += 1
@@ -2712,8 +2778,11 @@ def cmd_enrich_metadata(arg=None, *flags):
         if unit["kind"] == "show":
             _apply_episode_overviews(unit, tmdb_id, api_key)
 
-        # 4) NFO write — only when --nfo flag is set (IMP-U3 down-payment, step 5.8).
-        if write_nfo and folder:
+        # 4) NFO write (IMP-U3 down-payment + IMP-U6/D6): written by DEFAULT when
+        #    this run stamped the folder — Plex's NFO agent (PMS 1.43+) pins the
+        #    id from it; Jellyfin/Emby read it too. --nfo forces it even without a
+        #    stamp; --no-nfo turns it off entirely (overrides --nfo).
+        if folder and not no_nfo and (write_nfo or will_stamp):
             _write_nfo(
                 folder,
                 kind=unit["kind"],
@@ -3620,7 +3689,7 @@ def _collect_folder_descendants(library, old_folder):
 def cmd_rename_folder(old_folder_or_id, new_folder_name_or_token):
     """Crash-safe cascading folder rename (IMP-D17).
 
-    Rename an on-disk SHOW/season folder (e.g. stamp a `{tmdb-12345}` token onto it)
+    Rename an on-disk SHOW/season folder (e.g. stamp a `[tmdbid-12345]` token onto it)
     and rewrite `folder_path` for EVERY library entry under that folder — all
     seasons/episodes leaves AND the show's season_map container — atomically.
 
@@ -3669,7 +3738,7 @@ def cmd_rename_folder(old_folder_or_id, new_folder_name_or_token):
     else:
         old_folder = os.path.abspath(old_folder_or_id)
 
-    # The new name is a LEAF name (e.g. "Dark {tmdb-70523}"), not a full path:
+    # The new name is a LEAF name (e.g. "Dark [tmdbid-70523]"), not a full path:
     # keep the same parent dir, swap the leaf. Reject a name carrying a separator
     # (that would move the folder elsewhere — out of scope and a footgun).
     if os.sep in new_folder_name_or_token or (os.altsep and os.altsep in new_folder_name_or_token):
@@ -7557,7 +7626,7 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
 # the movie EXACTLY as `cmd_prep_push_rep` does, then (once the archive is
 # confirmed `archived`) enrich it — preset a CLI-supplied `-tmdbid` via
 # `cmd_set_tmdb`, resolve against TMDB, write metadata, and — after a ONE-TIME
-# confirmation gate (Decision 2/3) — stamp the `{tmdb-<id>}` folder token and
+# confirmation gate (Decision 2/3) — stamp the `[tmdbid-<id>]` folder token and
 # download art. `-tvdbid` is refused outright (Decision 1 — TMDB-only; a TVDB
 # id is a different numbering space and would fetch the wrong title).
 #
@@ -7624,7 +7693,7 @@ def _make_rename_confirm(choice, note=None):
     return _confirm
 
 
-def _enrich_after_archive(real_id, write_nfo, no_web, gate):
+def _enrich_after_archive(real_id, write_nfo, no_web, gate, no_nfo=False):
     """Candidate-A enrich leg for `cmd_prep_push_rep_enrich`: resolve + apply +
     confirm-gated stamp for the ONE enrich unit containing `real_id`, WITHOUT
     ever calling `cmd_enrich_metadata` (zero lines of it touched — IMP-D22).
@@ -7727,7 +7796,7 @@ def _enrich_after_archive(real_id, write_nfo, no_web, gate):
     base_name = os.path.basename(os.path.normpath(folder)) if folder else ""
     will_stamp = bool(folder) and not _has_tmdb_token(base_name)
     if will_stamp:
-        new_name = f"{base_name} {{tmdb-{tmdb_id}}}"
+        new_name = f"{base_name} {format_tmdb_token(tmdb_id)}"
         new_folder = os.path.join(os.path.dirname(os.path.normpath(folder)), new_name)
         if gate(folder, new_folder):
             ok = cmd_rename_folder(folder, new_name)  # may raise RollbackHardFail — caller catches
@@ -7737,7 +7806,7 @@ def _enrich_after_archive(real_id, write_nfo, no_web, gate):
         else:
             print("     ⏭️  folder rename declined — run rename_folder later to add the token.")
     elif folder:
-        print(f"     folder already has a {{tmdb-…}} token — skip stamp ({base_name}).")
+        print(f"     folder already has a provider id token — skip stamp ({base_name}).")
 
     image_base = _tmdb_image_base(api_key)
     n_images = _download_unit_images(unit, res, image_base, folder)
@@ -7746,7 +7815,9 @@ def _enrich_after_archive(real_id, write_nfo, no_web, gate):
     if unit["kind"] == "show":
         _apply_episode_overviews(unit, tmdb_id, api_key)
 
-    if write_nfo and folder:
+    # NFO (IMP-U6/D6): default ON when this run stamped the folder; --nfo forces
+    # it even without a stamp; --no-nfo turns it off entirely.
+    if folder and not no_nfo and (write_nfo or will_stamp):
         _write_nfo(
             folder,
             kind=unit["kind"],
@@ -7763,10 +7834,12 @@ def cmd_prep_push_rep_enrich(manual_id, filepath, split_method=None, split_val=N
                                device_id=None, eager_rehash=False, temp_dir=None,
                                extras=None, extras_size=None,
                                tmdb_id=None, tvdb_id=None,
-                               write_nfo=False,  # Decision 4 (2026-08-28, LOCKED): OFF by
-                                                  # default — the NFO CONTENT enrichment
-                                                  # below is independent of this default.
+                               write_nfo=False,  # Decision 4 (2026-08-28, LOCKED): the
+                                                  # --nfo force flag stays OFF by default;
+                                                  # since IMP-U6/D6 a stamp writes the NFO
+                                                  # by default anyway (no_nfo=False).
                                no_web=False,
+                               no_nfo=False,
                                rename_choice="ask"):
     """Autopilot: archive (prep -> push -> replace, EXACTLY `cmd_prep_push_rep`)
     THEN enrich the just-archived movie (IMP-D22). `tmdb_id` presets the TMDB id
@@ -7811,7 +7884,7 @@ def cmd_prep_push_rep_enrich(manual_id, filepath, split_method=None, split_val=N
 
     gate = _make_rename_confirm(rename_choice)
     try:
-        _enrich_after_archive(real_id, write_nfo, no_web, gate)
+        _enrich_after_archive(real_id, write_nfo, no_web, gate, no_nfo=no_nfo)
     except RollbackHardFail as hf:
         # Decision 7: a post-PONR rename failure warns and continues — the
         # archive already succeeded, so this never re-raises nor returns False.
@@ -7883,10 +7956,12 @@ def cmd_prep_push_rep_season_enrich(base_id, folder_path, split_method=None, spl
                                       episode_range=None, device_id=None, eager_rehash=False,
                                       temp_dir=None, extras=None, extras_size=None,
                                       tmdb_id=None, tvdb_id=None,
-                                      write_nfo=False,  # Decision 4 (2026-08-28, LOCKED): OFF by
-                                                         # default — same one-line-flip contract
-                                                         # as `cmd_prep_push_rep_enrich`'s signature.
+                                      write_nfo=False,  # Decision 4 (2026-08-28, LOCKED): the
+                                                         # --nfo force flag stays OFF by default;
+                                                         # since IMP-U6/D6 a stamp writes the NFO
+                                                         # by default anyway (no_nfo=False).
                                       no_web=False,
+                                      no_nfo=False,
                                       rename_choice="ask"):
     """Season autopilot: archive (prep -> push -> replace, EXACTLY
     `cmd_prep_push_rep_season`, every argument forwarded unmodified) THEN
@@ -7989,7 +8064,7 @@ def cmd_prep_push_rep_season_enrich(base_id, folder_path, split_method=None, spl
         gate = _make_rename_confirm(rename_choice)
 
     try:
-        _enrich_after_archive(base_id, write_nfo, no_web, gate)
+        _enrich_after_archive(base_id, write_nfo, no_web, gate, no_nfo=no_nfo)
     except RollbackHardFail as hf:
         # Decision 7: a post-PONR rename failure warns and continues — the
         # archive already succeeded, so this never re-raises nor returns False.
@@ -8323,9 +8398,10 @@ def suggest_target_folder(item):
     For an IN-LIBRARY item (existing leaf), folders are NEVER renamed: returns
     the entry's existing folder_path with applies=False (informational only).
     For a NEW (UNPREPPED) item, builds a leaf-folder name from the guessed
-    Title/Year plus an EDITABLE provider-id placeholder per the provider-tag
-    template (Movies -> {tmdb-…}, Series/Anime -> {tvdb-…}). This step does NO
-    TMDB/TVDB lookup; the braces hold an editable placeholder.
+    Title/Year plus an EDITABLE provider-id placeholder — `[tmdbid-0000000]` for
+    EVERY category (IMP-U6, D2: the old split — Movies `{tmdb-…}`, Series/Anime
+    `{tvdb-…}` — is superseded; TMDB-for-everything stamps tmdbid on shows too).
+    This step does NO TMDB/TVDB lookup; the brackets hold an editable placeholder.
     """
     entry = item.get("entry")
     if entry is not None:
@@ -8359,12 +8435,13 @@ def suggest_target_folder(item):
 
     year_disp = f"({year})" if year else "(Year)"
 
-    if category == "mov":
-        provider_tag = "{tmdb-0000000}"
-        provider_field = "tmdb"
-    else:  # tv / ani -> series-style
-        provider_tag = "{tvdb-000000}"
-        provider_field = "tvdb"
+    # IMP-U6 (D2): the placeholder unifies on TMDB for EVERY category — the
+    # enricher stamps [tmdbid-…] on shows too (TMDB-for-everything, §6.3a), so a
+    # tvdb suggestion would invite a second tag later. (The old per-provider
+    # split — movies {tmdb-…}, series/anime {tvdb-…} — is superseded; legacy
+    # [tvdbid-…] folders in the wild stay recognized by the detectors.)
+    provider_tag = "[tmdbid-0000000]"
+    provider_field = "tmdb"
 
     folder = f"{title} {year_disp} {provider_tag}"
     return {
@@ -8811,7 +8888,7 @@ def items_payload():
         # (Phase 5.7) — the SAME resolver /api/media-image uses, so the SPA only
         # requests a poster <img> when one will actually be served (no speculative
         # 404 per card). It is a few os.path checks per row (own folder -> season
-        # folder -> {tmdb-…} ancestor, first existing wins); short-circuit to False
+        # folder -> provider-token ancestor, first existing wins); short-circuit to False
         # when the entry has neither a folder_path nor a parent to inherit from, so
         # a folderless leaf never even enters the resolver on a large grid.
         has_anchor = bool(entry.get("folder_path")) or bool(entry.get("parent_id"))
@@ -8821,7 +8898,7 @@ def items_payload():
         # backdrop_available: same cheap, LIVE on-disk check via the SAME resolver
         # the /api/media-image route uses, but for the FANART (backdrop) the hover
         # detail-window shows. fanart resolution walks own folder -> season folder ->
-        # {tmdb-…} show folder (it has no per-episode rung), so an episode inherits the
+        # provider-token show folder (it has no per-episode rung), so an episode inherits the
         # season/show backdrop. Gated on has_anchor + short-circuited like the poster
         # check so a folderless leaf never enters the resolver (a couple os.path stats
         # at most). Kept a real bool (JSON-friendly), never a path.
@@ -9582,11 +9659,11 @@ def find_folder_image(folder):
     return None
 
 
-# A folder name carries a provider token like `{tmdb-70523}` / `{tvdb-12345}`
-# (the Plex/Emby/Jellyfin convention rename_folder stamps on a SHOW folder). The
-# season-inheritance resolver walks UP to the nearest ancestor whose basename
-# matches this — i.e. the show folder — and uses ITS poster as the fallback.
-_PROVIDER_TOKEN_RE = re.compile(r"\{tmdb-[^}]+\}", re.IGNORECASE)
+# The provider-token regexes live in ONE block near the top of the file (IMP-U6 —
+# the IMP-C23 anti-drift rule). `_PROVIDER_TOKEN_RE` (any provider, either
+# shape) is defined there. The season-inheritance resolver walks UP to the
+# nearest ancestor whose basename matches it — i.e. the show folder — and uses
+# ITS poster as the fallback.
 
 
 def _kind_image_under_root(folder, kind):
@@ -9649,7 +9726,8 @@ def _episode_still_under_root(folder, filename):
 
 def _ancestor_show_folder_image(start_folder, kind):
     """Walk UP ``start_folder``'s real on-disk ancestors to the NEAREST ancestor
-    whose basename carries a ``{tmdb-…}`` token (the show folder) and return that
+    whose basename carries a provider token — `[tmdbid-…]` / `[tvdbid-…]` /
+    `[imdbid-tt…]` or the legacy curly shapes (IMP-U6) — (the show folder) and return that
     folder's vetted ``<kind>.jpg`` (or None). Stops at / never escapes LOCAL_ROOT
     (the walk halts once it climbs above the media root). READ-ONLY."""
     if not start_folder or not _is_within_local_root(start_folder):
@@ -9699,7 +9777,8 @@ def resolve_artwork_path(library, mid, kind="poster"):
       (ii)  else the entry's season container's folder ``<kind>.jpg`` — found via
             the leaf's ``parent_id`` -> the ``season_map`` entry's ``folder_path``.
       (iii) else the NEAREST ancestor folder (walking UP the entry's real
-            ``folder_path``) whose name carries a ``{tmdb-…}`` token — the show
+            ``folder_path``) whose name carries a provider token (`[tmdbid-…]` or
+            legacy curly shapes, IMP-U6) — the show
             folder — and its ``<kind>.jpg`` (so every episode inherits the show
             poster when nothing more specific exists).
     So an episode WITHOUT its own still falls back to the season poster, then the
@@ -9774,7 +9853,7 @@ def resolve_artwork_path(library, mid, kind="poster"):
             if hit:
                 return hit
 
-    # (iii) Walk UP to the nearest {tmdb-…} show folder and use its <kind>.jpg.
+    # (iii) Walk UP to the nearest provider-token show folder and use its <kind>.jpg.
     # Anchor the walk at the most-specific folder we have for this entry.
     anchor = own_folder
     if not anchor and parent_id:
@@ -9925,8 +10004,8 @@ if __name__ == "__main__":
         print("  prep [id] [filepath]")
         print("  prep_push_rep [id] [filepath] [optional: SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>]")
         print("  prep_push_rep_season [id] [folder] [optional: SIZE..] [OPT: episodes] [device <id_or_name>] [rehash] [tempdir <path>]")
-        print("  prep_push_rep_enrich [id] [filepath] [SIZE_GB/SIZE_MB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>] [-tmdbid <id>] [--yes|--no-rename] [--nfo] [--no-web]  — archive then TMDB-enrich; no id -> auto-resolve exactly like enrich_metadata")
-        print("  prep_push_rep_season_enrich [id] [folder] [SIZE_GB/SIZE_MB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [-tmdbid <id>] [--yes|--no-rename] [--nfo] [--no-web]  — season autopilot, then show-centric enrich")
+        print("  prep_push_rep_enrich [id] [filepath] [SIZE_GB/SIZE_MB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>] [-tmdbid <id>] [--yes|--no-rename] [--nfo] [--no-nfo] [--no-web]  — archive then TMDB-enrich (stamps [tmdbid-…] + writes the NFO); no id -> auto-resolve exactly like enrich_metadata")
+        print("  prep_push_rep_season_enrich [id] [folder] [SIZE_GB/SIZE_MB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [-tmdbid <id>] [--yes|--no-rename] [--nfo] [--no-nfo] [--no-web]  — season autopilot, then show-centric enrich")
         print("  fetch_restore [id] [OPT: episodes 1-3]")  # [NEW]
         print("  set_search [id] [term]")
         print("  set_poster [id] [url]")
@@ -9951,7 +10030,7 @@ if __name__ == "__main__":
         print("  sort")
         print("  fetch [id]")
         print("  recover [id|folder]  (or: recover --scan)")
-        print("  rename_folder [id|folder] \"<NewName {tmdb-12345}>\"  — rename a show/season folder + rewrite every descendant folder_path (crash-safe, no rehash)")
+        print("  rename_folder [id|folder] \"<NewName [tmdbid-12345]>\"  — rename a show/season folder + rewrite every descendant folder_path (crash-safe, no rehash)")
         print("  add_extras <title_id> \"<folders>\" [--extras-size <v|none>] [device <id>] [no-replace]  — attach extras (Specials/Trailers/BTS) to an existing title")
         print("  web [--port N] [--host H] [--no-browser] [--demo]  — Launch the local web operations console (Disk Reclaim view); --demo = SAFE build, all actions simulated")
         print("  token create [--label \"X\"] [--ttl 1h|8h|12h|1d|3d|7d|30d|never]  — Mint a web access token (default --ttl 7d)")
@@ -10113,7 +10192,7 @@ if __name__ == "__main__":
         # rehash, tempdir, --extras/--extras-size), plus the enrich-only flags. The
         # existing block is deliberately untouched: this is a separate sibling.
         if len(sys.argv) < 4:
-            print("❌ Usage: prep_push_rep_enrich [id] [filepath] [optional: SIZE_MB/COUNT val] [device <id_or_name>] [-tmdbid <id>] [--yes|--no-rename] [--nfo] [--no-web]")
+            print("❌ Usage: prep_push_rep_enrich [id] [filepath] [optional: SIZE_MB/COUNT val] [device <id_or_name>] [-tmdbid <id>] [--yes|--no-rename] [--nfo] [--no-nfo] [--no-web]")
             sys.exit(1)
 
         mid = sys.argv[2]
@@ -10128,8 +10207,10 @@ if __name__ == "__main__":
         _et_ppre = []
         cli_tmdb_id = None
         cli_tvdb_id = None
-        write_nfo_flag = False   # Decision 4: --nfo is OFF by default.
+        write_nfo_flag = False   # Decision 4: --nfo (force) is OFF by default; a
+                                 # stamp writes the NFO by default (IMP-U6/D6).
         no_web_flag = False
+        no_nfo_flag = False
         rename_choice = "ask"    # Decision 3: --yes -> "yes", --no-rename -> "no".
 
         i = 0
@@ -10190,6 +10271,10 @@ if __name__ == "__main__":
                 write_nfo_flag = True
                 i += 1
                 continue
+            elif arg == "--no-nfo":
+                no_nfo_flag = True
+                i += 1
+                continue
             elif arg == "--no-web":
                 no_web_flag = True
                 i += 1
@@ -10202,14 +10287,14 @@ if __name__ == "__main__":
         cmd_prep_push_rep_enrich(mid, filepath, method, val, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
                                  extras=_er_ppre["folders"] or None, extras_size=_er_ppre["extras_size"],
                                  tmdb_id=cli_tmdb_id, tvdb_id=cli_tvdb_id,
-                                 write_nfo=write_nfo_flag, no_web=no_web_flag, rename_choice=rename_choice)
+                                 write_nfo=write_nfo_flag, no_web=no_web_flag, no_nfo=no_nfo_flag, rename_choice=rename_choice)
 
     elif cmd == "prep_push_rep_season_enrich":
         # IMP-D22 — same token walk as `prep_push_rep_season` above (SIZE_*/COUNT,
         # episodes, device, rehash, tempdir, --extras/--extras-size), plus the
         # enrich-only flags. The existing block is deliberately untouched.
         if len(sys.argv) < 4:
-            print("❌ Usage: prep_push_rep_season_enrich [id] [folder] [optional: SIZE..] [OPT: episodes <range>] [device <id_or_name>] [-tmdbid <id>] [--yes|--no-rename] [--nfo] [--no-web]")
+            print("❌ Usage: prep_push_rep_season_enrich [id] [folder] [optional: SIZE..] [OPT: episodes <range>] [device <id_or_name>] [-tmdbid <id>] [--yes|--no-rename] [--nfo] [--no-nfo] [--no-web]")
             sys.exit(1)
 
         group_id = sys.argv[2]
@@ -10224,8 +10309,10 @@ if __name__ == "__main__":
         _et_pprse = []
         cli_tmdb_id = None
         cli_tvdb_id = None
-        write_nfo_flag = False   # Decision 4: --nfo is OFF by default.
+        write_nfo_flag = False   # Decision 4: --nfo (force) is OFF by default; a
+                                 # stamp writes the NFO by default (IMP-U6/D6).
         no_web_flag = False
+        no_nfo_flag = False
         rename_choice = "ask"    # Decision 3: --yes -> "yes", --no-rename -> "no".
 
         i = 0
@@ -10291,6 +10378,10 @@ if __name__ == "__main__":
                 write_nfo_flag = True
                 i += 1
                 continue
+            elif arg == "--no-nfo":
+                no_nfo_flag = True
+                i += 1
+                continue
             elif arg == "--no-web":
                 no_web_flag = True
                 i += 1
@@ -10303,7 +10394,7 @@ if __name__ == "__main__":
         cmd_prep_push_rep_season_enrich(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
                                         extras=_er_pprse["folders"] or None, extras_size=_er_pprse["extras_size"],
                                         tmdb_id=cli_tmdb_id, tvdb_id=cli_tvdb_id,
-                                        write_nfo=write_nfo_flag, no_web=no_web_flag, rename_choice=rename_choice)
+                                        write_nfo=write_nfo_flag, no_web=no_web_flag, no_nfo=no_nfo_flag, rename_choice=rename_choice)
 
     elif cmd == "set_search":
         if len(sys.argv) >= 4:
@@ -10537,11 +10628,11 @@ if __name__ == "__main__":
             print("❌ Usage: recover [id|folder]   (or: recover --scan)")
 
     elif cmd == "rename_folder":
-        # rename_folder <old_folder_or_id> "<NewName {tmdb-12345}>"
+        # rename_folder <old_folder_or_id> "<NewName [tmdbid-12345]>"
         if len(sys.argv) >= 4:
             cmd_rename_folder(sys.argv[2], sys.argv[3])
         else:
-            print("❌ Usage: rename_folder [id|folder] \"<NewName {tmdb-12345}>\"")
+            print("❌ Usage: rename_folder [id|folder] \"<NewName [tmdbid-12345]>\"")
 
     elif cmd == "add_extras":
         # add_extras <title_id> "<folders>" [--extras-size <v|none>] [device <id_or_name>] [no-replace]

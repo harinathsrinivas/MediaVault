@@ -183,7 +183,7 @@ def test_nested_layout_happy_path_stamps_parent_folder_with_note(
     assert preset_target == f"{base_id}e01", "children are processed in sorted order -> first child == e01"
 
     # --- token stamped on the PARENT show folder (nested layout) ---
-    stamped_show = show_dir.parent / "Dark {tmdb-70523}"
+    stamped_show = show_dir.parent / "Dark [tmdbid-70523]"
     assert stamped_show.is_dir() and not show_dir.exists()
     assert (stamped_show / "Season 01").is_dir(), "the season subfolder must move WITH the show folder"
     assert (stamped_show / "poster.jpg").read_bytes() == FAKE_JPG
@@ -226,7 +226,7 @@ def test_flat_layout_happy_path_stamps_same_folder_no_note(
         "flat layout: season folder == show folder -> the parent-folder note would be WRONG"
 
     # --- token stamped on the SAME folder (no separate parent) ---
-    stamped = season_dir.parent / "Peaky.Blinders.S06.2022 {tmdb-60574}"
+    stamped = season_dir.parent / "Peaky.Blinders.S06.2022 [tmdbid-60574]"
     assert stamped.is_dir() and not season_dir.exists()
     assert (stamped / "poster.jpg").read_bytes() == FAKE_JPG
 
@@ -403,7 +403,7 @@ def test_sibling_season_preset_not_reached_by_base_id_scoping(
     assert lib[sibling_ep]["metadata"]["tmdb_id"] == 999999
     assert lib[sibling_ep]["folder_path"] == str(sibling_dir)
     assert lib[sibling_id]["folder_path"] == str(sibling_dir)
-    assert not (sibling_dir.parent / f"Peaky.Blinders.S05.2019 {{tmdb-{TMDB_ID_A}}}").exists()
+    assert not (sibling_dir.parent / f"Peaky.Blinders.S05.2019 [tmdbid-{TMDB_ID_A}]").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -456,7 +456,7 @@ def test_show_nfo_carries_creator_names_from_created_by(
         base_id, str(season_dir), tmdb_id=TMDB_ID, write_nfo=True, rename_choice="yes")
 
     assert result is True
-    stamped = season_dir.parent / f"Stranger.Things.S01.2016 {{tmdb-{TMDB_ID}}}"
+    stamped = season_dir.parent / f"Stranger.Things.S01.2016 [tmdbid-{TMDB_ID}]"
     nfo_path = stamped / "tvshow.nfo"
     assert nfo_path.exists(), "tvshow.nfo must be written when --nfo (write_nfo=True) is on"
 
@@ -1086,7 +1086,7 @@ def test_inventory_nested_layout_full_artifact_checklist(
 
       row 1  show `poster.jpg` + `fanart.jpg` at the folder `_show_folder_of`
              resolves — here the PARENT of `Season 01`
-      row 2  the `{tmdb-…}` token stamped on that SAME show folder, with
+      row 2  the `[tmdbid-…]` token stamped on that SAME show folder, with
              `Season 01` intact underneath it
       row 3  a per-season `poster.jpg` inside `Season 01` that is a DIFFERENT
              file from the show poster — its bytes must come from the
@@ -1115,7 +1115,7 @@ def test_inventory_nested_layout_full_artifact_checklist(
     assert not any("/search/" in u for u in fake.urls), "a preset id must never search"
 
     # --- row 2: the token landed on the SHOW folder (the PARENT) ------------
-    stamped_show = show_dir.parent / "Dark {tmdb-70523}"
+    stamped_show = show_dir.parent / "Dark [tmdbid-70523]"
     stamped_season = stamped_show / "Season 01"
     assert stamped_show.is_dir() and not show_dir.exists()
     assert stamped_season.is_dir(), "the season subfolder must move WITH the show folder"
@@ -1204,11 +1204,11 @@ def test_inventory_flat_layout_full_artifact_checklist(
         base_id, str(season_dir), tmdb_id=TMDB_ID, rename_choice="yes") is True
 
     out = capsys.readouterr().out
-    stamped = season_dir.parent / "Peaky.Blinders.S06.2022 {tmdb-60574}"
+    stamped = season_dir.parent / "Peaky.Blinders.S06.2022 [tmdbid-60574]"
 
     # --- row 2: EXACTLY ONE rename, onto the one and only folder ------------
     assert len(rename_calls) == 1, rename_calls
-    assert rename_calls[0][1] == "Peaky.Blinders.S06.2022 {tmdb-60574}"
+    assert rename_calls[0][1] == "Peaky.Blinders.S06.2022 [tmdbid-60574]"
     assert stamped.is_dir() and not season_dir.exists()
     assert "this is the SHOW folder" not in out, \
         "flat layout: show folder == season folder -> the parent note would be WRONG"
@@ -1262,7 +1262,7 @@ def test_episode_range_that_fully_archives_still_stamps_the_token(
         sandbox, make_video, stub_tech_specs, mock_device, fake_dummy,
         patch_tmdb_by_id):
     """An `episode_range` run whose RANGE fully archives enriches normally —
-    including the `{tmdb-…}` folder stamp — even though episodes OUTSIDE the
+    including the `[tmdbid-…]` folder stamp — even though episodes OUTSIDE the
     range are still `local_ready`. (The existing range test asserts the
     metadata side with `rename_choice="no"`; this pins the STAMP side.)"""
     base_id = "tv-en-2019-theexpanse-s05"
@@ -1281,7 +1281,7 @@ def test_episode_range_that_fully_archives_still_stamps_the_token(
         base_id, str(season_dir), episode_range="1-2", tmdb_id=TMDB_ID,
         rename_choice="yes") is True
 
-    stamped = season_dir.parent / f"TheExpanse.S05.2020 {{tmdb-{TMDB_ID}}}"
+    stamped = season_dir.parent / f"TheExpanse.S05.2020 [tmdbid-{TMDB_ID}]"
     assert stamped.is_dir() and not season_dir.exists()
     assert (stamped / "poster.jpg").exists()
     lib = mvcommon.load_library()
@@ -1371,7 +1371,7 @@ def test_preset_tmdb_id_lands_on_a_leaf_never_on_the_season_map(
 
     captured = {}
 
-    def _spy_enrich(real_id, write_nfo, no_web, gate):
+    def _spy_enrich(real_id, write_nfo, no_web, gate, no_nfo=False):
         captured["real_id"] = real_id
         captured["library"] = mvcommon.load_library()
 
@@ -1458,7 +1458,7 @@ def test_mid_season_failure_skips_enrich_and_leaves_resume_message_untouched(
     lib = mvcommon.load_library()
     assert lib[f"{base_id}e01"]["status"] == "archived"
     assert lib[f"{base_id}e02"]["status"] == "local_ready"
-    assert not (season_dir.parent / f"Halted.S01.2020 {{tmdb-60574}}").exists()
+    assert not (season_dir.parent / f"Halted.S01.2020 [tmdbid-60574]").exists()
 
 
 # --- B8: `_season_run_target_ids` de-aliases a combined-episode season ------
@@ -1557,7 +1557,7 @@ def test_local_always_wins_across_the_full_inventory(
         base_id, str(season_dir), tmdb_id=TMDB_ID, rename_choice="yes") is True
 
     out = capsys.readouterr().out
-    stamped_show = show_dir.parent / "Dark {tmdb-70523}"
+    stamped_show = show_dir.parent / "Dark [tmdbid-70523]"
     stamped_season = stamped_show / "Season 01"
 
     assert (stamped_show / "poster.jpg").read_bytes() == LOCAL_SHOW_POSTER
@@ -1602,7 +1602,7 @@ def test_nfo_nested_layout_full_element_set_with_imdb(
         base_id, str(season_dir), tmdb_id=TMDB_ID, write_nfo=True,
         rename_choice="yes") is True
 
-    stamped_show = show_dir.parent / "Dark {tmdb-70523}"
+    stamped_show = show_dir.parent / "Dark [tmdbid-70523]"
     nfo_path = stamped_show / "tvshow.nfo"
     assert nfo_path.exists(), "the NFO belongs in the SHOW folder"
     assert not (stamped_show / "Season 01" / "tvshow.nfo").exists(), \
@@ -1651,7 +1651,7 @@ def test_nfo_flat_layout_omits_imdb_elements_when_the_lookup_fails(
         base_id, str(season_dir), tmdb_id=TMDB_ID, write_nfo=True,
         rename_choice="yes") is True
 
-    stamped = season_dir.parent / f"Peaky.Blinders.S06.2022 {{tmdb-{TMDB_ID}}}"
+    stamped = season_dir.parent / f"Peaky.Blinders.S06.2022 [tmdbid-{TMDB_ID}]"
     root = ET.parse(str(stamped / "tvshow.nfo")).getroot()
 
     assert root.find("imdbid") is None, "a failed lookup must OMIT the element"
@@ -1664,11 +1664,12 @@ def test_nfo_flat_layout_omits_imdb_elements_when_the_lookup_fails(
     assert root.find("tvdbid") is None, "Decision 1: <tvdbid> is NEVER emitted"
 
 
-def test_nfo_is_off_by_default(
+def test_nfo_is_written_by_default(
         sandbox, make_video, stub_tech_specs, mock_device, fake_dummy,
         patch_tmdb_by_id):
-    """Decision 4: `--nfo` is OPT-IN. The same happy path WITHOUT `write_nfo`
-    must leave NO `.nfo` file of any name anywhere under the show folder."""
+    """IMP-U6 (D6): the stamp-time NFO is ON by default — the happy path WITHOUT
+    `write_nfo` writes `tvshow.nfo` into the stamped SHOW folder (Plex's NFO
+    agent pins the id from it). (--no-nfo opts out.)"""
     base_id = "tv-en-2017-dark-s01"
     show_dir, season_dir = _seed_nested_season_show(sandbox, make_video)
     TMDB_ID = 70523
@@ -1679,23 +1680,25 @@ def test_nfo_is_off_by_default(
     assert main.cmd_prep_push_rep_season_enrich(
         base_id, str(season_dir), tmdb_id=TMDB_ID, rename_choice="yes") is True
 
-    stamped_show = show_dir.parent / "Dark {tmdb-70523}"
+    stamped_show = show_dir.parent / "Dark [tmdbid-70523]"
     assert (stamped_show / "poster.jpg").exists(), "the rest of the enrich still ran"
-    assert list(stamped_show.rglob("*.nfo")) == []
+    nfo = stamped_show / "tvshow.nfo"
+    assert nfo.is_file(), "the default stamp-time NFO must exist"
+    assert f"<tmdbid>{TMDB_ID}</tmdbid>" in nfo.read_text(encoding="utf-8")
 
 
-def test_nfo_is_regenerated_not_kept(
+def test_nfo_never_overwritten(
         sandbox, make_video, stub_tech_specs, mock_device, fake_dummy,
         patch_tmdb_by_id):
-    """DEVIATION D-B, pinned explicitly: unlike the artwork rows, a pre-existing
-    `tvshow.nfo` is OVERWRITTEN. That is `_write_nfo`'s own documented,
-    pre-existing contract ("NFOs are regenerable metadata"), shared verbatim
-    with `enrich_metadata --nfo`; IMP-D22 did not introduce or change it. This
-    test exists so the difference from LOCAL-ALWAYS-WINS is deliberate and
-    visible rather than an untested assumption."""
+    """IMP-U6 (D6) — the OLD overwrite deviation is REVERSED: like the artwork
+    rows, a pre-existing `tvshow.nfo` is now KEPT (never overwritten — a local
+    .nfo always wins; delete it to regenerate). `_write_nfo`'s shared contract
+    changed with D6, so `enrich_metadata --nfo` behaves the same way. This test
+    pins the reversal so it is deliberate and visible."""
     base_id = "tv-en-2017-dark-s01"
     show_dir, season_dir = _seed_nested_season_show(sandbox, make_video)
-    (show_dir / "tvshow.nfo").write_bytes(b"<tvshow><title>STALE</title></tvshow>")
+    hand_tuned = b"<tvshow><title>STALE</title></tvshow>"
+    (show_dir / "tvshow.nfo").write_bytes(hand_tuned)
 
     TMDB_ID = 70523
     patch_tmdb_by_id(_FakeTMDBSeriesFull(
@@ -1706,9 +1709,9 @@ def test_nfo_is_regenerated_not_kept(
         base_id, str(season_dir), tmdb_id=TMDB_ID, write_nfo=True,
         rename_choice="yes") is True
 
-    nfo = (show_dir.parent / "Dark {tmdb-70523}" / "tvshow.nfo").read_text(encoding="utf-8")
-    assert "STALE" not in nfo
-    assert "<title>Dark</title>" in nfo and f"<tmdbid>{TMDB_ID}</tmdbid>" in nfo
+    stamped_nfo = show_dir.parent / "Dark [tmdbid-70523]" / "tvshow.nfo"
+    assert stamped_nfo.is_file()
+    assert stamped_nfo.read_bytes() == hand_tuned, "a pre-existing NFO is never overwritten"
 
 
 # --- B15: the D3 non-interactive default can never reach input() -----------
@@ -1739,7 +1742,7 @@ def test_default_rename_choice_is_non_interactive_and_does_not_rename(
     out = capsys.readouterr().out
     assert "non-interactive session — defaulting to NOT renaming" in out
     assert season_dir.is_dir(), "the folder must NOT have been renamed"
-    assert not (season_dir.parent / f"Peaky.Blinders.S06.2022 {{tmdb-{TMDB_ID}}}").exists()
+    assert not (season_dir.parent / f"Peaky.Blinders.S06.2022 [tmdbid-{TMDB_ID}]").exists()
     assert (season_dir / "poster.jpg").exists(), "artwork still lands in the un-stamped folder"
     lib = mvcommon.load_library()
     assert lib[f"{base_id}e01"]["metadata"]["tmdb_id"] == TMDB_ID
@@ -1859,7 +1862,7 @@ def test_anime_glued_season_episode_ids_archive_and_enrich_via_tv_endpoints(
     assert lib[base_id]["type"] == "season_map"
 
     # --- archive leg: both episodes fully archived + dummied + on the device ---
-    stamped_show = show_dir.parent / f"Kurokos Basketball {{tmdb-{TMDB_ID}}}"
+    stamped_show = show_dir.parent / f"Kurokos Basketball [tmdbid-{TMDB_ID}]"
     stamped_season = stamped_show / "Season 03"
     assert stamped_show.is_dir() and not show_dir.exists()
     assert stamped_season.is_dir(), "the season subfolder moves WITH the show folder"
@@ -1965,7 +1968,7 @@ def test_anime_without_a_season_suffix_resolves_through_search_tv(
     assert not any("/episode/" in u for u in fake.urls), fake.urls
 
     # --- archive + stamp on THIS folder (flat layout) -------------------------
-    stamped = season_dir.parent / f"Attack on Titan {{tmdb-{TMDB_ID}}}"
+    stamped = season_dir.parent / f"Attack on Titan [tmdbid-{TMDB_ID}]"
     assert stamped.is_dir() and not season_dir.exists()
     for eid, fn in zip((ep1, ep2), filenames):
         assert lib[eid]["status"] == "archived" and lib[eid]["uploaded"] is True

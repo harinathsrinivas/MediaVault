@@ -26,3 +26,12 @@ Locked decisions + IMP assignments for the web-media-UI feature (mirrors PLAN.md
 | 3 | **IMP-E14** (continues) | aesthetic polish + author & install GLOBAL `web-ui-polish` skill + PWA manifest. |
 | 4 | **IMP-E15** (NEW) — "mobile + Tailscale remote + token auth" + **IMP-A5** (existing, minimal slice) | localhost bind kept; `tailscale serve` doc+script; shared-token middleware; minimal config for host/port/token/TMDB-key; iOS-Safari responsive polish. |
 | 5 | **IMP-E3** + **IMP-U3** (existing) + **IMP-D17** (NEW — `rename_folder` CLI) | TMDB auto-enrich (local-first) + `tmdb_id` field + media-image route + crash-safe cascading `rename_folder` + season inheritance + optional NFO. |
+
+---
+
+## ADDENDUM 2026-09-07 (IMP-U6)
+
+- **#7 update:** the folder token the rename stamps is now `[tmdbid-<id>]` (IMP-U6, D1); the
+  cascade/crash-safe/hash-safe contract of `rename_folder` itself is unchanged.
+- **#8 update:** the artwork ancestor walk matches ANY provider token in EITHER bracket shape
+  (`[tmdbid-…]` / `[tvdbid-…]` / `[imdbid-tt…]` / legacy curly) — `_has_provider_token`.

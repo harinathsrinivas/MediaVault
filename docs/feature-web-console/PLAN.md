@@ -80,6 +80,12 @@ Notes baked into the implementation:
 - Anime: treated as series for foldering — `<Title> (<Year>) {tvdb-000000}` (AniDB/TMDB enrichment deferred to IMP-E3/D10).
 The id inside the braces is an EDITABLE placeholder the user fills/confirms in the UI; this task does NO TMDB/TVDB lookup (deferred to IMP-D10/E3). NOTE: the user's pre-existing folders use the older square-bracket form (e.g. `Dark (2017) [tvdbid-334824]`) and are intentionally left untouched — only NEW suggestions use the curly form.
 
+> **⚠️ SUPERSEDED by IMP-U6 (2026-09-07, D2):** suggestions now use the square
+> `[tmdbid-0000000]` placeholder for EVERY category (movies, series AND anime) — TMDB-only,
+> matching what the enricher actually stamps. The curly `{tvdb-000000}` series suggestion above
+> is history; the note about the user's pre-existing square-bracket folders proved prescient —
+> IMP-U6 migrated the whole library back to that shape (with the `tmdbid-` keyword).
+
 ## Steps
 
 > **Multi-candidate steps (revised on user request — explore competing approaches; usage de-prioritized).** Steps **1, 3, and 6** run as multi-candidate bake-offs (each: N isolated worktrees → judge picks the winner, which is merged before dependent steps run). These are the three genuinely fork-worthy decisions: the reclaim-scan **data model** (step 1 — greenfield, and everything downstream depends on its shape), the **action-execution / concurrency model** behind partly-destructive actions (step 3 — safety-critical), and the **"futuristic" UI's information architecture** (step 6 — the user's headline ask and an inherently subjective design space). Each multi-candidate step PINS its output / HTTP / behavior **contract** (identical across candidates) so the bake-off never ripples into dependent steps; candidates differ ONLY on internal strategy. All other steps (2, 4, 5, 7, 8, 9 — tests, dispatch arm, requirements, docs) follow fixed patterns and stay single-executor.

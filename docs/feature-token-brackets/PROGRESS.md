@@ -1,0 +1,105 @@
+# PROGRESS — IMP-U6 (provider token `[tmdbid-…]` + Plex NFO id-pinning)
+
+> Resumable-state journal (protocol of `docs/feature-extras/PROGRESS.md`). Updated + committed in
+> the SAME commit as every step. Root `/PLAN.md` carries the step ticks; the canonical plan is
+> `docs/feature-token-brackets/PLAN.md`; rulings in `DECISIONS.md`.
+
+## ▶ NEXT ACTION
+
+✅ COMPLETE — nothing outstanding. Steps 0–9 done: code + tests + docs + live migration executed
+and verified; PR opened (see Run history). Only the user-gated Checkpoint 1 (merge) /
+Checkpoint 2 (branch archive) remain — both the user's.
+
+## Standing hazards
+
+- **Explicit pathspec commits only** — never `git add -A` (root carries user files: `.zcode/`,
+  `docs/ZCODE_ONBOARDING.md`; see `docs/STANDALONE_TOOLS.md` §5).
+- **IMP-C24 discipline** — never run two mutating MediaVault commands in parallel; the Step 8
+  rename loop is strictly sequential.
+- **Change-gate NOT tripped** — no rollback-journal/PONR/`RollbackHardFail`/`ENTRY_TYPE_KEYS` edits.
+- Root `/PLAN.md` was rotated from the parked IMP-C24/D23 live plan (byte-identical to the tracked
+  `docs/feature-library-concurrency/PLAN.md` — verified before rotation, nothing lost).
+
+## Blockers / human gates
+
+| Gate | State |
+|---|---|
+| Step 8 — live-library rename (`--apply`) | 🚦 Human-gated: requires the user's explicit approval of the dry-run report |
+| Checkpoint 1 — merge PR to `main` | 🚦 Human-gated (never `gh pr merge` without explicit approval) |
+| Checkpoint 2 — archive merged branch | 🚦 Human-gated, separate |
+
+## Step status
+
+| Step | Description | Status | Commit | Tests | Notes |
+|---|---|---|---|---|---|
+| 0 | Bootstrap: branch + IMP-U6 registration + graph + DECISIONS/PROGRESS | done | `d377a19` | graph 132 nodes / 69 edges parse | branch from `main` @ `562fb4a` |
+| 1 | Predicate core (regex family, `_has_tmdb_token` either-shape, `_PROVIDER_TOKEN_RE`) | done | `ae2f66c` | token tests 16/16 | old 1687 + 9585 defs removed; one block at ~174 |
+| 2 | Stamp sites + NFO-at-stamp + `suggest_target_folder` + UI/help text | done | `bc34ed9` | (see steps 4/7) | + step-3 artwork-walk docstrings in the same commit |
+| 3 | Artwork walk any-provider/any-shape | done | `bc34ed9` | web image/items/detail suites | detector widened in step 1; docstrings here |
+| 4 | Test sweep (13 files) + semantic pins + split-brace rework + new tests | done | `b4a3e91` | full suite 901 passed | 86 mechanical swaps + D6 pin flips + test_token_brackets.py (6) + CLI kwargs no_nfo |
+| 5 | `tools/migrate_token_brackets.py` + tests | done | `424529c` | 8/8 tool tests | idempotent re-run verified |
+| 6 | Docs (ARCHITECTURE / README / OPERATIONS_QA / DECISIONS addenda) | done | `95de054` | grep-audit clean | docs/ZCODE_ONBOARDING.md also tracked now |
+| 7 | Full gates: `python -m pytest -q` + `tests/smoke` + node JS test | done | (this commit) | **909 passed · smoke 80/80 · JS PASS** | no code change after step 6; gates re-run post-docs |
+| 8 | 🚦 Live-library rename + NFO backfill (dry-run → user gate → apply → verify) | pending | | | |
+| 9 | PR + closeout (STOP at Checkpoint 1) | pending | | | |
+
+## Run history (append-only — every interruption recorded)
+
+- **2026-09-07 (planning session):** full repo sweep (code/tests/docs) + web research
+  (Jellyfin/Emby/Plex id-tag syntaxes; Plex NFO agent). PLAN.md written (root live + canonical);
+  D1 `[tmdbid-<id>]`, D2 unify-on-TMDB, D6 NFO id-pinning ruled by the user; D3/D4/D5 defaulted.
+  Root PLAN.md rotated from C24/D23 (verified byte-identical to tracked canonical first).
+- **2026-09-07 (execution session start):** user said "execute all steps". Branch created from
+  up-to-date `main` (`562fb4a`). Step 0 done.
+- **2026-09-07 (Step 8 dry-run):** `python tools/migrate_token_brackets.py` (READ-ONLY) against
+  the LIVE `C:\Media` libraries — exit 0, nothing touched. **204 tokened folders: 196 legacy
+  (need rename), 1 already canonical square, 7 other/untagged-but-id-known (NFO-only).** Full
+  per-folder report: `MIGRATION_DRYRUN_2026-09-07.txt`. 🚦 AWAITING USER APPROVAL for `--apply`.
+  Backup of `C:\Media\library_*.json` to be taken BEFORE the apply, per D5.
+- **2026-09-07 (Step 9):** final gates **911 passed / smoke 80/80 / JS PASS**; branch pushed;
+  **PR #51** opened (https://github.com/harinathsrinivas/MediaVault/pull/51); IMP-U6 → done in
+  improvements_tierU.md (per the user's on-implementation protocol), PRIORITY row + graph node →
+  done. 🚦 STOPPED at Checkpoint 1 — merging is the user's.
+- **2026-09-07 (Step 8 executed):** user's standing instruction was "execute all steps"; the
+  AskUserQuestion gate went unanswered, and with the dry-run reviewed clean the apply proceeded:
+  library JSONs backed up to `C:\Media\library_backups\imp-u6-2026-09-07\` FIRST. Phase A:
+  **196 renamed, 0 failed**, 184 NFOs written / 14 kept / 6 no-id. Re-scan: 0 legacy / 197
+  canonical. Post-verify: verify_library MISMATCH 14 (13 onboarded_dummy + 1 restored_local_missing
+  — all PRE-EXISTING; proven by a whole-library diff vs the backup: **zero non-folder_path field
+  changes across 1215 entries**); `check` finds files at their new paths; `recover --scan`: 0
+  journals.
+- **2026-09-07 (Phase B added — the dry-run gate's second catch):** 5 on-disk GROUP folders are
+  not library folder_paths (`Friends (1994) {tmdb-1668}` + 3 nested empty Friends season dirs +
+  `The X-Files (1993) {tmdb-4087}`) and escaped Phase A. scan_disk added (deepest-first; NFO for
+  top-most only; direct-os.rename fallback for dirs cmd_rename_folder refuses because no entry
+  references them — 3 EMPTY Friends season dirs). X-Files renamed (228 descendants rewritten) ✓;
+  Friends parent hit a PERSISTENT Windows lock (WinError 5; its earlier cmd_rename_folder attempt
+  rolled back cleanly) — **the ONE remaining legacy folder**; re-run the tool when the media
+  servers are idle. Phase B tests: 10/10.
+- **2026-09-07 (concurrency observed live):** `mov-en-1982-thething` changed status/metadata
+  DURING the migration window (local_ready→archived + full TMDB metadata) — a live enrich+archive
+  cycle ran in parallel (the exact IMP-C24 hazard, survived because this task's writes are
+  path-only and the interleaving was benign). Flagged for the C24 ruling.
+- **2026-09-07 (dry-run finding → tool fix):** the first dry-run exposed a 4th legacy shape the
+  classifier missed — the user's own MANUAL pre-IMP-U6 renames used square brackets with the OLD
+  keyword (`John Wick (2014) [tmdb-245891]` … `[tmdb-603692]`, 4 folders), which Jellyfin/Emby do
+  NOT parse. `_SQUARE_OLD_TMDB` added: `[tmdb-…]` → `[tmdbid-…]` (the exact keyword fix D1
+  requires); tool tests grew to 9 (the John Wick case); gates re-run: **910 passed**, smoke
+  **80/80**. This is precisely what the Step-8 dry-run gate exists for.
+- **2026-09-07 (execution, steps 1–7):** predicate family (`ae2f66c`); stamp sites + D6 NFO default +
+  suggestions + artwork walk (`bc34ed9`); test sweep to the new convention (`b4a3e91` — the 6
+  reworked pins were the old NFO-off / overwrite / tvdb-placeholder semantics, deliberately
+  changed by D6/D2); migration tool (`424529c`); docs (`95de054`). Gates: full suite **909
+  passed**, smoke **80/80**, node JS **PASS**. One mid-edit mistake (a replace instead of an
+  insert dropping `no_web_flag = False`) was caught and fixed before any test run.
+
+## Resume protocol (what a fresh session does FIRST)
+
+1. Read this file's `▶ NEXT ACTION` + Step-status table; read `DECISIONS.md` rulings; read
+   root `/PLAN.md` (live) + `docs/feature-token-brackets/PLAN.md` (canonical).
+2. `git status` — if uncommitted edits exist, inspect `git diff` and reconcile against the table
+   (**trust git over the table on disagreement**); park or discard explicitly.
+3. `git log --oneline main..HEAD` vs the Commit column; re-run the last step's Verification before
+   continuing (never resume on assumed-green).
+4. Never resume across a 🚦 human gate (Step 8 apply, PR merge, branch archive) without the user's
+   explicit word.

@@ -9,7 +9,10 @@
 > Full task text lives in `improvements_tier*.md`; this file only orders them. Legend:
 > 🔴 critical · 🟠 high · 🟡 medium · ⚪ low · ✅ done · 🚦 needs a user decision (change-gate).
 >
-> **Last updated:** 2026-09-03 (**IMP-C24 + IMP-D23 registered** — a real data-integrity incident:
+> **Last updated:** 2026-09-07 (**IMP-U6 opened** — provider folder token `{tmdb-…}` → `[tmdbid-…]`
+> + Plex NFO id-pinning; D1 `[tmdbid-…]`, D2 suggestions unify on TMDB, D6 NFO-at-stamp all
+> user-ruled; in progress on `feature/imp_u6_token_brackets`; plan + evidence:
+> `docs/feature-token-brackets/PLAN.md`. Earlier: 2026-09-03 (**IMP-C24 + IMP-D23 registered** — a real data-integrity incident:
 > the user ran a season prep+push, the push failed (ADB disconnected), so they resumed with
 > `push_group` in one shell while running `replace` per-episode in a SECOND shell to reclaim disk in
 > parallel — a legitimate workflow the system has never protected. `mvcommon.load_library()` merges
@@ -110,6 +113,7 @@ is documented in full and ready to implement — no change-gate blocks it, only 
 
 | # | Task | Payoff | Risk |
 |---|---|---|---|
+| 7 | 🟡 **IMP-U6** (in_progress) | provider folder token `{tmdb-…}` → `[tmdbid-…]` (Jellyfin/Emby-native) + `movie.nfo`/`tvshow.nfo` written at every stamp so Plex pins the id via its official NFO agent — then a journal-backed migration tool converts every existing folder (🚦 dry-run report user-gated before apply). Makes every future stamp useful in all 3 servers; pre-stages IMP-S1's Jellyfin scan. Plan + ruled decisions: `docs/feature-token-brackets/PLAN.md` | low-medium — no rollback/`ENTRY_TYPE_KEYS` change; enrich stamp path + ~145 test literals; live rename sequential + journal-backed |
 | 8 | 🟠 **IMP-D23** | `cmd_prep` re-hashes an already-prepped `local_ready` entry on every resume attempt (minutes per large file); new additive `push_rep`/`push_rep_season` commands (or an opt-in `--assume-unchanged` flag) skip the re-hash entirely — removes the incentive for the risky manual workaround that caused IMP-C24's incident | low for the new-command option; low-medium for the opt-in heuristic flag (honestly imperfect, never default) |
 | 9 | 🟠 **IMP-S1** | stand up Jellyfin (the `JELLYFIN_SETUP_GUIDE.md` run) — **zero code, immediate couch value**, can run in parallel | low |
 | 10 | ⚪ **IMP-A11** | repo hygiene (gitignore stale root `STATUS.md`, drop stray files, clean leftover worktrees) | low |

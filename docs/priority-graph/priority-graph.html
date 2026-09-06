@@ -254,6 +254,7 @@ const TASKS = [
  ["U3","NFO + artwork pipeline","U","high","todo","partial — NFO/artwork down-payment shipped (movie.nfo/tvshow.nfo via --nfo; poster.jpg/fanart.jpg auto-download; /api/media-image season-inheritance resolver); per-episode NFOs + combined-ep NFOs + AniDB ids in anime NFOs + bulk backfill review-diff mode pending"],
  ["U4","DV-FEL playback paths","U","med","todo","Right device for reference content (Ugoos)"],
  ["U5","C# Jellyfin plugin","U","med","todo","Polish phase — last, after the daemon proves out"],
+ ["U6","provider token → [tmdbid-…] + Plex NFO pin","U","med","todo","IMP-U6 — {tmdb-…} → [tmdbid-…] (Jellyfin/Emby-native) + movie.nfo/tvshow.nfo at every stamp (Plex NFO agent pins the id); migration tool converts existing folders (dry-run user-gated); D1/D2/D6 user-ruled 2026-09-07"],
  // X — cloud resilience & privacy (NEW)
  ["X1","multi-account replication","X","high","todo","Every chunk in ≥2 accounts — the real backup vs CSAM-ban loss"],
  ["X2","topology + loss runbook","X","high","todo","Records sharing-vs-replication decision; recovery checklist"],
@@ -271,6 +272,7 @@ const EDGES = [
  ["E7","X1"],["F3","X1"],["X1","X2"],["X1","X4"],["X1","X5"],["X3","F1"],
  ["C12","B7"],["E1","F7"],["U3","U2"],["C16","X1"],["C16","S3"],["C17","C6"],["C16","C17"],["C19","C20"],["C20","C21"],["E14","E15"],["A5","E15"],["E14","E16"],["E3","E16"],["C18","C22"],["D22","C22"],["C18","C23"],["D22","C23"],
  ["D22","D23"],["C24","D23"],["C24","B1"],
+ ["D17","U6"],["D22","U6"],["C23","U6"],
 ];
 
 const PRI={crit:{c:"#ff2d55",r:140,size:30,lbl:"Critical / decision"},high:{c:"#ff9f0a",r:300,size:22,lbl:"High"},

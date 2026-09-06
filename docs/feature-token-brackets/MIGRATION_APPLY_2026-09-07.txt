@@ -1,0 +1,650 @@
+⚠️  LIVE OPERATION: folders under C:\Media will be RENAMED (journal-backed, hash-safe, sequential). Library JSONs are NOT backed up by this tool — back up C:\Media\library_*.json first if you have not already.
+==============================================================================
+  IMP-U6 token migration — 204 tokened folder(s) found
+    legacy token (needs rename) : 0
+    already square [tmdbid-…]   : 197
+    other-provider tags only    : 7
+==============================================================================
+  [  ok  ] Attack.on.Titan.S01.2013.1080p [tmdbid-1429]
+          ids: ani-ja-2013-attackontitan21, ani-ja-2013-attackontitan17, ani-ja-2013-attackontitan18, ani-ja-2013-attackontitan19, ani-ja-2013-attackontitan20, ani-ja-2013-attackontitan13, ani-ja-2013-attackontitan05, ani-ja-2013-attackontitan22, ani-ja-2013-attackontitan24, ani-ja-2013-attackontitan02, ani-ja-2013-attackontitan25, ani-ja-2013-attackontitan10, ani-ja-2013-attackontitan11, ani-ja-2013-attackontitan01, ani-ja-2013-attackontitan08, ani-ja-2013-attackontitan09, ani-ja-2013-attackontitan12, ani-ja-2013-attackontitan04, ani-ja-2013-attackontitan03, ani-ja-2013-attackontitan07, ani-ja-2013-attackontitan16, ani-ja-2013-attackontitan14, ani-ja-2013-attackontitan23, ani-ja-2013-attackontitan15, ani-ja-2013-attackontitan06, ani-ja-2013-attackontitan  kind: tvshow  tmdb_id: 1429  nfo: present
+  [  ok  ] Death Note (Complete Series) [1080p] (Dual Audio) [tmdbid-13916]
+          ids: ani-ja-2006-deathnote01, ani-ja-2006-deathnote02, ani-ja-2006-deathnote03, ani-ja-2006-deathnote04, ani-ja-2006-deathnote05, ani-ja-2006-deathnote06, ani-ja-2006-deathnote07, ani-ja-2006-deathnote08, ani-ja-2006-deathnote09, ani-ja-2006-deathnote10, ani-ja-2006-deathnote11, ani-ja-2006-deathnote12, ani-ja-2006-deathnote13, ani-ja-2006-deathnote14, ani-ja-2006-deathnote15, ani-ja-2006-deathnote16, ani-ja-2006-deathnote17, ani-ja-2006-deathnote18, ani-ja-2006-deathnote19, ani-ja-2006-deathnote20, ani-ja-2006-deathnote21, ani-ja-2006-deathnote22, ani-ja-2006-deathnote23, ani-ja-2006-deathnote24, ani-ja-2006-deathnote25, ani-ja-2006-deathnote26, ani-ja-2006-deathnote27, ani-ja-2006-deathnote28, ani-ja-2006-deathnote29, ani-ja-2006-deathnote30, ani-ja-2006-deathnote31, ani-ja-2006-deathnote32, ani-ja-2006-deathnote33, ani-ja-2006-deathnote34, ani-ja-2006-deathnote35, ani-ja-2006-deathnote36, ani-ja-2006-deathnote37, ani-ja-2006-deathnote  kind: tvshow  tmdb_id: 13916  nfo: present
+  [  ok  ] Kuroko's Basketball - Season 1 (2012) [tmdbid-45783]
+          ids: ani-ja-2012-kurokosbasketball-s0118, ani-ja-2012-kurokosbasketball-s0101, ani-ja-2012-kurokosbasketball-s0125, ani-ja-2012-kurokosbasketball-s0104, ani-ja-2012-kurokosbasketball-s0103, ani-ja-2012-kurokosbasketball-s0123, ani-ja-2012-kurokosbasketball-s0102, ani-ja-2012-kurokosbasketball-s0113, ani-ja-2012-kurokosbasketball-s0112, ani-ja-2012-kurokosbasketball-s0121, ani-ja-2012-kurokosbasketball-s0114, ani-ja-2012-kurokosbasketball-s0109, ani-ja-2012-kurokosbasketball-s0106, ani-ja-2012-kurokosbasketball-s0124, ani-ja-2012-kurokosbasketball-s0108, ani-ja-2012-kurokosbasketball-s0122, ani-ja-2012-kurokosbasketball-s0110, ani-ja-2012-kurokosbasketball-s0111, ani-ja-2012-kurokosbasketball-s0105, ani-ja-2012-kurokosbasketball-s0115, ani-ja-2012-kurokosbasketball-s0116, ani-ja-2012-kurokosbasketball-s0107, ani-ja-2012-kurokosbasketball-s0117, ani-ja-2012-kurokosbasketball-s0120, ani-ja-2012-kurokosbasketball-s0119, ani-ja-2012-kurokosbasketball-s0122.5, ani-ja-2012-kurokosbasketball-s01  kind: tvshow  tmdb_id: 45783  nfo: present
+  [  ok  ] Kuroko's Basketball - Season 2 (2013) [tmdbid-45783]
+          ids: ani-ja-2013-kurokosbasketball-s0217, ani-ja-2013-kurokosbasketball-s0224, ani-ja-2013-kurokosbasketball-s0218, ani-ja-2013-kurokosbasketball-s0214, ani-ja-2013-kurokosbasketball-s0222, ani-ja-2013-kurokosbasketball-s0215, ani-ja-2013-kurokosbasketball-s0219, ani-ja-2013-kurokosbasketball-s0221, ani-ja-2013-kurokosbasketball-s0213, ani-ja-2013-kurokosbasketball-s0223, ani-ja-2013-kurokosbasketball-s0216, ani-ja-2013-kurokosbasketball-s0220, ani-ja-2013-kurokosbasketball-s0225, ani-ja-2013-kurokosbasketball-s0216.5, ani-ja-2013-kurokosbasketball-s0206, ani-ja-2013-kurokosbasketball-s0201, ani-ja-2013-kurokosbasketball-s0204, ani-ja-2013-kurokosbasketball-s0211, ani-ja-2013-kurokosbasketball-s0205, ani-ja-2013-kurokosbasketball-s0210, ani-ja-2013-kurokosbasketball-s0203, ani-ja-2013-kurokosbasketball-s0212, ani-ja-2013-kurokosbasketball-s0209, ani-ja-2013-kurokosbasketball-s0207, ani-ja-2013-kurokosbasketball-s0208, ani-ja-2013-kurokosbasketball-s0202, ani-ja-2013-kurokosbasketball-s02  kind: tvshow  tmdb_id: 45783  nfo: present
+  [  ok  ] Kuroko's Basketball - Season 3 (2015) [tmdbid-45783]
+          ids: ani-ja-2015-kurokosbasketball-s0324, ani-ja-2015-kurokosbasketball-s0323, ani-ja-2015-kurokosbasketball-s0311, ani-ja-2015-kurokosbasketball-s0325, ani-ja-2015-kurokosbasketball-s0322, ani-ja-2015-kurokosbasketball-s0319, ani-ja-2015-kurokosbasketball-s0321, ani-ja-2015-kurokosbasketball-s0318, ani-ja-2015-kurokosbasketball-s0317, ani-ja-2015-kurokosbasketball-s0320, ani-ja-2015-kurokosbasketball-s0310, ani-ja-2015-kurokosbasketball-s0302, ani-ja-2015-kurokosbasketball-s0303, ani-ja-2015-kurokosbasketball-s0309, ani-ja-2015-kurokosbasketball-s0307, ani-ja-2015-kurokosbasketball-s0301, ani-ja-2015-kurokosbasketball-s0316, ani-ja-2015-kurokosbasketball-s0312, ani-ja-2015-kurokosbasketball-s0305, ani-ja-2015-kurokosbasketball-s0306, ani-ja-2015-kurokosbasketball-s0304, ani-ja-2015-kurokosbasketball-s0308, ani-ja-2015-kurokosbasketball-s0315, ani-ja-2015-kurokosbasketball-s0314, ani-ja-2015-kurokosbasketball-s0313, ani-ja-2015-kurokosbasketball-s0325.5, ani-ja-2015-kurokosbasketball-s03  kind: tvshow  tmdb_id: 45783  nfo: present
+  [  ok  ] John Wick (2014) [tmdbid-245891]
+          ids: mov-en-2014-johnwick1  kind: movie  tmdb_id: 245891  nfo: present
+  [  ok  ] John Wick Chapter 2 (2017) [tmdbid-324552]
+          ids: mov-en-2017-johnwick2  kind: movie  tmdb_id: 324552  nfo: present
+  [  ok  ] John Wick Chapter 3 - Parabellum (2019) [tmdbid-458156]
+          ids: mov-en-2019-johnwick3  kind: movie  tmdb_id: 458156  nfo: present
+  [  ok  ] John Wick Chapter 4 (2023) [tmdbid-603692]
+          ids: mov-en-2023-johnwick4  kind: movie  tmdb_id: 603692  nfo: present
+  [  ok  ] Nobody.2021.2160p.BluRay.REMUX.DTS-HD.MA.TrueHD.7.1.Atmos [tmdbid-615457]
+          ids: mov-en-2021-nobody  kind: movie  tmdb_id: 615457  nfo: present
+  [  ok  ] Casino.Royale.2006.UHD.BluRay.2160p.DTS-HD.MA.5.1.DV.HEVC.REMUX [tmdbid-36557]
+          ids: mov-en-2006-bond1casinoroyal  kind: movie  tmdb_id: 36557  nfo: present
+  [  ok  ] No.Time.to.Die.2021.UHD.BluRay.2160p.TrueHD.Atmos.7.1.DV.HEVC.REMUX [tmdbid-370172]
+          ids: mov-en-2021-bond5notimetodie  kind: movie  tmdb_id: 370172  nfo: present
+  [  ok  ] Quantum.of.Solace.2008.UHD.BluRay.2160p.DTS-HD.MA.5.1.DV.HEVC.REMUX [tmdbid-10764]
+          ids: mov-en-2008-bond2quantumofsolace  kind: movie  tmdb_id: 10764  nfo: present
+  [  ok  ] Skyfall.2012.UHD.BluRay.2160p.DTS-HD.MA.5.1.DV.HEVC.REMUX [tmdbid-37724]
+          ids: mov-en-2012-bond3skyfall  kind: movie  tmdb_id: 37724  nfo: present
+  [  ok  ] Spectre.2015.UHD.BluRay.2160p.DTS-HD.MA.7.1.DV.HEVC.REMUX [tmdbid-206647]
+          ids: mov-en-2015-bond4spectre  kind: movie  tmdb_id: 206647  nfo: present
+  [  ok  ] 12 Angry Men 1957 4k [tmdbid-389]
+          ids: mov-en-1957-12angrymen  kind: movie  tmdb_id: 389  nfo: present
+  [  ok  ] The,Godfather.Part.II.1974.UHD.2160p.HDR10.DV.P7.TrueHD.5.1 [tmdbid-240]
+          ids: mov-en-1974-godfather2  kind: movie  tmdb_id: 240  nfo: present
+  [  ok  ] The.Godfather.1972.2160p.BluRay.TrueHD.5.1-FGT [tmdbid-238]
+          ids: mov-en-1972-godfather  kind: movie  tmdb_id: 238  nfo: present
+  [  ok  ] The.Godfather.Part.III.1990.UHD.2160p.Hybrid.HDR10.DV.P7 [tmdbid-242]
+          ids: mov-en-1990-godfather3  kind: movie  tmdb_id: 242  nfo: present
+  [  ok  ] The Thing (1982) [tmdbid-1091]
+          ids: mov-en-1982-thething  kind: movie  tmdb_id: 1091  nfo: present
+  [  ok  ] The.Silence.of.the.Lambs.1991.UHD.2160p.REMUX.Hybrid.HDR10.DV.P7.DTS-HD.5.1.TrueHD.DDP.H265-KC [tmdbid-274]
+          ids: mov-en-1972-silenceofthelambs  kind: movie  tmdb_id: 274  nfo: present
+  [  ok  ] The.Truman.Show.1998.2160p.UHD.Blu-ray.Remux.DV.HDR.HEVC.TrueHD.Atmos.7.1 [tmdbid-37165]
+          ids: mov-en-1998-thetrumanshow  kind: movie  tmdb_id: 37165  nfo: present
+  [  ok  ] Titanic 1997 2160p 7.1 [tmdbid-597]
+          ids: mov-en-1997-titanic  kind: movie  tmdb_id: 597  nfo: present
+  [  ok  ] Manchester.by.the.Sea.2016.2160p.SDR.AMZN.WEBRip.DTS-HD.MA.5.1.x265 [tmdbid-334541]
+          ids: mov-en-2016-manchesterbythesea  kind: movie  tmdb_id: 334541  nfo: present
+  [  ok  ] V.for.Vendetta.2005.UHD.BluRay.2160p.TrueHD.Atmos.7.1.DV.HEVC.HYBRID [tmdbid-752]
+          ids: mov-en-2005-vforvendetta  kind: movie  tmdb_id: 752  nfo: present
+  [  ok  ] Boiler.Room.2000.1080p.Remux.AVC.DTS-HD.MA.7.1 [tmdbid-14181]
+          ids: mov-en-2000-boilerroom  kind: movie  tmdb_id: 14181  nfo: present
+  [  ok  ] Margin.Call.2011.MULTi.1080p.BluRay.AVC.DTS-HD.MA.5.1 [tmdbid-50839]
+          ids: mov-en-2011-margincall  kind: movie  tmdb_id: 50839  nfo: present
+  [  ok  ] The.Big.Short.2015.1080p.BluRay.REMUX.AVC.DTS-HD.MA.7.1 [tmdbid-318846]
+          ids: mov-en-2015-thrbigshort  kind: movie  tmdb_id: 318846  nfo: present
+  [  ok  ] The.Wolf.of.Wall.Street.2013.UHD.2160p.REMUX.Hybrid.HDR10 [tmdbid-106646]
+          ids: mov-en-2013-wolfofwallstreet  kind: movie  tmdb_id: 106646  nfo: present
+  [  ok  ] Too.Big.To.Fail.2011.1080p.BluRay.x264.DTS-FGT [tmdbid-65034]
+          ids: mov-en-2011-toobigtofail  kind: movie  tmdb_id: 65034  nfo: present
+  [  ok  ] Wall.Street.1987.2160p.WEB-DL.x265.10bit.SDR.DTS-HD.MA.5.1 [tmdbid-10673]
+          ids: mov-en-1987-wallstreet  kind: movie  tmdb_id: 10673  nfo: present
+  [  ok  ] Wall.Street.Money.Never.Sleeps.2010.1080p.CEE.BluRay.REMUX.AVC.DTS-HD.MA.5.1-FGT [tmdbid-33909]
+          ids: mov-en-2010-wallstreetmoneyneversleeps  kind: movie  tmdb_id: 33909  nfo: present
+  [  ok  ] Climax.2018.FRENCH.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-FGT [tmdbid-507076]
+          ids: mov-en-2018-climax  kind: movie  tmdb_id: 507076  nfo: present
+  [  ok  ] Enter.The.Void.2009.Uncut.Bluray.1080p.DTS-HD.x264 [tmdbid-34647]
+          ids: mov-en-2009-enterthevoid  kind: movie  tmdb_id: 34647  nfo: present
+  [  ok  ] Irreversible.2002.Remastered.1080p.BluRay.x264 [tmdbid-979]
+          ids: mov-en-2002-irreversible  kind: movie  tmdb_id: 979  nfo: present
+  [  ok  ] Harry.Potter.and.the.Sorcerer's.Stone.2001.Theatrical.Cut.UHD.BluRay.2160p.DTS-X.7.1.DV.HEVC.HYBRID.REMUX-FraMeSToR
+          ids: mov-en-2001-hp1harrypotterandtheSorcerersstone  kind: movie  tmdb_id: None  nfo: no id — skipped
+  [  ok  ] The Autopsy of Jane Doe (2016) [tmdbid-397243]
+          ids: mov-en-2016-theautopsyofjanedoe  kind: movie  tmdb_id: 397243  nfo: present
+  [  ok  ] The Conjuring 2013 UHD 2160p HDR DV HEVC DTS-HD MA 5 1
+          ids: mov-en-20013-conjuring  kind: movie  tmdb_id: None  nfo: no id — skipped
+  [  ok  ] Jerry.and.Marge.Go.Large.2022.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1 [tmdbid-843847]
+          ids: mov-en-2022-jerryandmargegolarge  kind: movie  tmdb_id: 843847  nfo: present
+  [  ok  ] 1.Iron.Man.2008.UHD.BluRay.2160p.TrueHD.Atmos.7.1.DV.HEVC.HYBRiD.REMUX-FraMeSToR [tmdbid-1726]
+          ids: mov-en-2008-ironman  kind: movie  tmdb_id: 1726  nfo: present
+  [  ok  ] 2.The.Incredible.Hulk.2008.UHD.BluRay.2160p.DTS-X.7.1.DV.HEVC.HYBRID.REMUX-FraMeSToR [tmdbid-1724]
+          ids: mov-en-2008-theincrediblehulk  kind: movie  tmdb_id: 1724  nfo: present
+  [  ok  ] 3.Iron.Man.2.2010.UHD.BluRay.2160p.TrueHD.Atmos.7.1.DV.HEVC.HYBRiD.REMUX-FraMeSToR [tmdbid-10138]
+          ids: mov-en-2010-ironman2  kind: movie  tmdb_id: 10138  nfo: present
+  [  ok  ] The.Punisher.One.Last.Kill.2026.2160p.DSNP.WEB-DL.DV.HDR.DDP5.1.H265.MP4-BEN.THE.MEN [tmdbid-1439930]
+          ids: mov-en-2026-thepunisheronelastkill  kind: movie  tmdb_id: 1439930  nfo: present
+  [  ok  ] Coherence.2013.BluRay.1080p.DTS-HD.MA.5.1.AVC [tmdbid-220289]
+          ids: mov-en-2013-coherence  kind: movie  tmdb_id: 220289  nfo: present
+  [  ok  ] Eden.Lake.2008.UHD.BluRay.2160p.DTS-HD.MA.5.1.DV [tmdbid-13510]
+          ids: mov-en-2008-edenlake  kind: movie  tmdb_id: 13510  nfo: present
+  [  ok  ] Inception.2010.2160p.DTS-HD.MA.5.1.DV.HEVC [tmdbid-27205]
+          ids: mov-en-2010-inception  kind: movie  tmdb_id: 27205  nfo: present
+  [  ok  ] Midnight in Paris.2011.BluRay [tmdbid-59436]
+          ids: mov-en-2011-midnightinparis  kind: movie  tmdb_id: 59436  nfo: present
+  [  ok  ] Ocean's.Thirteen.2007.UHD.BluRay.2160p.DTS-HD.MA.5.1.DV.HEVC.HYBRID [tmdbid-298]
+          ids: mov-en-2007-oceans13  kind: movie  tmdb_id: 298  nfo: present
+  [  ok  ] Oceans.Eleven.2001.DV.HDR.2160p.WEB.h265-EDITH [tmdbid-161]
+          ids: mov-en-2001-oceans11  kind: movie  tmdb_id: 161  nfo: present
+  [  ok  ] Oceans.Twelve.2004.2160p.NF.WEB-DL.DDP5.1.DV.HDR.H.265-4kTRASH [tmdbid-163]
+          ids: mov-en-2004-oceans12  kind: movie  tmdb_id: 163  nfo: present
+  [  ok  ] F1.The.Movie.2025.2160p.UHD.BluRay.Remux.DV.P7.HDR [tmdbid-911430]
+          ids: mov-en-2025-f1  kind: movie  tmdb_id: 911430  nfo: present
+  [  ok  ] Rush 2013 2160p HEVC DV TrueHD 7.1 Atmos [tmdbid-96721]
+          ids: mov-en-2013-rush  kind: movie  tmdb_id: 96721  nfo: present
+  [  ok  ] 2001.A.Space.Odyssey.1968.PROPER.2160p.BluRay [tmdbid-62]
+          ids: mov-te-1968-2001aspaceodyssey  kind: movie  tmdb_id: 62  nfo: present
+  [  ok  ] Interstellar.2014.iMAX.UHD.2160p.REMUX.Hybrid.HDR10.DV.P8.MULTi.DTS-HD.TrueHD.7.1.ATMOS.H265-KC [tmdbid-157336]
+          ids: mov-en-2014-interstellar  kind: movie  tmdb_id: 157336  nfo: present
+  [  ok  ] Sicario.2015.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos-FGT [tmdbid-273481]
+          ids: mov-en-2015-sicario  kind: movie  tmdb_id: 273481  nfo: present
+  [  ok  ] The.Housemaid.2025.2160p.UHD.Remux.HEVC.DoVi.TrueHD.Atmos.7.1.[tmdbid-1368166]
+          ids: mov-en-2025-thehousemaid  kind: movie  tmdb_id: 1368166  nfo: present
+  [  ok  ] 12th Fail (2023) [tmdbid-1163258]
+          ids: mov-hi-2023-12thfail  kind: movie  tmdb_id: 1163258  nfo: present
+  [  ok  ] Dhurandhar.(2025).TRUE.WEB-DL.4K.SDR.HEVC.[Tam.Tel.Hin].(DD+5.1.640Kbps.AAC).20GB.ESub [tmdbid-1291608]
+          ids: mov-hi-2025-dhurandhar  kind: movie  tmdb_id: 1291608  nfo: present
+  [  ok  ] Fanaa 2006 Hindi 1080p BluRay x264 AAC 5.1 -Hon3y [tmdbid-8453]
+          ids: mov-hi-2006-fanaa  kind: movie  tmdb_id: 8453  nfo: present
+  [  ok  ] The Tashkent Files (2019) [tmdbid-594673]
+          ids: mov-hi-2019-thetashkentfiles  kind: movie  tmdb_id: 594673  nfo: present
+  [  ok  ] Blink (2024) Kannada Tamil Multi TRUE WEB-DL - 4K SDR - 5.1 [tmdbid-1340168]
+          ids: mov-ka-2024-blink  kind: movie  tmdb_id: 1340168  nfo: present
+  [  ok  ] A Tale of Two Sisters (2003) [tmdbid-4552]
+          ids: mov-kor-2003-ataleoftwosisters  kind: movie  tmdb_id: 4552  nfo: present
+  [  ok  ] I.Saw.The.Devil.2010.KOREAN.1080p.BluRay.x264.DTS-FGT
+          ids: mov-kor-2010-isawthedevil  kind: movie  tmdb_id: None  nfo: no id — skipped
+  [  ok  ] The Wailing (2016) [tmdbid-293670]
+          ids: mov-kor-2016-thewailing  kind: movie  tmdb_id: 293670  nfo: present
+  [  ok  ] Balan The Boy (2026) [tmdbid-1410937]
+          ids: mov-ma-2026-balantheboy  kind: movie  tmdb_id: 1410937  nfo: present
+  [  ok  ] Drishyam 1 (2013) 1080p BluRay [tmdbid-244049]
+          ids: mov-ma-2013-drishyam1  kind: movie  tmdb_id: 244049  nfo: present
+  [  ok  ] Drishyam 2 (2021) UHD 2160p [tmdbid-706872]
+          ids: mov-ma-2021-drishyam2  kind: movie  tmdb_id: 706872  nfo: present
+  [  ok  ] Drishyam 3 (2026) UHD 2160p [tmdbid-847742]
+          ids: mov-ma-2026-drishyam3  kind: movie  tmdb_id: 847742  nfo: present
+  [  ok  ] Eko (2025) Malayalam TRUE WEB-DL - 4K SDR - HEVC [tmdbid-1070186]
+          ids: mov-ma-2025-eko  kind: movie  tmdb_id: 1070186  nfo: present
+  [  ok  ] Sarvam Maya (2025) TRUE WEB-DL - 4K SDR - 2160p HQ - HEVC [tmdbid-1473354]
+          ids: mov-ma-2025-sarvammaya  kind: movie  tmdb_id: 1473354  nfo: present
+  [  ok  ] Varshangalkku Shesham (2024) [tmdbid-1151560]
+          ids: mov-ma-2024-varshangalkkushesham  kind: movie  tmdb_id: 1151560  nfo: present
+  [  ok  ] 96 (2018) [4K - Untouched - UHD - MP4 - 5.9GB - ESubs - Tamil] [tmdbid-441717]
+          ids: mov-ta-2018-96  kind: movie  tmdb_id: 441717  nfo: present
+  [  ok  ] Baasha (1995) 1080p 5.1 [tmdbid-49074]
+          ids: mov-ta-1995-baasha  kind: movie  tmdb_id: 49074  nfo: present
+  [  ok  ] Bombay 1995 AVC - 5.1 [tmdbid-26247]
+          ids: mov-ta-1995-bombay  kind: movie  tmdb_id: 26247  nfo: present
+  [  ok  ] Ghajini (2005) Remastered Tamil TRUE WEB-DL - 4K - 2160p [tmdbid-69636]
+          ids: mov-en-2005-ghajini  kind: movie  tmdb_id: 69636  nfo: present
+  [  ok  ] Michael Madana Kama Rajan (1990) [tmdbid-14445]
+          ids: mov-ta-1990-michaekmadanakamarajan  kind: movie  tmdb_id: 14445  nfo: present
+  [  ok  ] Mudhalvan (1999) Tamil TRUE HQ HDTV - 1080p - AVC - x264 [tmdbid-66526]
+          ids: mov-ta-1999-mudhalvan  kind: movie  tmdb_id: 66526  nfo: present
+  [  ok  ] Nayakan (1987) Tamil v2 TRUE WEB-DL - 1080p - AVC - 5. 1 [tmdbid-29971]
+          ids: mov-ta-1987-nayakan  kind: movie  tmdb_id: 29971  nfo: present
+  [  ok  ] Padaiyappa (1999) Tamil TRUE WEB-DL - 1080p - AVC - (AAC 2.0) [tmdbid-47940]
+          ids: mov-ta-1999-padayappa  kind: movie  tmdb_id: 47940  nfo: present
+  [  ok  ] Panchantantram (2002) WEBDL TAMIL 5.1 [tmdbid-49033]
+          ids: mov-ta-2002-panchatantram  kind: movie  tmdb_id: 49033  nfo: present
+  [  ok  ] Pudhupettai (2006) Tamil TRUE WEB-DL - 1080p - AVC 5.1 [tmdbid-69520]
+          ids: mov-ta-2006-pudhupettai  kind: movie  tmdb_id: 69520  nfo: present
+  [  ok  ] Ratsasan (2018) [tmdbid-412862]
+          ids: mov-ta-2018-ratsasan  kind: movie  tmdb_id: 412862  nfo: present
+  [  ok  ] Saamy (2003) Tamil TRUE HQ HDTV 1080p - AVC - x264 (DTS 5.1 - 754Kbps & AAC 2.0) [tmdbid-49029]
+          ids: mov-ta-2003-saamy  kind: movie  tmdb_id: 49029  nfo: present
+  [  ok  ] Sivaji 2007 BluRay AVC 5.1 [tmdbid-24049]
+          ids: mov-ta-2007-sivaji  kind: movie  tmdb_id: 24049  nfo: present
+  [  ok  ] Thalapathi 1991 1080p SS WEB-DL AAC2 0 x264 [tmdbid-29811]
+          ids: mov-ta-1991-thalapathi  kind: movie  tmdb_id: 29811  nfo: present
+  [  ok  ] Virumaandi (2005) Tamil TRUE WEB-DL - 1080p - AVC - (DTS5.1 - 754Kbps & AAC 2.0) - 13GB - ESub [tmdbid-66340]
+          ids: mov-ta-2005-virumaandi  kind: movie  tmdb_id: 66340  nfo: present
+  [  ok  ] Anbe Diana (2026) [tmdbid-1607634]
+          ids: mov-ta-2026-anbediana  kind: movie  tmdb_id: 1607634  nfo: present
+  [  ok  ] Kalathil_Sandhippom_2021 [tmdbid-621004]
+          ids: mov-ta-2021-kalathilsandhipom  kind: movie  tmdb_id: 621004  nfo: present
+  [  ok  ] Black (2024) Tamil TRUE WEB-DL - 4K SDR [tmdbid-1340332]
+          ids: mov-ta-2024-black  kind: movie  tmdb_id: 1340332  nfo: present
+  [  ok  ] Jiivi.2019.1080p.WEBRip.x264.AAC5.1 [tmdbid-610296]
+          ids: mov-ta-2019-jiivi  kind: movie  tmdb_id: 610296  nfo: present
+  [  ok  ] Mankatha (2011) Tamil BluRay - 1080p - DTS5.1 [tmdbid-76788]
+          ids: mov-en-2011-mankatha  kind: movie  tmdb_id: 76788  nfo: present
+  [  ok  ] Mounam Pesiyadhe (2002) [tmdbid-111583]
+          ids: mov-ta-2002-mounampesiyadhe  kind: movie  tmdb_id: 111583  nfo: present
+  [  ok  ] Mundasupatti (2015) BluRay - 5.1 [tmdbid-270772]
+          ids: mov-ta-2015-mundasupatti  kind: movie  tmdb_id: 270772  nfo: present
+  [  ok  ] Oh My Kadavule (2020) [Tamil - 1080p TRUE HD AVC [tmdbid-631637]
+          ids: mov-ta-2020-ohmykadavule  kind: movie  tmdb_id: 631637  nfo: present
+  [  ok  ] Raam (2005) Tamil Remastered TRUE WEB-DL - 1080p - AVC [tmdbid-69556]
+          ids: mov-ta-2005-raam  kind: movie  tmdb_id: 69556  nfo: present
+  [  ok  ] Rajathandhiram (2015) [tmdbid-330399]
+          ids: mov-ta-2015-rajathandhiram  kind: movie  tmdb_id: 330399  nfo: present
+  [  ok  ] Sathuranga Vettai (2014) [tmdbid-281992]
+          ids: mov-en-2014-sathurangavettai  kind: movie  tmdb_id: 281992  nfo: present
+  [  ok  ] Thegidi [Bhadram] (2014) BluRay - 1080p - DTS5.1 [tmdbid-257423]
+          ids: mov-ta-2014-thegidi  kind: movie  tmdb_id: 257423  nfo: present
+  [  ok  ] Aaranya Kaandam 2011 1080p WEB-DL H 264 AAC [tmdbid-119123]
+          ids: mov-ta-2011-aaranyakaandam  kind: movie  tmdb_id: 119123  nfo: present
+  [  ok  ] Autograph (2004) Remastered Tamil TRUE WEB-DL - 4K SDR - 2160p - AVC [tmdbid-140299]
+          ids: mov-ta-2004-autograph  kind: movie  tmdb_id: 140299  nfo: present
+  [  ok  ] Dhool (2003) Tamil TRUE WEB-DL - 1080p - AVC - (DD+5.1 - 192Kbps & AAC 2.0) [tmdbid-69661]
+          ids: mov-ta-2003-dhool  kind: movie  tmdb_id: 69661  nfo: present
+  [  ok  ] Indru.Netru.Naalai.2015.1080p.AMZN.WEB-DL.Tamil.DDP.5.1.640K.H264-JeRi [tmdbid-330418]
+          ids: mov-ta-2015-indrunetrunaalai  kind: movie  tmdb_id: 330418  nfo: present
+  [  ok  ] Jigarthanda (2014) [tmdbid-270766]
+          ids: mov-ta-2014-jigarthanda  kind: movie  tmdb_id: 270766  nfo: present
+  [  ok  ] Kannathil Muthamittal (2002) - Tamil - TRUE WEB-DL - 1080p - AVC [tmdbid-40998]
+          ids: mov-ta-2002-kannathilmuthamittal  kind: movie  tmdb_id: 40998  nfo: present
+  [  ok  ] Sillunu Oru Kadhal (2006) Tamil TRUE WEB-DL - 1080p - AVC - (DD+5.1 - 192Kbps & AAC) [tmdbid-69635]
+          ids: mov-ta-2006-sillunuorukadhal  kind: movie  tmdb_id: 69635  nfo: present
+  [  ok  ] Soodhu Kavvum (2013) [tmdbid-189227]
+          ids: mov-ta-2013-soodhukavvum  kind: movie  tmdb_id: 189227  nfo: present
+  [  ok  ] Thani Oruvan (2015) [tmdbid-280165]
+          ids: mov-ta-2015-thanioruvan  kind: movie  tmdb_id: 280165  nfo: present
+  [  ok  ] Theeran.Adhigaaram.Ondru.2017.2160p.WEB-DL.DD5.1.H.265 [tmdbid-456218]
+          ids: mov-en-2017-theeranadhigaaramondru  kind: movie  tmdb_id: 456218  nfo: present
+  [  ok  ] Thuppakki (2012) [tmdbid-143010]
+          ids: mov-ta-2012-thuppakki  kind: movie  tmdb_id: 143010  nfo: present
+  [  ok  ] Vikram Vedha (2017) Tamil TRUE WEB-DL - 1080p - AVC DD+5.1 [tmdbid-432139]
+          ids: mov-ta-2017-vikramvedha  kind: movie  tmdb_id: 432139  nfo: present
+  [  ok  ] Yavarum Nalam (2009) 2160p WEB-DL 5.1 [tmdbid-19950]
+          ids: mov-ta-2009-yavarumnalam  kind: movie  tmdb_id: 19950  nfo: present
+  [  ok  ] Uttama Villain (2015) Tamil TRUE WEB-DL - 1080p - AVC [tmdbid-273870]
+          ids: mov-en-2015-uttamavillain  kind: movie  tmdb_id: 273870  nfo: present
+  [  ok  ] Varumaiyin.Niram.Sivappu.1980.Tamil.1080p.WEB-DL.AVC.DDP.2.0 [tmdbid-66406]
+          ids: mov-ta-1980-varumaiyinniramsivappu  kind: movie  tmdb_id: 66406  nfo: present
+  [  ok  ] Vettaiyaadu Vilaiyaadu (2006) WEB-DL - 1080p - AVC - DD+5.1 [tmdbid-63670]
+          ids: mov-en-2006-vettaiyaaduvilaiyadu  kind: movie  tmdb_id: 63670  nfo: present
+  [  ok  ] Maharaja (2024) TRUE WEB-DL-4K SDR - HEVC-(DD+5.1 - 640Kbps)-19GB-ESub [tmdbid-1118224]
+          ids: mov-ta-2024-maharaja  kind: movie  tmdb_id: 1118224  nfo: present
+  [  ok  ] 3 (2012) [tmdbid-79660]
+          ids: mov-ta-2012-3moonu  kind: movie  tmdb_id: 79660  nfo: present
+  [  ok  ] Con City (2026) TRUE WEB-DL - 4K SDR - 2160p HQ - HEVC
+          ids: mov-ta-2026-concity  kind: movie  tmdb_id: None  nfo: no id — skipped
+  [  ok  ] Dumm Dumm Dumm (2001) Tamil TRUE WEB-DL - 1080p [tmdbid-63826]
+          ids: mov-ta-2001-dummdummdumm  kind: movie  tmdb_id: 63826  nfo: present
+  [  ok  ] Eleven (2025) [tmdbid-1309643]
+          ids: mov-ta-2025-eleven  kind: movie  tmdb_id: 1309643  nfo: present
+  [  ok  ] Ezhumalai (2002) Tamil TRUE WEB-DL - 1080p - AVC - (DD5.1 - 448Kbps & AAC 2.0) - 7.5GB [tmdbid-69443]
+          ids: mov-ta-2002-ezhumalai  kind: movie  tmdb_id: 69443  nfo: present
+  [  ok  ] Hotspot 2 Much (2026) [tmdbid-1566095]
+          ids: mov-ta-2026-hotspot2much  kind: movie  tmdb_id: 1566095  nfo: present
+  [  ok  ] Idhayam Murali (2026) TRUE WEB-DL - 4K SDR - 2160p
+          ids: mov-ta-2026-idhayammurali  kind: movie  tmdb_id: None  nfo: no id — skipped
+  [  ok  ] Jana Nayagan (2026) [tmdbid-1235877]
+          ids: mov-ta-2026-jananayagan  kind: movie  tmdb_id: 1235877  nfo: present
+  [  ok  ] Karuppu (2026) [tmdbid-1367220]
+          ids: mov-ta-2026-karuppu  kind: movie  tmdb_id: 1367220  nfo: present
+  [  ok  ] Leader (2026) [tmdbid-1504848]
+          ids: mov-ta-2026-leader  kind: movie  tmdb_id: 1504848  nfo: present
+  [  ok  ] Marudhamalai (2007) Tamil Remastered 1080p - AVC - (DTS5.1 - 754Kbps & AAC 2.0) [tmdbid-66507]
+          ids: mov-ta-2007-marudhamalai  kind: movie  tmdb_id: 66507  nfo: present
+  [  ok  ] Nooru Sami (2026) [tmdbid-1544326]
+          ids: mov-ta-2026-noorusami  kind: movie  tmdb_id: 1544326  nfo: present
+  [  ok  ] Parasakthi (2026) Tamil TRUE WEB-DL - 4K SDR - 2160p HQ - HEVC [tmdbid-965483]
+          ids: mov-ta-2026-parasakthi  kind: movie  tmdb_id: 965483  nfo: present
+  [  ok  ] Parasakthi.(2026).Tamil.Unce.Ver.TRUE.WEB-DL.4K.SDR.HQ [tmdbid-965483]
+          ids: mov-ta-2026-parasakthiv2  kind: movie  tmdb_id: 965483  nfo: present
+  [  ok  ] Run (2002) - 4K SDR - (DD+5.1 - 192Kbps & AAC) [tmdbid-69590]
+          ids: mov-ta-2002-run  kind: movie  tmdb_id: 69590  nfo: present
+  [  ok  ] Sirai (2025) TRUE WEB-DL - 4K SDR - HEVC - (DD+5.1 - 192Kbps & AAC) [tmdbid-1487142]
+          ids: mov-ta-2025-sirai  kind: movie  tmdb_id: 1487142  nfo: present
+  [  ok  ] Tourist Family (2025) Proper TRUE WEB-DL - 4K SDR - HEVC [tmdbid-1398359]
+          ids: mov-ta-2025-touristfamily  kind: movie  tmdb_id: 1398359  nfo: present
+  [  ok  ] With Love (2026) TRUE WEB-DL - 1080p - AVC - [Tam + Tel + Hin + Mal + Kan] [tmdbid-1508564]
+          ids: mov-ta-2026-withlove  kind: movie  tmdb_id: 1508564  nfo: present
+  [  ok  ] Middle Class Madhavan (2001) Tamil Remastered (DD+2.0 - 224Kbps & AAC 2.0) [tmdbid-366252]
+          ids: mov-ta-2001-middleclassmadhavan  kind: movie  tmdb_id: 366252  nfo: present
+  [  ok  ] Raatchasan (2018) [4K - Untouched - UHD - MP4 - 5.6GB - ESubs - Tamil] [tmdbid-412862]
+          ids: mov-ta-2018-raatchasan  kind: movie  tmdb_id: 412862  nfo: present
+  [  ok  ] Vaaranam Aayiram (2008) 4K UHD AVC DD5.1 (320 Kbps) - 7.7GB - ESubs] [tmdbid-38637]
+          ids: mov-ta-2008-v1000  kind: movie  tmdb_id: 38637  nfo: present
+  [  ok  ] Vikram 2022 [tmdbid-743563]
+          ids: mov-ta-2022-vikram  kind: movie  tmdb_id: 743563  nfo: present
+  [  ok  ] Arya 2 2009 UNCUT 1080P SNXT WEB-DL [tmdbid-34763]
+          ids: mov-te-2009-arya2  kind: movie  tmdb_id: 34763  nfo: present
+  [  ok  ] Bahubali The Beginning (2015) [tmdbid-256040]
+          ids: mov-te-2015-baahubalithebeginning  kind: movie  tmdb_id: 256040  nfo: present
+  [  ok  ] Dacoit A Love Story (2026) [tmdbid-1220522]
+          ids: mov-te-2026-dacoit  kind: movie  tmdb_id: 1220522  nfo: present
+  [  ok  ] Newton's 3rd Law (2026) [tmdbid-1740614]
+          ids: mov-te-2026-newtons3rdlaw  kind: movie  tmdb_id: 1740614  nfo: present
+  [  ok  ] Sing Geetham (2026) [tmdbid-1626170]
+          ids: mov-te-2026-singgeetham  kind: movie  tmdb_id: 1626170  nfo: present
+  [  ok  ] Sita Ramam (2022) 2160p AMZN WEB DL HEVC x265 [tmdbid-894803]
+          ids: mov-te-2022-sitaramam  kind: movie  tmdb_id: 894803  nfo: present
+  [  ok  ] Virupaksha (2023) Telugu TRUE WEB-DL - 1080p [tmdbid-1034590]
+          ids: mov-te-2023-virupaksha  kind: movie  tmdb_id: 1034590  nfo: present
+  [  ok  ] Vivaha Bhojanambu (2021) Telugu 1080p [tmdbid-402354]
+          ids: mov-te-2021-vivahabhojanambu  kind: movie  tmdb_id: 402354  nfo: present
+  [  ok  ] Chernobyl (Miniseries) 2019 2160p.DTS-HD.MA.5.1.DV [tmdbid-87108]
+          ids: tv-en-2019-chernobyle02, tv-en-2019-chernobyle05, tv-en-2019-chernobyle03, tv-en-2019-chernobyle01, tv-en-2019-chernobyle04, tv-en-2019-chernobyl  kind: tvshow  tmdb_id: 87108  nfo: present
+  [  ok  ] Friends Season 01 (1994) [tmdbid-1668]
+          ids: tv-en-1994-friends-s01, tv-en-1994-friends-s01e01, tv-en-1994-friends-s01e02, tv-en-1994-friends-s01e03, tv-en-1994-friends-s01e04, tv-en-1994-friends-s01e05, tv-en-1994-friends-s01e06, tv-en-1994-friends-s01e07, tv-en-1994-friends-s01e08, tv-en-1994-friends-s01e09, tv-en-1994-friends-s01e10, tv-en-1994-friends-s01e11, tv-en-1994-friends-s01e12, tv-en-1994-friends-s01e13, tv-en-1994-friends-s01e14, tv-en-1994-friends-s01e15, tv-en-1994-friends-s01e16, tv-en-1994-friends-s01e17, tv-en-1994-friends-s01e18, tv-en-1994-friends-s01e19, tv-en-1994-friends-s01e20, tv-en-1994-friends-s01e21, tv-en-1994-friends-s01e22, tv-en-1994-friends-s01e23, tv-en-1994-friends-s01e24  kind: tvshow  tmdb_id: 1668  nfo: present
+  [  ok  ] Friends Season 02 (1995) [tmdbid-1668]
+          ids: tv-en-1994-friends-s02, tv-en-1994-friends-s02e01, tv-en-1994-friends-s02e02, tv-en-1994-friends-s02e03, tv-en-1994-friends-s02e04, tv-en-1994-friends-s02e05, tv-en-1994-friends-s02e06, tv-en-1994-friends-s02e07, tv-en-1994-friends-s02e08, tv-en-1994-friends-s02e09, tv-en-1994-friends-s02e10, tv-en-1994-friends-s02e11, tv-en-1994-friends-s02e12, tv-en-1994-friends-s02e13, tv-en-1994-friends-s02e14, tv-en-1994-friends-s02e15, tv-en-1994-friends-s02e16, tv-en-1994-friends-s02e17, tv-en-1994-friends-s02e18, tv-en-1994-friends-s02e19, tv-en-1994-friends-s02e20, tv-en-1994-friends-s02e21, tv-en-1994-friends-s02e22, tv-en-1994-friends-s02e23, tv-en-1994-friends-s02e24  kind: tvshow  tmdb_id: 1668  nfo: present
+  [  ok  ] Friends Season 03 (1996) [tmdbid-1668]
+          ids: tv-en-1994-friends-s03, tv-en-1994-friends-s03e01, tv-en-1994-friends-s03e02, tv-en-1994-friends-s03e03, tv-en-1994-friends-s03e04, tv-en-1994-friends-s03e05, tv-en-1994-friends-s03e06, tv-en-1994-friends-s03e07, tv-en-1994-friends-s03e08, tv-en-1994-friends-s03e09, tv-en-1994-friends-s03e10, tv-en-1994-friends-s03e11, tv-en-1994-friends-s03e12, tv-en-1994-friends-s03e13, tv-en-1994-friends-s03e14, tv-en-1994-friends-s03e15, tv-en-1994-friends-s03e16, tv-en-1994-friends-s03e17, tv-en-1994-friends-s03e18, tv-en-1994-friends-s03e19, tv-en-1994-friends-s03e20, tv-en-1994-friends-s03e21, tv-en-1994-friends-s03e22, tv-en-1994-friends-s03e23, tv-en-1994-friends-s03e24, tv-en-1994-friends-s03e25  kind: tvshow  tmdb_id: 1668  nfo: present
+  [  ok  ] Friends Season 04 (1997) [tmdbid-1668]
+          ids: tv-en-1994-friends-s04, tv-en-1994-friends-s04e01, tv-en-1994-friends-s04e02, tv-en-1994-friends-s04e03, tv-en-1994-friends-s04e04, tv-en-1994-friends-s04e05, tv-en-1994-friends-s04e06, tv-en-1994-friends-s04e07, tv-en-1994-friends-s04e08, tv-en-1994-friends-s04e09, tv-en-1994-friends-s04e10, tv-en-1994-friends-s04e11, tv-en-1994-friends-s04e12, tv-en-1994-friends-s04e13, tv-en-1994-friends-s04e14, tv-en-1994-friends-s04e15, tv-en-1994-friends-s04e16, tv-en-1994-friends-s04e17, tv-en-1994-friends-s04e18, tv-en-1994-friends-s04e19, tv-en-1994-friends-s04e20, tv-en-1994-friends-s04e21, tv-en-1994-friends-s04e22, tv-en-1994-friends-s04e23, tv-en-1994-friends-s04e24  kind: tvshow  tmdb_id: 1668  nfo: present
+  [  ok  ] Friends Season 05 (1998) [tmdbid-1668]
+          ids: tv-en-1994-friends-s05, tv-en-1994-friends-s05e01, tv-en-1994-friends-s05e02, tv-en-1994-friends-s05e03, tv-en-1994-friends-s05e04, tv-en-1994-friends-s05e05, tv-en-1994-friends-s05e06, tv-en-1994-friends-s05e07, tv-en-1994-friends-s05e08, tv-en-1994-friends-s05e09, tv-en-1994-friends-s05e10, tv-en-1994-friends-s05e11, tv-en-1994-friends-s05e12, tv-en-1994-friends-s05e13, tv-en-1994-friends-s05e14, tv-en-1994-friends-s05e15, tv-en-1994-friends-s05e16, tv-en-1994-friends-s05e17, tv-en-1994-friends-s05e18, tv-en-1994-friends-s05e19, tv-en-1994-friends-s05e20, tv-en-1994-friends-s05e21, tv-en-1994-friends-s05e22, tv-en-1994-friends-s05e23, tv-en-1994-friends-s05e24  kind: tvshow  tmdb_id: 1668  nfo: present
+  [  ok  ] Friends Season 06 (1999) [tmdbid-1668]
+          ids: tv-en-1994-friends-s06, tv-en-1994-friends-s06e01, tv-en-1994-friends-s06e02, tv-en-1994-friends-s06e03, tv-en-1994-friends-s06e04, tv-en-1994-friends-s06e05, tv-en-1994-friends-s06e06, tv-en-1994-friends-s06e07, tv-en-1994-friends-s06e08, tv-en-1994-friends-s06e09, tv-en-1994-friends-s06e10, tv-en-1994-friends-s06e11, tv-en-1994-friends-s06e12, tv-en-1994-friends-s06e13, tv-en-1994-friends-s06e14, tv-en-1994-friends-s06e15, tv-en-1994-friends-s06e16, tv-en-1994-friends-s06e17, tv-en-1994-friends-s06e18, tv-en-1994-friends-s06e19, tv-en-1994-friends-s06e20, tv-en-1994-friends-s06e21, tv-en-1994-friends-s06e22, tv-en-1994-friends-s06e23, tv-en-1994-friends-s06e24, tv-en-1994-friends-s06e25  kind: tvshow  tmdb_id: 1668  nfo: present
+  [  ok  ] Friends Season 07 (2000) [tmdbid-1668]
+          ids: tv-en-1994-friends-s07, tv-en-1994-friends-s07e01, tv-en-1994-friends-s07e02, tv-en-1994-friends-s07e03, tv-en-1994-friends-s07e04, tv-en-1994-friends-s07e05, tv-en-1994-friends-s07e06, tv-en-1994-friends-s07e07, tv-en-1994-friends-s07e08, tv-en-1994-friends-s07e09, tv-en-1994-friends-s07e10, tv-en-1994-friends-s07e11, tv-en-1994-friends-s07e12, tv-en-1994-friends-s07e13, tv-en-1994-friends-s07e14, tv-en-1994-friends-s07e15, tv-en-1994-friends-s07e16, tv-en-1994-friends-s07e17, tv-en-1994-friends-s07e18, tv-en-1994-friends-s07e19, tv-en-1994-friends-s07e20, tv-en-1994-friends-s07e21, tv-en-1994-friends-s07e22, tv-en-1994-friends-s07e23, tv-en-1994-friends-s07e24  kind: tvshow  tmdb_id: 1668  nfo: present
+  [  ok  ] Friends Season 08 (2001) [tmdbid-1668]
+          ids: tv-en-1994-friends-s08, tv-en-1994-friends-s08e01, tv-en-1994-friends-s08e02, tv-en-1994-friends-s08e03, tv-en-1994-friends-s08e04, tv-en-1994-friends-s08e05, tv-en-1994-friends-s08e06, tv-en-1994-friends-s08e07, tv-en-1994-friends-s08e08, tv-en-1994-friends-s08e09, tv-en-1994-friends-s08e10, tv-en-1994-friends-s08e11, tv-en-1994-friends-s08e12, tv-en-1994-friends-s08e13, tv-en-1994-friends-s08e14, tv-en-1994-friends-s08e15  kind: tvshow  tmdb_id: 1668  nfo: present
+  [  ok  ] Peaky.Blinders.S01.2013.1080i.BluRay.REMUX.AVC.DTS-HD.MA.2.0-NOGRP[rartv] [tmdbid-60574]
+          ids: tv-en-2013-peakyblinders-s01e02, tv-en-2013-peakyblinders-s01e01, tv-en-2013-peakyblinders-s01e03, tv-en-2013-peakyblinders-s01e04, tv-en-2013-peakyblinders-s01e05, tv-en-2013-peakyblinders-s01e06, tv-en-2013-peakyblinders-s01  kind: tvshow  tmdb_id: 60574  nfo: present
+  [  ok  ] Peaky.Blinders.S02.2014.1080i.BluRay.REMUX.AVC.DTS-HD.MA.2.0-NOGRP[rartv] [tmdbid-60574]
+          ids: tv-en-2014-peakyblinders-s02e06, tv-en-2014-peakyblinders-s02e05, tv-en-2014-peakyblinders-s02e04, tv-en-2014-peakyblinders-s02e03, tv-en-2014-peakyblinders-s02e01, tv-en-2014-peakyblinders-s02e02, tv-en-2014-peakyblinders-s02  kind: tvshow  tmdb_id: 60574  nfo: present
+  [  ok  ] Peaky.Blinders.S03.2016.1080i.BluRay.REMUX.AVC.DTS-HD.MA.5.1-NOGRP[rartv] [tmdbid-60574]
+          ids: tv-en-2016-peakyblinders-s03e06, tv-en-2016-peakyblinders-s03e03, tv-en-2016-peakyblinders-s03e02, tv-en-2016-peakyblinders-s03e05, tv-en-2016-peakyblinders-s03e04, tv-en-2016-peakyblinders-s03e01, tv-en-2016-peakyblinders-s03  kind: tvshow  tmdb_id: 60574  nfo: present
+  [  ok  ] Peaky.Blinders.S04.2017.1080i.BluRay.REMUX.AVC.DTS-HD.MA.5.1-NOGRP[rartv] [tmdbid-60574]
+          ids: tv-en-2017-peakyblinders-s04e03, tv-en-2017-peakyblinders-s04e02, tv-en-2017-peakyblinders-s04e01, tv-en-2017-peakyblinders-s04e05, tv-en-2017-peakyblinders-s04e06, tv-en-2017-peakyblinders-s04e04, tv-en-2017-peakyblinders-s04  kind: tvshow  tmdb_id: 60574  nfo: present
+  [  ok  ] Peaky.Blinders.S05.2019.2160p.NF.WEBRip.DDP5.1.x264-AJP69.[RiCK] [tmdbid-60574]
+          ids: tv-en-2019-peakyblinders-s05e06, tv-en-2019-peakyblinders-s05e04, tv-en-2019-peakyblinders-s05e05, tv-en-2019-peakyblinders-s05e01, tv-en-2019-peakyblinders-s05e02, tv-en-2019-peakyblinders-s05e03, tv-en-2019-peakyblinders-s05  kind: tvshow  tmdb_id: 60574  nfo: present
+  [  ok  ] Peaky.Blinders.S06.2022.2160p.iP.WEB-DL.x265.10bit.HDR.HLG.DDP5.1-FLUX[rartv] [tmdbid-60574]
+          ids: tv-en-2022-peakyblinders-s06e06, tv-en-2022-peakyblinders-s06e05, tv-en-2022-peakyblinders-s06e02, tv-en-2022-peakyblinders-s06e01, tv-en-2022-peakyblinders-s06e04, tv-en-2022-peakyblinders-s06e03, tv-en-2022-peakyblinders-s06  kind: tvshow  tmdb_id: 60574  nfo: present
+  [  ok  ] The.Wire.S01.2002.1080p.BluRay.REMUX.AVC.AVC.DTS-HD.MA.5.1 [tmdbid-1438]
+          ids: tv-en-2002-thewire-s01e06, tv-en-2002-thewire-s01e13, tv-en-2002-thewire-s01e07, tv-en-2002-thewire-s01e12, tv-en-2002-thewire-s01e09, tv-en-2002-thewire-s01e11, tv-en-2002-thewire-s01e08, tv-en-2002-thewire-s01e10, tv-en-2002-thewire-s01e01, tv-en-2002-thewire-s01e02, tv-en-2002-thewire-s01e03, tv-en-2002-thewire-s01e04, tv-en-2002-thewire-s01e05, tv-en-2002-thewire-s01  kind: tvshow  tmdb_id: 1438  nfo: present
+  [  ok  ] The.Wire.S02.2003.1080p.BluRay.REMUX.AVC.AVC.DTS-HD.MA.5.1 [tmdbid-1438]
+          ids: tv-en-2003-thewire-s02e12, tv-en-2003-thewire-s02e01, tv-en-2003-thewire-s02e02, tv-en-2003-thewire-s02e03, tv-en-2003-thewire-s02e04, tv-en-2003-thewire-s02e05, tv-en-2003-thewire-s02e06, tv-en-2003-thewire-s02e07, tv-en-2003-thewire-s02e08, tv-en-2003-thewire-s02e09, tv-en-2003-thewire-s02e10, tv-en-2003-thewire-s02e11, tv-en-2003-thewire-s02  kind: tvshow  tmdb_id: 1438  nfo: present
+  [  ok  ] The.Wire.S03.2004.1080p.BluRay.REMUX.AVC.AVC.DTS-HD.MA.5.1-NOGRP[rartv] [tmdbid-1438]
+          ids: tv-en-2004-thewire-s03e12, tv-en-2004-thewire-s03e01, tv-en-2004-thewire-s03e02, tv-en-2004-thewire-s03e03, tv-en-2004-thewire-s03e04, tv-en-2004-thewire-s03e05, tv-en-2004-thewire-s03e06, tv-en-2004-thewire-s03e07, tv-en-2004-thewire-s03e08, tv-en-2004-thewire-s03e09, tv-en-2004-thewire-s03e10, tv-en-2004-thewire-s03e11, tv-en-2004-thewire-s03  kind: tvshow  tmdb_id: 1438  nfo: present
+  [  ok  ] The.Wire.S04.2006.1080p.BluRay.REMUX.AVC.AVC.DTS-HD.MA.5.1-NOGRP[rartv] [tmdbid-1438]
+          ids: tv-en-2006-thewire-s04e13, tv-en-2006-thewire-s04e12, tv-en-2006-thewire-s04e01, tv-en-2006-thewire-s04e02, tv-en-2006-thewire-s04e03, tv-en-2006-thewire-s04e04, tv-en-2006-thewire-s04e05, tv-en-2006-thewire-s04e06, tv-en-2006-thewire-s04e07, tv-en-2006-thewire-s04e08, tv-en-2006-thewire-s04e09, tv-en-2006-thewire-s04e10, tv-en-2006-thewire-s04e11, tv-en-2006-thewire-s04  kind: tvshow  tmdb_id: 1438  nfo: present
+  [  ok  ] The.Wire.S05.2008.1080p.BluRay.REMUX.AVC.AVC.DTS-HD.MA.5.1-NOGRP[rartv] [tmdbid-1438]
+          ids: tv-en-2008-thewire-s05e10, tv-en-2008-thewire-s05e02, tv-en-2008-thewire-s05e06, tv-en-2008-thewire-s05e01, tv-en-2008-thewire-s05e07, tv-en-2008-thewire-s05e04, tv-en-2008-thewire-s05e09, tv-en-2008-thewire-s05e05, tv-en-2008-thewire-s05e03, tv-en-2008-thewire-s05e08, tv-en-2008-thewire-s05  kind: tvshow  tmdb_id: 1438  nfo: present
+  [  ok  ] The.Office.US.S01.2005.1080p.BluRay.REMUX.AVC.DD5.1-NOGRP [tmdbid-2316]
+          ids: tv-en-2005-theoffice-s01e03, tv-en-2005-theoffice-s01e01, tv-en-2005-theoffice-s01e05, tv-en-2005-theoffice-s01e06, tv-en-2005-theoffice-s01e04, tv-en-2005-theoffice-s01e02, tv-en-2005-theoffice-s01  kind: tvshow  tmdb_id: 2316  nfo: present
+  [  ok  ] Dark Season 01 (2017) [tmdbid-70523]
+          ids: tv-en-2017-dark-s01e09, tv-en-2017-dark-s01e01, tv-en-2017-dark-s01e06, tv-en-2017-dark-s01e07, tv-en-2017-dark-s01e08, tv-en-2017-dark-s01e03, tv-en-2017-dark-s01e04, tv-en-2017-dark-s01e05, tv-en-2017-dark-s01e02, tv-en-2017-dark-s01, tv-en-2017-dark-s01e10  kind: tvshow  tmdb_id: 70523  nfo: present
+  [  ok  ] Dark Season 02 (2019) [tmdbid-70523]
+          ids: tv-en-2019-dark-s02, tv-en-2019-dark-s02e01, tv-en-2019-dark-s02e02, tv-en-2019-dark-s02e03, tv-en-2019-dark-s02e04, tv-en-2019-dark-s02e05, tv-en-2019-dark-s02e06, tv-en-2019-dark-s02e07, tv-en-2019-dark-s02e08  kind: tvshow  tmdb_id: 70523  nfo: present
+  [  ok  ] Dark Season 03 (2020) [tmdbid-70523]
+          ids: tv-en-2020-dark-s03, tv-en-2020-dark-s03e01, tv-en-2020-dark-s03e02, tv-en-2020-dark-s03e03, tv-en-2020-dark-s03e04, tv-en-2020-dark-s03e05, tv-en-2020-dark-s03e06, tv-en-2020-dark-s03e07, tv-en-2020-dark-s03e08  kind: tvshow  tmdb_id: 70523  nfo: present
+  [  ok  ] Devs.S01.2020.2160p.WEB.HDR [tmdbid-81349]
+          ids: tv-en-2020-devs-s01e01, tv-en-2020-devs-s01e07, tv-en-2020-devs-s01e06, tv-en-2020-devs-s01e08, tv-en-2020-devs-s01e02, tv-en-2020-devs-s01e05, tv-en-2020-devs-s01e04, tv-en-2020-devs-s01e03, tv-en-2020-devs-s01  kind: tvshow  tmdb_id: 81349  nfo: present
+  [  ok  ] Fringe Season 01 (2008) [tmdbid-1705]
+          ids: tv-en-2008-fringe-s01e01, tv-en-2008-fringe-s01e14, tv-en-2008-fringe-s01e16, tv-en-2008-fringe-s01e15, tv-en-2008-fringe-s01e13, tv-en-2008-fringe-s01e02, tv-en-2008-fringe-s01e11, tv-en-2008-fringe-s01e10, tv-en-2008-fringe-s01e03, tv-en-2008-fringe-s01e12, tv-en-2008-fringe-s01e09, tv-en-2008-fringe-s01e05, tv-en-2008-fringe-s01e04, tv-en-2008-fringe-s01e07, tv-en-2008-fringe-s01e06, tv-en-2008-fringe-s01e08, tv-en-2008-fringe-s01e19, tv-en-2008-fringe-s01e18, tv-en-2008-fringe-s01e20, tv-en-2008-fringe-s01e17, tv-en-2008-fringe-s01  kind: tvshow  tmdb_id: 1705  nfo: present
+  [  ok  ] Fringe Season 02 (2009) [tmdbid-1705]
+          ids: tv-en-2009-fringe-s02e04, tv-en-2009-fringe-s02e23, tv-en-2009-fringe-s02e20, tv-en-2009-fringe-s02e06, tv-en-2009-fringe-s02e14, tv-en-2009-fringe-s02e05, tv-en-2009-fringe-s02e02, tv-en-2009-fringe-s02e10, tv-en-2009-fringe-s02e17, tv-en-2009-fringe-s02e08, tv-en-2009-fringe-s02e11, tv-en-2009-fringe-s02e22, tv-en-2009-fringe-s02e21, tv-en-2009-fringe-s02e16, tv-en-2009-fringe-s02e18, tv-en-2009-fringe-s02e07, tv-en-2009-fringe-s02e13, tv-en-2009-fringe-s02e19, tv-en-2009-fringe-s02e12, tv-en-2009-fringe-s02e09, tv-en-2009-fringe-s02e01, tv-en-2009-fringe-s02e15, tv-en-2009-fringe-s02e03, tv-en-2009-fringe-s02  kind: tvshow  tmdb_id: 1705  nfo: present
+  [  ok  ] Fringe Season 03 (2010) [tmdbid-1705]
+          ids: tv-en-2010-fringe-s03e03, tv-en-2010-fringe-s03e05, tv-en-2010-fringe-s03e06.6955, tv-en-2010-fringe-s03e02, tv-en-2010-fringe-s03e04, tv-en-2010-fringe-s03e01, tv-en-2010-fringe-s03e19, tv-en-2010-fringe-s03e13, tv-en-2010-fringe-s03e08, tv-en-2010-fringe-s03e22, tv-en-2010-fringe-s03e14.6, tv-en-2010-fringe-s03e15, tv-en-2010-fringe-s03e07, tv-en-2010-fringe-s03e17, tv-en-2010-fringe-s03e09, tv-en-2010-fringe-s03e12, tv-en-2010-fringe-s03e16, tv-en-2010-fringe-s03e21, tv-en-2010-fringe-s03e18, tv-en-2010-fringe-s03e11, tv-en-2010-fringe-s03e20, tv-en-2010-fringe-s03e10, tv-en-2010-fringe-s03  kind: tvshow  tmdb_id: 1705  nfo: present
+  [  ok  ] Fringe Season 04 (2011) [tmdbid-1705]
+          ids: tv-en-2011-fringe-s04e16, tv-en-2011-fringe-s04e17, tv-en-2011-fringe-s04e12, tv-en-2011-fringe-s04e15, tv-en-2011-fringe-s04e08, tv-en-2011-fringe-s04e13, tv-en-2011-fringe-s04e06, tv-en-2011-fringe-s04e09, tv-en-2011-fringe-s04e19, tv-en-2011-fringe-s04e04, tv-en-2011-fringe-s04e07, tv-en-2011-fringe-s04e20, tv-en-2011-fringe-s04e10, tv-en-2011-fringe-s04e03, tv-en-2011-fringe-s04e01, tv-en-2011-fringe-s04e11, tv-en-2011-fringe-s04e14, tv-en-2011-fringe-s04e22, tv-en-2011-fringe-s04e05, tv-en-2011-fringe-s04e18, tv-en-2011-fringe-s04e21, tv-en-2011-fringe-s04e02, tv-en-2011-fringe-s04  kind: tvshow  tmdb_id: 1705  nfo: present
+  [  ok  ] Fringe Season 05 (2012) [tmdbid-1705]
+          ids: tv-en-2012-fringe-s05e05, tv-en-2012-fringe-s05e08, tv-en-2012-fringe-s05e10, tv-en-2012-fringe-s05e11, tv-en-2012-fringe-s05e01, tv-en-2012-fringe-s05e13, tv-en-2012-fringe-s05e09, tv-en-2012-fringe-s05e07, tv-en-2012-fringe-s05e04, tv-en-2012-fringe-s05e12, tv-en-2012-fringe-s05e06, tv-en-2012-fringe-s05e02, tv-en-2012-fringe-s05e03, tv-en-2012-fringe-s05  kind: tvshow  tmdb_id: 1705  nfo: present
+  [  ok  ] Stranger Things Season 02 (2017) [tmdbid-66732]
+          ids: tv-en-2017-strangerthings-s02, tv-en-2017-strangerthings-s02e01, tv-en-2017-strangerthings-s02e02, tv-en-2017-strangerthings-s02e03, tv-en-2017-strangerthings-s02e04, tv-en-2017-strangerthings-s02e05, tv-en-2017-strangerthings-s02e06, tv-en-2017-strangerthings-s02e07, tv-en-2017-strangerthings-s02e08, tv-en-2017-strangerthings-s02e09  kind: tvshow  tmdb_id: 66732  nfo: present
+  [  ok  ] Stranger.Things.S01.2016.2160p.BluRay.HEVC.DD5.1 [tmdbid-66732]
+          ids: tv-en-2016-strangerthings-s01e08, tv-en-2016-strangerthings-s01e01, tv-en-2016-strangerthings-s01e02, tv-en-2016-strangerthings-s01e03, tv-en-2016-strangerthings-s01e04, tv-en-2016-strangerthings-s01e05, tv-en-2016-strangerthings-s01e06, tv-en-2016-strangerthings-s01e07, tv-en-2016-strangerthings-s01  kind: tvshow  tmdb_id: 66732  nfo: present
+  [  ok  ] The X-Files Season 01 (1993) [tmdbid-4087]
+          ids: tv-en-1993-xfiles-s01, tv-en-1993-xfiles-s01e01, tv-en-1993-xfiles-s01e02, tv-en-1993-xfiles-s01e03, tv-en-1993-xfiles-s01e04, tv-en-1993-xfiles-s01e05, tv-en-1993-xfiles-s01e06, tv-en-1993-xfiles-s01e07, tv-en-1993-xfiles-s01e08, tv-en-1993-xfiles-s01e09, tv-en-1993-xfiles-s01e10, tv-en-1993-xfiles-s01e11, tv-en-1993-xfiles-s01e12, tv-en-1993-xfiles-s01e18, tv-en-1993-xfiles-s01e19, tv-en-1993-xfiles-s01e20, tv-en-1993-xfiles-s01e13, tv-en-1993-xfiles-s01e14, tv-en-1993-xfiles-s01e15, tv-en-1993-xfiles-s01e16, tv-en-1993-xfiles-s01e17, tv-en-1993-xfiles-s01e21, tv-en-1993-xfiles-s01e22, tv-en-1993-xfiles-s01e23, tv-en-1993-xfiles-s01e24  kind: tvshow  tmdb_id: 4087  nfo: present
+  [  ok  ] The X-Files Season 02 (1994) [tmdbid-4087]
+          ids: tv-en-1994-xfiles-s02, tv-en-1994-xfiles-s02e01, tv-en-1994-xfiles-s02e02, tv-en-1994-xfiles-s02e03, tv-en-1994-xfiles-s02e04, tv-en-1994-xfiles-s02e05, tv-en-1994-xfiles-s02e06, tv-en-1994-xfiles-s02e07, tv-en-1994-xfiles-s02e08, tv-en-1994-xfiles-s02e13, tv-en-1994-xfiles-s02e09, tv-en-1994-xfiles-s02e10, tv-en-1994-xfiles-s02e11, tv-en-1994-xfiles-s02e12, tv-en-1994-xfiles-s02e14, tv-en-1994-xfiles-s02e15, tv-en-1994-xfiles-s02e16, tv-en-1994-xfiles-s02e17, tv-en-1994-xfiles-s02e18, tv-en-1994-xfiles-s02e19, tv-en-1994-xfiles-s02e20, tv-en-1994-xfiles-s02e21, tv-en-1994-xfiles-s02e22, tv-en-1994-xfiles-s02e23, tv-en-1994-xfiles-s02e24, tv-en-1994-xfiles-s02e25  kind: tvshow  tmdb_id: 4087  nfo: present
+  [  ok  ] The X-Files Season 03 (1995) [tmdbid-4087]
+          ids: tv-en-1995-xfiles-s03, tv-en-1995-xfiles-s03e01, tv-en-1995-xfiles-s03e02, tv-en-1995-xfiles-s03e03, tv-en-1995-xfiles-s03e04, tv-en-1995-xfiles-s03e05, tv-en-1995-xfiles-s03e06, tv-en-1995-xfiles-s03e07, tv-en-1995-xfiles-s03e08, tv-en-1995-xfiles-s03e09, tv-en-1995-xfiles-s03e10, tv-en-1995-xfiles-s03e11, tv-en-1995-xfiles-s03e12, tv-en-1995-xfiles-s03e13, tv-en-1995-xfiles-s03e14, tv-en-1995-xfiles-s03e15, tv-en-1995-xfiles-s03e16, tv-en-1995-xfiles-s03e17, tv-en-1995-xfiles-s03e18, tv-en-1995-xfiles-s03e19, tv-en-1995-xfiles-s03e20, tv-en-1995-xfiles-s03e21, tv-en-1995-xfiles-s03e22, tv-en-1995-xfiles-s03e23, tv-en-1995-xfiles-s03e24  kind: tvshow  tmdb_id: 4087  nfo: present
+  [  ok  ] The X-Files Season 04 (1996) [tmdbid-4087]
+          ids: tv-en-1996-xfiles-s04, tv-en-1996-xfiles-s04e01, tv-en-1996-xfiles-s04e02, tv-en-1996-xfiles-s04e03, tv-en-1996-xfiles-s04e04, tv-en-1996-xfiles-s04e05, tv-en-1996-xfiles-s04e06, tv-en-1996-xfiles-s04e07, tv-en-1996-xfiles-s04e08, tv-en-1996-xfiles-s04e09, tv-en-1996-xfiles-s04e10, tv-en-1996-xfiles-s04e11, tv-en-1996-xfiles-s04e12, tv-en-1996-xfiles-s04e13, tv-en-1996-xfiles-s04e14, tv-en-1996-xfiles-s04e15, tv-en-1996-xfiles-s04e16, tv-en-1996-xfiles-s04e17, tv-en-1996-xfiles-s04e18, tv-en-1996-xfiles-s04e19, tv-en-1996-xfiles-s04e20, tv-en-1996-xfiles-s04e21, tv-en-1996-xfiles-s04e22, tv-en-1996-xfiles-s04e23, tv-en-1996-xfiles-s04e24  kind: tvshow  tmdb_id: 4087  nfo: present
+  [  ok  ] The X-Files Season 05 (1997) [tmdbid-4087]
+          ids: tv-en-1997-xfiles-s05, tv-en-1997-xfiles-s05e01, tv-en-1997-xfiles-s05e02, tv-en-1997-xfiles-s05e03, tv-en-1997-xfiles-s05e04, tv-en-1997-xfiles-s05e05, tv-en-1997-xfiles-s05e06, tv-en-1997-xfiles-s05e07, tv-en-1997-xfiles-s05e08, tv-en-1997-xfiles-s05e09, tv-en-1997-xfiles-s05e10, tv-en-1997-xfiles-s05e11, tv-en-1997-xfiles-s05e12, tv-en-1997-xfiles-s05e13, tv-en-1997-xfiles-s05e14, tv-en-1997-xfiles-s05e15, tv-en-1997-xfiles-s05e16, tv-en-1997-xfiles-s05e17, tv-en-1997-xfiles-s05e18, tv-en-1997-xfiles-s05e19, tv-en-1997-xfiles-s05e20  kind: tvshow  tmdb_id: 4087  nfo: present
+  [  ok  ] The X-Files Season 06 (1998) [tmdbid-4087]
+          ids: tv-en-1998-xfiles-s06, tv-en-1998-xfiles-s06e01, tv-en-1998-xfiles-s06e02, tv-en-1998-xfiles-s06e03, tv-en-1998-xfiles-s06e04, tv-en-1998-xfiles-s06e05, tv-en-1998-xfiles-s06e06, tv-en-1998-xfiles-s06e07, tv-en-1998-xfiles-s06e08, tv-en-1998-xfiles-s06e09, tv-en-1998-xfiles-s06e10, tv-en-1998-xfiles-s06e11, tv-en-1998-xfiles-s06e12, tv-en-1998-xfiles-s06e13, tv-en-1998-xfiles-s06e14, tv-en-1998-xfiles-s06e15, tv-en-1998-xfiles-s06e16, tv-en-1998-xfiles-s06e17, tv-en-1998-xfiles-s06e18, tv-en-1998-xfiles-s06e19, tv-en-1998-xfiles-s06e20, tv-en-1998-xfiles-s06e21, tv-en-1998-xfiles-s06e22  kind: tvshow  tmdb_id: 4087  nfo: present
+  [  ok  ] The X-Files Season 07 (1999) [tmdbid-4087]
+          ids: tv-en-1999-xfiles-s07, tv-en-1999-xfiles-s07e01, tv-en-1999-xfiles-s07e02, tv-en-1999-xfiles-s07e05, tv-en-1999-xfiles-s07e06, tv-en-1999-xfiles-s07e07, tv-en-1999-xfiles-s07e08, tv-en-1999-xfiles-s07e09, tv-en-1999-xfiles-s07e10, tv-en-1999-xfiles-s07e03, tv-en-1999-xfiles-s07e04, tv-en-1999-xfiles-s07e11, tv-en-1999-xfiles-s07e12, tv-en-1999-xfiles-s07e13, tv-en-1999-xfiles-s07e14, tv-en-1999-xfiles-s07e15, tv-en-1999-xfiles-s07e16, tv-en-1999-xfiles-s07e17, tv-en-1999-xfiles-s07e18, tv-en-1999-xfiles-s07e19, tv-en-1999-xfiles-s07e20, tv-en-1999-xfiles-s07e21, tv-en-1999-xfiles-s07e22  kind: tvshow  tmdb_id: 4087  nfo: present
+  [  ok  ] The X-Files Season 08 (2000) [tmdbid-4087]
+          ids: tv-en-2000-xfiles-s08, tv-en-2000-xfiles-s08e01, tv-en-2000-xfiles-s08e02, tv-en-2000-xfiles-s08e03, tv-en-2000-xfiles-s08e04, tv-en-2000-xfiles-s08e05, tv-en-2000-xfiles-s08e06, tv-en-2000-xfiles-s08e07, tv-en-2000-xfiles-s08e08, tv-en-2000-xfiles-s08e09, tv-en-2000-xfiles-s08e10, tv-en-2000-xfiles-s08e11, tv-en-2000-xfiles-s08e12, tv-en-2000-xfiles-s08e13, tv-en-2000-xfiles-s08e14, tv-en-2000-xfiles-s08e15, tv-en-2000-xfiles-s08e16, tv-en-2000-xfiles-s08e17, tv-en-2000-xfiles-s08e18, tv-en-2000-xfiles-s08e19, tv-en-2000-xfiles-s08e20, tv-en-2000-xfiles-s08e21  kind: tvshow  tmdb_id: 4087  nfo: present
+  [  ok  ] The X-Files Season 09 (2001) [tmdbid-4087]
+          ids: tv-en-2001-xfiles-s09, tv-en-2001-xfiles-s09e01, tv-en-2001-xfiles-s09e02, tv-en-2001-xfiles-s09e03, tv-en-2001-xfiles-s09e04, tv-en-2001-xfiles-s09e05, tv-en-2001-xfiles-s09e06, tv-en-2001-xfiles-s09e07, tv-en-2001-xfiles-s09e08, tv-en-2001-xfiles-s09e09, tv-en-2001-xfiles-s09e10, tv-en-2001-xfiles-s09e11, tv-en-2001-xfiles-s09e12, tv-en-2001-xfiles-s09e13, tv-en-2001-xfiles-s09e14, tv-en-2001-xfiles-s09e15, tv-en-2001-xfiles-s09e16, tv-en-2001-xfiles-s09e17, tv-en-2001-xfiles-s09e18, tv-en-2001-xfiles-s09e19  kind: tvshow  tmdb_id: 4087  nfo: present
+  [  ok  ] The X-Files Season 10 (2016) [tmdbid-4087]
+          ids: tv-en-2016-xfiles-s10, tv-en-2016-xfiles-s10e01, tv-en-2016-xfiles-s10e02, tv-en-2016-xfiles-s10e03, tv-en-2016-xfiles-s10e04, tv-en-2016-xfiles-s10e05, tv-en-2016-xfiles-s10e06  kind: tvshow  tmdb_id: 4087  nfo: present
+  [  ok  ] The X-Files Season 11 (2018) [tmdbid-4087]
+          ids: tv-en-2018-xfiles-s11, tv-en-2018-xfiles-s11e01, tv-en-2018-xfiles-s11e02, tv-en-2018-xfiles-s11e03, tv-en-2018-xfiles-s11e04, tv-en-2018-xfiles-s11e05, tv-en-2018-xfiles-s11e06, tv-en-2018-xfiles-s11e07, tv-en-2018-xfiles-s11e08, tv-en-2018-xfiles-s11e09, tv-en-2018-xfiles-s11e10  kind: tvshow  tmdb_id: 4087  nfo: present
+  [  ok  ] Battlestar Galactica (2004) Season 1 [tmdbid-1972]
+          ids: tv-en-2004-battlestargalactica-s01e01, tv-en-2004-battlestargalactica-s01e02, tv-en-2004-battlestargalactica-s01e03, tv-en-2004-battlestargalactica-s01e04, tv-en-2004-battlestargalactica-s01e05, tv-en-2004-battlestargalactica-s01e06, tv-en-2004-battlestargalactica-s01e07, tv-en-2004-battlestargalactica-s01e08, tv-en-2004-battlestargalactica-s01e09, tv-en-2004-battlestargalactica-s01e10, tv-en-2004-battlestargalactica-s01, tv-en-2004-battlestargalactica-s01e11, tv-en-2004-battlestargalactica-s01e12, tv-en-2004-battlestargalactica-s01e13  kind: tvshow  tmdb_id: 1972  nfo: present
+  [  ok  ] Battlestar Galactica (2004) Season 2 [tmdbid-1972]
+          ids: tv-en-2005-battlestargalactica-s02e20, tv-en-2005-battlestargalactica-s02e10, tv-en-2005-battlestargalactica-s02e19, tv-en-2005-battlestargalactica-s02e18, tv-en-2005-battlestargalactica-s02e16, tv-en-2005-battlestargalactica-s02e15, tv-en-2005-battlestargalactica-s02e17, tv-en-2005-battlestargalactica-s02e14, tv-en-2005-battlestargalactica-s02e13, tv-en-2005-battlestargalactica-s02e12, tv-en-2005-battlestargalactica-s02e11, tv-en-2005-battlestargalactica-s02e08, tv-en-2005-battlestargalactica-s02e04, tv-en-2005-battlestargalactica-s02e07, tv-en-2005-battlestargalactica-s02e06, tv-en-2005-battlestargalactica-s02e01, tv-en-2005-battlestargalactica-s02e05, tv-en-2005-battlestargalactica-s02e09, tv-en-2005-battlestargalactica-s02e02, tv-en-2005-battlestargalactica-s02e03, tv-en-2005-battlestargalactica-s02  kind: tvshow  tmdb_id: 1972  nfo: present
+  [  ok  ] Battlestar Galactica (2004) Season 3 [tmdbid-1972]
+          ids: tv-en-2006-battlestargalactica-s03e09, tv-en-2006-battlestargalactica-s03e20, tv-en-2006-battlestargalactica-s03e18, tv-en-2006-battlestargalactica-s03e19, tv-en-2006-battlestargalactica-s03e08, tv-en-2006-battlestargalactica-s03e06, tv-en-2006-battlestargalactica-s03e07, tv-en-2006-battlestargalactica-s03e10, tv-en-2006-battlestargalactica-s03e11, tv-en-2006-battlestargalactica-s03e12, tv-en-2006-battlestargalactica-s03e15, tv-en-2006-battlestargalactica-s03e16, tv-en-2006-battlestargalactica-s03e14, tv-en-2006-battlestargalactica-s03e17, tv-en-2006-battlestargalactica-s03e13, tv-en-2006-battlestargalactica-s03e02, tv-en-2006-battlestargalactica-s03e01, tv-en-2006-battlestargalactica-s03e03, tv-en-2006-battlestargalactica-s03e04, tv-en-2006-battlestargalactica-s03e05, tv-en-2006-battlestargalactica-s03  kind: tvshow  tmdb_id: 1972  nfo: present
+  [  ok  ] Battlestar Galactica (2004) Season 4 [tmdbid-1972]
+          ids: tv-en-2008-battlestargalactica-s04e19, tv-en-2008-battlestargalactica-s04e18, tv-en-2008-battlestargalactica-s04e12, tv-en-2008-battlestargalactica-s04e01, tv-en-2008-battlestargalactica-s04e03, tv-en-2008-battlestargalactica-s04e04, tv-en-2008-battlestargalactica-s04e05, tv-en-2008-battlestargalactica-s04e02, tv-en-2008-battlestargalactica-s04e11, tv-en-2008-battlestargalactica-s04e06, tv-en-2008-battlestargalactica-s04e10, tv-en-2008-battlestargalactica-s04e07, tv-en-2008-battlestargalactica-s04e09, tv-en-2008-battlestargalactica-s04e08, tv-en-2008-battlestargalactica-s04e13, tv-en-2008-battlestargalactica-s04e14, tv-en-2008-battlestargalactica-s04e15, tv-en-2008-battlestargalactica-s04e17, tv-en-2008-battlestargalactica-s04e16, tv-en-2008-battlestargalactica-s04  kind: tvshow  tmdb_id: 1972  nfo: present
+  [  ok  ] The.Expanse.S01.2015.2160p.AMZN.WEB-DL.x265.10bit.HDR.DTS-HD.MA.5.1-SAFETY[rartv] [tmdbid-63639]
+          ids: tv-en-2015-theexpanse-s01e01, tv-en-2015-theexpanse-s01e02, tv-en-2015-theexpanse-s01e03, tv-en-2015-theexpanse-s01e04, tv-en-2015-theexpanse-s01e06, tv-en-2015-theexpanse-s01e10, tv-en-2015-theexpanse-s01e07, tv-en-2015-theexpanse-s01e08, tv-en-2015-theexpanse-s01e05, tv-en-2015-theexpanse-s01e09, tv-en-2015-theexpanse-s01  kind: tvshow  tmdb_id: 63639  nfo: present
+  [  ok  ] The.Expanse.S02.2017.2160p.AMZN.WEB-DL.x265.10bit.HDR.DTS-HD.MA.5.1-SAFETY[rartv] [tmdbid-63639]
+          ids: tv-en-2017-theexpanse-s02e01, tv-en-2017-theexpanse-s02e05, tv-en-2017-theexpanse-s02e07, tv-en-2017-theexpanse-s02e12, tv-en-2017-theexpanse-s02e08, tv-en-2017-theexpanse-s02e04, tv-en-2017-theexpanse-s02e11, tv-en-2017-theexpanse-s02e02, tv-en-2017-theexpanse-s02e06, tv-en-2017-theexpanse-s02e13, tv-en-2017-theexpanse-s02e10, tv-en-2017-theexpanse-s02e03, tv-en-2017-theexpanse-s02e09, tv-en-2017-theexpanse-s02  kind: tvshow  tmdb_id: 63639  nfo: present
+  [  ok  ] The.Expanse.S03.2018.2160p.AMZN.WEB-DL.x265.10bit.HDR.DTS-HD.MA.5.1-SAFETY[rartv] [tmdbid-63639]
+          ids: tv-en-2018-theexpanse-s03e07, tv-en-2018-theexpanse-s03e11, tv-en-2018-theexpanse-s03e06, tv-en-2018-theexpanse-s03e03, tv-en-2018-theexpanse-s03e04, tv-en-2018-theexpanse-s03e05, tv-en-2018-theexpanse-s03e08, tv-en-2018-theexpanse-s03e09, tv-en-2018-theexpanse-s03e01, tv-en-2018-theexpanse-s03e02, tv-en-2018-theexpanse-s03e12, tv-en-2018-theexpanse-s03e13, tv-en-2018-theexpanse-s03e10, tv-en-2018-theexpanse-s03  kind: tvshow  tmdb_id: 63639  nfo: present
+  [  ok  ] The.Expanse.S04.HDR.2019.2160p.WEB.h265-SKGTV[rartv] [tmdbid-63639]
+          ids: tv-en-2019-theexpanse-s04e08, tv-en-2019-theexpanse-s04e01, tv-en-2019-theexpanse-s04e10, tv-en-2019-theexpanse-s04e06, tv-en-2019-theexpanse-s04e02, tv-en-2019-theexpanse-s04e03, tv-en-2019-theexpanse-s04e05, tv-en-2019-theexpanse-s04e07, tv-en-2019-theexpanse-s04e04, tv-en-2019-theexpanse-s04e09, tv-en-2019-theexpanse-s04  kind: tvshow  tmdb_id: 63639  nfo: present
+  [  ok  ] The.Expanse.S05.2020.2160p.AMZN.WEB-DL.x265.10bit.HDR10plus.DDP5.1.Atmos-MIXED[rartv] [tmdbid-63639]
+          ids: tv-en-2020-theexpanse-s05e10, tv-en-2020-theexpanse-s05e08, tv-en-2020-theexpanse-s05e02, tv-en-2020-theexpanse-s05e03, tv-en-2020-theexpanse-s05e09, tv-en-2020-theexpanse-s05e01, tv-en-2020-theexpanse-s05e06, tv-en-2020-theexpanse-s05e05, tv-en-2020-theexpanse-s05e07, tv-en-2020-theexpanse-s05e04, tv-en-2020-theexpanse-s05  kind: tvshow  tmdb_id: 63639  nfo: present
+  [  ok  ] The.Expanse.S06.2021.2160p.AMZN.WEB-DL.x265.10bit.HDR10Plus.DDP5.1-MZABI[rartv] [tmdbid-63639]
+          ids: tv-en-2021-theexpanse-s06e06, tv-en-2021-theexpanse-s06e05, tv-en-2021-theexpanse-s06e04, tv-en-2021-theexpanse-s06e01, tv-en-2021-theexpanse-s06e02, tv-en-2021-theexpanse-s06e03, tv-en-2021-theexpanse-s06  kind: tvshow  tmdb_id: 63639  nfo: present
+  [  ok  ] Mr.Robot.S01.2015.1080p.DTS-HD.MA.5.1.AVC [tmdbid-62560]
+          ids: tv-en-2015-mrrobot-s01e01, tv-en-2015-mrrobot-s01e10, tv-en-2015-mrrobot-s01e09, tv-en-2015-mrrobot-s01e02, tv-en-2015-mrrobot-s01e08, tv-en-2015-mrrobot-s01e04, tv-en-2015-mrrobot-s01e05, tv-en-2015-mrrobot-s01e03, tv-en-2015-mrrobot-s01e06, tv-en-2015-mrrobot-s01e07, tv-en-2015-mrrobot-s01  kind: tvshow  tmdb_id: 62560  nfo: present
+  [  ok  ] Mr.Robot.S02.2016.1080p.DTS-HD.MA.5.1.AVC [tmdbid-62560]
+          ids: tv-en-2016-mrrobot-s02  kind: tvshow  tmdb_id: 62560  nfo: present
+  [  ok  ] Mr.Robot.S03.1080p.DTS-HD.MA.5.1.AVC [tmdbid-62560]
+          ids: tv-en-2017-mrrobot-s03e10, tv-en-2017-mrrobot-s03e01, tv-en-2017-mrrobot-s03e02, tv-en-2017-mrrobot-s03e03, tv-en-2017-mrrobot-s03e04, tv-en-2017-mrrobot-s03e08, tv-en-2017-mrrobot-s03e09, tv-en-2017-mrrobot-s03e05, tv-en-2017-mrrobot-s03e06, tv-en-2017-mrrobot-s03e07, tv-en-2017-mrrobot-s03  kind: tvshow  tmdb_id: 62560  nfo: present
+  [  ok  ] Mr.Robot.S04.BluRay.2019.1080p.DTS-HD.MA.5.1.AVC.REMUX
+          ids: tv-en-2016-mrrobot-s02e11, tv-en-2016-mrrobot-s02e09, tv-en-2016-mrrobot-s02e13, tv-en-2016-mrrobot-s02e10, tv-en-2016-mrrobot-s02e12, tv-en-2016-mrrobot-s02e01, tv-en-2016-mrrobot-s02e03, tv-en-2016-mrrobot-s02e07, tv-en-2016-mrrobot-s02e08, tv-en-2016-mrrobot-s02e02, tv-en-2016-mrrobot-s02e04, tv-en-2016-mrrobot-s02e05, tv-en-2016-mrrobot-s02e06  kind: tvshow  tmdb_id: 62560  nfo: present
+  [  ok  ] Aindham Vedham (2024) S01 EP (01-08) TRUE WEB-DL - 1080p - AVC - UNTOUCHED [tmdbid-274276]
+          ids: tv-ta-2024-aindhamvedham-s01e01, tv-ta-2024-aindhamvedham-s01e07, tv-ta-2024-aindhamvedham-s01e02, tv-ta-2024-aindhamvedham-s01e08, tv-ta-2024-aindhamvedham-s01e06, tv-ta-2024-aindhamvedham-s01e04, tv-ta-2024-aindhamvedham-s01e03, tv-ta-2024-aindhamvedham-s01e05, tv-ta-2024-aindhamvedham-s01  kind: tvshow  tmdb_id: 274276  nfo: present
+  [  ok  ] FIFA World Cup 2026 (USA-Canada-Mexico)
+          ids: oth-football-2026-fifaworldcup-s01, oth-football-2026-fifaworldcup-s01e01, oth-football-2026-fifaworldcup-s01e02, oth-football-2026-fifaworldcup-s01e03, oth-football-2026-fifaworldcup-s01e04, oth-football-2026-fifaworldcup-s01e05, oth-football-2026-fifaworldcup-s01e06, oth-football-2026-fifaworldcup-s01e07, oth-football-2026-fifaworldcup-s01e08, oth-football-2026-fifaworldcup-s01e09, oth-football-2026-fifaworldcup-s01e10, oth-football-2026-fifaworldcup-s01e11, oth-football-2026-fifaworldcup-s01e12, oth-football-2026-fifaworldcup-s01e13, oth-football-2026-fifaworldcup-s01e14, oth-football-2026-fifaworldcup-s01e15, oth-football-2026-fifaworldcup-s01e16, oth-football-2026-fifaworldcup-s01e17, oth-football-2026-fifaworldcup-s01e18, oth-football-2026-fifaworldcup-s01e19, oth-football-2026-fifaworldcup-s01e20, oth-football-2026-fifaworldcup-s01e21, oth-football-2026-fifaworldcup-s01e22, oth-football-2026-fifaworldcup-s01e23, oth-football-2026-fifaworldcup-s01e24, oth-football-2026-fifaworldcup-s01e25, oth-football-2026-fifaworldcup-s01e26, oth-football-2026-fifaworldcup-s01e27, oth-football-2026-fifaworldcup-s01e28, oth-football-2026-fifaworldcup-s01e29, oth-football-2026-fifaworldcup-s01e30, oth-football-2026-fifaworldcup-s01e31, oth-football-2026-fifaworldcup-s01e32, oth-football-2026-fifaworldcup-s01e33, oth-football-2026-fifaworldcup-s01e34, oth-football-2026-fifaworldcup-s01e35  kind: tvshow  tmdb_id: None  nfo: no id — skipped
+==============================================================================
+
+  PHASE B — 4 on-disk group folder(s) not referenced by a library folder_path (deepest-first):
+    [RENAME] Friends Season 00 (1994) {tmdb-1668}
+          -> Friends Season 00 (1994) [tmdbid-1668]
+    [RENAME] Friends Season 09 (2002) {tmdb-1668}
+          -> Friends Season 09 (2002) [tmdbid-1668]
+    [RENAME] Friends Season 10 (2003) {tmdb-1668}
+          -> Friends Season 10 (2003) [tmdbid-1668]
+    [RENAME] Friends (1994) {tmdb-1668}
+          -> Friends (1994) [tmdbid-1668]
+
+🚀 APPLY: renaming folders strictly sequentially (journal-backed)…
+   > renaming: Friends Season 00 (1994) {tmdb-1668}  ->  Friends Season 00 (1994) [tmdbid-1668]
+=== RENAME FOLDER ===
+   > FROM: C:\Media\Series\English\Classic\Friends (1994) {tmdb-1668}\Friends Season 00 (1994) {tmdb-1668}
+   > TO:   C:\Media\Series\English\Classic\Friends (1994) {tmdb-1668}\Friends Season 00 (1994) [tmdbid-1668]
+❌ No library entries reference C:\Media\Series\English\Classic\Friends (1994) {tmdb-1668}\Friends Season 00 (1994) {tmdb-1668} — nothing to rename.
+   ⚠️  rename FAILED for C:\Media\Series\English\Classic\Friends (1994) {tmdb-1668}\Friends Season 00 (1994) {tmdb-1668} — continuing with the rest.
+   > renaming: Friends Season 09 (2002) {tmdb-1668}  ->  Friends Season 09 (2002) [tmdbid-1668]
+=== RENAME FOLDER ===
+   > FROM: C:\Media\Series\English\Classic\Friends (1994) {tmdb-1668}\Friends Season 09 (2002) {tmdb-1668}
+   > TO:   C:\Media\Series\English\Classic\Friends (1994) {tmdb-1668}\Friends Season 09 (2002) [tmdbid-1668]
+❌ No library entries reference C:\Media\Series\English\Classic\Friends (1994) {tmdb-1668}\Friends Season 09 (2002) {tmdb-1668} — nothing to rename.
+   ⚠️  rename FAILED for C:\Media\Series\English\Classic\Friends (1994) {tmdb-1668}\Friends Season 09 (2002) {tmdb-1668} — continuing with the rest.
+   > renaming: Friends Season 10 (2003) {tmdb-1668}  ->  Friends Season 10 (2003) [tmdbid-1668]
+=== RENAME FOLDER ===
+   > FROM: C:\Media\Series\English\Classic\Friends (1994) {tmdb-1668}\Friends Season 10 (2003) {tmdb-1668}
+   > TO:   C:\Media\Series\English\Classic\Friends (1994) {tmdb-1668}\Friends Season 10 (2003) [tmdbid-1668]
+❌ No library entries reference C:\Media\Series\English\Classic\Friends (1994) {tmdb-1668}\Friends Season 10 (2003) {tmdb-1668} — nothing to rename.
+   ⚠️  rename FAILED for C:\Media\Series\English\Classic\Friends (1994) {tmdb-1668}\Friends Season 10 (2003) {tmdb-1668} — continuing with the rest.
+   > renaming: Friends (1994) {tmdb-1668}  ->  Friends (1994) [tmdbid-1668]
+=== RENAME FOLDER ===
+   > FROM: C:\Media\Series\English\Classic\Friends (1994) {tmdb-1668}
+   > TO:   C:\Media\Series\English\Classic\Friends (1994) [tmdbid-1668]
+   > 193 library entr(y/ies) will be re-pointed:
+       - tv-en-1994-friends-s01
+       - tv-en-1994-friends-s01e01
+       - tv-en-1994-friends-s01e02
+       - tv-en-1994-friends-s01e03
+       - tv-en-1994-friends-s01e04
+       - tv-en-1994-friends-s01e05
+       - tv-en-1994-friends-s01e06
+       - tv-en-1994-friends-s01e07
+       - tv-en-1994-friends-s01e08
+       - tv-en-1994-friends-s01e09
+       - tv-en-1994-friends-s01e10
+       - tv-en-1994-friends-s01e11
+       - tv-en-1994-friends-s01e12
+       - tv-en-1994-friends-s01e13
+       - tv-en-1994-friends-s01e14
+       - tv-en-1994-friends-s01e15
+       - tv-en-1994-friends-s01e16
+       - tv-en-1994-friends-s01e17
+       - tv-en-1994-friends-s01e18
+       - tv-en-1994-friends-s01e19
+       - tv-en-1994-friends-s01e20
+       - tv-en-1994-friends-s01e21
+       - tv-en-1994-friends-s01e22
+       - tv-en-1994-friends-s01e23
+       - tv-en-1994-friends-s01e24
+       - tv-en-1994-friends-s02
+       - tv-en-1994-friends-s02e01
+       - tv-en-1994-friends-s02e02
+       - tv-en-1994-friends-s02e03
+       - tv-en-1994-friends-s02e04
+       - tv-en-1994-friends-s02e05
+       - tv-en-1994-friends-s02e06
+       - tv-en-1994-friends-s02e07
+       - tv-en-1994-friends-s02e08
+       - tv-en-1994-friends-s02e09
+       - tv-en-1994-friends-s02e10
+       - tv-en-1994-friends-s02e11
+       - tv-en-1994-friends-s02e12
+       - tv-en-1994-friends-s02e13
+       - tv-en-1994-friends-s02e14
+       - tv-en-1994-friends-s02e15
+       - tv-en-1994-friends-s02e16
+       - tv-en-1994-friends-s02e17
+       - tv-en-1994-friends-s02e18
+       - tv-en-1994-friends-s02e19
+       - tv-en-1994-friends-s02e20
+       - tv-en-1994-friends-s02e21
+       - tv-en-1994-friends-s02e22
+       - tv-en-1994-friends-s02e23
+       - tv-en-1994-friends-s02e24
+       - tv-en-1994-friends-s03
+       - tv-en-1994-friends-s03e01
+       - tv-en-1994-friends-s03e02
+       - tv-en-1994-friends-s03e03
+       - tv-en-1994-friends-s03e04
+       - tv-en-1994-friends-s03e05
+       - tv-en-1994-friends-s03e06
+       - tv-en-1994-friends-s03e07
+       - tv-en-1994-friends-s03e08
+       - tv-en-1994-friends-s03e09
+       - tv-en-1994-friends-s03e10
+       - tv-en-1994-friends-s03e11
+       - tv-en-1994-friends-s03e12
+       - tv-en-1994-friends-s03e13
+       - tv-en-1994-friends-s03e14
+       - tv-en-1994-friends-s03e15
+       - tv-en-1994-friends-s03e16
+       - tv-en-1994-friends-s03e17
+       - tv-en-1994-friends-s03e18
+       - tv-en-1994-friends-s03e19
+       - tv-en-1994-friends-s03e20
+       - tv-en-1994-friends-s03e21
+       - tv-en-1994-friends-s03e22
+       - tv-en-1994-friends-s03e23
+       - tv-en-1994-friends-s03e24
+       - tv-en-1994-friends-s03e25
+       - tv-en-1994-friends-s04
+       - tv-en-1994-friends-s04e01
+       - tv-en-1994-friends-s04e02
+       - tv-en-1994-friends-s04e03
+       - tv-en-1994-friends-s04e04
+       - tv-en-1994-friends-s04e05
+       - tv-en-1994-friends-s04e06
+       - tv-en-1994-friends-s04e07
+       - tv-en-1994-friends-s04e08
+       - tv-en-1994-friends-s04e09
+       - tv-en-1994-friends-s04e10
+       - tv-en-1994-friends-s04e11
+       - tv-en-1994-friends-s04e12
+       - tv-en-1994-friends-s04e13
+       - tv-en-1994-friends-s04e14
+       - tv-en-1994-friends-s04e15
+       - tv-en-1994-friends-s04e16
+       - tv-en-1994-friends-s04e17
+       - tv-en-1994-friends-s04e18
+       - tv-en-1994-friends-s04e19
+       - tv-en-1994-friends-s04e20
+       - tv-en-1994-friends-s04e21
+       - tv-en-1994-friends-s04e22
+       - tv-en-1994-friends-s04e23
+       - tv-en-1994-friends-s04e24
+       - tv-en-1994-friends-s05
+       - tv-en-1994-friends-s05e01
+       - tv-en-1994-friends-s05e02
+       - tv-en-1994-friends-s05e03
+       - tv-en-1994-friends-s05e04
+       - tv-en-1994-friends-s05e05
+       - tv-en-1994-friends-s05e06
+       - tv-en-1994-friends-s05e07
+       - tv-en-1994-friends-s05e08
+       - tv-en-1994-friends-s05e09
+       - tv-en-1994-friends-s05e10
+       - tv-en-1994-friends-s05e11
+       - tv-en-1994-friends-s05e12
+       - tv-en-1994-friends-s05e13
+       - tv-en-1994-friends-s05e14
+       - tv-en-1994-friends-s05e15
+       - tv-en-1994-friends-s05e16
+       - tv-en-1994-friends-s05e17
+       - tv-en-1994-friends-s05e18
+       - tv-en-1994-friends-s05e19
+       - tv-en-1994-friends-s05e20
+       - tv-en-1994-friends-s05e21
+       - tv-en-1994-friends-s05e22
+       - tv-en-1994-friends-s05e23
+       - tv-en-1994-friends-s05e24
+       - tv-en-1994-friends-s06
+       - tv-en-1994-friends-s06e01
+       - tv-en-1994-friends-s06e02
+       - tv-en-1994-friends-s06e03
+       - tv-en-1994-friends-s06e04
+       - tv-en-1994-friends-s06e05
+       - tv-en-1994-friends-s06e06
+       - tv-en-1994-friends-s06e07
+       - tv-en-1994-friends-s06e08
+       - tv-en-1994-friends-s06e09
+       - tv-en-1994-friends-s06e10
+       - tv-en-1994-friends-s06e11
+       - tv-en-1994-friends-s06e12
+       - tv-en-1994-friends-s06e13
+       - tv-en-1994-friends-s06e14
+       - tv-en-1994-friends-s06e15
+       - tv-en-1994-friends-s06e16
+       - tv-en-1994-friends-s06e17
+       - tv-en-1994-friends-s06e18
+       - tv-en-1994-friends-s06e19
+       - tv-en-1994-friends-s06e20
+       - tv-en-1994-friends-s06e21
+       - tv-en-1994-friends-s06e22
+       - tv-en-1994-friends-s06e23
+       - tv-en-1994-friends-s06e24
+       - tv-en-1994-friends-s06e25
+       - tv-en-1994-friends-s07
+       - tv-en-1994-friends-s07e01
+       - tv-en-1994-friends-s07e02
+       - tv-en-1994-friends-s07e03
+       - tv-en-1994-friends-s07e04
+       - tv-en-1994-friends-s07e05
+       - tv-en-1994-friends-s07e06
+       - tv-en-1994-friends-s07e07
+       - tv-en-1994-friends-s07e08
+       - tv-en-1994-friends-s07e09
+       - tv-en-1994-friends-s07e10
+       - tv-en-1994-friends-s07e11
+       - tv-en-1994-friends-s07e12
+       - tv-en-1994-friends-s07e13
+       - tv-en-1994-friends-s07e14
+       - tv-en-1994-friends-s07e15
+       - tv-en-1994-friends-s07e16
+       - tv-en-1994-friends-s07e17
+       - tv-en-1994-friends-s07e18
+       - tv-en-1994-friends-s07e19
+       - tv-en-1994-friends-s07e20
+       - tv-en-1994-friends-s07e21
+       - tv-en-1994-friends-s07e22
+       - tv-en-1994-friends-s07e23
+       - tv-en-1994-friends-s07e24
+       - tv-en-1994-friends-s08
+       - tv-en-1994-friends-s08e01
+       - tv-en-1994-friends-s08e02
+       - tv-en-1994-friends-s08e03
+       - tv-en-1994-friends-s08e04
+       - tv-en-1994-friends-s08e05
+       - tv-en-1994-friends-s08e06
+       - tv-en-1994-friends-s08e07
+       - tv-en-1994-friends-s08e08
+       - tv-en-1994-friends-s08e09
+       - tv-en-1994-friends-s08e10
+       - tv-en-1994-friends-s08e11
+       - tv-en-1994-friends-s08e12
+       - tv-en-1994-friends-s08e13
+       - tv-en-1994-friends-s08e14
+       - tv-en-1994-friends-s08e15
+❌ rename_folder failed (pre-rename): [WinError 5] Access is denied: 'C:\\Media\\Series\\English\\Classic\\Friends (1994) {tmdb-1668}' -> 'C:\\Media\\Series\\English\\Classic\\Friends (1994) [tmdbid-1668]'
+✅ Rollback complete — back to exact pre-command state.
+   ⚠️  rename FAILED for C:\Media\Series\English\Classic\Friends (1994) {tmdb-1668} — continuing with the rest.
+
+=== MIGRATED: renamed=0 failed=4 nfos_written=0 nfos_kept=198 nfos_skipped_no_id=6 ===
+Re-run this tool (dry-run) to confirm 0 pending folders remain.

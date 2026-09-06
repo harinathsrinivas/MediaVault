@@ -181,6 +181,45 @@ def test_idempotent_rerun_finds_nothing_pending(sandbox):
     assert second["nfos_written"] == 0 and second["nfos_kept"] == 1
 
 
+def test_phase_b_group_parent_folders(sandbox):
+    """PHASE B: a show-parent carrying a legacy token but NOT referenced by any
+    library folder_path (its flat season folders are the library entries) must
+    still be renamed — deepest-first (children before parents) — and the top-most
+    one gets a tvshow.nfo. Descendant library folder_paths are rewritten by
+    cmd_rename_folder."""
+    show_parent = sandbox["local_root"] / "Series" / "Friends (1994) {tmdb-1668}"
+    s01 = show_parent / "Friends Season 01 (1994) {tmdb-1668}"
+    s01.mkdir(parents=True)
+    (s01 / "ep.mkv").write_bytes(b"EP\n" * 40)
+    lib = mvcommon.load_library()
+    lib["tv-en-1994-friends-s01e01"] = {
+        "short_id": mvcommon.generate_short_id("tv-en-1994-friends-s01e01"),
+        "filename": "ep.mkv",
+        "folder_path": str(s01),
+        "status": "local_ready",
+        "uploaded": False,
+        "hash": "0" * 64,
+        "metadata": main.parse_metadata_from_id("tv-en-1994-friends-s01e01"),
+    }
+    mvcommon.save_library(lib)
+
+    summary = mig.migrate(apply=True, verbose=False)
+
+    new_show = sandbox["local_root"] / "Series" / "Friends (1994) [tmdbid-1668]"
+    new_s01 = new_show / "Friends Season 01 (1994) [tmdbid-1668]"
+    assert new_s01.is_dir(), "both parent and child are renamed"
+    assert not show_parent.exists()
+    assert summary["renamed"] == 2
+    # The season leaf's folder_path follows the parent rename.
+    lib = mvcommon.load_library()
+    assert main._norm_path(lib["tv-en-1994-friends-s01e01"]["folder_path"]) == \
+        main._norm_path(str(new_s01))
+    # The TOP-most group folder (the show parent) gets the tvshow.nfo — and the
+    # season folder has its own from PHASE A (both correct).
+    assert (new_show / "tvshow.nfo").is_file()
+    assert (new_s01 / "tvshow.nfo").is_file()
+
+
 def test_library_filter_and_limit_and_call_order(sandbox, monkeypatch):
     a = _seed_folder(sandbox, "Movies/A", ["mov-en-2001-aaa"], leaf_name="Aaa (2001) {tmdb-1}")
     b = _seed_folder(sandbox, "Movies/B", ["mov-en-2002-bbb"], leaf_name="Bbb (2002) {tmdb-2}")

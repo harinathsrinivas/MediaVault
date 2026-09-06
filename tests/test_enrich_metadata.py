@@ -1787,38 +1787,68 @@ def test_exa_resolve_caches_response_idempotent(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# IMP-C23 — `_has_tmdb_token` is CASE-INSENSITIVE.
+# IMP-C23 — `_has_tmdb_token` is CASE-INSENSITIVE (generalized by IMP-U6).
 #
 # Real folders in the wild carry an uppercase token (the user's own
 # `Run (2002)  - 4K SDR - (DD+5.1 - 192Kbps & AAC)  {TMDB-69590}`). Before the
 # fix `_has_tmdb_token` had no `re.IGNORECASE`, so such a folder read as "no
-# token" and the next enrich/rename pass appended a SECOND one. Its sibling
-# predicate `_PROVIDER_TOKEN_RE` (the artwork-inheritance resolver) has always
-# been case-insensitive; the two had drifted.
+# token" and the next enrich/rename pass appended a SECOND one. IMP-U6 widened
+# the predicate to BOTH shapes: the canonical square `[tmdbid-…]` (D1) and the
+# legacy curly `{tmdb-…}` / `{TMDB-…}`, which D3 keeps recognized forever so a
+# pre-migration folder can never be double-stamped.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("name", [
-    "Run (2002) {TMDB-69590}",          # the real-world uppercase shape
-    "Drishyam 3 (2026) {tmdb-847742}",  # lowercase (already worked)
+    "Run (2002) {TMDB-69590}",          # the real-world uppercase LEGACY shape
+    "Drishyam 3 (2026) {tmdb-847742}",  # lowercase legacy curly (already worked)
     "X {TmDb-1}",                       # mixed case
     "Dark Season 01 (2017) {TMDB-70523}",
+    "Inception (2010) [tmdbid-27205]",  # IMP-U6 canonical square form
+    "X [TmDbId-1]",                     # square, mixed case
 ])
 def test_has_tmdb_token_is_case_insensitive(name):
     assert main._has_tmdb_token(name) is True
 
 
-@pytest.mark.parametrize("name", ["No token here", "", None, "Movie (2020)", "{tvdb-123}"])
+@pytest.mark.parametrize("name", [
+    "No token here", "", None, "Movie (2020)",
+    "{tvdb-123}", "[tvdbid-123]",       # other providers: not a TMDB token, either shape
+])
 def test_has_tmdb_token_still_false_without_a_tmdb_token(name):
-    """The fix must not make the predicate over-eager: a name with no `{tmdb-…}`
-    (including a `{tvdb-…}` token, which this project never writes) stays False."""
+    """The fix must not make the predicate over-eager: a name with no tmdb
+    token — including a tvdb token in either shape, which this project never
+    STAMPS — stays False."""
     assert main._has_tmdb_token(name) is False
 
 
-def test_has_tmdb_token_agrees_with_provider_token_re():
+def test_has_tmdb_token_agrees_with_tmdb_token_re():
     """Regression pin for the DRIFT that caused IMP-C23: `_has_tmdb_token` and
-    `_PROVIDER_TOKEN_RE` are the same predicate over the same token and must
-    stay in lockstep. If a future edit changes one, this fails."""
+    the module-level `_TMDB_TOKEN_RE` are the same predicate and must stay in
+    lockstep. If a future edit changes one, this fails."""
     for name in ["Run (2002) {TMDB-69590}", "a {tmdb-1}", "X {TmDb-1}",
-                 "none", "", "{tvdb-9}", "Show (1993) {tmdb-4087}"]:
+                 "Inception (2010) [tmdbid-27205]", "X [TmDbId-9]",
+                 "none", "", "{tvdb-9}", "[tvdbid-9]", "Show (1993) {tmdb-4087}"]:
         assert bool(main._has_tmdb_token(name)) is bool(
+            main._TMDB_TOKEN_RE.search(name or "")), name
+
+
+def test_has_provider_token_agrees_with_provider_token_re():
+    """IMP-U6 pin: `_has_provider_token` and `_PROVIDER_TOKEN_RE` are the same
+    ANY-provider / any-shape predicate (the artwork walk's) and must not drift."""
+    for name in ["Run (2002) {TMDB-69590}", "a {tvdb-1}", "X [tmdbid-1]",
+                 "Y [TVDBID-334824]", "Z [IMDBID-tt123]", "none", "", "plain",
+                 "{imdb-tt9}", "Show (1993) {tmdb-4087}"]:
+        assert bool(main._has_provider_token(name)) is bool(
             main._PROVIDER_TOKEN_RE.search(name or "")), name
+
+
+def test_format_and_strip_tmdb_token():
+    """IMP-U6: the ONE stamp formatter + the strip helper used by the migration
+    tool and re-stamp flows."""
+    assert main.format_tmdb_token(603692) == "[tmdbid-603692]"
+    assert main.format_tmdb_token("70523") == "[tmdbid-70523]"
+    assert main.strip_tmdb_tokens("Dark (2017) [tmdbid-70523]") == "Dark (2017)"
+    assert main.strip_tmdb_tokens("Run (2002) {TMDB-69590}") == "Run (2002)"
+    assert main.strip_tmdb_tokens("A [tmdbid-1] B {tmdb-2}") == "A B"
+    assert main.strip_tmdb_tokens("No token") == "No token"
+    assert main.strip_tmdb_tokens(None) == ""

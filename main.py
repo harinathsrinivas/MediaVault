@@ -171,6 +171,72 @@ ENTRY_TYPE_KEYS = {
 
 
 # ==========================================
+#    PROVIDER FOLDER TOKENS (IMP-U6, D1/D2/D3)
+# ==========================================
+# The provider-id token stamped onto show/movie FOLDER names. IMP-U6 ruled
+# (docs/feature-token-brackets/DECISIONS.md): the stamped form is the
+# Jellyfin/Emby-native square bracket `[tmdbid-<id>]` (D1); the legacy
+# Plex-style curly `{tmdb-…}` / `{TMDB-…}` (pre-IMP-U6 folders) stays
+# RECOGNIZED forever so a legacy folder can never be double-stamped (D3).
+# ALL token regexes live in this one block (the IMP-C23 anti-drift rule) and
+# drift-pin tests assert the predicates agree with them.
+#
+#   DETECTION (either shape, case-insensitive):
+#     _TMDB_TOKEN_RE       tmdb tokens, both shapes   -> _has_tmdb_token()
+#     _PROVIDER_TOKEN_RE   any provider, both shapes  -> _has_provider_token()
+#                          (the artwork walk: a `[tvdbid-…]` show folder
+#                           satisfies the season-inheritance climb)
+#   STAMP (D1): format_tmdb_token() -> "[tmdbid-<id>]" — the ONE formatter;
+#   no stamp site may inline a `{tmdb-…}` f-string again.
+TMDB_TOKEN_SQUARE_RE = re.compile(r"\[tmdbid-[^\]]+\]", re.IGNORECASE)
+TMDB_TOKEN_CURLY_RE = re.compile(r"\{tmdb-[^\}]+\}", re.IGNORECASE)
+PROVIDER_TOKEN_SQUARE_RE = re.compile(r"\[(?:tmdbid|tvdbid|imdbid)-[^\]]+\]", re.IGNORECASE)
+PROVIDER_TOKEN_CURLY_RE = re.compile(r"\{(?:tmdb|tvdb|imdb)-[^\}]+\}", re.IGNORECASE)
+_TMDB_TOKEN_RE = re.compile(
+    r"(?:\[tmdbid-[^\]]+\]|\{tmdb-[^\}]+\})", re.IGNORECASE
+)
+# Kept name — the artwork season-inheritance resolver's predicate (any
+# provider, either shape). Historically tmdb-curly-only; IMP-U6 widened it.
+_PROVIDER_TOKEN_RE = re.compile(
+    r"(?:\[(?:tmdbid|tvdbid|imdbid)-[^\]]+\]|\{(?:tmdb|tvdb|imdb)-[^\}]+\})",
+    re.IGNORECASE,
+)
+
+
+def _has_tmdb_token(name):
+    """True if a folder leaf name already carries a tmdb provider token in
+    EITHER shape — the canonical square `[tmdbid-…]` (IMP-U6, D1) or the legacy
+    curly `{tmdb-…}` / `{TMDB-…}` (pre-IMP-U6 folders; kept recognized forever
+    so a legacy folder is never double-stamped, D3).
+
+    CASE-INSENSITIVE (IMP-C23). Kept deliberately in lockstep with
+    `_TMDB_TOKEN_RE` above (the same predicate; a drift-pin test asserts it);
+    `_PROVIDER_TOKEN_RE` is the ANY-provider superset the artwork walk uses."""
+    return _TMDB_TOKEN_RE.search(name or "") is not None
+
+
+def _has_provider_token(name):
+    """True if a folder leaf name carries ANY provider token (tmdbid / tvdbid /
+    imdbid) in either the square `[prov-…]` or the legacy curly `{prov-…}`
+    shape. The artwork season-inheritance walk uses this so a `[tvdbid-…]`-only
+    show folder also satisfies the climb (it previously did not)."""
+    return _PROVIDER_TOKEN_RE.search(name or "") is not None
+
+
+def format_tmdb_token(tmdb_id):
+    """The ONE stamp formatter (IMP-U6, D1): the canonical `[tmdbid-<id>]`
+    token. Every stamp site must go through this helper."""
+    return f"[tmdbid-{tmdb_id}]"
+
+
+def strip_tmdb_tokens(name):
+    """Remove every tmdb token (either shape) from a leaf name and tidy the
+    whitespace. Used by tools/migrate_token_brackets.py and re-stamp flows."""
+    stripped = _TMDB_TOKEN_RE.sub("", name or "")
+    return re.sub(r"\s{2,}", " ", stripped).strip()
+
+
+# ==========================================
 #               UTILITIES
 # ==========================================
 # load_library, save_library, generate_short_id, calculate_file_hash,
@@ -1682,20 +1748,6 @@ def _download_to(url, dest_path):
     except OSError as e:
         print(f"   ⚠️  could not write image {dest_path}: {e}")
         return False
-
-
-def _has_tmdb_token(name):
-    """True if a folder leaf name already carries a `{tmdb-…}` token (idempotency
-    guard — we stamp the token at most once per show/movie folder).
-
-    CASE-INSENSITIVE (IMP-C23). Plex/Emby/Jellyfin treat the provider token
-    case-insensitively and real folders in the wild use `{TMDB-69590}`; without
-    the flag such a folder read as "no token" and the next enrich/rename pass
-    appended a SECOND one (`… {TMDB-69590} {tmdb-69590}`). Kept deliberately in
-    lockstep with `_PROVIDER_TOKEN_RE` (the artwork-inheritance resolver's copy),
-    which has always been `re.IGNORECASE` — the two are the same predicate and
-    must not drift apart again."""
-    return re.search(r"\{tmdb-[^}]+\}", name or "", re.IGNORECASE) is not None
 
 
 _SEASON_ID_RE = re.compile(r"-s(\d+)$", re.IGNORECASE)
@@ -9582,11 +9634,11 @@ def find_folder_image(folder):
     return None
 
 
-# A folder name carries a provider token like `{tmdb-70523}` / `{tvdb-12345}`
-# (the Plex/Emby/Jellyfin convention rename_folder stamps on a SHOW folder). The
-# season-inheritance resolver walks UP to the nearest ancestor whose basename
-# matches this — i.e. the show folder — and uses ITS poster as the fallback.
-_PROVIDER_TOKEN_RE = re.compile(r"\{tmdb-[^}]+\}", re.IGNORECASE)
+# The provider-token regexes live in ONE block near the top of the file (IMP-U6 —
+# the IMP-C23 anti-drift rule). `_PROVIDER_TOKEN_RE` (any provider, either
+# shape) is defined there. The season-inheritance resolver walks UP to the
+# nearest ancestor whose basename matches it — i.e. the show folder — and uses
+# ITS poster as the fallback.
 
 
 def _kind_image_under_root(folder, kind):

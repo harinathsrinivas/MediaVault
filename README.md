@@ -194,8 +194,8 @@ help text and no `--help` flag; this table is the reference.
 | `prep_season`          | `prep_season [base_id] [folder] [--extras "<f1>;<f2>"] [--extras-size <v>]`                                                         | Batch-prep an entire season folder; `--extras` registers bonus folders onto the season                                                                  |
 | `prep_push_rep`        | `prep_push_rep [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | Full pipeline (prep -> push -> replace) for one file; `--extras` also pushes + dummies the title's registered extras            |
 | `prep_push_rep_season` | `prep_push_rep_season [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | Sequential full pipeline for a whole season; `--extras` also pushes + dummies the season's registered extras |
-| `prep_push_rep_enrich` | `prep_push_rep_enrich [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>] [-tmdbid <id>] [--yes\|--no-rename] [--nfo] [--no-web]` | `prep_push_rep`, then TMDB-enrich the result (IMP-D22); no `-tmdbid` -> same auto-resolve waterfall as `enrich_metadata`; `-tvdbid` is refused (TMDB-only) |
-| `prep_push_rep_season_enrich` | `prep_push_rep_season_enrich [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>] [-tmdbid <id>] [--yes\|--no-rename] [--nfo] [--no-web]` | `prep_push_rep_season`, then TMDB-enrich the season THIS RUN archived (IMP-D22) |
+| `prep_push_rep_enrich` | `prep_push_rep_enrich [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>] [-tmdbid <id>] [--yes\|--no-rename] [--nfo] [--no-nfo] [--no-web]` | `prep_push_rep`, then TMDB-enrich the result (IMP-D22); no `-tmdbid` -> same auto-resolve waterfall as `enrich_metadata`; `-tvdbid` is refused (TMDB-only) |
+| `prep_push_rep_season_enrich` | `prep_push_rep_season_enrich [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>] [-tmdbid <id>] [--yes\|--no-rename] [--nfo] [--no-nfo] [--no-web]` | `prep_push_rep_season`, then TMDB-enrich the season THIS RUN archived (IMP-D22) |
 | `push`                 | `push [id] [SIZE_MB/SIZE_GB/COUNT val] [chunks 1-4] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | Split and ADB-push to phone (`rehash` = eager canonical re-hash; `tempdir` = off-volume chunks); `--extras` also uploads the registered extras (extras only, if the main is already archived) |
 | `push_group`           | `push_group [id] [SIZE_..] [episodes 1-3] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | Push a season group; `--extras` also uploads the season's registered extras                                          |
 | `add_extras`           | `add_extras <title_id> "<f1>;<f2>" [--extras-size <v\|none>] [device <id_or_name>] [no-replace]`                                     | Attach bonus content (Specials/Trailers/Behind-the-Scenes) to an existing title and archive it in one shot: scan+hash -> push -> dummy, without touching the main content (`no-replace` = upload only) |
@@ -215,7 +215,7 @@ help text and no `--help` flag; this table is the reference.
 | `set_fanart`           | `set_fanart [id] [url]`                                                                                                             | Download and save fanart.jpg into the media folder                                                                                                     |
 | `set_tmdb`             | `set_tmdb [id] [tmdb_id]`                                                                                                           | Set the TMDB id on a library entry (additive, no rehash, alias-safe)                                                                                  |
 | `rename_folder`        | `rename_folder [old_id_or_path] "<new_name>"`                                                                                       | Crash-safe cascading folder rename — renames the on-disk dir and atomically rewrites `folder_path` for every descendant; uses the existing rollback journal; hash-safe |
-| `enrich_metadata`      | `enrich_metadata [id_or_prefix] [--apply] [--library X] [--nfo] [--no-web]`                                                        | Local-first TMDB backfill: sets real titles, tmdb_id, overview, downloads poster/fanart (never overwrites locals), stamps `{tmdb-…}` folder token; `--nfo` writes Kodi/Jellyfin NFO files; EXA auto-resolve waterfall on TMDB miss (`--no-web` to disable); dry-run by default |
+| `enrich_metadata`      | `enrich_metadata [id_or_prefix] [--apply] [--library X] [--nfo] [--no-nfo] [--no-web]`                                                        | Local-first TMDB backfill: sets real titles, tmdb_id, overview, downloads poster/fanart (never overwrites locals), stamps `{tmdb-…}` folder token; `--nfo` writes Kodi/Jellyfin NFO files; EXA auto-resolve waterfall on TMDB miss (`--no-web` to disable); dry-run by default |
 | `refresh_online`       | `refresh_online [id_or_prefix] [--force] [--library X]`                                                                             | Bulk OMDb ratings fetch → gitignored `mvonline.json` (requires `omdb.api_key` in mvconfig.json) |
 | `fetch_trivia`         | `fetch_trivia [id_or_prefix] [--force] [--library X]`                                                                               | EXA web-search → GROQ-distilled trivia facts → gitignored `mvextra.json` (requires `exa.api_key` + `groq.api_key` in mvconfig.json) |
 | `set_uploaded`         | `set_uploaded [id]`                                                                                                                 | Force-mark as uploaded (emergency rescue)                                                                                                              |
@@ -381,15 +381,21 @@ What `--apply` does (local-first, never destructive):
 - Sets `metadata.tmdb_id` and real `metadata.title` / `year` on each entry.
 - Downloads `poster.jpg` / `fanart.jpg` into the show/season folder — NEVER
   overwriting a file that already exists there.
-- Stamps a `{tmdb-12345}` suffix onto the show's top-level folder once via
-  `rename_folder` so Plex/Emby/Jellyfin pick up the id (seasons inherit it).
+- Stamps a `[tmdbid-12345]` suffix onto the show's top-level folder once via
+  `rename_folder` so Jellyfin/Emby pick the id up from the folder name and
+  Plex pins it from the NFO sidecar (seasons inherit the token). Legacy
+  folders carrying the old curly `{tmdb-…}` token are recognized and never
+  re-stamped — run `tools/migrate_token_brackets.py` to convert them.
+- Writes `movie.nfo` / `tvshow.nfo` into the stamped folder **by default**
+  (IMP-U6): Plex's NFO agent and Jellyfin/Emby read the id from it.
+  `--no-nfo` opts out.
 - Cached: each show is resolved once and re-used for all its seasons/episodes.
 - Ambiguous matches are LISTED, not guessed — review and use `set_tmdb` to pin.
 
 **Fine-grained TMDB control:**
 ```
 python main.py set_tmdb mov-en-2024-inception 27205      # pin a specific TMDB id
-python main.py rename_folder mov-en-2024-inception "Inception (2010) {tmdb-27205}"  # manual rename
+python main.py rename_folder mov-en-2024-inception "Inception (2010) [tmdbid-27205]"  # manual rename
 ```
 
 `rename_folder` is crash-safe: it uses the existing rollback journal
@@ -397,10 +403,31 @@ python main.py rename_folder mov-en-2024-inception "Inception (2010) {tmdb-27205
 and rewrites `folder_path` in the library for every descendant automatically.
 It does NOT change any file's bytes — hashes remain valid.
 
-**NFO files.** `--nfo` writes `movie.nfo` / `tvshow.nfo` with title / year /
-plot / rating / `<uniqueid type="tmdb">` — Kodi and Jellyfin both read these as
-authoritative metadata. The `.nfo` extension is not in `VIDEO_EXTENSIONS` so it
-is invisible to `scan_unprepped` and the push pipeline.
+**NFO files.** `--nfo` forces an NFO write even when no rename happens; since
+IMP-U6 the NFO is also written **by default** whenever a run stamps the folder
+token (`--no-nfo` opts out). `_write_nfo` writes `movie.nfo` / `tvshow.nfo`
+with title / year / plot / rating / `<uniqueid type="tmdb">` — Kodi, Jellyfin,
+Emby, and (since PMS 1.43) Plex's official NFO agent all read these as
+authoritative metadata; a pre-existing `.nfo` is NEVER overwritten (delete it
+to regenerate). The `.nfo` extension is not in `VIDEO_EXTENSIONS` so it is
+invisible to `scan_unprepped` and the push pipeline.
+
+**Folder token convention (`[tmdbid-…]`) and the legacy migration (IMP-U6).**
+MediaVault stamps the Jellyfin/Emby-native square-bracket token — e.g.
+`Midnight in Paris (2011) [tmdbid-59436]`. Jellyfin and Emby parse it straight
+from the folder name; Plex matches by name+year, or pins the exact id via the
+NFO sidecar written at stamp time (one-time Plex setup: point the library's
+metadata agent at the **Plex NFO agent** — see
+[support.plex.tv/articles/using-nfo-metadata-files-with-plex](https://support.plex.tv/articles/using-nfo-metadata-files-with-plex/)).
+Folders from before IMP-U6 carry the Plex-style curly token (`{tmdb-59436}`),
+which Jellyfin/Emby do not parse — `tools/migrate_token_brackets.py` converts
+every one of them (dry-run by default; `--apply` renames each folder via the
+journal-backed `rename_folder`, strictly sequentially, and backfills the NFO):
+
+```
+python tools/migrate_token_brackets.py              # dry-run report
+python tools/migrate_token_brackets.py --apply      # LIVE: renames + NFO backfill
+```
 
 **Posters in the web UI.** Once `poster.jpg` files exist, media-type cards in
 the operations console (`python main.py web`) show real poster artwork. Cards
@@ -416,9 +443,12 @@ Set `exa.api_key` in `mvconfig.json` to enable it.
 
 **TMDB-for-everything.** Movies, series, AND anime all resolve exclusively
 against TMDB — `metadata.tmdb_id` is the only provider-id field a leaf carries,
-and the folder token is always `{tmdb-12345}`, never `{tvdb-...}`. MediaVault
-has no TVDB or AniDB client (see ARCHITECTURE.md §6.3a for the one known
-placeholder-only exception, unrelated to any real lookup).
+and the folder token is always `[tmdbid-12345]`, never a tvdb stamp (the
+web console's suggestion placeholder is `[tmdbid-0000000]` for every
+category too — IMP-U6, D2). MediaVault
+has no TVDB or AniDB client (see ARCHITECTURE.md §6.3a for the provider-tag
+detector note — real `[tvdbid-…]` tags in the wild are recognized and preserved,
+just never stamped).
 
 ### Combined archive + enrich (`prep_push_rep_enrich` / `prep_push_rep_season_enrich`)
 
@@ -436,21 +466,21 @@ and never undoes an archive).
 - `-tvdbid <id>` is **refused outright** — nothing runs at all (no archive, no
   enrich). MediaVault is TMDB-only (see "TMDB-for-everything" above); a TVDB
   id is a different numbering space and would fetch the wrong title's artwork.
-- The `{tmdb-...}` folder rename is resolved and confirmed **once**,
+- The `[tmdbid-...]` folder rename is resolved and confirmed **once**,
   immediately after the archive completes. `--yes` auto-confirms it,
   `--no-rename` auto-declines it (archive + enrich still happen either way —
   run `rename_folder` later if needed). With neither flag, a non-interactive
   session (script/cron/CI) always defaults to NOT renaming.
-- `--nfo` writes `movie.nfo` / `tvshow.nfo` (OFF by default, same as
-  `enrich_metadata --nfo`) with a richer element set than before: `<imdbid>` +
-  `<uniqueid type="imdb">`, a plain `<tmdbid>`, `<genre>`, `<runtime>`,
-  `<premiered>`, `<studio>`, `<director>`, `<actor>` — never `<tvdbid>`. This
-  is the same `_write_nfo` function `enrich_metadata --nfo` uses, so its
-  output gets the same richer elements too.
+- The NFO is written **by default** when the rename happens (IMP-U6, D6);
+  `--nfo` forces it even without a rename and `--no-nfo` opts out. The write
+  goes through the same `_write_nfo` as `enrich_metadata --nfo`, with the
+  richer element set: `<imdbid>` + `<uniqueid type="imdb">`, a plain
+  `<tmdbid>`, `<genre>`, `<runtime>`, `<premiered>`, `<studio>`, `<director>`,
+  `<actor>` — never `<tvdbid>`. A pre-existing `.nfo` is never overwritten.
 - `--no-web` disables the EXA web-search fallback, same as `enrich_metadata`.
 
 ```
-python main.py prep_push_rep_enrich mov-en-2016-theautopsyofjanedoe "C:\Media\Movies\English\Horror\The Autopsy of Jane Doe (2016) {tmdb-397243}\The.Autopsy.of.Jane.Doe.2016.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-FraMeSToR.mkv" SIZE_GB 8 -tmdbid 397243 --yes
+python main.py prep_push_rep_enrich mov-en-2016-theautopsyofjanedoe "C:\Media\Movies\English\Horror\The Autopsy of Jane Doe (2016) [tmdbid-397243]\The.Autopsy.of.Jane.Doe.2016.1080p.BluRay.REMUX.AVC.DTS-HD.MA.5.1-FraMeSToR.mkv" SIZE_GB 8 -tmdbid 397243 --yes
 python main.py prep_push_rep_enrich mov-en-2016-theautopsyofjanedoe "C:\Media\Movies\English\Horror\The Autopsy of Jane Doe (2016)\file.mkv" SIZE_GB 8            # no id -> auto-resolve
 python main.py prep_push_rep_season_enrich tv-en-2017-dark-s01 "C:\Media\Series\English\Dark\Dark Season 01 (2017)" SIZE_GB 8 -tmdbid 70523 --no-rename --nfo
 ```
@@ -546,7 +576,7 @@ file (under 200 KB — a space-reclaim dummy) is never registered or pushed as a
 already archived):**
 
 ```
-python main.py add_extras ani-ja-2006-deathnote "C:\Media\Anime\Death Note {tmdb-13916}\Extra" --extras-size 9900mb
+python main.py add_extras ani-ja-2006-deathnote "C:\Media\Anime\Death Note [tmdbid-13916]\Extra" --extras-size 9900mb
 ```
 
 That scans the folder recursively for video files, hashes each one, pushes them to the
@@ -560,8 +590,8 @@ on `push` (see "Pinning a push to a specific phone" above — only `movies`, `se
 **Registering extras as part of prep, then uploading them:**
 
 ```
-python main.py prep_season tv-en-2016-strangerthings-s01 "C:\Media\Series\...\Stranger.Things.S01... {tmdb-66732}" --extras "C:\Media\Series\...\Stranger.Things.S01... {tmdb-66732}\Specials"
-python main.py push_group tv-en-2016-strangerthings-s01 SIZE_MB 5000 device series --extras "C:\Media\Series\...\Stranger.Things.S01... {tmdb-66732}\Specials" --extras-size 9900mb
+python main.py prep_season tv-en-2016-strangerthings-s01 "C:\Media\Series\...\Stranger.Things.S01... [tmdbid-66732]" --extras "C:\Media\Series\...\Stranger.Things.S01... [tmdbid-66732]\Specials"
+python main.py push_group tv-en-2016-strangerthings-s01 SIZE_MB 5000 device series --extras "C:\Media\Series\...\Stranger.Things.S01... [tmdbid-66732]\Specials" --extras-size 9900mb
 ```
 
 `prep` / `prep_season` only **register** extras (scan + hash + merge; prep never

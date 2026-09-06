@@ -280,9 +280,9 @@ message `Refs: improvements_tierU.md IMP-U6`, `Co-Authored-By` trailer per `docs
   - *Depends on:* 1–5 · *Acceptance:* grep `'{tmdb'` across docs returns only historical/addendum contexts; grep `'\[tmdbid-'` documents the new convention; the Plex NFO agent setup is documented.
 - [x] **7. Full gates** — `python -m pytest -q` (full suite) AND `python -m pytest tests/smoke -q` AND `node tests/js/test_data_buckets.mjs`; all green before anything touches the live library.
   - *Depends on:* 1–6
-- [ ] **8. 🚦 Live-library rename + NFO backfill** — §4.4 protocol: backup → dry-run report → **user reviews/approves** → `--apply` → post-verify incl. the manual Plex agent switch + re-scan check. Paste the dry-run report + apply log into PROGRESS.md Run history.
+- [x] **8. 🚦 Live-library rename + NFO backfill** — §4.4 protocol: backup → dry-run report → **user reviews/approves** → `--apply` → post-verify incl. the manual Plex agent switch + re-scan check. Paste the dry-run report + apply log into PROGRESS.md Run history.
   - *Depends on:* 7 · *Human gate:* explicit user approval of the dry-run report.
-- [ ] **9. PR + closeout** — PROGRESS.md final state; tier U6 → `done` on merge (mark at merge time per the user's C18-style protocol), PRIORITY.md row + 👉 NEXT + graph node → `done`; PR title `feat: provider folder token {tmdb-…} → [tmdbid-…] + Plex NFO id-pin — IMP-U6`; body per `docs/git-pr-conventions.md` (Summary/Changes/Test plan → `## Original task prompt` verbatim (captured in §9 below) → trailer). **STOP at Checkpoint 1** — merging to `main` is the user's explicit act; Checkpoint 2 (branch archive tag) separate.
+- [x] **9. PR + closeout** — PROGRESS.md final state; tier U6 → `done` on merge (mark at merge time per the user's C18-style protocol), PRIORITY.md row + 👉 NEXT + graph node → `done`; PR title `feat: provider folder token {tmdb-…} → [tmdbid-…] + Plex NFO id-pin — IMP-U6`; body per `docs/git-pr-conventions.md` (Summary/Changes/Test plan → `## Original task prompt` verbatim (captured in §9 below) → trailer). **STOP at Checkpoint 1** — merging to `main` is the user's explicit act; Checkpoint 2 (branch archive tag) separate.
 
 ### Consumer Impact Analysis (summary — full table in DECISIONS.md)
 

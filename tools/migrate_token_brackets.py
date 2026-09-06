@@ -48,8 +48,12 @@ LIBRARY_PREFIXES = {
     "others": "oth",
 }
 
-# The legacy curly tmdb token, with its id captured (case-insensitive, IMP-C23).
+# Legacy curly tmdb token, id captured (case-insensitive, IMP-C23).
 _CURLY_TMDB = re.compile(r"\{tmdb-([^\}]+)\}", re.IGNORECASE)
+# Legacy SQUARE token with the OLD keyword ("tmdb-", not "tmdbid-") — the user's
+# own pre-IMP-U6 manual renames (e.g. "John Wick Chapter 4 (2023) [tmdb-603692]").
+# `[tmdbid-…]` does NOT match this (after "[tmdb" comes "i", not "-").
+_SQUARE_OLD_TMDB = re.compile(r"\[tmdb-([^\]]+)\]", re.IGNORECASE)
 
 
 def _norm(p):
@@ -59,30 +63,32 @@ def _norm(p):
 def classify_leaf(leaf):
     """Classify a folder leaf name's token shape.
 
-    Returns (needs_rename, square_tmdb_id_or_None, curly_ids):
-      needs_rename       — a curly tmdb token is present
-      square_tmdb_id     — id carried by an existing square `[tmdbid-…]` tag
-      curly_ids          — ids carried by legacy curly tokens, in order
+    Returns (needs_rename, square_tmdb_id_or_None, legacy_ids):
+      needs_rename    — a legacy tmdb token (curly OR old-keyword square) is present
+      square_tmdb_id  — id carried by an existing canonical `[tmdbid-…]` tag
+      legacy_ids      — ids carried by legacy tmdb tokens (either shape), in order
     """
     square = main.TMDB_TOKEN_SQUARE_RE.search(leaf or "")
     square_id = square.group(0)[len("[tmdbid-"):-1] if square else None
-    curly_ids = _CURLY_TMDB.findall(leaf or "")
-    return bool(curly_ids), square_id, curly_ids
+    legacy_ids = _CURLY_TMDB.findall(leaf or "") + _SQUARE_OLD_TMDB.findall(leaf or "")
+    return bool(legacy_ids), square_id, legacy_ids
 
 
 def target_leaf(leaf, square_id):
-    """The migrated leaf name: every curly tmdb token becomes the square form
-    (`[tmdbid-<id>]`); a curly token whose id is ALREADY present in square form
-    is dropped (no duplicate tag); other providers' square tags are untouched."""
+    """The migrated leaf name: every legacy tmdb token (curly `{tmdb-…}` /
+    `{TMDB-…}` or old-keyword square `[tmdb-…]`) becomes the canonical
+    `[tmdbid-<id>]`; a token whose id is ALREADY present in canonical form is
+    dropped (no duplicate tag); other providers' square tags are untouched."""
     square_lower = str(square_id).strip().lower() if square_id is not None else None
 
     def _repl(m):
         cid = m.group(1).strip()
         if square_lower is not None and cid.lower() == square_lower:
-            return " "  # duplicate identity — drop the legacy curly token
+            return " "  # duplicate identity — drop the legacy token
         return f"[tmdbid-{cid}]"
 
     out = _CURLY_TMDB.sub(_repl, leaf)
+    out = _SQUARE_OLD_TMDB.sub(_repl, out)
     return re.sub(r"\s{2,}", " ", out).strip()
 
 
@@ -95,7 +101,7 @@ def scan(library_filter=None):
     """Scan the (sandboxed-or-live) library for tokened folders.
 
     Returns a list of plans sorted by folder path:
-      {"old_path", "leaf", "needs_rename", "new_leaf", "square_id", "curly_ids",
+      {"old_path", "leaf", "needs_rename", "new_leaf", "square_id", "legacy_ids",
        "ids", "kind", "tmdb_id", "has_nfo"}
     """
     prefix = LIBRARY_PREFIXES.get(library_filter) if library_filter else None
@@ -121,16 +127,16 @@ def scan(library_filter=None):
     for key in sorted(folders):
         info = folders[key]
         leaf = os.path.basename(os.path.normpath(info["path"]))
-        needs_rename, square_id, curly_ids = classify_leaf(leaf)
+        needs_rename, square_id, legacy_ids = classify_leaf(leaf)
         ids = info["ids"]
         kind = _nfo_kind_for(ids)
-        # id source: the square/curly token wins (it is what the name promises);
+        # id source: the square/legacy token wins (it is what the name promises);
         # else the library's metadata.tmdb_id (e.g. a [tvdbid-…]-only folder).
         tmdb_id = None
         if square_id is not None:
             tmdb_id = square_id
-        elif curly_ids:
-            tmdb_id = curly_ids[0]
+        elif legacy_ids:
+            tmdb_id = legacy_ids[0]
         else:
             for mid in ids:
                 meta = (library.get(mid) or {}).get("metadata") or {}
@@ -145,7 +151,7 @@ def scan(library_filter=None):
             "needs_rename": needs_rename,
             "new_leaf": new_leaf,
             "square_id": square_id,
-            "curly_ids": curly_ids,
+            "legacy_ids": legacy_ids,
             "ids": ids,
             "kind": kind,
             "tmdb_id": tmdb_id,
@@ -160,7 +166,7 @@ def _print_report(plans):
     other_n = len(plans) - rename_n - square_n
     print("=" * 78)
     print(f"  IMP-U6 token migration — {len(plans)} tokened folder(s) found")
-    print(f"    legacy curly (needs rename) : {rename_n}")
+    print(f"    legacy token (needs rename) : {rename_n}")
     print(f"    already square [tmdbid-…]   : {square_n}")
     print(f"    other-provider tags only    : {other_n}")
     print("=" * 78)

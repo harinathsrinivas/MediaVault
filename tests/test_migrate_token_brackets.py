@@ -124,6 +124,23 @@ def test_uppercase_curly_and_dedup_and_preserved_tags(sandbox):
     assert lib["mov-en-2012-dup"]["folder_path"].endswith("3 (2012) [tmdbid-79660]")
 
 
+def test_old_keyword_square_token_converted(sandbox):
+    """The user's own pre-IMP-U6 MANUAL renames used square brackets with the OLD
+    keyword — 'John Wick Chapter 4 (2023) [tmdb-603692]' — which Jellyfin/Emby do
+    NOT parse. The migration fixes the keyword to the canonical [tmdbid-…]."""
+    jw = _seed_folder(sandbox, "Movies/JW4", ["mov-en-2023-johnwick4"],
+                      leaf_name="John Wick Chapter 4 (2023) [tmdb-603692]")
+
+    summary = mig.migrate(apply=True)
+
+    stamped = jw.parent / "John Wick Chapter 4 (2023) [tmdbid-603692]"
+    assert stamped.is_dir(), "the old-keyword square token must be converted"
+    assert not jw.exists()
+    assert summary["renamed"] == 1
+    lib = mvcommon.load_library()
+    assert lib["mov-en-2023-johnwick4"]["folder_path"] == str(stamped)
+
+
 def test_already_square_folder_gets_only_a_missing_nfo(sandbox):
     folder = _seed_folder(sandbox, "Movies/Square", ["mov-en-2010-square"],
                           leaf_name="Square (2010) [tmdbid-27205]")

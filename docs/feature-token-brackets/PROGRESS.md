@@ -51,6 +51,17 @@ user. AWAITING the user's explicit approval to run `python tools/migrate_token_b
   Root PLAN.md rotated from C24/D23 (verified byte-identical to tracked canonical first).
 - **2026-09-07 (execution session start):** user said "execute all steps". Branch created from
   up-to-date `main` (`562fb4a`). Step 0 done.
+- **2026-09-07 (Step 8 dry-run):** `python tools/migrate_token_brackets.py` (READ-ONLY) against
+  the LIVE `C:\Media` libraries — exit 0, nothing touched. **204 tokened folders: 196 legacy
+  (need rename), 1 already canonical square, 7 other/untagged-but-id-known (NFO-only).** Full
+  per-folder report: `MIGRATION_DRYRUN_2026-09-07.txt`. 🚦 AWAITING USER APPROVAL for `--apply`.
+  Backup of `C:\Media\library_*.json` to be taken BEFORE the apply, per D5.
+- **2026-09-07 (dry-run finding → tool fix):** the first dry-run exposed a 4th legacy shape the
+  classifier missed — the user's own MANUAL pre-IMP-U6 renames used square brackets with the OLD
+  keyword (`John Wick (2014) [tmdb-245891]` … `[tmdb-603692]`, 4 folders), which Jellyfin/Emby do
+  NOT parse. `_SQUARE_OLD_TMDB` added: `[tmdb-…]` → `[tmdbid-…]` (the exact keyword fix D1
+  requires); tool tests grew to 9 (the John Wick case); gates re-run: **910 passed**, smoke
+  **80/80**. This is precisely what the Step-8 dry-run gate exists for.
 - **2026-09-07 (execution, steps 1–7):** predicate family (`ae2f66c`); stamp sites + D6 NFO default +
   suggestions + artwork walk (`bc34ed9`); test sweep to the new convention (`b4a3e91` — the 6
   reworked pins were the old NFO-off / overwrite / tvdb-placeholder semantics, deliberately

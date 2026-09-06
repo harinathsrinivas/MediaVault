@@ -6,9 +6,9 @@
 
 ## ▶ NEXT ACTION
 
-Step 1 — predicate core: token regex family + `_has_provider_token` + `format_tmdb_token` +
-`strip_tmdb_tokens` in `main.py`; rewrite `_has_tmdb_token` to either-shape; re-point
-`_PROVIDER_TOKEN_RE`; rework the IMP-C23 drift-pin tests.
+🚦 Step 8 human gate — the live-library dry-run report has been produced and presented to the
+user. AWAITING the user's explicit approval to run `python tools/migrate_token_brackets.py --apply`.
+(Steps 0–7 are done and green; nothing else is pending.)
 
 ## Standing hazards
 
@@ -32,14 +32,14 @@ Step 1 — predicate core: token regex family + `_has_provider_token` + `format_
 
 | Step | Description | Status | Commit | Tests | Notes |
 |---|---|---|---|---|---|
-| 0 | Bootstrap: branch + IMP-U6 registration + graph + DECISIONS/PROGRESS | done | (this commit) | graph node/edge syntax check | branch `feature/imp_u6_token_brackets` from `main` @ `562fb4a` |
-| 1 | Predicate core (regex family, `_has_tmdb_token` either-shape, `_PROVIDER_TOKEN_RE`) | pending | | | |
-| 2 | Stamp sites + NFO-at-stamp + `suggest_target_folder` + UI/help text | pending | | | |
-| 3 | Artwork walk any-provider/any-shape | pending | | | |
-| 4 | Test sweep (13 files) + semantic pins + split-brace rework + new tests | pending | | | |
-| 5 | `tools/migrate_token_brackets.py` + tests | pending | | | |
-| 6 | Docs (ARCHITECTURE / README / OPERATIONS_QA / DECISIONS addenda) | pending | | | |
-| 7 | Full gates: `python -m pytest -q` + `tests/smoke` + node JS test | pending | | | |
+| 0 | Bootstrap: branch + IMP-U6 registration + graph + DECISIONS/PROGRESS | done | `d377a19` | graph 132 nodes / 69 edges parse | branch from `main` @ `562fb4a` |
+| 1 | Predicate core (regex family, `_has_tmdb_token` either-shape, `_PROVIDER_TOKEN_RE`) | done | `ae2f66c` | token tests 16/16 | old 1687 + 9585 defs removed; one block at ~174 |
+| 2 | Stamp sites + NFO-at-stamp + `suggest_target_folder` + UI/help text | done | `bc34ed9` | (see steps 4/7) | + step-3 artwork-walk docstrings in the same commit |
+| 3 | Artwork walk any-provider/any-shape | done | `bc34ed9` | web image/items/detail suites | detector widened in step 1; docstrings here |
+| 4 | Test sweep (13 files) + semantic pins + split-brace rework + new tests | done | `b4a3e91` | full suite 901 passed | 86 mechanical swaps + D6 pin flips + test_token_brackets.py (6) + CLI kwargs no_nfo |
+| 5 | `tools/migrate_token_brackets.py` + tests | done | `424529c` | 8/8 tool tests | idempotent re-run verified |
+| 6 | Docs (ARCHITECTURE / README / OPERATIONS_QA / DECISIONS addenda) | done | `95de054` | grep-audit clean | docs/ZCODE_ONBOARDING.md also tracked now |
+| 7 | Full gates: `python -m pytest -q` + `tests/smoke` + node JS test | done | (this commit) | **909 passed · smoke 80/80 · JS PASS** | no code change after step 6; gates re-run post-docs |
 | 8 | 🚦 Live-library rename + NFO backfill (dry-run → user gate → apply → verify) | pending | | | |
 | 9 | PR + closeout (STOP at Checkpoint 1) | pending | | | |
 
@@ -51,6 +51,12 @@ Step 1 — predicate core: token regex family + `_has_provider_token` + `format_
   Root PLAN.md rotated from C24/D23 (verified byte-identical to tracked canonical first).
 - **2026-09-07 (execution session start):** user said "execute all steps". Branch created from
   up-to-date `main` (`562fb4a`). Step 0 done.
+- **2026-09-07 (execution, steps 1–7):** predicate family (`ae2f66c`); stamp sites + D6 NFO default +
+  suggestions + artwork walk (`bc34ed9`); test sweep to the new convention (`b4a3e91` — the 6
+  reworked pins were the old NFO-off / overwrite / tvdb-placeholder semantics, deliberately
+  changed by D6/D2); migration tool (`424529c`); docs (`95de054`). Gates: full suite **909
+  passed**, smoke **80/80**, node JS **PASS**. One mid-edit mistake (a replace instead of an
+  insert dropping `no_web_flag = False`) was caught and fixed before any test run.
 
 ## Resume protocol (what a fresh session does FIRST)
 

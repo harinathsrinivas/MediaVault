@@ -270,7 +270,7 @@ one shared implementation in `mvcommon.py`, thin call sites in `main.py`.
     diversity (A = unified regex, B = decompose-then-validate) is what differs and survives a model
     fallback unchanged; only the executor's model changes if fable is unavailable.
 
-- [ ] 2. [model: opus] [effort: high] Wire the shared helper into every detection/read call site in `main.py`.
+- [x] 2. [model: opus] [effort: high] Wire the shared helper into every detection/read call site in `main.py`.
   - Files: `main.py`
   - Depends on: Step 1 (the merged, user-chosen winner).
   - Consumed by: Step 5 (tests exercise these wrappers too), Step 8 (artwork-inheritance tests exercise

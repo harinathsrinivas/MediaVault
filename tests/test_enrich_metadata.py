@@ -1794,7 +1794,9 @@ def test_exa_resolve_caches_response_idempotent(monkeypatch, tmp_path):
 # fix `_has_tmdb_token` had no `re.IGNORECASE`, so such a folder read as "no
 # token" and the next enrich/rename pass appended a SECOND one. Its sibling
 # predicate `_PROVIDER_TOKEN_RE` (the artwork-inheritance resolver) has always
-# been case-insensitive; the two had drifted.
+# been case-insensitive; the two had drifted. IMP-U6 deleted that second copy
+# outright — both callers now go through `mvcommon.has_tmdb_token`, which is
+# what the lockstep pin below compares the wrapper against.
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("name", [
@@ -1814,11 +1816,12 @@ def test_has_tmdb_token_still_false_without_a_tmdb_token(name):
     assert main._has_tmdb_token(name) is False
 
 
-def test_has_tmdb_token_agrees_with_provider_token_re():
-    """Regression pin for the DRIFT that caused IMP-C23: `_has_tmdb_token` and
-    `_PROVIDER_TOKEN_RE` are the same predicate over the same token and must
-    stay in lockstep. If a future edit changes one, this fails."""
+def test_has_tmdb_token_agrees_with_shared_helper():
+    """Regression pin for the DRIFT that caused IMP-C23. The second copy of the
+    predicate (`_PROVIDER_TOKEN_RE`) is gone as of IMP-U6, so this now pins the
+    surviving pair: `main._has_tmdb_token` must stay a faithful wrapper over the
+    shared `mvcommon.has_tmdb_token`. If a future edit changes one, this fails."""
     for name in ["Run (2002) {TMDB-69590}", "a {tmdb-1}", "X {TmDb-1}",
                  "none", "", "{tvdb-9}", "Show (1993) {tmdb-4087}"]:
         assert bool(main._has_tmdb_token(name)) is bool(
-            main._PROVIDER_TOKEN_RE.search(name or "")), name
+            mvcommon.has_tmdb_token(name or "")), name

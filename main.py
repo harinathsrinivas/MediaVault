@@ -1685,17 +1685,23 @@ def _download_to(url, dest_path):
 
 
 def _has_tmdb_token(name):
-    """True if a folder leaf name already carries a `{tmdb-…}` token (idempotency
-    guard — we stamp the token at most once per show/movie folder).
+    """True if a folder leaf name already carries a TMDB provider token in ANY
+    recognized format — `{tmdb-…}`, `[tmdb-…]`, `[tmdbid-…]`, `[tmdbid=…]`, in
+    any casing (idempotency guard — we stamp the token at most once per
+    show/movie folder).
 
-    CASE-INSENSITIVE (IMP-C23). Plex/Emby/Jellyfin treat the provider token
-    case-insensitively and real folders in the wild use `{TMDB-69590}`; without
-    the flag such a folder read as "no token" and the next enrich/rename pass
-    appended a SECOND one (`… {TMDB-69590} {tmdb-69590}`). Kept deliberately in
-    lockstep with `_PROVIDER_TOKEN_RE` (the artwork-inheritance resolver's copy),
-    which has always been `re.IGNORECASE` — the two are the same predicate and
-    must not drift apart again."""
-    return re.search(r"\{tmdb-[^}]+\}", name or "", re.IGNORECASE) is not None
+    A thin wrapper over the shared `mvcommon.has_tmdb_token` (IMP-U6), kept
+    because this is the name every stamp site reads. CASE-INSENSITIVE since
+    IMP-C23: Plex/Emby/Jellyfin treat the provider token case-insensitively and
+    real folders in the wild use `{TMDB-69590}`; while this predicate was
+    case-SENSITIVE such a folder read as "no token" and the next enrich/rename
+    pass appended a SECOND one (`… {TMDB-69590} {tmdb-69590}`). It then had to be
+    kept by hand in lockstep with the artwork-inheritance resolver's own copy of
+    the regex; that copy is gone — both callers now go through this ONE shared
+    implementation, so the two predicates cannot drift apart again. Called
+    MODULE-QUALIFIED so a test that monkeypatches the helper is honoured (the
+    binding-hazard note at `import mvcommon`)."""
+    return mvcommon.has_tmdb_token(name)
 
 
 _SEASON_ID_RE = re.compile(r"-s(\d+)$", re.IGNORECASE)
@@ -9582,13 +9588,6 @@ def find_folder_image(folder):
     return None
 
 
-# A folder name carries a provider token like `{tmdb-70523}` / `{tvdb-12345}`
-# (the Plex/Emby/Jellyfin convention rename_folder stamps on a SHOW folder). The
-# season-inheritance resolver walks UP to the nearest ancestor whose basename
-# matches this — i.e. the show folder — and uses ITS poster as the fallback.
-_PROVIDER_TOKEN_RE = re.compile(r"\{tmdb-[^}]+\}", re.IGNORECASE)
-
-
 def _kind_image_under_root(folder, kind):
     """Return the absolute path of ``<kind>.jpg`` (poster.jpg / fanart.jpg)
     sitting DIRECTLY in ``folder`` — but ONLY if it exists on disk AND the
@@ -9649,9 +9648,17 @@ def _episode_still_under_root(folder, filename):
 
 def _ancestor_show_folder_image(start_folder, kind):
     """Walk UP ``start_folder``'s real on-disk ancestors to the NEAREST ancestor
-    whose basename carries a ``{tmdb-…}`` token (the show folder) and return that
-    folder's vetted ``<kind>.jpg`` (or None). Stops at / never escapes LOCAL_ROOT
-    (the walk halts once it climbs above the media root). READ-ONLY."""
+    whose basename carries a TMDB provider token — the show folder, i.e. the
+    Plex/Emby/Jellyfin convention rename_folder stamps onto a SHOW folder — and
+    return that folder's vetted ``<kind>.jpg`` (or None). Stops at / never
+    escapes LOCAL_ROOT (the walk halts once it climbs above the media root).
+    READ-ONLY.
+
+    Recognition goes through the shared ``mvcommon.has_tmdb_token`` (IMP-U6), so
+    every format in the wild is found — ``{tmdb-…}``, ``[tmdb-…]``,
+    ``[tmdbid-…]``, ``[tmdbid=…]``, any casing. It used to be a brace-only copy
+    of the regex living here, which silently matched nothing on a library already
+    migrated to the square form and broke this whole inheritance rung."""
     if not start_folder or not _is_within_local_root(start_folder):
         return None
     try:
@@ -9662,7 +9669,7 @@ def _ancestor_show_folder_image(start_folder, kind):
     # Climb until we exit the media root or hit the filesystem ceiling.
     while _is_within_local_root(current):
         name = os.path.basename(current)
-        if _PROVIDER_TOKEN_RE.search(name or ""):
+        if mvcommon.has_tmdb_token(name or ""):
             hit = _kind_image_under_root(current, kind)
             if hit:
                 return hit

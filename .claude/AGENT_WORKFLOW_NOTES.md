@@ -70,3 +70,19 @@ Headline v2 behaviors (full detail in each `*-v2.md` / `executor-fable.md`, whic
 3. **8-block context packaging:** every dispatch carries WHOLE-TASK BRIEF / LOCKED DECISIONS / PRIOR-STEP DIGEST / THE STEP / DOWNSTREAM CONSUMERS / GUARDRAILS / VERIFICATION DUTIES / REPORTING+RESUMABILITY DUTIES — codifying (and tightening) the packaging proven on the IMP-D19 run.
 4. **Resumability journal is standard:** every v2 plan has a Step 0 scaffolding `docs/<feature>/PROGRESS.md`, updated + committed in the same commit as each step (pattern: `docs/feature-extras/PROGRESS.md`).
 5. **Registration reminder:** agent registration is fixed at session start — after adding/editing v2 files, a FRESH session is needed before the new names are spawnable. (Same-session workaround: dispatch `general-purpose` with a `model` override and paste the v2 contract into the prompt.)
+
+## Model-availability waterfall (2026-09-07): probe fable, degrade to Opus deliberately
+
+**Problem.** The v2 set hard-codes `model: fable` in four definitions (planner-v2, orchestrator-v2, executor-fable, judge-v2). Fable can be disabled for a session by weekly/usage caps with no warning, so a v2 run could fail — or silently degrade — mid-flight. The user directed that every v2 run check fable reachability first and fall back to **Opus at max/ultra** when it is gone.
+
+**Decision.** Added `.claude/MODEL_WATERFALL.md` (the policy) plus a delta in each v2 file: orchestrator-v2 override 7, planner-v2 override 6, executor-fable delta 7, judge-v2 delta 5. Pre-change snapshot: `.claude/agent-backups/2026-09-07_pre-fable-waterfall/`.
+
+**The key mechanism — override the model, keep the agent.** The `Agent` tool's `model` parameter takes precedence over a definition's `model:` frontmatter, while the definition's body AND its baked `effort:` tier still apply. So the fallback is `Agent(subagent_type: "executor-fable", model: "opus", …)`, **not** a swap to a different agent type. Every V2 rule (no-limits depth, mandatory self-review, evidence-over-self-report) survives the downgrade, and `effort: xhigh` is inherited — which is exactly the "Opus at max/ultra" the user asked for. (`subagent_type: "fork"` is the one exception: a fork ignores a `model` override, so never use one for a fable step.)
+
+**Protocol.** (1) Probe once per session before the first fable dispatch — a throwaway `general-purpose` agent with `model: "fable"` echoing `FABLE_PROBE_OK <model id>`, no tools. (2) Report the result to the user *before* executing any step — a silent downgrade is the hidden substitution CLAUDE.md's "surface fundamental contradictions" rule forbids. (3) Banner every degraded dispatch (`⚠️ MODEL-FALLBACK ACTIVE`). (4) Record the model *actually used* in PROGRESS.md / STATUS.md / DECISIONS.md so a resuming session or another account knows which steps ran degraded. (5) Re-probe after any mid-run model/limit error — caps can trip during a run. (6) If Opus is gone too, STOP and ask; never run a fable-tagged step on sonnet.
+
+**Planner duty.** Every `[model: fable]` step now carries `[fallback: opus]` (default, safe to run degraded) or `[fallback: none]` (fable-or-nothing — a degraded run PARKS the step and asks the user; reserve for change-gated surfaces). Model-diverse candidate sets collapse to duplicates under fallback, so the planner states which candidate carries the differentiating APPROACH — approach diversity survives a fallback, model diversity does not.
+
+**Same-session caveat (see point 5 above).** Agent definitions are read at session start, so these edits do not bind sub-agents spawned in the session that made them. Until a fresh session, the waterfall must also be pasted into the dispatch prompt (this is what the 2026-09-07 bracket-token planning run did).
+
+**First run:** 2026-09-07 — probe returned `claude-fable-5-1` (AVAILABLE), so the bracket-token planning task ran v2 at full strength; the waterfall was carried in-band in the planner dispatch.

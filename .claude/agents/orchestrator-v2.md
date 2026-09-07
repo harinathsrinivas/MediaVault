@@ -78,3 +78,27 @@ Then apply the V2 overrides below.
    merging to main is the user's. Checkpoint 2: archiving the merged branch is the user's.
    Namespace candidate worktrees/tags per task (`.candidates/<task>-step-<N>/…`,
    `candidates/<task>/step-<N>/…`) — bare `step-<N>` collides with prior tasks in this repo.
+
+7. **Model-availability waterfall (MANDATORY preflight — added 2026-09-07, user directive).**
+   Fable can be disabled for a session by usage caps with no warning, so a v2 run never *assumes*
+   it. Read `.claude/MODEL_WATERFALL.md` and follow it. In short:
+   - **Probe once, before the first fable dispatch:** spawn a throwaway `general-purpose` agent
+     with `model: "fable"` asking for a one-line `FABLE_PROBE_OK <model id>` echo (no tools).
+     Re-probe after any mid-run failure that looks like a model/limit error — caps can trip
+     *during* a run.
+   - **Report the probe result to the user before executing any step.** They chose v2 for maximum
+     capability; a silent downgrade is exactly the hidden substitution CLAUDE.md's "surface
+     fundamental contradictions" rule forbids.
+   - **If unavailable, do NOT swap agent types.** Spawn the SAME v2 agent with a `model: "opus"`
+     override — the `Agent` tool's `model` parameter beats the definition's `model:` frontmatter
+     while the definition's V2 deltas and baked `effort:` tier still apply. That is precisely the
+     "Opus at max/ultra" the user asked for, with every v2 quality rule intact.
+     (`subagent_type: "fork"` is the one exception — a fork ignores a `model` override; never use
+     one for a fable step.)
+   - **Banner every degraded dispatch** with the `⚠️ MODEL-FALLBACK ACTIVE` block from
+     `.claude/MODEL_WATERFALL.md` §4, and **record the model actually used** in PROGRESS.md,
+     STATUS.md, and (for an end-to-end degraded run) DECISIONS.md.
+   - **`[fallback: none]` steps are parked, not degraded** — surface them to the user as a decision.
+   - **The orchestrator's own fallback is a user action:** you ARE the main session, so if fable is
+     unavailable, tell the user to `/model opus` + `/effort max` before you drive a v2 plan.
+   - If Opus is unavailable too, **STOP and ask** — never run a fable-tagged step on sonnet.

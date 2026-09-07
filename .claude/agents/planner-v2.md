@@ -62,3 +62,23 @@ ALL apply unchanged. Then apply the V2 overrides below.
    completing SHA / tests, a `▶ NEXT ACTION` pointer, sub-state + blockers blocks, and the resume
    protocol), updated + committed in the SAME commit as every step. Pattern source:
    `docs/feature-extras/PROGRESS.md` (IMP-D19).
+
+6. **Model-availability waterfall — every fable step carries a fallback tag (added 2026-09-07,
+   user directive).** Fable can be disabled for a session by usage caps, so `.claude/MODEL_WATERFALL.md`
+   defines a probe-then-degrade policy the orchestrator executes. Your duty in it:
+   - Tag every `[model: fable]` step with an explicit fallback:
+     `[fallback: opus]` (default — safe to run degraded on Opus at the same effort tier) or
+     `[fallback: none]` (genuinely fable-or-nothing; a degraded run PARKS the step and asks the
+     user). Reserve `none` for change-gated surfaces (rollback contract, ENTRY_TYPE_KEYS) where a
+     weaker pass is worse than no pass — it stalls the run, so it must earn its place.
+   - Do NOT pre-emptively downgrade assignments because fable *might* be unavailable. Route by
+     complexity as override 2 says; the waterfall handles availability at dispatch time.
+   - When you specify per-candidate models (`[candidate-model: fable]`), note in the step whether a
+     degraded run should still execute that candidate on Opus or drop it — a model-diversity
+     candidate set collapses to duplicates if every candidate falls back to the same model. Prefer:
+     keep the candidates, and say which one carries the differentiating APPROACH (approach diversity
+     survives a model fallback; model diversity does not).
+   - If YOU are running degraded (dispatched with a `model: "opus"` override and the
+     `⚠️ MODEL-FALLBACK ACTIVE` banner), say so in one line at the top of PLAN.md under
+     `Framework: v2` — e.g. `Planned under: opus (fable-fallback, 2026-09-07)` — so a later session
+     knows the plan's provenance.

@@ -2639,11 +2639,18 @@ def cmd_enrich_metadata(arg=None, *flags):
         folder = unit.get("folder")
         base_name = os.path.basename(os.path.normpath(folder)) if folder else ""
         will_stamp = bool(folder) and not _has_tmdb_token(base_name)
+        # The stamped name is spelled ONCE (IMP-U6): the preview print below and
+        # the real stamp in step 2 both use this exact string, so they cannot
+        # drift, and the emitted format is a one-line change in mvcommon.
+        new_name = f"{base_name} {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=tmdb_id)}"
         if will_stamp:
             print(f"     {'would stamp' if not apply else 'stamping'} folder token: "
-                  f"{base_name} -> {base_name} {{tmdb-{tmdb_id}}}")
+                  f"{base_name} -> {new_name}")
         elif folder:
-            print(f"     folder already has a {{tmdb-…}} token — skip stamp ({base_name}).")
+            # Deliberately format-agnostic: _has_tmdb_token accepts every
+            # recognized spelling, so naming ONE would misreport a folder
+            # carrying a legacy brace token — and base_name shows the real one.
+            print(f"     folder already has a TMDB token — skip stamp ({base_name}).")
         print(f"     {'would write' if not apply else 'writing'} metadata.tmdb_id on "
               f"{len(unit['ids'])} entr(y/ies).")
         print(f"     {'would download' if not apply else 'downloading'} up to "
@@ -2689,10 +2696,11 @@ def cmd_enrich_metadata(arg=None, *flags):
                 meta["overview"] = tmdb_overview
         save_library(live)
 
-        # 2) stamp the {tmdb-…} token ONCE on the show/movie folder (paths only —
-        #    cmd_rename_folder is journaled + hash-safe; reused exactly as-is).
+        # 2) stamp the canonical [tmdbid-…] token ONCE on the show/movie folder
+        #    (`new_name`, built above; paths only — cmd_rename_folder is journaled
+        #    + hash-safe; reused exactly as-is — only the STRING it is called with
+        #    changed in IMP-U6, never its journal/PONR behaviour).
         if will_stamp:
-            new_name = f"{base_name} {{tmdb-{tmdb_id}}}"
             ok = cmd_rename_folder(folder, new_name)
             if ok:
                 n_stamped += 1
@@ -7733,7 +7741,10 @@ def _enrich_after_archive(real_id, write_nfo, no_web, gate):
     base_name = os.path.basename(os.path.normpath(folder)) if folder else ""
     will_stamp = bool(folder) and not _has_tmdb_token(base_name)
     if will_stamp:
-        new_name = f"{base_name} {{tmdb-{tmdb_id}}}"
+        # Same canonical spelling cmd_enrich_metadata uses (IMP-U6) — this block
+        # is a deliberate duplicate of its stamping logic (ARCHITECTURE §6.3a
+        # standing sync obligation), so the two MUST emit the same format.
+        new_name = f"{base_name} {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=tmdb_id)}"
         new_folder = os.path.join(os.path.dirname(os.path.normpath(folder)), new_name)
         if gate(folder, new_folder):
             ok = cmd_rename_folder(folder, new_name)  # may raise RollbackHardFail — caller catches
@@ -7743,7 +7754,8 @@ def _enrich_after_archive(real_id, write_nfo, no_web, gate):
         else:
             print("     ⏭️  folder rename declined — run rename_folder later to add the token.")
     elif folder:
-        print(f"     folder already has a {{tmdb-…}} token — skip stamp ({base_name}).")
+        # Format-agnostic wording, matching cmd_enrich_metadata's twin print.
+        print(f"     folder already has a TMDB token — skip stamp ({base_name}).")
 
     image_base = _tmdb_image_base(api_key)
     n_images = _download_unit_images(unit, res, image_base, folder)
@@ -8366,10 +8378,10 @@ def suggest_target_folder(item):
     year_disp = f"({year})" if year else "(Year)"
 
     if category == "mov":
-        provider_tag = "{tmdb-0000000}"
+        provider_tag = mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id="0000000")
         provider_field = "tmdb"
     else:  # tv / ani -> series-style
-        provider_tag = "{tvdb-000000}"
+        provider_tag = mvcommon.CANONICAL_TVDB_TOKEN_FMT.format(id="000000")
         provider_field = "tvdb"
 
     folder = f"{title} {year_disp} {provider_tag}"

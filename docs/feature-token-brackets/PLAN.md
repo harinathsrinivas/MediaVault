@@ -289,7 +289,7 @@ one shared implementation in `mvcommon.py`, thin call sites in `main.py`.
     tests/test_set_tmdb.py -q` still green (these exercise adjacent code paths and must show zero
     incidental regression).
 
-- [ ] 3. [model: opus] [effort: high] Update every EMIT site to the canonical `[tmdbid-…]` / `[tvdbid-…]` format.
+- [x] 3. [model: opus] [effort: high] Update every EMIT site to the canonical `[tmdbid-…]` / `[tvdbid-…]` format.
   - Files: `main.py`
   - Depends on: Step 2 (detection must already be format-agnostic before emission changes, or a
     legacy `{tmdb-…}` folder would get double-stamped on the very next run — see "Approach" above).

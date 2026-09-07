@@ -338,7 +338,7 @@ one shared implementation in `mvcommon.py`, thin call sites in `main.py`.
     `python main.py` (bare, no args — prints usage) shows `[tmdbid-12345]` in the `rename_folder` help
     line.
 
-- [ ] 5. [model: sonnet] [effort: medium] New unit tests for the shared detection helper.
+- [x] 5. [model: sonnet] [effort: medium] New unit tests for the shared detection helper.
   - Files: `tests/test_provider_tokens.py` (NEW)
   - Depends on: Step 2 (tests both `mvcommon`'s functions directly AND `main._has_tmdb_token`'s thin
     wrapper, in one file, so a future regression in the wrapper wiring is caught here too).

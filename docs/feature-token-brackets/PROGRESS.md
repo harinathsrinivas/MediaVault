@@ -22,11 +22,12 @@
   library in this PR · **Steps 1 and 6's 🚦 candidate checkpoints are WAIVED for this run** — see D10.
 - **Pre-change test baseline (recorded by the orchestrator on this branch, before any code step):**
   `python -m pytest tests -q` → **887 passed** in 241s. Step 12's full-suite run must be >= this and green.
-- **Last updated:** 2026-09-07 (Step 0 — journal scaffolded).
+- **Last updated:** 2026-09-07 (Step 1 — detection helper merged, candidate B).
 
 ## ▶ NEXT ACTION
-**Step 1 — [model: fable, fallback: opus] Design + implement the shared provider-token detect/parse helper
-in `mvcommon.py` (`[candidates: 2]`, judge-v2 decides — see D10, no user pause).**
+**Step 2 — [model: opus] Wire the shared helper into every detection/read call site in
+`main.py` (`_has_tmdb_token` becomes a thin wrapper; delete `_PROVIDER_TOKEN_RE` and repoint
+`_ancestor_show_folder_image`). Call MODULE-QUALIFIED (`mvcommon.has_tmdb_token`) — IMP-A1 binding hazard.**
 
 ## Resume protocol (first thing a new session does)
 1. `git fetch && git checkout feature/imp_u6_provider_tokens` (or create it from `main` if it does not
@@ -50,7 +51,7 @@ in `mvcommon.py` (`[candidates: 2]`, judge-v2 decides — see D10, no user pause
 | Step | Description | Status | Completing SHA | Tests | Notes |
 |------|-------------|--------|----------------|-------|-------|
 | 0  | [model: sonnet] Scaffold `PROGRESS.md` + `DECISIONS.md` | done | 063f19f | n/a | journal + decisions committed onto the branch |
-| 1  | [model: fable, fallback: opus] `[candidates: 2]` 🚦(waived, D10) Shared provider-token detect/parse helper in `mvcommon.py` | pending | | | `has_tmdb_token`/`find_provider_tokens`/`CANONICAL_TMDB_TOKEN_FMT`/`CANONICAL_TVDB_TOKEN_FMT` |
+| 1  | [model: fable, fallback: opus] `[candidates: 2]` 🚦(waived, D10) Shared provider-token detect/parse helper in `mvcommon.py` | done | (backfilled next step) | acceptance 11/11 incl. compound mismatched-bracket case; targeted 66; smoke 80 | **Candidate B merged** (two-stage: vocabulary-free span finder -> separate validator). Ran A=fable, B=opus. Judge verified both against the REAL library (290 folder names, 0 disagreements) and found A had a cross-family bracket-bleed false positive (`{tmdb-123] [tmdbid-456}` matched as one token) that B rejects structurally — decisive under criterion 1. Records: `.candidates/imp-u6-step-1/DECISION.md`, `CRITIQUE-A.md`, `CRITIQUE-B.md`. |
 | 2  | [model: opus] Wire the shared helper into every detection/read call site in `main.py` | pending | | | `_has_tmdb_token` wrapper + delete `_PROVIDER_TOKEN_RE` |
 | 3  | [model: opus] Update every EMIT site to canonical `[tmdbid-…]`/`[tvdbid-…]` format | pending | | | `cmd_enrich_metadata`, `_enrich_after_archive`, `suggest_target_folder` (STANDING SYNC pair) |
 | 4  | [model: sonnet] Mechanical doc-string/help-text/comment updates in `main.py` | pending | | | 14+ comment/docstring sites, no logic change |
@@ -100,5 +101,3 @@ external behavior both candidates must satisfy.)_
   tag, then delete).
 - Real `--apply` against `C:\Media` is explicitly OUT OF SCOPE for this PR (Decision #6/D6) — it is a
   separate, user-run, post-merge procedure documented at the end of PLAN.md.
-</content>
-</invoke>

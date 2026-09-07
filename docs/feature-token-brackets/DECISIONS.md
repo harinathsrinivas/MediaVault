@@ -121,5 +121,3 @@ the feature branch + its commit history + the two tracked files under `docs/feat
 (`PLAN.md`, this file, and the companion `PROGRESS.md` execution journal — updated + committed after every
 step, in the same commit as that step's own work). Full spec + resume protocol: see `PROGRESS.md`'s "Resume
 protocol" section and Step 0 above (mirrors the `docs/feature-extras/` IMP-D19 precedent exactly).
-</content>
-</invoke>

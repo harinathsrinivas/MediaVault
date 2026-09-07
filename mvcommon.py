@@ -669,3 +669,128 @@ def episode_num_from_id(child_id, base_id):
         ep_str = child_id            # base not a prefix -> parse the whole id
     m = re.search(r'^[eExX]?(\d+(?:\.\d+)?)$', ep_str)
     return float(m.group(1)) if m else None
+
+
+# ==========================================
+#         PROVIDER TOKENS (folder names)
+# ==========================================
+# A media folder can carry a PROVIDER TOKEN — `Dark (2017) [tmdbid-70523]` — that
+# pins Plex/Emby/Jellyfin to an exact metadata match instead of a fuzzy title
+# search. MediaVault both WRITES one (the enrich/rename stamp) and READS one (the
+# "already stamped?" idempotency guard, and the artwork-inheritance walk that
+# looks UP for the show folder).
+#
+# DETECTION is format-agnostic — all of these are real, and all must be found:
+#   {tmdb-603692}    Plex's curly form, and what MediaVault used to emit
+#   [tmdb-603692]    TRaSH-Guides' square preset
+#   [tmdbid-603692]  Emby/Jellyfin's square form — the CANONICAL form we now emit
+#   [tmdbid=603692]  Emby's `=` variant (square family only)
+# ...in any casing (`Run (2002) {TMDB-69590}` is a real library folder — IMP-C23).
+#
+# EMISSION is single-format: every emit site formats CANONICAL_TMDB_TOKEN_FMT /
+# CANONICAL_TVDB_TOKEN_FMT, so changing what we WRITE is a one-line change here
+# rather than a hunt through main.py.
+#
+# This lives in mvcommon (stdlib only; never imports main/mainfetch) because the
+# detection regex had been hand-copied and then drifted between two call sites
+# (IMP-C22, IMP-C23). There is now exactly ONE parser — find_provider_tokens —
+# and every other token predicate is DERIVED from it, so the copies cannot come
+# back. Callers must reach it module-qualified (`mvcommon.has_tmdb_token(...)`),
+# per the binding-hazard note in the RUNTIME CONFIG section.
+
+CANONICAL_TMDB_TOKEN_FMT = "[tmdbid-{id}]"  # .format(id=…) -> "[tmdbid-603692]"
+CANONICAL_TVDB_TOKEN_FMT = "[tvdbid-{id}]"  # placeholder-only; never a real lookup
+
+# STAGE 1 — bracket spans. Two deliberately dumb regexes with zero vocabulary
+# knowledge: "an opening bracket, some bracket-free text, the MATCHING closing
+# bracket". Excluding ALL FOUR bracket characters from the inner text is what
+# keeps the two families from cross-matching: `{tmdb-123]` has no `}`, and a
+# curly scan cannot reach across to borrow the `]` of a later square token
+# (`{tmdb-123] [tmdbid-456}` matches nothing, in either family). That same
+# exclusion proves the two families' spans can never overlap — which is why the
+# combined result can simply be sorted back into left-to-right order.
+_CURLY_SPAN_RE = re.compile(r"\{([^{}\[\]]*)\}")
+_SQUARE_SPAN_RE = re.compile(r"\[([^{}\[\]]*)\]")
+
+# STAGE 2 — the vocabulary. Both the bare tag (`tmdb`, TRaSH-Guides) and the
+# `…id` tag (`tmdbid`, Emby/Jellyfin) are in the wild and mean the same thing.
+# Adding a 4th provider (anidb, …) is ONE string in _PROVIDERS.
+_PROVIDERS = ("tmdb", "tvdb", "imdb")
+_PROVIDER_BY_TAG = {tag: provider for provider in _PROVIDERS
+                    for tag in (provider, provider + "id")}
+
+# `<tag><separator><id>`, anchored (fullmatch) and nothing else — so a bare
+# release-group tag (`[rartv]`, `[FraMeSToR]`) or a chunk short_id (`[a1b2c3]`)
+# has no separator and is rejected before the vocabulary is even consulted.
+_TOKEN_CONTENT_RE = re.compile(r"([A-Za-z]+)([-=])(.+)")
+
+
+def _parse_token_content(content):
+    """Stage 2: decide whether `content` — the text INSIDE one bracket pair — is
+    a provider token, and take it apart.
+
+    Returns (provider, tag, separator, id), or None when it is not a token.
+    `provider` is the canonical name ('tmdb') and `tag` the spelling actually
+    used ('tmdbid'), both lower-cased; `separator` and `id` are verbatim, so
+    tag+separator+id reconstructs `content` apart from its casing.
+
+    Deliberately bracket-AGNOSTIC: it never learns which family produced
+    `content`, so `{…}` and `[…]` cannot grow different vocabularies. The one
+    rule that IS family-specific (`=` is square-only) is applied by the caller.
+    """
+    m = _TOKEN_CONTENT_RE.fullmatch(content)
+    if not m:
+        return None
+    tag = m.group(1).lower()
+    provider = _PROVIDER_BY_TAG.get(tag)
+    if provider is None:
+        return None
+    return provider, tag, m.group(2), m.group(3)
+
+
+def find_provider_tokens(name):
+    """Every recognized provider token in `name`, in left-to-right order.
+
+    There can be more than one — a release folder may carry a source-provided
+    `[tvdbid-…]` next to MediaVault's own `[tmdbid-…]`. Each item is:
+
+        {"provider": "tmdb"|"tvdb"|"imdb",      # canonical name, lower-case
+         "id":       "<the id substring>",      # verbatim: "603692", "tt0111161"
+         "bracket":  "curly"|"square",          # which family it was written in
+         "match":    "<the matched substring>", # brackets included
+         "span":     (start, end)}              # name[start:end] == match
+
+    Spans never overlap, so a caller can rewrite ONE token by its span and leave
+    every other bracketed chunk (`[tvdbid-…]`, `[rartv]`, a chunk short_id)
+    byte-identical — which is what the token migration does.
+    """
+    name = name or ""
+    found = []
+    for bracket, span_re in (("curly", _CURLY_SPAN_RE), ("square", _SQUARE_SPAN_RE)):
+        for m in span_re.finditer(name):
+            parsed = _parse_token_content(m.group(1))
+            if parsed is None:
+                continue
+            provider, _tag, separator, token_id = parsed
+            # `=` is Emby's square-bracket variant. `{tmdb=…}` is not a
+            # convention anywhere, so it stays a non-token.
+            if separator == "=" and bracket != "square":
+                continue
+            found.append({"provider": provider, "id": token_id, "bracket": bracket,
+                          "match": m.group(0), "span": m.span()})
+    found.sort(key=lambda token: token["span"])
+    return found
+
+
+def has_tmdb_token(name):
+    """True if `name` already carries a TMDB provider token in ANY recognized
+    format — `{tmdb-…}`, `[tmdb-…]`, `[tmdbid-…]`, `[tmdbid=…]`, any casing.
+
+    The idempotency guard behind every stamp site: a folder that already has a
+    token must never be given a second one. TMDB-ONLY on purpose — a
+    source-provided `[tvdbid-…]` is somebody else's tag and must not block
+    MediaVault's own tmdb stamp. Derived from find_provider_tokens rather than
+    re-matching, so this predicate and the parser cannot drift apart (which is
+    exactly what happened to the two hand-written copies in IMP-C22/C23).
+    """
+    return any(token["provider"] == "tmdb" for token in find_provider_tokens(name))

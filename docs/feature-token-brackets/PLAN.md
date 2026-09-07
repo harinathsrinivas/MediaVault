@@ -216,7 +216,7 @@ one shared implementation in `mvcommon.py`, thin call sites in `main.py`.
   - Acceptance: both files exist, committed; PROGRESS.md's step table has exactly 15 rows (0–14)
     matching this plan's step numbers/models; `▶ NEXT ACTION` points at Step 1.
 
-- [ ] 1. [model: fable] [fallback: opus] [effort: xhigh] [candidates: 2] 🚦 Design + implement the shared provider-token detect/parse helper in `mvcommon.py`.
+- [x] 1. [model: fable] [fallback: opus] [effort: xhigh] [candidates: 2] 🚦 Design + implement the shared provider-token detect/parse helper in `mvcommon.py`.
   - Files: `mvcommon.py`
   - Depends on: Step 0.
   - Consumed by: Step 2 (main.py detection wiring — calls `mvcommon.has_tmdb_token`), Step 3 (emit

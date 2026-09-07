@@ -193,7 +193,7 @@ one shared implementation in `mvcommon.py`, thin call sites in `main.py`.
 
 ## Steps
 
-- [ ] 0. [model: sonnet] [effort: low] Scaffold `docs/feature-token-brackets/PROGRESS.md` + `DECISIONS.md`.
+- [x] 0. [model: sonnet] [effort: low] Scaffold `docs/feature-token-brackets/PROGRESS.md` + `DECISIONS.md`.
   - Files: `docs/feature-token-brackets/PROGRESS.md` (NEW), `docs/feature-token-brackets/DECISIONS.md` (NEW)
   - Depends on: branch created (orchestrator Phase 1).
   - Consumed by: EVERY later step (updates PROGRESS.md's step table + `▶ NEXT ACTION` in the SAME

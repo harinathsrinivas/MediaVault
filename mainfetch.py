@@ -286,6 +286,26 @@ def fetch_single_entry(driver, entry):
                 "fallback_index": i,
                 "status": "pending"
             })
+
+        # [FLAC-CARRYOUT] Each carried-out track's holder is fetched like a chunk:
+        # same hash-routing, staged into restore/ beside the chunks. The holder is
+        # NOT in `chunks` (it is in carried_out_tracks), so enqueue it explicitly.
+        for ct in entry.get("split_info", {}).get("carried_out_tracks", []):
+            hname = ct.get("holder_filename")
+            hhash = ct.get("holder_hash")
+            if not hname or not hhash:
+                continue
+            if os.path.exists(os.path.join(restore_folder, hname)):
+                continue
+            queue.append({
+                "filename": hname,
+                "hash": hhash,
+                "dest": restore_folder,
+                "specific_query": hname,
+                "fallback_query": fallback_term,
+                "fallback_index": 0,
+                "status": "pending"
+            })
     else:
         fname = entry["filename"]
         if not os.path.exists(os.path.join(restore_folder, fname)):
@@ -488,6 +508,25 @@ def build_download_queue(entries):
                     "specific_query": fname,
                     "fallback_query": fallback_term,
                     "fallback_index": i,
+                    "status": "pending"
+                })
+
+            # [FLAC-CARRYOUT] enqueue each carried-out track's holder (same
+            # hash-routing, staged into restore/ beside the chunks).
+            for ct in entry.get("split_info", {}).get("carried_out_tracks", []):
+                hname = ct.get("holder_filename")
+                hhash = ct.get("holder_hash")
+                if not hname or not hhash:
+                    continue
+                if os.path.exists(os.path.join(restore_folder, hname)):
+                    continue
+                queue.append({
+                    "filename": hname,
+                    "hash": hhash,
+                    "dest": restore_folder,
+                    "specific_query": hname,
+                    "fallback_query": fallback_term,
+                    "fallback_index": 0,
                     "status": "pending"
                 })
         else:

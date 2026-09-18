@@ -811,6 +811,15 @@ this section) add no entry type and appear in no `required` set.
     "merge_tool":   "mkvmerge v97.0",          // OPTIONAL — tool captured at bless (version-drift triage)
     "rehashed_at":  "2026-06-07T14:03:22Z",    // OPTIONAL — when re_hashed flipped true
     "canonical_hash": "a0b239a1..."            // OPTIONAL/TRANSIENT — eager only: blessed at push, promoted into "hash" at replace then dropped
+    "carried_out_tracks": [                    // OPTIONAL — FLAC carry-out (feature/flac-carryout)
+      {
+        "track_id": 2, "codec": "A_FLAC", "language": "eng", "channels": 8,
+        "position": 2, "default": false, "forced": false, "enabled": true, "name": null,
+        "holder_filename": "F1... [f6b674].holder.mkv", "holder_hash": "…",
+        "original_tracks": [ ... ordered per-track manifest (type/codec_id/language/
+                               default/forced/enabled/name/uid), the generic re-add source ... ]
+      }
+    ]
   },
   "parent_id":    "tv-ta-2024-aindhamvedham-s01"  // OPTIONAL — present if part of a season
 }
@@ -1446,6 +1455,46 @@ across the user's whole library:
 ```
 
 `mkvmerge` substitutes `%03d` with 001, 002, ....
+
+### 7.3a FLAC carry-out (unsplittable audio, feature/flac-carryout)
+
+`mkvmerge` cannot `--split` a file carrying an `A_FLAC` audio track (a
+packetizer-level refusal, all six `--split` modes, no override). Rather than
+refuse-and-hand-off (the pre-carry-out behaviour), `cmd_push` now **carries the
+FLAC out** when a split is requested — losslessly, with no conversion and no
+dropping:
+
+1. **Carry out** — extract the FLAC with `ffmpeg -map 0:N -c copy` (byte-exact),
+   then wrap it in a valid-video **holder**: a ~10 s H.264/AAC stub with the FLAC
+   attached as a Matroska ATTACHMENT (`wrap_payload_in_container`), and verify the
+   wrap round-trips byte-exact (extract-and-md5). The holder is named
+   `<base> [<short_id>].holder.mkv` in `_parts/` beside the chunks.
+2. **Split the remainder** — `split_video_file(..., drop_track=N)` emits
+   `--audio-tracks !N`, dropping only the FLAC so the rest splits normally.
+3. **Record** — `split_info.carried_out_tracks[]` stores the FLAC's `position`,
+   `language`/`default`/`forced`/`enabled`/`name`, the holder filename+hash, and a
+   full `original_tracks` manifest (every track's type/codec/language/flags/name/uid).
+4. **Restore** — fetch the holder beside the chunks; `extract_payload_from_container`
+   recovers the byte-exact FLAC; `merge_video_files(..., carried=…)` re-adds it at its
+   ORIGINAL position with its ORIGINAL flags via `--track-order` + per-file
+   `--language`/`--default-track`/`--forced-track`/`--track-name` (all regenerated
+   from the manifest, matched by track UID — generic, not sample-specific). The re-add
+   is inside the single `--deterministic` run, so the blessed canonical hash already
+   includes the re-added FLAC (the h1→split→h2→verify loop is unchanged).
+
+The only field NOT preserved is the FLAC's **internal track UID** (mkvmerge has no
+`--track-uid` and re-generates it; the regenerated value is itself deterministic). This
+is cosmetic — playback, language/default/order, content bytes and the deterministic
+hash are all unaffected. A FLAC file pushed **without** a split uploads whole, unchanged
+(the carry-out engages only when FLAC AND split coincide). The same
+`wrap_payload_in_container` primitive is the planned route for blank-disc `.iso`
+archival (a future IMP) — it is payload-agnostic bytes-in→bytes-out.
+
+`CARRY_OUT_CODEC_IDS = {"A_FLAC"}` (subset of `UNSPLITTABLE_CODEC_IDS`) gates which
+codecs are carried out vs refused; `refuse_if_unsplittable(..., carry_out_flac=False)`
+keeps the non-carry-out paths (e.g. `push_one_extra`, which splits without a carry-out)
+refusing FLAC exactly as before. See also
+[`docs/feature-flac-carryout/`](docs/feature-flac-carryout/).
 
 ### 7.4 UID (short_id) system
 

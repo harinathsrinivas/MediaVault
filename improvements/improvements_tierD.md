@@ -524,3 +524,18 @@
 - If skipped: every failed-push resume on a large file stays a multi-minute (or, for the largest masters, multi-tens-of-minutes) unnecessary re-hash, which is precisely the cost that pushed the user toward the risky manual parallel-command workaround that caused IMP-C24's incident.
 - Cross-references: IMP-C24 — the incident this task's absence directly motivated; IMP-C1 (season auto-resume) is a related but distinct progress-tracking feature for *automating* the resume command itself, not for skipping the re-hash.
 - Status: pending
+
+## IMP-D24: opaque-payload archival — containerize arbitrary files (BluRay `.iso`) for Google Photos cold storage
+
+- Category: other
+- Priority: medium (end-goal adjacent — the couch-vault's "keep the full disc image" path)
+- Files: reuse `wrap_payload_in_container` / `extract_payload_from_container` (`main.py`, landed with the FLAC carry-out on `feature/flac-carryout`); a new per-item "payload" lifecycle field or an adjacent entry-type; the CLI + README/ARCHITECTURE docs.
+- Current behavior: the FLAC carry-out already generalizes "hide opaque bytes as a valid video" — a `A_FLAC` track is wrapped in a Matroska attachment inside a ~10 s H.264/AAC stub, uploaded to the Pixel's Photos, and recovered byte-exact. The SAME primitive, unmodified, can carry a BluRay `.iso` (or any file) through the identical push/fetch/restore path.
+- Proposed change: a generic "payload" mode that takes a path (an `.iso`, an `.img`, whatever), wraps it with `wrap_payload_in_container`, registers it in the library as a payload-carrying item (recorded in `split_info`/a sibling block so fetch/restore know to `extract_payload_from_container` rather than re-merge chunks), and — on restore — surfaces the byte-exact original. No new entry type strictly required if it reuses the leaf + a `payload` marker; decide that during planning (a new entry type triggers the `ENTRY_TYPE_KEYS` guard + consumer-impact audit).
+- Rationale: the user's end-goal includes keeping full-disc images (the ripped BluRay source) in the same free-unlimited cold storage, not just the remuxed movie. The primitive is already built and proven byte-exact; this task is the wiring + provenance + docs.
+- Goal: `prep_push_rep` (or a sibling `archive_payload <id> <path>`) round-trips an `.iso` through Google Photos byte-identically, exactly like a FLAC track today.
+- Effort estimate: medium (mostly lifecycle wiring + a `payload` provenance field; the hard byte-exact-container part is already done).
+- Risk: low-medium — the container/Photos byte-exactness is already proven (FLAC holder); the open question is multi-GB `.iso` indexing behaviour in Photos, which a manual upload spike should confirm first (the same de-risk the FLAC holder got).
+- If skipped: BluRay disc images stay local-only, with no cold-storage path.
+- Cross-references: the FLAC carry-out feature this generalizes (`docs/feature-flac-carryout/`); IMP-E7 (multi-device push) and IMP-X1/X2 (replication/backup) pair naturally with it.
+- Status: pending

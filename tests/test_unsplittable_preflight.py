@@ -35,8 +35,10 @@ VIDEO_TRACK = {"id": 0, "type": "video", "properties": {"codec_id": "V_MPEGH/ISO
 THREE_MB = b"m" * (3 * 1024 * 1024)
 
 
-def _stub_identify(monkeypatch, payload, exc=None):
+def _stub_identify(monkeypatch, payload, exc=None, kwargs_out=None):
     def _run(cmd, **kwargs):
+        if kwargs_out is not None:
+            kwargs_out.append(kwargs)
         if exc is not None:
             raise exc
 
@@ -57,6 +59,33 @@ def test_probe_flags_flac_track_with_id_and_language(monkeypatch, tmp_path):
     _stub_identify(monkeypatch, json.dumps({"tracks": [VIDEO_TRACK, DTS_TRACK, FLAC_TRACK]}))
 
     assert main.find_unsplittable_tracks(str(tmp_path / "m.mkv")) == [(4, "A_FLAC", "ita")]
+
+
+def test_probe_decodes_utf8_reader_thread(monkeypatch, tmp_path):
+    """[fix/mkvmerge-j-utf8-decode] mkvmerge -J is valid UTF-8, and a track name
+    like NFC-composed "Íslenska" carries a UTF-8 byte (0x81) that cp1252 does NOT
+    define. With text=True and NO encoding, Windows defaults to cp1252 (strict),
+    so the subprocess reader thread raises UnicodeDecodeError OUTSIDE the probe's
+    try block. Passing encoding="utf-8" (with errors="replace" as a safety belt)
+    prevents that crash. Encoded here as real UTF-8 so a naive ascii payload would
+    not accidentally pass."""
+    name = "I\xcc\x81slenska"  # NFC-composed í (>cp1252) exactly like the live file
+    payload = json.dumps({"tracks": [
+        {"id": 0, "type": "video", "properties": {"codec_id": "V_MPEGH/ISO/HEVC"}},
+        {"id": 4, "type": "audio", "properties": {"codec_id": "A_DTS", "track_name": name}},
+    ]})
+    # A world WITHOUT the fix decodes bytes with cp1252: emitting the UTF-8 bytes of
+    # that name would crash the reader thread. The stub below lets us assert the
+    # kwargs the probe passes in, so the regression is caught even without a real
+    # subprocess.
+    kwargs_out = []
+    _stub_identify(monkeypatch, payload, kwargs_out=kwargs_out)
+
+    assert main.find_unsplittable_tracks(str(tmp_path / "m.mkv")) == []
+    assert kwargs_out, "probe must call subprocess.run"
+    call = kwargs_out[0]
+    assert call.get("encoding") == "utf-8", f"reader thread must decode UTF-8, got encoding={call.get('encoding')!r}"
+    assert call.get("errors") == "replace", "pathological bytes must degrade, never crash the thread"
 
 
 def test_probe_passes_a_file_with_no_unsplittable_track(monkeypatch, tmp_path):

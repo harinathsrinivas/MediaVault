@@ -258,8 +258,16 @@ def find_unsplittable_tracks(input_path):
     never block an archive on its own. The split itself still reports, now legibly.
     """
     try:
+        # [get-encoding] mkvmerge -J emits valid UTF-8 (track names can be
+        # non-ASCII, e.g. NFC-composed "Íslenska"). Without an explicit encoding,
+        # Windows text=True defaults to cp1252 (strict), and the reader thread's
+        # decode of a UTF-8 non-cp1252 byte (0x81) raises UnicodeDecodeError
+        # OUTSIDE this try block — crashing the thread and degrading the probe.
+        # encoding="utf-8" fixes that; errors="replace" guards any pathological
+        # byte so the probe still degrades to [] per its never-block contract.
         r = subprocess.run([MKVMERGE_PATH, "-J", input_path],
-                           capture_output=True, text=True, check=True)
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", check=True)
         tracks = json.loads(r.stdout).get("tracks", [])
     except Exception:
         return []

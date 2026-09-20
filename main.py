@@ -486,6 +486,15 @@ def merge_video_files(chunk_paths, output_path, seed=None, carried=None, chunk_u
     # (mkvmerge v97.0, confirmed in the planning spike). seed=None keeps the argv
     # byte-for-byte identical to the original, non-deterministic merge.
     #
+    # [SPLIT-SYNC] `--append-mode track` offsets each appended chunk by that TRACK's
+    # own end timestamp, not the WHOLE file's (mkvmerge's default "file" mode uses the
+    # highest timestamp across ALL tracks, which over-gaps when video/audio/subtitle
+    # tracks end at different times — stretching the merged timeline vs the source).
+    # Measured: default "file" stretched a 290s slice to 291.35s; "track" kept it at
+    # 290.04s (identical to source). Without this, a carried-out FLAC (re-added at its
+    # true length) drifts out of sync with the stretched video — the Black Panther
+    # desync bug.
+    #
     # [FLAC-CARRYOUT] carried: a carried_out_tracks record. When present, the
     # merge re-adds the extracted FLAC at its ORIGINAL position/flags (D-9) by
     # appending the .flac as an additional (non-appended) input (FID=len(chunks))
@@ -493,6 +502,7 @@ def merge_video_files(chunk_paths, output_path, seed=None, carried=None, chunk_u
     cmd = [MKVMERGE_PATH]
     if seed is not None:
         cmd += ["--deterministic", seed]
+    cmd += ["--append-mode", "track"]
     if carried is not None:
         flac_path = carried.get("flac_path")
         track_order, opts = _carryout_merge_argv(

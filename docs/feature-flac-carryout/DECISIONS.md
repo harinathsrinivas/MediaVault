@@ -138,3 +138,29 @@ the code derives these from the manifest.
   Google Photos successfully), payload always carried as a Matroska attachment.
 - ISO/BluRay payload generalization → deferred to a separate IMP (primitive is shared).
 - Multi-track FLAC / non-FLAC unsplittable → still refuse (unchanged).
+
+## ✅ D-10. The deterministic re-merge must use `--append-mode track` (split-sync)
+
+**Bug found after merge:** a restored file's carried-out FLAC was ~4.57 s out of sync by
+the end of a 2h41m movie. Root cause: `merge_video_files` used mkvmerge's DEFAULT
+`--append-mode file`, which offsets each appended chunk by the **whole file's** highest end
+timestamp (across ALL tracks). When video/audio/subtitle tracks end at different times
+(video 9678.669 s, AC3 tracks 9678.688 s in the source), the default mode over-gaps each
+chunk boundary and **stretches the merged video timeline** (measured: a 290 s slice →
+291.35 s; the full 9678.669 s video → 9683.237 s — the same ~0.47 % error).
+
+The carried-out FLAC is re-added at its TRUE length (9678.669 s), so it no longer lines up
+with the stretched video — hence the desync. This was invisible before because a normal
+file re-splits ALL tracks uniformly (they stretch together and stay mutually in sync); the
+FLAC carry-out breaks that uniformity.
+
+**Fix (verified):** emit `--append-mode track` in `merge_video_files` (global option, after
+`--deterministic`, before `-o`). It offsets each appended chunk by **that track's own** end
+timestamp, preserving the exact timeline: the 290 s slice merges back to 290.041 s, and a
+full FLAC re-add reproduces the original video/flac == 9678.669 s. Determinism is unchanged
+(`--append-mode track` is a fixed global flag; `det` and `nondet` produce the same timeline).
+
+Source of truth: the freshly re-downloaded original at
+`D:\Downloads\Torrents\Movies\Black.Panther.Wakanda.Forever.2022.4K.HDR.DV.2160p.BDRemux
+Ita Eng x265-NAHOM.mkv` has video == FLAC == **9678.669 s, in perfect sync** (the restored
+mis-synced file had stretched video to 9683.237 s).

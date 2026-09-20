@@ -370,7 +370,9 @@ def split_video_file(input_path, output_dir, method, value_str, file_id=""):
 
     # Command Execution.
     # mkvmerge v97 formats the --split output name via libfmt, so any literal `{`/`}`
-    # in the path (e.g. a `{tmdb-12345}` Plex/Emby/Jellyfin folder token) is read as a
+    # in the path (e.g. a legacy `{tmdb-…}` Plex-style folder token — still a
+    # recognized format, though MediaVault now stamps `[tmdbid-…]`, which libfmt
+    # treats as ordinary characters and needs no escaping) is read as a
     # format field and mkvmerge dies with `fmt::format_error: argument not found`
     # (exit 3). Escape them as `{{`/`}}` for the -o arg ONLY — mkvmerge renders them
     # back to single braces and writes to the real folder. (A plain merge -o is taken
@@ -1288,7 +1290,7 @@ def cmd_set_tmdb(manual_id, tmdb_id):
 # `cmd_enrich_metadata` is a LOCAL-FIRST TMDB backfill: it reads the ids already
 # in the library, asks TMDB (themoviedb.org) for the matching show/movie, and —
 # only with --apply — writes `metadata.tmdb_id`, stamps the Plex/Emby/Jellyfin
-# `{tmdb-<id>}` token on the SHOW/MOVIE folder (via cmd_rename_folder), and
+# `[tmdbid-<id>]` token on the SHOW/MOVIE folder (via cmd_rename_folder), and
 # downloads poster.jpg / fanart.jpg (+ per-season posters) WITHOUT EVER fetching
 # media bytes. It is SHOW-CENTRIC (user-confirmed design C): every season + every
 # episode of one show resolves ONCE and the folder token is stamped ONCE.
@@ -1819,7 +1821,7 @@ def _season_episode_meta(season_details):
 
 
 def _show_folder_of(season_folders):
-    """The on-disk SHOW folder that the `{tmdb-…}` token is stamped onto, given the
+    """The on-disk SHOW folder that the `[tmdbid-…]` token is stamped onto, given the
     distinct season folders of one show.
 
     Layout assumption (Plex/Emby/Jellyfin standard, matched by the project's own
@@ -2027,7 +2029,7 @@ def _gather_enrich_units(library, id_or_prefix=None, library_filter=None):
         if cat == "other":
             # IMP-D18: Others/sports is not on TMDB/OMDb. Never enrich it — enriching
             # would mis-tag (wrong tmdb_id), rename the real Sports folder via a bogus
-            # {tmdb-…} token, and fetch wrong posters. One skip here covers
+            # [tmdbid-…] token, and fetch wrong posters. One skip here covers
             # enrich_metadata / refresh_online / fetch_trivia (all gather via this fn).
             continue
 
@@ -3634,7 +3636,7 @@ def _collect_folder_descendants(library, old_folder):
 def cmd_rename_folder(old_folder_or_id, new_folder_name_or_token):
     """Crash-safe cascading folder rename (IMP-D17).
 
-    Rename an on-disk SHOW/season folder (e.g. stamp a `{tmdb-12345}` token onto it)
+    Rename an on-disk SHOW/season folder (e.g. stamp a `[tmdbid-12345]` token onto it)
     and rewrite `folder_path` for EVERY library entry under that folder — all
     seasons/episodes leaves AND the show's season_map container — atomically.
 
@@ -3683,7 +3685,7 @@ def cmd_rename_folder(old_folder_or_id, new_folder_name_or_token):
     else:
         old_folder = os.path.abspath(old_folder_or_id)
 
-    # The new name is a LEAF name (e.g. "Dark {tmdb-70523}"), not a full path:
+    # The new name is a LEAF name (e.g. "Dark [tmdbid-70523]"), not a full path:
     # keep the same parent dir, swap the leaf. Reject a name carrying a separator
     # (that would move the folder elsewhere — out of scope and a footgun).
     if os.sep in new_folder_name_or_token or (os.altsep and os.altsep in new_folder_name_or_token):
@@ -7571,7 +7573,7 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
 # the movie EXACTLY as `cmd_prep_push_rep` does, then (once the archive is
 # confirmed `archived`) enrich it — preset a CLI-supplied `-tmdbid` via
 # `cmd_set_tmdb`, resolve against TMDB, write metadata, and — after a ONE-TIME
-# confirmation gate (Decision 2/3) — stamp the `{tmdb-<id>}` folder token and
+# confirmation gate (Decision 2/3) — stamp the `[tmdbid-<id>]` folder token and
 # download art. `-tvdbid` is refused outright (Decision 1 — TMDB-only; a TVDB
 # id is a different numbering space and would fetch the wrong title).
 #
@@ -8342,8 +8344,8 @@ def suggest_target_folder(item):
     the entry's existing folder_path with applies=False (informational only).
     For a NEW (UNPREPPED) item, builds a leaf-folder name from the guessed
     Title/Year plus an EDITABLE provider-id placeholder per the provider-tag
-    template (Movies -> {tmdb-…}, Series/Anime -> {tvdb-…}). This step does NO
-    TMDB/TVDB lookup; the braces hold an editable placeholder.
+    template (Movies -> [tmdbid-…], Series/Anime -> [tvdbid-…]). This step does NO
+    TMDB/TVDB lookup; the brackets hold an editable placeholder.
     """
     entry = item.get("entry")
     if entry is not None:
@@ -8829,7 +8831,7 @@ def items_payload():
         # (Phase 5.7) — the SAME resolver /api/media-image uses, so the SPA only
         # requests a poster <img> when one will actually be served (no speculative
         # 404 per card). It is a few os.path checks per row (own folder -> season
-        # folder -> {tmdb-…} ancestor, first existing wins); short-circuit to False
+        # folder -> TMDB-token ancestor, first existing wins); short-circuit to False
         # when the entry has neither a folder_path nor a parent to inherit from, so
         # a folderless leaf never even enters the resolver on a large grid.
         has_anchor = bool(entry.get("folder_path")) or bool(entry.get("parent_id"))
@@ -8839,7 +8841,7 @@ def items_payload():
         # backdrop_available: same cheap, LIVE on-disk check via the SAME resolver
         # the /api/media-image route uses, but for the FANART (backdrop) the hover
         # detail-window shows. fanart resolution walks own folder -> season folder ->
-        # {tmdb-…} show folder (it has no per-episode rung), so an episode inherits the
+        # TMDB-token show folder (it has no per-episode rung), so an episode inherits the
         # season/show backdrop. Gated on has_anchor + short-circuited like the poster
         # check so a folderless leaf never enters the resolver (a couple os.path stats
         # at most). Kept a real bool (JSON-friendly), never a path.
@@ -9718,7 +9720,7 @@ def resolve_artwork_path(library, mid, kind="poster"):
       (ii)  else the entry's season container's folder ``<kind>.jpg`` — found via
             the leaf's ``parent_id`` -> the ``season_map`` entry's ``folder_path``.
       (iii) else the NEAREST ancestor folder (walking UP the entry's real
-            ``folder_path``) whose name carries a ``{tmdb-…}`` token — the show
+            ``folder_path``) whose name carries a TMDB provider token — the show
             folder — and its ``<kind>.jpg`` (so every episode inherits the show
             poster when nothing more specific exists).
     So an episode WITHOUT its own still falls back to the season poster, then the
@@ -9793,7 +9795,7 @@ def resolve_artwork_path(library, mid, kind="poster"):
             if hit:
                 return hit
 
-    # (iii) Walk UP to the nearest {tmdb-…} show folder and use its <kind>.jpg.
+    # (iii) Walk UP to the nearest TMDB-token show folder and use its <kind>.jpg.
     # Anchor the walk at the most-specific folder we have for this entry.
     anchor = own_folder
     if not anchor and parent_id:
@@ -9970,7 +9972,7 @@ if __name__ == "__main__":
         print("  sort")
         print("  fetch [id]")
         print("  recover [id|folder]  (or: recover --scan)")
-        print("  rename_folder [id|folder] \"<NewName {tmdb-12345}>\"  — rename a show/season folder + rewrite every descendant folder_path (crash-safe, no rehash)")
+        print("  rename_folder [id|folder] \"<NewName [tmdbid-12345]>\"  — rename a show/season folder + rewrite every descendant folder_path (crash-safe, no rehash)")
         print("  add_extras <title_id> \"<folders>\" [--extras-size <v|none>] [device <id>] [no-replace]  — attach extras (Specials/Trailers/BTS) to an existing title")
         print("  web [--port N] [--host H] [--no-browser] [--demo]  — Launch the local web operations console (Disk Reclaim view); --demo = SAFE build, all actions simulated")
         print("  token create [--label \"X\"] [--ttl 1h|8h|12h|1d|3d|7d|30d|never]  — Mint a web access token (default --ttl 7d)")
@@ -10556,11 +10558,11 @@ if __name__ == "__main__":
             print("❌ Usage: recover [id|folder]   (or: recover --scan)")
 
     elif cmd == "rename_folder":
-        # rename_folder <old_folder_or_id> "<NewName {tmdb-12345}>"
+        # rename_folder <old_folder_or_id> "<NewName [tmdbid-12345]>"
         if len(sys.argv) >= 4:
             cmd_rename_folder(sys.argv[2], sys.argv[3])
         else:
-            print("❌ Usage: rename_folder [id|folder] \"<NewName {tmdb-12345}>\"")
+            print("❌ Usage: rename_folder [id|folder] \"<NewName [tmdbid-12345]>\"")
 
     elif cmd == "add_extras":
         # add_extras <title_id> "<folders>" [--extras-size <v|none>] [device <id_or_name>] [no-replace]

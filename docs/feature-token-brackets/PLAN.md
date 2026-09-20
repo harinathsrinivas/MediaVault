@@ -319,7 +319,7 @@ one shared implementation in `mvcommon.py`, thin call sites in `main.py`.
     three functions after this step. A fresh `cmd_enrich_metadata --apply` (fixture-driven, in Step 9's
     tests) on an entry with no existing token stamps `[tmdbid-<id>]`, never `{tmdb-<id>}`.
 
-- [ ] 4. [model: sonnet] [effort: low] Mechanical doc-string / help-text / comment updates in `main.py`.
+- [x] 4. [model: sonnet] [effort: low] Mechanical doc-string / help-text / comment updates in `main.py`.
   - Files: `main.py`
   - Depends on: Steps 2, 3 (so the comments describe the already-changed code truthfully).
   - Consumed by: Step 13 (README/ARCHITECTURE examples should match the CLI's own help text).

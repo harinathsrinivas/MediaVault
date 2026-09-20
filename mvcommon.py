@@ -25,6 +25,7 @@ LIBRARY_OTHERS = r'C:\Media\library_others.json'
 
 LOCAL_ROOT = r"C:\Media"  # Your PC Root
 MKVMERGE_PATH = r"C:\Program Files\MKVToolNix\mkvmerge.exe"
+MKVEXTRACT_PATH = r"C:\Program Files\MKVToolNix\mkvextract.exe"  # opaque-payload extraction (FLAC carry-out)
 
 # Folder Naming Conventions
 SPLIT_DIR_NAME = "_parts"  # Temp folder for chunks during push

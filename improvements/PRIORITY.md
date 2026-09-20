@@ -147,7 +147,7 @@ Feels-instant spikes: `G2` (gphotosdl) → `S7` (fetch hardening); `S6` (watch-w
 
 Perf: `B1`–`B10`. Utility commands: `D2`,`D3`,`D6`–`D15`. Integration long-tail: `E1`,`E2`,`E6`,
 `E8`,`E10`,`E11`. Rollback hardening: `R1`,`R3`,`R4`,`R5`,`R8`,`R9` (R4/R8/R9 are 🚦 change-gated; R6/R7 ✅ done).
-Moonshots: `F1`–`F9`. Research-only: `G3`,`G5`,`H2`,`A6`.
+Moonshots: `F1`–`F9`. Research-only: `G3`,`G5`,`H2`,`A6`. Opaque-payload archival (BluRay `.iso` → container): `D24` (reuses the FLAC carry-out primitive).
 
 ## ✅ DONE (36)
 

@@ -55,6 +55,15 @@ puts the file back where it was.
 - `add_extras` / `--extras` — give a title's bonus-content folders (`Specials\`,
   `Extra\`, `Trailers\`) the very same lifecycle, with an independent chunk size and
   an opt-in `--fetchExtras` on the way back. See "Archiving extras" below.
+- **FLAC carry-out** — a FILE carrying an unsplittable `A_FLAC` audio track (mkvmerge
+  cannot `--split` FLAC) is handled automatically when a split is requested: the FLAC
+  is **extracted losslessly** (no conversion, no dropping), wrapped in a valid-video
+  "holder" (a short H.264/AAC stub with the FLAC carried as a byte-exact Matroska
+  attachment), uploaded beside the chunks, and — on `restore` — recovered byte-exact and
+  re-merged at its **original track position with its original default/forced/language/
+  name flags** (driven by a recorded per-track manifest). A FLAC file pushed *without*
+  a split (under the ~10 GB cap) uploads whole, unchanged. See
+  [`docs/feature-flac-carryout/PLAN.md`](docs/feature-flac-carryout/PLAN.md).
 
 ### Failure handling (auto-rollback)
 

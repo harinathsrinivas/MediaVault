@@ -251,14 +251,27 @@ def automation_download_file(driver, search_queries, filename_expected, dest_fol
 #             CORE LOGIC
 # ==========================================
 
-def fetch_single_entry(driver, entry):
+def _fetch_restore_folder(entry, temp_dir, entry_id=None):
+    """Where a fetched entry's files are staged. Defaults to the entry's own
+    <folder_path>/restore, or temp_dir/<filesystem-safe manual_id>/restore when a
+    temp volume is supplied (mirrors main.cmd_push's tempdir redirect, so fetch and
+    restore agree on the off-volume location via the SAME manual_id)."""
+    if not temp_dir:
+        return os.path.join(entry.get("folder_path"), RESTORE_DIR_NAME)
+    # safe_id must match main._parts_base(local_folder, temp_dir, manual_id): the
+    # manual_id (library key), not filename/search_term.
+    safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", entry_id or entry.get("filename") or "entry")
+    return os.path.join(temp_dir, safe_id, RESTORE_DIR_NAME)
+
+
+def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None):
     """
     Handles the fetch logic for a single library entry (Movie or Episode).
     Refactored to use PARALLEL TRIGGER + HARVESTER for large files.
     """
     print(f"\n🔹 PROCESSING: {entry['filename']} ({entry.get('short_id', 'N/A')})")
 
-    restore_folder = os.path.join(entry["folder_path"], RESTORE_DIR_NAME)
+    restore_folder = _fetch_restore_folder(entry, temp_dir, entry_id)
     os.makedirs(restore_folder, exist_ok=True)
 
     # 1. Build Queue
@@ -485,6 +498,36 @@ def resolve_targets(manual_id, ep_range=None):
         return [entry]
 
 
+def resolve_target_ids(manual_id, ep_range=None):
+    """The RESOLVED library ids of resolve_targets's entries, in the SAME order —
+    the `safe_id` source for the tempdir redirect (must match main._parts_base's
+    manual_id). A season returns its de-aliased children ids; single returns the
+    resolved [real_id]."""
+    lib = load_library()
+    if manual_id not in lib:
+        return []
+    entry = lib[manual_id]
+    if entry.get("type") == "season_map":
+        children_ids = list(entry["children"])
+        if ep_range:
+            try:
+                s, e = map(float, ep_range.split('-'))
+                children_ids = [cid for cid in children_ids
+                                if (lambda n: n is not None and s <= n <= e)(
+                                    episode_num_from_id(cid, manual_id))]
+            except Exception:
+                pass
+        seen, resolved = set(), []
+        for cid in children_ids:
+            real_id, _ = _resolve_alias(lib, cid)
+            if real_id not in seen:
+                seen.add(real_id)
+                resolved.append(real_id)
+        return resolved
+    real_id, _ = _resolve_alias(lib, manual_id)
+    return [real_id]
+
+
 def build_download_queue(entries):
     queue = []
 
@@ -632,7 +675,7 @@ def profile_for_id(manual_id):
     return DEFAULT_PROFILE
 
 
-def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False):
+def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None):
     print(f"--- FETCH ROUTER: {manual_id} ---")
 
     active_profile = profile_for_id(manual_id)
@@ -640,6 +683,7 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False):
           f"({CHROME_PROFILES.get(active_profile, '?')})")
 
     targets = resolve_targets(manual_id, ep_range)
+    target_ids = resolve_target_ids(manual_id, ep_range)
     # [IMP-D19 Step 5, Card C — flag-only] When --fetchExtras is set, ALSO fetch
     # the title's cloud-resident extras (ALL groups — the episode range filters
     # only episodes; extras are all-or-nothing). Absent flag => no extras query,
@@ -665,8 +709,9 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False):
             driver = init_driver(active_profile)
             if not driver: return
 
-            for entry in targets:
-                fetch_single_entry(driver, entry)
+            for idx, entry in enumerate(targets):
+                fetch_single_entry(driver, entry, temp_dir=temp_dir,
+                                   entry_id=target_ids[idx] if idx < len(target_ids) else None)
 
             # [IMP-D19 Step 5] Extras fetch through the SAME proven mechanism:
             # each synthetic extra entry stages into its own
@@ -698,34 +743,40 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False):
 
 def parse_fetch_args(argv):
     """Pure parser for mainfetch CLI args. Takes full argv list, returns
-    (mid, epr, fetch_extras). Prints usage and sys.exit(1) on bad invocation —
-    no Selenium/browser side effects.
+    (mid, epr, fetch_extras, temp_dir). Prints usage and sys.exit(1) on bad
+    invocation — no Selenium/browser side effects.
 
     [IMP-D19 Step 5, Card C — flag-only] `--fetchExtras` (aliases
     `--fetch-extras` / `--extras` / `--extra`) is a boolean flag forwarded
     verbatim from main.py; when set, cmd_fetch_route ALSO fetches the title's
     cloud-resident extras. There is no prompt — the flag is the sole gate, and
     its absence reproduces today's main-content-only fetch byte-for-byte. The
-    flag and the `episodes <range>` pair may appear in any order after the id."""
+    flag, the `episodes <range>` pair, and `tempdir <path>` may appear in any
+    order after the id."""
     if len(argv) < 3 or argv[1] != "fetch":
-        print("Usage: fetch [id] [episodes] [range] [--fetchExtras]")
+        print("Usage: fetch [id] [episodes] [range] [tempdir <path>] [--fetchExtras]")
         sys.exit(1)
     mid = argv[2]
     rest = argv[3:]
     epr = None
+    temp_dir = None
     i = 0
     while i < len(rest):
         if rest[i] == "episodes" and i + 1 < len(rest):
             epr = rest[i + 1]
             i += 2
             continue
+        if rest[i] == "tempdir" and i + 1 < len(rest):
+            temp_dir = rest[i + 1]
+            i += 2
+            continue
         i += 1
     fetch_extras = any(
         t in ("--fetchExtras", "--fetch-extras", "--extras", "--extra") for t in rest
     )
-    return (mid, epr, fetch_extras)
+    return (mid, epr, fetch_extras, temp_dir)
 
 
 if __name__ == "__main__":
-    mid, epr, fetch_extras = parse_fetch_args(sys.argv)
-    cmd_fetch_route(mid, epr, fetch_extras)
+    mid, epr, fetch_extras, temp_dir = parse_fetch_args(sys.argv)
+    cmd_fetch_route(mid, epr, fetch_extras, temp_dir=temp_dir)

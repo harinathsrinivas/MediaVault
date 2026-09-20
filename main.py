@@ -19,6 +19,7 @@ from pymediainfo import MediaInfo
 # Ensure emoji/Unicode output works on Windows consoles
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
@@ -6813,7 +6814,7 @@ def quarantine_restore_file(restore_folder, filename):
     return final
 
 
-def cmd_restore(manual_id):
+def cmd_restore(manual_id, temp_dir=None):
     print(f"--- RESTORING: {manual_id} ---")
     library = load_library()
     if manual_id not in library: print("❌ ID not found."); return False
@@ -6823,7 +6824,16 @@ def cmd_restore(manual_id):
         manual_id = real_id
 
     local_folder = entry['folder_path']
-    restore_folder = os.path.join(local_folder, RESTORE_DIR_NAME)
+    # [FLAC-CARRYOUT/tempdir] The chunks (and any carried-out holder) live under
+    # `restore/` beside the master, or — when a temp_dir is given — under
+    # temp_dir/<safe-id>/restore so a big re-merge can read off a second volume.
+    # The MERGED OUTPUT + final target always stay in local_folder (the merge would
+    # otherwise transiently need chunks + merged output on one volume).
+    restore_base, restore_err = _parts_base(local_folder, temp_dir, manual_id)
+    if restore_err:
+        print(f"❌ {restore_err}")
+        return False
+    restore_folder = os.path.join(restore_base, RESTORE_DIR_NAME)
     filename = entry['filename']
     target_path = os.path.join(local_folder, filename)
 
@@ -7056,6 +7066,14 @@ def cmd_restore(manual_id):
                     os.rmdir(restore_folder)
                 except:
                     pass
+            # [tempdir] remove the now-empty per-entry temp base (temp_dir/<safe-id>)
+            # when chunks were redirected — mirrors cmd_push's post-push cleanup.
+            if temp_dir and restore_base != local_folder:
+                if os.path.isdir(restore_base) and not os.listdir(restore_base):
+                    try:
+                        os.rmdir(restore_base)
+                    except OSError:
+                        pass
             # ---------------
 
             print(f"✅ SUCCESS: {filename} restored & re-indexed.")
@@ -7114,7 +7132,7 @@ def cmd_restore(manual_id):
         return True
 
 
-def cmd_restore_group(group_id, episode_range=None):
+def cmd_restore_group(group_id, episode_range=None, temp_dir=None):
     # [UPDATED] Added episode_range support and handling for .5
     print(f"=== BATCH RESTORE GROUP: {group_id} ===")
     library = load_library()
@@ -7163,7 +7181,7 @@ def cmd_restore_group(group_id, episode_range=None):
     count = 0
     for mid in target_ids:
         # Loop blindly - the restore command handles checks
-        if cmd_restore(mid):
+        if cmd_restore(mid, temp_dir=temp_dir):
             count += 1
 
     # IMP-D19 Step 6: explicit batch wire — restore the title's fetched extras
@@ -8416,7 +8434,7 @@ def cmd_prep_push_rep_season_enrich(base_id, folder_path, split_method=None, spl
     return True
 
 
-def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False):
+def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False, temp_dir=None):
     # This keeps main.py clean but still lets you run "main.py fetch"
     cmd = ["python", MAINFETCH_SCRIPT, "fetch", manual_id]
 
@@ -8433,6 +8451,10 @@ def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False):
     # never queues extras (existing main-content fetch behavior is unchanged).
     if fetch_extras:
         cmd.append("--fetchExtras")
+    # [tempdir] forward a temp volume to mainfetch so downloads land off the
+    # media volume (mirrors push's tempdir redirect).
+    if temp_dir:
+        cmd += ["tempdir", temp_dir]
 
     try:
         # Force the child's stdio to UTF-8 — a PIPEd child defaults to cp1252 on Windows and would crash printing mainfetch's emoji.
@@ -8464,12 +8486,12 @@ def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False):
         print(f"❌ Error running fetch script: {e}")
 
 
-def cmd_fetch_restore(manual_id, episode_range=None, fetch_extras=False):
+def cmd_fetch_restore(manual_id, episode_range=None, fetch_extras=False, temp_dir=None):
     # [NEW] Automated Fetch -> Restore Pipeline
     print(f"=== 🔄 AUTO-PILOT: FETCH -> RESTORE for {manual_id} ===")
 
     # 1. FETCH
-    cmd_dispatch_fetch(manual_id, episode_range, fetch_extras=fetch_extras)
+    cmd_dispatch_fetch(manual_id, episode_range, fetch_extras=fetch_extras, temp_dir=temp_dir)
     # IMP-D19 Step 5: fetch extras when fetch_extras (forwarded above to mainfetch)
 
     # 2. DETECT & RESTORE
@@ -8486,10 +8508,10 @@ def cmd_fetch_restore(manual_id, episode_range=None, fetch_extras=False):
     if is_season_map:
         # [UPDATED] Pass the range to restore_group
         print(f"   > Season Map detected. Running Batch Restore...")
-        restored_count = cmd_restore_group(manual_id, episode_range)
+        restored_count = cmd_restore_group(manual_id, episode_range, temp_dir=temp_dir)
     else:
         print(f"   > Single Item detected. Running Restore...")
-        cmd_restore(manual_id)
+        cmd_restore(manual_id, temp_dir=temp_dir)
 
     # IMP-D19 Step 6: place any fetched extras back into their subfolders —
     # only when --fetchExtras staged them (flag-only, Card C). Reload first: the
@@ -10830,10 +10852,26 @@ if __name__ == "__main__":
         cmd_verify_restore(sys.argv[2])
 
     elif cmd == "restore":
-        cmd_restore(sys.argv[2])
+        args = sys.argv[2:]
+        tdir = None
+        i = 0
+        while i < len(args):
+            if args[i] == "tempdir" and i + 1 < len(args):
+                tdir = args[i + 1]; i += 2
+            else:
+                i += 1
+        cmd_restore(args[0], temp_dir=tdir) if args else print("❌ Usage: restore [id] [tempdir <path>]")
 
     elif cmd == "restore_group":
-        cmd_restore_group(sys.argv[2])
+        args = sys.argv[2:]
+        tdir = None
+        i = 0
+        while i < len(args):
+            if args[i] == "tempdir" and i + 1 < len(args):
+                tdir = args[i + 1]; i += 2
+            else:
+                i += 1
+        cmd_restore_group(args[0], temp_dir=tdir) if args else print("❌ Usage: restore_group [id] [tempdir <path>]")
 
     elif cmd == "push":
         args = sys.argv[2:]
@@ -10999,42 +11037,46 @@ if __name__ == "__main__":
 
     elif cmd == "fetch":
         if len(sys.argv) < 3:
-            print("❌ Usage: fetch [id] [OPT: episodes 1-3] [--fetchExtras]")
+            print("❌ Usage: fetch [id] [OPT: episodes 1-3] [tempdir <path>] [--fetchExtras]")
             sys.exit(1)
 
         mid = sys.argv[2]
         _fetch_tokens = sys.argv[3:]
         _fetch_extras = any(t in ("--fetchExtras", "--fetch-extras", "--extras", "--extra") for t in _fetch_tokens)
-        # Scan tokens for "episodes <range>" regardless of position
+        # Scan tokens for "episodes <range>" and "tempdir <path>" regardless of position
         epr = None
+        ftdir = None
         _ft_i = 0
         while _ft_i < len(_fetch_tokens):
             if _fetch_tokens[_ft_i] == "episodes" and _ft_i + 1 < len(_fetch_tokens):
                 epr = _fetch_tokens[_ft_i + 1]
-                break
+            elif _fetch_tokens[_ft_i] == "tempdir" and _ft_i + 1 < len(_fetch_tokens):
+                ftdir = _fetch_tokens[_ft_i + 1]
             _ft_i += 1
 
-        cmd_dispatch_fetch(mid, epr, fetch_extras=_fetch_extras)
+        cmd_dispatch_fetch(mid, epr, fetch_extras=_fetch_extras, temp_dir=ftdir)
 
     elif cmd == "fetch_restore":
-        # [NEW] Usage: fetch_restore [id] [OPT: episodes 1-3] [--fetchExtras]
+        # [NEW] Usage: fetch_restore [id] [OPT: episodes 1-3] [tempdir <path>] [--fetchExtras]
         if len(sys.argv) < 3:
-            print("❌ Usage: fetch_restore [id] [OPT: episodes 1-3] [--fetchExtras]")
+            print("❌ Usage: fetch_restore [id] [OPT: episodes 1-3] [tempdir <path>] [--fetchExtras]")
             sys.exit(1)
 
         mid = sys.argv[2]
         _fr_tokens = sys.argv[3:]
         _fetch_extras = any(t in ("--fetchExtras", "--fetch-extras", "--extras", "--extra") for t in _fr_tokens)
-        # Scan tokens for "episodes <range>" regardless of position
+        # Scan tokens for "episodes <range>" and "tempdir <path>" regardless of position
         epr = None
+        frdir = None
         _fr_i = 0
         while _fr_i < len(_fr_tokens):
             if _fr_tokens[_fr_i] == "episodes" and _fr_i + 1 < len(_fr_tokens):
                 epr = _fr_tokens[_fr_i + 1]
-                break
+            elif _fr_tokens[_fr_i] == "tempdir" and _fr_i + 1 < len(_fr_tokens):
+                frdir = _fr_tokens[_fr_i + 1]
             _fr_i += 1
 
-        cmd_fetch_restore(mid, epr, fetch_extras=_fetch_extras)
+        cmd_fetch_restore(mid, epr, fetch_extras=_fetch_extras, temp_dir=frdir)
 
     elif cmd == "token":
         # Web access token management (IMP-E15): create / list / revoke.

@@ -230,7 +230,7 @@ Brackets denote optional args; `[id]` is the manual library ID like
 | `prep_push_rep_season` | `prep_push_rep_season [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | `cmd_prep_push_rep_season` — sequential pipeline for a season; with `--extras` it also pushes AND dummies the season's registered extras after the episode loop |
 | `prep_push_rep_enrich` | `prep_push_rep_enrich [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>] [-tmdbid <id>] [--yes\|--no-rename] [--nfo] [--no-web]` | `cmd_prep_push_rep_enrich` (IMP-D22) — calls `cmd_prep_push_rep` **unmodified**, then TMDB-enriches the just-archived movie; `-tmdbid` presets the id via `cmd_set_tmdb` (no title search), no id ⇒ the same resolve waterfall `enrich_metadata` uses; `-tvdbid` is REFUSED before anything runs (§6.3a); the `{tmdb-…}` folder rename is confirmation-gated (`--yes` = auto-confirm, `--no-rename` = auto-decline, non-interactive ⇒ do not rename) |
 | `prep_push_rep_season_enrich` | `prep_push_rep_season_enrich [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>] [-tmdbid <id>] [--yes\|--no-rename] [--nfo] [--no-web]` | `cmd_prep_push_rep_season_enrich` (IMP-D22) — same, over `cmd_prep_push_rep_season` **unmodified**; enrich runs only once every id THIS RUN targeted (range-scoped when `episodes` is given) reads `status == "archived"`, and is scoped by the season's OWN `base_id`, so `-tmdbid` is the primary per-season mechanism (§6.3a) |
-| `fetch_restore` | `fetch_restore [id] [OPT: episodes <range>] [--fetchExtras]` | `cmd_fetch_restore` — dispatch fetch then restore; `--fetchExtras` also fetches the title's cloud-resident extras (flag-only, no prompt) |
+| `fetch_restore` | `fetch_restore [id] [OPT: episodes <range>] [tempdir <path>] [--fetchExtras]` | `cmd_fetch_restore` — dispatch fetch then restore; `tempdir` stages downloads off-volume (fetch) and reads chunks off-volume (restore); `--fetchExtras` also fetches the title's cloud-resident extras (flag-only, no prompt) |
 | `set_search` | `set_search [id] [term]` | `cmd_set_search` |
 | `set_poster` | `set_poster [id] [url]` | `cmd_set_poster` |
 | `set_fanart` | `set_fanart [id] [url]` | `cmd_set_fanart` |
@@ -244,7 +244,7 @@ Brackets denote optional args; `[id]` is the manual library ID like
 | `replace_group` | `replace_group [id]` | `cmd_replace_group` |
 | `repair_dummies` | `repair_dummies [optional: id_prefix]` | `cmd_repair_dummies` — walk all `status=="archived"` entries and upgrade legacy text-blob dummies to valid video dummies |
 | `verify_restore` | `verify_restore [id]` | `cmd_verify_restore` — dry-run hash check of files in `restore/` |
-| `restore` | `restore [id]` | `cmd_restore` — re-merge chunks + verify + move into place |
+| `restore` | `restore [id] [tempdir <path>]` | `cmd_restore` — re-merge chunks + verify + move into place; `tempdir` reads chunks/holder from `<tempdir>/<safe-id>/restore` while the merged output stays on the media volume |
 | `restore_group` | `restore_group [id]` | `cmd_restore_group` |
 | `sort` | `sort` | `cmd_sort` — re-order JSONs by lang -> year -> size |
 | `web` | `web [--port N] [--host H] [--no-browser]` | `cmd_web` — launch the local FastAPI operations console (Disk Reclaim view) at `http://127.0.0.1:8765`; lazy-imports fastapi/uvicorn so importing `main` never hard-requires them (IMP-E12) |
@@ -1490,6 +1490,15 @@ hash are all unaffected. A FLAC file pushed **without** a split uploads whole, u
 `wrap_payload_in_container` primitive is the planned route for blank-disc `.iso`
 archival (a future IMP) — it is payload-agnostic bytes-in→bytes-out.
 
+**Split-sync (`--append-mode track`, D-10):** `merge_video_files` emits
+`mkvmerge --append-mode track` so each appended chunk is offset by that TRACK's own
+end timestamp, not the whole file's (mkvmerge's default `--append-mode file` uses the
+highest-end timestamp across ALL tracks and overlaps/stretches the merged timeline when
+tracks end at different times). Without it, the re-muxed video/AC3/subs drifted ~4.6 s on
+a 2h41m movie while the carried-out FLAC (true length) stayed put → audible desync.
+`--append-mode track` reproduces the original timeline exactly (0.0 s delta on the real
+file). Determinism is unchanged (it is a fixed global flag).
+
 `CARRY_OUT_CODEC_IDS = {"A_FLAC"}` (subset of `UNSPLITTABLE_CODEC_IDS`) gates which
 codecs are carried out vs refused; `refuse_if_unsplittable(..., carry_out_flac=False)`
 keeps the non-carry-out paths (e.g. `push_one_extra`, which splits without a carry-out)
@@ -1769,7 +1778,16 @@ either:
 
 Prints pass/fail per file. Does not write or move anything.
 
-#### `cmd_restore(manual_id)` (lines 895-984) — DESTRUCTIVE
+#### `cmd_restore(manual_id, temp_dir=None)` (lines 895-984) — DESTRUCTIVE
+
+`temp_dir` is optional. When given, the chunk + holder staging folder becomes
+`temp_dir/<filesystem-safe manual_id>/restore` (via `_parts_base`, the SAME
+`<safe-id>` the push `tempdir` uses, so fetch and restore agree on the off-volume
+location); the MERGED OUTPUT and final target always stay in the entry's media
+folder. This splits a big re-merge across two volumes — chunks read off `temp_dir`,
+the ~orig-size merged file written on the media volume — so a 50 GB restore no
+longer needs chunks + merged output simultaneously on one volume. With
+`temp_dir=None` the restore folder is `<folder>/restore` (unchanged).
 
 For split entries:
 1. Verify all chunk filenames exist in `<folder>/restore/`. If any

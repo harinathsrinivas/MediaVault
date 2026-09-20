@@ -10375,7 +10375,7 @@ if __name__ == "__main__":
         print("  prep_push_rep_season [id] [folder] [optional: SIZE..] [OPT: episodes] [device <id_or_name>] [rehash] [tempdir <path>]")
         print("  prep_push_rep_enrich [id] [filepath] [SIZE_GB/SIZE_MB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>] [-tmdbid <id>] [--yes|--no-rename] [--nfo] [--no-web]  — archive then TMDB-enrich; no id -> auto-resolve exactly like enrich_metadata")
         print("  prep_push_rep_season_enrich [id] [folder] [SIZE_GB/SIZE_MB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [-tmdbid <id>] [--yes|--no-rename] [--nfo] [--no-web]  — season autopilot, then show-centric enrich")
-        print("  fetch_restore [id] [OPT: episodes 1-3]")  # [NEW]
+        print("  fetch_restore [id] [OPT: episodes 1-3] [tempdir <path>] [--fetchExtras]")  # [NEW]
         print("  set_search [id] [term]")
         print("  set_poster [id] [url]")
         print("  set_fanart [id] [url]")
@@ -10394,10 +10394,10 @@ if __name__ == "__main__":
         print("  repair_dummies [optional: id_prefix]")
         print("  verify_library [--fix-dummies]")
         print("  verify_restore [id]")
-        print("  restore [id]")
-        print("  restore_group [id]")
+        print("  restore [id] [tempdir <path>]")
+        print("  restore_group [id] [tempdir <path>]")
         print("  sort")
-        print("  fetch [id]")
+        print("  fetch [id] [tempdir <path>]")
         print("  recover [id|folder]  (or: recover --scan)")
         print("  rename_folder [id|folder] \"<NewName {tmdb-12345}>\"  — rename a show/season folder + rewrite every descendant folder_path (crash-safe, no rehash)")
         print("  add_extras <title_id> \"<folders>\" [--extras-size <v|none>] [device <id>] [no-replace]  — attach extras (Specials/Trailers/BTS) to an existing title")

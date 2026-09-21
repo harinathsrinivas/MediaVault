@@ -512,7 +512,7 @@ one shared implementation in `mvcommon.py`, thin call sites in `main.py`.
     beyond the literal format-string assertions — no other test logic changes.
   - Acceptance: `pytest tests/test_enrich_metadata.py tests/test_prep_push_rep_enrich.py tests/test_prep_push_rep_season_enrich.py tests/test_web_datafns.py -q` green with zero `{tmdb-`/`{tvdb-` assertions remaining that expect them to be produced BY MediaVault's own code (assertions about a pre-existing/seeded fixture folder that merely HAPPENS to use braces to prove "any recognized format still works" are fine and should stay — this step only fixes assertions about what MediaVault ITSELF now emits).
 
-- [ ] 10. [model: sonnet] [effort: low] mkvmerge brace-escape regression pin (no code change).
+- [x] 10. [model: sonnet] [effort: low] mkvmerge brace-escape regression pin (no code change).
   - Files: `tests/test_split_brace_escape.py`
   - Depends on: Step 3 (conceptually — sequenced here for narrative order; no actual code dependency).
   - Consumed by: Step 12.

@@ -531,7 +531,7 @@ one shared implementation in `mvcommon.py`, thin call sites in `main.py`.
   - Acceptance: `pytest tests/test_split_brace_escape.py -q` shows 3 passed (the original 2 unchanged +
     the 1 new one).
 
-- [ ] 11. [model: sonnet] [effort: medium] Smoke-suite coverage.
+- [x] 11. [model: sonnet] [effort: medium] Smoke-suite coverage.
   - Files: `tests/smoke/test_smoke_all_commands.py`
   - Depends on: Steps 3, 6.
   - Consumed by: Step 12 (this IS part of the mandatory smoke gate).

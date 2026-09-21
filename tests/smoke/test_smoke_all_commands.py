@@ -1055,6 +1055,54 @@ class TestEachCommand:
         assert alias["type"] == "multi_ep_alias"
         assert "alias_of" in alias and "parent_id" in alias
 
+    # ---- migrate_provider_tokens ---------------------------------------------
+    def test_migrate_provider_tokens_dry_run_then_apply_then_idempotent(
+            self, sandbox, capsys):
+        """IMP-U6: an old-style `{tmdb-…}` folder is left untouched by a
+        dry-run (1 candidate reported, nothing on disk or in the library
+        changes), then renamed to the canonical `[tmdbid-…]` by `--apply`
+        (folder_path re-pointed, entry otherwise byte-identical), and a
+        second `--apply` is a no-op (0 further renames)."""
+        old_folder = sandbox["local_root"] / "Movies" / "OldToken (2015) {tmdb-321}"
+        old_folder.mkdir(parents=True)
+        (old_folder / "m.mkv").write_bytes(b"DUMMY")
+        entry_id = "mov-en-2015-oldtoken"
+        entry = {
+            "short_id": mvcommon.generate_short_id(entry_id),
+            "filename": "m.mkv",
+            "folder_path": str(old_folder),
+            "status": "local_ready",
+            "uploaded": False,
+            "hash": "deadbeef",
+        }
+        mvcommon.save_library({entry_id: entry})
+
+        new_folder = old_folder.parent / "OldToken (2015) [tmdbid-321]"
+
+        # --- dry-run: reports 1 candidate, changes nothing on disk or in lib ---
+        main.cmd_migrate_provider_tokens()
+        out = capsys.readouterr().out
+        assert "DRY-RUN" in out and "would-rename=1" in out
+        assert old_folder.is_dir() and not new_folder.exists()
+        assert mvcommon.load_library()[entry_id]["folder_path"] == str(old_folder)
+
+        # --- --apply: the rename happens, folder_path is updated, entry untouched ---
+        main.cmd_migrate_provider_tokens("--apply")
+        out = capsys.readouterr().out
+        assert not old_folder.exists() and new_folder.is_dir()
+        entry_after = mvcommon.load_library()[entry_id]
+        assert entry_after["folder_path"] == str(new_folder)
+        assert entry_after["hash"] == "deadbeef"
+        assert entry_after["status"] == "local_ready"
+        assert entry_after["uploaded"] is False
+
+        # --- re-run --apply: idempotent, 0 additional renames ---
+        main.cmd_migrate_provider_tokens("--apply")
+        out = capsys.readouterr().out
+        assert "renamed=0" in out and "errors=0" in out
+        assert new_folder.is_dir()
+        assert mvcommon.load_library()[entry_id]["folder_path"] == str(new_folder)
+
     # ---- enrich_metadata (with mock_tmdb) -----------------------------------
     def test_enrich_metadata_dry_run(self, sandbox, make_video, mock_tmdb, capsys):
         """DRY-RUN (no --apply): a confident match is REPORTED but NOTHING is
@@ -1813,7 +1861,7 @@ class TestPrepPushRepEnrich:
                               returns (does not hang), folder left unrenamed,
                               metadata.tmdb_id still written.
       3. season             — a 1-episode season through the season autopilot;
-                              the SHOW folder gets the {tmdb-…} token.
+                              the SHOW folder gets the [tmdbid-…] token.
       4. -tvdbid refusal    — both commands refuse before anything runs
                               (no TMDB call, nothing prepped).
     """
@@ -1823,7 +1871,7 @@ class TestPrepPushRepEnrich:
             self, sandbox, make_video, stub_tech_specs, mock_device, fake_dummy,
             mock_tmdb, monkeypatch, capsys):
         """`-tmdbid` + `--yes`: the movie ends ARCHIVED, carries the tmdb_id,
-        its folder gets the {tmdb-…} token and a poster lands inside it."""
+        its folder gets the [tmdbid-…] token and a poster lands inside it."""
         _empty_libs(sandbox)
         _forbid_input(monkeypatch)
         _serve_tmdb_details(monkeypatch, mock_tmdb,
@@ -1843,7 +1891,7 @@ class TestPrepPushRepEnrich:
         assert entry["status"] == "archived"          # archive leg completed
         assert entry["metadata"]["tmdb_id"] == ENRICH_TMDB_ID   # enrich leg applied
 
-        stamped = folder.parent / f"{folder.name} {{tmdb-{ENRICH_TMDB_ID}}}"
+        stamped = folder.parent / f"{folder.name} {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=ENRICH_TMDB_ID)}"
         assert stamped.is_dir() and not folder.exists()
         assert entry["folder_path"] == str(stamped)
         assert (stamped / "poster.jpg").stat().st_size > 0
@@ -1877,7 +1925,7 @@ class TestPrepPushRepEnrich:
         assert entry["metadata"]["tmdb_id"] == ENRICH_TMDB_ID
         assert folder.is_dir(), "the non-interactive default must NOT rename"
         assert entry["folder_path"] == str(folder)
-        assert not (folder.parent / f"{folder.name} {{tmdb-{ENRICH_TMDB_ID}}}").exists()
+        assert not (folder.parent / f"{folder.name} {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=ENRICH_TMDB_ID)}").exists()
 
     # ---- 3. season: the SHOW folder gets the token --------------------------
     def test_prep_push_rep_season_enrich_stamps_show_folder(
@@ -1885,7 +1933,7 @@ class TestPrepPushRepEnrich:
             mock_tmdb, monkeypatch, capsys):
         """A 1-episode season through the season autopilot: the episode ends
         ARCHIVED and the SHOW folder (== the season folder in this flat layout,
-        the dominant real-library shape) carries the {tmdb-…} token."""
+        the dominant real-library shape) carries the [tmdbid-…] token."""
         _empty_libs(sandbox)
         _forbid_input(monkeypatch)
         _serve_tmdb_details(monkeypatch, mock_tmdb,
@@ -1906,7 +1954,7 @@ class TestPrepPushRepEnrich:
         assert lib[EP1_ID]["status"] == "archived"
         assert lib[EP1_ID]["metadata"]["tmdb_id"] == ENRICH_TMDB_ID
 
-        stamped = series_root / f"SMK.S01.2020 {{tmdb-{ENRICH_TMDB_ID}}}"
+        stamped = series_root / f"SMK.S01.2020 {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=ENRICH_TMDB_ID)}"
         assert stamped.is_dir() and not season_dir.exists()
         assert lib[SEASON_ID]["folder_path"] == str(stamped)
         assert lib[EP1_ID]["folder_path"] == str(stamped)

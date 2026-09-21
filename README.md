@@ -55,6 +55,15 @@ puts the file back where it was.
 - `add_extras` / `--extras` — give a title's bonus-content folders (`Specials\`,
   `Extra\`, `Trailers\`) the very same lifecycle, with an independent chunk size and
   an opt-in `--fetchExtras` on the way back. See "Archiving extras" below.
+- **FLAC carry-out** — a FILE carrying an unsplittable `A_FLAC` audio track (mkvmerge
+  cannot `--split` FLAC) is handled automatically when a split is requested: the FLAC
+  is **extracted losslessly** (no conversion, no dropping), wrapped in a valid-video
+  "holder" (a short H.264/AAC stub with the FLAC carried as a byte-exact Matroska
+  attachment), uploaded beside the chunks, and — on `restore` — recovered byte-exact and
+  re-merged at its **original track position with its original default/forced/language/
+  name flags** (driven by a recorded per-track manifest). A FLAC file pushed *without*
+  a split (under the ~10 GB cap) uploads whole, unchanged. See
+  [`docs/feature-flac-carryout/PLAN.md`](docs/feature-flac-carryout/PLAN.md).
 
 ### Failure handling (auto-rollback)
 
@@ -202,10 +211,10 @@ help text and no `--help` flag; this table is the reference.
 | `replace`              | `replace [id]`                                                                                                                      | Swap original with a tiny valid video file placeholder (requires ffmpeg)                                                                               |
 | `replace_group`        | `replace_group [id]`                                                                                                                | Replace a season group                                                                                                                                 |
 | `repair_dummies`       | `repair_dummies [id_prefix]`                                                                                                        | Regenerate any archived-entry dummy on disk to the current 10 KB video spec (idempotent — re-runs are safe; atomic swap)                                            |
-| `fetch`                | `fetch [id] [episodes <range>] [--fetchExtras]`                                                                                     | Selenium-download from Google Photos; `--fetchExtras` also downloads the title's archived extras (flag-only — never prompts)                            |
-| `fetch_restore`        | `fetch_restore [id] [episodes <range>] [--fetchExtras]`                                                                             | Fetch then restore in one command; `--fetchExtras` also fetches + restores the extras into their `Specials\`/`Extra\` subfolder                         |
-| `restore`              | `restore [id]`                                                                                                                      | Re-merge chunks, verify SHA256, place file back                                                                                                        |
-| `restore_group`        | `restore_group [id]`                                                                                                                | Restore a season group                                                                                                                                 |
+| `fetch`                | `fetch [id] [episodes <range>] [tempdir <path>] [--fetchExtras]`                                                                     | Selenium-download from Google Photos; `tempdir` stages downloads off the media volume; `--fetchExtras` also downloads the title's archived extras (flag-only — never prompts)                            |
+| `fetch_restore`        | `fetch_restore [id] [episodes <range>] [tempdir <path>] [--fetchExtras]`                                                             | Fetch then restore in one command; `tempdir` stages chunks off-volume (reads off the temp volume, writes the merged output back to the media folder); `--fetchExtras` also fetches + restores the extras into their `Specials\`/`Extra\` subfolder                         |
+| `restore`              | `restore [id] [tempdir <path>]`                                                                                                     | Re-merge chunks (optionally staged on `tempdir`), verify SHA256, place file back                                                                                                    |
+| `restore_group`        | `restore_group [id] [tempdir <path>]`                                                                                               | Restore a season group, optionally with `tempdir` chunk staging                                                                                                                            |
 | `verify_restore`       | `verify_restore [id]`                                                                                                               | Dry-run hash check of restore/ folder contents                                                                                                         |
 | `check`                | `check [id]`                                                                                                                        | Re-hash file in place and compare to library                                                                                                           |
 | `scan_unprepped`       | `scan_unprepped`                                                                                                                    | Find video files on disk not yet in any library                                                                                                        |

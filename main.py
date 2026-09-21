@@ -19,6 +19,7 @@ from pymediainfo import MediaInfo
 # Ensure emoji/Unicode output works on Windows consoles
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+
 if hasattr(sys.stderr, 'reconfigure'):
     sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 
@@ -29,6 +30,7 @@ if hasattr(sys.stderr, 'reconfigure'):
 # (the single source of truth imported by both main.py and mainfetch.py).
 from mvcommon import (
     LIBRARY_MOVIES, LIBRARY_SERIES, LIBRARY_ANIME, LOCAL_ROOT, MKVMERGE_PATH,
+    MKVEXTRACT_PATH,
     SPLIT_DIR_NAME, CHECKSUM_DIR_NAME, RESTORE_DIR_NAME, VIDEO_EXTENSIONS,
     load_library, save_library, generate_short_id, calculate_file_hash,
     human_readable_size, parse_size_str, retry, episode_num_from_id,
@@ -247,6 +249,11 @@ def parse_metadata_from_id(manual_id):
 # only costs the (clear, post-IMP-C19) mkvmerge error at split time. TrueHD is a
 # suspected member but is deliberately absent — it has not been measured.
 UNSPLITTABLE_CODEC_IDS = {"A_FLAC"}
+# [FLAC-CARRYOUT] Codecs we can CARRY OUT (extract → store in a valid-video holder →
+# re-add on restore) instead of refusing. FLAC is the one measured case: its bytes
+# are preserved exactly (lossless, no conversion) via the opaque-payload container.
+# A codec in UNSPLITTABLE_CODEC_IDS but NOT here is still refused with the runbook.
+CARRY_OUT_CODEC_IDS = {"A_FLAC"}
 
 
 def find_unsplittable_tracks(input_path):
@@ -258,8 +265,16 @@ def find_unsplittable_tracks(input_path):
     never block an archive on its own. The split itself still reports, now legibly.
     """
     try:
+        # [get-encoding] mkvmerge -J emits valid UTF-8 (track names can be
+        # non-ASCII, e.g. NFC-composed "Íslenska"). Without an explicit encoding,
+        # Windows text=True defaults to cp1252 (strict), and the reader thread's
+        # decode of a UTF-8 non-cp1252 byte (0x81) raises UnicodeDecodeError
+        # OUTSIDE this try block — crashing the thread and degrading the probe.
+        # encoding="utf-8" fixes that; errors="replace" guards any pathological
+        # byte so the probe still degrades to [] per its never-block contract.
         r = subprocess.run([MKVMERGE_PATH, "-J", input_path],
-                           capture_output=True, text=True, check=True)
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", check=True)
         tracks = json.loads(r.stdout).get("tracks", [])
     except Exception:
         return []
@@ -269,14 +284,24 @@ def find_unsplittable_tracks(input_path):
             if t.get("properties", {}).get("codec_id") in UNSPLITTABLE_CODEC_IDS]
 
 
-def refuse_if_unsplittable(input_path, label):
+def refuse_if_unsplittable(input_path, label, carry_out_flac=False):
     """[IMP-C20] Shared gate: print the refusal and return True when `input_path`
-    carries a track mkvmerge cannot split. Callers abort on True.
+    carries a track mkvmerge cannot split AND we will not carry it out. Callers
+    abort on True.
+
+    [FLAC-CARRYOUT] FLAC is carry-out-able, but ONLY on the paths that actually do
+    the carry-out (`cmd_push`, the autopilot gates). `carry_out_flac=True` lets a
+    FLAC track pass through (the caller handles the carry-out / proceeds to it);
+    the DEFAULT (False) still refuses FLAC — protecting paths that split WITHOUT
+    carrying out (e.g. `push_one_extra`). A codec that is unsplittable but NOT
+    carry-out-able is refused regardless.
 
     Used both by cmd_push (immediately before the split) and by the autopilots
     BEFORE their prep leg — the prep leg is the expensive one (deep scan +
     whole-file hash), so refusing only at push time would still burn it."""
-    bad = find_unsplittable_tracks(input_path)
+    skip = CARRY_OUT_CODEC_IDS if carry_out_flac else set()
+    bad = [(tid, codec, lang) for (tid, codec, lang) in find_unsplittable_tracks(input_path)
+           if codec not in skip]
     if not bad:
         return False
     print(f"❌ Cannot split {label} — mkvmerge cannot split these tracks:")
@@ -308,7 +333,7 @@ def _print_mkvmerge_failure(e):
         print(f"   > {line}")
 
 
-def split_video_file(input_path, output_dir, method, value_str, file_id=""):
+def split_video_file(input_path, output_dir, method, value_str, file_id="", drop_track=None):
     import math  # Needed for ceil calculation
 
     filename_base = os.path.splitext(os.path.basename(input_path))[0]
@@ -377,12 +402,25 @@ def split_video_file(input_path, output_dir, method, value_str, file_id=""):
     # (exit 3). Escape them as `{{`/`}}` for the -o arg ONLY — mkvmerge renders them
     # back to single braces and writes to the real folder. (A plain merge -o is taken
     # literally and must NOT be escaped — see merge_video_files; verified mkvmerge v97.)
+    # [FLAC-CARRYOUT] drop_track: exclude one audio track (by its container track
+    # id) from the split so the remainder is splittable even when that single
+    # track is a codec mkvmerge refuses to split (FLAC). None = byte-for-byte the
+    # pre-existing argv (no --audio-tracks).
     mkv_out = output_pattern.replace("{", "{{").replace("}", "}}")
-    cmd = [MKVMERGE_PATH, "-o", mkv_out, "--split", f"size:{split_arg}", input_path]
+    cmd = [MKVMERGE_PATH, "-o", mkv_out, "--split", f"size:{split_arg}"]
+    if drop_track is not None:
+        cmd += ["--audio-tracks", f"!{drop_track}"]
+    cmd.append(input_path)
     try:
         # [IMP-C19] Capture BOTH streams — mkvmerge reports its errors on stdout.
         subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        chunks = sorted([os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".mkv")])
+        # [FLAC-CARRYOUT] Match ONLY the split's own chunk pattern (".chunk.NNN.mkv"),
+        # not every ".mkv" in the dir — a carried-out FLAC holder also lives in the
+        # same dir as "<base> [<short_id>].holder.mkv" and must NOT be returned as a
+        # chunk (it is uploaded/hashed separately via carried_out_tracks).
+        chunk_re = re.compile(r"\.chunk\.\d+\.mkv$")
+        chunks = sorted([os.path.join(output_dir, f) for f in os.listdir(output_dir)
+                         if chunk_re.search(f)])
         print(f"   > Done. Generated {len(chunks)} parts.")
         return chunks
     except subprocess.CalledProcessError as e:
@@ -394,20 +432,93 @@ def split_video_file(input_path, output_dir, method, value_str, file_id=""):
         return []
 
 
-def merge_video_files(chunk_paths, output_path, seed=None):
+def _carryout_merge_argv(chunk_uids, carried, flac_fid):
+    """[FLAC-CARRYOUT] Pure: build the `--track-order` string + per-FLAC flag
+    options that re-insert a carried-out track at its ORIGINAL position with its
+    ORIGINAL flags, GENERICALLY (driven by the recorded manifest, matched by UID —
+    not by sample-specific indices).
+
+    `chunk_uids`  : ordered list of the dropped-track chunk's track UIDs (FID 0).
+    `carried`     : a carried_out_tracks record — must carry `uid`, `language`,
+                    `default`, `forced`, `enabled`, `name`, and the full
+                    `original_tracks` manifest (ordered, each with a `uid`).
+    `flac_fid`    : the FID of the re-added audio file (= len(chunk_paths)).
+
+    Returns (track_order_str, per_flac_opts). No I/O, no mutation."""
+    manifest = carried.get("original_tracks") or []
+    # map chunk track uid -> its index within FID 0 (mkvmerge renumbers, UID is stable)
+    chunk_index = {uid: i for i, uid in enumerate(chunk_uids)}
+    pairs = []
+    for mt in manifest:
+        muid = mt.get("uid")
+        if muid is not None and str(muid) == str(carried.get("uid")):
+            pairs.append(f"{flac_fid}:0")  # the carried track re-added from the FLAC file
+        else:
+            # a track that survives in the chunk — find its renumbered id by uid
+            idx = chunk_index.get(str(muid)) if muid is not None else None
+            if idx is None:
+                # uid unknown: fall back to positional (last resort, should not happen
+                # when the manifest + chunk agree)
+                continue
+            pairs.append(f"0:{idx}")
+    track_order = ",".join(pairs) if pairs else None
+
+    opts = []
+    lang = carried.get("language")
+    if lang:
+        opts += ["--language", f"0:{lang}"]
+    if carried.get("default") is True:
+        opts += ["--default-track", "0:1"]
+    else:
+        opts += ["--default-track", "0:0"]
+    if carried.get("forced") is True:
+        opts += ["--forced-track", "0:1"]
+    else:
+        opts += ["--forced-track", "0:0"]
+    if carried.get("name"):
+        opts += ["--track-name", f"0:{carried['name']}"]
+    return track_order, opts
+
+
+def merge_video_files(chunk_paths, output_path, seed=None, carried=None, chunk_uids=None):
     print(f"   > 🛠️  Merging {len(chunk_paths)} chunks...")
     # Syntax: mkvmerge -o output.mkv chunk1 +chunk2 +chunk3 ...
     # When a seed is supplied, prepend the GLOBAL `--deterministic <seed>` option
     # (it must precede -o) so the merged container is byte-identical across runs
     # (mkvmerge v97.0, confirmed in the planning spike). seed=None keeps the argv
     # byte-for-byte identical to the original, non-deterministic merge.
+    #
+    # [SPLIT-SYNC] `--append-mode track` offsets each appended chunk by that TRACK's
+    # own end timestamp, not the WHOLE file's (mkvmerge's default "file" mode uses the
+    # highest timestamp across ALL tracks, which over-gaps when video/audio/subtitle
+    # tracks end at different times — stretching the merged timeline vs the source).
+    # Measured: default "file" stretched a 290s slice to 291.35s; "track" kept it at
+    # 290.04s (identical to source). Without this, a carried-out FLAC (re-added at its
+    # true length) drifts out of sync with the stretched video — the Black Panther
+    # desync bug.
+    #
+    # [FLAC-CARRYOUT] carried: a carried_out_tracks record. When present, the
+    # merge re-adds the extracted FLAC at its ORIGINAL position/flags (D-9) by
+    # appending the .flac as an additional (non-appended) input (FID=len(chunks))
+    # with `--track-order` + per-file flag options regenerated from the manifest.
     cmd = [MKVMERGE_PATH]
     if seed is not None:
         cmd += ["--deterministic", seed]
+    cmd += ["--append-mode", "track"]
+    if carried is not None:
+        flac_path = carried.get("flac_path")
+        track_order, opts = _carryout_merge_argv(
+            chunk_uids or [], carried, len(chunk_paths))
+        if track_order:
+            cmd += ["--track-order", track_order]
     cmd += ["-o", output_path]
     cmd.append(chunk_paths[0])
     for chunk in chunk_paths[1:]:
         cmd.append(f"+{chunk}")
+    if carried is not None:
+        # per-file options must sit immediately before the FLAC input (D-9)
+        cmd += opts
+        cmd.append(carried["flac_path"])
 
     try:
         # [IMP-C19] Capture BOTH streams — a merge failure happens during restore,
@@ -602,6 +713,219 @@ def make_video_dummy(output_path, extension):
     os.replace(tmp_path, output_path)
     print(f"   ✅ Dummy video created: {os.path.basename(output_path)}")
     return True
+
+
+# ==========================================
+#   OPAQUE-PAYLOAD CONTAINER (FLAC carry-out; reusable for ISO later)
+# ==========================================
+# A Matroska file can carry arbitrary bytes as an ATTACHMENT, and Google Photos
+# ingests a valid playable MKV as a normal video. So an opaque payload (a FLAC
+# track, an .iso, …) can be "hidden" inside a short, valid video purely as an
+# attachment, uploaded to the Pixel's Photos, and recovered byte-for-byte (the
+# attachment round-trip is lossless — proven by md5). This is the SAME trick the
+# 10 KB dummy already relies on, generalized to a payload of any size/type.
+#
+# The helpers below are payload-agnostic: bytes in -> attachment -> bytes out.
+# `wrap_payload_in_container` builds a ~10 s H.264/AAC stub and attaches `payload`
+# via `mkvmerge --attach-file`; `extract_payload_from_container` surfaces the
+# payload back with `mkvextract attachments`. Neither inspects nor interprets the
+# payload — the caller decides what those bytes mean.
+#
+# PURE wrt MediaVault: these touch no library, no journal, no rollback state. They
+# are only invoked from cmd_push/cmd_restore (and, later, an ISO archival path).
+
+def _build_container_stub(stub_path):
+    """Write a ~10 s testsrc H.264+AAC stub (the same shape the user already
+    uploaded to Google Photos). Returns True on success."""
+    ffmpeg = resolve_ffmpeg()
+    if not ffmpeg:
+        print("❌ ffmpeg not found. Cannot build the payload container stub.")
+        return False
+    cmd = [
+        ffmpeg,
+        "-f", "lavfi", "-i", "testsrc=size=320x240:rate=24:duration=10",
+        "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "veryfast",
+        "-c:a", "aac", "-shortest",
+        "-loglevel", "error", "-nostdin", "-y", stub_path,
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    return r.returncode == 0 and os.path.exists(stub_path)
+
+
+def wrap_payload_in_container(payload_path, out_path):
+    """Wrap `payload_path` (any bytes) into a valid playable MKV as an attachment.
+    Returns True on success. `out_path` is created (never overwritten by callers
+    — callers remove any prior file first)."""
+    stub_path = out_path + ".stub.mkv"
+    try:
+        if not _build_container_stub(stub_path):
+            return False
+        payload_name = os.path.basename(payload_path)
+        cmd = [
+            MKVMERGE_PATH, "-o", out_path,
+            "--attachment-name", payload_name,
+            "--attach-file", payload_path,
+            stub_path,
+        ]
+        # mkvmerge reports errors on stdout (IMP-C19) — capture both.
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        if r.returncode != 0 or not os.path.exists(out_path):
+            _print_mkvmerge_failure(r)
+            return False
+        return True
+    finally:
+        if os.path.exists(stub_path):
+            try:
+                os.remove(stub_path)
+            except Exception:
+                pass
+
+
+def _container_attachment_id(container_path):
+    """Return the attachment id of the single payload attachment in `container_path`,
+    or None. Uses mkvmerge -J (JSON, UTF-8-normalized like find_unsplittable_tracks)."""
+    try:
+        r = subprocess.run([MKVMERGE_PATH, "-J", container_path],
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", check=True)
+        data = json.loads(r.stdout)
+    except Exception:
+        return None
+    atts = data.get("attachments", [])
+    if len(atts) != 1:
+        return None
+    return atts[0].get("id")
+
+
+def extract_payload_from_container(container_path, out_path):
+    """Extract the single payload attachment out of a container back to `out_path`.
+    Returns True on success (the recovered bytes are then byte-compared by callers)."""
+    aid = _container_attachment_id(container_path)
+    if aid is None:
+        print("❌ Container has no single payload attachment to extract.")
+        return False
+    cmd = [MKVEXTRACT_PATH, "attachments", container_path, f"{aid}:{out_path}"]
+    r = subprocess.run(cmd, capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    return r.returncode == 0 and os.path.exists(out_path)
+
+
+def probe_track_manifest(input_path):
+    """Return the ORDERED per-track manifest of `input_path`:
+    a list of {index, type, codec_id, language, default, forced, enabled, name, uid}.
+    The driver of generic track-order + flag reconstruction (D-9). Returns [] on
+    any probe failure (mkvmerge -J is UTF-8; a failure must be handled upstream)."""
+    try:
+        r = subprocess.run([MKVMERGE_PATH, "-J", input_path],
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", check=True)
+        data = json.loads(r.stdout)
+    except Exception:
+        return []
+    out = []
+    for t in data.get("tracks", []):
+        p = t.get("properties", {})
+        out.append({
+            "id": t.get("id"),
+            "type": t.get("type"),
+            "codec_id": p.get("codec_id"),
+            "language": p.get("language") or "und",
+            "default": p.get("default_track"),
+            "forced": p.get("forced_track"),
+            "enabled": p.get("enabled_track"),
+            "name": p.get("track_name"),
+            "uid": str(p.get("uid")) if p.get("uid") is not None else None,
+        })
+    return out
+
+
+def _carry_out_flac_track(source_path, parts_dir, short_id, track_id, codec_id, language):
+    """[FLAC-CARRYOUT] Carry one FLAC track out of `source_path` into a valid-video
+    holder in `parts_dir`, returning the `carried_out_tracks` record (or None on any
+    failure — the caller aborts the push cleanly). Does NOT convert or drop anything:
+    the FLAC bytes are carried verbatim as a Matroska attachment and proven to
+    round-trip byte-exact.
+
+    Steps: (1) extract the FLAC with `ffmpeg -map 0:<track_id> -c copy` to `<base>
+    [<short_id>].flac`; (2) wrap it via `wrap_payload_in_container` into `<base>
+    [<short_id>].holder.mkv`; (3) verify the wrap round-trips byte-exact; (4) capture
+    the full original track manifest for generic re-add. The transient `.flac` is
+    removed after the holder is verified (the holder is the stored artifact)."""
+    base = os.path.splitext(os.path.basename(source_path))[0]
+    flac_path = os.path.join(parts_dir, f"{base} [{short_id}].flac")
+    holder_path = os.path.join(parts_dir, f"{base} [{short_id}].holder.mkv")
+
+    ffmpeg = resolve_ffmpeg()
+    if not ffmpeg:
+        print("   ❌ ffmpeg not found — cannot carry out the FLAC track.")
+        return None
+
+    # 1. extract FLAC (stream-copy, byte-exact)
+    print(f"   > 🎧 Carrying out FLAC track {track_id} ({language})...")
+    r = subprocess.run([ffmpeg, "-y", "-v", "error", "-i", source_path,
+                        "-map", f"0:{track_id}", "-c", "copy", flac_path],
+                       capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    if r.returncode != 0 or not os.path.exists(flac_path):
+        print("   ❌ Failed to extract the FLAC track.")
+        return None
+
+    # 2. wrap into a valid-video holder
+    if os.path.exists(holder_path):
+        os.remove(holder_path)
+    if not wrap_payload_in_container(flac_path, holder_path):
+        print("   ❌ Failed to wrap the FLAC into a holder container.")
+        if os.path.exists(flac_path):
+            os.remove(flac_path)
+        return None
+
+    # 3. verify the wrap round-trips byte-exact before trusting it
+    verify_flac = os.path.join(parts_dir, f"{base} [{short_id}].verify.flac")
+    if extract_payload_from_container(holder_path, verify_flac) and \
+            calculate_file_hash(verify_flac) == calculate_file_hash(flac_path):
+        print("   > ✅ Holder verified byte-exact.")
+    else:
+        print("   ❌ Holder round-trip verification failed — aborting carry-out.")
+        for p in (flac_path, holder_path, verify_flac):
+            if os.path.exists(p):
+                os.remove(p)
+        return None
+    if os.path.exists(verify_flac):
+        os.remove(verify_flac)
+
+    # 4. capture the full original manifest (generic re-add, D-9)
+    manifest = probe_track_manifest(source_path)
+    carried = {
+        "track_id": track_id,
+        "codec": codec_id,
+        "language": language,
+        "holder_filename": os.path.basename(holder_path),
+        "holder_hash": calculate_file_hash(holder_path),
+        "original_tracks": manifest,
+    }
+    # copy the carried track's own flags into the record for the merge builder
+    own = next((m for m in (manifest or []) if m.get("id") == track_id), None)
+    if own is not None:
+        carried["position"] = (manifest or []).index(own)
+        carried["default"] = own.get("default")
+        carried["forced"] = own.get("forced")
+        carried["enabled"] = own.get("enabled")
+        carried["name"] = own.get("name")
+        carried["uid"] = own.get("uid")
+    else:
+        carried["position"] = track_id
+        carried["default"] = False
+        carried["forced"] = False
+        carried["enabled"] = True
+        carried["name"] = None
+        carried["uid"] = None
+
+    # the transient FLAC extract is removed after the holder is verified
+    if os.path.exists(flac_path):
+        os.remove(flac_path)
+    return carried
 
 
 # ==========================================
@@ -5166,16 +5490,15 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
                     print("   (Or drop the `rehash` token to halve the need — deferred re-hash uses 1X, not 2X.)")
                 return False
             # [IMP-C20] UNSPLITTABLE-TRACK PRE-FLIGHT. mkvmerge refuses to split a
-            # file containing certain codecs (FLAC today) and fails the ENTIRE run —
-            # historically only after prep had already deep-scanned and whole-file
-            # hashed the master. Stop here instead, name the track, and hand the
-            # operator the fix. Like the free-space check above this is READ-ONLY and
-            # runs BEFORE makedirs/journal, so nothing exists yet to roll back — a
-            # clean early return. MediaVault deliberately does NOT convert or drop the
-            # track itself: that is an irreversible quality decision about what becomes
-            # the only surviving copy, and it stays the operator's to make.
-            if refuse_if_unsplittable(local_file_path, manual_id):
+            # file containing certain codecs (FLAC today) and fails the ENTIRE run.
+            # [FLAC-CARRYOUT] FLAC is carry-out-able: extract it to a holder, split
+            # the remainder with the track dropped, and re-add on restore — so it is
+            # NOT refused. Only a carry-out-able unsplittable track that we cannot
+            # handle (multiple FLAC tracks, or a non-FLAC unsplittable codec) is
+            # refused here, naming the track and handing over the runbook.
+            if refuse_if_unsplittable(local_file_path, manual_id, carry_out_flac=True):
                 return False
+
             print(f"   > ✂️ Splitting...")
             # [ROLLBACK C] Journal the dir creations (this run only) BEFORE makedirs.
             if not parts_preexisted:
@@ -5185,21 +5508,60 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             os.makedirs(parts_dir, exist_ok=True)
             os.makedirs(checksum_dir, exist_ok=True)
 
+            # Detect FLAC carry-out (single track only — conservative).
+            flac_tracks = [(tid, codec, lang) for (tid, codec, lang)
+                           in find_unsplittable_tracks(local_file_path)
+                           if codec in CARRY_OUT_CODEC_IDS]
+            if len(flac_tracks) > 1:
+                print(f"❌ {manual_id} has {len(flac_tracks)} FLAC tracks — carrying out "
+                      "multiple tracks is not yet supported. Remux one to a splittable "
+                      "codec first (see the unsplittable-tracks runbook).")
+                journal.rollback(library)
+                return False
+            carried_tracks = []
+            drop_track = None
+            if flac_tracks:
+                track_id, codec, lang = flac_tracks[0]
+                rec = _carry_out_flac_track(local_file_path, parts_dir, short_id,
+                                            track_id, codec, lang)
+                if rec is None:
+                    print("❌ FLAC carry-out failed — nothing was pushed.")
+                    journal.rollback(library)
+                    return False
+                # journal the holder as created-this-run so a pre-upload rollback removes it
+                holder_local = os.path.join(parts_dir, rec["holder_filename"])
+                journal.record_create_file(holder_local)
+                carried_tracks = [rec]
+                drop_track = track_id
+
             # [UPDATED] Pass short_id to attach UID to chunk names
-            files_to_upload_paths = split_video_file(local_file_path, parts_dir, split_method, split_val,
-                                                     file_id=short_id)
+            # [FLAC-CARRYOUT] drop_track excludes the carried FLAC so the remainder
+            # splits. Only pass it when non-None so the non-FLAC argv is byte-identical
+            # to today (a stubbed split_video_file in the tests takes no drop_track).
+            split_kwargs = {"file_id": short_id}
+            if drop_track is not None:
+                split_kwargs["drop_track"] = drop_track
+            files_to_upload_paths = split_video_file(local_file_path, parts_dir,
+                                                     split_method, split_val, **split_kwargs)
             if not files_to_upload_paths:
                 # [ROLLBACK C] Split failed pre-any-upload — replay journalled inverses.
                 journal.rollback(library)
                 return False  # Stop if split failed
 
-            # Hash Chunks
+            # Hash Chunks (chunks ONLY — the holder is tracked separately in
+            # carried_out_tracks, never in `chunks`).
             for chunk_path in files_to_upload_paths:
                 c_name = os.path.basename(chunk_path)
                 c_hash = calculate_file_hash(chunk_path)
                 chunk_metadata.append({"filename": c_name, "hash": c_hash})
                 # Save sidecar
                 with open(os.path.join(checksum_dir, f"{c_name}.sha256"), 'w') as f: f.write(f"{c_hash} *{c_name}")
+
+            # [FLAC-CARRYOUT] the holder uploads alongside the chunks (its own hash is
+            # already in carried_tracks[0].holder_hash; keep it OUT of `chunks`).
+            if carried_tracks:
+                files_to_upload_paths.append(os.path.join(
+                    parts_dir, carried_tracks[0]["holder_filename"]))
 
             # Save split info to library IMMEDIATELY
             # [ROLLBACK SPEC] split_info is written HERE this run. A pre-any-upload
@@ -5210,8 +5572,13 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
                 journal.record_set_field(manual_id, "split_info", existed=False, prior=None)
             library[manual_id]["split_info"] = {
                 "is_split": True, "method": split_method, "val": split_val,
-                "total_chunks": len(files_to_upload_paths), "chunks": chunk_metadata
+                "total_chunks": len(chunk_metadata), "chunks": chunk_metadata
             }
+            # [FLAC-CARRYOUT] record the carry-out so fetch/restore recover the FLAC
+            # and re-add it. Additive to split_info (rides the same journalled
+            # record_set_field above), so a pre-upload rollback reverts it cleanly.
+            if carried_tracks:
+                library[manual_id]["split_info"]["carried_out_tracks"] = carried_tracks
             # [SPLIT-HASH] RE-SPLIT REHASH RESET (new-split branch ONLY; the resume
             # branch above must NOT reset). Fresh chunks were just produced and the
             # OLD split_info (which may have carried merge_seed/merge_tool/
@@ -5237,30 +5604,41 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             # above); no new rollback-relevant state is introduced and the push
             # remains PONR-less (O-1).
             if eager_rehash:
-                seed = entry.get("short_id") or manual_id
-                base = os.path.splitext(filename)[0]
-                # [SPLIT-HASH] Step 5: eager merge temp lives next to the chunks
-                # under base_dir (== local_folder when no temp_dir).
-                rehash_tmp = os.path.join(base_dir, f"{base}.rehash_tmp.mkv")
-                try:
-                    print(f"   > 🧬 Eager canonical re-hash: merging {len(files_to_upload_paths)} chunks (seed={seed})...")
-                    merged_ok = merge_video_files(files_to_upload_paths, rehash_tmp, seed=seed)
-                    canonical = calculate_file_hash(rehash_tmp) if merged_ok else None
-                    if merged_ok and canonical:
-                        library[manual_id]["split_info"]["merge_seed"] = seed
-                        library[manual_id]["split_info"]["merge_tool"] = _current_merge_tool()
-                        library[manual_id]["split_info"]["canonical_hash"] = canonical
-                        print(f"   > 🧬 Eager canonical hash staged (promotes at replace): {canonical}")
-                    else:
-                        print("   ⚠️ Eager re-hash did not produce a hash — continuing as deferred (will bless at first restore).")
-                except Exception as e:
-                    print(f"   ⚠️ Eager re-hash failed ({e}) — continuing as deferred (will bless at first restore).")
-                finally:
-                    if os.path.exists(rehash_tmp):
-                        try:
-                            os.remove(rehash_tmp)
-                        except Exception:
-                            pass
+                if carried_tracks:
+                    # [FLAC-CARRYOUT] Eager rehash is skipped when a track was carried
+                    # out: the canonical hash must include the RE-ADDED FLAC, which the
+                    # first-restore deterministic merge does correctly (and eagerly it
+                    # would also wrongly mix the holder file into the chunk merge). So
+                    # fall back to deferred — bless at first restore — instead of staging
+                    # a WRONG canonical now. Mirrors the existing "eager did not produce
+                    # a hash -> deferred" path.
+                    print("   > ⚠️ FLAC carry-out: eager re-hash skipped (canonical will "
+                          "be blessed at first restore, which re-adds the FLAC).")
+                else:
+                    seed = entry.get("short_id") or manual_id
+                    base = os.path.splitext(filename)[0]
+                    # [SPLIT-HASH] Step 5: eager merge temp lives next to the chunks
+                    # under base_dir (== local_folder when no temp_dir).
+                    rehash_tmp = os.path.join(base_dir, f"{base}.rehash_tmp.mkv")
+                    try:
+                        print(f"   > 🧬 Eager canonical re-hash: merging {len(files_to_upload_paths)} chunks (seed={seed})...")
+                        merged_ok = merge_video_files(files_to_upload_paths, rehash_tmp, seed=seed)
+                        canonical = calculate_file_hash(rehash_tmp) if merged_ok else None
+                        if merged_ok and canonical:
+                            library[manual_id]["split_info"]["merge_seed"] = seed
+                            library[manual_id]["split_info"]["merge_tool"] = _current_merge_tool()
+                            library[manual_id]["split_info"]["canonical_hash"] = canonical
+                            print(f"   > 🧬 Eager canonical hash staged (promotes at replace): {canonical}")
+                        else:
+                            print("   ⚠️ Eager re-hash did not produce a hash — continuing as deferred (will bless at first restore).")
+                    except Exception as e:
+                        print(f"   ⚠️ Eager re-hash failed ({e}) — continuing as deferred (will bless at first restore).")
+                    finally:
+                        if os.path.exists(rehash_tmp):
+                            try:
+                                os.remove(rehash_tmp)
+                            except Exception:
+                                pass
 
             save_library(library)
         else:
@@ -6759,7 +7137,7 @@ def quarantine_restore_file(restore_folder, filename):
     return final
 
 
-def cmd_restore(manual_id):
+def cmd_restore(manual_id, temp_dir=None):
     print(f"--- RESTORING: {manual_id} ---")
     library = load_library()
     if manual_id not in library: print("❌ ID not found."); return False
@@ -6769,7 +7147,16 @@ def cmd_restore(manual_id):
         manual_id = real_id
 
     local_folder = entry['folder_path']
-    restore_folder = os.path.join(local_folder, RESTORE_DIR_NAME)
+    # [FLAC-CARRYOUT/tempdir] The chunks (and any carried-out holder) live under
+    # `restore/` beside the master, or — when a temp_dir is given — under
+    # temp_dir/<safe-id>/restore so a big re-merge can read off a second volume.
+    # The MERGED OUTPUT + final target always stay in local_folder (the merge would
+    # otherwise transiently need chunks + merged output on one volume).
+    restore_base, restore_err = _parts_base(local_folder, temp_dir, manual_id)
+    if restore_err:
+        print(f"❌ {restore_err}")
+        return False
+    restore_folder = os.path.join(restore_base, RESTORE_DIR_NAME)
     filename = entry['filename']
     target_path = os.path.join(local_folder, filename)
 
@@ -6850,6 +7237,38 @@ def cmd_restore(manual_id):
         # Chosen/persisted BEFORE the merge so the canonical-producing merge below
         # uses exactly the stored value.
         seed = entry["split_info"].get("merge_seed") or entry.get("short_id") or manual_id
+        # [FLAC-CARRYOUT] Recover any carried-out tracks before the merge: verify the
+        # holder (fetched to restore/ beside the chunks), extract the FLAC byte-exact,
+        # and build the `carried` record so the merge re-adds it at its original
+        # position/flags (D-9). All PRE-PONR and reproducible (re-fetchable).
+        carried_out = entry["split_info"].get("carried_out_tracks", [])
+        carried_arg = None
+        chunk_uids = None
+        flac_tmp_paths = []
+        if carried_out:
+            if len(carried_out) > 1:
+                print("❌ Multiple carried-out tracks are not yet supported for restore.")
+                return False
+            rec = dict(carried_out[0])
+            hname = rec.get("holder_filename")
+            holder_path = os.path.join(restore_folder, hname)
+            if not os.path.exists(holder_path):
+                print(f"⏭️  Skipping {manual_id}: carried-out holder missing from restore folder.")
+                return False
+            # verify the holder hash before trusting it
+            if calculate_file_hash(holder_path) != rec.get("holder_hash"):
+                print(f"❌ Carry-out holder hash mismatch for {manual_id} — re-fetch required.")
+                return False
+            # extract the FLAC byte-exact out of the holder
+            flac_tmp = os.path.join(restore_folder, f"{os.path.splitext(hname)[0]}.recovered.flac")
+            if not extract_payload_from_container(holder_path, flac_tmp):
+                print(f"❌ Could not extract the carried-out FLAC from the holder.")
+                return False
+            flac_tmp_paths.append(flac_tmp)
+            rec["flac_path"] = flac_tmp
+            # the chunk's track order (renumbered after the drop) for --track-order
+            chunk_uids = [m.get("uid") for m in probe_track_manifest(chunk_paths_in_restore[0])]
+            carried_arg = rec
         # [ROLLBACK C + IMP-R6] The merge is PRE-PONR. To guarantee the archived
         # dummy at target_path is NEVER lost on a merge/verify failure, merge into a
         # TEMP sibling (<target>.merge_tmp<ext>) and atomically os.replace() it into
@@ -6863,8 +7282,19 @@ def cmd_restore(manual_id):
         merge_tmp_path = f"{merge_root}.merge_tmp{merge_ext}"
         journal = RollbackJournal(local_folder, manual_id)
         journal.record_create_reproducible(merge_tmp_path)
+        # [FLAC-CARRYOUT] the recovered FLAC temp is reproducible (re-extractable from
+        # the holder) — journal it so a pre-PONR roolback removes it.
+        for fp in flac_tmp_paths:
+            journal.record_create_reproducible(fp)
         try:
-            merged_ok = merge_video_files(chunk_paths_in_restore, merge_tmp_path, seed=seed)
+            # [FLAC-CARRYOUT] pass carried/chunk_uids ONLY when a carry-out exists,
+            # so the non-FLAC restore argv is byte-identical (test stubs take
+            # merge_video_files(chunk_paths, output_path, seed=None) exactly).
+            merge_kwargs = {"seed": seed}
+            if carried_arg is not None:
+                merge_kwargs["carried"] = carried_arg
+                merge_kwargs["chunk_uids"] = chunk_uids
+            merged_ok = merge_video_files(chunk_paths_in_restore, merge_tmp_path, **merge_kwargs)
         except Exception as e:
             print(f"❌ Merge crashed: {e}")
             merged_ok = False
@@ -6944,7 +7374,12 @@ def cmd_restore(manual_id):
             # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
             _warn_if_entry_inconsistent(library[manual_id], manual_id)
             print("   > 🧹 Cleaning up chunks...")
-            for p in chunk_paths_in_restore:
+            cleanup_paths = list(chunk_paths_in_restore)
+            # [FLAC-CARRYOUT] the holder + recovered FLAC temp live in restore/ too
+            cleanup_paths += [os.path.join(restore_folder, c["holder_filename"])
+                              for c in carried_out if c.get("holder_filename")]
+            cleanup_paths += flac_tmp_paths
+            for p in cleanup_paths:
                 try:
                     os.remove(p)
                 except Exception as e:
@@ -6954,6 +7389,14 @@ def cmd_restore(manual_id):
                     os.rmdir(restore_folder)
                 except:
                     pass
+            # [tempdir] remove the now-empty per-entry temp base (temp_dir/<safe-id>)
+            # when chunks were redirected — mirrors cmd_push's post-push cleanup.
+            if temp_dir and restore_base != local_folder:
+                if os.path.isdir(restore_base) and not os.listdir(restore_base):
+                    try:
+                        os.rmdir(restore_base)
+                    except OSError:
+                        pass
             # ---------------
 
             print(f"✅ SUCCESS: {filename} restored & re-indexed.")
@@ -7012,7 +7455,7 @@ def cmd_restore(manual_id):
         return True
 
 
-def cmd_restore_group(group_id, episode_range=None):
+def cmd_restore_group(group_id, episode_range=None, temp_dir=None):
     # [UPDATED] Added episode_range support and handling for .5
     print(f"=== BATCH RESTORE GROUP: {group_id} ===")
     library = load_library()
@@ -7061,7 +7504,7 @@ def cmd_restore_group(group_id, episode_range=None):
     count = 0
     for mid in target_ids:
         # Loop blindly - the restore command handles checks
-        if cmd_restore(mid):
+        if cmd_restore(mid, temp_dir=temp_dir):
             count += 1
 
     # IMP-D19 Step 6: explicit batch wire — restore the title's fetched extras
@@ -7620,7 +8063,8 @@ def cmd_prep_push_rep(manual_id, filepath, split_method=None, split_val=None, de
     # file mkvmerge cannot split, but by then STEP 1 has already deep-scanned and
     # whole-file hashed the master — 62 GB of wasted work on the incident file.
     # Only meaningful when a split was actually requested.
-    if split_method and split_val and refuse_if_unsplittable(filepath, manual_id):
+    # [FLAC-CARRYOUT] gate lets FLAC through — cmd_push (STEP 2) will carry it out.
+    if split_method and split_val and refuse_if_unsplittable(filepath, manual_id, carry_out_flac=True):
         print("   Nothing was prepped — the library is untouched.")
         return
 
@@ -7683,7 +8127,7 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
         blocked = False
         for fn in sorted([f for f in os.listdir(folder_path)
                           if f.lower().endswith(VIDEO_EXTENSIONS)]):
-            if refuse_if_unsplittable(os.path.join(folder_path, fn), fn):
+            if refuse_if_unsplittable(os.path.join(folder_path, fn), fn, carry_out_flac=True):
                 blocked = True
         if blocked:
             print("   Nothing was prepped — the library is untouched.")
@@ -8317,7 +8761,7 @@ def cmd_prep_push_rep_season_enrich(base_id, folder_path, split_method=None, spl
     return True
 
 
-def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False):
+def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False, temp_dir=None):
     # This keeps main.py clean but still lets you run "main.py fetch"
     cmd = ["python", MAINFETCH_SCRIPT, "fetch", manual_id]
 
@@ -8334,6 +8778,10 @@ def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False):
     # never queues extras (existing main-content fetch behavior is unchanged).
     if fetch_extras:
         cmd.append("--fetchExtras")
+    # [tempdir] forward a temp volume to mainfetch so downloads land off the
+    # media volume (mirrors push's tempdir redirect).
+    if temp_dir:
+        cmd += ["tempdir", temp_dir]
 
     try:
         # Force the child's stdio to UTF-8 — a PIPEd child defaults to cp1252 on Windows and would crash printing mainfetch's emoji.
@@ -8365,12 +8813,12 @@ def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False):
         print(f"❌ Error running fetch script: {e}")
 
 
-def cmd_fetch_restore(manual_id, episode_range=None, fetch_extras=False):
+def cmd_fetch_restore(manual_id, episode_range=None, fetch_extras=False, temp_dir=None):
     # [NEW] Automated Fetch -> Restore Pipeline
     print(f"=== 🔄 AUTO-PILOT: FETCH -> RESTORE for {manual_id} ===")
 
     # 1. FETCH
-    cmd_dispatch_fetch(manual_id, episode_range, fetch_extras=fetch_extras)
+    cmd_dispatch_fetch(manual_id, episode_range, fetch_extras=fetch_extras, temp_dir=temp_dir)
     # IMP-D19 Step 5: fetch extras when fetch_extras (forwarded above to mainfetch)
 
     # 2. DETECT & RESTORE
@@ -8387,10 +8835,10 @@ def cmd_fetch_restore(manual_id, episode_range=None, fetch_extras=False):
     if is_season_map:
         # [UPDATED] Pass the range to restore_group
         print(f"   > Season Map detected. Running Batch Restore...")
-        restored_count = cmd_restore_group(manual_id, episode_range)
+        restored_count = cmd_restore_group(manual_id, episode_range, temp_dir=temp_dir)
     else:
         print(f"   > Single Item detected. Running Restore...")
-        cmd_restore(manual_id)
+        cmd_restore(manual_id, temp_dir=temp_dir)
 
     # IMP-D19 Step 6: place any fetched extras back into their subfolders —
     # only when --fetchExtras staged them (flag-only, Card C). Reload first: the
@@ -10245,7 +10693,7 @@ if __name__ == "__main__":
         print("  prep_push_rep_season [id] [folder] [optional: SIZE..] [OPT: episodes] [device <id_or_name>] [rehash] [tempdir <path>]")
         print("  prep_push_rep_enrich [id] [filepath] [SIZE_GB/SIZE_MB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>] [-tmdbid <id>] [--yes|--no-rename] [--nfo] [--no-web]  — archive then TMDB-enrich; no id -> auto-resolve exactly like enrich_metadata")
         print("  prep_push_rep_season_enrich [id] [folder] [SIZE_GB/SIZE_MB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [-tmdbid <id>] [--yes|--no-rename] [--nfo] [--no-web]  — season autopilot, then show-centric enrich")
-        print("  fetch_restore [id] [OPT: episodes 1-3]")  # [NEW]
+        print("  fetch_restore [id] [OPT: episodes 1-3] [tempdir <path>] [--fetchExtras]")  # [NEW]
         print("  set_search [id] [term]")
         print("  set_poster [id] [url]")
         print("  set_fanart [id] [url]")
@@ -10264,10 +10712,10 @@ if __name__ == "__main__":
         print("  repair_dummies [optional: id_prefix]")
         print("  verify_library [--fix-dummies]")
         print("  verify_restore [id]")
-        print("  restore [id]")
-        print("  restore_group [id]")
+        print("  restore [id] [tempdir <path>]")
+        print("  restore_group [id] [tempdir <path>]")
         print("  sort")
-        print("  fetch [id]")
+        print("  fetch [id] [tempdir <path>]")
         print("  recover [id|folder]  (or: recover --scan)")
         print("  rename_folder [id|folder] \"<NewName [tmdbid-12345]>\"  — rename a show/season folder + rewrite every descendant folder_path (crash-safe, no rehash)")
         print("  migrate_provider_tokens [id_or_prefix] [--apply] [--library movies|series|anime|others]  — migrate every folder still on the OLD {tmdb-…}/[tmdb-…] token format to canonical [tmdbid-…], ancestor-aware (dry-run by default; --apply writes a JSON report under migration_reports/)")
@@ -10733,10 +11181,26 @@ if __name__ == "__main__":
         cmd_verify_restore(sys.argv[2])
 
     elif cmd == "restore":
-        cmd_restore(sys.argv[2])
+        args = sys.argv[2:]
+        tdir = None
+        i = 0
+        while i < len(args):
+            if args[i] == "tempdir" and i + 1 < len(args):
+                tdir = args[i + 1]; i += 2
+            else:
+                i += 1
+        cmd_restore(args[0], temp_dir=tdir) if args else print("❌ Usage: restore [id] [tempdir <path>]")
 
     elif cmd == "restore_group":
-        cmd_restore_group(sys.argv[2])
+        args = sys.argv[2:]
+        tdir = None
+        i = 0
+        while i < len(args):
+            if args[i] == "tempdir" and i + 1 < len(args):
+                tdir = args[i + 1]; i += 2
+            else:
+                i += 1
+        cmd_restore_group(args[0], temp_dir=tdir) if args else print("❌ Usage: restore_group [id] [tempdir <path>]")
 
     elif cmd == "push":
         args = sys.argv[2:]
@@ -10912,42 +11376,46 @@ if __name__ == "__main__":
 
     elif cmd == "fetch":
         if len(sys.argv) < 3:
-            print("❌ Usage: fetch [id] [OPT: episodes 1-3] [--fetchExtras]")
+            print("❌ Usage: fetch [id] [OPT: episodes 1-3] [tempdir <path>] [--fetchExtras]")
             sys.exit(1)
 
         mid = sys.argv[2]
         _fetch_tokens = sys.argv[3:]
         _fetch_extras = any(t in ("--fetchExtras", "--fetch-extras", "--extras", "--extra") for t in _fetch_tokens)
-        # Scan tokens for "episodes <range>" regardless of position
+        # Scan tokens for "episodes <range>" and "tempdir <path>" regardless of position
         epr = None
+        ftdir = None
         _ft_i = 0
         while _ft_i < len(_fetch_tokens):
             if _fetch_tokens[_ft_i] == "episodes" and _ft_i + 1 < len(_fetch_tokens):
                 epr = _fetch_tokens[_ft_i + 1]
-                break
+            elif _fetch_tokens[_ft_i] == "tempdir" and _ft_i + 1 < len(_fetch_tokens):
+                ftdir = _fetch_tokens[_ft_i + 1]
             _ft_i += 1
 
-        cmd_dispatch_fetch(mid, epr, fetch_extras=_fetch_extras)
+        cmd_dispatch_fetch(mid, epr, fetch_extras=_fetch_extras, temp_dir=ftdir)
 
     elif cmd == "fetch_restore":
-        # [NEW] Usage: fetch_restore [id] [OPT: episodes 1-3] [--fetchExtras]
+        # [NEW] Usage: fetch_restore [id] [OPT: episodes 1-3] [tempdir <path>] [--fetchExtras]
         if len(sys.argv) < 3:
-            print("❌ Usage: fetch_restore [id] [OPT: episodes 1-3] [--fetchExtras]")
+            print("❌ Usage: fetch_restore [id] [OPT: episodes 1-3] [tempdir <path>] [--fetchExtras]")
             sys.exit(1)
 
         mid = sys.argv[2]
         _fr_tokens = sys.argv[3:]
         _fetch_extras = any(t in ("--fetchExtras", "--fetch-extras", "--extras", "--extra") for t in _fr_tokens)
-        # Scan tokens for "episodes <range>" regardless of position
+        # Scan tokens for "episodes <range>" and "tempdir <path>" regardless of position
         epr = None
+        frdir = None
         _fr_i = 0
         while _fr_i < len(_fr_tokens):
             if _fr_tokens[_fr_i] == "episodes" and _fr_i + 1 < len(_fr_tokens):
                 epr = _fr_tokens[_fr_i + 1]
-                break
+            elif _fr_tokens[_fr_i] == "tempdir" and _fr_i + 1 < len(_fr_tokens):
+                frdir = _fr_tokens[_fr_i + 1]
             _fr_i += 1
 
-        cmd_fetch_restore(mid, epr, fetch_extras=_fetch_extras)
+        cmd_fetch_restore(mid, epr, fetch_extras=_fetch_extras, temp_dir=frdir)
 
     elif cmd == "token":
         # Web access token management (IMP-E15): create / list / revoke.

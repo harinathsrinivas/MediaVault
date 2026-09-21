@@ -113,57 +113,70 @@ class TestParseFetchArgs:
     """Tests for mainfetch.parse_fetch_args(argv).
 
     The parser takes the full argv list (argv[0] = script name, argv[1] = 'fetch',
-    argv[2] = media id, …). It returns (mid, epr, fetch_extras) on success or
-    sys.exit(1). The trailing fetch_extras (IMP-D19 Step 5) is the flag-only
+    argv[2] = media id, …). It returns (mid, epr, fetch_extras, temp_dir) on success
+    or sys.exit(1). The trailing fetch_extras (IMP-D19 Step 5) is the flag-only
     `--fetchExtras` gate; it defaults to False so the main-content fetch is
-    unchanged when the flag is absent.
+    unchanged when the flag is absent. `temp_dir` (the off-volume staging
+    redirect) defaults to None.
     """
 
     # --- success cases ---
 
     def test_id_only_returns_mid_and_none(self):
         """Minimal valid invocation: script + verb + id."""
-        mid, epr, fx = mainfetch.parse_fetch_args(["mainfetch.py", "fetch", "tv-x"])
+        mid, epr, fx, tdir = mainfetch.parse_fetch_args(["mainfetch.py", "fetch", "tv-x"])
         assert mid == "tv-x"
         assert epr is None
         assert fx is False
+        assert tdir is None
 
     def test_episodes_range_is_parsed(self):
         """Full invocation: id + episodes + range."""
-        mid, epr, fx = mainfetch.parse_fetch_args(
+        mid, epr, fx, tdir = mainfetch.parse_fetch_args(
             ["mainfetch.py", "fetch", "tv-x", "episodes", "1-3"]
         )
         assert mid == "tv-x"
         assert epr == "1-3"
         assert fx is False
+        assert tdir is None
 
     def test_extra_tokens_beyond_range_ignored(self):
         """Tokens after the range are tolerated (parser stops after reading range).
         A bare 'extra' token (no dashes) is NOT the --extra flag alias."""
-        mid, epr, fx = mainfetch.parse_fetch_args(
+        mid, epr, fx, tdir = mainfetch.parse_fetch_args(
             ["mainfetch.py", "fetch", "tv-x", "episodes", "4-6", "extra"]
         )
         assert mid == "tv-x"
         assert epr == "4-6"
         assert fx is False
+        assert tdir is None
+
+    def test_tempdir_is_parsed(self):
+        """tempdir <path> is captured regardless of position vs episodes/flag."""
+        mid, epr, fx, tdir = mainfetch.parse_fetch_args(
+            ["mainfetch.py", "fetch", "tv-x", "tempdir", "D:\\test", "episodes", "1-2"]
+        )
+        assert (mid, epr, fx, tdir) == ("tv-x", "1-2", False, "D:\\test")
 
     # --- IMP-D19 Step 5: --fetchExtras flag (and aliases) ---
 
     def test_fetchExtras_flag_sets_true(self):
         """--fetchExtras after the id flips fetch_extras True (range still parsed)."""
-        mid, epr, fx = mainfetch.parse_fetch_args(
+        mid, epr, fx, tdir = mainfetch.parse_fetch_args(
             ["mainfetch.py", "fetch", "tv-x", "episodes", "1-3", "--fetchExtras"]
         )
         assert (mid, epr, fx) == ("tv-x", "1-3", True)
+        assert tdir is None
 
     def test_fetchExtras_aliases_and_order_independent(self):
         """Each documented alias flips the flag, regardless of position vs episodes."""
         for alias in ("--fetch-extras", "--extras", "--extra"):
-            mid, epr, fx = mainfetch.parse_fetch_args(
+            mid, epr, fx, tdir = mainfetch.parse_fetch_args(
                 ["mainfetch.py", "fetch", "tv-x", alias, "episodes", "2-2"]
             )
             assert fx is True, f"alias {alias!r} should set fetch_extras True"
             assert (mid, epr) == ("tv-x", "2-2")
+            assert tdir is None
 
     # --- fail-fast cases ---
 

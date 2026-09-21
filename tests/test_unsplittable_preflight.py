@@ -35,8 +35,10 @@ VIDEO_TRACK = {"id": 0, "type": "video", "properties": {"codec_id": "V_MPEGH/ISO
 THREE_MB = b"m" * (3 * 1024 * 1024)
 
 
-def _stub_identify(monkeypatch, payload, exc=None):
+def _stub_identify(monkeypatch, payload, exc=None, kwargs_out=None):
     def _run(cmd, **kwargs):
+        if kwargs_out is not None:
+            kwargs_out.append(kwargs)
         if exc is not None:
             raise exc
 
@@ -57,6 +59,33 @@ def test_probe_flags_flac_track_with_id_and_language(monkeypatch, tmp_path):
     _stub_identify(monkeypatch, json.dumps({"tracks": [VIDEO_TRACK, DTS_TRACK, FLAC_TRACK]}))
 
     assert main.find_unsplittable_tracks(str(tmp_path / "m.mkv")) == [(4, "A_FLAC", "ita")]
+
+
+def test_probe_decodes_utf8_reader_thread(monkeypatch, tmp_path):
+    """[fix/mkvmerge-j-utf8-decode] mkvmerge -J is valid UTF-8, and a track name
+    like NFC-composed "Íslenska" carries a UTF-8 byte (0x81) that cp1252 does NOT
+    define. With text=True and NO encoding, Windows defaults to cp1252 (strict),
+    so the subprocess reader thread raises UnicodeDecodeError OUTSIDE the probe's
+    try block. Passing encoding="utf-8" (with errors="replace" as a safety belt)
+    prevents that crash. Encoded here as real UTF-8 so a naive ascii payload would
+    not accidentally pass."""
+    name = "I\xcc\x81slenska"  # NFC-composed í (>cp1252) exactly like the live file
+    payload = json.dumps({"tracks": [
+        {"id": 0, "type": "video", "properties": {"codec_id": "V_MPEGH/ISO/HEVC"}},
+        {"id": 4, "type": "audio", "properties": {"codec_id": "A_DTS", "track_name": name}},
+    ]})
+    # A world WITHOUT the fix decodes bytes with cp1252: emitting the UTF-8 bytes of
+    # that name would crash the reader thread. The stub below lets us assert the
+    # kwargs the probe passes in, so the regression is caught even without a real
+    # subprocess.
+    kwargs_out = []
+    _stub_identify(monkeypatch, payload, kwargs_out=kwargs_out)
+
+    assert main.find_unsplittable_tracks(str(tmp_path / "m.mkv")) == []
+    assert kwargs_out, "probe must call subprocess.run"
+    call = kwargs_out[0]
+    assert call.get("encoding") == "utf-8", f"reader thread must decode UTF-8, got encoding={call.get('encoding')!r}"
+    assert call.get("errors") == "replace", "pathological bytes must degrade, never crash the thread"
 
 
 def test_probe_passes_a_file_with_no_unsplittable_track(monkeypatch, tmp_path):
@@ -101,20 +130,24 @@ def _ready_to_split(sandbox, sandbox_entry):
 def test_push_aborts_before_creating_anything(sandbox, sandbox_entry, mock_device,
                                               monkeypatch, capsys):
     """The preflight must fire before makedirs/journal, so the abort leaves the
-    folder exactly as it was — a clean early return with nothing to roll back."""
+    folder exactly as it was — a clean early return with nothing to roll back.
+
+    Uses a NON-carry-out unsplittable codec (A_TRUEHD): FLAC is now carried out
+    (see test_flac_carryout.py), but an unknown unsplittable codec must still
+    refuse before creating anything."""
     _ready_to_split(sandbox, sandbox_entry)
     media_dir = sandbox_entry["media_dir"]
     before = sorted(p.name for p in media_dir.iterdir())
 
-    monkeypatch.setattr(main, "find_unsplittable_tracks", lambda path: [(4, "A_FLAC", "ita")])
+    monkeypatch.setattr(main, "find_unsplittable_tracks", lambda path: [(4, "A_TRUEHD", "ger")])
 
     result = main.cmd_push(sandbox_entry["entry_id"], "SIZE_MB", "1")
 
     assert result is False, "push must refuse a file it cannot split"
 
     out = capsys.readouterr().out
-    assert "track 4" in out and "A_FLAC" in out, f"the offending track must be named:\n{out}"
-    assert "ita" in out, "the track's language helps identify which dub it is"
+    assert "track 4" in out and "A_TRUEHD" in out, f"the offending track must be named:\n{out}"
+    assert "ger" in out, "the track's language helps identify which dub it is"
     assert "RUNBOOK-remux-before-split" in out, "the operator needs the fix procedure"
 
     assert not (media_dir / main.SPLIT_DIR_NAME).exists(), "_parts must not be created"
@@ -132,10 +165,11 @@ def test_push_aborts_before_creating_anything(sandbox, sandbox_entry, mock_devic
 
 def test_push_does_not_convert_or_drop_the_track(sandbox, sandbox_entry, mock_device,
                                                  monkeypatch, capsys):
-    """Guard on the user's standing decision: MediaVault never fixes this itself.
-    The abort must tell the operator what to do, not report doing it."""
+    """Guard on the user's standing decision: MediaVault never converts or drops a
+    track on its own. For a NON-carry-out unsplittable codec the abort must tell
+    the operator what to do, not report doing it."""
     _ready_to_split(sandbox, sandbox_entry)
-    monkeypatch.setattr(main, "find_unsplittable_tracks", lambda path: [(4, "A_FLAC", "ita")])
+    monkeypatch.setattr(main, "find_unsplittable_tracks", lambda path: [(4, "A_TRUEHD", "ger")])
 
     main.cmd_push(sandbox_entry["entry_id"], "SIZE_MB", "1")
 
@@ -163,10 +197,11 @@ def test_clean_file_still_splits(sandbox, sandbox_entry, mock_device, monkeypatc
 def test_autopilot_refuses_before_prep(tmp_path, monkeypatch, capsys):
     """cmd_push alone is too late: prep_push_rep deep-scans and whole-file hashes
     the master at STEP 1, so refusing at push time still burns it (62 GB on the
-    incident file). The gate must precede prep entirely."""
+    incident file). The gate must precede prep entirely. (Uses a NON-carry-out
+    codec — A_TRUEHD — because FLAC is now carried out, not refused.)"""
     src = tmp_path / "movie.mkv"
     src.write_bytes(THREE_MB)
-    monkeypatch.setattr(main, "find_unsplittable_tracks", lambda p: [(4, "A_FLAC", "ita")])
+    monkeypatch.setattr(main, "find_unsplittable_tracks", lambda p: [(4, "A_TRUEHD", "ger")])
     called = []
     monkeypatch.setattr(main, "cmd_prep", lambda *a, **k: called.append("prep") or True)
     monkeypatch.setattr(main, "cmd_push", lambda *a, **k: called.append("push") or True)
@@ -175,7 +210,7 @@ def test_autopilot_refuses_before_prep(tmp_path, monkeypatch, capsys):
 
     assert called == [], "neither prep nor push may run"
     out = capsys.readouterr().out
-    assert "track 4" in out and "A_FLAC" in out
+    assert "track 4" in out and "A_TRUEHD" in out
     assert "Nothing was prepped" in out
 
 
@@ -198,7 +233,8 @@ def test_autopilot_not_gated_when_no_split_requested(tmp_path, monkeypatch):
 
 def test_season_autopilot_refuses_before_prep_season(tmp_path, monkeypatch, capsys):
     """cmd_prep_season hashes EVERY episode before the first push, so one bad
-    episode would waste the whole season's prep."""
+    episode would waste the whole season's prep. (Uses a NON-carry-out codec —
+    A_TRUEHD — because FLAC is now carried out, not refused.)"""
     folder = tmp_path / "Season 01"
     folder.mkdir()
     (folder / "ep01.mkv").write_bytes(THREE_MB)
@@ -209,7 +245,7 @@ def test_season_autopilot_refuses_before_prep_season(tmp_path, monkeypatch, caps
 
     def _probe(path):
         seen.append(path)
-        return [(4, "A_FLAC", "ita")] if path.endswith("ep02.mkv") else []
+        return [(4, "A_TRUEHD", "ger")] if path.endswith("ep02.mkv") else []
 
     monkeypatch.setattr(main, "find_unsplittable_tracks", _probe)
     called = []

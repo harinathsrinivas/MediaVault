@@ -562,7 +562,7 @@ one shared implementation in `mvcommon.py`, thin call sites in `main.py`.
     `docs/feature-extras/PROGRESS.md` convention of citing e.g. "full 648, smoke 76"); smoke green,
     under 30s.
 
-- [ ] 13. [model: sonnet] [effort: medium] Documentation updates.
+- [x] 13. [model: sonnet] [effort: medium] Documentation updates.
   - Files: `ARCHITECTURE.md`, `README.md`, `docs/OPERATIONS_QA.md`
   - Depends on: Steps 3, 4, 6 (describes the final, implemented behavior).
   - Consumed by: nothing downstream in this plan — this is a leaf/terminal documentation step, but its

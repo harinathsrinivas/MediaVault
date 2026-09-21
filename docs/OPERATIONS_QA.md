@@ -11,7 +11,7 @@
 > **Maintenance:** when a question is asked and answered in any Claude session, add it here.
 > See the protocol at the bottom.
 
-**Last updated:** 2026-09-03
+**Last updated:** 2026-09-21
 
 ---
 
@@ -96,6 +96,32 @@ web-search fallback (so hard/concatenated/regional titles go AMBIGUOUS instead o
 and `fetch_trivia` entirely. OMDb (`refresh_online`) is unaffected — different provider.
 
 Workaround with no EXA: supply ids manually via `set_tmdb` on a leaf, or pass `--no-web`.
+
+### Why did my folder suddenly get a second, bracket-style token? / What format does MediaVault use for provider ids now, and do I need to do anything?
+
+As of **IMP-U6**, `enrich_metadata` stamps the canonical `[tmdbid-<id>]` token instead of the old
+`{tmdb-<id>}` one (Emby/Jellyfin read `[tmdbid-…]`; Plex ignores bracketed text and falls back to
+fuzzy title/year matching either way — that tradeoff was accepted deliberately, see decision D1 in
+`docs/feature-token-brackets/DECISIONS.md`). Detection still accepts every old spelling
+(`{tmdb-…}`, `[tmdb-…]`, `[tmdbid=…]`, any casing) case-insensitively, so an existing folder is
+never re-tokened or duplicated — you will only ever see ONE tmdb token per folder.
+
+You don't have to do anything by default; the format only changes going forward, on folders
+`enrich_metadata` newly stamps. To bring your **existing** library over to the canonical form, run
+`python main.py migrate_provider_tokens` — it is dry-run by default (prints every `OLD -> NEW`
+rename it would make, mutates nothing) and `--apply` performs the renames through the existing
+crash-safe `rename_folder` and writes a JSON report under `migration_reports/`. It's ancestor-aware
+(it also catches a show's top-level folder even when every entry's `folder_path` only points at a
+season underneath it), so it's the right tool even if an earlier ad-hoc rename already got most of
+your leaf folders.
+
+As a byproduct, IMP-U6 also fixed a **live regression**: season/episode artwork inheritance walks
+UP the directory tree looking for the nearest tmdb-tokened show folder, and that walk's predicate
+had drifted to curly-brace-only while an earlier external migration had already renamed most of the
+real library to `[tmdbid-…]` — so the walk matched almost nothing and inherited posters/fanart were
+silently missing library-wide. It now shares the same detection helper
+(`mvcommon.has_tmdb_token`) the stamping idempotency guard uses, so the two cannot drift apart
+again.
 
 ---
 

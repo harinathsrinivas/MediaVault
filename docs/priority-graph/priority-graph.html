@@ -254,6 +254,7 @@ const TASKS = [
  ["U3","NFO + artwork pipeline","U","high","todo","partial — NFO/artwork down-payment shipped (movie.nfo/tvshow.nfo via --nfo; poster.jpg/fanart.jpg auto-download; /api/media-image season-inheritance resolver); per-episode NFOs + combined-ep NFOs + AniDB ids in anime NFOs + bulk backfill review-diff mode pending"],
  ["U4","DV-FEL playback paths","U","med","todo","Right device for reference content (Ugoos)"],
  ["U5","C# Jellyfin plugin","U","med","todo","Polish phase — last, after the daemon proves out"],
+ ["U6","provider-token bracket format + migration cmd","U","done","done","Shipped feature/imp_u6_provider_tokens (PR pending): canonical [tmdbid-NNNN] emission built from one shared mvcommon helper, the duplicate _PROVIDER_TOKEN_RE deleted, and a new ancestor-aware migrate_provider_tokens command (dry-run by default). Also fixed a live library-wide artwork-inheritance regression and an IMP-C23-class double-stamp risk. Suite 938/938, smoke 81/81."],
  // X — cloud resilience & privacy (NEW)
  ["X1","multi-account replication","X","high","todo","Every chunk in ≥2 accounts — the real backup vs CSAM-ban loss"],
  ["X2","topology + loss runbook","X","high","todo","Records sharing-vs-replication decision; recovery checklist"],
@@ -264,6 +265,7 @@ const TASKS = [
 /* dependency / flow edges [from,to] — major chains only */
 const EDGES = [
  ["A2","A4"],["A4","A5"],["A4","E12"],["A4","D1"],["A4","S2"],["A3","S2"],["E12","D16"],["E12","E14"],["A12","E14"],["E14","S2"],
+ ["D17","U6"],["C23","U6"],
  ["A2","D10"],["E3","U3"],["E3","D10"],["E3","D1"],["D4","D5"],["D17","E3"],["D18","E14"],["D19","E14"],["D19","D20"],["D20","D21"],["C20","D21"],["D21","D22"],["E3","D22"],
  ["S1","S2"],["S2","S3"],["S3","S4"],["S4","S5"],["S2","E9"],["S2","U2"],
  ["C6","S3"],["S4","U1"],["E4","S4"],["E4","S5"],["E5","S5"],["C1","S2"],

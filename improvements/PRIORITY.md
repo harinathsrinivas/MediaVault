@@ -9,7 +9,23 @@
 > Full task text lives in `improvements_tier*.md`; this file only orders them. Legend:
 > 🔴 critical · 🟠 high · 🟡 medium · ⚪ low · ✅ done · 🚦 needs a user decision (change-gate).
 >
-> **Last updated:** 2026-09-03 (**IMP-C24 + IMP-D23 registered** — a real data-integrity incident:
+> **Last updated:** 2026-09-21 (**IMP-U6 registered — done, PR pending**: canonical `[tmdbid-<id>]`
+> provider-token folder format + shared `mvcommon.has_tmdb_token`/`find_provider_tokens` detection +
+> new `cmd_migrate_provider_tokens` (dry-run by default, `--apply`, `--library` scoping, ancestor-aware,
+> deepest-first, idempotent) on `feature/imp_u6_provider_tokens`. Filed as a format-standardization task
+> but elevated into 🔴 Band 0 because implementation surfaced two live problems on `main`: a
+> library-wide artwork-inheritance regression (the poster/fanart ancestor-walk regex only matched the
+> old `{tmdb-…}` brace form, while ~1,400 real folders had already been externally migrated to
+> `[tmdbid-…]`, so inheritance silently failed almost everywhere) and an active double-stamp risk —
+> the same class of bug as **IMP-C23** (case-sensitivity), this time triggered by bracket-vs-brace
+> format instead of case: `_has_tmdb_token` read all ~1,400 bracket folders as untokened, so the next
+> enrichment pass on any of them would have appended a SECOND token. Measured 0 folders currently
+> double-stamped (2026-09-21), so it had not fired yet, but the exposure was live. Fourth instance of
+> the drift-between-duplicated-parsers class (after IMP-C18/C22/C23) — closed structurally this time by
+> deleting the duplicate regex outright. **Unlike IMP-R10/IMP-C24, IMP-U6 is NOT change-gated** — it
+> does not touch the rollback contract, PONR placement, or `ENTRY_TYPE_KEYS`; it reuses IMP-D17's
+> `cmd_rename_folder` additively. Full suite 938/938, smoke 81/81. See `improvements_tierU.md` IMP-U6.
+> Earlier: **IMP-C24 + IMP-D23 registered** — a real data-integrity incident:
 > the user ran a season prep+push, the push failed (ADB disconnected), so they resumed with
 > `push_group` in one shell while running `replace` per-episode in a SECOND shell to reclaim disk in
 > parallel — a legitimate workflow the system has never protected. `mvcommon.load_library()` merges
@@ -33,6 +49,13 @@
 ---
 
 ## 👉 SUGGESTED NEXT TASK: fix IMP-C24 — concurrent library writes silently lose updates (no lock)
+
+> **IMP-U6 shipped** (2026-09-21, `feature/imp_u6_provider_tokens`, done — PR to `main` pending): canonical
+> `[tmdbid-<id>]` provider-token format + `cmd_migrate_provider_tokens`; also fixes a live artwork-inheritance
+> regression and closes a IMP-C23-class double-stamp risk (see the Last-updated note above and
+> `improvements_tierU.md` IMP-U6 for the full write-up). **It is NOT change-gated** (unlike R10/C24 below) —
+> it is already implemented and merge-ready, just awaiting the PR-merge human gate, so it does not change
+> the actionable "what to start next" answer below.
 
 > **IMP-C24 is next**: registered 2026-09-03 after a real incident — parallel `push_group` (one shell)
 > + `replace` (a second shell, to reclaim disk as each episode finished) lost updates on 13 library
@@ -59,7 +82,8 @@
 
 **IMP-R6 + IMP-R7 done** (crash-safety fixes — restore merge-to-temp + journal auto-recovery on re-run
 — on `feature/imp_r6_r7_restore_journal_crashsafe`). **Band 0 is NOT clear** — **IMP-R10** (change-gated,
-deferred by user) and now **IMP-C24** (change-gated, awaiting ruling) are both open. **Phase 5 done**
+deferred by user) and **IMP-C24** (change-gated, awaiting ruling) are both open; **IMP-U6** is also in
+Band 0 but is `done` (not gated, PR pending) — see the ✅ row below. **Phase 5 done**
 (IMP-E3 partial / IMP-U3 partial / IMP-D17 done). **IMP-E14 fully done**. **IMP-E15 done**.
 
 **Recommended next starts (pick one or run in parallel):**
@@ -92,13 +116,16 @@ new), and **IMP-C22** (pending, not gated). R10's fix is deferred on a user deci
 corrupted entries, one dummy uploaded to Google Photos) and needs a user ruling on which fix approach
 before implementation — see `docs/feature-library-concurrency/PLAN.md`. C22 (registered 2026-08-29)
 is documented in full and ready to implement — no change-gate blocks it, only implementation capacity.
-**IMP-C23 done** (2026-08-31); **IMP-D22 done**, both now merged to `main`.
+**IMP-C23 done** (2026-08-31); **IMP-D22 done**, both now merged to `main`. **IMP-U6 done** (2026-09-21,
+PR pending) — not change-gated; elevated here because it fixes a live artwork-inheritance regression and
+closes an IMP-C23-class double-stamp risk.
 
 | # | Task | Why it's critical | Risk to fix | Gate |
 |---|---|---|---|---|
 | 1 | 🚦 **IMP-C24** | `mvcommon.load_library`/`save_library` have no lock; two concurrent mutating commands (any two of prep/push/replace/restore/`web`) each hold a stale in-memory snapshot across a slow operation and the later save silently erases the earlier one's change — blast radius is all four library JSONs, not one. Already caused a real incident: 13 corrupted entries + one dummy uploaded to Google Photos in place of a real episode | **gated** — the recommended fix touches the wrapping of `cmd_prep`/`cmd_push`/`cmd_replace`/`cmd_restore` and `RollbackJournal`'s own `save_library()` call | 🚦 **needs a user decision** (`CLAUDE.md` change-gate); options + recommendation in `docs/feature-library-concurrency/PLAN.md` |
 | 2 | 🚦 **IMP-R10** | a transient lock on `.mediavault_txn.json` during `cmd_replace`'s PONR write is caught by the retry loop meant for a locked *media* file → spurious `IRREVERSIBLE`, and the handler advises `fetch_restore` (a 62 GB re-download) while the master sits on local disk as `.tobedeleted` | **gated** — touches `mark_point_of_no_return()` placement | 🚦 **needs a user decision** (`CLAUDE.md` change-gate); documented in `docs/edge-case-replace-ponr-journal-lock/` |
 | 3 | 🟠 **IMP-C22** | `_episode_se_of` mis-parses season-glued anime ids instead of delegating to the IMP-C18 shared helper — a 4th copy of the episode-number parser that drifted; per-episode stills + overview/title backfill silently never land for either real anime id shape (145 affected entries), while show-level enrichment appears to succeed | low-medium — narrows parsing to the existing shared helper; Shape-B's default-season needs a small decision | not change-gated — ready to implement; see `improvements_tierC.md` IMP-C22 |
+| ✅ | ✅ **IMP-U6** | provider-token folder format was brace-only in detection (`{tmdb-…}`) while ~1,400 real folders had already been externally migrated to bracket form (`[tmdbid-…]`) — this silently broke poster/fanart ancestor-inheritance library-wide AND left an active IMP-C23-class double-stamp risk (bracket folders read as "untokened", so the next enrich pass would append a second token); fourth instance of the drift-between-duplicated-parsers class (C18/C22/C23) | low — additive to `main.py`, one duplicate regex deleted and replaced 1:1 by the shared helper it should always have used; no rollback-contract or `ENTRY_TYPE_KEYS` change | done — `feature/imp_u6_provider_tokens`; shared `mvcommon.has_tmdb_token`/`find_provider_tokens` + canonical `[tmdbid-<id>]` emission + new `cmd_migrate_provider_tokens` (dry-run default); full suite 938/938, smoke 81/81; PR to `main` pending |
 | ✅ | ✅ **IMP-C23** | `_has_tmdb_token` missing `re.IGNORECASE` — an uppercase `{TMDB-…}` folder token read as "no token" and the idempotency guard let a SECOND token get appended on the next enrich/rename pass; third instance of the drift-between-duplicated-parsers class also seen in IMP-C18/IMP-C22 | low | done — `fix/imp_c23_has_tmdb_token_ignorecase`; added `re.IGNORECASE` + a drift-pin test against `_PROVIDER_TOKEN_RE` |
 | ✅ | ✅ **IMP-C19** | mkvmerge's `Error:` lines go to stdout, which `split_video_file` sent to DEVNULL → every split failure was an uninterpretable `exit status 2`, after a 62 GB prep | low | done — `1af16a3`, both split + merge call sites |
 | ✅ | ✅ **IMP-C20** | no pre-flight for tracks mkvmerge cannot split (FLAC) → a whole class of sources burned a full prep before failing | low | done — `e2b799c` + `1b1a899` (gate moved ahead of prep in both auto-pilots); detect-and-stop only, never auto-converts |

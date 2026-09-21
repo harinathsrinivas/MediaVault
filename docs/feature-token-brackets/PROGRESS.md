@@ -25,14 +25,15 @@
   count is IDENTICAL across the merge, so the merge introduced zero regressions; all 41 are the
   format-literal assertions Steps 9 and 11 own. **Step 12's gate is 920 + later steps' additions (928 after Step 7), 0 failing** —
   do NOT compare against the stale 887.
-- **Last updated:** 2026-09-21 (Steps 11+12 done — **suite fully green at 938**; real-library dry run validated).
+- **Last updated:** 2026-09-21 (**ALL 15 STEPS DONE** — suite 938 green; next: push + PR, then STOP at the human merge gate).
 
 ## ▶ NEXT ACTION
-**Step 13 — [model: sonnet] Documentation: ARCHITECTURE.md §6.3a, README.md command
-reference + examples, and a new docs/OPERATIONS_QA.md entry. Then Step 14 (register IMP-U6 in
-improvements_tierU.md + PRIORITY.md + docs/priority-graph/priority-graph.html), then push + PR.**
+**All 15 steps are complete and committed. Remaining: push the branch and open the PR
+(title carries IMP-U6; body = Claude Code summary, then `## Original task prompt` verbatim, then the
+trailer), then **STOP** — merging to `main` is human-gated (Checkpoint 1), and archiving the branch
+afterwards is a separate gate (Checkpoint 2).**
 
-> **Steps 0-12 are done and committed, and `main` is merged in (`a2085c9`).** Step 4's executor died mid-step on a session rate limit; its
+> **Steps 0-14 are ALL done and committed, and `main` is merged in (`a2085c9`).** Step 4's executor died mid-step on a session rate limit; its
 > work was already on disk and was verified + finished by the orchestrator (one remaining site,
 > `main.py:373`) rather than re-run from scratch — see the Step 4 row.
 
@@ -132,8 +133,8 @@ next person reads a test docstring and believes MediaVault still stamps braces.
 | 10 | [model: sonnet] mkvmerge brace-escape regression pin (no code change) | done | 17a21c0 | `test_split_brace_escape.py` 2 -> 3 passed | +29 lines, zero deletions, **zero production code touched** (`git diff main.py` empty). Pins D4: square brackets need NO libfmt escape and the brace escape stays (still required for the real `Friends (1994) {tmdb-1668}` folder). Non-vacuous — the captured `-o` is `... (2012) [tmdbid-79660]\_parts\movie.chunk.%03d.mkv`: token byte-identical, no `[[`/`]]` doubling. |
 | 11 | [model: sonnet] Smoke-suite coverage | done | 88a2ed3 | smoke 2F/78P -> **81 passed in 15.06s** (gate is 30s); **FULL SUITE 938 passed, 0 failed** | Fixed the last 2 reds (3 emit literals now built from `mvcommon.CANONICAL_TMDB_TOKEN_FMT`, 3 docstrings). Left `:1019`/`:1041`/`:1365` untouched — caller-supplied `cmd_rename_folder` names, a genuinely different property from 'what does enrich stamp'. New case `test_migrate_provider_tokens_dry_run_then_apply_then_idempotent` exercises dry-run -> apply -> re-apply on a seeded old-format folder. |
 | 12 | [model: opus] Full verification pass | done | 2067a9d | **full suite 938 passed, 0 failed** (102s); smoke **81 passed, 14s** | Run by the orchestrator (verification-only step, no files). **Also validated against the REAL library with a read-only dry run:** scanned=317, would-rename=**1** (the `Friends (1994) {tmdb-1668}` ancestor — exactly what the 2026-09-21 audit predicted), already-canonical=236, remote-bearing=1 (correct: it holds archived content). SHA-256 of all four `library_*.json` **byte-identical before and after**, no `migration_reports/` dir created, Friends folder untouched — so dry-run is provably read-only against real data, not just under fixtures. |
-| 13 | [model: sonnet] Documentation updates | done | (backfilled next step) | smoke 81 passed | ARCHITECTURE.md §6.3a, README.md command table + examples, new OPERATIONS_QA §1 entry. **Corrected a PRE-EXISTING false claim** in ARCHITECTURE.md that `{tmdb-...}` was the "Plex/Emby/Jellyfin standard" — Plex actually ignores bracketed text; that misconception plausibly drove the original format choice. Plex tradeoff (D1) documented honestly rather than sold as a pure upgrade. Deliberately untouched: NFO XML element names (`<tmdbid>`, `<uniqueid type="tmdb">`) and the `-tmdbid`/`-tvdbid` CLI flags — unrelated to folder tokens. |
-| 14 | [model: sonnet] Register IMP-U6 | pending | | | `improvements_tierU.md`, `PRIORITY.md`, `priority-graph.html` |
+| 13 | [model: sonnet] Documentation updates | done | 2e397bf | smoke 81 passed | ARCHITECTURE.md §6.3a, README.md command table + examples, new OPERATIONS_QA §1 entry. **Corrected a PRE-EXISTING false claim** in ARCHITECTURE.md that `{tmdb-...}` was the "Plex/Emby/Jellyfin standard" — Plex actually ignores bracketed text; that misconception plausibly drove the original format choice. Plex tradeoff (D1) documented honestly rather than sold as a pure upgrade. Deliberately untouched: NFO XML element names (`<tmdbid>`, `<uniqueid type="tmdb">`) and the `-tmdbid`/`-tvdbid` CLI flags — unrelated to folder tokens. |
+| 14 | [model: sonnet] Register IMP-U6 | done | (backfilled at push) | smoke 81 passed; graph arrays parse-validated (132 TASKS / 68 EDGES) | Registered in `improvements_tierU.md` (full field-format entry, Status=done/PR pending, Risk=low), `PRIORITY.md` (Band 0, maintenance protocol followed), and `docs/priority-graph/priority-graph.html`. Executor died on a session limit after the first two files; the orchestrator finished the graph. **Plan correction:** the plan specified priority `"crit"` for the graph row "mirroring C22/C24" — but `crit` appears NOWHERE in that file (the vocabulary is done|low|med|high, and C22/C24 are both `high`), so it would have created a phantom ring in the renderer. Used `done|done` like the other 37 completed tasks. Edges `D17->U6` (builds on rename_folder) and `C23->U6` (same drift-class lineage). |
 
 ## Multi-candidate tracking (Steps 1 and 6)
 Both steps use the standard orchestrator multi-candidate flow (isolated worktrees, `judge-v2`), but **per

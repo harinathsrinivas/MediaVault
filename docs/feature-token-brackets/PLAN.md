@@ -590,7 +590,7 @@ one shared implementation in `mvcommon.py`, thin call sites in `main.py`.
     MediaVault's OWN behavior (a historical/before-state mention inside a changelog-style sentence, if
     any is added, is fine and should say so explicitly). `docs/OPERATIONS_QA.md` has a new dated entry.
 
-- [ ] 14. [model: sonnet] [effort: low] Register IMP-U6.
+- [x] 14. [model: sonnet] [effort: low] Register IMP-U6.
   - Files: `improvements/improvements_tierU.md`, `improvements/PRIORITY.md`, `docs/priority-graph/priority-graph.html`
   - Depends on: Steps 0-13 (register the task as `done` reflecting the actually-implemented shape).
   - Consumed by: nothing in this plan; this is the durable backlog record future sessions read.

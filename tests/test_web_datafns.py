@@ -159,7 +159,7 @@ class TestSuggestTargetFolder:
         item = self._make_item("mov-en-2024-darkriver")
         result = main.suggest_target_folder(item)
         assert result["applies"] is True
-        assert "{tmdb-" in result["folder"], f"Expected {{tmdb-…}} in folder, got: {result['folder']}"
+        assert "[tmdbid-" in result["folder"], f"Expected [tmdbid-…] in folder, got: {result['folder']}"
         assert result["provider_tag"] is not None
         assert result["editable_provider_field"] == "tmdb"
 
@@ -167,7 +167,7 @@ class TestSuggestTargetFolder:
         item = self._make_item("tv-en-2017-dark-s01e01")
         result = main.suggest_target_folder(item)
         assert result["applies"] is True
-        assert "{tvdb-" in result["folder"], f"Expected {{tvdb-…}} in folder, got: {result['folder']}"
+        assert "[tvdbid-" in result["folder"], f"Expected [tvdbid-…] in folder, got: {result['folder']}"
         assert result["provider_tag"] is not None
         assert result["editable_provider_field"] == "tvdb"
 
@@ -175,7 +175,7 @@ class TestSuggestTargetFolder:
         item = self._make_item("ani-en-2006-deathnote07")
         result = main.suggest_target_folder(item)
         assert result["applies"] is True
-        assert "{tvdb-" in result["folder"], f"Expected {{tvdb-…}} in folder, got: {result['folder']}"
+        assert "[tvdbid-" in result["folder"], f"Expected [tvdbid-…] in folder, got: {result['folder']}"
         assert result["editable_provider_field"] == "tvdb"
 
     def test_in_library_item_applies_false(self):

@@ -495,7 +495,7 @@ one shared implementation in `mvcommon.py`, thin call sites in `main.py`.
   - Acceptance: `pytest tests/test_web_media_image.py -q` green; at least 2 new
     `[tmdbid-…]`-format parallel cases exist alongside the untouched original `{tmdb-…}` cases.
 
-- [ ] 9. [model: sonnet] [effort: medium] Update existing test assertions that hardcode the OLD emitted format.
+- [x] 9. [model: sonnet] [effort: medium] Update existing test assertions that hardcode the OLD emitted format.
   - Files: `tests/test_enrich_metadata.py`, `tests/test_prep_push_rep_enrich.py`, `tests/test_prep_push_rep_season_enrich.py`, `tests/test_web_datafns.py`
   - Depends on: Step 3.
   - Consumed by: Step 12.

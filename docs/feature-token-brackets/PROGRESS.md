@@ -25,7 +25,7 @@
   count is IDENTICAL across the merge, so the merge introduced zero regressions; all 41 are the
   format-literal assertions Steps 9 and 11 own. **Step 12's gate is 920 + later steps' additions (928 after Step 7), 0 failing** —
   do NOT compare against the stale 887.
-- **Last updated:** 2026-09-21 (Step 8 done — artwork regression pinned, 936 total).
+- **Last updated:** 2026-09-21 (Steps 9+10 done — suite down to the 2 smoke reds Step 11 owns).
 
 ## ▶ NEXT ACTION
 **Steps 9 + 10 running in parallel (disjoint files), then Step 11.** Step 9 [sonnet]:
@@ -85,6 +85,21 @@ Step 6's candidate worktrees were cut from `4f31606` and are mid-flight, so merg
 them. The 887-passing baseline predates these 8 commits — **re-baseline the expected suite count right
 after the merge**, before treating any Step 12 number as a regression signal.
 
+## Known follow-up (recorded, deliberately NOT done in this PR)
+
+**Test-file prose still describes brace stamping.** Step 4 realigned `main.py`'s comments/docstrings to the
+canonical `[tmdbid-...]` form, but the same stale prose survives in the TEST files' own docstrings and
+comments — `tests/test_enrich_metadata.py` (:6, :12, :342, :428, :527, :747, :953, :1626),
+`tests/test_prep_push_rep_enrich.py` (:188), `tests/test_prep_push_rep_season_enrich.py`
+(:1089, :1265, :1811, :1999, :2050) and `tests/test_web_media_image.py` (:6-9, :59, :66, :106, :188, :460).
+
+No assertion depends on any of it, and Steps 8/9 deliberately left it alone: editing prose would have
+produced deletion lines and broken the "existing tests pass byte-unchanged" evidence that is itself part of
+each step's proof. Step 13's scope is ARCHITECTURE/README/OPERATIONS_QA, not test prose.
+
+Left as a cheap, low-risk follow-up rather than silently widening this PR's scope. Worth doing before the
+next person reads a test docstring and believes MediaVault still stamps braces.
+
 ## Resume protocol (first thing a new session does)
 1. `git fetch && git checkout feature/imp_u6_provider_tokens` (or create it from `main` if it does not
    exist — first run).
@@ -115,7 +130,7 @@ after the merge**, before treating any Step 12 number as a regression signal.
 | 6  | [model: fable, fallback: opus] `[candidates: 2]` (waived, D10) `cmd_migrate_provider_tokens` command | done | 3dd57ef | targeted 28; smoke 2F/78P (known Step-11 reds); judge ran a shared fixture harness against both | **Candidate A merged** (library-entry-driven ancestor walk-up, +308 purely additive). Ran A=fable, B=opus. Decisive finding: the judge injected a mid-batch `RollbackHardFail` and found B **re-raised it uncaught** (no enclosing try/except in the CLI dispatch) — a raw traceback on a real `--apply`, plus it skipped an unrelated folder that would have succeeded; A warns and continues per the existing 'Decision 7' precedent and persists `resume_cmd` in the report. The judge also PROVED the multi-level nested-ancestor case that A had flagged as unproven — it passes. Both share a `remote_bearing` blind spot to pushed `extras` sub-items (a wash, logged as future scope). B's orphan-audit is retained as a future `--audit-disk` follow-up. Records: `.candidates/imp-u6-step-6/DECISION.md`, `CRITIQUE-A.md`, `CRITIQUE-B.md`; tags `candidates/imp-u6/step-6/cand_{a,b}`. |
 | 7  | [model: opus] Tests for the migration command | done | cfd020e | `tests/test_migrate_provider_tokens.py` 8 passed; full suite 41F/887P = **928** (+8, +0 failures) | 7 plan cases + an 8th pinning the multi-level nested-ancestor case the Step 6 judge proved (that proof otherwise lived only in DECISION.md and would evaporate on a refactor). **Mutation-verified:** flipping Step 6's `reverse=True` -> `False` makes the command report `renamed=1 errors=2` and leave a half-migrated tree, so deepest-first is genuinely load-bearing and the test is not vacuous (mutation reverted; `git diff main.py` empty). Report path is parsed from stdout, never globbed — the `-1` de-collision suffix sorts BEFORE `.json`, so a name-sorted glob silently returns the wrong run's file (Step 11 should reuse `_read_report`). No bugs found in Step 6. |
 | 8  | [model: opus] Artwork-inheritance regression coverage across all three formats | done | b4bddbd | `test_web_media_image.py` 30 -> 38 passed; full suite 41F/895P = **936** | +189 lines, **zero deletions, zero existing tests modified** — the originals passing byte-unchanged is itself half the proof. **Mutation-verified:** restoring the pre-IMP-U6 brace-only predicate makes 6 of the 8 new cases fail while all 30 originals still pass, so the new cases are genuine regression detectors and the originals were always format-agnostic. Carry to Step 13: this file's OWN module docstring + comments (:6-9, :59, :66, :106, :188, :460) still say "nearest `{tmdb-...}` show folder" — left deliberately to preserve the additions-only guarantee. |
-| 9  | [model: sonnet] Update existing test assertions that hardcode the OLD emitted format | pending | | | enrich/prep_push_rep_enrich/web_datafns test files |
+| 9  | [model: sonnet] Update existing test assertions that hardcode the OLD emit format | done | (backfilled next step) | four files 39F/128P -> **167 passed**; full suite **2F/935P** (only Step 11's smoke pair left) | 56 emit-assertion literals updated across 4 files. **Legacy brace FIXTURES deliberately preserved** — verified by the orchestrator: the IMP-C23 drift-pin tests at `test_enrich_metadata.py:1802-1825` still carry `{TMDB-69590}` / `{TmDb-1}` / the `{tvdb-9}` negative, and :549 now asserts the format-agnostic `'already has a TMDB token'` per Step 3. Converting those would have deleted legacy coverage while turning the suite green — the worse of the two possible mistakes. One self-inflicted regex slip (an f-string mangled to `f"...{[tmdbid-60574]}"`) was caught by the test run and hand-fixed, not papered over. |
 | 10 | [model: sonnet] mkvmerge brace-escape regression pin (no code change) | done | (backfilled next step) | `test_split_brace_escape.py` 2 -> 3 passed | +29 lines, zero deletions, **zero production code touched** (`git diff main.py` empty). Pins D4: square brackets need NO libfmt escape and the brace escape stays (still required for the real `Friends (1994) {tmdb-1668}` folder). Non-vacuous — the captured `-o` is `... (2012) [tmdbid-79660]\_parts\movie.chunk.%03d.mkv`: token byte-identical, no `[[`/`]]` doubling. |
 | 11 | [model: sonnet] Smoke-suite coverage | pending | | | `tests/smoke/test_smoke_all_commands.py`, migrate case + assertion update |
 | 12 | [model: opus] Full verification pass — run the complete suite and fix any fallout | pending | | | full suite + smoke gate, record exact counts |

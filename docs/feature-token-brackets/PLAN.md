@@ -546,7 +546,7 @@ one shared implementation in `mvcommon.py`, thin call sites in `main.py`.
   - Acceptance: `pytest tests/smoke -q` green, completes in well under 30s, includes the new
     `migrate_provider_tokens` case.
 
-- [ ] 12. [model: opus] [effort: high] Full verification pass — run the complete suite and fix any fallout.
+- [x] 12. [model: opus] [effort: high] Full verification pass — run the complete suite and fix any fallout.
   - Files: none (verification + targeted fixes only; if a fix is needed, it must be traceable to one of
     the specific files touched above — no new scope).
   - Depends on: Steps 0-11 (everything).

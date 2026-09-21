@@ -25,16 +25,14 @@
   count is IDENTICAL across the merge, so the merge introduced zero regressions; all 41 are the
   format-literal assertions Steps 9 and 11 own. **Step 12's gate is 920 + later steps' additions (928 after Step 7), 0 failing** —
   do NOT compare against the stale 887.
-- **Last updated:** 2026-09-21 (Steps 9+10 done — suite down to the 2 smoke reds Step 11 owns).
+- **Last updated:** 2026-09-21 (Steps 11+12 done — **suite fully green at 938**; real-library dry run validated).
 
 ## ▶ NEXT ACTION
-**Steps 9 + 10 running in parallel (disjoint files), then Step 11.** Step 9 [sonnet]:
-update the 39 existing assertions that hardcode the OLD emit format across `test_enrich_metadata.py`,
-`test_prep_push_rep_enrich.py`, `test_prep_push_rep_season_enrich.py`, `test_web_datafns.py`. Step 10
-[sonnet]: add ONE square-bracket regression pin to `test_split_brace_escape.py` (no code change).
-Step 11 [sonnet] then updates the smoke suite (2 known reds) — run AFTER, since 9/10 execute smoke.
+**Step 13 — [model: sonnet] Documentation: ARCHITECTURE.md §6.3a, README.md command
+reference + examples, and a new docs/OPERATIONS_QA.md entry. Then Step 14 (register IMP-U6 in
+improvements_tierU.md + PRIORITY.md + docs/priority-graph/priority-graph.html), then push + PR.**
 
-> **Steps 0-8 are done and committed, and `main` is merged in (`a2085c9`).** Step 4's executor died mid-step on a session rate limit; its
+> **Steps 0-12 are done and committed, and `main` is merged in (`a2085c9`).** Step 4's executor died mid-step on a session rate limit; its
 > work was already on disk and was verified + finished by the orchestrator (one remaining site,
 > `main.py:373`) rather than re-run from scratch — see the Step 4 row.
 
@@ -132,8 +130,8 @@ next person reads a test docstring and believes MediaVault still stamps braces.
 | 8  | [model: opus] Artwork-inheritance regression coverage across all three formats | done | b4bddbd | `test_web_media_image.py` 30 -> 38 passed; full suite 41F/895P = **936** | +189 lines, **zero deletions, zero existing tests modified** — the originals passing byte-unchanged is itself half the proof. **Mutation-verified:** restoring the pre-IMP-U6 brace-only predicate makes 6 of the 8 new cases fail while all 30 originals still pass, so the new cases are genuine regression detectors and the originals were always format-agnostic. Carry to Step 13: this file's OWN module docstring + comments (:6-9, :59, :66, :106, :188, :460) still say "nearest `{tmdb-...}` show folder" — left deliberately to preserve the additions-only guarantee. |
 | 9  | [model: sonnet] Update existing test assertions that hardcode the OLD emit format | done | 75ceda2 | four files 39F/128P -> **167 passed**; full suite **2F/935P** (only Step 11's smoke pair left) | 56 emit-assertion literals updated across 4 files. **Legacy brace FIXTURES deliberately preserved** — verified by the orchestrator: the IMP-C23 drift-pin tests at `test_enrich_metadata.py:1802-1825` still carry `{TMDB-69590}` / `{TmDb-1}` / the `{tvdb-9}` negative, and :549 now asserts the format-agnostic `'already has a TMDB token'` per Step 3. Converting those would have deleted legacy coverage while turning the suite green — the worse of the two possible mistakes. One self-inflicted regex slip (an f-string mangled to `f"...{[tmdbid-60574]}"`) was caught by the test run and hand-fixed, not papered over. |
 | 10 | [model: sonnet] mkvmerge brace-escape regression pin (no code change) | done | 17a21c0 | `test_split_brace_escape.py` 2 -> 3 passed | +29 lines, zero deletions, **zero production code touched** (`git diff main.py` empty). Pins D4: square brackets need NO libfmt escape and the brace escape stays (still required for the real `Friends (1994) {tmdb-1668}` folder). Non-vacuous — the captured `-o` is `... (2012) [tmdbid-79660]\_parts\movie.chunk.%03d.mkv`: token byte-identical, no `[[`/`]]` doubling. |
-| 11 | [model: sonnet] Smoke-suite coverage | done | (backfilled next step) | smoke 2F/78P -> **81 passed in 15.06s** (gate is 30s); **FULL SUITE 938 passed, 0 failed** | Fixed the last 2 reds (3 emit literals now built from `mvcommon.CANONICAL_TMDB_TOKEN_FMT`, 3 docstrings). Left `:1019`/`:1041`/`:1365` untouched — caller-supplied `cmd_rename_folder` names, a genuinely different property from 'what does enrich stamp'. New case `test_migrate_provider_tokens_dry_run_then_apply_then_idempotent` exercises dry-run -> apply -> re-apply on a seeded old-format folder. |
-| 12 | [model: opus] Full verification pass — run the complete suite and fix any fallout | pending | | | full suite + smoke gate, record exact counts |
+| 11 | [model: sonnet] Smoke-suite coverage | done | 88a2ed3 | smoke 2F/78P -> **81 passed in 15.06s** (gate is 30s); **FULL SUITE 938 passed, 0 failed** | Fixed the last 2 reds (3 emit literals now built from `mvcommon.CANONICAL_TMDB_TOKEN_FMT`, 3 docstrings). Left `:1019`/`:1041`/`:1365` untouched — caller-supplied `cmd_rename_folder` names, a genuinely different property from 'what does enrich stamp'. New case `test_migrate_provider_tokens_dry_run_then_apply_then_idempotent` exercises dry-run -> apply -> re-apply on a seeded old-format folder. |
+| 12 | [model: opus] Full verification pass | done | (backfilled next step) | **full suite 938 passed, 0 failed** (102s); smoke **81 passed, 14s** | Run by the orchestrator (verification-only step, no files). **Also validated against the REAL library with a read-only dry run:** scanned=317, would-rename=**1** (the `Friends (1994) {tmdb-1668}` ancestor — exactly what the 2026-09-21 audit predicted), already-canonical=236, remote-bearing=1 (correct: it holds archived content). SHA-256 of all four `library_*.json` **byte-identical before and after**, no `migration_reports/` dir created, Friends folder untouched — so dry-run is provably read-only against real data, not just under fixtures. |
 | 13 | [model: sonnet] Documentation updates | pending | | | `ARCHITECTURE.md`, `README.md`, `docs/OPERATIONS_QA.md` |
 | 14 | [model: sonnet] Register IMP-U6 | pending | | | `improvements_tierU.md`, `PRIORITY.md`, `priority-graph.html` |
 

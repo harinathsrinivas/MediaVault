@@ -20,18 +20,20 @@
   `mvcommon.CANONICAL_TMDB_TOKEN_FMT`) · finish the ~202 stragglers forward, not restore-and-redo ·
   remote-path remedy = report-only `remote_bearing` field, no schema/adb change · do not touch the real
   library in this PR · **Steps 1 and 6's 🚦 candidate checkpoints are WAIVED for this run** — see D10.
-- **Pre-change test baseline (recorded by the orchestrator on this branch, before any code step):**
-  `python -m pytest tests -q` → **887 passed** in 241s. Step 12's full-suite run must be >= this and green.
-- **Last updated:** 2026-09-21 (Steps 4+5 done; journal mojibake repaired; resuming at Step 6).
+- **Test baselines.** Pre-change on this branch: **887 passed**. After merging `main` (commit `a2085c9`,
+  which brought 8 upstream commits and 33 new tests): **41 failed, 879 passed = 920 total**. The failure
+  count is IDENTICAL across the merge, so the merge introduced zero regressions; all 41 are the
+  format-literal assertions Steps 9 and 11 own. **Step 12's gate is therefore 920 passing, 0 failing** —
+  do NOT compare against the stale 887.
+- **Last updated:** 2026-09-21 (Step 6 merged — candidate A; `main` merged in; suite re-baselined to 920).
 
 ## ▶ NEXT ACTION
-**Step 6 — [model: fable, fallback: opus] `[candidates: 2]` Design + implement
-`cmd_migrate_provider_tokens`: dry-run by default, `--apply` to execute, ancestor-aware discovery
-(deepest-first), built on the existing crash-safe `cmd_rename_folder`, idempotent/resumable by
-re-detection. Candidate A = library-entry-driven ancestor walk-up; Candidate B = category-root disk
-walk with library cross-reference. Judge decides, no user pause (D10).**
+**Step 7 — [model: opus] Write `tests/test_migrate_provider_tokens.py`: 7 named cases against the
+CLI surface and JSON report shape Step 6 locked (leaf rename, ancestor-only/Friends shape, idempotent
+re-run, dry-run mutates nothing, mixed-format library, `[rartv]` coexistence, report `remote_bearing`).
+Fixtures only — never the real C:\Media / library_*.json.**
 
-> **Steps 0-5 are done and committed.** Step 4's executor died mid-step on a session rate limit; its
+> **Steps 0-6 are done and committed, and `main` is merged in (`a2085c9`).** Step 4's executor died mid-step on a session rate limit; its
 > work was already on disk and was verified + finished by the orchestrator (one remaining site,
 > `main.py:373`) rather than re-run from scratch — see the Step 4 row.
 
@@ -59,7 +61,7 @@ Two consequences for Step 6 and the post-merge run:
    guard on `main` is still brace-only, so the exposure persists until this branch merges — this is
    an argument for merging sooner rather than sitting on the branch.
 
-## Upstream `main` has moved — merge scheduled after Step 6
+## Upstream `main` — MERGED 2026-09-21 as `a2085c9` (was: scheduled after Step 6)
 
 While this branch was in flight, `main` gained 8 commits (branch point `562fb4a`): the FLAC carry-out
 feature, a restore tempdir option, and the mkvmerge `-J` UTF-8 probe fix — **+614 lines in `main.py`**,
@@ -109,7 +111,7 @@ after the merge**, before treating any Step 12 number as a regression signal.
 | 3  | [model: opus] Update every EMIT site to canonical `[tmdbid-…]`/`[tvdbid-…]` | done | 1edef0b | full 41F/846P = 887 (all reds owned by Steps 9/11); smoke 2F/78P; targeted 48 | Standing-sync pair `cmd_enrich_metadata` + `_enrich_after_archive` changed together; `suggest_target_folder` placeholders now `[tmdbid-0000000]`/`[tvdbid-000000]`. All emission built from `mvcommon.CANONICAL_*_TOKEN_FMT` (never a literal) so dual-token stays a one-line change. Confirmed NO third stamping site. **Authorized deviation:** the 'already has a token' print is format-AGNOSTIC, not naming the new format — otherwise a legacy `{tmdb-1668}` folder prints a self-contradictory message. Step 9 must assert `'already has a TMDB token'`. |
 | 4  | [model: sonnet] Mechanical doc-string/help-text/comment updates in `main.py` | done | 4f31606 | acceptance grep clean; smoke/full re-run at Step 12 | 15 comment/docstring/help-text sites, zero logic change. Executor died mid-step on a session rate limit with its edits already on disk; the orchestrator verified them against the acceptance criteria and finished the one remaining site (`main.py:373`, the mkvmerge brace-escape comment) rather than re-running the step. `{tmdb-...}` is deliberately RETAINED at main.py:1689/1698/9670 — those docstrings describe what detection ACCEPTS (braces are still valid input) and at :1698 the IMP-C23 history; rewriting them would make the code lie about its own contract. |
 | 5  | [model: sonnet] New unit tests for the shared detection helper | done | eff88de | `tests/test_provider_tokens.py` 16 passed | Acceptance (a)-(i) one named test each, plus pins that must not be lost: the compound cross-family case `{tmdb-123] [tmdbid-456}` (the exact input that decided the Step 1 bake-off), `span` integrity + non-overlap + left-to-right ordering (load-bearing for Step 6's in-place rewrite), the canonical constants with str+int ids, None/empty tolerance, and the IMP-C23-style drift-pin asserting `main._has_tmdb_token` == `mvcommon.has_tmdb_token` across every input. |
-| 6  | [model: fable, fallback: opus] `[candidates: 2]` (waived, D10) `cmd_migrate_provider_tokens` command | done | (backfilled next step) | targeted 28; smoke 2F/78P (known Step-11 reds); judge ran a shared fixture harness against both | **Candidate A merged** (library-entry-driven ancestor walk-up, +308 purely additive). Ran A=fable, B=opus. Decisive finding: the judge injected a mid-batch `RollbackHardFail` and found B **re-raised it uncaught** (no enclosing try/except in the CLI dispatch) — a raw traceback on a real `--apply`, plus it skipped an unrelated folder that would have succeeded; A warns and continues per the existing 'Decision 7' precedent and persists `resume_cmd` in the report. The judge also PROVED the multi-level nested-ancestor case that A had flagged as unproven — it passes. Both share a `remote_bearing` blind spot to pushed `extras` sub-items (a wash, logged as future scope). B's orphan-audit is retained as a future `--audit-disk` follow-up. Records: `.candidates/imp-u6-step-6/DECISION.md`, `CRITIQUE-A.md`, `CRITIQUE-B.md`; tags `candidates/imp-u6/step-6/cand_{a,b}`. |
+| 6  | [model: fable, fallback: opus] `[candidates: 2]` (waived, D10) `cmd_migrate_provider_tokens` command | done | 3dd57ef | targeted 28; smoke 2F/78P (known Step-11 reds); judge ran a shared fixture harness against both | **Candidate A merged** (library-entry-driven ancestor walk-up, +308 purely additive). Ran A=fable, B=opus. Decisive finding: the judge injected a mid-batch `RollbackHardFail` and found B **re-raised it uncaught** (no enclosing try/except in the CLI dispatch) — a raw traceback on a real `--apply`, plus it skipped an unrelated folder that would have succeeded; A warns and continues per the existing 'Decision 7' precedent and persists `resume_cmd` in the report. The judge also PROVED the multi-level nested-ancestor case that A had flagged as unproven — it passes. Both share a `remote_bearing` blind spot to pushed `extras` sub-items (a wash, logged as future scope). B's orphan-audit is retained as a future `--audit-disk` follow-up. Records: `.candidates/imp-u6-step-6/DECISION.md`, `CRITIQUE-A.md`, `CRITIQUE-B.md`; tags `candidates/imp-u6/step-6/cand_{a,b}`. |
 | 7  | [model: opus] Tests for the migration command | pending | | | `tests/test_migrate_provider_tokens.py` (NEW), 7 cases |
 | 8  | [model: opus] Artwork-inheritance regression coverage across all three formats | pending | | | `tests/test_web_media_image.py`, additive parallel cases |
 | 9  | [model: sonnet] Update existing test assertions that hardcode the OLD emitted format | pending | | | enrich/prep_push_rep_enrich/web_datafns test files |

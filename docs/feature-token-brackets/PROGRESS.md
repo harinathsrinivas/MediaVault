@@ -23,17 +23,17 @@
 - **Test baselines.** Pre-change on this branch: **887 passed**. After merging `main` (commit `a2085c9`,
   which brought 8 upstream commits and 33 new tests): **41 failed, 879 passed = 920 total**. The failure
   count is IDENTICAL across the merge, so the merge introduced zero regressions; all 41 are the
-  format-literal assertions Steps 9 and 11 own. **Step 12's gate is therefore 920 passing, 0 failing** —
+  format-literal assertions Steps 9 and 11 own. **Step 12's gate is 920 + later steps' additions (928 after Step 7), 0 failing** —
   do NOT compare against the stale 887.
-- **Last updated:** 2026-09-21 (Step 6 merged — candidate A; `main` merged in; suite re-baselined to 920).
+- **Last updated:** 2026-09-21 (Step 7 done — migration tests, 928 total).
 
 ## ▶ NEXT ACTION
-**Step 7 — [model: opus] Write `tests/test_migrate_provider_tokens.py`: 7 named cases against the
-CLI surface and JSON report shape Step 6 locked (leaf rename, ancestor-only/Friends shape, idempotent
-re-run, dry-run mutates nothing, mixed-format library, `[rartv]` coexistence, report `remote_bearing`).
-Fixtures only — never the real C:\Media / library_*.json.**
+**Step 8 — [model: opus] Artwork-inheritance regression coverage in
+`tests/test_web_media_image.py`: ADD parallel `[tmdbid-...]` cases alongside the existing `{tmdb-...}`
+ones (do NOT edit the existing cases — braces are still recognized and they must keep passing).
+This is the proof-of-fix for the live ancestor-walk regression Step 2 repaired.**
 
-> **Steps 0-6 are done and committed, and `main` is merged in (`a2085c9`).** Step 4's executor died mid-step on a session rate limit; its
+> **Steps 0-7 are done and committed, and `main` is merged in (`a2085c9`).** Step 4's executor died mid-step on a session rate limit; its
 > work was already on disk and was verified + finished by the orchestrator (one remaining site,
 > `main.py:373`) rather than re-run from scratch — see the Step 4 row.
 
@@ -112,7 +112,7 @@ after the merge**, before treating any Step 12 number as a regression signal.
 | 4  | [model: sonnet] Mechanical doc-string/help-text/comment updates in `main.py` | done | 4f31606 | acceptance grep clean; smoke/full re-run at Step 12 | 15 comment/docstring/help-text sites, zero logic change. Executor died mid-step on a session rate limit with its edits already on disk; the orchestrator verified them against the acceptance criteria and finished the one remaining site (`main.py:373`, the mkvmerge brace-escape comment) rather than re-running the step. `{tmdb-...}` is deliberately RETAINED at main.py:1689/1698/9670 — those docstrings describe what detection ACCEPTS (braces are still valid input) and at :1698 the IMP-C23 history; rewriting them would make the code lie about its own contract. |
 | 5  | [model: sonnet] New unit tests for the shared detection helper | done | eff88de | `tests/test_provider_tokens.py` 16 passed | Acceptance (a)-(i) one named test each, plus pins that must not be lost: the compound cross-family case `{tmdb-123] [tmdbid-456}` (the exact input that decided the Step 1 bake-off), `span` integrity + non-overlap + left-to-right ordering (load-bearing for Step 6's in-place rewrite), the canonical constants with str+int ids, None/empty tolerance, and the IMP-C23-style drift-pin asserting `main._has_tmdb_token` == `mvcommon.has_tmdb_token` across every input. |
 | 6  | [model: fable, fallback: opus] `[candidates: 2]` (waived, D10) `cmd_migrate_provider_tokens` command | done | 3dd57ef | targeted 28; smoke 2F/78P (known Step-11 reds); judge ran a shared fixture harness against both | **Candidate A merged** (library-entry-driven ancestor walk-up, +308 purely additive). Ran A=fable, B=opus. Decisive finding: the judge injected a mid-batch `RollbackHardFail` and found B **re-raised it uncaught** (no enclosing try/except in the CLI dispatch) — a raw traceback on a real `--apply`, plus it skipped an unrelated folder that would have succeeded; A warns and continues per the existing 'Decision 7' precedent and persists `resume_cmd` in the report. The judge also PROVED the multi-level nested-ancestor case that A had flagged as unproven — it passes. Both share a `remote_bearing` blind spot to pushed `extras` sub-items (a wash, logged as future scope). B's orphan-audit is retained as a future `--audit-disk` follow-up. Records: `.candidates/imp-u6-step-6/DECISION.md`, `CRITIQUE-A.md`, `CRITIQUE-B.md`; tags `candidates/imp-u6/step-6/cand_{a,b}`. |
-| 7  | [model: opus] Tests for the migration command | pending | | | `tests/test_migrate_provider_tokens.py` (NEW), 7 cases |
+| 7  | [model: opus] Tests for the migration command | done | (backfilled next step) | `tests/test_migrate_provider_tokens.py` 8 passed; full suite 41F/887P = **928** (+8, +0 failures) | 7 plan cases + an 8th pinning the multi-level nested-ancestor case the Step 6 judge proved (that proof otherwise lived only in DECISION.md and would evaporate on a refactor). **Mutation-verified:** flipping Step 6's `reverse=True` -> `False` makes the command report `renamed=1 errors=2` and leave a half-migrated tree, so deepest-first is genuinely load-bearing and the test is not vacuous (mutation reverted; `git diff main.py` empty). Report path is parsed from stdout, never globbed — the `-1` de-collision suffix sorts BEFORE `.json`, so a name-sorted glob silently returns the wrong run's file (Step 11 should reuse `_read_report`). No bugs found in Step 6. |
 | 8  | [model: opus] Artwork-inheritance regression coverage across all three formats | pending | | | `tests/test_web_media_image.py`, additive parallel cases |
 | 9  | [model: sonnet] Update existing test assertions that hardcode the OLD emitted format | pending | | | enrich/prep_push_rep_enrich/web_datafns test files |
 | 10 | [model: sonnet] mkvmerge brace-escape regression pin (no code change) | pending | | | `tests/test_split_brace_escape.py`, 1 new test |

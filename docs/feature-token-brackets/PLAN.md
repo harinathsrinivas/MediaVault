@@ -453,7 +453,7 @@ one shared implementation in `mvcommon.py`, thin call sites in `main.py`.
     the detection-helper step. Approach diversity (A = targeted per-entry walk, B = full disk audit)
     is what differs and survives a model fallback unchanged.
 
-- [ ] 7. [model: opus] [effort: high] Tests for the migration command.
+- [x] 7. [model: opus] [effort: high] Tests for the migration command.
   - Files: `tests/test_migrate_provider_tokens.py` (NEW)
   - Depends on: Step 6 (the merged, user-chosen winner).
   - Consumed by: Step 12 (full-suite gate).

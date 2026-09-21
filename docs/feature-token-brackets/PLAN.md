@@ -355,7 +355,7 @@ one shared implementation in `mvcommon.py`, thin call sites in `main.py`.
   - Acceptance: `pytest tests/test_provider_tokens.py -q` green; every Step 1 Acceptance case has a
     corresponding named test.
 
-- [ ] 6. [model: fable] [fallback: opus] [effort: xhigh] [candidates: 2] 🚦 Design + implement `cmd_migrate_provider_tokens` — the real migration command.
+- [x] 6. [model: fable] [fallback: opus] [effort: xhigh] [candidates: 2] 🚦 Design + implement `cmd_migrate_provider_tokens` — the real migration command.
   - Files: `main.py` (new function + CLI dispatch wiring)
   - Depends on: Steps 2 + 3 (needs the corrected detection AND canonical emit format to migrate
     TOWARD and verify AGAINST).

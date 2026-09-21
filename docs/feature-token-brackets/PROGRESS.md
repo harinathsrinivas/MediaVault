@@ -35,6 +35,53 @@ walk with library cross-reference. Judge decides, no user pause (D10).**
 > work was already on disk and was verified + finished by the orchestrator (one remaining site,
 > `main.py:373`) rather than re-run from scratch — see the Step 4 row.
 
+## Real-library state re-audited 2026-09-21 (supersedes the 2026-09-07 figures in PLAN.md)
+
+The user kept archiving between 2026-09-07 and 2026-09-21 (all four `library_*.json` written
+2026-09-20 23:51), so the migration worklist moved. Re-measured read-only:
+
+| Measure | 2026-09-07 (PLAN.md) | 2026-09-21 (now) |
+|---|---|---|
+| `library_movies.json` `[tmdbid-]` | 135 | **168** (+33 new titles) |
+| `library_series.json` entries whose `folder_path` holds a brace token | 202 | **244** |
+| Folders on disk with an OLD-style tmdb token | 1 | **1** (`Series/English/Classic/Friends (1994) {tmdb-1668}`) |
+| Double-stamped folders (brace AND square in one name) | 0 | **0** |
+
+Two consequences for Step 6 and the post-merge run:
+
+1. **The ancestor case IS the entire remaining migration.** Exactly one folder needs renaming, and
+   renaming it re-points **244** library entries via `cmd_rename_folder`'s cascade (up from 202 —
+   Friends gained episodes). A leaf-only migration would find nothing to do and report success while
+   leaving all 244 entries stale. Candidate selection for Step 6 must turn on ancestor handling.
+2. **The double-stamp risk has NOT fired yet, and is still live on `main`.** No folder carries both
+   token styles. `Friends` is skipped correctly because it still has a brace, and the ~1400
+   `[tmdbid-]` folders have not been through `enrich_metadata` since the foreign migration. The
+   guard on `main` is still brace-only, so the exposure persists until this branch merges — this is
+   an argument for merging sooner rather than sitting on the branch.
+
+## Upstream `main` has moved — merge scheduled after Step 6
+
+While this branch was in flight, `main` gained 8 commits (branch point `562fb4a`): the FLAC carry-out
+feature, a restore tempdir option, and the mkvmerge `-J` UTF-8 probe fix — **+614 lines in `main.py`**,
+plus `mvcommon.py`, `README.md`, `ARCHITECTURE.md`, `improvements/PRIORITY.md` and
+`improvements/improvements_tierD.md`.
+
+Assessed 2026-09-21 (read-only, `git merge-tree --write-tree main HEAD`):
+- **The merge is CLEAN — zero conflicts.** `mvcommon.py`'s change is a new `MKVEXTRACT_PATH` constant
+  near line 28, nowhere near the provider-token helper at the end of the file.
+- **`main`'s new code adds NO provider-token handling** (grepped every added line for
+  tmdb/tvdb/imdb/_has_tmdb_token/PROVIDER_TOKEN — no hits), so Steps 2/3's "no third detection site /
+  no third stamping site" audits remain valid against the merged tree.
+- `main` DID change `split_video_file` (new `drop_track` parameter) adjacent to the mkvmerge
+  brace-escape comment Step 4 reworded. Merges cleanly; **re-read that comment after merging** to
+  confirm it still describes the surrounding code truthfully.
+
+**Plan: merge `main` into this branch immediately AFTER Step 6 lands**, so Step 7's migration tests and
+Step 12's full-suite gate run against the real combined code and Step 13 documents merged reality.
+Step 6's candidate worktrees were cut from `4f31606` and are mid-flight, so merging now would strand
+them. The 887-passing baseline predates these 8 commits — **re-baseline the expected suite count right
+after the merge**, before treating any Step 12 number as a regression signal.
+
 ## Resume protocol (first thing a new session does)
 1. `git fetch && git checkout feature/imp_u6_provider_tokens` (or create it from `main` if it does not
    exist — first run).
@@ -60,9 +107,9 @@ walk with library cross-reference. Judge decides, no user pause (D10).**
 | 1  | [model: fable, fallback: opus]  🚦(waived, D10) Shared provider-token detect/parse helper in  | done | 68d30df | acceptance 11/11 incl. compound mismatched-bracket case; targeted 66; smoke 80 | **Candidate B merged** (two-stage: vocabulary-free span finder -> separate validator). Ran A=fable, B=opus. Judge verified both against the REAL library (290 folder names, 0 disagreements) and found A had a cross-family bracket-bleed false positive (`{tmdb-123] [tmdbid-456}` matched as one token) that B rejects structurally — decisive under criterion 1. Records: `.candidates/imp-u6-step-1/DECISION.md`, `CRITIQUE-A.md`, `CRITIQUE-B.md`. |
 | 2  | [model: opus] Wire the shared helper into every detection/read call site in `main.py` | done | b2a537e | rename_folder+set_tmdb 16; enrich+web_media_image 88; smoke 80; FULL SUITE 887 (= baseline, zero regressions) | `_has_tmdb_token` is now a thin module-qualified wrapper; `_PROVIDER_TOKEN_RE` deleted and `_ancestor_show_folder_image` repointed at the shared helper — this is the fix for the live artwork-inheritance regression. **Authorized deviation:** also repaired `tests/test_enrich_metadata.py:1824`, which dereferenced the deleted constant (reproduced as a real failure first); the drift-pin test now pins `main._has_tmdb_token` against `mvcommon.has_tmdb_token`. Audited for a third detection site: none exists (`_show_folder_of` is geometric; `suggest_target_folder` tokenizes titles; `mainfetch.py` has no provider-token code). |
 | 3  | [model: opus] Update every EMIT site to canonical `[tmdbid-…]`/`[tvdbid-…]` | done | 1edef0b | full 41F/846P = 887 (all reds owned by Steps 9/11); smoke 2F/78P; targeted 48 | Standing-sync pair `cmd_enrich_metadata` + `_enrich_after_archive` changed together; `suggest_target_folder` placeholders now `[tmdbid-0000000]`/`[tvdbid-000000]`. All emission built from `mvcommon.CANONICAL_*_TOKEN_FMT` (never a literal) so dual-token stays a one-line change. Confirmed NO third stamping site. **Authorized deviation:** the 'already has a token' print is format-AGNOSTIC, not naming the new format — otherwise a legacy `{tmdb-1668}` folder prints a self-contradictory message. Step 9 must assert `'already has a TMDB token'`. |
-| 4  | [model: sonnet] Mechanical doc-string/help-text/comment updates in `main.py` | done | (backfilled next step) | acceptance grep clean; smoke/full re-run at Step 12 | 15 comment/docstring/help-text sites, zero logic change. Executor died mid-step on a session rate limit with its edits already on disk; the orchestrator verified them against the acceptance criteria and finished the one remaining site (`main.py:373`, the mkvmerge brace-escape comment) rather than re-running the step. `{tmdb-...}` is deliberately RETAINED at main.py:1689/1698/9670 — those docstrings describe what detection ACCEPTS (braces are still valid input) and at :1698 the IMP-C23 history; rewriting them would make the code lie about its own contract. |
+| 4  | [model: sonnet] Mechanical doc-string/help-text/comment updates in `main.py` | done | 4f31606 | acceptance grep clean; smoke/full re-run at Step 12 | 15 comment/docstring/help-text sites, zero logic change. Executor died mid-step on a session rate limit with its edits already on disk; the orchestrator verified them against the acceptance criteria and finished the one remaining site (`main.py:373`, the mkvmerge brace-escape comment) rather than re-running the step. `{tmdb-...}` is deliberately RETAINED at main.py:1689/1698/9670 — those docstrings describe what detection ACCEPTS (braces are still valid input) and at :1698 the IMP-C23 history; rewriting them would make the code lie about its own contract. |
 | 5  | [model: sonnet] New unit tests for the shared detection helper | done | eff88de | `tests/test_provider_tokens.py` 16 passed | Acceptance (a)-(i) one named test each, plus pins that must not be lost: the compound cross-family case `{tmdb-123] [tmdbid-456}` (the exact input that decided the Step 1 bake-off), `span` integrity + non-overlap + left-to-right ordering (load-bearing for Step 6's in-place rewrite), the canonical constants with str+int ids, None/empty tolerance, and the IMP-C23-style drift-pin asserting `main._has_tmdb_token` == `mvcommon.has_tmdb_token` across every input. |
-| 6  | [model: fable, fallback: opus] `[candidates: 2]` 🚦(waived, D10) `cmd_migrate_provider_tokens` command | pending | | | ancestor-aware, deepest-first, idempotent, dry-run-by-default |
+| 6  | [model: fable, fallback: opus] `[candidates: 2]` (waived, D10) `cmd_migrate_provider_tokens` command | done | (backfilled next step) | targeted 28; smoke 2F/78P (known Step-11 reds); judge ran a shared fixture harness against both | **Candidate A merged** (library-entry-driven ancestor walk-up, +308 purely additive). Ran A=fable, B=opus. Decisive finding: the judge injected a mid-batch `RollbackHardFail` and found B **re-raised it uncaught** (no enclosing try/except in the CLI dispatch) — a raw traceback on a real `--apply`, plus it skipped an unrelated folder that would have succeeded; A warns and continues per the existing 'Decision 7' precedent and persists `resume_cmd` in the report. The judge also PROVED the multi-level nested-ancestor case that A had flagged as unproven — it passes. Both share a `remote_bearing` blind spot to pushed `extras` sub-items (a wash, logged as future scope). B's orphan-audit is retained as a future `--audit-disk` follow-up. Records: `.candidates/imp-u6-step-6/DECISION.md`, `CRITIQUE-A.md`, `CRITIQUE-B.md`; tags `candidates/imp-u6/step-6/cand_{a,b}`. |
 | 7  | [model: opus] Tests for the migration command | pending | | | `tests/test_migrate_provider_tokens.py` (NEW), 7 cases |
 | 8  | [model: opus] Artwork-inheritance regression coverage across all three formats | pending | | | `tests/test_web_media_image.py`, additive parallel cases |
 | 9  | [model: sonnet] Update existing test assertions that hardcode the OLD emitted format | pending | | | enrich/prep_push_rep_enrich/web_datafns test files |

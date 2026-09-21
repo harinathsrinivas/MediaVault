@@ -479,7 +479,7 @@ one shared implementation in `mvcommon.py`, thin call sites in `main.py`.
   - Acceptance: `pytest tests/test_migrate_provider_tokens.py -q` green, all 7 cases present and named
     per the list above.
 
-- [ ] 8. [model: opus] [effort: high] Artwork-inheritance regression coverage across all three formats.
+- [x] 8. [model: opus] [effort: high] Artwork-inheritance regression coverage across all three formats.
   - Files: `tests/test_web_media_image.py`
   - Depends on: Step 2.
   - Consumed by: Step 12.

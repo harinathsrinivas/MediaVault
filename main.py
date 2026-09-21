@@ -9124,12 +9124,15 @@ def suggest_target_folder(item):
 
     year_disp = f"({year})" if year else "(Year)"
 
-    if category == "mov":
-        provider_tag = mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id="0000000")
-        provider_field = "tmdb"
-    else:  # tv / ani -> series-style
-        provider_tag = mvcommon.CANONICAL_TVDB_TOKEN_FMT.format(id="000000")
-        provider_field = "tvdb"
+    # TMDB for every category, movies and series/anime alike. MediaVault is
+    # TMDB-for-everything — `-tvdbid` is refused outright (IMP-D22, a different
+    # id space) — so offering a `[tvdb-…]` placeholder invited the user to type
+    # an id this tool can never resolve. Verified 2026-09-22 against real Plex,
+    # Emby and Jellyfin installs: a `[tmdb-…]` token matches TV shows on all
+    # three (test rows S2/S5/S7), so there is nothing to gain from a second
+    # provider here.
+    provider_tag = mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id="0000000")
+    provider_field = "tmdb"
 
     folder = f"{title} {year_disp} {provider_tag}"
     return {

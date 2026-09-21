@@ -125,13 +125,18 @@ def test_tokens_returned_non_overlapping_left_to_right():
 
 
 def test_canonical_tmdb_format_constant():
-    assert mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=603692) == "[tmdbid-603692]"
-    assert mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id="603692") == "[tmdbid-603692]"
+    # Hardcoding the literal is the POINT of these two tests — they are the one
+    # place that pins what the constant expands to. Everywhere else, build the
+    # expected name from the constant so the emit format stays a one-line flip.
+    # `tmdb` (not `tmdbid`) is load-bearing: Plex ignores the `tmdbid` keyword,
+    # while `[tmdb-…]` is read by Plex, Emby AND Jellyfin (empirically verified).
+    assert mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=603692) == "[tmdb-603692]"
+    assert mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id="603692") == "[tmdb-603692]"
 
 
 def test_canonical_tvdb_format_constant():
-    assert mvcommon.CANONICAL_TVDB_TOKEN_FMT.format(id=0) == "[tvdbid-0]"
-    assert mvcommon.CANONICAL_TVDB_TOKEN_FMT.format(id="000000") == "[tvdbid-000000]"
+    assert mvcommon.CANONICAL_TVDB_TOKEN_FMT.format(id=0) == "[tvdb-0]"
+    assert mvcommon.CANONICAL_TVDB_TOKEN_FMT.format(id="000000") == "[tvdb-000000]"
 
 
 def test_has_tmdb_token_tolerates_none_and_empty_string():

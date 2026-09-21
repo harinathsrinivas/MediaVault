@@ -158,24 +158,27 @@ class TestSuggestTargetFolder:
     def test_new_movie_has_tmdb_placeholder(self):
         item = self._make_item("mov-en-2024-darkriver")
         result = main.suggest_target_folder(item)
+        expected = mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id="0000000")
         assert result["applies"] is True
-        assert "[tmdbid-" in result["folder"], f"Expected [tmdbid-…] in folder, got: {result['folder']}"
+        assert expected in result["folder"], f"Expected {expected} in folder, got: {result['folder']}"
         assert result["provider_tag"] is not None
         assert result["editable_provider_field"] == "tmdb"
 
     def test_new_series_has_tvdb_placeholder(self):
         item = self._make_item("tv-en-2017-dark-s01e01")
         result = main.suggest_target_folder(item)
+        expected = mvcommon.CANONICAL_TVDB_TOKEN_FMT.format(id="000000")
         assert result["applies"] is True
-        assert "[tvdbid-" in result["folder"], f"Expected [tvdbid-…] in folder, got: {result['folder']}"
+        assert expected in result["folder"], f"Expected {expected} in folder, got: {result['folder']}"
         assert result["provider_tag"] is not None
         assert result["editable_provider_field"] == "tvdb"
 
     def test_new_anime_has_tvdb_placeholder(self):
         item = self._make_item("ani-en-2006-deathnote07")
         result = main.suggest_target_folder(item)
+        expected = mvcommon.CANONICAL_TVDB_TOKEN_FMT.format(id="000000")
         assert result["applies"] is True
-        assert "[tvdbid-" in result["folder"], f"Expected [tvdbid-…] in folder, got: {result['folder']}"
+        assert expected in result["folder"], f"Expected {expected} in folder, got: {result['folder']}"
         assert result["editable_provider_field"] == "tvdb"
 
     def test_in_library_item_applies_false(self):

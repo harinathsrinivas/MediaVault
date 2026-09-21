@@ -699,8 +699,8 @@ def episode_num_from_id(child_id, base_id):
 # back. Callers must reach it module-qualified (`mvcommon.has_tmdb_token(...)`),
 # per the binding-hazard note in the RUNTIME CONFIG section.
 
-CANONICAL_TMDB_TOKEN_FMT = "[tmdbid-{id}]"  # .format(id=…) -> "[tmdbid-603692]"
-CANONICAL_TVDB_TOKEN_FMT = "[tvdbid-{id}]"  # placeholder-only; never a real lookup
+CANONICAL_TMDB_TOKEN_FMT = "[tmdb-{id}]"  # .format(id=…) -> "[tmdb-603692]"
+CANONICAL_TVDB_TOKEN_FMT = "[tvdb-{id}]"  # placeholder-only; never a real lookup
 
 # STAGE 1 — bracket spans. Two deliberately dumb regexes with zero vocabulary
 # knowledge: "an opening bracket, some bracket-free text, the MATCHING closing

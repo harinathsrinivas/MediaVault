@@ -74,7 +74,7 @@ def test_split_no_braces_path_is_unchanged(tmp_path, monkeypatch):
 
 
 def test_split_square_bracket_path_is_unchanged(tmp_path, monkeypatch):
-    """A canonical [tmdbid-…] folder must be passed through byte-identically.
+    """A square-bracket [tmdbid-…] folder must be passed through byte-identically.
 
     Square brackets are not special to mkvmerge's libfmt output-name parser,
     so unlike braces they must never be doubled/escaped.

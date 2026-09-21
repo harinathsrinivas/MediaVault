@@ -695,7 +695,7 @@ def _seed_show_named(sandbox, make_video, show_folder, season_folder="Season 01"
 
 
 def test_season_inherits_show_poster_via_endpoint_square_tmdbid_format(sandbox, make_video):
-    """Twin of test_season_inherits_show_poster_via_endpoint with the canonical
+    """Twin of test_season_inherits_show_poster_via_endpoint with the square
     `[tmdbid-…]` show folder — the user-visible half of the fix: the SPA asks for
     an episode's poster and gets the show poster instead of a gradient."""
     seeded = _seed_show_named(sandbox, make_video, "Dark [tmdbid-70523]")
@@ -728,7 +728,7 @@ def test_season_inherits_show_poster_resolver_square_tmdbid_format(sandbox, make
 def test_episode_still_only_serves_poster_kind_not_fanart_square_tmdbid_format(sandbox, make_video):
     """Twin of test_episode_still_only_serves_poster_kind_not_fanart: kind=fanart
     still skips the `-thumb.jpg` still and walks UP to the show fanart — now with
-    the show folder in the canonical `[tmdbid-…]` form. Fanart inheritance broke
+    the show folder in the square `[tmdbid-…]` form. Fanart inheritance broke
     in exactly the same way poster inheritance did."""
     seeded = _seed_show_named(sandbox, make_video, "Dark [tmdbid-70523]")
     _ep_thumb_path(seeded).write_bytes(_jpeg(b"STILL"))   # a still is present...

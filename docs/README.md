@@ -25,6 +25,11 @@
    the project is GOING (the couch-vault phases).
 6. The relevant tier file / feature folder for whatever you're touching.
 
+- [`FOLDER_NAMING_CONVENTIONS.md`](FOLDER_NAMING_CONVENTIONS.md) — how media is laid out on disk:
+  the `{tmdb-<id>}` provider token, the directory layout, season-folder naming, episode file
+  naming, and the two commands that maintain it. Every rule verified against real Plex/Emby/
+  Jellyfin installs.
+
 ## 1. Top-level documents (repo root)
 
 | File | What it is |

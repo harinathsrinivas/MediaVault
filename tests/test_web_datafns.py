@@ -158,25 +158,37 @@ class TestSuggestTargetFolder:
     def test_new_movie_has_tmdb_placeholder(self):
         item = self._make_item("mov-en-2024-darkriver")
         result = main.suggest_target_folder(item)
+        expected = mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id="0000000")
         assert result["applies"] is True
-        assert "[tmdbid-" in result["folder"], f"Expected [tmdbid-…] in folder, got: {result['folder']}"
+        assert expected in result["folder"], f"Expected {expected} in folder, got: {result['folder']}"
         assert result["provider_tag"] is not None
         assert result["editable_provider_field"] == "tmdb"
 
-    def test_new_series_has_tvdb_placeholder(self):
+    def test_new_series_has_tmdb_placeholder(self):
+        """Series get a TMDB placeholder, not TVDB (IMP-U6 / decision D11).
+
+        MediaVault is TMDB-for-everything and refuses `-tvdbid` outright
+        (IMP-D22, a different id space), so a `[tvdb-…]` placeholder invited the
+        user to type an id this tool can never resolve. Verified 2026-09-22
+        against real Plex/Emby/Jellyfin installs: a `tmdb` token matches TV
+        shows on all three (in any bracket style), so a second provider buys
+        nothing here."""
         item = self._make_item("tv-en-2017-dark-s01e01")
         result = main.suggest_target_folder(item)
+        expected = mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id="0000000")
         assert result["applies"] is True
-        assert "[tvdbid-" in result["folder"], f"Expected [tvdbid-…] in folder, got: {result['folder']}"
+        assert expected in result["folder"], f"Expected {expected} in folder, got: {result['folder']}"
         assert result["provider_tag"] is not None
-        assert result["editable_provider_field"] == "tvdb"
+        assert result["editable_provider_field"] == "tmdb"
 
-    def test_new_anime_has_tvdb_placeholder(self):
+    def test_new_anime_has_tmdb_placeholder(self):
+        """Anime get a TMDB placeholder too — same reasoning as the series case."""
         item = self._make_item("ani-en-2006-deathnote07")
         result = main.suggest_target_folder(item)
+        expected = mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id="0000000")
         assert result["applies"] is True
-        assert "[tvdbid-" in result["folder"], f"Expected [tvdbid-…] in folder, got: {result['folder']}"
-        assert result["editable_provider_field"] == "tvdb"
+        assert expected in result["folder"], f"Expected {expected} in folder, got: {result['folder']}"
+        assert result["editable_provider_field"] == "tmdb"
 
     def test_in_library_item_applies_false(self):
         """Existing in-library item -> applies=False, provider_tag=None, editable_provider_field=None."""

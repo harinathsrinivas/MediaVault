@@ -121,3 +121,111 @@ the feature branch + its commit history + the two tracked files under `docs/feat
 (`PLAN.md`, this file, and the companion `PROGRESS.md` execution journal — updated + committed after every
 step, in the same commit as that step's own work). Full spec + resume protocol: see `PROGRESS.md`'s "Resume
 protocol" section and Step 0 above (mirrors the `docs/feature-extras/` IMP-D19 precedent exactly).
+
+## D11 — Canonical format is `[tmdb-<id>]` (SUPERSEDES D1's `[tmdbid-<id>]`)
+
+**Status: USER-CONFIRMED, 2026-09-22, on empirical evidence.**
+
+D1 chose `[tmdbid-<id>]` and recorded "Plex ignores bracketed content" as an accepted tradeoff.
+**That premise was wrong**, and so was the follow-on advice to consider dual-token emission.
+
+A 20-folder matrix was built at `D:\MediaVaultTokenTest` and scanned by the user's real Plex, Emby
+and Jellyfin servers. Every folder used a nonsense title (`Zyrquat …`) and a deliberately wrong year,
+so a correct match could only come from reading the token. Both controls behaved (no-token folder
+matched nothing; real-title folder matched), and per-server item counts reconciled exactly against
+same-movie merges, which is how the Plex `[tmdb-]` result was confirmed.
+
+| Token | Plex | Emby | Jellyfin |
+|---|---|---|---|
+| `{tmdb-680}` | yes | yes | yes |
+| **`[tmdb-27205]`** | **yes** | **yes** | **yes** |
+| `[tmdbid-603]` | **NO** | yes | yes |
+| `{tmdbid-550}` | NO | yes | yes |
+| `{tmdb=13}` / `[tmdb=238]` / `[tmdbid=11]` | NO | yes | yes |
+| `(tmdb-105)` | yes | **NO** | yes |
+| `(tmdbid-78)` | NO | NO | yes |
+| dual `{tmdb-12} [tmdbid-12]` | yes | yes | **folder vanished from the library** |
+
+**What this actually shows:** Plex does **not** ignore square brackets — the widely-repeated claim,
+which this branch's own docs had adopted. Plex rejects the `tmdbid` keyword and the `=` separator;
+bracket style is irrelevant to it. The `id` suffix was the entire defect, and it is what made ~1400
+already-migrated folders invisible to the user's primary media server.
+
+Two formats survived on all three servers: `{tmdb-<id>}` and `[tmdb-<id>]`. **`[tmdb-<id>]` is
+chosen** — square brackets were the user's original request, and it is one character shorter than
+what the library already had.
+
+**Also retired by this evidence:**
+- **Dual-token emission** — floated as "the only way to satisfy all three". Jellyfin drops such a
+  folder from the library entirely, which is worse than either single format. Never ship it.
+- **NFO-at-stamp** (the competing branch's headline feature, which this branch was advised to graft).
+  Its sole purpose was rescuing Plex from bracketed tokens. Plex reads `[tmdb-]` natively, so the
+  feature would cost a per-library agent change and the loss of Plex watch-state sync to solve a
+  problem that no longer exists. See `COMPARISON.md` — that recommendation is withdrawn.
+
+**Consequence for the migration:** `[tmdbid-<id>]` is no longer canonical, so it is now itself an old
+format to convert. The live worklist went from **1 folder to 237** (dry-run 2026-09-22:
+`scanned=317 would-rename=237 already-canonical=0 remote-bearing=236`). Detection deliberately still
+accepts `[tmdbid-…]` — the library is entirely in that shape until the migration runs.
+
+**Still open before `--apply`:** 21 of the 237 folders carry another bracket group *before* the token
+(`… [1080p] (Dual Audio) [tmdbid-13916]`, `…-NOGRP[rartv] [tmdbid-60574]`, `… [Tam + Tel + Hin] […]`).
+Test row P — that exact shape with `[tmdbid-]` — failed on **both Plex and Jellyfin**, while the same
+token without a preceding group passed on Jellyfin. Rows Q/R/S/T at `D:\MediaVaultTokenTest` isolate
+whether the preceding bracket or the keyword caused it. Do not run `--apply` until that is answered:
+if position matters, the migration should move the token ahead of the noise group for those 21 rather
+than leaving them broken on two of three servers.
+
+## D12 — Canonical format is `{tmdb-<id>}` (SUPERSEDES D11's `[tmdb-<id>]`)
+
+**Status: USER-CONFIRMED, 2026-09-22.** This is the final format. D11 correctly identified that the
+`id` **suffix** was the defect and that both `{tmdb-…}` and `[tmdb-…]` work on all three servers; it
+then picked square. The user chose **curly** instead, for one consistent form across movies, series
+and anime. Nothing in D11's evidence changes — only the pick.
+
+### Why this is a free choice, and what it costs
+
+Both forms were verified on the user's real Plex, Emby and Jellyfin installs (D11's matrix, plus a
+12-show series/anime matrix). Neither server-side behaviour nor category coverage differs:
+
+| | `{tmdb-<id>}` | `[tmdb-<id>]` |
+|---|---|---|
+| Plex / Emby / Jellyfin, movies and TV | works | works |
+| Matches Plex's own published naming docs | yes | no |
+| mkvmerge `--split` | **needs brace-escaping** | none needed |
+
+The one real cost is the last row, and it is not theoretical. `{`/`}` are libfmt replacement-field
+syntax, and a `{tmdb-79660}` folder once aborted an entire prep→push→replace with
+`fmt::format_error: argument not found` (exit 3). `split_video_file` doubles the braces for its
+`--split -o` argument (`main.py:409`), pinned by `tests/test_split_brace_escape.py`.
+
+**Consequence worth stating plainly: that escape moves from legacy safeguard to load-bearing on the
+happy path.** Under D11's square canonical it protected only the one remaining legacy folder; under
+D12 every stamped folder carries braces, so every split of an archived title depends on it. The
+comment at `main.py:397` says so, and the test must never be deleted as "no longer relevant".
+
+### Also settled here
+
+- **Season folders carry no id at all** (`The Wire Season 01 (2002)`). Friends S01's own TMDB *season*
+  id is `4573`, and `4573` as a *show* id is "Late Night with Conan O'Brien" — season and show ids
+  share one namespace and no server reads a season-level token.
+- **One provider token per folder.** A stale non-tmdb token is stripped when a show folder is stamped
+  (`Dark (2017) [tvdbid-334824]` → `Dark (2017) {tmdb-70523}`). Two folders library-wide.
+- **TMDB for every category.** Series test rows S2/S5/S7 confirmed `{tmdb-…}`/`[tmdb-…]` match TV
+  shows on all three servers, and MediaVault refuses `-tvdbid` (IMP-D22), so one id space serves all.
+
+### Retired, and why — do not revive either
+
+- **Dual-token** (`{tmdb-12} [tmdbid-12]`): Jellyfin drops such a folder from the library **entirely**.
+  Worse than either single format. It had been floated as "the only way to satisfy all three"; that
+  premise was false, and the test caught it.
+- **NFO-at-stamp sidecars**: existed solely to rescue Plex from bracketed tokens. Plex reads
+  `{tmdb-…}` natively, so the feature would cost a per-library agent change and the loss of Plex
+  watch-state sync to solve a problem that does not exist.
+
+### Migration impact
+
+Detection stays a superset (`{tmdb-…}`, `[tmdb-…]`, `[tmdbid-…]`, `[tmdbid=…]`, any casing) because
+the live library is entirely `[tmdbid-…]` until the migration runs. Live dry runs, 2026-09-22:
+`migrate_provider_tokens` → `scanned=317 would-rename=236 already-canonical=1`;
+`normalize_season_folders` → `scanned=64 show_folders_would_token=11 seasons_would_rename=60 skipped=4`.

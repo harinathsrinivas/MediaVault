@@ -997,11 +997,19 @@ class MockTMDB:
     """
 
     def __init__(self, search=None, season_images=None, episode_images=None,
-                 network_error_titles=()):
+                 network_error_titles=(), tv_details=None):
         self.search = {k.lower(): v for k, v in (search or {}).items()}
         self.season_images = season_images or {}
         self.episode_images = episode_images or {}
         self.network_error_titles = {t.lower() for t in network_error_titles}
+        # `/tv/{id}` DETAILS (IMP-U6 Step 16 — cmd_normalize_season_folders'
+        # Phase B): maps an int TMDB show id -> a details dict, minimally
+        # `{"name": "<Show>", "seasons": [{"season_number": int, "air_date":
+        # "YYYY-MM-DD"}, ...]}`. An id absent from this dict falls through to
+        # the generic "any other endpoint -> {}" branch below, which
+        # cmd_normalize_season_folders' own code already treats as "TMDB GET
+        # failed or returned no name" (season renames skipped, never invented).
+        self.tv_details = tv_details or {}
         self.calls = []        # list of (url, params) for post-hoc assertions
         self.image_urls = []   # image URLs actually requested
 
@@ -1045,6 +1053,16 @@ class MockTMDB:
             return _MockTMDBResp(200, json_data={
                 "posters": self.season_images.get((series_id, n), [])
             })
+
+        # `/tv/{id}` DETAILS — bare show-details call (cmd_normalize_season_folders'
+        # Phase B, `_tmdb_get(f"{TMDB_API_ROOT}/tv/{tmdb_id}", {}, api_key)`).
+        # Matched as EXACTLY ".../tv/<digits>" (parts[-2] == "tv") so it cannot
+        # collide with "/search/tv" (parts[-2] == "search") or any /tv/{id}/season/…
+        # sub-path (parts[-2] is a season/episode number there, never "tv").
+        parts = url.rstrip("/").split("/")
+        if len(parts) >= 2 and parts[-2] == "tv" and parts[-1].isdigit():
+            series_id = int(parts[-1])
+            return _MockTMDBResp(200, json_data=self.tv_details.get(series_id, {}))
 
         # Any other TMDB endpoint -> empty JSON (safe fallback).
         return _MockTMDBResp(200, json_data={})

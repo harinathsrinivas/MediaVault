@@ -228,7 +228,7 @@ Brackets denote optional args; `[id]` is the manual library ID like
 | `prep_season` | `prep_season [base_id] [folder] [--extras "<f1>;<f2>"] [--extras-size <v>]` | `cmd_prep_season` — batch-prep an entire season folder; `--extras` registers bonus folders onto the `season_map` title |
 | `prep_push_rep` | `prep_push_rep [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | `cmd_prep_push_rep` — full pipeline on one movie; with `--extras` it also pushes AND dummies the title's registered extras after the main content |
 | `prep_push_rep_season` | `prep_push_rep_season [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | `cmd_prep_push_rep_season` — sequential pipeline for a season; with `--extras` it also pushes AND dummies the season's registered extras after the episode loop |
-| `prep_push_rep_enrich` | `prep_push_rep_enrich [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>] [-tmdbid <id>] [--yes\|--no-rename] [--nfo] [--no-web]` | `cmd_prep_push_rep_enrich` (IMP-D22) — calls `cmd_prep_push_rep` **unmodified**, then TMDB-enriches the just-archived movie; `-tmdbid` presets the id via `cmd_set_tmdb` (no title search), no id ⇒ the same resolve waterfall `enrich_metadata` uses; `-tvdbid` is REFUSED before anything runs (§6.3a); the `[tmdbid-…]` folder rename is confirmation-gated (`--yes` = auto-confirm, `--no-rename` = auto-decline, non-interactive ⇒ do not rename) |
+| `prep_push_rep_enrich` | `prep_push_rep_enrich [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>] [-tmdbid <id>] [--yes\|--no-rename] [--nfo] [--no-web]` | `cmd_prep_push_rep_enrich` (IMP-D22) — calls `cmd_prep_push_rep` **unmodified**, then TMDB-enriches the just-archived movie; `-tmdbid` presets the id via `cmd_set_tmdb` (no title search), no id ⇒ the same resolve waterfall `enrich_metadata` uses; `-tvdbid` is REFUSED before anything runs (§6.3a); the `{tmdb-…}` folder rename is confirmation-gated (`--yes` = auto-confirm, `--no-rename` = auto-decline, non-interactive ⇒ do not rename) |
 | `prep_push_rep_season_enrich` | `prep_push_rep_season_enrich [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>] [-tmdbid <id>] [--yes\|--no-rename] [--nfo] [--no-web]` | `cmd_prep_push_rep_season_enrich` (IMP-D22) — same, over `cmd_prep_push_rep_season` **unmodified**; enrich runs only once every id THIS RUN targeted (range-scoped when `episodes` is given) reads `status == "archived"`, and is scoped by the season's OWN `base_id`, so `-tmdbid` is the primary per-season mechanism (§6.3a) |
 | `fetch_restore` | `fetch_restore [id] [OPT: episodes <range>] [tempdir <path>] [--fetchExtras]` | `cmd_fetch_restore` — dispatch fetch then restore; `tempdir` stages downloads off-volume (fetch) and reads chunks off-volume (restore); `--fetchExtras` also fetches the title's cloud-resident extras (flag-only, no prompt) |
 | `set_search` | `set_search [id] [term]` | `cmd_set_search` |
@@ -252,9 +252,10 @@ Brackets denote optional args; `[id]` is the manual library ID like
 | `recover` | `recover [id\|folder]` / `recover --scan` | `cmd_recover` — finish an interrupted rollback (calls `recover_journal`); `--scan` lists leftover journals read-only |
 | `set_tmdb` | `set_tmdb [id] [tmdb_id]` | `cmd_set_tmdb` — sets the OPTIONAL additive leaf field `metadata.tmdb_id`; zero-byte (no rehash); alias-safe |
 | `rename_folder` | `rename_folder [old_id_or_path] "<new_name>"` | `cmd_rename_folder` — crash-safe cascading folder rename: renames the on-disk dir + atomically rewrites `folder_path` for every descendant (season_map + leaves; `multi_ep_alias` skipped); uses the existing `RollbackJournal` (journal in parent dir; `os.rename` = PONR) — additive, does NOT change the rollback contract (journal format/PONR/`RollbackHardFail` unchanged); hash-safe (moves a dir + rewrites JSON; no rehash; `uid`/`.sha256` sidecars move with the folder); works on archived dummies (cross-ref §12a) |
-| `migrate_provider_tokens` | `migrate_provider_tokens [id_or_prefix] [--apply] [--library movies\|series\|anime\|others]` | `cmd_migrate_provider_tokens` (IMP-U6) — ancestor-aware, deepest-first rename of every folder still carrying an old-style tmdb token (`{tmdb-…}`/`[tmdb-…]`/`[tmdbid=…]`/wrong casing) to the canonical `[tmdbid-…]`, driving each rename through the unmodified `cmd_rename_folder` (rollback contract untouched); dry-run by default, provably read-only; `--apply` writes a JSON audit report under `<LOCAL_ROOT>/migration_reports/`; a mistyped `--library` is a hard refusal, not a silent whole-library widen |
+| `migrate_provider_tokens` | `migrate_provider_tokens [id_or_prefix] [--apply] [--library movies\|series\|anime\|others]` | `cmd_migrate_provider_tokens` (IMP-U6) — ancestor-aware, deepest-first rename of every folder still carrying an old-style tmdb token (`[tmdbid-…]`/`[tmdb-…]`/`[tmdbid=…]`/wrong casing) to the canonical `{tmdb-<id>}`, driving each rename through the unmodified `cmd_rename_folder` (rollback contract untouched); dry-run by default, provably read-only; `--apply` writes a JSON audit report under `<LOCAL_ROOT>/migration_reports/`; a mistyped `--library` is a hard refusal, not a silent whole-library widen |
+| `normalize_season_folders` | `normalize_season_folders [id_or_prefix] [--apply]` | `cmd_normalize_season_folders` (IMP-U6) — two-phase STRUCTURAL rename of series/anime `season_map` entries: **Phase A** stamps the show folder with `{tmdb-<id>}` (stripping any stale non-tmdb token so exactly one remains), **Phase B** renames each season folder to `<Show Name> Season <NN> (<season air year>)` with **NO id**; gated by the two-half category-folder guard (`_season_parent_is_exclusive_to_show`); dry-run by default; `--apply` backfills `metadata.tmdb_id` on every season in a group, renames via the unmodified `cmd_rename_folder`, and writes a JSON report under `<LOCAL_ROOT>/migration_reports/`; no `--library` filter (series/anime only by construction) |
 | `add_extras` | `add_extras <title_id> "<f1>;<f2>" [--extras-size <v\|none>] [device <id_or_name>] [no-replace]` | `cmd_add_extras` (IMP-D19) — one-shot extras lifecycle on an EXISTING/archived/local-only title: scan+merge → push → dummy, **never touching main content**; the folder list is POSITIONAL (semicolon-separated, not a `--extras` flag); `no-replace` = upload-only |
-| `enrich_metadata` | `enrich_metadata [id_or_prefix] [--apply] [--library X] [--nfo] [--no-web]` | `cmd_enrich_metadata` — local-first TMDB backfill (show-centric): resolves each show/movie once, writes `metadata.tmdb_id` + `metadata.title`/`year`/`overview`/`episode_title`, stamps the `[tmdbid-…]` token once per show via `rename_folder` (seasons inherit), downloads show + per-season `poster.jpg`/`fanart.jpg` — NEVER overwriting a local image, NEVER fetching media, cached, dry-run default; `--nfo` writes Kodi/Jellyfin `movie.nfo`/`tvshow.nfo`; `--no-web` disables EXA auto-resolve (IMP-E16: on TMDB API miss → EXA searches themoviedb.org → validates candidate id; resolves hard/regional titles without manual pinning); ambiguous → listed not guessed |
+| `enrich_metadata` | `enrich_metadata [id_or_prefix] [--apply] [--library X] [--nfo] [--no-web]` | `cmd_enrich_metadata` — local-first TMDB backfill (show-centric): resolves each show/movie once, writes `metadata.tmdb_id` + `metadata.title`/`year`/`overview`/`episode_title`, stamps the `{tmdb-…}` token once per show via `rename_folder` (seasons inherit), downloads show + per-season `poster.jpg`/`fanart.jpg` — NEVER overwriting a local image, NEVER fetching media, cached, dry-run default; `--nfo` writes Kodi/Jellyfin `movie.nfo`/`tvshow.nfo`; `--no-web` disables EXA auto-resolve (IMP-E16: on TMDB API miss → EXA searches themoviedb.org → validates candidate id; resolves hard/regional titles without manual pinning); ambiguous → listed not guessed |
 | `refresh_online` | `refresh_online [id_or_prefix] [--force] [--library X]` | `cmd_refresh_online` (IMP-E16) — bulk OMDb ratings fetch for entries that have a `tmdb_id`; writes gitignored `mvonline.json` keyed by `tmdb_id`; requires `omdb.api_key` in `mvconfig.json`; `--force` re-fetches even if cached |
 | `fetch_trivia` | `fetch_trivia [id_or_prefix] [--force] [--library X]` | `cmd_fetch_trivia` (IMP-E16) — EXA web-search → GROQ-distilled `[source]`-tagged trivia facts; writes gitignored `mvextra.json`; requires `exa.api_key` + `groq.api_key` in `mvconfig.json`; `--force` re-fetches even if cached |
 
@@ -498,7 +499,7 @@ It binds **localhost only**.
     resolver** (`resolve_artwork_path`): look in the entry's own `folder_path` for
     `poster.jpg` / `fanart.jpg`; if absent, check the `season_map`'s
     `folder_path`; if still absent, walk UP the directory tree to the nearest
-    `[tmdbid-…]` show folder. LOCAL copy ALWAYS wins over TMDB-stamped path. Security:
+    tmdb-tokened (`{tmdb-…}`) show folder. LOCAL copy ALWAYS wins over TMDB-stamped path. Security:
     only `poster.jpg`/`fanart.jpg`, `realpath`-contained under `LOCAL_ROOT`, derived
     from the library entry (no traversal); gated by the `/api/*` token guard. Used
     by the SPA to display real posters on media-type cards; a gradient is the
@@ -901,7 +902,7 @@ section (`main.py:3616`); the locked shape is decision A2 in
 ```jsonc
 "tv-en-2016-strangerthings-s01": {
   "type":        "season_map",
-  "folder_path": "C:\\Media\\Series\\...\\Stranger.Things.S01... [tmdbid-66732]",
+  "folder_path": "C:\\Media\\Series\\...\\Stranger Things Season 01 (2016)",
   "children":    [ ... ],
   "extras": {
     "groups": {
@@ -996,9 +997,12 @@ this and are relied on everywhere:
 - `metadata.tmdb_id` is the **only** provider-id field a leaf ever carries. No
   `tvdb_id` / `anidb_id` field exists in any schema (§6.3) and none is ever
   written.
-- The folder token is `[tmdbid-…]` for **every** category — `enrich_metadata`
+- The folder token is `{tmdb-…}` for **every** category — `enrich_metadata`
   stamps it with no branch on `unit["kind"]`, so a series folder looks like
-  `Dark Season 01 (2017) [tmdbid-70523]`, never `[tvdbid-…]`.
+  `Dark (2017) {tmdb-70523}`, never `[tvdbid-…]`. Confirmed empirically, not
+  assumed: a `tmdb` token matches TV shows on Plex, Emby AND Jellyfin (the
+  12-show series/anime matrix, D11 below), so one provider covers movies,
+  series and anime alike.
 - A TVDB id is a **different numbering space** from a TMDB id. Writing one into
   `metadata.tmdb_id` would make `_resolve_unit_by_id` fetch a *different title*
   and download its artwork — silent library corruption with no error. This is
@@ -1006,37 +1010,90 @@ this and are relied on everywhere:
   `-tvdbid` argument outright (`_refuse_tvdbid`, `main.py`), before the archive
   runs, rather than accepting and best-effort-converting it (IMP-D22 Decision 1).
 
-> **The one apparent contradiction — it is not one.** `suggest_target_folder`
-> (`main.py`, web console) proposes a `[tvdbid-000000]` **placeholder string** in
-> the suggested folder name for a NEW (unprepped) series/anime item. It is a
-> user-editable placeholder in a suggestion box: nothing is looked up, nothing is
-> renamed, and no `tvdb` value is ever stored. It predates the enricher (decided
-> under IMP-E12, `docs/feature-web-console/DECISIONS.md`) and is pinned by
-> `tests/test_web_datafns.py`. Do **not** read it as evidence of a TVDB
-> convention, and do not "fix" it as part of enrichment work. If TVDB/AniDB
-> integration is ever added (IMP-E3/U3 breadth, PRIORITY.md Band 1), *this
-> paragraph* is the statement that changes.
+> **The one apparent contradiction — resolved by IMP-U6.** `suggest_target_folder`
+> (`main.py:9775`, web console) used to propose a `[tvdbid-000000]` **placeholder
+> string** in the suggested folder name for a NEW (unprepped) series/anime item —
+> a user-editable placeholder in a suggestion box, never looked up and never
+> stored, inherited from IMP-E12 (`docs/feature-web-console/DECISIONS.md`) before
+> the enricher existed. It now proposes
+> `mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id="0000000")` — i.e. `{tmdb-0000000}`
+> — for **every** category (`main.py:9826`), because offering a `tvdb` placeholder
+> invited the user to type an id this tool refuses outright and can never resolve.
+> Pinned by `tests/test_web_datafns.py`. If TVDB/AniDB integration is ever added
+> (IMP-E3/U3 breadth, PRIORITY.md Band 1), *this paragraph* is the statement that
+> changes.
 
-**`[tmdbid-<id>]` folder token** (IMP-U6; Emby/Jellyfin standard — Plex's scanner
-ignores bracketed text and falls back to fuzzy title/year matching, a tradeoff
-accepted in decision D1, `docs/feature-token-brackets/DECISIONS.md`; a dual-token
-`{tmdb-…} [tmdbid-…]` emit that also satisfies Plex remains a one-line change via
-`mvcommon.CANONICAL_TMDB_TOKEN_FMT` if ever wanted). `enrich_metadata` stamps a
-`[tmdbid-<id>]` suffix onto the show's top-level folder exactly once via
-`rename_folder` — e.g. `Death Note (Complete Series)` →
-`Death Note (Complete Series) [tmdbid-12345]`. Seasons inside the folder inherit
+**`{tmdb-<id>}` folder token** (IMP-U6). The canonical emit format is curly
+braces with the **bare `tmdb` keyword** — one form for movies, series and anime
+alike, rendered from the single constant `mvcommon.CANONICAL_TMDB_TOKEN_FMT`
+(`mvcommon.py:712`) so changing what we WRITE stays a one-line edit. The format
+was corrected **twice** on server evidence: `[tmdbid-<id>]` (D1) →
+`[tmdb-<id>]` (D11) → the current `{tmdb-<id>}`. **Note when reading
+`docs/feature-token-brackets/DECISIONS.md`: D11 carries the full evidence matrix
+but its headline still names the square `[tmdb-<id>]`, because the final flip to
+curly was made after it and no D12 was written. The constant in `mvcommon.py`
+is the authority, not D11's headline.**
+
+**Settled empirically against the user's REAL Plex, Emby and Jellyfin installs**
+(2026-09-22), not from vendor docs or community lore, which disagree with each
+other and with the observed behaviour. A 20-folder matrix was scanned by all
+three servers using nonsense titles and **deliberately wrong years**, so only a
+token — never fuzzy title/year matching — could produce a correct match:
+
+| Token form | Plex | Emby | Jellyfin |
+|---|---|---|---|
+| `{tmdb-680}` | ✅ | ✅ | ✅ |
+| `[tmdb-27205]` | ✅ | ✅ | ✅ |
+| `[tmdbid-603]` | ❌ | ✅ | ✅ |
+
+The rule this establishes: **Plex rejects the `id` SUFFIX** (`tmdbid`, `tvdbid`)
+**and the `=` separator, and is indifferent to bracket style** — it reads
+`{tmdb-…}`, `[tmdb-…]` and `(tmdb-…)` alike. The widely-repeated claim that
+**Plex ignores square brackets is false**; the load-bearing half is `tmdb` vs
+`tmdbid`, not the bracket. A parallel **12-show series/anime matrix** confirmed
+the identical rule for TV and that `[tmdb-…]`/`{tmdb-…}` match TV shows on all
+three — which is why TMDB serves every category and MediaVault refuses `-tvdbid`
+(IMP-D22). Curly was chosen from the two forms that work everywhere, for one
+consistent shape across categories.
+
+Two more results from the same matrix, both retired options — **do not
+re-propose either**:
+- **Parentheses are NOT a third option.** `(tmdb-105)` matched Plex and Jellyfin
+  but **failed on Emby**. Only the two bracket families work on all three.
+- **Dual-token emission is dead.** A folder carrying `{tmdb-12} [tmdbid-12]`
+  matched Plex and Emby, and **vanished from the Jellyfin library entirely** —
+  strictly worse than either single format. It had been floated as "the only way
+  to satisfy all three" back when the Plex premise was wrong; it is not needed
+  (one `tmdb` token satisfies all three) and it is actively harmful.
+
+`enrich_metadata` stamps a `{tmdb-<id>}` suffix onto the show's top-level folder
+exactly once via `rename_folder` — e.g. `Death Note (Complete Series)` →
+`Death Note (Complete Series) {tmdb-12345}`. Seasons inside the folder inherit
 the token automatically (their `folder_path` is under the parent directory and
-does not repeat the token). This is push-safe: `split_video_file`'s mkvmerge v97
-`-o` argument is rendered through libfmt as a format string, so a literal
-`{`/`}` (a legacy `{tmdb-…}` folder — still a recognized, detectable format) is
-escaped as `{{`/`}}` for that argument only; the canonical `[tmdbid-…]` brackets
-are ordinary characters to libfmt and need no escaping at all (pinned by
-`tests/test_split_brace_escape.py::test_split_square_bracket_path_is_unchanged`,
-IMP-U6 Step 10).
-Detection itself (`mvcommon.find_provider_tokens`) accepts four spellings
+does not repeat the token — and `normalize_season_folders` actively removes one
+if it is there; see below).
+
+**Push-safety — the brace escape is now on the HAPPY path.** `split_video_file`'s
+mkvmerge v97 `-o` argument is rendered through libfmt as a format string, so a
+literal `{`/`}` anywhere in the path is read as a format field and mkvmerge dies
+with `fmt::format_error: argument not found` (exit 3). Those braces are escaped
+as `{{`/`}}` for that argument ONLY (`main.py:409`), and mkvmerge renders them
+back to single braces when it writes. Before D11 this mattered only for *legacy*
+curly folders; now that **every** canonically-tokened folder contains braces, it
+is load-bearing on every push out of a tokened folder. Pinned by
+`tests/test_split_brace_escape.py::test_split_output_escapes_curly_braces_for_mkvmerge`
+(a plain `merge -o` is taken literally and must NOT be escaped — see
+`merge_video_files`).
+
+**Detection is a deliberate SUPERSET of emission.**
+`mvcommon.find_provider_tokens` (`mvcommon.py:763`) accepts four spellings
 case-insensitively — `{tmdb-…}`, `[tmdb-…]`, `[tmdbid-…]`, and the Emby `=`
 variant `[tmdbid=…]` — so a folder carrying any of them is recognized as already
-tokened; only `[tmdbid-…]` is ever newly EMITTED.
+tokened and never gets a second token, while only `{tmdb-<id>}` is ever newly
+EMITTED. This asymmetry is **required, not legacy tolerance**: the live library
+is still full of the older spellings until `migrate_provider_tokens --apply`
+runs, and detection is what every idempotency guard, the artwork-inheritance
+walk, and both migration commands' re-detection depend on in the meantime.
 
 **`metadata.tmdb_id` OPTIONAL leaf field.** Set by `set_tmdb` or
 `enrich_metadata`. Additive: adding it is zero-byte (no rehash, no `folder_path`
@@ -1056,25 +1113,32 @@ Given an entry id, the resolver checks in order:
    already renamed most of the real library to `[tmdbid-…]`, so the walk
    matched almost nothing and season/episode artwork inheritance was silently
    broken library-wide — a live regression fixed as a byproduct of unifying on
-   `has_tmdb_token`.
+   `has_tmdb_token`. The fix was to share the SUPERSET detector, not to pick a
+   bracket: that is why IMP-U6 later settling on curly `{tmdb-…}` **emission**
+   did not reintroduce the bug — the walk matches every recognized spelling
+   regardless of what is currently emitted.
 A LOCAL image always wins over a TMDB-downloaded one — `enrich_metadata` never
 overwrites an existing file. Security: only `poster.jpg` / `fanart.jpg` are
 served; the resolved path is `realpath`-contained under `LOCAL_ROOT`; the path is
 derived entirely from the library entry (no user traversal).
 
 **Two series folder layouts — the flat one is the common case.** `_show_folder_of`
-(`main.py`) picks the folder the `[tmdbid-…]` token is stamped onto and the show
+(`main.py`) picks the folder the `{tmdb-…}` token is stamped onto and the show
 artwork is written into, from a show's distinct season folders. It has three
 branches, and the third is NOT a corner case:
 1. **≥2 season folders** → `os.path.commonpath` — the parent is the show folder.
 2. **1 season folder with a season-shaped basename** (`Season 04`, `S04`,
-   `Season_4`) → climb to its PARENT (the classic `<Show>/Season NN/` layout,
-   e.g. `Dark Season 01 (2017) [tmdbid-70523]`).
+   `Season_4`) → climb to its PARENT (the classic `<Show>/Season NN/` layout —
+   the season `Dark Season 01 (2017)` under the show `Dark (2017) {tmdb-70523}`;
+   the token is on the PARENT, never on the season).
 3. **1 season folder that is NOT season-shaped** → that folder already IS the
    show folder. This is a flat release folder holding the episodes directly
-   (e.g. `Peaky.Blinders.S06.2022… [tmdbid-60574]`, `Devs.S01.2020.2160p.WEB.HDR
-   [tmdbid-81349]`) and a 2026-08-28 audit of the live library found it to be the
-   **dominant real-world shape — 46 of the user's shows**.
+   (e.g. `Peaky.Blinders.S06.2022… {tmdb-60574}`, `Devs.S01.2020.2160p.WEB.HDR
+   {tmdb-81349}`) and a 2026-08-28 audit of the live library found it to be the
+   **dominant real-world shape — 46 of the user's shows**. A flat show is left
+   STRUCTURALLY untouched by `normalize_season_folders` (it is both show and
+   season, so there is no season folder to rename); `migrate_provider_tokens`
+   still brings its token to the canonical form.
 
 In case 3 the show folder and the season folder are the SAME path, so the
 show-level poster write and the per-season poster write target the identical
@@ -1140,13 +1204,14 @@ post-PONR). It is ADDITIVE to the rollback mechanism: it does NOT change the
 journal format, the `fsync`+`os.replace` durability, the `RollbackHardFail`
 contract, or any PONR location in other commands. See §12a and
 `docs/feature-auto-rollback/ROLLBACK_MECHANISM.md` §10 (change-gate). IMP-U6's
-`migrate_provider_tokens` (below) changes NEITHER the journal format NOR any
-PONR — it only changes the STRING `cmd_rename_folder` is CALLED WITH.
+`migrate_provider_tokens` **and** `normalize_season_folders` (both below) change
+NEITHER the journal format NOR any PONR — they only change the STRING
+`cmd_rename_folder` is CALLED WITH.
 
 **`migrate_provider_tokens` (IMP-U6, `main.py:cmd_migrate_provider_tokens`).**
 Whole-library format migration: every on-disk folder still carrying an
-old-style tmdb token (`{tmdb-…}`, `[tmdb-…]`, `[tmdbid=…]`, or wrong casing) is
-renamed to the canonical `[tmdbid-…]`. Discovery is **ancestor-aware** — for
+old-style tmdb token (`[tmdbid-…]`, `[tmdb-…]`, `[tmdbid=…]`, or wrong casing) is
+renamed to the canonical `{tmdb-<id>}`. Discovery is **ancestor-aware** — for
 every in-scope physical entry it climbs from the entry's own `folder_path` up
 to `LOCAL_ROOT`, deduplicating every directory in the chain, because a prior
 external migration tool had already renamed most LEAF folders but never
@@ -1168,6 +1233,86 @@ whole library) — deliberately, because this command mutates real folders under
 command must not allow. A stale `folder_path` (directory no longer on disk) is
 not pre-filtered; `cmd_rename_folder` refuses it and the refusal is recorded in
 the report's `errors` array rather than silently dropped or aborting the run.
+Live dry run over the real library: `scanned=317 would-rename=236
+already-canonical=1`.
+
+**`normalize_season_folders` (IMP-U6, `main.py:cmd_normalize_season_folders`).**
+The STRUCTURAL follow-up to the format flip above. `migrate_provider_tokens`
+fixes the *spelling* of a token already on a folder; this command fixes *which
+folder carries one at all*, because season folders are uploaded to a phone
+individually and must be self-identifying by NAME. Two phases, per show, in this
+order:
+
+- **Phase A — the show folder gets the id.** If a season's parent is a genuine,
+  untokened show folder, it is renamed to `<existing name> {tmdb-<id>}` — e.g.
+  `Peaky Blinders` → `Peaky Blinders {tmdb-60574}`. The id is resolved locally
+  only (parent's own token → the season's own token → `metadata.tmdb_id`); no
+  TMDB call is needed, so Phase A works with no API key. **One token per
+  folder:** any stale NON-tmdb token is stripped first, by its own span, so the
+  rest of the name survives byte-identically — `Dark (2017) [tvdbid-334824]` →
+  `Dark (2017) {tmdb-70523}`, `Fringe (2008) [tvdbid-82066]` →
+  `Fringe (2008) {tmdb-1705}`. Both ids name the same show, but MediaVault is
+  TMDB-for-everything and Plex ignores the `tvdbid` spelling entirely, so the
+  tvdb one is dead weight (pinned by
+  `tests/test_normalize_season_folders.py::test_phase_a_strips_a_stale_non_tmdb_token`).
+- **Phase B — the season folder gets a NAME, and NO id.** Renamed to
+  `<Show Name> Season <NN> (<season air year>)` from ONE cached
+  `GET /tv/{tmdb_id}` per show. The show name is sanitized for Windows-illegal
+  characters (`_sanitize_folder_name_component` — this is the first place in the
+  codebase a raw external title becomes a folder name; `Star Wars: Andor` →
+  `Star Wars - Andor`). A season with no `air_date`, or a failed `/tv/{id}` call,
+  is SKIPPED rather than given an invented year.
+
+**Why a season folder must NEVER carry an id.** Season ids and show ids share
+ONE numeric TMDB namespace. Friends S01's own TMDB *season* id is `4573`, and
+`4573` as a *show* id is "Late Night with Conan O'Brien" — a season-level token
+can therefore only mislead a scanner, and no media server reads one anyway. The
+id belongs on the show folder; seasons inherit it by living underneath.
+
+**THE CATEGORY-FOLDER GUARD has two independent halves**
+(`_season_parent_is_exclusive_to_show`), and both are required. A season's
+parent is treated as that show's own folder only if:
+1. **Content half** — every tracked direct child resolves to the SAME TMDB id
+   (an untracked sibling is ignored: it has no library entry to misattribute and
+   rides along for free when the parent is renamed — the real Mr.Robot S04
+   shape). A different id, or tracked content with *no* discoverable id at all
+   (ambiguous), refuses the whole group.
+2. **Structural half** — the parent must NOT be a direct child of a
+   `CATEGORY_ROOT`. This exists because `C:\Media\Series\Tamil` holds exactly one
+   show whose *folder name contains `S01`*, so the content half and the
+   season-marker gate both passed it and Phase A proposed renaming the user's
+   **language folder** to `Tamil {tmdb-274276}`. "Coincidentally one occupant
+   today" is not "exclusively this show's folder". **Depth cannot decide this** —
+   the tree is not uniform: `Series/English/Classic/<Show>` is three levels,
+   `Series/Tamil/<Show>` is two. Only structure can tell them apart.
+
+**Ownership is keyed on the TMDB id, never the library key**
+(`_folder_tmdb_owner_ids`). MediaVault's library ids embed the SEASON's own air
+year, so Peaky Blinders' six seasons derive six different `tv-en-<year>-…` show
+keys while sharing ONE TMDB id, `60574`. The first version of the guard compared
+library keys, which made a show's own sibling seasons look like foreign titles
+and **refused 52 of 64 real seasons**.
+
+**`--apply` backfills `metadata.tmdb_id`** onto every season in a group *before*
+renaming anything. Only 41 of the 64 real season entries carry it — Friends and
+The X-Files carry it on **none** — and once Phase B strips the folder token that
+field is their only remaining id source. Without the backfill, a later run's
+category-folder guard would see "tracked content, no discoverable TMDB id" and
+wrongly refuse the whole show, breaking the idempotency guarantee.
+
+Like `migrate_provider_tokens`: **dry-run by default**, idempotent by
+re-detection with no state file (Phase A skips a parent that already has any
+recognized tmdb token; Phase B skips a season already at its target name), every
+rename through the unmodified `cmd_rename_folder`, and a JSON report under
+`<LOCAL_ROOT>/migration_reports/` on `--apply`. Ordering is **shallowest-first
+per show** — the opposite of `migrate_provider_tokens`' deepest-first — and this
+is about ID SOURCING, not the rename cascade: Phase B's whole point is to strip
+the season's token, so Phase A must read the id off it FIRST or it is lost for
+every show whose only surviving id lives on a season folder. A Phase A failure
+aborts that group's Phase B (the parent may be torn) and lists the untouched
+seasons on the error record's `seasons_not_attempted`; other groups continue.
+Live dry run over the real library: `scanned=64 show_folders_would_token=11
+seasons_would_rename=60 skipped=4`.
 
 **Hash safety of folder renames.** `rename_folder` moves the on-disk directory
 and rewrites `folder_path` in JSON. It does NOT change any file's bytes — the
@@ -1181,7 +1326,7 @@ path (§7.4). Chunk hashes in `split_info` are also byte-hashes and are unchange
 `category_of_id(...)` is `"other"` before bucketing — so no `oth-` id ever
 reaches a movie/show unit. Sports/Others content is not on TMDB/OMDb, so
 enriching it would mis-match a title, stamp a wrong `metadata.tmdb_id`, rename
-the real Sports folder with a bogus `[tmdbid-…]` token, and download wrong artwork.
+the real Sports folder with a bogus `{tmdb-…}` token, and download wrong artwork.
 The guard is unconditional (one place covers all three commands), so even a
 no-arg whole-library `enrich_metadata` run is safe.
 

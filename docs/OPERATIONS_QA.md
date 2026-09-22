@@ -11,7 +11,7 @@
 > **Maintenance:** when a question is asked and answered in any Claude session, add it here.
 > See the protocol at the bottom.
 
-**Last updated:** 2026-09-21
+**Last updated:** 2026-09-22
 
 ---
 
@@ -97,23 +97,115 @@ and `fetch_trivia` entirely. OMDb (`refresh_online`) is unaffected — different
 
 Workaround with no EXA: supply ids manually via `set_tmdb` on a leaf, or pass `--no-web`.
 
-### Why did my folder suddenly get a second, bracket-style token? / What format does MediaVault use for provider ids now, and do I need to do anything?
+### What token format does MediaVault write now, and why did it change twice?
 
-As of **IMP-U6**, `enrich_metadata` stamps the canonical `[tmdbid-<id>]` token instead of the old
-`{tmdb-<id>}` one (Emby/Jellyfin read `[tmdbid-…]`; Plex ignores bracketed text and falls back to
-fuzzy title/year matching either way — that tradeoff was accepted deliberately, see decision D1 in
-`docs/feature-token-brackets/DECISIONS.md`). Detection still accepts every old spelling
-(`{tmdb-…}`, `[tmdb-…]`, `[tmdbid=…]`, any casing) case-insensitively, so an existing folder is
-never re-tokened or duplicated — you will only ever see ONE tmdb token per folder.
+**The canonical format is `{tmdb-<id>}`** — curly braces, the bare `tmdb` keyword, the same shape
+for movies, series and anime (`mvcommon.CANONICAL_TMDB_TOKEN_FMT`, `mvcommon.py:712`).
 
-You don't have to do anything by default; the format only changes going forward, on folders
-`enrich_metadata` newly stamps. To bring your **existing** library over to the canonical form, run
-`python main.py migrate_provider_tokens` — it is dry-run by default (prints every `OLD -> NEW`
-rename it would make, mutates nothing) and `--apply` performs the renames through the existing
-crash-safe `rename_folder` and writes a JSON report under `migration_reports/`. It's ancestor-aware
-(it also catches a show's top-level folder even when every entry's `folder_path` only points at a
-season underneath it), so it's the right tool even if an earlier ad-hoc rename already got most of
-your leaf folders.
+It changed twice during IMP-U6 because the first two answers came from vendor docs and community
+lore, and **testing against your actual servers contradicted both**. A 20-folder matrix was scanned
+by real Plex, Emby and Jellyfin installs, with nonsense titles and deliberately wrong years so that
+nothing but a token could produce a correct match:
+
+| Token form | Plex | Emby | Jellyfin |
+|---|---|---|---|
+| `{tmdb-680}` | ✅ | ✅ | ✅ |
+| `[tmdb-27205]` | ✅ | ✅ | ✅ |
+| `[tmdbid-603]` | ❌ | ✅ | ✅ |
+
+What that actually establishes:
+
+- **Plex rejects the `id` suffix** (`tmdbid`, `tvdbid`) and the `=` separator. That is the half that
+  matters.
+- **Plex does not care about bracket style** — `{tmdb-…}`, `[tmdb-…]` and `(tmdb-…)` all work on
+  Plex. The widely-repeated claim that Plex ignores square brackets is **false**, and believing it
+  is what produced the earlier `[tmdbid-…]` answer.
+- **Don't reach for parentheses or two tokens.** `(tmdb-105)` passed Plex and Jellyfin but failed on
+  **Emby**, and a folder carrying two tokens (`{tmdb-12} [tmdbid-12]`) **disappeared from Jellyfin
+  entirely**. Curly and square `tmdb` are the only forms that work on all three; one token, always.
+- A parallel 12-show series/anime matrix confirmed the identical rule for TV, so TMDB covers every
+  category and there is nothing to gain from a second provider (MediaVault refuses `-tvdbid`,
+  IMP-D22).
+
+**Detection is deliberately wider than emission.** `mvcommon.find_provider_tokens` still recognizes
+`{tmdb-…}`, `[tmdb-…]`, `[tmdbid-…]` and `[tmdbid=…]`, case-insensitively, so a folder that already
+carries any of them is never given a second token — you will only ever see ONE tmdb token per
+folder. That superset is not politeness: your library is still full of the old spellings until you
+run the migration below, and every idempotency guard and the artwork-inheritance walk depend on
+recognizing them in the meantime.
+
+Nothing breaks if you do nothing — the new format only applies going forward, to folders
+`enrich_metadata` newly stamps. To convert what you already have, see the next entry.
+
+### How do I bring my existing library over? (`migrate_provider_tokens` + `normalize_season_folders`)
+
+Two commands, and they do different jobs. **Both are dry-run by default. Always read the preview
+before you pass `--apply`** — these rename real folders.
+
+```
+python main.py migrate_provider_tokens              # 1a. preview
+python main.py migrate_provider_tokens --apply      # 1b. convert token SPELLING
+
+python main.py normalize_season_folders             # 2a. preview
+python main.py normalize_season_folders --apply     # 2b. restructure show/season NAMES
+```
+
+**`migrate_provider_tokens`** fixes the *spelling* of tokens already on disk — every
+`[tmdbid-…]` / `[tmdb-…]` / `[tmdbid=…]` / wrong-cased folder becomes `{tmdb-<id>}`. It is
+**ancestor-aware**: it also catches a show's top-level folder even when every library entry's
+`folder_path` only points at a season underneath it, so it is the right tool even if an earlier
+ad-hoc rename already got most of your leaf folders. Renames run deepest-first, and re-running is
+free — an already-canonical folder is simply no longer a candidate. `--library
+movies|series|anime|others` narrows the scope; a **mistyped** value is refused outright rather than
+silently widening to your whole library. Real dry run on this library:
+`scanned=317 would-rename=236 already-canonical=1`.
+
+**`normalize_season_folders`** fixes *which folder carries a token at all* — the structural job.
+Phase A gives the **show** folder its id (`Peaky Blinders` → `Peaky Blinders {tmdb-60574}`),
+stripping any stale non-tmdb token so exactly one remains (`Dark (2017) [tvdbid-334824]` →
+`Dark (2017) {tmdb-70523}`). Phase B renames each **season** folder to
+`<Show Name> Season <NN> (<season air year>)` with **no id**, using one TMDB call per show. It
+refuses to touch a category or language folder, leaves flat shows alone, and never invents a year —
+a season TMDB has no air date for is skipped, not guessed. Real dry run on this library:
+`scanned=64 show_folders_would_token=11 seasons_would_rename=60 skipped=4`.
+
+**Run them in that order**, for a concrete reason: Phase A only stamps a show folder that has **no**
+tmdb token at all, and detection recognizes the old spellings — so a show folder already carrying
+`[tmdbid-…]` is left alone by `normalize_season_folders` and keeps the old spelling until
+`migrate_provider_tokens` converts it. Running the spelling pass first means the structural pass
+finds everything already canonical. (Neither command is destructive in the other order; you would
+just need a second `migrate_provider_tokens` run afterwards.)
+
+Neither one is "just cosmetic" — both rename real folders, including already-pushed content
+(`migrate_provider_tokens` flags those as `remote-bearing` in its preview). Preview both.
+
+### `--apply` wrote a report with a non-empty `errors` array. Did the run fail?
+
+**No.** `--apply` always writes a JSON report to `<LOCAL_ROOT>\migration_reports\`
+(`token_format_<UTC timestamp>.json` / `season_folders_<UTC timestamp>.json`; a same-second re-run
+gets a `-1` suffix instead of clobbering the earlier one). A non-empty `errors` array is the command
+**telling you about folders it could not rename, having continued with everything else** — that is
+the designed behaviour, not an abort.
+
+The common entry is a **stale `folder_path`**: the library points at a directory that is no longer
+on disk (you moved or deleted it outside MediaVault). Neither command pre-filters those. The rename
+is attempted, `rename_folder` refuses it with `❌ No such folder (or unknown id)` (`main.py:4051`),
+and the refusal is recorded rather than silently skipped — **surfacing it is the point**, because a
+stale pointer is a real library problem you want to know about. Fix it with `rename_folder` or by
+re-prepping, then re-run the migration; it will pick the folder up on the next pass.
+
+Two other things land in `errors`:
+
+- A rename that crossed its **point of no return** (folder moved, library rewrite failed). The record
+  carries a `resume_cmd` — run exactly that, then re-run the migration.
+- For `normalize_season_folders`, a Phase A failure aborts **that show's** Phase B (the parent may be
+  half-renamed) and lists the untouched seasons on the record's `seasons_not_attempted`. Other shows
+  are unaffected.
+
+Not everything lands in `errors`. A group the **category-folder guard** declined — a language folder,
+a genre folder holding several shows, a season whose show has no discoverable TMDB id — goes to
+`skipped` with a plain-English reason, as does a season whose parent folder is missing entirely.
+Read `skipped` when a show you expected to be renamed wasn't.
 
 As a byproduct, IMP-U6 also fixed a **live regression**: season/episode artwork inheritance walks
 UP the directory tree looking for the nearest tmdb-tokened show folder, and that walk's predicate
@@ -121,7 +213,8 @@ had drifted to curly-brace-only while an earlier external migration had already 
 real library to `[tmdbid-…]` — so the walk matched almost nothing and inherited posters/fanart were
 silently missing library-wide. It now shares the same detection helper
 (`mvcommon.has_tmdb_token`) the stamping idempotency guard uses, so the two cannot drift apart
-again.
+again. (The fix was to share the **superset** detector, not to pick a bracket — which is why later
+settling on curly `{tmdb-…}` for emission did not bring the bug back.)
 
 ---
 
@@ -172,19 +265,25 @@ Real example of both, in this library:
 So this is correct and recommended:
 ```
 IDs      tv-en-1994-friends-s02      ← show year
-Folders  Friends Season 02 (1995) {tmdb-1668}   ← real air year, purely cosmetic to the code
+Folders  Friends Season 02 (1995)    ← real air year, purely cosmetic to the code
 ```
 
 ### Folder layout
 
 ```
 Friends (1994) {tmdb-1668}\
-  Friends Season 01 (1994) {tmdb-1668}\
-  Friends Season 02 (1995) {tmdb-1668}\
+  Friends Season 01 (1994)\
+  Friends Season 02 (1995)\
 ```
 
+- **The id goes on the SHOW folder. A season folder must never carry one.** Not a style preference:
+  season ids and show ids share one numeric TMDB namespace, so a season token is an id that means
+  something else. Friends S01's own TMDB *season* id is `4573` — and `4573` as a *show* id is "Late
+  Night with Conan O'Brien". No media server reads a season-level token anyway, so writing one can
+  only mislead a scanner. `normalize_season_folders` strips them (see §1).
+- The season folder earns its keep by being **self-identifying by name** — `<Show Name> Season <NN>
+  (<air year>)` — because each season is uploaded to a phone on its own.
 - Season numbering starts at **01** (00 is the Specials convention; MediaVault uses `--extras` instead).
-- The `{tmdb-…}` token on season folders is redundant but harmless.
 - **A malformed token breaks detection** — `tmdb-1668}` (missing `{`) won't match, and enrich will
   append a second token.
 - Case no longer matters (`{TMDB-…}` works) as of **IMP-C23**.
@@ -303,7 +402,9 @@ you're working in.
 | `restore`, `restore_group` | `verify_library` |
 | `set_tmdb`, `set_uploaded` | `scan_unprepped` |
 | `rename_folder` | `enrich_metadata` (dry-run, no `--apply`) |
-| `enrich_metadata --apply` | |
+| `enrich_metadata --apply` | `migrate_provider_tokens` / `normalize_season_folders` (dry-run, no `--apply`) |
+| `migrate_provider_tokens --apply` | |
+| `normalize_season_folders --apply` | |
 | all `prep_push_rep*` autopilots | |
 
 **Note:** `prep_push_rep_season` already runs `replace` internally per episode. There is nothing to

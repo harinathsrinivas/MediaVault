@@ -395,11 +395,15 @@ def split_video_file(input_path, output_dir, method, value_str, file_id="", drop
 
     # Command Execution.
     # mkvmerge v97 formats the --split output name via libfmt, so any literal `{`/`}`
-    # in the path (e.g. a legacy `{tmdb-…}` Plex-style folder token — still a
-    # recognized format, though MediaVault now stamps `[tmdbid-…]`, which libfmt
-    # treats as ordinary characters and needs no escaping) is read as a
+    # in the path is read as a
     # format field and mkvmerge dies with `fmt::format_error: argument not found`
-    # (exit 3). Escape them as `{{`/`}}` for the -o arg ONLY — mkvmerge renders them
+    # (exit 3). This escape is LOAD-BEARING ON THE HAPPY PATH, not a legacy
+    # safeguard: the canonical provider token is `{tmdb-<id>}` (decision D12), so
+    # every stamped folder contains braces and every split of an archived title
+    # passes through here. It has fired for real before — a `{tmdb-79660}` folder
+    # once aborted an entire prep→push→replace. Pinned by
+    # tests/test_split_brace_escape.py.
+    # Escape them as `{{`/`}}` for the -o arg ONLY — mkvmerge renders them
     # back to single braces and writes to the real folder. (A plain merge -o is taken
     # literally and must NOT be escaped — see merge_video_files; verified mkvmerge v97.)
     # [FLAC-CARRYOUT] drop_track: exclude one audio track (by its container track
@@ -4124,7 +4128,7 @@ def _rewrite_folder_path(folder_path, old_folder, new_folder):
 # ==========================================
 # Migrates every on-disk folder still carrying the OLD tmdb token spelling
 # (curly `{tmdb-…}`, or a non-canonical square `[tmdb-…]`/`[tmdbid=…]`/wrong
-# casing) to the canonical `[tmdbid-…]` (mvcommon.CANONICAL_TMDB_TOKEN_FMT).
+# casing) to the canonical `{tmdb-…}` (mvcommon.CANONICAL_TMDB_TOKEN_FMT).
 # See cmd_migrate_provider_tokens below for the full design rationale.
 
 def _old_style_tmdb_token(basename):
@@ -4132,12 +4136,22 @@ def _old_style_tmdb_token(basename):
     `mvcommon.find_provider_tokens` item — or None if it carries no tmdb token
     at all, or only the EXACT canonical one already.
 
-    'Old-style' = a curly `{tmdb-…}` token (any casing/spelling — curly is
-    never canonical), or a square token whose matched text is not
-    byte-identical to `mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=<its own
-    id>)` — e.g. `[tmdb-…]`, `[tmdbid=…]`, wrong casing. A folder carrying
-    ONLY a `[tvdbid-…]`/`[imdbid-…]` token (no tmdb token) is not old-style —
-    there is nothing here for this migration to do.
+    'Old-style' = ANY tmdb token whose matched text is not byte-identical to
+    `mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=<its own id>)` — e.g.
+    `[tmdbid-…]`, `[tmdb-…]`, `[tmdbid=…]`, or the right shape in the wrong
+    casing. A folder carrying ONLY a `[tvdbid-…]`/`[imdbid-…]` token (no tmdb
+    token) is not old-style — there is nothing here for this migration to do.
+
+    The test is deliberately a pure byte-comparison against the canonical
+    render, with NO special-casing of bracket style. An earlier version also
+    short-circuited on `bracket == "curly"`, encoding the then-true assumption
+    that curly is never canonical. That clause never changed an outcome while
+    canonical was square (a curly token's text cannot equal a square render),
+    and it became actively wrong the moment canonical became curly: every
+    already-migrated `{tmdb-…}` folder was reclassified as a candidate, the
+    rename was refused as already-existing, and the command lost the
+    idempotency its own contract promises. Compare against the constant and
+    nothing else.
 
     find_provider_tokens returns tokens in left-to-right (span) order; the
     FIRST old-style tmdb token found is returned (a real folder name carries
@@ -4146,14 +4160,14 @@ def _old_style_tmdb_token(basename):
         if token["provider"] != "tmdb":
             continue
         canonical = mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=token["id"])
-        if token["bracket"] == "curly" or token["match"] != canonical:
+        if token["match"] != canonical:
             return token
     return None
 
 
 def _apply_token_span(basename, token):
     """Replace ONLY `token`'s span in `basename` with the canonical
-    `[tmdbid-<id>]` render, leaving every other character — including a
+    `{tmdb-<id>}` render, leaving every other character — including a
     coexisting `[tvdbid-…]`/`[rartv]`/etc. bracketed tag — byte-identical.
     Never rebuilds the name from scratch (spans are exact/non-overlapping,
     verified by the mvcommon detection-contract tests)."""
@@ -4165,7 +4179,7 @@ def _apply_token_span(basename, token):
 def cmd_migrate_provider_tokens(arg=None, *flags):
     """Whole-library TMDB provider-token format migration (IMP-U6): every
     on-disk folder still carrying the OLD `{tmdb-…}`/`[tmdb-…]` spelling is
-    renamed to the canonical `[tmdbid-…]`.
+    renamed to the canonical `{tmdb-…}`.
 
     Usage: migrate_provider_tokens [id_or_prefix] [--apply] [--library movies|series|anime|others]
     DRY-RUN by default (prints every `OLD -> NEW` it WOULD rename plus a
@@ -4413,6 +4427,688 @@ def cmd_migrate_provider_tokens(arg=None, *flags):
 
     print(f"\n=== APPLIED === scanned={scanned} renamed={len(renamed)} "
           f"already-canonical={already_canonical} errors={len(errors)}")
+    print(f"   > report: {report_path}")
+
+
+# ==========================================
+#   SEASON FOLDER NORMALIZATION (IMP-U6, Steps 15-18)
+# ==========================================
+# Structural follow-up to the token-format flip above: season folders must be
+# SELF-IDENTIFYING (each is uploaded to a phone individually) and must carry NO
+# id (a verified hazard — Friends S01's own TMDB *season* id, 4573, is "Late
+# Night with Conan O'Brien" as a *show* id; season and show ids share one
+# numeric namespace and no media server reads a season-level token anyway).
+# See cmd_normalize_season_folders below for the full design rationale.
+
+# A season folder's basename embeds a season marker ANYWHERE ('S01',
+# 'Season 01', 'Season_04', 's4', case-insensitive) — real season folders
+# always do, whether user-organized ('Season 01') or release-named
+# ('Peaky.Blinders.S01.2013…'); a FLAT show's own name never does ('Chernobyl
+# (Miniseries) 2019 …'). See _season_folder_looks_season_shaped's docstring for
+# why this is needed ALONGSIDE the sibling guard, not instead of it.
+_SEASON_FOLDER_MARKER_RE = re.compile(r"(?i)(?:^|[\s._-])s(?:eason)?[\s._-]?0*\d{1,2}(?:[^0-9]|$)")
+
+# Windows forbids these in a folder name (control chars included); `:` is
+# handled separately (see _sanitize_folder_name_component) so it is NOT in
+# this class.
+_WIN_INVALID_FOLDER_CHARS_RE = re.compile(r'[<>"/\\|?*\x00-\x1f]')
+
+
+def _sanitize_folder_name_component(name):
+    """Make a raw TMDB show `name` safe as a Windows folder-name component.
+
+    TMDB titles routinely carry characters Windows forbids in a folder name
+    (`Star Wars: Andor` has a colon) that never show up on this codebase's
+    OTHER folder-naming paths (release names, id-derived slugs — see
+    suggest_target_folder) because those are never built from a raw external
+    title. cmd_normalize_season_folders is the FIRST place a raw TMDB title
+    becomes a folder name, so it is sanitized here, narrowly, rather than
+    adding a general-purpose helper nothing else needs yet.
+
+    `:` -> ` -` (a common "Show - Subtitle" release convention — keeps the
+    subtitle readable instead of just dropping it). Every other Windows-
+    reserved character (`<>"/\\|?*` + control chars) is replaced with a space
+    and whitespace is collapsed. A trailing dot/space (also Windows-illegal)
+    is stripped. Never returns an empty string (falls back to "Untitled",
+    matching suggest_target_folder's own fallback)."""
+    name = (name or "").strip()
+    name = name.replace(":", " -")
+    name = _WIN_INVALID_FOLDER_CHARS_RE.sub(" ", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    name = name.rstrip(". ")  # Windows forbids a trailing dot/space
+    return name or "Untitled"
+
+
+def _season_folder_looks_season_shaped(basename):
+    """True iff `basename` embeds a season marker ANYWHERE (see
+    _SEASON_FOLDER_MARKER_RE) — a structural signal this folder is genuinely
+    A SEASON of some larger show, not a flat show's own top-level identity.
+
+    Deliberately looser than _show_folder_of's own 'basename EQUALS Season NN'
+    check (that check would miss a real release-style season name like
+    'Peaky.Blinders.S01.2013…' — see cmd_normalize_season_folders' docstring,
+    "FLAT SHOWS"). A folder with NO marker is left alone (conservative —
+    'refuse a borderline case rather than rename it'): this is the guard's
+    SECOND, independent layer alongside the sibling-ownership check
+    (_season_parent_is_exclusive_to_show), needed because a SOLO flat show (no
+    OTHER tracked show currently sharing its parent) would otherwise slip past
+    the sibling check alone — see that function's docstring for the concrete
+    Tamil counter-example this closes."""
+    return bool(_SEASON_FOLDER_MARKER_RE.search(basename or ""))
+
+
+def _folder_tmdb_owner_ids(library, folder):
+    """Distinct TMDB show ids evidenced for library-tracked content anywhere
+    under `folder` (folder's own basename token included) — THE
+    CATEGORY-FOLDER GUARD's ownership test (see
+    _season_parent_is_exclusive_to_show).
+
+    TMDB id, not the library key, is the true, stable show identity (defect 1
+    — the original guard compared `_show_id_of` library keys instead, and
+    MediaVault's library ids embed the SEASON's own air year, not the show's:
+    Peaky Blinders S01..S06 are 6 DISTINCT `tv-en-<year>-peakyblinders-s0N`
+    keys sharing ONE TMDB id, 60574. Comparing library keys made a show's own
+    sibling seasons look like foreign titles and refused almost everything).
+
+    Sources consulted (folder-name token AND metadata.tmdb_id — no TMDB
+    network call is ever made here):
+      - the folder's OWN basename (an already-tokened show/flat-show folder).
+      - each tracked descendant's `metadata.tmdb_id` (written show-wide by a
+        prior enrich_metadata run — the SHOW's id, never a season-specific
+        one, onto every season_map/leaf of that show unit).
+      - each tracked descendant's OWN `folder_path` basename token (the real,
+        documented gap: 30 of 59 real season folders are the ONLY place their
+        show's id currently survives — see _find_show_tmdb_id).
+
+    Returns None when `folder` holds NO library-tracked content at all
+    (untracked — the Mr.Robot S04 case: harmless, never a foreign owner, rides
+    along for free when the parent is renamed). Otherwise returns the
+    (possibly EMPTY) set of ids found as strings — an empty set means tracked
+    content exists but no source above resolved an id anywhere: THE AMBIGUOUS
+    case the guard must refuse on, never treat as "no conflict"."""
+    descendants = _collect_folder_descendants(library, folder)
+    if not descendants:
+        return None
+    ids = set()
+    for t in mvcommon.find_provider_tokens(os.path.basename(folder)):
+        if t["provider"] == "tmdb":
+            ids.add(str(t["id"]))
+    for mid, entry in descendants:
+        meta_id = (entry.get("metadata") or {}).get("tmdb_id")
+        if meta_id:
+            ids.add(str(meta_id))
+        fp = entry.get("folder_path")
+        if fp:
+            for t in mvcommon.find_provider_tokens(os.path.basename(fp)):
+                if t["provider"] == "tmdb":
+                    ids.add(str(t["id"]))
+    return ids
+
+
+def _season_parent_is_exclusive_to_show(library, parent, show_tmdb_id):
+    """THE CATEGORY-FOLDER GUARD (see cmd_normalize_season_folders' docstring
+    for the full rationale + real counter-examples: Classic, Tamil, Mr.Robot).
+    Returns (True, None) iff `parent` is safe to treat as `show_tmdb_id`'s OWN
+    show folder, else (False, <reason string>).
+
+    THE EXACT RULE — TMDB-id-based, not library-key-based (defect 1; see
+    _folder_tmdb_owner_ids for why the identity had to change). Every DIRECT
+    SUBDIRECTORY of `parent` is classified by _folder_tmdb_owner_ids into ONE
+    of three buckets:
+      (a) untracked (no library entry lives under it) — e.g. Mr.Robot's
+          un-prepped `Mr.Robot.S04.BluRay.2019.1080p.DTS` folder: harmless, it
+          rides along for free when the parent is renamed, since
+          cmd_rename_folder's os.rename moves the WHOLE directory regardless
+          of what the library tracks. IGNORED.
+      (b) tracked, and its discoverable TMDB id(s) are EXACTLY
+          `{show_tmdb_id}` — another season of the SAME show, an extras
+          subfolder of the SAME title, etc. FINE.
+      (c) tracked, and EITHER a different TMDB id is found (a sibling
+          belonging to a different show/title — `parent` is a CATEGORY folder,
+          e.g. `Classic` holding Friends/Peaky Blinders/The Wire/Chernobyl's
+          flat folder as four unrelated direct children — tokening it would
+          rename the user's entire classics collection to one title's token)
+          OR no TMDB id is discoverable at all (ambiguous — a wrong rename
+          here is catastrophic, so this is ALSO refused, conservatively, even
+          though no PROVEN conflict exists). Either way: REFUSED.
+
+    Deliberately ONE hop, never climbed further — `parent` is always
+    `os.path.dirname(<this season's own folder>)`, exactly the level
+    cmd_normalize_season_folders' Phase A tokens. NOT climbing further is
+    itself part of the guard's safety, not a simplification: climbing further
+    is what would eventually reach a category/language folder (`Tamil`) that
+    currently, coincidentally, holds only one show — "coincidentally only one
+    occupant right now" must never be mistaken for "exclusively this show's
+    own folder" (that is what _season_folder_looks_season_shaped additionally
+    guards against, for the case where Tamil's one occupant is itself a solo
+    flat show with nothing to conflict with here)."""
+    if not os.path.isdir(parent):
+        return False, f"parent folder not found on disk: {parent}"
+
+    # STRUCTURAL GATE — a direct child of a CATEGORY_ROOT is a LANGUAGE folder
+    # (Series/English, Series/Tamil, Movies/Hindi, Anime/Classic), never any one
+    # show's own folder. This is checked FIRST because the sibling rule below
+    # cannot see it: a language folder that currently happens to hold exactly one
+    # show has no foreign sibling to trip on, so it looks "exclusive" by accident.
+    #
+    # Caught by the real-library dry run: `C:\Media\Series\Tamil` holds only
+    # `Aindham Vedham (2024) S01 EP (01-08) …`, whose name DOES carry an S01
+    # marker, so both the sibling rule and the season-marker gate passed it and
+    # Phase A proposed renaming the user's Tamil language folder to
+    # `Tamil {tmdb-274276}`. "Coincidentally one occupant today" is not
+    # "exclusively this show's folder", and only structure can tell them apart —
+    # depth cannot, because the tree is not uniform (Series/English/Classic/<Show>
+    # is three levels, Series/Tamil/<Show> is two).
+    #
+    # A season sitting directly under a language folder is a FLAT show (one
+    # folder is both show and season). Refusing here is exactly right: it is left
+    # structurally untouched, and migrate_provider_tokens still fixes its id.
+    _category_roots = {_norm_path(os.path.join(LOCAL_ROOT, sub))
+                       for subs in CATEGORY_ROOTS.values() for sub in subs}
+    if _norm_path(os.path.dirname(parent)) in _category_roots:
+        return False, (f"parent is a language folder (direct child of a category root): "
+                       f"{parent} — flat show, left structurally untouched")
+
+    try:
+        children = [e.path for e in os.scandir(parent) if e.is_dir()]
+    except OSError as e:
+        return False, f"could not list parent folder {parent}: {e}"
+    show_id_str = str(show_tmdb_id)
+    for child in children:
+        ids = _folder_tmdb_owner_ids(library, child)
+        if ids is None:
+            continue  # untracked sibling — rides along for free (Mr.Robot S04 case)
+        if not ids:
+            return False, (f"'{os.path.basename(child)}' under '{os.path.basename(parent)}' has "
+                            f"library-tracked content but no discoverable TMDB id (no folder "
+                            f"token, no metadata.tmdb_id) — category-folder guard refuses it "
+                            f"(ambiguous; run enrich_metadata first)")
+        foreign = ids - {show_id_str}
+        if foreign:
+            return False, (f"'{os.path.basename(parent)}' holds another title's folder "
+                            f"('{os.path.basename(child)}', TMDB id {sorted(foreign)[0]}) — "
+                            f"category-folder guard refuses it")
+    return True, None
+
+
+def _find_show_tmdb_id(parent_basename, season_basename, season_entry):
+    """The TMDB id for a season's show, tried in priority order, plus which
+    source supplied it (for the report / dry-run print):
+
+      1. The PARENT (show) folder's own existing token — the simplest,
+         already-authoritative case (Phase A already done, e.g. on a re-run).
+      2. The season folder's OWN token — the documented real gap this command
+         exists to fix: 30 of 59 real season folders are the ONLY place their
+         show's id survives (their show folder has none).
+      3. metadata.tmdb_id on the season_map entry itself — written by a prior
+         enrich_metadata run onto EVERY id of a show unit (season_maps
+         included), even one where the folder-token stamp never landed.
+
+    Returns (id, source_label), or (None, None) when no source has one. Never
+    raises; never queries TMDB (id resolution is purely local/library-derived,
+    so Phase A works even with no TMDB API key configured)."""
+    for t in mvcommon.find_provider_tokens(parent_basename):
+        if t["provider"] == "tmdb":
+            return t["id"], "parent folder's existing token"
+    for t in mvcommon.find_provider_tokens(season_basename):
+        if t["provider"] == "tmdb":
+            return t["id"], "season folder's own token"
+    meta_id = (season_entry.get("metadata") or {}).get("tmdb_id")
+    if meta_id:
+        return meta_id, "metadata.tmdb_id"
+    return None, None
+
+
+def cmd_normalize_season_folders(arg=None, *flags):
+    """Structural season-folder rename (IMP-U6 Steps 15-18): give each SHOW
+    folder its TMDB token, then rename each SEASON folder underneath it to
+    `<Show Name> Season <NN> (<season air year>)` — WITH NO ID ON THE SEASON.
+
+    Usage: normalize_season_folders [id_or_prefix] [--apply]
+    DRY-RUN by default (prints every `OLD -> NEW` it WOULD rename, both
+    phases, plus a summary; writes nothing — no library mutation, no disk
+    mutation, no report file). `--apply` performs it for real and writes a
+    JSON audit report. No `--library` filter (unlike migrate_provider_tokens):
+    this command only ever considers series/anime season_map entries, so a
+    library filter would have nothing else to restrict.
+
+    WHY: media-server folder names moved to a bare `{tmdb-<id>}` token on the
+    SHOW folder (D11); the user separately asked for season folders to be
+    SELF-IDENTIFYING (each is uploaded to a phone individually) — AND for
+    season folders to carry NO id, because season and show ids collide in one
+    numeric TMDB namespace (Friends S01's own TMDB *season* id, 4573, is
+    "Late Night with Conan O'Brien" as a *show* id) and no media server reads
+    a season-level token anyway, so writing one can only mislead a scanner.
+
+    TWO PHASES, in this order (load-bearing — see "ORDERING" below):
+      A — if a season's parent is a genuine, untokened SHOW folder (see THE
+          CATEGORY-FOLDER GUARD), rename it to `<existing name>
+          {tmdb-<id>}` (mvcommon.CANONICAL_TMDB_TOKEN_FMT — NEVER a hardcoded
+          literal). The id is resolved via _find_show_tmdb_id (parent's own
+          token -> season's own token -> season_map's metadata.tmdb_id).
+      B — rename the season folder to `<Show Name> Season <NN> (<year>)`.
+          Show Name + per-season air_date come from ONE cached
+          `GET /tv/{tmdb_id}` call per show (_tmdb_get — the SAME TMDB
+          plumbing/cache/api-key resolution every other TMDB command uses; no
+          new HTTP path). Show Name is sanitized for Windows-illegal
+          characters (_sanitize_folder_name_component) since this is the
+          FIRST place in the codebase a raw external title becomes a folder
+          name. A season with no `air_date` (or a failed /tv/{id} call) is
+          SKIPPED, not given an invented year.
+
+    THE CATEGORY-FOLDER GUARD (_season_parent_is_exclusive_to_show) — the most
+    dangerous code in this command. A season's os.path.dirname() is ONLY ever
+    treated as its show folder if EVERY direct subdirectory in it is either
+    untracked by the library, or tracked EXCLUSIVELY by this SAME show's TMDB
+    id (_folder_tmdb_owner_ids — TMDB id, not a library key: MediaVault's
+    library ids embed the SEASON's own air year, so a show's own sibling
+    seasons carry DIFFERENT library keys but share ONE TMDB id). A single
+    sibling tracked under a DIFFERENT TMDB id — or tracked at all with no
+    discoverable TMDB id anywhere (ambiguous) — fails the guard: that parent
+    is a CATEGORY folder (`Classic` holds Friends/Peaky Blinders/The Wire/
+    Chernobyl's flat folder as four unrelated direct children) and is left
+    byte-identical. The guard checks EXACTLY ONE hop up, never further — see
+    that function's docstring for why not-climbing is itself part of the
+    safety (the Tamil counter-example: a language folder that currently,
+    coincidentally, holds only one show). It runs PER GROUP (after that
+    group's own TMDB id is resolved below), not per season, so every season
+    of one show gets one consistent verdict.
+
+    UNTRACKED SIBLING (Mr.Robot: 3 library-tracked seasons + one un-prepped
+    `Mr.Robot.S04.BluRay.2019.1080p.DTS` directory, same show): the guard
+    treats an untracked sibling as harmless and does NOT refuse it — it has no
+    library entry to misattribute, and physically rides along for free when
+    the parent is renamed. Refusing on ANY unknown directory (the naive
+    version of this guard) would incorrectly refuse Mr.Robot itself.
+
+    FLAT SHOWS (one folder is both show and season, e.g. `Chernobyl
+    (Miniseries) 2019 … [tmdbid-87108]` sitting directly in `Classic`) are
+    left STRUCTURALLY UNTOUCHED — migrate_provider_tokens already fixes their
+    id in place. A flat show sharing its category folder with other tracked
+    shows is already excluded by the sibling-ownership guard above. A SOLO
+    flat show (the only thing in its category folder right now, e.g. `Tamil`)
+    would NOT be caught by sibling-ownership alone (nothing to conflict
+    with) — so this command ALSO requires the season folder's own basename to
+    embed a season marker (_season_folder_looks_season_shaped) before it is
+    even considered a Phase A/B candidate. A flat show's own name never embeds
+    one; a real season folder's name (even a release-style one) always does.
+    This is a DELIBERATE addition beyond the literal "check every sibling"
+    rule, adopted because it can only ever cause an EXTRA (safe) skip, never a
+    wrongful rename — the "refuse a borderline case rather than rename it"
+    instruction this guard was built to satisfy. (Flag for Step 18: if the
+    real-library run finds a legitimate season folder skipped by this check,
+    loosen the regex — never the sibling rule.)
+
+    ORDERING — Phase A before Phase B, per show, NOT deepest-first: unlike
+    cmd_migrate_provider_tokens's single flat deepest-first candidate list,
+    this command's phases run SHALLOWEST-first per show. This is NOT about
+    cmd_rename_folder's cascade (a directory rename moves whatever is inside
+    it regardless of which level renamed first — a plain os.rename at either
+    level composes correctly either way). It is about ID SOURCING:
+    _find_show_tmdb_id can read an id off the season folder's OWN token — but
+    Phase B's whole point is to STRIP that token. If a season's Phase B ran
+    before its show's Phase A, the id would already be gone by the time Phase
+    A went looking for it, and for the 30-of-59 shows whose ONLY surviving id
+    is on the season folder, that id would be permanently lost. So: for a
+    given show (grouped by the season's OWN computed parent — every season
+    sharing that exact parent, e.g. Friends' S01/S02/…, is one group), Phase
+    A's rename (if any) always completes BEFORE any of that group's Phase B
+    renames begin. Between DIFFERENT shows, order is immaterial (independent
+    subtrees); groups are processed in a stable, sorted order for
+    reproducible dry-run output.
+
+    IDEMPOTENT BY RE-DETECTION, no new state file (mirrors
+    migrate_provider_tokens exactly): Phase A is skipped whenever the parent
+    already carries ANY recognized tmdb token (mvcommon.has_tmdb_token);
+    Phase B is skipped whenever the season folder's basename is ALREADY
+    byte-identical to the computed `<Show> Season NN (year)` target. Re-
+    detection for the CATEGORY-FOLDER GUARD itself additionally depends on
+    every season's TMDB id staying DISCOVERABLE across runs — since Phase B's
+    whole point is to remove the id from the season folder's name, `--apply`
+    ALSO writes the group's resolved id to `metadata.tmdb_id` on every season
+    in the group (the same field enrich_metadata already uses), so a season
+    whose ONLY id source was its own now-stripped folder name is still
+    identifiable — via metadata — on a later run.
+
+    REPORT (only on --apply): `<LOCAL_ROOT>/migration_reports/
+    season_folders_<UTC ISO8601 timestamp>.json` (same-second de-collision
+    suffix as migrate_provider_tokens) shaped:
+      {"scanned": N,                      # in-scope season_map entries considered
+       "show_folders_tokened": [{"show_id", "old_folder", "new_folder", "id_source"}],
+       "seasons_renamed": [{"season_id", "old_folder", "new_folder"}],
+       "already_normalized": K,           # seasons already in final shape (no-op)
+       "skipped": [{"season_id", "old_folder", "reason"}],   # guard/data-driven skips
+       "errors": [...]}                   # cmd_rename_folder declines / RollbackHardFail
+    A cmd_rename_folder PONR-crossed failure (RollbackHardFail) is caught and
+    recorded in `errors` with the printed resume_cmd; the run CONTINUES with
+    the next group ("Decision 7" convention, same as migrate_provider_tokens)
+    — EXCEPT that a Phase A failure for a group aborts THAT group's Phase B
+    (the parent may be in a torn state; re-run the printed resume_cmd, then
+    re-run this command to pick up cleanly) — the aborted seasons are listed
+    on the error record's `seasons_not_attempted`.
+
+    SCOPE: only `type == "season_map"` entries under series/anime
+    (category_of_id != "movies"/"other") are ever considered — mirrors
+    cmd_enrich_metadata's own "IMP-D18: Others/sports is not on TMDB, never
+    enrich it" exclusion (Others has no TMDB id to source from either).
+    `multi_ep_alias` carries no folder_path and is never iterated directly
+    here (only reached, harmlessly, as an owned descendant via
+    _collect_folder_descendants, which already skips it)."""
+    flist = list(flags)
+    if arg and str(arg).startswith("--"):
+        flist = [arg] + flist
+        id_or_prefix = None
+    else:
+        id_or_prefix = arg or None
+    apply = "--apply" in flist
+
+    def _in_scope(mid):
+        if id_or_prefix and not (mid == id_or_prefix or mid.startswith(id_or_prefix)):
+            return False
+        return True
+
+    library = load_library()
+    api_key = mvcommon.tmdb_api_key()
+
+    # --- discovery: in-scope season_map entries (series/anime only). ---
+    seasons = []
+    for mid, entry in library.items():
+        if entry.get("type") != "season_map":
+            continue
+        if category_of_id(mid) not in ("series", "anime"):
+            continue
+        if not entry.get("folder_path"):
+            continue
+        if not _in_scope(mid):
+            continue
+        seasons.append((mid, entry))
+    seasons.sort(key=lambda t: t[0])
+    scanned = len(seasons)
+
+    # --- group by the season's OWN immediate parent (one Phase-A target per
+    # parent; every season sharing that exact parent, e.g. a multi-season
+    # show's S01/S02/…, is one group). The season-marker-shape gate is
+    # evaluated per season, against the ORIGINAL on-disk tree, BEFORE any
+    # rename in this run executes — so it never depends on this run's own
+    # processing order. THE CATEGORY-FOLDER GUARD itself is evaluated per
+    # GROUP, below (in the planning loop), AFTER that group's own TMDB id has
+    # been resolved — it needs a real show identity to compare siblings
+    # against (_folder_tmdb_owner_ids), and that identity can only be reliably
+    # known once every season sharing this parent has had a chance to supply
+    # it (the same season-to-season fallback the id-resolution step below
+    # already does), not from any ONE season alone. ---
+    groups = {}   # norm(parent) -> {"parent", "seasons": [(mid, entry, season_number, folder)]}
+    skipped = []
+    for mid, entry in seasons:
+        folder = os.path.abspath(entry["folder_path"])
+        season_number = _season_number_of(mid)
+        if season_number is None:
+            skipped.append({"season_id": mid, "old_folder": folder,
+                             "reason": "could not parse a season number from this id"})
+            continue
+        basename = os.path.basename(folder)
+        if not _season_folder_looks_season_shaped(basename):
+            skipped.append({"season_id": mid, "old_folder": folder,
+                             "reason": "folder name has no season marker (S01/Season 01/…) — "
+                                       "treated as a possible flat show, left structurally alone"})
+            continue
+        parent = os.path.dirname(folder)
+        g = groups.setdefault(_norm_path(parent), {"parent": parent, "seasons": []})
+        g["seasons"].append((mid, entry, season_number, folder))
+
+    # --- plan every rename (both phases), for EVERY group, regardless of
+    # --apply — this is what makes the dry-run preview real (id + TMDB
+    # name/year are actually resolved, not guessed) and is the SAME work
+    # --apply needs, so it is done exactly once. ---
+    mode = "APPLY" if apply else "DRY-RUN"
+    print(f"=== NORMALIZE SEASON FOLDERS ({mode}) ===")
+    if id_or_prefix:
+        print(f"   > scope: ids == or startswith '{id_or_prefix}'")
+    print(f"   > {scanned} season folder(s) in scope.\n")
+    if not api_key:
+        print("⚠️  No TMDB API key configured — Phase B (season renames) will be skipped for "
+              "every show; only Phase A (show-folder tokening) can run.\n")
+
+    plan = []
+    already_normalized = 0
+
+    for parent_norm in sorted(groups):
+        g = groups[parent_norm]
+        parent = g["parent"]
+        g["seasons"].sort(key=lambda t: t[2])  # by season number
+        parent_basename = os.path.basename(parent)
+
+        # --- id resolution BEFORE any Phase B rename could strip it (load-bearing order — see docstring "ORDERING"). ---
+        tmdb_id, id_source = None, None
+        if mvcommon.has_tmdb_token(parent_basename):
+            for t in mvcommon.find_provider_tokens(parent_basename):
+                if t["provider"] == "tmdb":
+                    tmdb_id, id_source = t["id"], "parent folder's existing token"
+                    break
+        if tmdb_id is None:
+            for mid, entry, season_number, folder in g["seasons"]:
+                tmdb_id, id_source = _find_show_tmdb_id(parent_basename, os.path.basename(folder), entry)
+                if tmdb_id:
+                    break
+        if tmdb_id is None:
+            for mid, entry, season_number, folder in g["seasons"]:
+                skipped.append({"season_id": mid, "old_folder": folder,
+                                 "reason": "no TMDB id known for this show (no token on the show "
+                                           "or season folder, no metadata.tmdb_id) — has it been "
+                                           "enriched? run enrich_metadata first"})
+            continue
+
+        # THE CATEGORY-FOLDER GUARD (_season_parent_is_exclusive_to_show) —
+        # run HERE, per group, against the group's own just-resolved TMDB id
+        # (defect 1 fix: TMDB id, not a library key, is the identity every
+        # direct sibling of `parent` is compared against — see that
+        # function's docstring + _folder_tmdb_owner_ids). A guard failure
+        # skips the WHOLE group, so every season of one show gets one
+        # consistent verdict rather than a per-season one.
+        exclusive, reason = _season_parent_is_exclusive_to_show(library, parent, tmdb_id)
+        if not exclusive:
+            for mid, entry, season_number, folder in g["seasons"]:
+                skipped.append({"season_id": mid, "old_folder": folder, "reason": reason})
+            continue
+
+        # Cosmetic, report-only label (the documented report's "show_id"
+        # field) — the lowest-season-number entry's own library-style id.
+        # The real identity used for the rename/guard above is `tmdb_id`,
+        # already recorded verbatim in new_parent_basename/id_source below.
+        show_id = _show_id_of(g["seasons"][0][0], g["seasons"][0][1], library)
+
+        will_stamp = not mvcommon.has_tmdb_token(parent_basename)
+        # One token per folder (user decision, 2026-09-22). A show folder carrying
+        # a stale NON-tmdb provider token — the real cases are
+        # `Dark (2017) [tvdbid-334824]` and `Fringe (2008) [tvdbid-82066]` — would
+        # otherwise end up with two (`Dark (2017) [tvdbid-334824] {tmdb-70523}`).
+        # Both ids name the same show so it is harmless, but cluttered, and the
+        # tvdb one is dead weight: MediaVault is TMDB-for-everything and refuses
+        # -tvdbid (IMP-D22), and Plex ignores the `tvdbid` spelling entirely
+        # (verified on real servers, test row S8). Strip any non-tmdb token off
+        # the basename before appending the canonical one, using each token's own
+        # span so the rest of the name survives byte-identically.
+        stamp_base = parent_basename
+        if will_stamp:
+            for tok in sorted(mvcommon.find_provider_tokens(stamp_base),
+                              key=lambda t: t["span"][0], reverse=True):
+                if tok["provider"] == "tmdb":
+                    continue  # cannot happen under will_stamp; belt and braces
+                s, e = tok["span"]
+                stamp_base = (stamp_base[:s] + stamp_base[e:]).replace("  ", " ").strip()
+        new_parent_basename = (f"{stamp_base} {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=tmdb_id)}"
+                                if will_stamp else parent_basename)
+        new_parent_path = os.path.join(os.path.dirname(parent), new_parent_basename)
+        if will_stamp:
+            print(f"   [show]   {parent} -> {new_parent_path}  (id source: {id_source})")
+
+        season_plan = []
+        if not api_key:
+            for mid, entry, season_number, folder in g["seasons"]:
+                skipped.append({"season_id": mid, "old_folder": folder,
+                                 "reason": "no TMDB API key configured — season rename needs the "
+                                           "show name/air year"})
+        else:
+            detail = _tmdb_get(f"{TMDB_API_ROOT}/tv/{tmdb_id}", {}, api_key)
+            if not isinstance(detail, dict) or not detail.get("name"):
+                for mid, entry, season_number, folder in g["seasons"]:
+                    skipped.append({"season_id": mid, "old_folder": folder,
+                                     "reason": f"TMDB GET /tv/{tmdb_id} failed or returned no name "
+                                               f"— season(s) not renamed"})
+            else:
+                show_name = _sanitize_folder_name_component(detail.get("name"))
+                year_by_season = {}
+                for s in detail.get("seasons") or []:
+                    if not isinstance(s, dict):
+                        continue
+                    sn = s.get("season_number")
+                    air = s.get("air_date")
+                    if isinstance(sn, int) and isinstance(air, str) and re.match(r"\d{4}", air):
+                        year_by_season[sn] = air[:4]
+
+                for mid, entry, season_number, folder in g["seasons"]:
+                    year = year_by_season.get(season_number)
+                    if not year:
+                        skipped.append({"season_id": mid, "old_folder": folder,
+                                         "reason": f"TMDB has no air_date for season {season_number} "
+                                                   f"— not renamed (never inventing a year)"})
+                        continue
+                    new_season_name = f"{show_name} Season {season_number:02d} ({year})"
+                    if os.path.basename(folder) == new_season_name:
+                        already_normalized += 1
+                        continue
+                    new_folder_display = os.path.join(new_parent_path, new_season_name)
+                    print(f"   [season] {folder} -> {new_folder_display}")
+                    season_plan.append({"season_id": mid, "old_folder": folder,
+                                         "new_name": new_season_name,
+                                         "new_folder": new_folder_display})
+
+        all_season_ids = [mid for mid, entry, season_number, folder in g["seasons"]]
+        plan.append({"parent": parent, "show_id": show_id, "tmdb_id": tmdb_id, "will_stamp": will_stamp,
+                     "new_parent_basename": new_parent_basename, "new_parent_path": new_parent_path,
+                     "id_source": id_source, "seasons": season_plan,
+                     "all_season_ids": all_season_ids})
+
+    if not apply:
+        would_token = sum(1 for p in plan if p["will_stamp"])
+        would_rename = sum(len(p["seasons"]) for p in plan)
+        print(f"\n=== DRY-RUN === scanned={scanned} show_folders_would_token={would_token} "
+              f"seasons_would_rename={would_rename} already_normalized={already_normalized} "
+              f"skipped={len(skipped)}")
+        print("   (dry-run: nothing was written — re-run with --apply to perform it.)")
+        return
+
+    # --- APPLY: execute Phase A then Phase B, per group (load-bearing order —
+    # see docstring "ORDERING"). Every rename goes through the EXISTING,
+    # crash-safe cmd_rename_folder — never reimplemented here. ---
+    show_folders_tokened = []
+    seasons_renamed = []
+    errors = []
+
+    for p in plan:
+        parent, show_id = p["parent"], p["show_id"]
+        actual_parent = parent
+
+        # Persist this show's TMDB id onto EVERY season_map entry in the group
+        # (all_season_ids — the FULL group, not just season_plan/p["seasons"],
+        # which only lists seasons THIS run is about to rename and would skip
+        # one that is already in its final, id-free shape) as metadata.tmdb_id
+        # — a DURABLE, folder-name-INDEPENDENT identity record (the same
+        # field/semantics enrich_metadata already writes). Without this, a
+        # season whose ONLY id source was its own folder name (the common
+        # real-library case — see id_source) becomes UNIDENTIFIABLE to
+        # _folder_tmdb_owner_ids the moment its name carries no id (whether
+        # stripped by THIS run's Phase B or already gone before it), and a
+        # FUTURE run's category-folder guard would then see it as "tracked
+        # content, no discoverable TMDB id" and wrongly refuse the WHOLE show —
+        # breaking the documented "idempotent by re-detection" guarantee.
+        # Written regardless of this run's rename outcome (identity is already
+        # confirmed once tmdb_id is resolved, independent of whether the
+        # physical rename below succeeds) and BEFORE Phase A/B so a later
+        # RollbackHardFail still leaves the id durably recorded for a retry.
+        try:
+            meta_tmdb_id = int(p["tmdb_id"])
+        except (TypeError, ValueError):
+            meta_tmdb_id = p["tmdb_id"]
+        live = load_library()
+        meta_changed = False
+        for season_id in p["all_season_ids"]:
+            ent = live.get(season_id)
+            if ent is None:
+                continue
+            meta = ent.setdefault("metadata", {})
+            if meta.get("tmdb_id") != meta_tmdb_id:
+                meta["tmdb_id"] = meta_tmdb_id
+                meta_changed = True
+        if meta_changed:
+            save_library(live)
+
+        if p["will_stamp"]:
+            try:
+                ok = cmd_rename_folder(parent, p["new_parent_basename"])
+            except RollbackHardFail as hf:
+                print(f"⚠️  IRREVERSIBLE — show folder moved but the library rewrite failed: "
+                      f"{hf.state} — {hf.reason}")
+                print(f"   > To finish it: {hf.resume_cmd}")
+                errors.append({"season_id": None, "show_id": show_id, "old_folder": parent,
+                                "new_folder": p["new_parent_path"],
+                                "error": f"{hf.state}: {hf.reason}", "resume_cmd": hf.resume_cmd,
+                                "seasons_not_attempted": [s["season_id"] for s in p["seasons"]]})
+                continue  # parent may be in a torn state — do not touch its seasons this run
+            if not ok:
+                errors.append({"season_id": None, "show_id": show_id, "old_folder": parent,
+                                "new_folder": p["new_parent_path"],
+                                "error": "cmd_rename_folder declined (see console output above)",
+                                "seasons_not_attempted": [s["season_id"] for s in p["seasons"]]})
+                continue
+            show_folders_tokened.append({"show_id": show_id, "old_folder": parent,
+                                          "new_folder": p["new_parent_path"], "id_source": p["id_source"]})
+            actual_parent = p["new_parent_path"]
+
+        for s in p["seasons"]:
+            # Re-point onto the REAL, current parent: if Phase A renamed it
+            # above, the season folder physically moved along (cmd_rename_
+            # folder's own descendant cascade) — its OWN basename is
+            # unchanged by that move, so a plain join is enough (a season
+            # folder is always a direct child of its own parent, never
+            # nested deeper).
+            cur_folder = os.path.join(actual_parent, os.path.basename(s["old_folder"]))
+            try:
+                ok = cmd_rename_folder(cur_folder, s["new_name"])
+            except RollbackHardFail as hf:
+                print(f"⚠️  IRREVERSIBLE — season folder moved but the library rewrite failed: "
+                      f"{hf.state} — {hf.reason}")
+                print(f"   > To finish it: {hf.resume_cmd}")
+                errors.append({"season_id": s["season_id"], "old_folder": cur_folder,
+                                "new_folder": os.path.join(actual_parent, s["new_name"]),
+                                "error": f"{hf.state}: {hf.reason}", "resume_cmd": hf.resume_cmd})
+                continue
+            if ok:
+                seasons_renamed.append({"season_id": s["season_id"], "old_folder": cur_folder,
+                                         "new_folder": os.path.join(actual_parent, s["new_name"])})
+            else:
+                errors.append({"season_id": s["season_id"], "old_folder": cur_folder,
+                                "new_folder": os.path.join(actual_parent, s["new_name"]),
+                                "error": "cmd_rename_folder declined (see console output above)"})
+
+    report = {"scanned": scanned, "show_folders_tokened": show_folders_tokened,
+              "seasons_renamed": seasons_renamed, "already_normalized": already_normalized,
+              "skipped": skipped, "errors": errors}
+    report_dir = os.path.join(LOCAL_ROOT, "migration_reports")
+    os.makedirs(report_dir, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    report_path = os.path.join(report_dir, f"season_folders_{ts}.json")
+    # Same-second collision guard as cmd_migrate_provider_tokens's own report.
+    n = 1
+    while os.path.exists(report_path):
+        report_path = os.path.join(report_dir, f"season_folders_{ts}-{n}.json")
+        n += 1
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+
+    print(f"\n=== APPLIED === scanned={scanned} show_folders_tokened={len(show_folders_tokened)} "
+          f"seasons_renamed={len(seasons_renamed)} already_normalized={already_normalized} "
+          f"skipped={len(skipped)} errors={len(errors)}")
     print(f"   > report: {report_path}")
 
 
@@ -9089,8 +9785,10 @@ def suggest_target_folder(item):
     the entry's existing folder_path with applies=False (informational only).
     For a NEW (UNPREPPED) item, builds a leaf-folder name from the guessed
     Title/Year plus an EDITABLE provider-id placeholder per the provider-tag
-    template (Movies -> [tmdbid-…], Series/Anime -> [tvdbid-…]). This step does NO
-    TMDB/TVDB lookup; the brackets hold an editable placeholder.
+    template — `{tmdb-0000000}` for EVERY category, movies and series/anime
+    alike, since MediaVault is TMDB-for-everything and refuses `-tvdbid`
+    (IMP-D22). This step does NO TMDB lookup; the braces hold an editable
+    placeholder.
     """
     entry = item.get("entry")
     if entry is not None:
@@ -9124,12 +9822,15 @@ def suggest_target_folder(item):
 
     year_disp = f"({year})" if year else "(Year)"
 
-    if category == "mov":
-        provider_tag = mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id="0000000")
-        provider_field = "tmdb"
-    else:  # tv / ani -> series-style
-        provider_tag = mvcommon.CANONICAL_TVDB_TOKEN_FMT.format(id="000000")
-        provider_field = "tvdb"
+    # TMDB for every category, movies and series/anime alike. MediaVault is
+    # TMDB-for-everything — `-tvdbid` is refused outright (IMP-D22, a different
+    # id space) — so offering a `[tvdb-…]` placeholder invited the user to type
+    # an id this tool can never resolve. Verified 2026-09-22 against real Plex,
+    # Emby and Jellyfin installs: a `[tmdb-…]` token matches TV shows on all
+    # three (test rows S2/S5/S7), so there is nothing to gain from a second
+    # provider here.
+    provider_tag = mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id="0000000")
+    provider_field = "tmdb"
 
     folder = f"{title} {year_disp} {provider_tag}"
     return {
@@ -10717,8 +11418,9 @@ if __name__ == "__main__":
         print("  sort")
         print("  fetch [id] [tempdir <path>]")
         print("  recover [id|folder]  (or: recover --scan)")
-        print("  rename_folder [id|folder] \"<NewName [tmdbid-12345]>\"  — rename a show/season folder + rewrite every descendant folder_path (crash-safe, no rehash)")
-        print("  migrate_provider_tokens [id_or_prefix] [--apply] [--library movies|series|anime|others]  — migrate every folder still on the OLD {tmdb-…}/[tmdb-…] token format to canonical [tmdbid-…], ancestor-aware (dry-run by default; --apply writes a JSON report under migration_reports/)")
+        print("  rename_folder [id|folder] \"<NewName {tmdb-12345}>\"  — rename a show/season folder + rewrite every descendant folder_path (crash-safe, no rehash)")
+        print("  migrate_provider_tokens [id_or_prefix] [--apply] [--library movies|series|anime|others]  — migrate every folder still on an OLD token format ([tmdbid-…], [tmdb-…], [tmdbid=…], wrong casing) to canonical {tmdb-…}, ancestor-aware (dry-run by default; --apply writes a JSON report under migration_reports/)")
+        print("  normalize_season_folders [id_or_prefix] [--apply]  — two-phase structural rename: Phase A gives the show folder its TMDB token, Phase B renames each season folder to '<Show Name> Season NN (air year)' with NO id on the season (dry-run by default; --apply writes a JSON report under migration_reports/)")
         print("  add_extras <title_id> \"<folders>\" [--extras-size <v|none>] [device <id>] [no-replace]  — attach extras (Specials/Trailers/BTS) to an existing title")
         print("  web [--port N] [--host H] [--no-browser] [--demo]  — Launch the local web operations console (Disk Reclaim view); --demo = SAFE build, all actions simulated")
         print("  token create [--label \"X\"] [--ttl 1h|8h|12h|1d|3d|7d|30d|never]  — Mint a web access token (default --ttl 7d)")
@@ -11335,6 +12037,17 @@ if __name__ == "__main__":
         rest = sys.argv[2:]
         positional = rest[0] if (rest and not rest[0].startswith("--")) else None
         cmd_migrate_provider_tokens(positional, *rest)
+
+    elif cmd == "normalize_season_folders":
+        # normalize_season_folders [id_or_prefix] [--apply]
+        # DRY-RUN by default; --apply performs the two-phase structural rename
+        # (through the existing, crash-safe cmd_rename_folder) and writes a
+        # JSON audit report. Pass the positional id/prefix (if any) plus all
+        # remaining tokens as flags so cmd_normalize_season_folders parses
+        # --apply itself (mirrors migrate_provider_tokens's own CLI wiring).
+        rest = sys.argv[2:]
+        positional = rest[0] if (rest and not rest[0].startswith("--")) else None
+        cmd_normalize_season_folders(positional, *rest)
 
     elif cmd == "add_extras":
         # add_extras <title_id> "<folders>" [--extras-size <v|none>] [device <id_or_name>] [no-replace]

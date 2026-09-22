@@ -682,11 +682,21 @@ def episode_num_from_id(child_id, base_id):
 # looks UP for the show folder).
 #
 # DETECTION is format-agnostic — all of these are real, and all must be found:
-#   {tmdb-603692}    Plex's curly form, and what MediaVault used to emit
-#   [tmdb-603692]    TRaSH-Guides' square preset
-#   [tmdbid-603692]  Emby/Jellyfin's square form — the CANONICAL form we now emit
-#   [tmdbid=603692]  Emby's `=` variant (square family only)
+#   {tmdb-603692}    the CANONICAL form we emit; read by Plex, Emby AND Jellyfin
+#   [tmdb-603692]    square, bare keyword — also read by all three
+#   [tmdbid-603692]  Emby/Jellyfin square form; INVISIBLE TO PLEX (see below)
+#   [tmdbid=603692]  Emby's `=` variant (square family only); invisible to Plex
 # ...in any casing (`Run (2002) {TMDB-69590}` is a real library folder — IMP-C23).
+#
+# Which form each server actually reads was settled empirically on 2026-09-22, not
+# from vendor docs (which disagree with each other and with community lore). A
+# 20-folder matrix was scanned by real Plex, Emby and Jellyfin installs, using
+# nonsense titles and deliberately wrong years so that ONLY a token could produce
+# a correct match. Result: Plex rejects the `id` SUFFIX (`tmdbid`, `tvdbid`) and
+# the `=` separator, and is indifferent to bracket style — it reads `{tmdb-…}`,
+# `[tmdb-…]` and `(tmdb-…)` alike. The widely-repeated claim that Plex ignores
+# square brackets is false. `{tmdb-<id>}` and `[tmdb-<id>]` both work on all
+# three; `{tmdb-<id>}` was chosen (decision D11). Full matrix: DECISIONS.md D11.
 #
 # EMISSION is single-format: every emit site formats CANONICAL_TMDB_TOKEN_FMT /
 # CANONICAL_TVDB_TOKEN_FMT, so changing what we WRITE is a one-line change here
@@ -699,8 +709,9 @@ def episode_num_from_id(child_id, base_id):
 # back. Callers must reach it module-qualified (`mvcommon.has_tmdb_token(...)`),
 # per the binding-hazard note in the RUNTIME CONFIG section.
 
-CANONICAL_TMDB_TOKEN_FMT = "[tmdbid-{id}]"  # .format(id=…) -> "[tmdbid-603692]"
-CANONICAL_TVDB_TOKEN_FMT = "[tvdbid-{id}]"  # placeholder-only; never a real lookup
+CANONICAL_TMDB_TOKEN_FMT = "{{tmdb-{id}}}"  # .format(id=…) -> "{tmdb-603692}"
+# ^ the doubled braces are str.format() escaping, not a typo: "{{" emits one "{".
+CANONICAL_TVDB_TOKEN_FMT = "{{tvdb-{id}}}"  # placeholder-only; never a real lookup
 
 # STAGE 1 — bracket spans. Two deliberately dumb regexes with zero vocabulary
 # knowledge: "an opening bracket, some bracket-free text, the MATCHING closing

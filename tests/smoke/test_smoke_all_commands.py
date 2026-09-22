@@ -1058,12 +1058,12 @@ class TestEachCommand:
     # ---- migrate_provider_tokens ---------------------------------------------
     def test_migrate_provider_tokens_dry_run_then_apply_then_idempotent(
             self, sandbox, capsys):
-        """IMP-U6: an old-style `{tmdb-…}` folder is left untouched by a
-        dry-run (1 candidate reported, nothing on disk or in the library
-        changes), then renamed to the canonical `[tmdb-…]` by `--apply`
-        (folder_path re-pointed, entry otherwise byte-identical), and a
-        second `--apply` is a no-op (0 further renames)."""
-        old_folder = sandbox["local_root"] / "Movies" / "OldToken (2015) {tmdb-321}"
+        """IMP-U6: an old-style `[tmdbid-…]` folder — the shape the user's live
+        library is in — is left untouched by a dry-run (1 candidate reported,
+        nothing on disk or in the library changes), then renamed to the canonical
+        `{tmdb-…}` by `--apply` (folder_path re-pointed, entry otherwise
+        byte-identical), and a second `--apply` is a no-op (0 further renames)."""
+        old_folder = sandbox["local_root"] / "Movies" / "OldToken (2015) [tmdbid-321]"
         old_folder.mkdir(parents=True)
         (old_folder / "m.mkv").write_bytes(b"DUMMY")
         entry_id = "mov-en-2015-oldtoken"
@@ -1861,7 +1861,7 @@ class TestPrepPushRepEnrich:
                               returns (does not hang), folder left unrenamed,
                               metadata.tmdb_id still written.
       3. season             — a 1-episode season through the season autopilot;
-                              the SHOW folder gets the [tmdb-…] token.
+                              the SHOW folder gets the {tmdb-…} token.
       4. -tvdbid refusal    — both commands refuse before anything runs
                               (no TMDB call, nothing prepped).
     """
@@ -1871,7 +1871,7 @@ class TestPrepPushRepEnrich:
             self, sandbox, make_video, stub_tech_specs, mock_device, fake_dummy,
             mock_tmdb, monkeypatch, capsys):
         """`-tmdbid` + `--yes`: the movie ends ARCHIVED, carries the tmdb_id,
-        its folder gets the [tmdb-…] token and a poster lands inside it."""
+        its folder gets the {tmdb-…} token and a poster lands inside it."""
         _empty_libs(sandbox)
         _forbid_input(monkeypatch)
         _serve_tmdb_details(monkeypatch, mock_tmdb,
@@ -1933,7 +1933,7 @@ class TestPrepPushRepEnrich:
             mock_tmdb, monkeypatch, capsys):
         """A 1-episode season through the season autopilot: the episode ends
         ARCHIVED and the SHOW folder (== the season folder in this flat layout,
-        the dominant real-library shape) carries the [tmdb-…] token."""
+        the dominant real-library shape) carries the {tmdb-…} token."""
         _empty_libs(sandbox)
         _forbid_input(monkeypatch)
         _serve_tmdb_details(monkeypatch, mock_tmdb,

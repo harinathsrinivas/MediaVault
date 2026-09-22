@@ -170,8 +170,9 @@ class TestSuggestTargetFolder:
         MediaVault is TMDB-for-everything and refuses `-tvdbid` outright
         (IMP-D22, a different id space), so a `[tvdb-…]` placeholder invited the
         user to type an id this tool can never resolve. Verified 2026-09-22
-        against real Plex/Emby/Jellyfin installs: a `[tmdb-…]` token matches TV
-        shows on all three, so a second provider buys nothing here."""
+        against real Plex/Emby/Jellyfin installs: a `tmdb` token matches TV
+        shows on all three (in any bracket style), so a second provider buys
+        nothing here."""
         item = self._make_item("tv-en-2017-dark-s01e01")
         result = main.suggest_target_folder(item)
         expected = mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id="0000000")

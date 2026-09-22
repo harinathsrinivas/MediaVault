@@ -850,3 +850,87 @@ block on `AskUserQuestion`.
    spellings and both separators on the square-bracket family (cheap, safe, already specified in Step
    1); emission stays fixed at the single canonical `[tmdbid-<id>]` form regardless of this
    uncertainty, so it cannot cause a regression in either direction.
+
+
+---
+
+# ADDENDUM — 2026-09-22: empirical re-scope after real-server testing
+
+Steps 0-14 shipped `[tmdbid-<id>]`. Real Plex/Emby/Jellyfin testing (decision D11) proved that format
+is invisible to Plex, and the user then asked for a second, structural change to season folder names.
+This addendum supersedes the relevant parts of the plan above.
+
+## The agreed folder-name format (one table, no jargon)
+
+| Kind of folder | Format | Example |
+|---|---|---|
+| Movie | `<existing name> [tmdb-<id>]` | `Oceans.Eleven.2001.DV.HDR.2160p… [tmdb-161]` |
+| Show (parent of season folders) | `<existing name> [tmdb-<id>]` | `Peaky Blinders [tmdb-60574]` |
+| Season | `<Show Name> Season <NN> (<season air year>)` | `The Wire Season 01 (2002)` |
+| Flat show (one folder = show AND season) | `<existing name> [tmdb-<id>]` | `Chernobyl (Miniseries) 2019 … [tmdb-87108]` |
+
+Rules that fall out of the evidence:
+
+- **`[tmdb-<id>]`, never `[tmdbid-…]`.** Plex rejects the `id` suffix on both tmdb and tvdb; bare
+  `tmdb`/`tvdb` work on all three servers. Bracket style is irrelevant to Plex — the suffix was the
+  whole defect.
+- **Season folders carry NO id.** Verified hazard: Friends S01's own TMDB *season* id is 4573, and
+  4573 as a *show* id is "Late Night with Conan O'Brien". Season and show ids share one namespace and
+  no server reads a season-level token, so writing one can only mislead.
+- **TMDB for every category** — movies, series and anime. MediaVault refuses `-tvdbid` (IMP-D22), and
+  test rows S2/S5/S7 confirmed `[tmdb-…]` matches TV shows on all three servers.
+- **Release names are preserved** on movie and show folders (user's explicit choice). Only the
+  id-in-brackets part changes.
+
+## Steps 15-18 (new)
+
+- [ ] 15. [model: fable] [fallback: opus] `cmd_normalize_season_folders` — the structural rename.
+  - Files: `main.py`
+  - Two phases, in this order, because phase B depends on phase A:
+    - **A — give the show folder the id.** 30 of 59 season folders are the ONLY place their id
+      exists (their show folder has none). Renaming those seasons to a token-free name without
+      first moving the id up would destroy it. So: where a season's parent is a genuine show folder
+      lacking a token, rename the parent to `<existing name> [tmdb-<id>]`.
+    - **B — rename the season folder** to `<Show Name> Season <NN> (<season air year>)`, no id.
+      Show name and per-season `air_date` come from TMDB (`/tv/{id}` and its `seasons[]`).
+  - **CATEGORY-FOLDER GUARD (load-bearing — a bug here is catastrophic).** A season's parent is only
+    a show folder if every directory under it belongs to this same show. `C:\Media\Series\English\Classic`
+    is a *category* folder holding Friends, Peaky Blinders, The Wire and Chernobyl's season; tokening
+    it would label the whole classics collection as Chernobyl. `C:\Media\Series\Tamil` is a language
+    folder with the same shape. These must never be renamed. A flat show whose single folder sits
+    directly under such a category folder is left structurally alone — phase 1's token swap is all it
+    needs.
+  - Dry-run by default, `--apply` to execute; every rename goes through the existing crash-safe
+    `cmd_rename_folder` so `folder_path` is rewritten for every descendant in one journalled
+    transaction. Idempotent by re-detection. Deepest-first, as the migration command already is.
+  - Acceptance: a fixture reproducing the Peaky-Blinders shape (untokened show folder, release-named
+    seasons) ends with the id on the show folder and clean `Season NN (year)` names beneath it; a
+    fixture reproducing the Classic shape leaves the category folder byte-identical; re-running is a
+    no-op.
+
+- [ ] 16. [model: opus] Tests for `cmd_normalize_season_folders` (`tests/test_normalize_season_folders.py`).
+  Must include the category-folder guard, the flat-show skip, the air-year lookup, idempotency,
+  dry-run purity, and that no season folder ends up with an id in its name.
+
+- [ ] 17. [model: sonnet] Docs: ARCHITECTURE.md + README.md + OPERATIONS_QA.md for the new command and
+  the season-name convention; update the DECISIONS D11 card with the structural rules.
+
+- [ ] 18. [model: opus] Full verification + the real-library run order (post-merge, user-run):
+  1. `python main.py migrate_provider_tokens` (dry-run) → review → `--apply`  — 237 folders
+  2. `python main.py normalize_season_folders` (dry-run) → review → `--apply` — 8 show folders + 29 seasons
+  3. `python main.py verify_library` and a `recover --scan` to confirm a clean journal
+
+## What must re-run after this change
+
+| Re-run | Why |
+|---|---|
+| Full suite + smoke | Emission format changed; every assertion that pins a stamped name moved. |
+| `migrate_provider_tokens` dry-run | Its worklist went 1 → 237 once `[tmdbid-]` stopped being canonical. |
+| The real-library audit | Counts in the body of this plan (135/145/202) predate both the D11 flip and the user's continued archiving; the live numbers are 237 token renames, 29 season renames, 8 show-folder tokens. |
+| Media-server rescan | Folder names change, so Plex/Emby/Jellyfin need a scan to pick up the new paths. |
+
+## What does NOT need to re-run
+
+Detection (Steps 1-2), the artwork-inheritance fix (Step 8) and the mkvmerge escape pin (Step 10) are
+format-agnostic by construction and are unaffected by the D11 flip — that was the point of routing
+every emission through one constant and keeping detection a superset.

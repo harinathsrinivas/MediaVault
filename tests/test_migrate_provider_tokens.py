@@ -1,8 +1,8 @@
 """IMP-U6 — the provider-token format migration command (cmd_migrate_provider_tokens).
 
-Migrates every on-disk folder still carrying an OLD tmdb spelling (curly
-`{tmdb-…}`, or a non-canonical square `[tmdbid-…]`/`[tmdbid=…]`) to the canonical
-`[tmdb-…]`. Discovery is ANCESTOR-AWARE (it climbs from every physical entry's
+Migrates every on-disk folder still carrying an OLD tmdb spelling (a square
+`[tmdb-…]`/`[tmdbid-…]`/`[tmdbid=…]`, or a wrong-cased curly `{TMDB-…}`) to the
+canonical `{tmdb-…}`. Discovery is ANCESTOR-AWARE (it climbs from every physical entry's
 `folder_path` up to — not past — LOCAL_ROOT) and renames DEEPEST-FIRST, so a
 show folder no entry's `folder_path` names directly is caught and every folder
 is renamed while its own path is still the one on disk. Every rename goes
@@ -153,12 +153,13 @@ def _movie(entry_id, folder, **overrides):
 # ---------------------------------------------------------------------------
 
 def test_leaf_only_rename_is_hash_and_status_safe(sandbox, capsys):
-    """The entry's own folder carries `{tmdb-…}` (no ancestor involved): it is
-    renamed to the canonical `[tmdb-…]`, `folder_path` is re-pointed, and the
+    """The entry's own folder carries `[tmdbid-…]` — the exact shape the user's
+    live library is in today — with no ancestor involved: it is renamed to the
+    canonical `{tmdb-…}`, `folder_path` is re-pointed, and the
     entry's `hash`/`status`/`uploaded`/`filename` are byte-identical afterwards
     (same hash-safety assertions as test_rename_folder.py — this command only
     ever moves a directory and rewrites path strings)."""
-    entry_id, folder, recorded_hash = _seed_archived_movie(sandbox, "DarkMovie {tmdb-70523}")
+    entry_id, folder, recorded_hash = _seed_archived_movie(sandbox, "DarkMovie [tmdbid-70523]")
     new_folder = folder.parent / f"DarkMovie {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=70523)}"
 
     main.cmd_migrate_provider_tokens("--apply")
@@ -194,9 +195,9 @@ def test_leaf_only_rename_is_hash_and_status_safe(sandbox, capsys):
 
 def test_ancestor_only_rename_friends_shape(sandbox, capsys):
     """The real gap the prior external migration left behind: the SEASON folder
-    (which the entries' `folder_path` names) already carries a square
-    `[tmdbid-…]` token, but its PARENT show folder — named by no entry's
-    folder_path at all — still carries `{tmdb-…}`.
+    (which the entries' `folder_path` names) carries a square `[tmdbid-…]`
+    token, and its PARENT show folder — named by no entry's folder_path at all —
+    carries one too.
 
     What this pins is ANCESTOR DISCOVERY: the show folder is found and renamed
     even though no `folder_path` names it, and both the season_map and the
@@ -204,20 +205,22 @@ def test_ancestor_only_rename_friends_shape(sandbox, capsys):
     (cmd_rename_folder's cascade). The multi_ep_alias under it is never given a
     folder_path.
 
-    `[tmdbid-…]` is an OLD format, NOT the canonical one: Plex ignores the
-    `tmdbid` keyword, so the canonical emit is `[tmdb-…]`. The season leaf is
-    deliberately left seeded in the `[tmdbid-…]` shape the user's real library
-    is in TODAY — which means it is now MIGRATED as well (deepest-first, leaf
-    before ancestor) rather than skipped as already-canonical."""
+    `[tmdbid-…]` is an OLD format, NOT the canonical one: Plex rejects the `id`
+    suffix, so the canonical emit is the curly `{tmdb-…}`. BOTH levels are
+    deliberately seeded in the `[tmdbid-…]` shape the user's real library is in
+    TODAY, which makes this test a true rehearsal of the real run — both migrate,
+    deepest-first, leaf before ancestor. Do not "modernise" these fixtures: they
+    are the migration's actual input."""
     season_id = "tv-en-1994-friends-s01"
     ep_id = "tv-en-1994-friends-s01e01"
     alias_id = "tv-en-1994-friends-s01e02"
 
     classic = sandbox["local_root"] / "Series" / "English" / "Classic"
-    show_old = classic / "Friends (1994) {tmdb-1668}"
-    # Seeded in the EXACT shape the user's real library is in right now. Still a
-    # recognized token (detection is unchanged), but no longer the canonical
-    # emit format -> this leaf migrates too. Do not "modernise" this fixture.
+    # Seeded in the EXACT shape the user's real library is in right now. Still
+    # recognized tokens (detection is unchanged), but no longer the canonical
+    # emit format -> both levels migrate. Do not "modernise" these fixtures.
+    show_old_name = "Friends (1994) [tmdbid-1668]"
+    show_old = classic / show_old_name
     season_old_name = "Friends Season 01 (1994) [tmdbid-1668]"
     season_old = show_old / season_old_name
     season_old.mkdir(parents=True)
@@ -256,11 +259,11 @@ def test_ancestor_only_rename_friends_shape(sandbox, capsys):
     # Two renames — the season leaf AND the ancestor above it.
     assert len(report["renamed"]) == 2
     by_old = {os.path.basename(r["old_folder"]): r for r in report["renamed"]}
-    assert set(by_old) == {season_old_name, "Friends (1994) {tmdb-1668}"}
+    assert set(by_old) == {season_old_name, show_old_name}
 
     # THE POINT OF THIS TEST: the show folder is renamed even though no entry's
     # folder_path names it, and it is reported as an ancestor.
-    ancestor = by_old["Friends (1994) {tmdb-1668}"]
+    ancestor = by_old[show_old_name]
     assert main._norm_path(ancestor["old_folder"]) == main._norm_path(str(show_old))
     assert main._norm_path(ancestor["new_folder"]) == main._norm_path(str(show_new))
     assert ancestor["id_or_note"].startswith("ancestor of")
@@ -287,7 +290,7 @@ def test_apply_is_idempotent_on_rerun(sandbox, capsys):
     errors, and leaves the entry byte-identical. Also pins the report filename
     de-collision — two runs inside the same wall-clock second must never clobber
     the first run's audit trail."""
-    entry_id, folder, _hash = _seed_archived_movie(sandbox, "DarkMovie {tmdb-70523}")
+    entry_id, folder, _hash = _seed_archived_movie(sandbox, "DarkMovie [tmdbid-70523]")
     new_folder = folder.parent / f"DarkMovie {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=70523)}"
 
     main.cmd_migrate_provider_tokens("--apply")
@@ -321,7 +324,7 @@ def test_dry_run_changes_nothing_and_never_calls_rename_folder(sandbox, monkeypa
     never called (monkeypatch spy), the on-disk tree and the library JSON are
     byte-identical afterwards, and NO report file is written (nothing changed,
     so there is nothing to persist)."""
-    entry_id, folder, _hash = _seed_archived_movie(sandbox, "DarkMovie {tmdb-70523}")
+    entry_id, folder, _hash = _seed_archived_movie(sandbox, "DarkMovie [tmdbid-70523]")
 
     calls = []
 
@@ -361,17 +364,20 @@ def test_mixed_format_library_moves_only_non_canonical_tmdb(sandbox, capsys):
     survives byte-identically in the renamed folder's new name, because only the
     tmdb token's own span is rewritten.
 
-    The seeded names below are all REAL formats found in the wild and are left
-    exactly as they were. What the canonical flip changed is which of them is
-    the already-canonical one: `[tmdb-…]` (row C) is now the canonical emit and
-    `[tmdbid-…]` (row A) is now an old format that migrates — so rows A and C
-    swapped roles while the totals (3 renamed / 1 already-canonical) did not."""
+    The seeded names below are all REAL formats found in the wild. WHICH of them
+    counts as already-canonical is exactly the thing that moves when the emit
+    format is flipped: it is now the curly `{tmdb-…}` (row B), and every SQUARE
+    spelling migrates. Each row is therefore identified by its FORMAT and never
+    by its role, so a future flip cannot leave behind a row called "canonical"
+    that is no longer canonical. The totals (3 renamed / 1 already-canonical /
+    6 scanned) are unchanged by the flip; only which row sits in which bucket
+    moved."""
     movies = sandbox["local_root"] / "Movies"
     cases = {
-        "mov-en-2019-canon":    "A Canonical (2019) [tmdbid-111]",           # `tmdbid` keyword -> migrate
-        "mov-en-2018-curly":    "B Curly (2018) {tmdb-222}",                 # curly     -> migrate
-        "mov-en-2017-square":   "C Square (2017) [tmdb-333]",                # CANONICAL -> untouched
-        "mov-en-2016-coexist":  "D Coexist (2016) [tvdbid-444] {tmdb-555}",  # coexisting tvdb -> migrate
+        "mov-en-2019-tmdbid":   "A Tmdbid (2019) [tmdbid-111]",              # `tmdbid` keyword -> migrate
+        "mov-en-2018-curly":    "B Curly (2018) {tmdb-222}",                 # CANONICAL -> untouched
+        "mov-en-2017-square":   "C Square (2017) [tmdb-333]",                # bare square -> migrate
+        "mov-en-2016-coexist":  "D Coexist (2016) [tvdbid-444] [tmdbid=555]",  # Emby `=` + coexisting tvdb -> migrate
         "mov-en-2015-tvdbonly": "E TvdbOnly (2015) [tvdbid-666]",            # no tmdb -> untouched
     }
     library = {}
@@ -387,11 +393,11 @@ def test_mixed_format_library_moves_only_non_canonical_tmdb(sandbox, capsys):
 
     tok = mvcommon.CANONICAL_TMDB_TOKEN_FMT.format
     expected = {
-        "mov-en-2019-canon":    f"A Canonical (2019) {tok(id=111)}",
-        "mov-en-2018-curly":    f"B Curly (2018) {tok(id=222)}",
+        "mov-en-2019-tmdbid":   f"A Tmdbid (2019) {tok(id=111)}",
         # Already canonical — seeded and expected byte-identical, never renamed.
-        "mov-en-2017-square":   "C Square (2017) [tmdb-333]",
-        # The `[tvdbid-444]` half is byte-identical — only `{tmdb-555}` was
+        "mov-en-2018-curly":    "B Curly (2018) {tmdb-222}",
+        "mov-en-2017-square":   f"C Square (2017) {tok(id=333)}",
+        # The `[tvdbid-444]` half is byte-identical — only `[tmdbid=555]` was
         # replaced. This migration NEVER touches a tvdb token's span.
         "mov-en-2016-coexist":  f"D Coexist (2016) [tvdbid-444] {tok(id=555)}",
         "mov-en-2015-tvdbonly": "E TvdbOnly (2015) [tvdbid-666]",
@@ -409,7 +415,7 @@ def test_mixed_format_library_moves_only_non_canonical_tmdb(sandbox, capsys):
         assert (want / "m.mkv").read_bytes() == b"DUMMY"
 
     assert len(report["renamed"]) == 3
-    assert report["already_canonical"] == 1  # only "C" — "E" carries no tmdb token at all
+    assert report["already_canonical"] == 1  # only "B" — "E" carries no tmdb token at all
     assert report["errors"] == []
     assert report["scanned"] == 6           # the five title folders + "Movies"
 
@@ -427,7 +433,10 @@ def test_rartv_release_group_tag_is_preserved_byte_identical(sandbox, capsys):
     base = ("Peaky.Blinders.S06.2022.2160p.iP.WEB-DL.x265.10bit.HDR.HLG.DDP5.1-FLUX"
             "[rartv]")
     canonical_token = mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=60574)
-    old_name = f"{base} {{tmdb-60574}}"
+    # The EXACT real folder — `[rartv]` immediately followed by the `[tmdbid-…]`
+    # the prior external migration left behind. Two adjacent square brackets, one
+    # a provider token and one not: leave this fixture in its live shape.
+    old_name = f"{base} [tmdbid-60574]"
     new_name = f"{base} {canonical_token}"
 
     series = sandbox["local_root"] / "Series"
@@ -465,9 +474,10 @@ def test_apply_report_shape_and_remote_bearing_flag(sandbox, capsys):
     exposure-quantification deliverable: it records which renames touched
     already-pushed content, it does not try to fix the phone side)."""
     movies = sandbox["local_root"] / "Movies"
-    pushed = movies / "Pushed (2020) {tmdb-777}"
-    local = movies / "Local (2021) {tmdb-888}"
-    show = sandbox["local_root"] / "Series" / "Show (2019) {tmdb-999}"
+    # Seeded in the live `[tmdbid-…]` shape, so all three are real candidates.
+    pushed = movies / "Pushed (2020) [tmdbid-777]"
+    local = movies / "Local (2021) [tmdbid-888]"
+    show = sandbox["local_root"] / "Series" / "Show (2019) [tmdbid-999]"
     season = show / "Season 01"
     for d in (pushed, local, season):
         d.mkdir(parents=True)
@@ -505,13 +515,13 @@ def test_apply_report_shape_and_remote_bearing_flag(sandbox, capsys):
     bearing = {os.path.basename(r["old_folder"]): r["remote_bearing"]
                for r in report["renamed"]}
     assert bearing == {
-        "Pushed (2020) {tmdb-777}": True,    # own entry: archived + uploaded
-        "Local (2021) {tmdb-888}": False,    # own entry: local_ready, never pushed
-        "Show (2019) {tmdb-999}": True,      # DESCENDANT episode is onboarded + uploaded
+        "Pushed (2020) [tmdbid-777]": True,    # own entry: archived + uploaded
+        "Local (2021) [tmdbid-888]": False,    # own entry: local_ready, never pushed
+        "Show (2019) [tmdbid-999]": True,      # DESCENDANT episode is onboarded + uploaded
     }
     note = {os.path.basename(r["old_folder"]): r["id_or_note"] for r in report["renamed"]}
-    assert note["Pushed (2020) {tmdb-777}"] == "mov-en-2020-pushed"
-    assert note["Show (2019) {tmdb-999}"].startswith("ancestor of")
+    assert note["Pushed (2020) [tmdbid-777]"] == "mov-en-2020-pushed"
+    assert note["Show (2019) [tmdbid-999]"].startswith("ancestor of")
 
     # --- the file really is on disk, in the documented location ---
     report_dir = sandbox["local_root"] / "migration_reports"
@@ -547,9 +557,9 @@ def test_multi_level_nested_ancestors_migrate_deepest_first(sandbox, monkeypatch
     under each newly-renamed ancestor's prefix."""
     entry_id = "mov-en-2008-tdk"
     movies = sandbox["local_root"] / "Movies"
-    coll_old = movies / "Nolan Coll {tmdb-263}"
-    show_old = coll_old / "Batman {tmdb-120801}"
-    title_old = show_old / "The Dark Knight (2008) {tmdb-155}"
+    coll_old = movies / "Nolan Coll [tmdbid-263]"
+    show_old = coll_old / "Batman [tmdbid-120801]"
+    title_old = show_old / "The Dark Knight (2008) [tmdbid-155]"
     title_old.mkdir(parents=True)
     (title_old / "m.mkv").write_bytes(b"DUMMY")
     _seed(sandbox, {entry_id: _movie(entry_id, title_old)})
@@ -568,12 +578,9 @@ def test_multi_level_nested_ancestors_migrate_deepest_first(sandbox, monkeypatch
     main.cmd_migrate_provider_tokens("--apply")
     _out, report, _path = _read_report(capsys, sandbox)
 
-    # DEEPEST-FIRST: own folder, then its parent, then its grandparent.
-    assert order == [
-        "The Dark Knight (2008) {tmdb-155}",
-        "Batman {tmdb-120801}",
-        "Nolan Coll {tmdb-263}",
-    ]
+    # DEEPEST-FIRST: own folder, then its parent, then its grandparent. Derived
+    # from the seeded Paths so the old-format literals live in exactly one place.
+    assert order == [title_old.name, show_old.name, coll_old.name]
 
     # End state: all three levels canonical, the file still inside, one entry
     # re-pointed through BOTH renamed ancestors.

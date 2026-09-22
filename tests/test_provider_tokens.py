@@ -128,15 +128,22 @@ def test_canonical_tmdb_format_constant():
     # Hardcoding the literal is the POINT of these two tests — they are the one
     # place that pins what the constant expands to. Everywhere else, build the
     # expected name from the constant so the emit format stays a one-line flip.
-    # `tmdb` (not `tmdbid`) is load-bearing: Plex ignores the `tmdbid` keyword,
-    # while `[tmdb-…]` is read by Plex, Emby AND Jellyfin (empirically verified).
-    assert mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=603692) == "[tmdb-603692]"
-    assert mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id="603692") == "[tmdb-603692]"
+    #
+    # Settled against the user's REAL Plex, Emby and Jellyfin servers (a 20-folder
+    # matrix of nonsense titles, so only a token could produce a match):
+    #   - `tmdb` (not `tmdbid`) is the load-bearing half. Plex rejects the `id`
+    #     suffix and the `=` separator; `[tmdbid-603]` matched Emby + Jellyfin but
+    #     NOT Plex.
+    #   - Bracket style is irrelevant to all three: `{tmdb-680}` and `[tmdb-27205]`
+    #     both matched everywhere. Curly is chosen for consistency across movies,
+    #     series and anime.
+    assert mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=603692) == "{tmdb-603692}"
+    assert mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id="603692") == "{tmdb-603692}"
 
 
 def test_canonical_tvdb_format_constant():
-    assert mvcommon.CANONICAL_TVDB_TOKEN_FMT.format(id=0) == "[tvdb-0]"
-    assert mvcommon.CANONICAL_TVDB_TOKEN_FMT.format(id="000000") == "[tvdb-000000]"
+    assert mvcommon.CANONICAL_TVDB_TOKEN_FMT.format(id=0) == "{tvdb-0}"
+    assert mvcommon.CANONICAL_TVDB_TOKEN_FMT.format(id="000000") == "{tvdb-000000}"
 
 
 def test_has_tmdb_token_tolerates_none_and_empty_string():

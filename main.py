@@ -4124,7 +4124,7 @@ def _rewrite_folder_path(folder_path, old_folder, new_folder):
 # ==========================================
 # Migrates every on-disk folder still carrying the OLD tmdb token spelling
 # (curly `{tmdb-…}`, or a non-canonical square `[tmdb-…]`/`[tmdbid=…]`/wrong
-# casing) to the canonical `[tmdbid-…]` (mvcommon.CANONICAL_TMDB_TOKEN_FMT).
+# casing) to the canonical `{tmdb-…}` (mvcommon.CANONICAL_TMDB_TOKEN_FMT).
 # See cmd_migrate_provider_tokens below for the full design rationale.
 
 def _old_style_tmdb_token(basename):
@@ -4132,12 +4132,22 @@ def _old_style_tmdb_token(basename):
     `mvcommon.find_provider_tokens` item — or None if it carries no tmdb token
     at all, or only the EXACT canonical one already.
 
-    'Old-style' = a curly `{tmdb-…}` token (any casing/spelling — curly is
-    never canonical), or a square token whose matched text is not
-    byte-identical to `mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=<its own
-    id>)` — e.g. `[tmdb-…]`, `[tmdbid=…]`, wrong casing. A folder carrying
-    ONLY a `[tvdbid-…]`/`[imdbid-…]` token (no tmdb token) is not old-style —
-    there is nothing here for this migration to do.
+    'Old-style' = ANY tmdb token whose matched text is not byte-identical to
+    `mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=<its own id>)` — e.g.
+    `[tmdbid-…]`, `[tmdb-…]`, `[tmdbid=…]`, or the right shape in the wrong
+    casing. A folder carrying ONLY a `[tvdbid-…]`/`[imdbid-…]` token (no tmdb
+    token) is not old-style — there is nothing here for this migration to do.
+
+    The test is deliberately a pure byte-comparison against the canonical
+    render, with NO special-casing of bracket style. An earlier version also
+    short-circuited on `bracket == "curly"`, encoding the then-true assumption
+    that curly is never canonical. That clause never changed an outcome while
+    canonical was square (a curly token's text cannot equal a square render),
+    and it became actively wrong the moment canonical became curly: every
+    already-migrated `{tmdb-…}` folder was reclassified as a candidate, the
+    rename was refused as already-existing, and the command lost the
+    idempotency its own contract promises. Compare against the constant and
+    nothing else.
 
     find_provider_tokens returns tokens in left-to-right (span) order; the
     FIRST old-style tmdb token found is returned (a real folder name carries
@@ -4146,7 +4156,7 @@ def _old_style_tmdb_token(basename):
         if token["provider"] != "tmdb":
             continue
         canonical = mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=token["id"])
-        if token["bracket"] == "curly" or token["match"] != canonical:
+        if token["match"] != canonical:
             return token
     return None
 
@@ -4165,7 +4175,7 @@ def _apply_token_span(basename, token):
 def cmd_migrate_provider_tokens(arg=None, *flags):
     """Whole-library TMDB provider-token format migration (IMP-U6): every
     on-disk folder still carrying the OLD `{tmdb-…}`/`[tmdb-…]` spelling is
-    renamed to the canonical `[tmdbid-…]`.
+    renamed to the canonical `{tmdb-…}`.
 
     Usage: migrate_provider_tokens [id_or_prefix] [--apply] [--library movies|series|anime|others]
     DRY-RUN by default (prints every `OLD -> NEW` it WOULD rename plus a

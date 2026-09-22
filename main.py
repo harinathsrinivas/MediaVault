@@ -4914,7 +4914,25 @@ def cmd_normalize_season_folders(arg=None, *flags):
         show_id = _show_id_of(g["seasons"][0][0], g["seasons"][0][1], library)
 
         will_stamp = not mvcommon.has_tmdb_token(parent_basename)
-        new_parent_basename = (f"{parent_basename} {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=tmdb_id)}"
+        # One token per folder (user decision, 2026-09-22). A show folder carrying
+        # a stale NON-tmdb provider token — the real cases are
+        # `Dark (2017) [tvdbid-334824]` and `Fringe (2008) [tvdbid-82066]` — would
+        # otherwise end up with two (`Dark (2017) [tvdbid-334824] {tmdb-70523}`).
+        # Both ids name the same show so it is harmless, but cluttered, and the
+        # tvdb one is dead weight: MediaVault is TMDB-for-everything and refuses
+        # -tvdbid (IMP-D22), and Plex ignores the `tvdbid` spelling entirely
+        # (verified on real servers, test row S8). Strip any non-tmdb token off
+        # the basename before appending the canonical one, using each token's own
+        # span so the rest of the name survives byte-identically.
+        stamp_base = parent_basename
+        if will_stamp:
+            for tok in sorted(mvcommon.find_provider_tokens(stamp_base),
+                              key=lambda t: t["span"][0], reverse=True):
+                if tok["provider"] == "tmdb":
+                    continue  # cannot happen under will_stamp; belt and braces
+                s, e = tok["span"]
+                stamp_base = (stamp_base[:s] + stamp_base[e:]).replace("  ", " ").strip()
+        new_parent_basename = (f"{stamp_base} {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=tmdb_id)}"
                                 if will_stamp else parent_basename)
         new_parent_path = os.path.join(os.path.dirname(parent), new_parent_basename)
         if will_stamp:

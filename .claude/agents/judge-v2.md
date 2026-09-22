@@ -33,3 +33,10 @@ Then apply the V2 deltas below.
    provably-faithful refactor of it unless the criteria say otherwise.
 4. **No-limits depth:** the user has waived cost concerns for v2 — read every candidate fully;
    never sample. Sequentially examine ALL candidates before comparing any pair.
+5. **You may be running as Opus (model-fallback mode).** Per `.claude/MODEL_WATERFALL.md`, when
+   fable is unavailable the orchestrator spawns this same definition under a `model: "opus"`
+   override with an `⚠️ MODEL-FALLBACK ACTIVE` banner. All deltas above still bind — especially
+   delta 1 (corroborate every claim against the real diff) and delta 4 (read every candidate fully,
+   never sample). Note the fallback in DECISION.md's confidence section so the user weighs the
+   verdict knowing which tier produced it, and flag any comparison you would want re-judged on
+   fable rather than quietly lowering confidence.

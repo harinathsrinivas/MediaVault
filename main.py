@@ -395,7 +395,9 @@ def split_video_file(input_path, output_dir, method, value_str, file_id="", drop
 
     # Command Execution.
     # mkvmerge v97 formats the --split output name via libfmt, so any literal `{`/`}`
-    # in the path (e.g. a `{tmdb-12345}` Plex/Emby/Jellyfin folder token) is read as a
+    # in the path (e.g. a legacy `{tmdb-…}` Plex-style folder token — still a
+    # recognized format, though MediaVault now stamps `[tmdbid-…]`, which libfmt
+    # treats as ordinary characters and needs no escaping) is read as a
     # format field and mkvmerge dies with `fmt::format_error: argument not found`
     # (exit 3). Escape them as `{{`/`}}` for the -o arg ONLY — mkvmerge renders them
     # back to single braces and writes to the real folder. (A plain merge -o is taken
@@ -1612,7 +1614,7 @@ def cmd_set_tmdb(manual_id, tmdb_id):
 # `cmd_enrich_metadata` is a LOCAL-FIRST TMDB backfill: it reads the ids already
 # in the library, asks TMDB (themoviedb.org) for the matching show/movie, and —
 # only with --apply — writes `metadata.tmdb_id`, stamps the Plex/Emby/Jellyfin
-# `{tmdb-<id>}` token on the SHOW/MOVIE folder (via cmd_rename_folder), and
+# `[tmdbid-<id>]` token on the SHOW/MOVIE folder (via cmd_rename_folder), and
 # downloads poster.jpg / fanart.jpg (+ per-season posters) WITHOUT EVER fetching
 # media bytes. It is SHOW-CENTRIC (user-confirmed design C): every season + every
 # episode of one show resolves ONCE and the folder token is stamped ONCE.
@@ -2009,17 +2011,23 @@ def _download_to(url, dest_path):
 
 
 def _has_tmdb_token(name):
-    """True if a folder leaf name already carries a `{tmdb-…}` token (idempotency
-    guard — we stamp the token at most once per show/movie folder).
+    """True if a folder leaf name already carries a TMDB provider token in ANY
+    recognized format — `{tmdb-…}`, `[tmdb-…]`, `[tmdbid-…]`, `[tmdbid=…]`, in
+    any casing (idempotency guard — we stamp the token at most once per
+    show/movie folder).
 
-    CASE-INSENSITIVE (IMP-C23). Plex/Emby/Jellyfin treat the provider token
-    case-insensitively and real folders in the wild use `{TMDB-69590}`; without
-    the flag such a folder read as "no token" and the next enrich/rename pass
-    appended a SECOND one (`… {TMDB-69590} {tmdb-69590}`). Kept deliberately in
-    lockstep with `_PROVIDER_TOKEN_RE` (the artwork-inheritance resolver's copy),
-    which has always been `re.IGNORECASE` — the two are the same predicate and
-    must not drift apart again."""
-    return re.search(r"\{tmdb-[^}]+\}", name or "", re.IGNORECASE) is not None
+    A thin wrapper over the shared `mvcommon.has_tmdb_token` (IMP-U6), kept
+    because this is the name every stamp site reads. CASE-INSENSITIVE since
+    IMP-C23: Plex/Emby/Jellyfin treat the provider token case-insensitively and
+    real folders in the wild use `{TMDB-69590}`; while this predicate was
+    case-SENSITIVE such a folder read as "no token" and the next enrich/rename
+    pass appended a SECOND one (`… {TMDB-69590} {tmdb-69590}`). It then had to be
+    kept by hand in lockstep with the artwork-inheritance resolver's own copy of
+    the regex; that copy is gone — both callers now go through this ONE shared
+    implementation, so the two predicates cannot drift apart again. Called
+    MODULE-QUALIFIED so a test that monkeypatches the helper is honoured (the
+    binding-hazard note at `import mvcommon`)."""
+    return mvcommon.has_tmdb_token(name)
 
 
 _SEASON_ID_RE = re.compile(r"-s(\d+)$", re.IGNORECASE)
@@ -2137,7 +2145,7 @@ def _season_episode_meta(season_details):
 
 
 def _show_folder_of(season_folders):
-    """The on-disk SHOW folder that the `{tmdb-…}` token is stamped onto, given the
+    """The on-disk SHOW folder that the `[tmdbid-…]` token is stamped onto, given the
     distinct season folders of one show.
 
     Layout assumption (Plex/Emby/Jellyfin standard, matched by the project's own
@@ -2345,7 +2353,7 @@ def _gather_enrich_units(library, id_or_prefix=None, library_filter=None):
         if cat == "other":
             # IMP-D18: Others/sports is not on TMDB/OMDb. Never enrich it — enriching
             # would mis-tag (wrong tmdb_id), rename the real Sports folder via a bogus
-            # {tmdb-…} token, and fetch wrong posters. One skip here covers
+            # [tmdbid-…] token, and fetch wrong posters. One skip here covers
             # enrich_metadata / refresh_online / fetch_trivia (all gather via this fn).
             continue
 
@@ -2957,11 +2965,18 @@ def cmd_enrich_metadata(arg=None, *flags):
         folder = unit.get("folder")
         base_name = os.path.basename(os.path.normpath(folder)) if folder else ""
         will_stamp = bool(folder) and not _has_tmdb_token(base_name)
+        # The stamped name is spelled ONCE (IMP-U6): the preview print below and
+        # the real stamp in step 2 both use this exact string, so they cannot
+        # drift, and the emitted format is a one-line change in mvcommon.
+        new_name = f"{base_name} {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=tmdb_id)}"
         if will_stamp:
             print(f"     {'would stamp' if not apply else 'stamping'} folder token: "
-                  f"{base_name} -> {base_name} {{tmdb-{tmdb_id}}}")
+                  f"{base_name} -> {new_name}")
         elif folder:
-            print(f"     folder already has a {{tmdb-…}} token — skip stamp ({base_name}).")
+            # Deliberately format-agnostic: _has_tmdb_token accepts every
+            # recognized spelling, so naming ONE would misreport a folder
+            # carrying a legacy brace token — and base_name shows the real one.
+            print(f"     folder already has a TMDB token — skip stamp ({base_name}).")
         print(f"     {'would write' if not apply else 'writing'} metadata.tmdb_id on "
               f"{len(unit['ids'])} entr(y/ies).")
         print(f"     {'would download' if not apply else 'downloading'} up to "
@@ -3007,10 +3022,11 @@ def cmd_enrich_metadata(arg=None, *flags):
                 meta["overview"] = tmdb_overview
         save_library(live)
 
-        # 2) stamp the {tmdb-…} token ONCE on the show/movie folder (paths only —
-        #    cmd_rename_folder is journaled + hash-safe; reused exactly as-is).
+        # 2) stamp the canonical [tmdbid-…] token ONCE on the show/movie folder
+        #    (`new_name`, built above; paths only — cmd_rename_folder is journaled
+        #    + hash-safe; reused exactly as-is — only the STRING it is called with
+        #    changed in IMP-U6, never its journal/PONR behaviour).
         if will_stamp:
-            new_name = f"{base_name} {{tmdb-{tmdb_id}}}"
             ok = cmd_rename_folder(folder, new_name)
             if ok:
                 n_stamped += 1
@@ -3944,7 +3960,7 @@ def _collect_folder_descendants(library, old_folder):
 def cmd_rename_folder(old_folder_or_id, new_folder_name_or_token):
     """Crash-safe cascading folder rename (IMP-D17).
 
-    Rename an on-disk SHOW/season folder (e.g. stamp a `{tmdb-12345}` token onto it)
+    Rename an on-disk SHOW/season folder (e.g. stamp a `[tmdbid-12345]` token onto it)
     and rewrite `folder_path` for EVERY library entry under that folder — all
     seasons/episodes leaves AND the show's season_map container — atomically.
 
@@ -3993,7 +4009,7 @@ def cmd_rename_folder(old_folder_or_id, new_folder_name_or_token):
     else:
         old_folder = os.path.abspath(old_folder_or_id)
 
-    # The new name is a LEAF name (e.g. "Dark {tmdb-70523}"), not a full path:
+    # The new name is a LEAF name (e.g. "Dark [tmdbid-70523]"), not a full path:
     # keep the same parent dir, swap the leaf. Reject a name carrying a separator
     # (that would move the folder elsewhere — out of scope and a footgun).
     if os.sep in new_folder_name_or_token or (os.altsep and os.altsep in new_folder_name_or_token):
@@ -4101,6 +4117,303 @@ def _rewrite_folder_path(folder_path, old_folder, new_folder):
     # `season 01`), so the subfolder's real name is preserved when joined onto new.
     tail = os.path.relpath(abs_fp, old_folder)
     return os.path.normpath(os.path.join(new_folder, tail))
+
+
+# ==========================================
+#   PROVIDER-TOKEN FORMAT MIGRATION (IMP-U6)
+# ==========================================
+# Migrates every on-disk folder still carrying the OLD tmdb token spelling
+# (curly `{tmdb-…}`, or a non-canonical square `[tmdb-…]`/`[tmdbid=…]`/wrong
+# casing) to the canonical `[tmdbid-…]` (mvcommon.CANONICAL_TMDB_TOKEN_FMT).
+# See cmd_migrate_provider_tokens below for the full design rationale.
+
+def _old_style_tmdb_token(basename):
+    """Return `basename`'s OLD-style TMDB provider token — a
+    `mvcommon.find_provider_tokens` item — or None if it carries no tmdb token
+    at all, or only the EXACT canonical one already.
+
+    'Old-style' = a curly `{tmdb-…}` token (any casing/spelling — curly is
+    never canonical), or a square token whose matched text is not
+    byte-identical to `mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=<its own
+    id>)` — e.g. `[tmdb-…]`, `[tmdbid=…]`, wrong casing. A folder carrying
+    ONLY a `[tvdbid-…]`/`[imdbid-…]` token (no tmdb token) is not old-style —
+    there is nothing here for this migration to do.
+
+    find_provider_tokens returns tokens in left-to-right (span) order; the
+    FIRST old-style tmdb token found is returned (a real folder name carries
+    at most one tmdb token in practice)."""
+    for token in mvcommon.find_provider_tokens(basename or ""):
+        if token["provider"] != "tmdb":
+            continue
+        canonical = mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=token["id"])
+        if token["bracket"] == "curly" or token["match"] != canonical:
+            return token
+    return None
+
+
+def _apply_token_span(basename, token):
+    """Replace ONLY `token`'s span in `basename` with the canonical
+    `[tmdbid-<id>]` render, leaving every other character — including a
+    coexisting `[tvdbid-…]`/`[rartv]`/etc. bracketed tag — byte-identical.
+    Never rebuilds the name from scratch (spans are exact/non-overlapping,
+    verified by the mvcommon detection-contract tests)."""
+    start, end = token["span"]
+    canonical = mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=token["id"])
+    return basename[:start] + canonical + basename[end:]
+
+
+def cmd_migrate_provider_tokens(arg=None, *flags):
+    """Whole-library TMDB provider-token format migration (IMP-U6): every
+    on-disk folder still carrying the OLD `{tmdb-…}`/`[tmdb-…]` spelling is
+    renamed to the canonical `[tmdbid-…]`.
+
+    Usage: migrate_provider_tokens [id_or_prefix] [--apply] [--library movies|series|anime|others]
+    DRY-RUN by default (prints every `OLD -> NEW` it WOULD rename plus a
+    summary; writes nothing — no library mutation, no disk mutation, no report
+    file). `--apply` performs the renames for real and writes a JSON audit
+    report. Mirrors the existing `enrich_metadata`/`refresh_online` dry-run/
+    --apply UX exactly — no new UX invented.
+
+    WHY THIS COMMAND EXISTS — the ancestor gap: a prior, external, partial
+    migration tool already rewrote the LEAF path segment of most library
+    entries to `[tmdbid-…]`, but never climbed to a PARENT directory that no
+    entry's `folder_path` names directly — e.g. a show folder
+    `Friends (1994) {tmdb-1668}` whose every entry only points at a SEASON
+    folder underneath it. This command's discovery walks UP from every
+    physical entry's `folder_path` so exactly that shape is caught.
+
+    ANCESTOR-AWARE DISCOVERY: for every physical entry in scope (`leaf` +
+    `season_map`; `multi_ep_alias` carries no `folder_path` at all — the
+    PR #21 crash class — always skipped), climb from its OWN `folder_path` up
+    to (not past) LOCAL_ROOT, collecting every directory in the chain (its own
+    folder AND every ancestor), deduplicated across the WHOLE library — one
+    show folder is the ancestor of every one of its episodes and must be
+    renamed exactly ONCE. This reuses the same test-basename-then-climb-to-
+    dirname idiom `_ancestor_show_folder_image` uses for artwork inheritance,
+    adapted to abspath/`_norm_path`/`_is_under` comparisons — the SAME path
+    vocabulary `cmd_rename_folder`/`_collect_folder_descendants` already use
+    (not realpath: a stored `folder_path` is never expected to hide a
+    symlink, and matching cmd_rename_folder's own comparison idiom exactly is
+    what makes the folder strings this function hands it valid).
+
+    A collected directory is a migration CANDIDATE iff `_old_style_tmdb_token`
+    finds an old-style tmdb token on its OWN basename (see that function).
+    When renamed, only the tmdb token's own `span` is replaced
+    (`_apply_token_span`) — any coexisting bracketed tag (`[tvdbid-…]`,
+    `[rartv]`, a chunk short_id, …) is carried through byte-identical.
+
+    DEEPEST-FIRST ORDERING (required, not an optimization): candidates are
+    renamed in path-depth-DESCENDING order
+    (`len(_norm_path(folder).split(os.sep))`). Renaming a shallower ancestor
+    FIRST would move a deeper, not-yet-processed candidate out from under the
+    path this function computed for it before the ancestor moved. Processing
+    leaf-most-first guarantees every candidate is renamed while its OWN path
+    is still what is on disk; `cmd_rename_folder`'s own cascade then re-points
+    every already-renamed descendant (physically moved earlier in this same
+    run) under the newly-renamed ancestor's new prefix. These two mechanisms
+    only compose correctly in this order.
+
+    RESUMABLE WITH NO NEW STATE: every rename goes through the EXISTING,
+    already crash-safe `cmd_rename_folder` (IMP-D17: journalled + PONR +
+    self-heal) — none of its journal/PONR/self-heal behaviour is touched or
+    reimplemented here. A run interrupted after N of M candidates leaves N
+    folders already at their canonical basename; a re-run's OWN discovery
+    pass simply no longer recognizes them as candidates (their basename is
+    already canonical) and continues from N+1. No journal of this command's
+    own is added or needed — that is the entire resumability story.
+
+    REPORT (only on --apply): `<LOCAL_ROOT>/migration_reports/
+    token_format_<UTC ISO8601 timestamp>.json` (auto-`makedirs`, mirroring the
+    existing `library_backups/` sibling-folder convention) shaped
+    `{"scanned": N, "renamed": [{"id_or_note", "old_folder", "new_folder",
+    "remote_bearing"}], "already_canonical": K, "errors": [...]}`.
+    `"scanned"` is the count of distinct directories examined (own folder +
+    every ancestor, deduplicated); `"already_canonical"` the count of those
+    already carrying the exact canonical tmdb token. `remote_bearing` is True
+    when the renamed directory (or ANY of its library descendants) has
+    `uploaded` truthy or `status` in `("onboarded", "archived",
+    "restored_local")` — it records which renames touched already-pushed
+    content so the mapping is never lost; it does NOT attempt any phone-side
+    fix (Open Decision #3, docs/feature-token-brackets/PLAN.md).
+
+    A `cmd_rename_folder` PONR-crossed failure (`RollbackHardFail`) is caught
+    per-candidate and the run CONTINUES — mirrors the existing "Decision 7"
+    convention this codebase already uses at `_enrich_after_archive`'s caller
+    (cmd_prep_push_rep_enrich): a post-PONR rename failure warns and
+    continues rather than aborting, because the folder that already moved is
+    unrelated to every other candidate. It is recorded in the report's
+    `errors` list (with the printed `resume_cmd`) — never silently dropped.
+    A pre-PONR refusal (`cmd_rename_folder` returning False — e.g. a target
+    collision) is likewise recorded in `errors` and the run continues.
+    """
+    flist = list(flags)
+    if arg and str(arg).startswith("--"):
+        flist = [arg] + flist
+        id_or_prefix = None
+    else:
+        id_or_prefix = arg or None
+
+    apply = "--apply" in flist
+    library_filter = None
+    if "--library" in flist:
+        i = flist.index("--library")
+        if i + 1 < len(flist):
+            library_filter = flist[i + 1].lower()
+
+    # "others" (IMP-D18) predates `_gather_enrich_units`'s own prefix_map (which
+    # only knows movies/series/anime), so this command keeps its own — mirrors
+    # category_of_id's mov/tv/ani/else bucketing, spelled out for the 4 values
+    # this command's LOCKED CLI surface accepts. Unlike enrich_metadata/
+    # refresh_online (which silently ignore an unrecognized --library value —
+    # falling back to "whole library"), an unrecognized value here is a hard
+    # refusal: this command MUTATES real folders under --apply, and a mistyped
+    # filter silently widening to the WHOLE library is exactly the kind of
+    # surprise a destructive command must not allow.
+    prefix_map = {"movies": "mov", "series": "tv", "anime": "ani", "others": "oth"}
+    want_prefix = None
+    if library_filter:
+        want_prefix = prefix_map.get(library_filter)
+        if want_prefix is None:
+            print(f"❌ Unknown --library value '{library_filter}' (expected movies|series|anime|others).")
+            return
+
+    def _in_scope(mid):
+        if want_prefix and not mid.startswith(want_prefix):
+            return False
+        if id_or_prefix and not (mid == id_or_prefix or mid.startswith(id_or_prefix)):
+            return False
+        return True
+
+    library = load_library()
+
+    # --- Ancestor-aware discovery: climb every in-scope PHYSICAL entry's
+    # folder_path up to (not past) LOCAL_ROOT, collecting + deduping every
+    # directory in the chain (own folder included) by its normalized path. ---
+    root_norm = _norm_path(LOCAL_ROOT)
+    walked_dirs = {}  # norm_path -> a real (abspath) form of that directory
+    for mid, entry in library.items():
+        if entry.get("type") == "multi_ep_alias":
+            continue  # no folder_path on an alias by construction (PR #21 crash class)
+        if not _in_scope(mid):
+            continue
+        fp = entry.get("folder_path")
+        if not fp:
+            continue
+        current = os.path.abspath(fp)
+        while True:
+            norm = _norm_path(current)
+            if not norm or norm == root_norm or not _is_under(norm, root_norm):
+                break  # climbed up to (excluded) or stepped outside LOCAL_ROOT — stop
+            walked_dirs.setdefault(norm, current)
+            parent = os.path.dirname(current)
+            if parent == current:
+                break  # filesystem ceiling (drive root) — cannot climb further
+            current = parent
+
+    # --- Classify every collected directory: old-style candidate, already
+    # canonical, or carries no tmdb token at all (untouched either way). ---
+    candidates = []
+    already_canonical = 0
+    for real_dir in walked_dirs.values():
+        basename = os.path.basename(real_dir)
+        token = _old_style_tmdb_token(basename)
+        if token is not None:
+            new_basename = _apply_token_span(basename, token)
+            new_dir = os.path.join(os.path.dirname(real_dir), new_basename)
+            candidates.append({"old_dir": real_dir, "new_dir": new_dir, "new_name": new_basename})
+        elif mvcommon.has_tmdb_token(basename):
+            already_canonical += 1
+        # else: no tmdb token at all — outside this migration's scope, skipped.
+
+    # Deepest-first (REQUIRED — see docstring): sort by _norm_path depth,
+    # descending, so every candidate is renamed while its own path is still
+    # what is on disk.
+    candidates.sort(key=lambda c: len(_norm_path(c["old_dir"]).split(os.sep)), reverse=True)
+
+    # --- Pre-scan reporting facts (remote_bearing / id_or_note) from the ONE
+    # library snapshot loaded above, entirely BEFORE any rename runs — purely
+    # read-only, so it is unaffected by whatever order the renames execute in. ---
+    for c in candidates:
+        descendants = _collect_folder_descendants(library, c["old_dir"])
+        c["remote_bearing"] = any(
+            e.get("uploaded") or e.get("status") in ("onboarded", "archived", "restored_local")
+            for _mid, e in descendants)
+        own_ids = sorted(mid for mid, e in descendants
+                          if _norm_path(e.get("folder_path")) == _norm_path(c["old_dir"]))
+        if own_ids:
+            c["id_or_note"] = (own_ids[0] if len(own_ids) == 1
+                                else f"{own_ids[0]} +{len(own_ids) - 1} more (own folder)")
+        else:
+            c["id_or_note"] = f"ancestor of {len(descendants)} entr(y/ies) (no entry's own folder)"
+
+    scanned = len(walked_dirs)
+    mode = "APPLY" if apply else "DRY-RUN"
+    print(f"=== MIGRATE PROVIDER TOKENS ({mode}) ===")
+    if library_filter:
+        print(f"   > library filter: {library_filter}")
+    if id_or_prefix:
+        print(f"   > scope: ids == or startswith '{id_or_prefix}'")
+    print(f"   > {scanned} director(y/ies) scanned (own folder + ancestors, deduplicated).\n")
+
+    for c in candidates:
+        print(f"   {c['old_dir']} -> {c['new_dir']}")
+        if c["remote_bearing"]:
+            print(f"       ⚠️  remote-bearing (already-pushed/archived content under this folder).")
+
+    if not apply:
+        remote_bearing_n = sum(1 for c in candidates if c["remote_bearing"])
+        print(f"\n=== DRY-RUN === scanned={scanned} would-rename={len(candidates)} "
+              f"already-canonical={already_canonical} remote-bearing={remote_bearing_n}")
+        print("   (dry-run: nothing was written — re-run with --apply to perform it.)")
+        return
+
+    # --- APPLY: execute each rename through the EXISTING, crash-safe
+    # cmd_rename_folder — never reimplemented here (only the STRING it is
+    # called with is ours; its journal/PONR/self-heal are untouched). ---
+    renamed = []
+    errors = []
+    for c in candidates:
+        try:
+            ok = cmd_rename_folder(c["old_dir"], c["new_name"])
+        except RollbackHardFail as hf:
+            # "Decision 7"-style warn-and-continue (see docstring): the folder
+            # already moved (PONR crossed) but is unrelated to every other
+            # candidate — record it and keep migrating the rest of the
+            # library rather than aborting the whole run over one torn folder.
+            print(f"⚠️  IRREVERSIBLE — folder moved but the library rewrite failed: {hf.state} — {hf.reason}")
+            print(f"   > To finish it: {hf.resume_cmd}")
+            errors.append({"id_or_note": c["id_or_note"], "old_folder": c["old_dir"],
+                            "new_folder": c["new_dir"], "remote_bearing": c["remote_bearing"],
+                            "error": f"{hf.state}: {hf.reason}", "resume_cmd": hf.resume_cmd})
+            continue
+        if ok:
+            renamed.append({"id_or_note": c["id_or_note"], "old_folder": c["old_dir"],
+                             "new_folder": c["new_dir"], "remote_bearing": c["remote_bearing"]})
+        else:
+            errors.append({"id_or_note": c["id_or_note"], "old_folder": c["old_dir"],
+                            "new_folder": c["new_dir"], "remote_bearing": c["remote_bearing"],
+                            "error": "cmd_rename_folder declined (see console output above)"})
+
+    report = {"scanned": scanned, "renamed": renamed, "already_canonical": already_canonical,
+              "errors": errors}
+    report_dir = os.path.join(LOCAL_ROOT, "migration_reports")
+    os.makedirs(report_dir, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    report_path = os.path.join(report_dir, f"token_format_{ts}.json")
+    # Same second-resolution collision guard `_preserve_leftover` already uses
+    # for its own timestamped sibling (main.py, RollbackJournal): two --apply
+    # runs within the same wall-clock second must never silently clobber the
+    # earlier report.
+    n = 1
+    while os.path.exists(report_path):
+        report_path = os.path.join(report_dir, f"token_format_{ts}-{n}.json")
+        n += 1
+    with open(report_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
+
+    print(f"\n=== APPLIED === scanned={scanned} renamed={len(renamed)} "
+          f"already-canonical={already_canonical} errors={len(errors)}")
+    print(f"   > report: {report_path}")
 
 
 # ==========================================
@@ -8001,7 +8314,7 @@ def cmd_prep_push_rep_season(base_id, folder_path, split_method=None, split_val=
 # the movie EXACTLY as `cmd_prep_push_rep` does, then (once the archive is
 # confirmed `archived`) enrich it — preset a CLI-supplied `-tmdbid` via
 # `cmd_set_tmdb`, resolve against TMDB, write metadata, and — after a ONE-TIME
-# confirmation gate (Decision 2/3) — stamp the `{tmdb-<id>}` folder token and
+# confirmation gate (Decision 2/3) — stamp the `[tmdbid-<id>]` folder token and
 # download art. `-tvdbid` is refused outright (Decision 1 — TMDB-only; a TVDB
 # id is a different numbering space and would fetch the wrong title).
 #
@@ -8171,7 +8484,10 @@ def _enrich_after_archive(real_id, write_nfo, no_web, gate):
     base_name = os.path.basename(os.path.normpath(folder)) if folder else ""
     will_stamp = bool(folder) and not _has_tmdb_token(base_name)
     if will_stamp:
-        new_name = f"{base_name} {{tmdb-{tmdb_id}}}"
+        # Same canonical spelling cmd_enrich_metadata uses (IMP-U6) — this block
+        # is a deliberate duplicate of its stamping logic (ARCHITECTURE §6.3a
+        # standing sync obligation), so the two MUST emit the same format.
+        new_name = f"{base_name} {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=tmdb_id)}"
         new_folder = os.path.join(os.path.dirname(os.path.normpath(folder)), new_name)
         if gate(folder, new_folder):
             ok = cmd_rename_folder(folder, new_name)  # may raise RollbackHardFail — caller catches
@@ -8181,7 +8497,8 @@ def _enrich_after_archive(real_id, write_nfo, no_web, gate):
         else:
             print("     ⏭️  folder rename declined — run rename_folder later to add the token.")
     elif folder:
-        print(f"     folder already has a {{tmdb-…}} token — skip stamp ({base_name}).")
+        # Format-agnostic wording, matching cmd_enrich_metadata's twin print.
+        print(f"     folder already has a TMDB token — skip stamp ({base_name}).")
 
     image_base = _tmdb_image_base(api_key)
     n_images = _download_unit_images(unit, res, image_base, folder)
@@ -8772,8 +9089,8 @@ def suggest_target_folder(item):
     the entry's existing folder_path with applies=False (informational only).
     For a NEW (UNPREPPED) item, builds a leaf-folder name from the guessed
     Title/Year plus an EDITABLE provider-id placeholder per the provider-tag
-    template (Movies -> {tmdb-…}, Series/Anime -> {tvdb-…}). This step does NO
-    TMDB/TVDB lookup; the braces hold an editable placeholder.
+    template (Movies -> [tmdbid-…], Series/Anime -> [tvdbid-…]). This step does NO
+    TMDB/TVDB lookup; the brackets hold an editable placeholder.
     """
     entry = item.get("entry")
     if entry is not None:
@@ -8808,10 +9125,10 @@ def suggest_target_folder(item):
     year_disp = f"({year})" if year else "(Year)"
 
     if category == "mov":
-        provider_tag = "{tmdb-0000000}"
+        provider_tag = mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id="0000000")
         provider_field = "tmdb"
     else:  # tv / ani -> series-style
-        provider_tag = "{tvdb-000000}"
+        provider_tag = mvcommon.CANONICAL_TVDB_TOKEN_FMT.format(id="000000")
         provider_field = "tvdb"
 
     folder = f"{title} {year_disp} {provider_tag}"
@@ -9259,7 +9576,7 @@ def items_payload():
         # (Phase 5.7) — the SAME resolver /api/media-image uses, so the SPA only
         # requests a poster <img> when one will actually be served (no speculative
         # 404 per card). It is a few os.path checks per row (own folder -> season
-        # folder -> {tmdb-…} ancestor, first existing wins); short-circuit to False
+        # folder -> TMDB-token ancestor, first existing wins); short-circuit to False
         # when the entry has neither a folder_path nor a parent to inherit from, so
         # a folderless leaf never even enters the resolver on a large grid.
         has_anchor = bool(entry.get("folder_path")) or bool(entry.get("parent_id"))
@@ -9269,7 +9586,7 @@ def items_payload():
         # backdrop_available: same cheap, LIVE on-disk check via the SAME resolver
         # the /api/media-image route uses, but for the FANART (backdrop) the hover
         # detail-window shows. fanart resolution walks own folder -> season folder ->
-        # {tmdb-…} show folder (it has no per-episode rung), so an episode inherits the
+        # TMDB-token show folder (it has no per-episode rung), so an episode inherits the
         # season/show backdrop. Gated on has_anchor + short-circuited like the poster
         # check so a folderless leaf never enters the resolver (a couple os.path stats
         # at most). Kept a real bool (JSON-friendly), never a path.
@@ -10030,13 +10347,6 @@ def find_folder_image(folder):
     return None
 
 
-# A folder name carries a provider token like `{tmdb-70523}` / `{tvdb-12345}`
-# (the Plex/Emby/Jellyfin convention rename_folder stamps on a SHOW folder). The
-# season-inheritance resolver walks UP to the nearest ancestor whose basename
-# matches this — i.e. the show folder — and uses ITS poster as the fallback.
-_PROVIDER_TOKEN_RE = re.compile(r"\{tmdb-[^}]+\}", re.IGNORECASE)
-
-
 def _kind_image_under_root(folder, kind):
     """Return the absolute path of ``<kind>.jpg`` (poster.jpg / fanart.jpg)
     sitting DIRECTLY in ``folder`` — but ONLY if it exists on disk AND the
@@ -10097,9 +10407,17 @@ def _episode_still_under_root(folder, filename):
 
 def _ancestor_show_folder_image(start_folder, kind):
     """Walk UP ``start_folder``'s real on-disk ancestors to the NEAREST ancestor
-    whose basename carries a ``{tmdb-…}`` token (the show folder) and return that
-    folder's vetted ``<kind>.jpg`` (or None). Stops at / never escapes LOCAL_ROOT
-    (the walk halts once it climbs above the media root). READ-ONLY."""
+    whose basename carries a TMDB provider token — the show folder, i.e. the
+    Plex/Emby/Jellyfin convention rename_folder stamps onto a SHOW folder — and
+    return that folder's vetted ``<kind>.jpg`` (or None). Stops at / never
+    escapes LOCAL_ROOT (the walk halts once it climbs above the media root).
+    READ-ONLY.
+
+    Recognition goes through the shared ``mvcommon.has_tmdb_token`` (IMP-U6), so
+    every format in the wild is found — ``{tmdb-…}``, ``[tmdb-…]``,
+    ``[tmdbid-…]``, ``[tmdbid=…]``, any casing. It used to be a brace-only copy
+    of the regex living here, which silently matched nothing on a library already
+    migrated to the square form and broke this whole inheritance rung."""
     if not start_folder or not _is_within_local_root(start_folder):
         return None
     try:
@@ -10110,7 +10428,7 @@ def _ancestor_show_folder_image(start_folder, kind):
     # Climb until we exit the media root or hit the filesystem ceiling.
     while _is_within_local_root(current):
         name = os.path.basename(current)
-        if _PROVIDER_TOKEN_RE.search(name or ""):
+        if mvcommon.has_tmdb_token(name or ""):
             hit = _kind_image_under_root(current, kind)
             if hit:
                 return hit
@@ -10147,7 +10465,7 @@ def resolve_artwork_path(library, mid, kind="poster"):
       (ii)  else the entry's season container's folder ``<kind>.jpg`` — found via
             the leaf's ``parent_id`` -> the ``season_map`` entry's ``folder_path``.
       (iii) else the NEAREST ancestor folder (walking UP the entry's real
-            ``folder_path``) whose name carries a ``{tmdb-…}`` token — the show
+            ``folder_path``) whose name carries a TMDB provider token — the show
             folder — and its ``<kind>.jpg`` (so every episode inherits the show
             poster when nothing more specific exists).
     So an episode WITHOUT its own still falls back to the season poster, then the
@@ -10222,7 +10540,7 @@ def resolve_artwork_path(library, mid, kind="poster"):
             if hit:
                 return hit
 
-    # (iii) Walk UP to the nearest {tmdb-…} show folder and use its <kind>.jpg.
+    # (iii) Walk UP to the nearest TMDB-token show folder and use its <kind>.jpg.
     # Anchor the walk at the most-specific folder we have for this entry.
     anchor = own_folder
     if not anchor and parent_id:
@@ -10399,7 +10717,8 @@ if __name__ == "__main__":
         print("  sort")
         print("  fetch [id] [tempdir <path>]")
         print("  recover [id|folder]  (or: recover --scan)")
-        print("  rename_folder [id|folder] \"<NewName {tmdb-12345}>\"  — rename a show/season folder + rewrite every descendant folder_path (crash-safe, no rehash)")
+        print("  rename_folder [id|folder] \"<NewName [tmdbid-12345]>\"  — rename a show/season folder + rewrite every descendant folder_path (crash-safe, no rehash)")
+        print("  migrate_provider_tokens [id_or_prefix] [--apply] [--library movies|series|anime|others]  — migrate every folder still on the OLD {tmdb-…}/[tmdb-…] token format to canonical [tmdbid-…], ancestor-aware (dry-run by default; --apply writes a JSON report under migration_reports/)")
         print("  add_extras <title_id> \"<folders>\" [--extras-size <v|none>] [device <id>] [no-replace]  — attach extras (Specials/Trailers/BTS) to an existing title")
         print("  web [--port N] [--host H] [--no-browser] [--demo]  — Launch the local web operations console (Disk Reclaim view); --demo = SAFE build, all actions simulated")
         print("  token create [--label \"X\"] [--ttl 1h|8h|12h|1d|3d|7d|30d|never]  — Mint a web access token (default --ttl 7d)")
@@ -11001,11 +11320,21 @@ if __name__ == "__main__":
             print("❌ Usage: recover [id|folder]   (or: recover --scan)")
 
     elif cmd == "rename_folder":
-        # rename_folder <old_folder_or_id> "<NewName {tmdb-12345}>"
+        # rename_folder <old_folder_or_id> "<NewName [tmdbid-12345]>"
         if len(sys.argv) >= 4:
             cmd_rename_folder(sys.argv[2], sys.argv[3])
         else:
-            print("❌ Usage: rename_folder [id|folder] \"<NewName {tmdb-12345}>\"")
+            print("❌ Usage: rename_folder [id|folder] \"<NewName [tmdbid-12345]>\"")
+
+    elif cmd == "migrate_provider_tokens":
+        # migrate_provider_tokens [id_or_prefix] [--apply] [--library movies|series|anime|others]
+        # DRY-RUN by default; --apply performs the renames (through the existing,
+        # crash-safe cmd_rename_folder) and writes a JSON audit report. Pass the
+        # positional id/prefix (if any) plus all remaining tokens as flags so
+        # cmd_migrate_provider_tokens parses --apply/--library itself.
+        rest = sys.argv[2:]
+        positional = rest[0] if (rest and not rest[0].startswith("--")) else None
+        cmd_migrate_provider_tokens(positional, *rest)
 
     elif cmd == "add_extras":
         # add_extras <title_id> "<folders>" [--extras-size <v|none>] [device <id_or_name>] [no-replace]

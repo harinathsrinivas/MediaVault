@@ -631,3 +631,192 @@ def test_episode_still_realpath_stays_under_root(sandbox, make_video, tmp_path):
     # Nothing eligible under the root -> None (the outside still is unreachable).
     assert got is None or os.path.realpath(got) != os.path.realpath(str(outside / "Dark.S01E01-thumb.jpg"))
     assert main._is_within_local_root(got) if got else True
+
+
+# ===========================================================================
+# Ancestor walk-up across ALL recognized provider-token formats (IMP-U6).
+#
+# THE REGRESSION THIS BLOCK PINS: rung (iii) — the walk UP to the nearest show
+# folder — used to consult a BRACE-ONLY regex private to main.py. A show folder
+# named `Dark [tmdbid-70523]` was therefore not seen as a show folder at all and
+# the whole inheritance rung silently returned None. On a real library already
+# renamed to the square form by a foreign tool that means NO artwork inheritance
+# anywhere. The walk now consults the shared `mvcommon.has_tmdb_token`, which
+# accepts `{tmdb-…}`, `[tmdb-…]`, `[tmdbid-…]` and `[tmdbid=…]`, any casing.
+#
+# Each test below is a deliberate TWIN of a `{tmdb-…}` case above — same seed,
+# same assertions, ONLY the show-folder spelling differs — so the pair can be
+# diffed by eye. The brace originals are left byte-unchanged on purpose: braces
+# are still a recognized format, and their continued passing is half the proof.
+# ===========================================================================
+
+def _seed_show_named(sandbox, make_video, show_folder, season_folder="Season 01"):
+    """`_seed_show` with the SHOW (and optionally the SEASON) folder name passed
+    in — the one thing these format twins need to vary.
+
+    Deliberately a parallel copy rather than a parameter bolted onto `_seed_show`:
+    the brace cases above must keep running against byte-identical fixture code,
+    so "the originals still pass untouched" stays a real statement about the
+    unmodified path.
+    """
+    root = sandbox["local_root"]
+    show_dir = root / "Series" / show_folder
+    season_dir = show_dir / season_folder
+    season_dir.mkdir(parents=True, exist_ok=True)
+    ep_path, _ = make_video(season_dir / "Dark.S01E01.mkv", marker=b"D")
+
+    season_id = "tv-de-2017-dark-s01"
+    ep_id = "tv-de-2017-dark-s01e01"
+
+    series = {
+        season_id: {
+            "type": "season_map",
+            "folder_path": str(season_dir),
+            "total_episodes": 1,
+            "children": [ep_id],
+        },
+        ep_id: {
+            "status": "local_ready",
+            "uploaded": False,
+            "folder_path": str(season_dir),
+            "filename": "Dark.S01E01.mkv",
+            "parent_id": season_id,
+        },
+    }
+    _write_libs(sandbox, series=series)
+    return {
+        "root": root,
+        "show_dir": show_dir,
+        "season_dir": season_dir,
+        "season_id": season_id,
+        "ep_id": ep_id,
+        "ep_path": str(ep_path),
+    }
+
+
+def test_season_inherits_show_poster_via_endpoint_square_tmdbid_format(sandbox, make_video):
+    """Twin of test_season_inherits_show_poster_via_endpoint with the canonical
+    `[tmdbid-…]` show folder — the user-visible half of the fix: the SPA asks for
+    an episode's poster and gets the show poster instead of a gradient."""
+    seeded = _seed_show_named(sandbox, make_video, "Dark [tmdbid-70523]")
+    show_poster = _jpeg(b"SHOW")
+    (seeded["show_dir"] / "poster.jpg").write_bytes(show_poster)
+    # Deliberately NO poster in the season or episode folder.
+
+    client = TestClient(create_app())
+    r = client.get(f"/api/media-image/{seeded['ep_id']}")
+    assert r.status_code == 200, f"-> {r.status_code}: {r.text}"
+    assert r.content == show_poster
+
+
+def test_season_inherits_show_poster_resolver_square_tmdbid_format(sandbox, make_video):
+    """Twin of test_season_inherits_show_poster_resolver: the resolver returns the
+    `[tmdbid-…]` SHOW folder's poster path. This is the exact folder shape the
+    already-migrated real library is in, and the case that returned None before
+    the walk stopped using its own brace-only regex."""
+    seeded = _seed_show_named(sandbox, make_video, "Dark [tmdbid-70523]")
+    (seeded["show_dir"] / "poster.jpg").write_bytes(_jpeg(b"SHOW"))
+
+    library = mvcommon.load_library()
+    got = main.resolve_artwork_path(library, seeded["ep_id"], kind="poster")
+    assert got is not None
+    assert os.path.realpath(got) == os.path.realpath(
+        str(seeded["show_dir"] / "poster.jpg")
+    ), f"expected show poster, got {got}"
+
+
+def test_episode_still_only_serves_poster_kind_not_fanart_square_tmdbid_format(sandbox, make_video):
+    """Twin of test_episode_still_only_serves_poster_kind_not_fanart: kind=fanart
+    still skips the `-thumb.jpg` still and walks UP to the show fanart — now with
+    the show folder in the canonical `[tmdbid-…]` form. Fanart inheritance broke
+    in exactly the same way poster inheritance did."""
+    seeded = _seed_show_named(sandbox, make_video, "Dark [tmdbid-70523]")
+    _ep_thumb_path(seeded).write_bytes(_jpeg(b"STILL"))   # a still is present...
+    show_fanart = _jpeg(b"SHOWFAN")
+    (seeded["show_dir"] / "fanart.jpg").write_bytes(show_fanart)  # ...and a show fanart
+
+    library = mvcommon.load_library()
+    got = main.resolve_artwork_path(library, seeded["ep_id"], kind="fanart")
+    # fanart must NOT be the still; it inherits the show fanart instead.
+    assert os.path.basename(got).lower() == "fanart.jpg"
+    assert os.path.realpath(got) == os.path.realpath(str(seeded["show_dir"] / "fanart.jpg"))
+
+
+@pytest.mark.parametrize(
+    "show_folder",
+    [
+        "Dark [tmdb-70523]",    # TRaSH-Guides bare tag in square brackets
+        "Dark [tmdbid=70523]",  # Emby's `=` separator (square-bracket-only)
+    ],
+)
+def test_ancestor_walk_accepts_other_recognized_formats(sandbox, make_video, show_folder):
+    """The two remaining spellings `mvcommon.has_tmdb_token` accepts reach the SAME
+    show poster as `{tmdb-…}` and `[tmdbid-…]` do. Pinned HERE, and not only in the
+    has_tmdb_token unit tests, because the walk-up is the consumer that regressed
+    when a second, narrower copy of the predicate lived alongside it."""
+    seeded = _seed_show_named(sandbox, make_video, show_folder)
+    (seeded["show_dir"] / "poster.jpg").write_bytes(_jpeg(b"SHOW"))
+
+    library = mvcommon.load_library()
+    got = main.resolve_artwork_path(library, seeded["ep_id"], kind="poster")
+    assert got is not None, f"{show_folder!r} was not recognized as a show folder"
+    assert os.path.realpath(got) == os.path.realpath(
+        str(seeded["show_dir"] / "poster.jpg")
+    ), f"expected show poster, got {got}"
+
+
+def test_token_bearing_ancestor_without_image_halts_walk_square_tmdbid_format(sandbox, make_video):
+    """Pins a behaviour the wider predicate made newly REACHABLE for square-format
+    folders: `_ancestor_show_folder_image` stops at the FIRST token-bearing
+    ancestor and returns None when that folder has no `<kind>.jpg` — it never
+    keeps climbing into collection roots. A `Season 01 [tmdbid-70523]` folder now
+    halts the climb exactly as `Season 01 {tmdb-…}` always did, so the show poster
+    one level up is deliberately NOT inherited. Not a new behaviour class, just a
+    newly reachable one; it is pinned so nobody "fixes" it by accident.
+
+    The control is test_season_inherits_show_poster_resolver_square_tmdbid_format:
+    same layout with a plain `Season 01`, and there the show poster IS found."""
+    seeded = _seed_show_named(
+        sandbox, make_video, "Dark [tmdbid-70523]",
+        season_folder="Season 01 [tmdbid-70523]",
+    )
+    (seeded["show_dir"] / "poster.jpg").write_bytes(_jpeg(b"SHOW"))
+    # Deliberately NO poster.jpg in the token-bearing season folder.
+
+    library = mvcommon.load_library()
+    got = main.resolve_artwork_path(library, seeded["ep_id"], kind="poster")
+    assert got is None, (
+        "a token-bearing ancestor with no poster.jpg must halt the walk rather "
+        f"than inherit the show poster above it — got {got}"
+    )
+
+
+@pytest.mark.parametrize(
+    "show_folder, expect_inherited",
+    [
+        # Somebody else's tag: a source-provided tvdb id must NEVER make a folder a
+        # TMDB show folder, so a release group's `[tvdbid-…]` cannot hijack the walk.
+        ("Dark [tvdbid-70523]", False),
+        # ...but a tvdb tag sitting NEXT TO a real tmdb token must not block it.
+        ("Dark [tvdbid-70523] [tmdbid-70523]", True),
+    ],
+)
+def test_ancestor_walk_is_tmdb_specific(sandbox, make_video, show_folder, expect_inherited):
+    """`mvcommon.has_tmdb_token` is TMDB-specific and the walk inherits that. A
+    folder carrying ONLY `[tvdbid-…]` is climbed PAST (past it, past `Series`, out
+    of the media root -> None) so its poster.jpg is never served; add a real tmdb
+    token beside it and the very same folder becomes the show folder."""
+    seeded = _seed_show_named(sandbox, make_video, show_folder)
+    (seeded["show_dir"] / "poster.jpg").write_bytes(_jpeg(b"SHOW"))
+
+    library = mvcommon.load_library()
+    got = main.resolve_artwork_path(library, seeded["ep_id"], kind="poster")
+    if expect_inherited:
+        assert got is not None and os.path.realpath(got) == os.path.realpath(
+            str(seeded["show_dir"] / "poster.jpg")
+        ), f"a tmdb token beside a tvdb tag must still be found, got {got}"
+    else:
+        assert got is None, (
+            f"{show_folder!r} carries no tmdb token and must not act as a show "
+            f"folder — got {got}"
+        )

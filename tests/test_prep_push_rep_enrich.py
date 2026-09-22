@@ -186,7 +186,7 @@ def test_id_supplied_happy_path_archives_presets_resolves_renames_downloads(
     old_folder = sandbox["media_dir"]
     # The renamed folder keeps its ORIGINAL basename (the media folder's own
     # leaf name, not the video filename) with the {tmdb-…} token appended.
-    stamped = old_folder.parent / f"{old_folder.name} {{tmdb-{TMDB_ID}}}"
+    stamped = old_folder.parent / f"{old_folder.name} {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=TMDB_ID)}"
     assert stamped.is_dir() and not old_folder.exists(), \
         f"expected the folder renamed to {stamped}"
     assert entry["folder_path"] == str(stamped)
@@ -224,7 +224,7 @@ def test_no_rename_leaves_folder_unchanged_but_still_writes_tmdb_id(
         "tmdb_id must be written regardless of the rename decision"
     assert entry["folder_path"] == str(original_folder), "folder must NOT be renamed"
     assert original_folder.is_dir()
-    assert not (original_folder.parent / f"{original_folder.name} {{tmdb-{TMDB_ID}}}").exists()
+    assert not (original_folder.parent / f"{original_folder.name} {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=TMDB_ID)}").exists()
 
     # Images still download into the (unrenamed) folder — enrich beyond the
     # rename decision is unaffected.
@@ -1152,7 +1152,7 @@ def test_auto_resolve_without_a_preset_id_searches_and_applies_the_match(
     assert entry["metadata"]["overview"] == "Resolved by title search."
 
     old_folder = sandbox["media_dir"]
-    stamped = old_folder.parent / f"{old_folder.name} {{tmdb-{AUTO_TMDB_ID}}}"
+    stamped = old_folder.parent / f"{old_folder.name} {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=AUTO_TMDB_ID)}"
     assert stamped.is_dir() and not old_folder.exists()
     assert entry["folder_path"] == str(stamped)
     assert (stamped / "poster.jpg").read_bytes() == FAKE_JPG
@@ -1189,7 +1189,7 @@ def test_non_tty_ask_defaults_to_no_rename_and_never_calls_input(
 
     assert result is True
     out = capsys.readouterr().out
-    stamped = original_folder.parent / f"{original_folder.name} {{tmdb-{TMDB_ID}}}"
+    stamped = original_folder.parent / f"{original_folder.name} {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=TMDB_ID)}"
     assert f'"{original_folder}" will be changed to "{stamped}"' in out, \
         "the gate must show the exact before/after folder pair"
     assert "non-interactive session — defaulting to NOT renaming" in out
@@ -1246,7 +1246,7 @@ def test_nfo_written_with_the_flag_and_never_carries_a_tvdbid(
     assert "wrote movie.nfo" in capsys.readouterr().out
 
     old_folder = sandbox["media_dir"]
-    stamped = old_folder.parent / f"{old_folder.name} {{tmdb-{TMDB_ID}}}"
+    stamped = old_folder.parent / f"{old_folder.name} {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=TMDB_ID)}"
     nfo_path = stamped / "movie.nfo"
     assert nfo_path.is_file(), f"movie.nfo missing in {sorted(p.name for p in stamped.iterdir())}"
 
@@ -1289,7 +1289,7 @@ def test_nfo_is_not_written_by_default(
     assert "wrote movie.nfo" not in capsys.readouterr().out
 
     old_folder = sandbox["media_dir"]
-    stamped = old_folder.parent / f"{old_folder.name} {{tmdb-{TMDB_ID}}}"
+    stamped = old_folder.parent / f"{old_folder.name} {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=TMDB_ID)}"
     assert [p.name for p in stamped.rglob("*.nfo")] == [], "no NFO may be written by default"
     entry = mvcommon.load_library()[MOVIE_ID]
     assert entry["metadata"]["tmdb_id"] == TMDB_ID
@@ -1357,7 +1357,7 @@ def test_exa_fallback_runs_when_no_web_is_off(
     entry = mvcommon.load_library()[AUTO_ID]
     assert entry["metadata"]["tmdb_id"] == AUTO_TMDB_ID
     assert entry["metadata"]["title"] == "Web Resolved"
-    stamped = sandbox["media_dir"].parent / f"{sandbox['media_dir'].name} {{tmdb-{AUTO_TMDB_ID}}}"
+    stamped = sandbox["media_dir"].parent / f"{sandbox['media_dir'].name} {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=AUTO_TMDB_ID)}"
     assert entry["folder_path"] == str(stamped) and stamped.is_dir()
 
 
@@ -1391,7 +1391,7 @@ def test_extras_and_enrich_both_complete_in_one_run(
     assert entry["status"] == "archived" and entry["hash"] == orig_hash
     assert entry["metadata"]["tmdb_id"] == TMDB_ID
 
-    stamped = media_dir.parent / f"{media_dir.name} {{tmdb-{TMDB_ID}}}"
+    stamped = media_dir.parent / f"{media_dir.name} {mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=TMDB_ID)}"
     assert entry["folder_path"] == str(stamped) and stamped.is_dir()
 
     item, = entry["extras"]["groups"]["Specials"]["items"]

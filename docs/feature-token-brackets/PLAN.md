@@ -1,4 +1,8 @@
-# Task: Canonical `[tmdbid-…]` square-bracket provider-token format (replacing `{tmdb-…}`) + a crash-safe migration command for the real library
+# Task: Canonical `{tmdb-<id>}` provider-token format + crash-safe migration commands for the real library
+
+> **Format history:** this plan was written targeting `[tmdbid-…]`, corrected to `[tmdb-…]` when real-server
+> testing showed Plex rejects the `id` suffix, then settled on `{tmdb-<id>}` by user choice. See DECISIONS.md
+> D11 (the evidence) and D12 (the final pick). Passages below predating those decisions are historical.
 
 Suggested branch: feature/imp_u6_provider_tokens
 Framework: v2
@@ -917,7 +921,7 @@ Rules that fall out of the evidence:
   Must include the category-folder guard, the flat-show skip, the air-year lookup, idempotency,
   dry-run purity, and that no season folder ends up with an id in its name.
 
-- [ ] 17. [model: sonnet] Docs: ARCHITECTURE.md + README.md + OPERATIONS_QA.md for the new command and
+- [x] 17. [model: sonnet] Docs: ARCHITECTURE.md + README.md + OPERATIONS_QA.md for the new command and
   the season-name convention; update the DECISIONS D11 card with the structural rules.
 
 - [ ] 18. [model: opus] Full verification + the real-library run order (post-merge, user-run):

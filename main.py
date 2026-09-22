@@ -395,11 +395,15 @@ def split_video_file(input_path, output_dir, method, value_str, file_id="", drop
 
     # Command Execution.
     # mkvmerge v97 formats the --split output name via libfmt, so any literal `{`/`}`
-    # in the path (e.g. a legacy `{tmdb-…}` Plex-style folder token — still a
-    # recognized format, though MediaVault now stamps `[tmdbid-…]`, which libfmt
-    # treats as ordinary characters and needs no escaping) is read as a
+    # in the path is read as a
     # format field and mkvmerge dies with `fmt::format_error: argument not found`
-    # (exit 3). Escape them as `{{`/`}}` for the -o arg ONLY — mkvmerge renders them
+    # (exit 3). This escape is LOAD-BEARING ON THE HAPPY PATH, not a legacy
+    # safeguard: the canonical provider token is `{tmdb-<id>}` (decision D12), so
+    # every stamped folder contains braces and every split of an archived title
+    # passes through here. It has fired for real before — a `{tmdb-79660}` folder
+    # once aborted an entire prep→push→replace. Pinned by
+    # tests/test_split_brace_escape.py.
+    # Escape them as `{{`/`}}` for the -o arg ONLY — mkvmerge renders them
     # back to single braces and writes to the real folder. (A plain merge -o is taken
     # literally and must NOT be escaped — see merge_video_files; verified mkvmerge v97.)
     # [FLAC-CARRYOUT] drop_track: exclude one audio track (by its container track
@@ -4163,7 +4167,7 @@ def _old_style_tmdb_token(basename):
 
 def _apply_token_span(basename, token):
     """Replace ONLY `token`'s span in `basename` with the canonical
-    `[tmdbid-<id>]` render, leaving every other character — including a
+    `{tmdb-<id>}` render, leaving every other character — including a
     coexisting `[tvdbid-…]`/`[rartv]`/etc. bracketed tag — byte-identical.
     Never rebuilds the name from scratch (spans are exact/non-overlapping,
     verified by the mvcommon detection-contract tests)."""
@@ -9781,8 +9785,10 @@ def suggest_target_folder(item):
     the entry's existing folder_path with applies=False (informational only).
     For a NEW (UNPREPPED) item, builds a leaf-folder name from the guessed
     Title/Year plus an EDITABLE provider-id placeholder per the provider-tag
-    template (Movies -> [tmdbid-…], Series/Anime -> [tvdbid-…]). This step does NO
-    TMDB/TVDB lookup; the brackets hold an editable placeholder.
+    template — `{tmdb-0000000}` for EVERY category, movies and series/anime
+    alike, since MediaVault is TMDB-for-everything and refuses `-tvdbid`
+    (IMP-D22). This step does NO TMDB lookup; the braces hold an editable
+    placeholder.
     """
     entry = item.get("entry")
     if entry is not None:
@@ -11412,8 +11418,8 @@ if __name__ == "__main__":
         print("  sort")
         print("  fetch [id] [tempdir <path>]")
         print("  recover [id|folder]  (or: recover --scan)")
-        print("  rename_folder [id|folder] \"<NewName [tmdbid-12345]>\"  — rename a show/season folder + rewrite every descendant folder_path (crash-safe, no rehash)")
-        print("  migrate_provider_tokens [id_or_prefix] [--apply] [--library movies|series|anime|others]  — migrate every folder still on the OLD {tmdb-…}/[tmdb-…] token format to canonical [tmdbid-…], ancestor-aware (dry-run by default; --apply writes a JSON report under migration_reports/)")
+        print("  rename_folder [id|folder] \"<NewName {tmdb-12345}>\"  — rename a show/season folder + rewrite every descendant folder_path (crash-safe, no rehash)")
+        print("  migrate_provider_tokens [id_or_prefix] [--apply] [--library movies|series|anime|others]  — migrate every folder still on an OLD token format ([tmdbid-…], [tmdb-…], [tmdbid=…], wrong casing) to canonical {tmdb-…}, ancestor-aware (dry-run by default; --apply writes a JSON report under migration_reports/)")
         print("  normalize_season_folders [id_or_prefix] [--apply]  — two-phase structural rename: Phase A gives the show folder its TMDB token, Phase B renames each season folder to '<Show Name> Season NN (air year)' with NO id on the season (dry-run by default; --apply writes a JSON report under migration_reports/)")
         print("  add_extras <title_id> \"<folders>\" [--extras-size <v|none>] [device <id>] [no-replace]  — attach extras (Specials/Trailers/BTS) to an existing title")
         print("  web [--port N] [--host H] [--no-browser] [--demo]  — Launch the local web operations console (Disk Reclaim view); --demo = SAFE build, all actions simulated")

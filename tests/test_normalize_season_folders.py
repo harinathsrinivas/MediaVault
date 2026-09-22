@@ -533,3 +533,94 @@ def test_no_season_folder_ends_up_with_id_in_name(sandbox, mock_tmdb, capsys):
     assert len(season_dirs) == 2
     for d in season_dirs:
         assert mvcommon.has_tmdb_token(d.name) is False
+
+
+# ---------------------------------------------------------------------------
+# (13) ONE TOKEN PER FOLDER — Phase A strips a stale NON-tmdb provider token
+# before appending the canonical one (user decision, 2026-09-22;
+# `main.py:4916-4937`). Regression pin for the real library shapes
+# `Dark (2017) [tvdbid-334824]` and `Fringe (2008) [tvdbid-82066]`, which would
+# otherwise come out carrying TWO provider ids
+# (`Dark (2017) [tvdbid-334824] {tmdb-70523}`).
+# ---------------------------------------------------------------------------
+
+def _carrier_text(name):
+    """Everything about `name` that is NOT a provider token: every recognized
+    token's own span cut out (nothing else touched), then the token's leading
+    separator space dropped from the tail.
+
+    This is the "the rest of the name survives byte-identically" claim, made
+    checkable. Span-based like the strip it pins (`main.py:4929-4934`), so a
+    bracketed NON-token tag (`[rartv]`, a chunk short_id) is deliberately part
+    of the carrier text and must survive too."""
+    out = name
+    for tok in sorted(mvcommon.find_provider_tokens(name),
+                      key=lambda t: t["span"][0], reverse=True):
+        start, end = tok["span"]
+        out = out[:start] + out[end:]
+    return out.rstrip()
+
+
+def test_phase_a_strips_a_stale_non_tmdb_token(sandbox, mock_tmdb, capsys):
+    """A show folder ends a Phase A stamp with EXACTLY ONE provider token, and
+    it is the canonical `{tmdb-<id>}`.
+
+    Three shapes in one run, all three real:
+      - `Dark (2017) [tvdbid-334824]`  — stale tvdb token, stripped.
+      - `Fringe (2008) [tvdbid-82066]` — same shape, second real case.
+      - `Stranger Things (2016)`       — CONTROL: no stale token, so the strip
+        must be a pure no-op and the name is only appended to.
+
+    MediaVault is TMDB-for-everything and refuses `-tvdbid` outright (IMP-D22),
+    and Plex ignores the `tvdbid` spelling entirely (verified on real servers),
+    so the tvdb id is dead weight — but the NON-token text around it is not, and
+    must come through byte-identical (`_carrier_text`). The canonical render
+    itself is pinned as a literal once, in
+    `tests/test_provider_tokens.py::test_canonical_tmdb_format_constant`; every folder
+    name here is built from that same constant so this file tracks it."""
+    scifi = sandbox["local_root"] / "Series" / "English" / "Sci-Fi"
+    dark_s01 = scifi / "Dark (2017) [tvdbid-334824]" / "Dark.S01.2017 [tmdbid-70523]"
+    fringe_s01 = scifi / "Fringe (2008) [tvdbid-82066]" / "Fringe.S01.2008 [tmdbid-1705]"
+    stranger_s01 = scifi / "Stranger Things (2016)" / "Stranger.Things.S01.2016 [tmdbid-66732]"
+    for folder in (dark_s01, fringe_s01, stranger_s01):
+        folder.mkdir(parents=True)
+    library = {
+        "tv-en-2017-dark-s01": _season_map(dark_s01),
+        "tv-en-2008-fringe-s01": _season_map(fringe_s01),
+        "tv-en-2016-strangerthings-s01": _season_map(stranger_s01),
+    }
+    _seed(sandbox, library)
+    mock_tmdb.tv_details[70523] = _tv_detail("Dark", {1: "2017-12-01"})
+    mock_tmdb.tv_details[1705] = _tv_detail("Fringe", {1: "2008-09-09"})
+    mock_tmdb.tv_details[66732] = _tv_detail("Stranger Things", {1: "2016-07-15"})
+
+    main.cmd_normalize_season_folders("--apply")
+    _out, report, _path = _read_report(capsys, sandbox)
+    assert report["errors"] == []
+
+    def _canon(tmdb_id):
+        return mvcommon.CANONICAL_TMDB_TOKEN_FMT.format(id=tmdb_id)
+
+    # EXACT final basenames — the whole string, not a substring of it.
+    expected = {
+        "Dark (2017) [tvdbid-334824]":  f"Dark (2017) {_canon(70523)}",
+        "Fringe (2008) [tvdbid-82066]": f"Fringe (2008) {_canon(1705)}",
+        "Stranger Things (2016)":       f"Stranger Things (2016) {_canon(66732)}",
+    }
+    assert {os.path.basename(rec["old_folder"]): os.path.basename(rec["new_folder"])
+            for rec in report["show_folders_tokened"]} == expected
+
+    for old_name, new_name in expected.items():
+        assert (scifi / new_name).is_dir()
+        assert not (scifi / old_name).exists()
+        # EXACTLY ONE provider token, and it is the canonical curly tmdb one.
+        tokens = mvcommon.find_provider_tokens(new_name)
+        assert len(tokens) == 1, f"{new_name!r} carries {len(tokens)} provider tokens"
+        assert tokens[0]["provider"] == "tmdb"
+        assert tokens[0]["bracket"] == "curly"
+        assert tokens[0]["match"] == _canon(tokens[0]["id"])
+        # The non-token part of the name survived byte-identically.
+        assert _carrier_text(new_name) == _carrier_text(old_name)
+
+    # The control show's name was ONLY appended to — the strip touched nothing.
+    assert _carrier_text("Stranger Things (2016)") == "Stranger Things (2016)"

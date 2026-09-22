@@ -176,3 +176,56 @@ whether the preceding bracket or the keyword caused it. Do not run `--apply` unt
 if position matters, the migration should move the token ahead of the noise group for those 21 rather
 than leaving them broken on two of three servers.
 
+## D12 — Canonical format is `{tmdb-<id>}` (SUPERSEDES D11's `[tmdb-<id>]`)
+
+**Status: USER-CONFIRMED, 2026-09-22.** This is the final format. D11 correctly identified that the
+`id` **suffix** was the defect and that both `{tmdb-…}` and `[tmdb-…]` work on all three servers; it
+then picked square. The user chose **curly** instead, for one consistent form across movies, series
+and anime. Nothing in D11's evidence changes — only the pick.
+
+### Why this is a free choice, and what it costs
+
+Both forms were verified on the user's real Plex, Emby and Jellyfin installs (D11's matrix, plus a
+12-show series/anime matrix). Neither server-side behaviour nor category coverage differs:
+
+| | `{tmdb-<id>}` | `[tmdb-<id>]` |
+|---|---|---|
+| Plex / Emby / Jellyfin, movies and TV | works | works |
+| Matches Plex's own published naming docs | yes | no |
+| mkvmerge `--split` | **needs brace-escaping** | none needed |
+
+The one real cost is the last row, and it is not theoretical. `{`/`}` are libfmt replacement-field
+syntax, and a `{tmdb-79660}` folder once aborted an entire prep→push→replace with
+`fmt::format_error: argument not found` (exit 3). `split_video_file` doubles the braces for its
+`--split -o` argument (`main.py:409`), pinned by `tests/test_split_brace_escape.py`.
+
+**Consequence worth stating plainly: that escape moves from legacy safeguard to load-bearing on the
+happy path.** Under D11's square canonical it protected only the one remaining legacy folder; under
+D12 every stamped folder carries braces, so every split of an archived title depends on it. The
+comment at `main.py:397` says so, and the test must never be deleted as "no longer relevant".
+
+### Also settled here
+
+- **Season folders carry no id at all** (`The Wire Season 01 (2002)`). Friends S01's own TMDB *season*
+  id is `4573`, and `4573` as a *show* id is "Late Night with Conan O'Brien" — season and show ids
+  share one namespace and no server reads a season-level token.
+- **One provider token per folder.** A stale non-tmdb token is stripped when a show folder is stamped
+  (`Dark (2017) [tvdbid-334824]` → `Dark (2017) {tmdb-70523}`). Two folders library-wide.
+- **TMDB for every category.** Series test rows S2/S5/S7 confirmed `{tmdb-…}`/`[tmdb-…]` match TV
+  shows on all three servers, and MediaVault refuses `-tvdbid` (IMP-D22), so one id space serves all.
+
+### Retired, and why — do not revive either
+
+- **Dual-token** (`{tmdb-12} [tmdbid-12]`): Jellyfin drops such a folder from the library **entirely**.
+  Worse than either single format. It had been floated as "the only way to satisfy all three"; that
+  premise was false, and the test caught it.
+- **NFO-at-stamp sidecars**: existed solely to rescue Plex from bracketed tokens. Plex reads
+  `{tmdb-…}` natively, so the feature would cost a per-library agent change and the loss of Plex
+  watch-state sync to solve a problem that does not exist.
+
+### Migration impact
+
+Detection stays a superset (`{tmdb-…}`, `[tmdb-…]`, `[tmdbid-…]`, `[tmdbid=…]`, any casing) because
+the live library is entirely `[tmdbid-…]` until the migration runs. Live dry runs, 2026-09-22:
+`migrate_provider_tokens` → `scanned=317 would-rename=236 already-canonical=1`;
+`normalize_season_folders` → `scanned=64 show_folders_would_token=11 seasons_would_rename=60 skipped=4`.

@@ -234,7 +234,11 @@ def test_groq_chat_sends_required_user_agent(monkeypatch):
     assert captured["url"] == "https://api.groq.com/openai/v1/chat/completions"
     assert "Mozilla/5.0" in captured["headers"]["User-Agent"]
     assert captured["headers"]["Authorization"] == "Bearer GROQ-KEY"
-    assert captured["json"]["model"] == "llama-3.3-70b-versatile"
+    # Assert against the constant, not a literal. The model name is a moving
+    # target -- Groq retired llama-3.3-70b-versatile out from under us and every
+    # trivia call began 404ing silently. Pinning the literal here would only
+    # re-break on the next retirement while testing nothing about the wiring.
+    assert captured["json"]["model"] == main.GROQ_MODEL
 
 
 def test_groq_chat_http_error_returns_none(monkeypatch):

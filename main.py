@@ -3287,7 +3287,19 @@ EXTRA_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mve
 
 EXA_API_ROOT = "https://api.exa.ai/search"
 GROQ_API_ROOT = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+# Verified reachable 2026-09-22. The previous value, "llama-3.3-70b-versatile",
+# was RETIRED by Groq and now 404s ("model does not exist") on every call, which
+# silently disabled the whole fetch_trivia distillation step. Re-check this
+# constant against GET https://api.groq.com/openai/v1/models when trivia stops
+# producing facts — a decommissioned model is the first thing to suspect.
+#
+# NOT a reasoning model, deliberately. Groq's gpt-oss-120b/20b are stronger but
+# spend part of the completion budget on hidden reasoning tokens first, so under
+# GROQ_MAX_TOKENS=300 with a system prompt they return HTTP 200 and an EMPTY
+# content string — a silent no-op indistinguishable from "no trivia found".
+# Switching to one of those means raising GROQ_MAX_TOKENS and reading the extra
+# `reasoning` field; qwen needs neither.
+GROQ_MODEL = "qwen/qwen3.8-27b"
 # GROQ sits behind Cloudflare, which 403s (error 1010) a default python-requests
 # User-Agent. A browser-ish UA is REQUIRED for every GROQ call.
 GROQ_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MediaVault/1.0"

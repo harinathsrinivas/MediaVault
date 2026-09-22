@@ -924,7 +924,7 @@ Rules that fall out of the evidence:
 - [x] 17. [model: sonnet] Docs: ARCHITECTURE.md + README.md + OPERATIONS_QA.md for the new command and
   the season-name convention; update the DECISIONS D11 card with the structural rules.
 
-- [ ] 18. [model: opus] Full verification + the real-library run order (post-merge, user-run):
+- [x] 18. [model: opus] Full verification + the real-library run order (post-merge, user-run):
   1. `python main.py migrate_provider_tokens` (dry-run) → review → `--apply`  — 237 folders
   2. `python main.py normalize_season_folders` (dry-run) → review → `--apply` — **11 show folders + 60 seasons** (measured 2026-09-22; the earlier 8/29 estimate predated the ownership fix, which un-skipped every show whose seasons' library ids carry different years)
   3. `python main.py verify_library` and a `recover --scan` to confirm a clean journal

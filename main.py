@@ -2149,7 +2149,7 @@ def _season_episode_meta(season_details):
 
 
 def _show_folder_of(season_folders):
-    """The on-disk SHOW folder that the `[tmdbid-…]` token is stamped onto, given the
+    """The on-disk SHOW folder that the `{tmdb-…}` token is stamped onto, given the
     distinct season folders of one show.
 
     Layout assumption (Plex/Emby/Jellyfin standard, matched by the project's own
@@ -3287,7 +3287,10 @@ EXTRA_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mve
 
 EXA_API_ROOT = "https://api.exa.ai/search"
 GROQ_API_ROOT = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.3-70b-versatile"
+GROQ_MODEL = "qwen/qwen3.8-27b"
+# GROQ retires models without notice — `llama-3.3-70b-versatile` vanished and every
+# distill silently returned nothing. When trivia stops producing facts, re-check this
+# constant against GET https://api.groq.com/openai/v1/models before debugging anything else.
 # GROQ sits behind Cloudflare, which 403s (error 1010) a default python-requests
 # User-Agent. A browser-ish UA is REQUIRED for every GROQ call.
 GROQ_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MediaVault/1.0"
@@ -3476,15 +3479,24 @@ def exa_search_trivia(title, year):
     return out
 
 
+class _GroqRateLimited(Exception):
+    """A transient GROQ 429. Raised only inside _groq_chat so retry() can back
+    off; it never escapes the function."""
+    pass
+
+
 def _groq_chat(messages, api_key, max_tokens=GROQ_MAX_TOKENS):
     """POST a chat-completion to GROQ -> the assistant message content string, or
     None on any failure. The single requests seam groq_distill_trivia funnels
     through (tests patch this to inject a canned reply).
 
-    The Mozilla User-Agent is REQUIRED (see GROQ_USER_AGENT). NEVER raises — a
-    network error / non-200 / bad JSON / a reply missing choices all return None."""
-    try:
-        r = requests.post(
+    The Mozilla User-Agent is REQUIRED (see GROQ_USER_AGENT). A 429 is retried
+    with backoff — GROQ's free tier rate-limits partway through a long backfill,
+    and without this a transient limit drops that title from the run for good.
+    Every other failure returns None on the first try. NEVER raises — a network
+    error / non-200 / bad JSON / a reply missing choices all return None."""
+    def _post():
+        resp = requests.post(
             GROQ_API_ROOT,
             headers={
                 "Authorization": f"Bearer {api_key}",
@@ -3494,6 +3506,21 @@ def _groq_chat(messages, api_key, max_tokens=GROQ_MAX_TOKENS):
             json={"model": GROQ_MODEL, "messages": messages, "max_tokens": max_tokens},
             timeout=60,
         )
+        if resp.status_code == 429:
+            raise _GroqRateLimited()
+        return resp
+
+    try:
+        r = retry(
+            _post,
+            attempts=4,
+            backoff=(5, 20, 60),
+            retry_on=(_GroqRateLimited,),
+            on_retry=lambda n, _e: print(f"   ⏳ GROQ rate-limited — backing off (attempt {n}/3)"),
+        )
+    except _GroqRateLimited:
+        print("   ⚠️  GROQ returned status 429 (rate limit) — gave up after 4 attempts")
+        return None
     except Exception as e:
         print(f"   ⚠️  GROQ request failed: {e}")
         return None
@@ -3964,7 +3991,7 @@ def _collect_folder_descendants(library, old_folder):
 def cmd_rename_folder(old_folder_or_id, new_folder_name_or_token):
     """Crash-safe cascading folder rename (IMP-D17).
 
-    Rename an on-disk SHOW/season folder (e.g. stamp a `[tmdbid-12345]` token onto it)
+    Rename an on-disk SHOW/season folder (e.g. stamp a `{tmdb-12345}` token onto it)
     and rewrite `folder_path` for EVERY library entry under that folder — all
     seasons/episodes leaves AND the show's season_map container — atomically.
 
@@ -4722,7 +4749,7 @@ def cmd_normalize_season_folders(arg=None, *flags):
     version of this guard) would incorrectly refuse Mr.Robot itself.
 
     FLAT SHOWS (one folder is both show and season, e.g. `Chernobyl
-    (Miniseries) 2019 … [tmdbid-87108]` sitting directly in `Classic`) are
+    (Miniseries) 2019 … {tmdb-87108}` sitting directly in `Classic`) are
     left STRUCTURALLY UNTOUCHED — migrate_provider_tokens already fixes their
     id in place. A flat show sharing its category folder with other tracked
     shows is already excluded by the sibling-ownership guard above. A SOLO
@@ -12026,7 +12053,7 @@ if __name__ == "__main__":
         if len(sys.argv) >= 4:
             cmd_rename_folder(sys.argv[2], sys.argv[3])
         else:
-            print("❌ Usage: rename_folder [id|folder] \"<NewName [tmdbid-12345]>\"")
+            print("❌ Usage: rename_folder [id|folder] \"<NewName {tmdb-12345}>\"")
 
     elif cmd == "migrate_provider_tokens":
         # migrate_provider_tokens [id_or_prefix] [--apply] [--library movies|series|anime|others]

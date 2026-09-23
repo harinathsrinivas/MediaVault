@@ -234,7 +234,53 @@ def test_groq_chat_sends_required_user_agent(monkeypatch):
     assert captured["url"] == "https://api.groq.com/openai/v1/chat/completions"
     assert "Mozilla/5.0" in captured["headers"]["User-Agent"]
     assert captured["headers"]["Authorization"] == "Bearer GROQ-KEY"
-    assert captured["json"]["model"] == "llama-3.3-70b-versatile"
+    # Assert against the CONSTANT, never a literal: GROQ retires models without
+    # notice, and a literal here stays green while trivia is silently dead.
+    assert captured["json"]["model"] == main.GROQ_MODEL
+
+
+def test_groq_chat_retries_a_429_then_succeeds(monkeypatch):
+    """A transient rate limit must NOT drop the title: 429s are retried."""
+    calls = {"n": 0}
+
+    def flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return _FakeResp(429, None)
+        return _FakeResp(200, {"choices": [{"message": {"content": "hello"}}]})
+
+    monkeypatch.setattr(main.requests, "post", flaky)
+    monkeypatch.setattr(main.mvcommon.time, "sleep", lambda s: None)
+    assert main._groq_chat([{"role": "user", "content": "x"}], "K") == "hello"
+    assert calls["n"] == 3
+
+
+def test_groq_chat_gives_up_after_repeated_429(monkeypatch):
+    """Exhausted retries return None — _groq_chat still NEVER raises."""
+    calls = {"n": 0}
+
+    def always_limited(*a, **k):
+        calls["n"] += 1
+        return _FakeResp(429, None)
+
+    monkeypatch.setattr(main.requests, "post", always_limited)
+    monkeypatch.setattr(main.mvcommon.time, "sleep", lambda s: None)
+    assert main._groq_chat([{"role": "user", "content": "x"}], "K") is None
+    assert calls["n"] == 4
+
+
+def test_groq_chat_does_not_retry_a_non_429(monkeypatch):
+    """Only 429 is transient. A 500 must still fail on the FIRST call, as before."""
+    calls = {"n": 0}
+
+    def server_error(*a, **k):
+        calls["n"] += 1
+        return _FakeResp(500, None)
+
+    monkeypatch.setattr(main.requests, "post", server_error)
+    monkeypatch.setattr(main.mvcommon.time, "sleep", lambda s: None)
+    assert main._groq_chat([{"role": "user", "content": "x"}], "K") is None
+    assert calls["n"] == 1
 
 
 def test_groq_chat_http_error_returns_none(monkeypatch):

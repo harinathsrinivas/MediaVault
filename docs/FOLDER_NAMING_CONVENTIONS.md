@@ -1,6 +1,6 @@
 # MediaVault folder structure & naming conventions
 
-**Last updated: 2026-09-22** · Established by IMP-U6; format settled by decisions
+**Last updated: 2026-09-23** · Established by IMP-U6; format settled by decisions
 [D11](feature-token-brackets/DECISIONS.md) (the evidence) and D12 (the final pick).
 
 This is the reference for how media is laid out on disk. Every rule here was verified against
@@ -128,6 +128,45 @@ Chernobyl (Miniseries) 2019 2160p.DTS-HD.MA.5.1.DV {tmdb-87108}
 Death Note (Complete Series) [1080p] (Dual Audio) {tmdb-13916}
 ```
 Left structurally alone — it needs its token, because it *is* the show folder.
+
+---
+
+## 3a. NFO files — they OVERRIDE the folder token
+
+Emby and Jellyfin read a sidecar `.nfo` in preference to the folder token. **A wrong NFO silently
+defeats everything in §1.** Verified 2026-09-23: `Fringe (2008) {tmdb-1705}` — a correct folder —
+displayed as *Barareh Nights* on both servers, because its `tvshow.nfo` carried
+`<tmdbid>1701</tmdbid>`. The token was never consulted.
+
+So the token is the *fallback*, not the authority, on two of the three servers.
+
+### Placement — one per title, never per season
+
+```
+<Show folder>\tvshow.nfo      ✅ the only correct place for a show
+<Movie folder>\movie.nfo      ✅
+<Season folder>\tvshow.nfo    ❌ tells the scanner the SEASON is a show
+```
+
+A `tvshow.nfo` inside a season folder invites Emby/Jellyfin to treat that season as a separate
+series. 60 such files existed on 2026-09-23 — artifacts of enriching *before*
+`normalize_season_folders` moved tokens up to the show folder, back when `_show_folder_of`
+legitimately resolved to the season folder because that was where the token lived. They were removed
+and regenerated at show level.
+
+### What a healthy NFO looks like
+
+`<title>` must be the real title. A `<title>` like `mov-ta-2002-run` or `tv-en-1994-friends-s01e01`
+is a **MediaVault library id that leaked into the file**, and both servers will display it verbatim.
+37 NFOs were in that state on 2026-09-23. Regenerate with:
+
+```powershell
+python main.py enrich_metadata <id_or_prefix> --apply --nfo
+```
+
+> ⚠️ **Do not run that across `--library series` until IMP-U7 is fixed.** `_show_folder_of` cannot
+> read the season-folder names `normalize_season_folders` creates, so the same run re-stamps provider
+> tokens onto 47 season folders and undoes §3. Movies are unaffected.
 
 ---
 

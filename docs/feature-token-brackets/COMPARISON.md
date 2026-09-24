@@ -1,5 +1,30 @@
 # IMP-U6 — Branch comparison: `feature/imp_u6_provider_tokens` (C, Claude) vs `feature/imp_u6_token_brackets` (D, DeepSeek)
 
+> ## OUTCOME — decided 2026-09-24
+>
+> **C shipped. D was rejected and its branch renamed `feature/imp_u6_token_brackets` →
+> `rejected/imp_u6_token_brackets`** (all 72 commits preserved; PR #51 closed unmerged). IMP-U6
+> shipped from C via PRs #53 → #54 → #55 → #56.
+>
+> **The approach changed after this review, on evidence this review did not have.** Both branches —
+> and this comparison — assumed `[tmdbid-<id>]` was the right canonical format. Live testing against
+> real Plex, Emby and Jellyfin installs showed it is **invisible to Plex**: Plex rejects the `id`
+> SUFFIX and the `=` separator and is indifferent to bracket style, so the widely-repeated "Plex
+> ignores square brackets" claim both branches relied on is false. Canonical is now **`{tmdb-<id>}`**
+> (decisions D11/D12). Dual-token was disproved too — Jellyfin drops such a folder from the library.
+>
+> **One of this review's two recommended grafts was withdrawn, then partly vindicated.** NFO-at-stamp
+> was dropped on the reasoning that Plex reads `{tmdb-…}` natively, making an NFO id-pin cost without
+> benefit. Later testing showed that reasoning was too narrow: **Emby and Jellyfin read a sidecar NFO
+> in preference to the folder token** — `Fringe (2008) {tmdb-1705}`, a correct folder, displayed as
+> *Barareh Nights* on both because a scraped `tvshow.nfo` carried `<tmdbid>1701</tmdbid>`. D's
+> instinct was sounder than the reason given for dropping it. See `FOLDER_NAMING_CONVENTIONS.md` §3a.
+> The second graft, D's one-line `card.js` fix, **was taken**, as was D's wider any-provider artwork
+> walk.
+>
+> **Sections below predate these findings** and are kept as the record of what was known at review
+> time. Where they present `[tmdbid-…]` as canonical, read `{tmdb-<id>}`.
+
 **Judge:** V2 judge (Fable 5.1, xhigh effort). RUNNING AS: `claude-fable-5-1` — this review ran on
 the primary model tier, not the Opus fallback.
 
@@ -481,10 +506,12 @@ onboarding docs are further discounted).
    trail as-is — C's in-CLI, smoke-gated, JSON-report design is more robust by this review's own
    testing, and D's transcript was found stale.
 
-This is a recommendation, not a decision — **nothing is merged until the user picks.** Both
-branches are legitimate, fully-green, non-trivial pieces of engineering; the gap between them is
-real but not enormous, and grafting NFO + the card.js fix onto C closes essentially all of D's
-advantage while keeping C's stronger, better-tested detection core.
+~~This is a recommendation, not a decision — **nothing is merged until the user picks.**~~
+**Decided 2026-09-24: C shipped, D rejected** (see OUTCOME at the top). Both branches were
+legitimate, fully-green, non-trivial pieces of engineering; the gap between them was real but not
+enormous. Of the two recommended grafts, `card.js` was taken and NFO-at-stamp was withdrawn — a call
+that later evidence partly undercut, since NFOs turned out to override the folder token on two of the
+three servers.
 
 ---
 

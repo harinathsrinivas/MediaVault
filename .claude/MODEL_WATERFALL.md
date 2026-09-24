@@ -25,8 +25,9 @@ So the fallback is **not** "swap to a different agent". It is:
 Agent(subagent_type: "executor-fable", model: "opus", prompt: <same dispatch + banner>)
 ```
 
-`executor-fable` declares `effort: xhigh`; `judge-v2` and `orchestrator-v2` likewise. Overriding
-only the model therefore yields exactly what the user asked for — **"Opus with max/ultra"** — with
+`executor-fable` and `judge-v2` declare `effort: max` (raised from `xhigh` on 2026-09-24, user
+decision, so a fallback really is Opus at *max*; `orchestrator-v2`'s frontmatter is irrelevant — it is a
+playbook, never spawned). Overriding only the model therefore yields exactly what the user asked for — **"Opus with max/ultra"** — with
 every v2 quality rule (no-limits depth, mandatory self-review, evidence-over-self-report) intact.
 
 **Exception — `subagent_type: "fork"` ignores a `model` override** (a fork always runs the parent's
@@ -66,8 +67,8 @@ Applied per role. Tier 1 is the default; drop a tier only on a failed probe or a
 |---|---|---|---|
 | Planning | `planner-v2` (fable/max) | `planner-v2` + `model: "opus"` | `planner` (v1) + `model: "opus"` |
 | Orchestration (main session) | main session on Fable, xhigh–max | main session on **Opus 5 at `/effort max`** | — |
-| Complex step | `executor-fable` (fable/xhigh) | `executor-fable` + `model: "opus"` | `executor-opus` (max) |
-| Judging | `judge-v2` (fable/xhigh) | `judge-v2` + `model: "opus"` | `judge` (v1) + `model: "opus"` |
+| Complex step | `executor-fable` (fable/max) | `executor-fable` + `model: "opus"` | `executor-opus` (max) |
+| Judging | `judge-v2` (fable/max) | `judge-v2` + `model: "opus"` | `judge` (v1) + `model: "opus"` |
 | Normal / simple steps | unchanged (`executor-opus` / `-sonnet` / `-haiku`) | unchanged | unchanged |
 
 Tier 3 exists only for the case where a v2 definition itself fails to load. **If Opus is also

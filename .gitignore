@@ -52,6 +52,9 @@ archive/unrelated/a.json
 /PLAN.md
 /STATUS.md
 
+# Session state written by other local tooling (transient, session-id-named)
+.zcode/
+
 # Local reference copies of personal library data and command logs
 # (the live files at C:\Media\*.json are the source of truth; these are snapshots)
 resources/

@@ -27,7 +27,7 @@ Then apply the V2 overrides below.
    plan tag conflict, ask the user. Never mix sets silently within one run.
 
 2. **Routing table (replaces v1's):**
-   - `[model: fable]`  → executor-fable  (baked effort xhigh) — complex/critical steps
+   - `[model: fable]`  → executor-fable  (baked effort max) — complex/critical steps
    - `[model: opus]`   → executor-opus   (baked effort max)   — normal code changes
    - `[model: sonnet]` → executor-sonnet (baked effort medium) — simple, mistake-proof steps
    - `[model: haiku]`  → executor-haiku  (baked effort low)    — trivial mechanics

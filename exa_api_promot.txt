@@ -1,0 +1,67 @@
+> **Canonical reference:** https://docs.exa.ai/reference/exa-mcp
+>
+> If anything below looks outdated or contradicts real MCP behavior, fetch that URL — it is the source of truth for MCP setup, auth, and tools. Report staleness back to the user.
+
+---
+
+# Exa MCP Setup Guide
+
+---
+
+## 🔌 Exa MCP Server for Claude
+
+Give Claude real-time web search and page fetching with Exa MCP.
+
+Claude Code and Claude Desktop/Web/Cowork install Exa differently. Pick the path for the Claude the user is in (ask if it is not clear from context).
+
+**Claude Code (CLI) — you can do this yourself. Run in the terminal:**
+
+```bash
+claude plugin install exa@claude-plugins-official
+```
+
+(The user can also type `/plugin` inside Claude Code, search for **Exa**, and install it.) Then start a new Claude Code session — plugins load on session start — and complete the Exa sign-in the browser opens on first use.
+
+**Claude Desktop, Web, or Cowork — uses Exa's official connector; there is no config file. Walk the user through it:**
+
+1. In a new chat, select the **+** button and choose **Add connector**.
+2. Search for **Exa**, open it, select **Connect to Claude**, and authorize access when prompted.
+3. Start a new chat and ask for something that needs current information from the web.
+
+Do not edit `claude_desktop_config.json` for Exa — the built-in connector is the supported path.
+
+**Verify it works:** in a fresh session after setup, ask the client something that needs the web, e.g. "Search for recent developments in AI agents and summarize the key trends." The `web_search_exa` tool should be called.
+
+**Authentication:** the hosted server works without a key on a small free plan — there is no sign-in step unless the client installed Exa as a plugin. Once the free plan is used up the server answers with a 429 (some clients, Hermes included, show this as a search that hangs and times out rather than an error). To lift the limit or use it in production, add the user's [Exa API key](https://dashboard.exa.ai/api-keys) as a header wherever the client's config accepts one:
+
+```json
+{
+  "exa": {
+    "url": "https://mcp.exa.ai/mcp",
+    "headers": {
+      "x-api-key": "YOUR_EXA_API_KEY"
+    }
+  }
+}
+```
+
+**Tools:** `web_search_exa` (search the web, get clean content) and `web_fetch_exa` (read a page as markdown) are on by default. `agent_run` (multi-step Exa Agent research; needs auth) and `web_search_advanced_exa` (category/domain/date filters, highlights, summaries, subpage crawling) are opt-in — append `?tools=` to the URL to choose exactly which tools the client sees:
+
+```
+https://mcp.exa.ai/mcp?tools=web_search_exa,web_fetch_exa,agent_run,web_search_advanced_exa
+```
+
+**Troubleshooting:**
+- Tools not appearing → restart the client after changing config; some clients need a full restart to detect new MCP servers.
+- Rate limit error (429), or the first search hangs and times out with no result → the free plan is used up; add the `x-api-key` header above.
+- Claude Desktop not connecting → use the built-in connector (**+** or **Add connectors** → **Connectors** → search **Exa** → **+**), not a config file.
+
+📖 Full docs: [docs.exa.ai/reference/exa-mcp](https://docs.exa.ai/reference/exa-mcp)
+
+---
+
+## Resources
+
+- Docs: https://exa.ai/docs
+- Dashboard: https://dashboard.exa.ai
+- API Status: https://status.exa.ai

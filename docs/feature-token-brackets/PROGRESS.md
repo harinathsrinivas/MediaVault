@@ -244,6 +244,20 @@ tests. The suite was green throughout, at 938 tests and later at 955:
 
 The same root cause — library ids embedding the season's air year — produced both #2 and IMP-U7.
 
+## The rejected branch
+
+The parallel DeepSeek implementation, `feature/imp_u6_token_brackets`, was **not merged**. It is
+renamed **`rejected/imp_u6_token_brackets`** (all 72 commits preserved) and PR #51 is closed with the
+reasoning on it. Two things from it did ship: the one-line `webui/static/card.js` hint fix, and the
+wider any-provider artwork walk.
+
+Its headline feature, NFO-at-stamp, was withdrawn on the reasoning that Plex reads `{tmdb-…}`
+natively — later evidence showed that reasoning was too narrow, since Emby and Jellyfin prefer a
+sidecar NFO over the folder token. Full outcome in `COMPARISON.md`.
+
+Earlier references to `feature/imp_u6_token_brackets` in `PLAN.md` and above in this file are kept
+as the historical record of what the branch was called at the time.
+
 ## Checkpoints
 
 - **Checkpoint 1 (merge to `main`):** satisfied — PRs #53, #54, #55, #56 merged on user confirmation.

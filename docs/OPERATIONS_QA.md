@@ -11,7 +11,7 @@
 > **Maintenance:** when a question is asked and answered in any Claude session, add it here.
 > See the protocol at the bottom.
 
-**Last updated:** 2026-09-22
+**Last updated:** 2026-09-23
 
 ---
 
@@ -415,6 +415,84 @@ gain by running `replace` alongside it — that is exactly what caused the incid
 An entry with a **dummy on disk** but `status != "archived"` or `uploaded != True`. `verify_library`
 reports these. The danger: `push_group`'s skip test is only `uploaded == True` — it never checks
 `status` or what's on disk, so it will happily upload a 9 KB dummy over a real cloud copy.
+
+---
+
+## 6a. Media-server library setup (Plex / Emby / Jellyfin)
+
+Verified against the live servers on 2026-09-22/23.
+
+### Plex hides shows nested more than 3 levels below the library root
+
+`TV Shows` showed **2 shows instead of 15**, and a forced full rescan changed nothing. Counting
+episode depth below the library root explained it exactly:
+
+| episode file depth below library root | scanned? |
+|---|---|
+| 2 (`<Show>/ep.mkv`) | yes |
+| 3 (`<Genre>/<Show>/ep.mkv`) | yes |
+| **4** (`<Genre>/<Show>/<Season>/ep.mkv`) | **no — 891 files invisible** |
+
+MediaVault's layout is `Series/<Language>/<Genre>/<Show>/<Season>/ep`, which puts episodes 4 deep.
+**Fix: point the library at the genre folders, not at `Series`** — one library, several locations, so
+each location root sits directly above the show folders. 2 shows → 15, 908 episodes. This is a Plex
+database change only; nothing on disk moves.
+
+### Overlapping library paths silently duplicate items
+
+A library whose path *contains* another library's path makes both index the same files. Found in
+Plex (`Movies SSD` = `C:\Media\Movies` over six per-language libraries) and in Emby
+(`Movies SSD`, `TV shows SSD`, and `English Movies` over `3D Movies`).
+
+**Before deleting the broad library, check what only it covers.** Deleting Plex's `Movies SSD` would
+have orphaned `Movies\Korean` (3 films, no Korean library existed); deleting Emby's would have
+orphaned `Movies\Kannada`, and `TV shows SSD` was the only cover for `Series\Tamil`. Create the
+missing narrow libraries first, then delete.
+
+Watch state survives: Plex's `Movies SSD` held 14 watched / 29 in progress, and the six language
+libraries held exactly the same, because Plex syncs state across duplicate items.
+
+To edit a Plex library's paths **losslessly** (instead of delete + recreate, which loses watch state)
+send the FULL parameter set — `location` alone returns 400:
+
+```
+PUT /library/sections/{id}?name=…&type=…&agent=…&scanner=…&language=…&location=<path>
+```
+
+### Emby: delete a library by `Id`, not by `name`
+
+`DELETE /Library/VirtualFolders?name=…` returns **500 `Object reference not set to an instance of an
+object`** for every variant — with or without `refreshLibrary`, and the `Paths` form fails the same
+way. Using the numeric id works:
+
+```
+DELETE /emby/Library/VirtualFolders?Id=<ItemId>&api_key=…      ->  204
+```
+
+Get `<ItemId>` from `GET /emby/Library/VirtualFolders`. (An earlier note in this project claimed Emby
+libraries could only be removed through the UI — that was wrong; only the `name=` form is broken.)
+
+### Auth differs per server
+
+| Server | How the key goes |
+|---|---|
+| Plex | header `X-Plex-Token` (query param 404s on some endpoints) |
+| Emby | query param `api_key=` |
+| Jellyfin | header `Authorization: MediaBrowser Token="…"` (query param → 401) |
+
+Plex's token is in the registry: `HKCU:\Software\Plex, Inc.\Plex Media Server` → `PlexOnlineToken`.
+
+### Auditing whether every item is matched correctly
+
+Don't compare item counts between servers — each has a different library set. Join on **each item's
+own path** and read the token out of it, then compare against what the server matched
+(`Guid`/`ProviderIds`). Across 214 tokened folders on 2026-09-23 this found 0 unmatched on all three
+and 4 genuinely wrong ids.
+
+One caveat that matters: "server agrees with our token" is **not** "the item is correct". If the
+token itself is wrong and every server obeys it, an id comparison calls it correct. Resolve each
+token against TMDB and compare the real title to the folder name — that is what caught
+`Ant-Man and the Wasp {tmdb-227914}` pointing at *Chainsaw Scumfuck*. See IMP-U8.
 
 ---
 

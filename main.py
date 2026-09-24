@@ -41,6 +41,9 @@ from mvcommon import (
 # them (or mvcommon.MVTOKENS_PATH) is honoured here — see the binding-hazard note
 # in mvcommon's RUNTIME CONFIG section.
 import mvcommon
+# [IMP-C25] interim identity capture (<folder>/<short_id>.gpcapture.json) — best-effort,
+# called only after cmd_prep / cmd_push succeed; never raises, never journalled.
+import gpcapture
 
 REMOTE_ROOT = "/sdcard/Media"  # Your Pixel Root
 FFMPEG_PATH = r"C:\Users\harin\AppData\Roaming\Emby-Server\system\ffmpeg.exe"
@@ -1510,6 +1513,13 @@ def cmd_prep(manual_id, filepath, parent_id=None, extras=None, extras_size=None)
         save_library(library)
         # [ROLLBACK C] Clean success — discard the journal.
         journal.commit()
+        # [IMP-C25] Post-commit, best-effort, NOT journalled: record the master's identity
+        # facts (sha1 from the same hash pass, Matroska DateUTC) for the Google Photos sweep.
+        try:
+            gpcapture.capture_after_prep(folder_path, manual_id, short_id, filepath,
+                                         default_search_term, file_hash, tech_specs)
+        except Exception:
+            pass  # belt and braces: a capture problem must never turn a committed prep into a failure
         print(f"✅ Library Entry Created & Linked (Search Key: {default_search_term}).\n")
         # IMP-D19: scan+merge extras if provided (prep never uploads)
         if extras:
@@ -6413,6 +6423,15 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             if c.get("hash")
         }
 
+    # [IMP-C25] Read-only snapshot of what is about to be uploaded (chunks are deleted
+    # locally as they upload); written to the capture file only after a successful push.
+    try:
+        _capture_objs = gpcapture.snapshot_push_objects(
+            files_to_upload_paths, SPLIT_DIR_NAME, short_id, _chunk_hashes, entry.get("hash"),
+            library.get(manual_id, {}).get("split_info", {}).get("carried_out_tracks", []))
+    except Exception:
+        _capture_objs = []
+
     # 3. UPLOAD LOOP
     all_success = True
     for f in files_to_upload_paths:
@@ -6531,6 +6550,12 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             journal.commit()
             # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
             _warn_if_entry_inconsistent(library[manual_id], manual_id)
+            # [IMP-C25] Post-commit, best-effort, NOT journalled identity capture.
+            try:
+                gpcapture.capture_after_push(local_folder, manual_id, short_id, _capture_objs,
+                                             device_id=device_id, remote_dir=remote_target_dir)
+            except Exception:
+                pass
             print("✅ SUCCESS.\n")
             if extras:
                 _push_title_extras_or_warn(library, _extras_title_id(library, manual_id), extras, extras_size, device_id, split_method, split_val)
@@ -6539,6 +6564,13 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             journal.commit()
             # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
             _warn_if_entry_inconsistent(library[manual_id], manual_id)
+            # [IMP-C25] Post-commit, best-effort, NOT journalled identity capture.
+            try:
+                gpcapture.capture_after_push(local_folder, manual_id, short_id, _capture_objs,
+                                             device_id=device_id, remote_dir=remote_target_dir,
+                                             chunk_range=chunk_range)
+            except Exception:
+                pass
             print(f"✅ Partial Upload Complete (Chunks {chunk_range}).\n")
             return True
     else:

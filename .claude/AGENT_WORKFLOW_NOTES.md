@@ -56,8 +56,8 @@ With Fable 5 available (Max plan; the user has explicitly waived token/limit con
 | :--------------- | :----- | :----- | :---------------------------------------------------------------- |
 | planner-v2       | fable  | max    | plans; may tag steps `[model: fable]`; no-limits candidate policy |
 | orchestrator-v2  | fable  | xhigh  | PLAYBOOK for the main session (depth-1 still applies — never spawn via Task); 8-block context packaging |
-| executor-fable   | fable  | xhigh  | complex/critical code + logic changes (NEW executor)              |
-| judge-v2         | fable  | xhigh  | candidate judging; diff-corroborated, user-facing DECISION.md     |
+| executor-fable   | fable  | max    | complex/critical code + logic changes (NEW executor)              |
+| judge-v2         | fable  | max    | candidate judging; diff-corroborated, user-facing DECISION.md     |
 | executor-opus    | opus   | max    | (reused from v1) normal code changes                              |
 | executor-sonnet  | sonnet | medium | (reused) very simple, mistake-proof jobs only                     |
 | executor-haiku   | haiku  | low    | (reused) trivial mechanics only                                   |
@@ -86,3 +86,7 @@ Headline v2 behaviors (full detail in each `*-v2.md` / `executor-fable.md`, whic
 **Same-session caveat (see point 5 above).** Agent definitions are read at session start, so these edits do not bind sub-agents spawned in the session that made them. Until a fresh session, the waterfall must also be pasted into the dispatch prompt (this is what the 2026-09-07 bracket-token planning run did).
 
 **First run:** 2026-09-07 — probe returned `claude-fable-5-1` (AVAILABLE), so the bracket-token planning task ran v2 at full strength; the waterfall was carried in-band in the planner dispatch.
+
+## Fallback effort raised to max (2026-09-24)
+
+**Decision (user).** `executor-fable` and `judge-v2` now declare `effort: max` (were `xhigh`). Under the waterfall the fallback keeps the agent and overrides only the model, so the baked tier is what an Opus fallback runs at — with `xhigh` the 2026-09-07 claim "exactly Opus at max/ultra" was not literally true. Now it is, and Fable itself also runs these two roles at max (consistent with the v2 no-limits policy). `orchestrator-v2`'s frontmatter is untouched (playbook, never spawned); `planner-v2` was already `max`. Supersedes the "`effort: xhigh` is inherited" remark in the 2026-09-07 entry above. Pre-change snapshot: `.claude/agent-backups/2026-09-24_pre-fallback-max/`. Takes effect for sub-agents spawned in sessions started after the edit (registration is fixed at session start).

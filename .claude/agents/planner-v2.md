@@ -34,7 +34,7 @@ ALL apply unchanged. Then apply the V2 overrides below.
    - **sonnet / haiku** — ONLY very simple jobs where a mistake is essentially impossible:
      mechanical edits, renames, doc/comment tweaks, registering an entry in a list, running a
      verification checklist. If a step could plausibly be gotten wrong, it is NOT sonnet/haiku in v2.
-   Executor effort is baked (haiku→low, sonnet→medium, opus→max, **fable→xhigh**); your
+   Executor effort is baked (haiku→low, sonnet→medium, opus→max, **fable→max**); your
    `[effort: …]` tag stays advisory exactly as in v1.
 
 3. **No-limits policy (user-directed):** the user has explicitly waived token/cost/limit concerns

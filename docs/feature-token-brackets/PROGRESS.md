@@ -172,3 +172,82 @@ external behavior both candidates must satisfy.)_
 - Real `--apply` against `C:\Media` is explicitly OUT OF SCOPE for this PR (Decision #6/D6) — it is a
   separate, user-run, post-merge procedure documented at the end of PLAN.md.
 
+
+---
+
+# FEATURE CLOSED — 2026-09-24
+
+The canonical provider-token format is **`{tmdb-<id>}`** and the real library is migrated.
+
+## Final state, measured not assumed
+
+| Check | Result |
+|---|---|
+| Tokened folders on disk | 218 |
+| Resolving to the correct TMDB title | **216** |
+| Unmatched on Plex / Emby / Jellyfin | **0 / 0 / 0** |
+| NFOs whose `<title>` was a library id | 37 → **0** |
+| NFOs with an empty `<plot>` | 40 → **2** |
+| NFOs whose id disagreed with the folder | 4 → **1** |
+| `tvshow.nfo` misplaced in a season folder | 60 → **0** |
+| Season folders carrying a provider token | **0** |
+| Test suite / smoke | 955 / 81 |
+
+The two remaining token exceptions are `25. Shang-Chi … {tmdb-912502}` (the user is verifying which
+film is actually in that folder — the id does not exist on TMDB and the library entry carries Avengers:
+Endgame's metadata) and `Oceans.Twelve … {tmdb-163}`, an apostrophe false positive in the audit's own
+title comparison, not a real mismatch.
+
+## What the format decision actually rested on
+
+The task opened targeting `[tmdbid-<id>]` on the strength of the widely-repeated claim that Plex ignores
+square brackets. **That claim is false, and so was the premise built on it** — that no single string
+satisfies all three servers. A 20-folder matrix with nonsense titles and deliberately wrong years, scanned
+by real Plex, Emby and Jellyfin installs, showed Plex rejects the `id` **suffix** and the `=` separator and
+is indifferent to bracket style. Both `{tmdb-…}` and `[tmdb-…]` work everywhere; dual-token is strictly
+worse than either (Jellyfin drops the folder from the library). Decisions D11 (evidence) and D12 (the pick).
+
+## Defect this feature leaves behind — IMP-U7
+
+Stripping tokens from season folders exposed that the season-name **builder** and **recogniser** are two
+independent copies that disagree:
+
+```
+main.py:5003   builds      f"{show_name} Season {season_number:02d} ({year})"
+main.py:2176   recognises  r"(?i)^season[\s_]*\d+$|^s\d+$"
+```
+
+`enrich_metadata --library series` therefore re-stamps 47 season folders across 11 shows and reverses this
+migration. **Series enrichment is unsafe until IMP-U7 is fixed.** Movie enrichment is unaffected and was
+run (176 matched, 5 legitimate first-time tokens).
+
+Because that blocked regenerating series NFOs through `enrich`, the 14 missing show-level `tvshow.nfo`
+files were written by calling `main._write_nfo` with an explicit show folder — same writer, no folder
+resolution, so no token could be stamped. Verified afterwards: 0 season folders carry a token.
+
+## What the fixture suite could not catch
+
+Every defect of consequence in this feature was found by **dry-running against the real library**, never by
+tests. The suite was green throughout, at 938 tests and later at 955:
+
+1. A migration proposed renaming the user's `Series\Tamil` **language folder** — both content-based guards
+   passed it, because its lone occupant's name contains `S01`. Fixed structurally (a direct child of a
+   `CATEGORY_ROOT` can never be one show's folder); depth cannot decide it, the tree is not uniform.
+2. The season guard refused **52 of 64** seasons, because library ids embed the *season's* air year, so one
+   show derives several different "show ids". Re-keyed on the TMDB id; scope went 12 → 60.
+3. Stripping a season's token could orphan it permanently — only 41 of 64 season entries carried
+   `metadata.tmdb_id`, and Friends and The X-Files carried it on none.
+4. `_old_style_tmdb_token` short-circuited on `bracket == "curly"`, which was dead code under a square
+   canonical and **actively wrong** under a curly one — it would have cost idempotency. It also exposed a
+   false green: a dry-run test that passed *because* of the bug.
+5. IMP-U7 itself, above.
+
+The same root cause — library ids embedding the season's air year — produced both #2 and IMP-U7.
+
+## Checkpoints
+
+- **Checkpoint 1 (merge to `main`):** satisfied — PRs #53, #54, #55, #56 merged on user confirmation.
+- **Checkpoint 2 (archive the branch):** still open. `feature/imp_u6_provider_tokens` has not been
+  archived; per `CLAUDE.md` that needs explicit approval, then an annotated `archive/<branch>` tag before
+  deleting local + remote.
+- **PR #57** (IMP-U7/U8 registration + this closure) is open and unmerged.

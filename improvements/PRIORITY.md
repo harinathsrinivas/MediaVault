@@ -50,12 +50,19 @@
 
 ## 👉 SUGGESTED NEXT TASK: fix IMP-C24 — concurrent library writes silently lose updates (no lock)
 
-> **IMP-U6 shipped** (2026-09-21, `feature/imp_u6_provider_tokens`, done — PR to `main` pending): canonical
-> `[tmdbid-<id>]` provider-token format + `cmd_migrate_provider_tokens`; also fixes a live artwork-inheritance
-> regression and closes a IMP-C23-class double-stamp risk (see the Last-updated note above and
-> `improvements_tierU.md` IMP-U6 for the full write-up). **It is NOT change-gated** (unlike R10/C24 below) —
-> it is already implemented and merge-ready, just awaiting the PR-merge human gate, so it does not change
-> the actionable "what to start next" answer below.
+> **IMP-U6 CLOSED** (2026-09-24) — merged via PR #53 → #54 → #55 → #56, canonical format
+> **`{tmdb-<id>}`** (not the `[tmdbid-<id>]` this task opened with; corrected on live-server evidence,
+> decisions D11/D12). The live migration ran against `C:\Media`: **218 tokened folders, 216 resolving to
+> the correct TMDB title**; the two exceptions are one folder the user is verifying by hand and one
+> apostrophe false positive. All three media servers were then reconciled item-by-item — 0 unmatched on
+> Plex, Emby and Jellyfin. Full write-up in `improvements_tierU.md` IMP-U6 and
+> `docs/FOLDER_NAMING_CONVENTIONS.md`.
+>
+> ⚠️ **It leaves one open defect behind: [IMP-U7](improvements_tierU.md).** The normalization this task
+> performed stripped provider tokens from season folders, but `_show_folder_of` cannot read the season
+> names `normalize_season_folders` creates — so `enrich_metadata --library series` silently re-stamps
+> them and reverses the migration on 47 season folders. **Do not run series enrichment until U7 is
+> fixed.** U6 itself is closed; U7 is tracked separately in Band 0.
 
 > **IMP-C24 is next**: registered 2026-09-03 after a real incident — parallel `push_group` (one shell)
 > + `replace` (a second shell, to reclaim disk as each episode finished) lost updates on 13 library

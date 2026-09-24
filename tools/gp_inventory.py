@@ -161,10 +161,15 @@ def parse_details(body):
     return out
 
 
+# The thumbnail sub-array comes in two observed shapes (2026-09-25): ["<url>",w,h] and
+# ["<url>",w,h,null,…,null,[n]] — so its tail is optional: nulls, numbers or one flat array.
+_RECORD_TAIL = r'(?:,(?:null|-?\d+(?:\.\d+)?|\[[^\[\]]*\]))*'
+
+
 def item_record(page_source, pid):
     """The item page embeds [<pid>,[<thumb>,w,h,...],taken_ms,"dedupKey",tz_offset_ms,upload_ms,...]."""
-    m = re.search(re.escape(pid) + r'",\["[^"]*",(\d+),(\d+),.*?\],(-?\d{10,14}),"([A-Za-z0-9_-]{27})",(-?\d+),(\d{12,14})',
-                  page_source)
+    m = re.search(re.escape(pid) + r'",\["[^"]*",(\d+),(\d+)' + _RECORD_TAIL
+                  + r'\],(-?\d{10,14}),"([A-Za-z0-9_-]{27})",(-?\d+),(\d{12,14})', page_source)
     if not m:
         return {}
     return {"width": int(m.group(1)), "height": int(m.group(2)), "taken_ms": int(m.group(3)),

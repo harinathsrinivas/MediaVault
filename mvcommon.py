@@ -9,6 +9,8 @@ import time
 import random
 import contextlib
 import errno
+import queue
+import threading
 from datetime import datetime, timezone
 from subprocess import SubprocessError
 
@@ -608,6 +610,82 @@ def generate_short_id(long_id):
     return hash_object.hexdigest()[:6]
 
 
+# [IMP-C25] SHA-1 side-channel. Google Photos identifies every uploaded item by its
+# dedupKey = urlsafe-base64(SHA-1 of the exact bytes) (docs/feature-fetch-datetime/
+# RESEARCH.md F21). calculate_file_hash computes that SHA-1 in the SAME read pass on a
+# worker thread (hashlib releases the GIL, so the SHA-256 loop is not slowed) and caches
+# it per (path, size, mtime); callers read it with cached_sha1(). The SHA-256 digest,
+# the return value and the progress output are unchanged, and anything going wrong on
+# the SHA-1 side only leaves the cache empty — it can never fail or alter a hash call.
+_SHA1_CACHE = {}
+_SHA1_CACHE_MAX = 512
+
+
+def _sha1_cache_key(filepath):
+    st = os.stat(filepath)
+    return (os.path.normcase(os.path.abspath(filepath)), st.st_size, st.st_mtime_ns)
+
+
+def cached_sha1(filepath):
+    """SHA-1 hex computed alongside the last calculate_file_hash() of this exact file
+    (same path, size and mtime) in this process, or None."""
+    try:
+        return _SHA1_CACHE.get(_sha1_cache_key(filepath))
+    except OSError:
+        return None
+
+
+class _Sha1Sidecar:
+    """Hashes the blocks it is fed with SHA-1 on a worker thread. Never raises."""
+
+    def __init__(self):
+        self._q = queue.Queue(maxsize=64)
+        self._sha1 = hashlib.sha1()
+        self._ok = True
+        self._thread = threading.Thread(target=self._run, name="sha1-sidecar", daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while True:  # always drain until the sentinel, so feed()/finish() can never block forever
+            block = self._q.get()
+            if block is None:
+                return
+            if self._ok:
+                try:
+                    self._sha1.update(block)
+                except Exception:
+                    self._ok = False
+
+    def feed(self, block):
+        if self._ok:
+            try:
+                self._q.put(block, timeout=60)
+            except Exception:
+                self._ok = False
+
+    def finish(self):
+        """Stop the worker; the hex digest, or None if anything went wrong."""
+        try:
+            self._q.put(None, timeout=60)
+            self._thread.join(timeout=60)
+        except Exception:
+            return None
+        return self._sha1.hexdigest() if self._ok and not self._thread.is_alive() else None
+
+
+def _remember_sha1(filepath, sidecar):
+    if sidecar is None:
+        return
+    try:
+        sha1_hex = sidecar.finish()
+        if sha1_hex:
+            if len(_SHA1_CACHE) >= _SHA1_CACHE_MAX:
+                _SHA1_CACHE.pop(next(iter(_SHA1_CACHE)))
+            _SHA1_CACHE[_sha1_cache_key(filepath)] = sha1_hex
+    except Exception:
+        pass
+
+
 def calculate_file_hash(filepath, block_size=65536):
     try:
         total = os.path.getsize(filepath)
@@ -619,9 +697,15 @@ def calculate_file_hash(filepath, block_size=65536):
     bar_width = 24
     fname = os.path.basename(filepath)
     try:
+        sidecar = _Sha1Sidecar()  # [IMP-C25] same-pass SHA-1 (see above)
+    except Exception:
+        sidecar = None
+    try:
         with open(filepath, 'rb') as f:
             for block in iter(lambda: f.read(block_size), b''):
                 sha256.update(block)
+                if sidecar is not None:
+                    sidecar.feed(block)
                 done += len(block)
                 pct = done / total if total else 1.0
                 filled = int(bar_width * pct)
@@ -629,8 +713,12 @@ def calculate_file_hash(filepath, block_size=65536):
                 size_str = f"{human_readable_size(done)} / {human_readable_size(total)}"
                 print(f"\r  🔍 {fname}  [{bar}] {size_str} ", end='', flush=True)
         print()
-        return sha256.hexdigest()
+        digest = sha256.hexdigest()
+        _remember_sha1(filepath, sidecar)
+        return digest
     except Exception as e:
+        if sidecar is not None:
+            sidecar.finish()
         print(f"\n  ❌ Error hashing {fname}: {e}")
         return None
 

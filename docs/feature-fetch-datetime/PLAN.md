@@ -451,8 +451,10 @@ re-dispatch planner-v2 to amend Steps 5/6/9–14.
   8. `--resolutions <csv>`: validates rows; `url` rows → hint (photo_id from the URL); `datetime` rows → hint (local time
      + offset); hints are verified by `check_photos hinted` before they become confirmed; `not_uploaded` rows are listed
      in the C27 report.
-  9. `--apply` → apply engine (Step 6) for `mapped`/`mapped-normalized`/resolved duplicates/wrong-account home accounts
-     (+ repairs only when requested).
+  9. `--apply` → recompute the mapping (offline, cheap), append the accepted rows to the learned sidecar (source `map`,
+     via Step 3f helpers — the durable record survives an IMP-C24 lost update) and run the apply engine (Step 6) for
+     `mapped`/`mapped-normalized`/resolved duplicates/wrong-account home accounts (+ repairs only when requested). A
+     dry-run never appends to the sidecar.
   10. `--devices-only` → only the Step 8 device report (§M2).
 - Tests: synthetic library + inventory across all four prefixes reproducing every class above (incl. a 31-episode
   wrong-account block, whitespace near-match, re-split duplicate sets, untagged name, missing last chunk, freed vs on
@@ -551,14 +553,20 @@ inconsistencies. Defects found here become Step 9b fix-ups (recorded in PROGRESS
 - Files: `mainfetch.py` (`cmd_check` engine, `__main__` `check`), `main.py` (`cmd_check_photos` + CLI; spawns
   `sys.executable <abs mainfetch.py> check …` with the streaming idiom; runs the apply engine after `--apply`),
   `tests/test_check_photos.py`.
-- CLI: `check_photos <scope> [--approaches best|all] [--account a] [--recheck] [--apply] [--limit N] [--pace S] [--max-minutes M]`
+- CLI: `check_photos <scope> [--approaches best|all] [--account a] [--recheck] [--apply | --apply-run <run dir|latest>] [--limit N] [--pace S] [--max-minutes M]`
   where scope = item id (movie/episode; alias resolves) · season_map id · `series:<any season id | show folder>` · id
   prefix · `account:<movies|tv|anime|others>` · `pending` (pushed but not confirmed) · `hinted` (manual resolutions) · `all`.
 - Details: series resolution = the show folder (parent of the season folder when the season folder name matches the
   season-folder patterns, or when ≥2 season_maps share the parent; else the folder itself) → every season_map under it;
-  ALWAYS print the resolved seasons and object count before running (multi-year id years: IMP-U7 memory). Per object:
-  `best` = stop at the first approach that pinpoints one verified item; `all` = evaluate every approach and record
-  `ok`/`failed`. Download-free: identity via page record (dedupKey) or normalized exact name. Flags: account mismatch
+  ALWAYS print the resolved seasons and object count before running (multi-year id years: IMP-U7 memory). Per object
+  and per approach the outcome is one of `exactly-one` (one verified item), `ambiguous(n)` (n candidates, none or several
+  verified), `not-found` (0 candidates), `wrong-item` (every candidate proven a different item), `error`; `best` = stop at
+  the first `exactly-one`; `all` = evaluate every approach and record `approach.ok`/`approach.failed`. Download-free:
+  identity via page record (dedupKey) or normalized exact name. A dry-run writes its verified records only to its run
+  directory (`results.jsonl`); `--apply` runs the check and appends + applies; `--apply-run <dir|latest>` applies a
+  REVIEWED dry-run's records without searching again (the run's recorded scope must equal the given scope, else refuse;
+  `latest` = newest completed run for that scope; the apply engine re-checks every pin, so stale runs cannot corrupt a
+  node). Flags: account mismatch
   (found in a non-home account), library/cloud inconsistencies (C27), `confirmed` on success (upload_ms + verified).
   Per-account sequential sessions, pacing (default 3 s + jitter), circuit breaker (5 consecutive errors), lock +
   heartbeat, resumable (sidecar + per-run progress file; re-run skips confirmed objects unless `--recheck`), Ctrl+C safe,
@@ -568,6 +576,7 @@ inconsistencies. Defects found here become Step 9b fix-ups (recorded in PROGRESS
 
 ### Step 14 — [model: fable] [effort: max] [fallback: opus] `--manual` mode, robust fetch_restore resume, web behavior
 - Depends on: Steps 10–13.
+- Consumed by: Step 15 (smoke/pins), 🚦 R2 (§M9–M10), Step 16 (README/OPERATIONS_QA wording of the identification block).
 - Files: `mainfetch.py`, `main.py` (`cmd_fetch_restore(..., manual=False)`), `webui/server.py` (no functional change
   expected; verify), `tests/test_fetch_manual.py`.
 - Details: after all stages fail for an object — without `--manual`: print a clear identification block (account, exact
@@ -581,6 +590,7 @@ inconsistencies. Defects found here become Step 9b fix-ups (recorded in PROGRESS
 
 ### Step 15 — [model: opus] [effort: high] Smoke coverage, regression pins, mutation probes
 - Depends on: Steps 2–14.
+- Consumed by: 🚦 R2 (the pack starts only on a green suite), Step 18 (checklist), the PR test plan.
 - Files: `tests/smoke/test_smoke_all_commands.py`, `tests/test_c25_regression_pins.py`.
 - Details: smoke (< 30 s idle): prep/push capture present; fetch + apply merge with a seeded sidecar; `map_photos` dry-run
   and `check_photos --approaches best` against fakes in-process; alias sweep over the new iterators/apply/check; all four
@@ -601,6 +611,19 @@ inconsistencies. Defects found here become Step 9b fix-ups (recorded in PROGRESS
   tempdir`, `--manual`; `mainfetch.py locate`; crawler; state dirs), `docs/OPERATIONS_QA.md` (new §6b Q&As),
   `docs/testing-strategy.md` (fake Google Photos, hermetic redirects), `docs/README.md` (index),
   `docs/feature-fetch-datetime/INVENTORY_AND_CAPTURE.md` (status update).
+- Known drift to fix (verified against the code 2026-09-25; re-verify line refs at execution time):
+  - ARCHITECTURE §8.1 lists three profiles and `ID_PREFIX_PROFILE` without `("oth", "others")`; the code has four
+    (`CHROME_PROFILES["others"] = C:\Media\Utils\ChromeProfile_Others`, mainfetch.py:32–40; the directory does not exist
+    yet — IMP-D18 prerequisite). Section-heading line refs are stale.
+  - ARCHITECTURE §8.3 says the attempt-1 query is typically `<filename> [<short_id>].mkv`; the code's attempt 1 types the
+    plain library `filename` for a whole file (no `[short_id]` — the uploaded name has it, hence F25's zero results) and
+    the exact chunk/holder name for split objects; attempt 2 types `search_term` (else `filename`) and clicks tile index =
+    chunk index. The primary selector `a[href*='./photo/']` matches nothing on search pages (F14), so the
+    `background-image` XPath fallback does the clicking. `trigger_download` is at mainfetch.py:129 (doc says 150–216).
+  - README "What it does" (`fetch` — "searches Google Photos for the embedded short-id … into `~/Downloads`") and the
+    command table (`fetch`: "`tempdir` stages downloads off the media volume"): Chrome's download always lands in
+    `~/Downloads` on C: first; only the verified move goes to `tempdir` — true until Step 11's staging dir; rewrite both
+    to the new behavior.
 - Q&As: why Google Photos shows Feb 5, 2022 for a file pushed in 2026; why a season / all chunks share one second; what
   the dedupKey is and how to check it (`adb shell sha1sum` → base64url); how fetch finds the exact item now; why some items
   live in another account and how routing handles it; how to backfill (crawl → map → resolve → apply); how to confirm
@@ -609,15 +632,22 @@ inconsistencies. Defects found here become Step 9b fix-ups (recorded in PROGRESS
 - Acceptance: every documented command replayed through the real parsers; no real ids.
 
 ### Step 17 — [model: opus] [effort: medium] IMP bookkeeping on implementation
+- Depends on: Step 16 and the R3 outcome (C27 status). Consumed by: Step 18, the PR body.
 - C25 → `done (feature/imp_c25_fetch_exact_gp_item, PR pending)`; C26 → done; C27 → status per the R3 findings (done if
   every case is resolved or explicitly accepted by the user, else in_progress with the open list); C5/A8/B10 → done
   (absorbed); B4 note; C24 cross-reference line; synergy lines on E5/G2/S7/X1/X5/C7/D9; PRIORITY.md + graph (+ node
   validation); three-file consistency.
 
-### Step 18 — [model: sonnet] [effort: low] Final verification → PR → 🚦 Checkpoint 1 (may be run by the orchestrator directly)
-- Step 1 sync if main moved; full suite; privacy grep (`git grep -nE "AF1Qip[A-Za-z0-9_-]{8,}" -- tests docs improvements`
-  → only synthetic `AF1Qip…FAKE…`/`AF1QipTEST…` ids); `git diff origin/main..HEAD --stat` scope check; PROGRESS SHAs
-  back-filled; smoke LAST. Push; open the PR (title/body below); STOP.
+### Step 18 — [model: sonnet] [effort: medium] Final verification checklist → PR (git-agent) → 🚦 Checkpoint 1
+- Depends on: Steps 0–17 done, R2/R3 recorded. If `git log --oneline HEAD..origin/main` is non-empty, the orchestrator
+  first re-dispatches **Step 1 (opus)** — a merge never runs inside this checklist step.
+- Checklist (read-only checks + one mechanical PROGRESS edit — the only reason this step may run on sonnet): full suite;
+  privacy grep `git grep -nE "AF1Qip[A-Za-z0-9_-]{8,}" -- tests docs improvements` → only synthetic ids
+  (`AF1Qip…FAKE…`/`AF1QipTEST…`); `git grep -n "hd9mASyG9pJhisPXFS3Zr7Mqr28"` → only the published S02E03 example;
+  `git diff origin/main..HEAD --stat` touches only the files named in this plan; PROGRESS SHAs back-filled; smoke LAST.
+  Any red item → STOP and report (no fixes in this step).
+- PR: the orchestrator dispatches git-agent to push and open the PR with the title/body below (body = summary →
+  `## Original task prompt` copied byte-for-byte from the appendix → trailer); then STOP at 🚦 Checkpoint 1.
 
 ---
 
@@ -743,9 +773,12 @@ first. Do not run prep/push/replace/restore in the main folder while an `--apply
 - **M11 — new archival + confirm:** `prep` + `push … device series` a new small MKV (from the worktree), wait for backup,
   `& $PY main.py check_photos pending --apply` → the node shows `confirmed`, approach `taken_second+dedupkey`/`photo_id`.
   Include C1c: Daredevil S01E01 `[4a9028]` should read May 4, 2024 7:18 AM GMT+08:00 (taken_ms 1714778282000).
-- **M12 — real-library apply (🚦 R3):** `& $PY main.py map_photos all --resolutions <filled csv>` (dry-run) → review →
-  add `--apply`; then `& $PY main.py check_photos account:<a> --approaches best` per account (dry-run) → review → `--apply`;
-  `& $PY main.py check_photos hinted --apply`.
+- **M12 — real-library apply (🚦 R3; no other MediaVault command running — OD-2):** back up the libraries first
+  (`Copy-Item C:\Media\library_*.json D:\MV_lib_backup\<date>\`); `& $PY main.py map_photos all --resolutions <filled csv>`
+  (dry-run) → review → the same command + `--apply`; then per account `& $PY main.py check_photos account:<a> --approaches best`
+  (dry-run, long; resumable) → review the report → `& $PY main.py check_photos account:<a> --apply-run latest` (no new
+  searches); finally `& $PY main.py check_photos hinted` → review → `--apply-run latest`. Expect: every mapped object
+  `confirmed`, the X-Files episodes with `home_account` movies, the C27 list unchanged unless the user resolved rows.
 - **M13 — kill switch sanity (optional):** set `EXACT_LOCATOR_ENABLED = False` locally (do not commit), fetch → today's
   behavior; revert.
 

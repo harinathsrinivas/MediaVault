@@ -35,7 +35,7 @@ next natural stop — it must be answered before Step 11.
 | 0 | plan (0a 16e292c/5fd4843 + 0a′ d29bb03) + journal + IMP registration | done | opus (executor-opus, claude-opus-5-5) | 16e292c · 5fd4843 · d29bb03 · 0b 20a10ae · 0c c2085e3 | full 971 · smoke 81 (baseline re-run 2026-09-28) | 0a = 16e292c (rev-1 draft) + 5fd4843 (rev-1 final pass); 0a′ = d29bb03 (revisions 2–6); root PLAN.md == tracked copy (cmp) · 0b = PROGRESS + DECISIONS · 0c = IMP-C25 + IMP-C27 registered (tier C, PRIORITY Band 0/1, graph TASKS 136 · EDGES 76 · badTasks 0 · badEdges 0); C5/A8/B10 → in_progress (absorbed); B4 note; C26 comes via Step H; both NEXT pointers untouched (OD-16) |
 | G0 | rulings recorded (2026-09-25) + clarifications | partial (P-12 pending before Step 11) | user | 20a10ae | | plan approved 2026-09-28 · OD-1: H confirmed, PR STOPS for user approval (decision card 2026-09-28; supersedes the auto-merge wording) · q2 OD-4 ANSWERED 2026-09-28: "Yes, with --apply only" — mvmeta_upgrade may rewrite phone sidecars with --apply only (dry-run default) · q3 P-12 download design PENDING — ask before Step 11 |
 | 1 | sync with main (after #60 / after H) | done | orchestrator (Opus 5.5) | 3029f6f | full 971 · smoke 81 | merged origin/main ac563a0 (PR #60) — clean; two-dot diff shows only feature docs; repeat after Step H merges |
-| H | C26 hotfix PR (worktree MediaVault-c26) | pending | | | | confirmed; PR STOPS for user approval (ruling 2026-09-28) · registers IMP-C26 on main; main's graph has no C25 node, so the `["C25","C26"]` edge can only be added on this branch (when Step 1 merges H) |
+| H | C26 hotfix PR (worktree MediaVault-c26) | done — PR #61 open, awaiting user approval (Checkpoint 1) | fable (executor-fable) | 2893d98 (branch fix/imp_c26_fetch_account_routing) | full 1003 · smoke 82 · disarm 3/3 | +switch guard (close prev Chrome, port 9222 free) beyond plan text; RH after merge; then Step 1 re-merges main |
 | RH | user fills fetch_account_overrides + tests | pending | user | | | after H merges |
 | 2 | gpweb + RPC parsers + fake Google Photos | pending | | | | |
 | 2b | gprpc read-only RPC client | pending | | | | |
@@ -71,7 +71,13 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 |---|---|---|---|
 
 ## In-progress sub-state
-_(none)_ — when a step is running (Execution protocol "In-step checkpoints"):
+`Step 2 — dispatched 2026-09-28 to executor-fable (fable) · single-executor, dispatch says DO NOT COMMIT (no WIP
+commits; this line is kept on disk only) · resumed 2026-09-28 by fable after a usage-limit reset: no uncommitted
+changes existed · sub-tasks: [x] 2.1 gpweb.py a–i (parsers, hash/time/name/query helpers, TILES_JS/SCROLL_JS) ·
+[x] 2.2 tests/test_gpweb.py parser tables (192 passed; disarm probes 4/4) · [ ] 2.3 tests/gphotos_fake.py (j) +
+conftest `fake_photos` + fake self-tests ← next · [ ] 2.4 crawler golden record (frozen oracle, captured BEFORE the refactor) · [ ] 2.5 tools/gp_inventory.py
+delegates to gpweb · [ ] 2.6 full suite + smoke + self-review`
+Template — when a step is running (Execution protocol "In-step checkpoints"):
 `Step N — dispatched <time> to <model> · sub-tasks: [x] N.a <what> (wip SHA) · [ ] N.b <what> ← next · [ ] N.c …`
 plus, after a crash, one line `resumed <time> by <model>: uncommitted N.b changes kept|discarded (<files>)`.
 

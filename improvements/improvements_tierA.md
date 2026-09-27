@@ -167,7 +167,7 @@
 - Effort estimate: small
 - Risk: low — deletions of provably-uncalled code; grep + test suite confirm.
 - If skipped: harmless today, but `build_download_queue` silently drifts from the inline queue builder it duplicates (it already lacks no logic-difference guarantees) — a future fetch fix applied to only one of the two wastes a debugging session.
-- Status: pending
+- Status: in_progress (absorbed by IMP-C25 Step 10)
 
 ---
 

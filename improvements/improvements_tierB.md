@@ -89,6 +89,7 @@
 - Effort estimate: small
 - Risk: medium — Google Photos' DOM is undocumented and shifts; a wrong wait-condition selector makes triggers FAIL (worse than slow). Keep the C2 one-retry wrapper and the max-timeout fallback identical. Consider doing this as part of the Tier S fetch-hardening spike (gphotos-cdp event patterns) instead of standalone.
 - If skipped: pure latency cost (~7.5 s/chunk); fetches still work. Matters more once the daemon fetches automatically and latency = couch wait time.
+- Note: partially addressed by IMP-C25 (in progress) — its new locator stages poll conditions instead of fixed sleeps; `trigger_download` itself is untouched (it stays the legacy last-resort stage), so the sleeps above remain.
 - Status: pending
 
 ---
@@ -200,4 +201,4 @@
 - Effort estimate: small
 - Risk: low — set-lifetime change; the matched/done bookkeeping is per-queue-item and unaffected. (Size pre-filter must remain a HINT only — hash stays the identity authority.)
 - If skipped: attempt-2 fetches in a messy Downloads folder stay needlessly slow; with the daemon auto-fetching, the cost recurs nightly.
-- Status: pending
+- Status: in_progress (absorbed by IMP-C25 Step 10)

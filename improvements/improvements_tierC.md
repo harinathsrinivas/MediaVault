@@ -109,7 +109,7 @@
 - Effort estimate: small
 - Risk: low — second-attempt query construction only; first attempt and hash-routing unchanged.
 - If skipped: titles whose precision search misses (punctuation/fuzzy-tokenizer quirks) are simply unfetchable without a manual `set_search` — for a daemon-triggered fetch that means a "fetch failed" tile and a trip to the PC, the exact thing the end goal abolishes.
-- Status: pending
+- Status: in_progress (absorbed by IMP-C25 — S2/S3 verified queries)
 
 ---
 
@@ -466,3 +466,33 @@
 - If skipped: the exact incident (or worse — a movie/anime entry clobbered by an unrelated series-entry save) can recur at any time two mutating commands overlap, including today's normal usage pattern of running `main.py web` alongside a CLI command.
 - Cross-references: IMP-D23 is what the user was manually working around (avoiding an expensive prep re-hash) when they triggered this incident via a risky parallel `push_group`+`replace` workaround — fixing D23 removes the *motive* for that specific workaround but does not fix the underlying race, which can still occur for other legitimate reasons (e.g. `web` alongside a CLI command, running right now in production). IMP-B1 ("cache library handle across cmd_* calls", `improvements_tierB.md`, pending) proposes the OPPOSITE direction — holding one library handle across an entire season batch — and would make this race's blast radius larger, not smaller, if implemented without C24's lock in place first; B1's own entry already flags it as risk "high" and change-gate-adjacent for this reason.
 - Status: pending
+
+---
+
+## IMP-C25: Fetch the EXACT Google Photos item — content key + taken-second locator + remembered photo_id + per-object account; map/check/confirm the archived library
+
+- Category: other
+- Priority: high
+- Files: `gpweb.py` (new), `gpcapture.py`, `mvcommon.py`, `main.py`, `mainfetch.py`, `tools/gp_inventory.py`, tests, docs. Plan: `docs/feature-fetch-datetime/PLAN.md`; research: `docs/feature-fetch-datetime/RESEARCH.md`.
+- Current behavior: fetch types filename/`search_term` queries, clicks a tile by position, downloads it and routes by SHA-256; wrong downloads are left in `~/Downloads` (RESEARCH F10). Text search is not an identity (F16/F18/F25), a release batch shares one second (F13), the primary tile selector is dead on search pages (F14), fetch routes by id prefix although 31 archived X-Files episodes live in the MOVIES account, and `tempdir` does not keep downloads off C:.
+- Proposed change: SHA-1 content key (= dedupKey) and DateUTC captured at prep/push (interim capture, PR #60); per-object versioned `gphotos` identity block with per-account learned record, approach term and confirmed-in-cloud marker; inventory crawl (read-only RPC, DOM fallback) → mapping (normalized names, dedupKey cross-checks, re-split sets, wrong-account, device cross-check) → user resolutions → `--apply`; `check_photos` (download-free verification by item/season/series/account/pending/all, RPC hash lookup, outlier list); auto-confirm of unverified pushes at the end of the next push; evidence-ordered waterfall (photo_id → SHA-1 hash lookup → taken second → exact name → title+short_id → user search term) with today's flow as the unchanged last resort; per-object account routing; failed list + `resolve_photos` manual confirm/match; downloads directly into the restore folder (or tempdir location) through a disposable `.mv_incoming` dir + fetch journal + interruption cleanup + `fetch_cleanup` for old `~/Downloads` leftovers; `--manual`; resumable fetch_restore; `mvmeta_upgrade` for the existing phone-side sidecars.
+- Rationale: identity by content, proven before any bytes move; every archived object becomes directly addressable.
+- Goal: every archived object fetchable by direct photo_id in its real account; new archivals confirmed after backup; zero regression when data is absent.
+- Effort estimate: large
+- Risk: medium — rewrites fetch selection behind a kill switch with today's flow as last resort; capture is post-commit (rollback-neutral, OD-3); `gphotos` is an optional nested block (ENTRY_TYPE_KEYS doc + guard); library writes through one apply engine with a fingerprint re-check (IMP-C24 note); internal RPCs are read-only and allowlisted.
+- If skipped: fetch keeps guessing by text and tile order; 31 wrong-account episodes stay unfetchable; possible cloud-loss cases stay invisible until a restore fails.
+- Cross-references: absorbs C5, A8, B10; partial B4; fixes C26; tooling for C27; synergies E5, G2/S7, X1/X5, C7, D9; interplay C24.
+- Status: in_progress (feature/imp_c25_fetch_exact_gp_item)
+
+---
+
+## IMP-C27: Library ↔ Google Photos inconsistencies on archived items — possible cloud loss
+
+- Category: bug
+- Priority: high (Band 0 🚦 — per-case user decisions; the local copy of an `archived` item is a dummy)
+- Files: data (library ↔ cloud); tooling in IMP-C25 (`map_photos`, `check_photos`, device cross-check)
+- Current behavior (verified 2026-09-25 13:30 after the incremental re-crawl, a day-search of each release day, and a read-only per-id search of both Pixels): (a) library says whole file but the cloud holds chunks (The Wire S02E12, Dark S01E10, BSG S01E11 — split_info lost; the Pixel still holds the Dark/BSG `.mvmeta.json` sidecars, which mirror split_info and can seed the `--repair split-info`); (b) uploaded under an old untagged name (Fanaa); (c) last chunk missing from the cloud and from both Pixels (A Tale of Two Sisters #10, The Wailing #9); (d) **13 Friends episodes in no account**: S04E16–19 (pushed 2026-09-03 to FA75V0303405 — only their `.mvmeta.json` sidecars remain on the Pixel = pushed, then freed, never backed up), S05E15/16/18/19/20 and S06E21–24 (absent from both Pixels); the day search of each release day (Jan 19/20/22, 2025) lists every other episode of those seasons but not these; and **Daredevil: Born Again S02E01–07** (added 2026-09-24; in no account and on neither Pixel). All are `archived` (local copy = dummy). Resolved by the re-crawl/retries: Death Note 09, Gentleman, Daredevil S01E07–11 (backed up), Friends S06E01.
+- Proposed change: IMP-C25's mapper/check detect, report loudly and offer dry-run repairs for (a)/(b); (c)/(d) become an explicit user decision list after the incremental re-crawl + device cross-check.
+- Effort estimate: small per case (decisions) · Risk: none from detection (read-only); repairs are dry-run-first.
+- If skipped: a restore of these items fails only when the user needs them — possibly after the phone copy is gone.
+- Status: pending (tooling in IMP-C25)

@@ -25,6 +25,21 @@ _REAL_MEDIA_BYTES = b"SMOKE-REAL-MEDIA-MASTER\n" * 11000  # ~264 KB > 200_000
 TEST_ENTRY_ID = "mov_test_c9_001"  # "mov" prefix -> goes to LIBRARY_MOVIES
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_mvconfig(monkeypatch):
+    """No test reads the machine's real mvconfig.json (IMP-C26).
+
+    mainfetch.profile_for_id now consults mvconfig.json's fetch_account_overrides
+    (through mvcommon._load_config()), and the operations checkout's real,
+    gitignored mvconfig.json carries the user's live overrides and API keys — so a
+    routing test could pass in a fresh worktree and fail in the main folder. Every
+    test therefore starts from an EMPTY config, exactly what a checkout without
+    mvconfig.json sees, by pinning mvcommon's config cache to {}. A test that needs
+    config sets its own: monkeypatch.setattr(mvcommon, "_CONFIG_CACHE", {...}).
+    Tests that patch a getter (e.g. mvcommon.tmdb_api_key) are unaffected."""
+    monkeypatch.setattr(mvcommon, "_CONFIG_CACHE", {})
+
+
 @pytest.fixture()
 def sandbox(tmp_path, monkeypatch):
     """

@@ -250,6 +250,29 @@ python mainfetch.py fetch <id> [episodes <range>] [--fetchExtras]
 
 `main.py fetch` is a thin wrapper that spawns exactly that command.
 
+**Items that live in another Google account (IMP-C26).** Fetch picks the Chrome
+profile — and so the Google account — from the id prefix (`mov-` → movies, `tv-` →
+tv, `ani-` → anime, `oth-` → others). If an archived item was backed up to a
+*different* account, list it in your gitignored `mvconfig.json`:
+
+```json
+"fetch_account_overrides": {
+  "tv-en-1994-xfiles-s02e03": "movies",
+  "tv-en-1995-xfiles-s03": "movies"
+}
+```
+
+Keys are exact manual ids or id prefixes (plain string prefixes — use a prefix only
+when *every* item under it lives in that account); values are `movies` / `tv` /
+`anime` / `others`. The longest matching key wins, so an exact id beats a prefix. A
+batch that spans accounts (e.g. a season with a few overridden episodes) runs one
+Chrome session per account, one after another under the same fetch lock: the first
+prints the usual `[Account] Profile for …` line, each further one prints
+`> [Account] Switching to profile '<account>' for N item(s) (fetch_account_overrides)`.
+`--fetchExtras` extras follow their title's id. With no overrides, fetch behaves
+exactly as before; an unknown account prints one warning and that entry is ignored.
+See `docs/OPERATIONS_QA.md` §6b.
+
 ### Web operations console (`web`)
 
 `python main.py web` opens a local, dark **operations console** at

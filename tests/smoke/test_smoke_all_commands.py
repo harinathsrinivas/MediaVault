@@ -939,6 +939,55 @@ class TestEachCommand:
             f"Expected 'is logged out' in output for IMP-C6 remediation, got: {out!r}"
         )
 
+    # ---- fetch: mixed-account batch (IMP-C26) --------------------------------
+    def test_fetch_route_mixed_account_batch(self, sandbox, monkeypatch, capsys):
+        """Smoke: a season whose episodes live in two Google accounts is fetched in
+        ONE run — one browser session per account, selector's account first.
+
+        EP2 is moved to the movies account by mvconfig's fetch_account_overrides,
+        pinned through mvcommon._CONFIG_CACHE (never the real mvconfig.json). No
+        real browser, no ~/.mediavault lock file, no socket: init_driver,
+        fetch_single_entry, the lock and the debug-port probe are stubs."""
+        import contextlib
+        import types as _types
+        import mainfetch
+
+        folder = str(sandbox["media_dir"])
+        _write_all_libs(sandbox, {
+            SEASON_ID: {"type": "season_map", "folder_path": folder,
+                        "total_episodes": 2, "children": [EP1_ID, EP2_ID]},
+            EP1_ID: {"filename": "SMK.S01E01.mkv", "folder_path": folder, "hash": "1" * 64,
+                     "parent_id": SEASON_ID, "uploaded": True, "status": "archived"},
+            EP2_ID: {"filename": "SMK.S01E02.mkv", "folder_path": folder, "hash": "2" * 64,
+                     "parent_id": SEASON_ID, "uploaded": True, "status": "archived"},
+        })
+        monkeypatch.setattr(mvcommon, "_CONFIG_CACHE",
+                            {"fetch_account_overrides": {EP2_ID: "movies"}})
+
+        launched, fetched = [], []
+
+        def _fake_init_driver(profile_key="movies"):
+            launched.append(profile_key)
+            return _types.SimpleNamespace(profile=profile_key, window_handles=[],
+                                          quit=lambda: None)
+
+        def _fake_fetch(driver, entry, temp_dir=None, entry_id=None):
+            fetched.append((driver.profile, entry_id))
+
+        monkeypatch.setattr(mainfetch, "init_driver", _fake_init_driver)
+        monkeypatch.setattr(mainfetch, "fetch_single_entry", _fake_fetch)
+        monkeypatch.setattr(mainfetch, "fetch_session_lock",
+                            lambda *_a, **_k: contextlib.nullcontext())
+        monkeypatch.setattr(mainfetch, "_debug_port_free", lambda *_a, **_k: True)
+
+        mainfetch.cmd_fetch_route(SEASON_ID)
+        out = capsys.readouterr().out
+
+        assert launched == ["tv", "movies"], out
+        assert fetched == [("tv", EP1_ID), ("movies", EP2_ID)], out
+        assert "Switching to profile 'movies' for 1 item(s)" in out
+        assert "✅ Batch Processing Complete." in out
+
     # ---- sort -----------------------------------------------------------------
     def test_sort(self, sandbox, make_video, capsys):
         _seed_season_two(sandbox, make_video)

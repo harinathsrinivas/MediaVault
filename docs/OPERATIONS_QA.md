@@ -11,7 +11,7 @@
 > **Maintenance:** when a question is asked and answered in any Claude session, add it here.
 > See the protocol at the bottom.
 
-**Last updated:** 2026-09-23
+**Last updated:** 2026-09-28
 
 ---
 
@@ -493,6 +493,55 @@ One caveat that matters: "server agrees with our token" is **not** "the item is 
 token itself is wrong and every server obeys it, an id comparison calls it correct. Resolve each
 token against TMDB and compare the real title to the folder name — that is what caught
 `Ant-Man and the Wasp {tmdb-227914}` pointing at *Chainsaw Scumfuck*. See IMP-U8.
+
+---
+
+## 6b. Fetch — which Google account
+
+### An episode lives in another Google account — how do I fetch it?
+
+Fetch picks the Chrome profile, and so the Google account, from the **id prefix**
+(`mainfetch.profile_for_id`, `mainfetch.py:730`): `mov-` → movies, `tv-` → tv, `ani-` → anime,
+`oth-` → others. An item that was backed up to a *different* account is never found that way — the
+search runs in the wrong account. A single file ends `❌ ENTRY INCOMPLETE` after two ~5-minute waits
+(`mainfetch.py:362`); in a batch, the third empty search in a row aborts the run with a misleading
+*"Profile … is logged out"* message (`mainfetch.py:228`). The 2026-09-25 inventory mapping found
+**31 X-Files episodes (seasons 2–4) in the movies account** (IMP-C26).
+
+**Fix — tell fetch where they live**, in your gitignored `mvconfig.json` (repo root):
+
+```json
+"fetch_account_overrides": {
+  "tv-en-1994-xfiles-s02e03": "movies",
+  "tv-en-1995-xfiles-s03": "movies"
+}
+```
+
+- Keys are **exact manual ids or id prefixes**; values are `movies` / `tv` / `anime` / `others`.
+  The **longest matching key wins**, so an exact id beats a prefix (`mainfetch.py:730`).
+- Prefixes are plain string prefixes (`…-s02e1` also matches `…-s02e10`–`s02e19`). Use a season
+  prefix **only if every episode of that season lives in that account** — otherwise list the exact
+  ids. A season fetch with a prefix that is too broad would send the other episodes to the wrong
+  account.
+- An unknown account (e.g. `"series"`) prints **one** `⚠️  mvconfig.json: fetch_account_overrides
+  entry …` warning and that entry is ignored; a blank key is refused the same way — it would match
+  every id (`mainfetch.py:696`). Every fetch run re-reads `mvconfig.json` (`main.py fetch` spawns a
+  fresh `mainfetch.py` process, `main.py:9519`), so an edit applies to the next fetch.
+- Then fetch as usual: `python main.py fetch tv-en-1994-xfiles-s02e03 tempdir D:\MV_fetch` — the
+  `[Account] Profile for …` line should now say `'movies'`.
+
+**A season whose episodes span accounts is fetched in one run** — one Chrome session per account,
+one after another, under the same fetch lock (`mainfetch.py:808`). The season's own account goes
+first with the usual `[Account] Profile for …` line; each further account prints
+`> [Account] Switching to profile '<account>' for N item(s) (fetch_account_overrides)`. Before the
+switch, the previous account's Chrome windows are closed and debug port 9222 must be free; if it
+stays busy the run stops with `❌ Cannot switch to profile …` — close that Chrome window and re-run.
+Files already fetched stay in their `restore` folder and are skipped on the re-run. A logged-out
+account is reported by *its own* profile name. `--fetchExtras` extras follow their **title's** id
+(the season), not the episode you typed.
+
+No overrides configured → fetch behaves exactly as before. IMP-C25 will learn each item's real
+account automatically; this list stays the manual override on top of it.
 
 ---
 

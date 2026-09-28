@@ -157,6 +157,53 @@ CATEGORY_ROOTS = {
 # split_info vocabulary a main-content leaf uses. Authoritative in-code spec:
 # the EXTRAS DATA LAYER section below (grep "EXTRAS DATA LAYER").
 #
+# (IMP-C25) An optional `gphotos` block — the Google Photos identity of ONE
+# uploaded object — nests on EACH object a push uploads (PLAN P-1): the
+# unsplit leaf itself, each `split_info.chunks[i]`, each FLAC holder
+# `split_info.carried_out_tracks[i]`, an unsplit extras item, and each
+# `split_info.chunks[i]` of a split extras item. Never on a split entry itself
+# (P-3: its chunks + holders were uploaded, not the whole file); a season_map
+# holds blocks only inside its extras; a multi_ep_alias holds none. Like
+# `extras` it adds NO entry type, is in NO `required` set, changes no
+# `physical` flag, round-trips through save_library/load_library untouched,
+# and the whole-library read commands ignore it. Shape v1 (only known facts,
+# never null; times are UTC "...Z" strings, or epoch ms in taken_ms/upload_ms):
+#   gphotos = {v: 1, sha256, sha1, dedup_key, size_bytes, width, height,
+#     duration_s, date_utc, uploaded_name,
+#     pushed: {at, device_id, device_tz, device_tz_offset_min},
+#     accounts: {<movies|tv|anime|others>: {photo_id, taken_ms, tz_offset_ms,
+#       upload_ms, dedup_key, gp_filename, width, height, verified_at,
+#       verified_by, source, approach: {best, ok, failed, at, via},
+#       alternates, original_quality, partial_upload, confirmed}},
+#     home_account, search_override: {query, at}}
+# - PIN (P-2): a block is trusted only while its `sha256` equals the owning
+#   object's CURRENT hash (leaf `hash` / chunk `hash` / holder `holder_hash` /
+#   extras item `hash`); an untrusted block (it describes other bytes, e.g. an
+#   extras item re-mastered after its push) is ignored by readers and replaced
+#   by the apply engine, the block's ONLY writer (P-10). A re-split replaces
+#   split_info wholesale, so the old chunks' blocks go with it.
+# - `sha1`/`dedup_key` = the content key Google Photos dedups on (dedup_key =
+#   unpadded urlsafe base64 of the SHA-1); `date_utc` = the file's Matroska
+#   DateUTC (the taken time Google Photos shows); `uploaded_name` = the exact
+#   pushed name; `pushed` = the push's device, device timezone and time.
+# - accounts[<account>] = the copy in that Google account: its permanent
+#   `photo_id` + item facts; `verified_by` dedupkey|sha256|filename|manual and
+#   `source` map|check|fetch|confirm|manual; `approach` = which fetch
+#   approaches pinpointed it (`ok`, `best` = the first in waterfall order) or
+#   `failed`, from photo_id|hash|taken_second|exact_name|title_sid|user_query|
+#   legacy (`via` rpc|ui); `alternates` = photo ids of other items with the
+#   same name (re-split duplicates); `original_quality` / `partial_upload` =
+#   that copy's quality flags (a non-original or partial copy fails a
+#   restore's SHA-256 check); `confirmed` = seen there with upload_ms AND a
+#   verified identity (never from the push-time capture alone, P-11).
+# - `home_account` = the learned account fetch routes to (P-4: mvconfig
+#   fetch_account_overrides > home_account > id prefix); `search_override` =
+#   the user's own search term for this object, from the failed list (OD-5).
+# - Never a download URL (P-20: URLs expire and act as credentials).
+# Authoritative in-code spec: mvcommon's "GOOGLE PHOTOS IDENTITY" section
+# (new_gphotos_block / block_trusted / iter_uploaded_objects); decisions:
+# docs/feature-fetch-datetime/DECISIONS.md.
+#
 # `required` = keys that distinguish the type and are always present; it is the
 # minimal set, not the exhaustive set (leaves also carry hash/metadata/etc.).
 # `physical` = "this entry owns a physical file on disk" (has folder_path AND
@@ -167,7 +214,9 @@ CATEGORY_ROOTS = {
 # This constant is documentation + a test seam (tests/test_entry_schema_guard.py
 # enforces it). It is intentionally NOT wired into the cmd_* code paths — the
 # guard test is the enforcement. When you add or change an entry type, update
-# THIS registry AND the guard test's non-physical set.
+# THIS registry AND the guard test's non-physical set; when you change a nested
+# block's shape, update its canonical fixture there too (_extras_block /
+# _gphotos_block).
 ENTRY_TYPE_KEYS = {
     "leaf":           {"required": {"folder_path", "filename", "status"}, "physical": True},
     "season_map":     {"required": {"folder_path", "children"},           "physical": False},

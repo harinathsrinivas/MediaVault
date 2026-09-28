@@ -32,6 +32,19 @@ top-level entry type have" and whether it owns a physical file. The tests:
                     `_extras_block()` below is THE canonical representative
                     shape — faithful to what the lifecycle code actually
                     writes — for other fixtures/tests to mirror.
+  (d) GPHOTOS     — (IMP-C25) the optional nested `gphotos` identity block
+                    (PLAN P-1, documented on ENTRY_TYPE_KEYS: no new type, in
+                    NO `required` set) on EVERY uploaded object — an unsplit
+                    leaf, split chunks + a FLAC holder, extras whole items and
+                    split items' chunks — across all four prefixes: the
+                    registry literal stays untouched; THE canonical
+                    `_gphotos_block()` carries every P-1 key; blocks round-trip
+                    byte-for-byte and sit exactly where mvcommon's object
+                    inventory looks for them; and every whole-library READ
+                    command (scan_unprepped, local_status, sort,
+                    collect_reclaimable, items_payload, verify_library,
+                    repair_dummies, build_tree) completes, mutates nothing and
+                    behaves EXACTLY as on the same library without blocks.
 
 When you add or change an entry type, update `ENTRY_TYPE_KEYS` in main.py AND add
 it to this guard's non-physical set; every whole-library iterator must tolerate
@@ -43,8 +56,13 @@ LOCAL_ROOT-hermetic (redirects BOTH mvcommon.* and main.* LIBRARY_*/LOCAL_ROOT
 into a temp dir). Never touches real C:\\Media or real library_*.json.
 """
 import hashlib
+import json
 import os
+from datetime import datetime, timezone
 
+import pytest
+
+import gpweb
 import main
 import mvcommon
 
@@ -426,3 +444,358 @@ def test_read_commands_tolerate_extras_bearing_library(sandbox, capsys):
     assert reloaded[SEASON_ID].get("extras") == season["extras"]
     assert reloaded[ALIAS_ID].get("type") == "multi_ep_alias"
     assert "type" not in reloaded[PRIMARY_ID]
+
+
+# ===========================================================================
+# (d) GPHOTOS — the optional nested Google Photos identity block (IMP-C25).
+# ===========================================================================
+# `gphotos` is NOT an entry type either: it nests on each UPLOADED OBJECT
+# (PLAN P-1) — the unsplit leaf itself, each split_info.chunks[i], each FLAC
+# holder split_info.carried_out_tracks[i], an unsplit extras item, each chunk
+# of a split extras item — and never on a split entry itself (P-3). Documented
+# on ENTRY_TYPE_KEYS. These tests are its schema tripwire:
+#   (d1) the registry literal stays untouched;
+#   (d2) THE canonical `_gphotos_block()` carries every P-1 key, in the
+#        writer's order — so (d3)/(d4) exercise the FULL block;
+#   (d3) blocks round-trip byte-for-byte at every placement through all four
+#        prefix-routed library files, and sit exactly where mvcommon's object
+#        inventory looks for them (TRUSTED — the P-2 pin);
+#   (d4) every whole-library READ command tolerates them: completes, mutates
+#        nothing, and behaves EXACTLY as on the same library without blocks
+#        (PLAN Consumer Impact row 14: "nested block invisible").
+
+ANIME_ID = "ani-ja-2019-guardanime01"  # "ani-" -> library_anime.json (split leaf + FLAC holder)
+OTHERS_ID = "oth-en-2024-guardfinal"   # "oth-" -> library_others.json (unsplit leaf)
+
+# Synthetic, mutually consistent facts (PLAN P-15: nothing real — photo ids
+# carry FAKE, the device serial is fake).
+GP_DATE_UTC = "2024-03-09T06:03:02Z"   # the file's DateUTC = the taken time Google Photos shows
+GP_TAKEN_MS = int(datetime(2024, 3, 9, 6, 3, 2, tzinfo=timezone.utc).timestamp()) * 1000
+GP_TZ_OFFSET_MS = 8 * 3600 * 1000      # the Pixel's +08:00 (Asia/Singapore)
+GP_PUSHED_AT = "2026-09-20T10:00:00Z"
+GP_UPLOAD_MS = int(datetime(2026, 9, 21, 3, 15, tzinfo=timezone.utc).timestamp()) * 1000  # backed up later
+GP_OVERRIDE_AT = "2026-09-27T09:00:00Z"
+GP_VERIFIED_AT = "2026-09-28T10:00:00Z"
+
+
+def _gphotos_block(owner_id, sha256, uploaded_name):
+    """THE canonical representative `gphotos` block (IMP-C25, PLAN P-1) of ONE
+    uploaded object: EVERY optional key present, synthetic values only. Built
+    with mvcommon.new_gphotos_block — the constructor behind the apply engine,
+    the block's only writer (P-10) — so it is exactly a stored block's shape.
+    Later IMP-C25 fixtures/tests should mirror it, as _extras_block is mirrored.
+
+      - `sha256` is the PIN: the owning object's CURRENT hash (P-2 — leaf
+        `hash`, chunk `hash`, holder `holder_hash`, extras item `hash`), so the
+        block is TRUSTED where it is placed;
+      - content key: a synthetic SHA-1 (one per object) and its dedupKey;
+      - `accounts` holds one record, for owner_id's prefix-default account,
+        which is also `home_account` (P-4): a confirmed, dedupkey-verified item
+        carrying every P-1 account key — approach verdicts, an alternate (a
+        re-split duplicate's photo id) and both quality flags;
+      - `search_override` is the user's failed-list term (OD-5) as Excel's
+        autocorrect leaves it (en dash, curly apostrophe), so the guards also
+        prove non-ASCII text survives save_library/load_library exactly."""
+    account = mvcommon.category_for_id(owner_id)  # a category is named after its default account
+    sha1 = hashlib.sha1(f"gphotos-guard:{sha256}".encode()).hexdigest()
+    dedup_key = gpweb.dedup_key(sha1)
+    stem = os.path.splitext(uploaded_name)[0]
+    return mvcommon.new_gphotos_block(
+        sha256,
+        sha1=sha1, dedup_key=dedup_key, size_bytes=4_294_967_296, width=1920, height=1080,
+        duration_s=2712.48, date_utc=GP_DATE_UTC, uploaded_name=uploaded_name,
+        pushed={"at": GP_PUSHED_AT, "device_id": "FAKESERIAL04", "device_tz": "Asia/Singapore",
+                "device_tz_offset_min": 480},
+        accounts={account: {
+            "photo_id": f"AF1QipFAKEguard{sha256[:24]}", "taken_ms": GP_TAKEN_MS,
+            "tz_offset_ms": GP_TZ_OFFSET_MS, "upload_ms": GP_UPLOAD_MS, "dedup_key": dedup_key,
+            "gp_filename": uploaded_name, "width": 1920, "height": 1080,
+            "verified_at": GP_VERIFIED_AT, "verified_by": "dedupkey", "source": "check",
+            "approach": {"best": "photo_id", "ok": ["photo_id", "hash", "taken_second"],
+                         "failed": ["title_sid", "legacy"], "at": GP_VERIFIED_AT, "via": "rpc"},
+            "alternates": [f"AF1QipFAKEalt{sha256[24:48]}"],
+            "original_quality": True, "partial_upload": False, "confirmed": True,
+        }},
+        home_account=account,
+        search_override={"query": f"{stem} – director’s cut", "at": GP_OVERRIDE_AT},
+    )
+
+
+def _uploaded_leaf(mid, folder, filename, status):
+    """A leaf with cmd_prep's key set (its `entry_data`) after the push:
+    uploaded=True, `status` = where it stands in the lifecycle."""
+    sid = mvcommon.generate_short_id(mid)
+    stem, ext = os.path.splitext(filename)
+    return {
+        "short_id": sid, "filename": filename, "folder_path": str(folder),
+        "status": status, "uploaded": True, "search_term": f"{stem} [{sid}]{ext}",
+        "hash": hashlib.sha256(f"{mid}:master".encode()).hexdigest(),
+        "metadata": main.parse_metadata_from_id(mid),
+        "tech_spec": {"resolution": "1080p", "video_codec": "HEVC", "size_bytes": 4_294_967_296},
+    }
+
+
+def _split_leaf(mid, folder, filename):
+    """A leaf pushed SPLIT with a FLAC carry-out, then restored and blessed:
+    split_info as cmd_push writes it — chunks [{filename, hash}] and
+    carried_out_tracks [_carry_out_flac_track's record] — plus the bless fields
+    of its first restore (merge_seed / merge_tool / rehashed_at, re_hashed)."""
+    leaf = _uploaded_leaf(mid, folder, filename, "restored_local")
+    sid, stem = leaf["short_id"], os.path.splitext(filename)[0]
+    manifest = [  # probe_track_manifest's shape: a video track + the carried-out FLAC
+        {"id": 0, "type": "video", "codec_id": "V_MPEGH/ISO/HEVC", "language": "und",
+         "default": True, "forced": False, "enabled": True, "name": None, "uid": "1001"},
+        {"id": 1, "type": "audio", "codec_id": "A_FLAC", "language": "jpn",
+         "default": True, "forced": False, "enabled": True, "name": "Stereo", "uid": "1002"},
+    ]
+    leaf["split_info"] = {
+        "is_split": True, "method": "SIZE_GB", "val": "8", "total_chunks": 2,
+        "chunks": [{"filename": f"{stem} [{sid}].chunk.{n:03d}.mkv",
+                    "hash": hashlib.sha256(f"{mid}:chunk{n}".encode()).hexdigest()} for n in (1, 2)],
+        "carried_out_tracks": [{
+            "track_id": 1, "codec": "A_FLAC", "language": "jpn",
+            "holder_filename": f"{stem} [{sid}].holder.mkv",
+            "holder_hash": hashlib.sha256(f"{mid}:holder".encode()).hexdigest(),
+            "original_tracks": manifest, "position": 1, "default": True, "forced": False,
+            "enabled": True, "name": "Stereo", "uid": "1002"}],
+        "merge_seed": sid, "merge_tool": "mkvmerge v97.0", "rehashed_at": "2026-09-25T00:00:00Z",
+    }
+    leaf["re_hashed"] = True
+    return leaf
+
+
+def _gphotos_library(sandbox):
+    """A library over ALL FOUR prefixes in which EVERY uploaded object carries
+    its canonical block at its P-1 placement:
+      mov-  movie leaf (archived) ......... the entry itself
+            + extras (_extras_block) ...... each whole item / each chunk of the split item
+      tv-   season_map + extras ........... likewise (the season_map itself holds none)
+            episode leaf (onboarded) ...... the entry itself (its multi_ep_alias holds none)
+      ani-  split leaf + FLAC carry-out ... each chunk + the holder, never the entry (P-3)
+      oth-  leaf (archived) ............... the entry itself
+    Each title's Trailer.mkv (local_ready, uploaded=False) carries the one
+    realistic UNTRUSTED block: it was re-mastered after its push, and
+    merge_extras_into_title reset it IN PLACE with the new hash — so its block
+    still pins the OLD bytes (P-2: ignored by readers until the apply engine
+    replaces it).
+
+    Returns (library, trusted, stale, files): the 14 trusted and 2 stale blocks
+    as placed, and {on-disk path: bytes} for every physical object — a small
+    dummy for `archived` (the movie's a legacy TEXT stub, the others valid
+    video dummies) and real-sized bytes for every other status."""
+    root = sandbox["local_root"]
+    movie_dir, season_dir = sandbox["media_dir"], root / "Series" / "BSG" / "Season 04"
+    movie = _uploaded_leaf(MOVIE_TITLE_ID, movie_dir, "guard_movie.mkv", "archived")
+    movie["extras"] = _extras_block(MOVIE_TITLE_ID)
+    season = _entry_for_type("season_map", str(season_dir))
+    season["extras"] = _extras_block(SEASON_ID)
+    library = {
+        MOVIE_TITLE_ID: movie,
+        SEASON_ID: season,
+        PRIMARY_ID: dict(_uploaded_leaf(PRIMARY_ID, season_dir, "leaf_episode.mkv", "onboarded"),
+                         parent_id=SEASON_ID),
+        ALIAS_ID: _entry_for_type("multi_ep_alias", str(season_dir)),
+        ANIME_ID: _split_leaf(ANIME_ID, root / "Anime" / "Guard Anime", "guard_anime_01.mkv"),
+        OTHERS_ID: _uploaded_leaf(OTHERS_ID, root / "Sports" / "Guard Final", "guard_final.mkv", "archived"),
+    }
+
+    trusted, stale = [], []
+
+    def place(owner_id, node, pin_key, uploaded_name):
+        node["gphotos"] = _gphotos_block(owner_id, node[pin_key], uploaded_name)
+        trusted.append(node["gphotos"])
+
+    for mid in (MOVIE_TITLE_ID, PRIMARY_ID, OTHERS_ID):  # unsplit leaves: the entry itself
+        leaf = library[mid]
+        place(mid, leaf, "hash", mvcommon.remote_upload_name(leaf["filename"], leaf["short_id"]))
+    split_info = library[ANIME_ID]["split_info"]         # a split leaf: its chunks + holder (P-3)
+    for chunk in split_info["chunks"]:
+        place(ANIME_ID, chunk, "hash", chunk["filename"])
+    for track in split_info["carried_out_tracks"]:
+        place(ANIME_ID, track, "holder_hash", track["holder_filename"])
+    for title_id in (MOVIE_TITLE_ID, SEASON_ID):         # extras: whole items / split items' chunks
+        for group in library[title_id]["extras"]["groups"].values():
+            for item in group["items"]:
+                name = mvcommon.remote_upload_name(item["filename"], item["short_id"])
+                if "split_info" in item:
+                    for chunk in item["split_info"]["chunks"]:
+                        place(title_id, chunk, "hash", chunk["filename"])
+                elif item["uploaded"]:
+                    place(title_id, item, "hash", name)
+                else:  # re-mastered after its push: the block still pins the OLD bytes
+                    old = hashlib.sha256(f"{title_id}:{item['sub_rel']}:before re-master".encode()).hexdigest()
+                    item["gphotos"] = _gphotos_block(title_id, old, name)
+                    stale.append(item["gphotos"])
+
+    real = b"GPHOTOS-GUARD-REAL-MEDIA\n" * 8400
+    assert len(real) > main.DUMMY_MAX_BYTES
+    statuses = {os.path.join(e["folder_path"], e["filename"]): e["status"]
+                for e in library.values() if "type" not in e}  # physical leaves
+    for entry in library.values():
+        statuses.update({path: item["status"] for _grp, path, item in main._extras_item_paths(entry)})
+    files = {path: b"MV-VIDEO-DUMMY" if status == "archived" else real for path, status in statuses.items()}
+    files[os.path.join(str(movie_dir), "guard_movie.mkv")] = b"Original Hash: legacy text stub\n"
+    return library, trusted, stale, files
+
+
+_LIBRARY_FILES = ("lib_movies", "lib_series", "lib_anime", "lib_others")
+
+
+def _library_bytes(sandbox):
+    """The raw bytes of all four prefix-routed library files."""
+    return {name: sandbox[name].read_bytes() for name in _LIBRARY_FILES}
+
+
+def _entries_json(library):
+    """{id: the entry as JSON}: equal dumps mean equal keys, values, types AND key order."""
+    return {mid: json.dumps(entry) for mid, entry in library.items()}
+
+
+def _nested_blocks(node):
+    """Every `gphotos` value nested anywhere in `node`, in document order."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == "gphotos":
+                yield value
+            else:
+                yield from _nested_blocks(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _nested_blocks(value)
+
+
+def _without_gphotos(node):
+    """A deep copy of `node` with every `gphotos` key removed: the library as it was before IMP-C25."""
+    if isinstance(node, dict):
+        return {key: _without_gphotos(value) for key, value in node.items() if key != "gphotos"}
+    if isinstance(node, list):
+        return [_without_gphotos(value) for value in node]
+    return node
+
+
+def _write_files(sandbox, files):
+    """(Re)write every {path: bytes} file, resetting any dummy a previous command
+    regenerated. Hard guard: every path lies under the sandbox's LOCAL_ROOT
+    (tmp_path), never the real C:\\Media."""
+    root = os.path.normcase(str(sandbox["local_root"])) + os.sep
+    for path, data in files.items():
+        assert os.path.normcase(path).startswith(root), f"fixture file escaped the sandbox: {path}"
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as fh:
+            fh.write(data)
+
+
+def test_gphotos_adds_no_entry_type_and_no_required_key():
+    """(d1) `gphotos` is an OPTIONAL nested block: the registry literal stays
+    exactly as IMP-H3 / IMP-D19 left it — no new type, no `required` or
+    `physical` change. A deliberate registry change updates this pin together
+    with the (a)/(b) builders above."""
+    assert main.ENTRY_TYPE_KEYS == {
+        "leaf":           {"required": {"folder_path", "filename", "status"}, "physical": True},
+        "season_map":     {"required": {"folder_path", "children"},           "physical": False},
+        "multi_ep_alias": {"required": {"alias_of", "parent_id"},             "physical": False},
+    }, "ENTRY_TYPE_KEYS changed — `gphotos` must stay an optional nested block (see the registry comment)"
+
+
+def test_canonical_gphotos_block_carries_every_p1_key():
+    """(d2) _gphotos_block() is complete: every key of the P-1 shape at every
+    level, in the writer's (mvcommon's) key order, and trusted under its pin.
+    Bound to mvcommon's own key lists, so a key added to the block cannot land
+    in the writer without landing in THE canonical block — and so in (d3)/(d4)."""
+    pin = hashlib.sha256(b"canonical").hexdigest()
+    block = _gphotos_block(MOVIE_TITLE_ID, pin, "guard_movie [abc123].mkv")
+    assert list(block) == list(mvcommon._BLOCK_KEYS)
+    assert block["v"] == mvcommon.GPHOTOS_BLOCK_VERSION
+    assert list(block["pushed"]) == list(mvcommon._PUSHED_KEYS)
+    assert list(block["accounts"]) == [block["home_account"]] == ["movies"]
+    record = block["accounts"]["movies"]
+    assert list(record) == list(mvcommon._ACCOUNT_KEYS)
+    assert list(record["approach"]) == list(mvcommon._APPROACH_KEYS)
+    assert list(block["search_override"]) == ["query", "at"]
+    assert mvcommon.block_trusted(block, pin)
+
+
+def test_gphotos_blocks_round_trip_byte_for_byte_at_every_placement(sandbox):
+    """(d3) Every block — at every P-1 placement, in all four prefix-routed
+    files — survives save_library -> load_library byte-for-byte, and so does
+    every entry around it; another load -> save cycle (what every
+    library-writing command does around its own edits) rewrites the files
+    byte-identically. And the placements are exactly where mvcommon's object
+    inventory (PLAN Step 3) looks: every uploaded object reports its canonical
+    block as TRUSTED, over all five object kinds and all four categories."""
+    library, trusted, stale, _files = _gphotos_library(sandbox)
+    assert (len(trusted), len(stale)) == (14, 2)
+    mvcommon.save_library(library)
+    saved = _library_bytes(sandbox)
+    for name, data in saved.items():  # each prefix-routed file really carries blocks
+        assert b'"gphotos"' in data, f"{name} holds no gphotos block"
+
+    reloaded = mvcommon.load_library()
+    # Focused first (a better failure diff): the blocks themselves, trusted and stale ...
+    assert sorted(json.dumps(b) for b in _nested_blocks(reloaded)) == \
+        sorted(json.dumps(b) for b in trusted + stale)
+    # ... then every entry around them.
+    assert _entries_json(reloaded) == _entries_json(library)
+
+    mvcommon.save_library(reloaded)
+    assert _library_bytes(sandbox) == saved, "a load -> save cycle changed the library files"
+
+    objects = list(mvcommon.iter_uploaded_objects(reloaded))
+    assert sorted(json.dumps(o["block"]) for o in objects) == sorted(json.dumps(b) for b in trusted)
+    assert {o["kind"] for o in objects} == {"whole", "chunk", "holder", "extra_whole", "extra_chunk"}
+    assert {o["category"] for o in objects} == {"movies", "tv", "anime", "others"}
+
+
+# The whole-library READ commands PLAN Step 4 names: label -> (call, rewrites_library).
+# Each call looks its command up on `main` when it runs (a patched command is what runs).
+_READ_COMMANDS = {
+    "scan_unprepped":             (lambda: main.cmd_scan_unprepped(), False),
+    "local_status":               (lambda: main.cmd_local_status(), False),
+    "local_status_40gb":          (lambda: main.cmd_local_status("40gb"), False),
+    "sort":                       (lambda: main.cmd_sort(), True),  # re-saves every file, sorted
+    "collect_reclaimable":        (lambda: main.collect_reclaimable(), False),
+    "items_payload":              (lambda: main.items_payload(), False),
+    "verify_library":             (lambda: main.cmd_verify_library(), False),
+    "verify_library_fix_dummies": (lambda: main.cmd_verify_library(fix_dummies=True), False),
+    "repair_dummies":             (lambda: main.cmd_repair_dummies(), False),  # rewrites dummy FILES only
+    "build_tree":                 (lambda: main.build_tree(), False),
+}
+
+
+@pytest.mark.parametrize("command", list(_READ_COMMANDS))
+def test_read_commands_tolerate_gphotos_blocks(command, sandbox, fake_dummy, capsys):
+    """(d4) Each whole-library READ command runs twice on the same disk — over
+    the gphotos-bearing library, then over the SAME library with every block
+    stripped (the library as it was before IMP-C25) — and must:
+      - complete without raising on the blocks, trusted and stale alike;
+      - mutate nothing: the library files stay byte-identical (cmd_sort, which
+        re-saves every file in sorted order, must keep every entry — blocks
+        included — JSON-identical), and no Google Photos identity state is
+        written (only fetch/check/map/apply produce it — P-10);
+      - behave EXACTLY as without blocks: the same return value, stdout and
+        stderr. The block is invisible to these readers (PLAN Consumer Impact
+        row 14); a reader that starts to act on it must update this guard.
+    The disk holds real-sized files and dummies (fake_dummy stands in for
+    ffmpeg), so the per-state branches of these commands all meet block-bearing
+    entries: pending (local_status), reclaimable (collect_reclaimable,
+    items_payload, build_tree), archived dummies incl. a legacy TEXT stub
+    (verify_library, repair_dummies)."""
+    call, rewrites_library = _READ_COMMANDS[command]
+    library, _trusted, _stale, files = _gphotos_library(sandbox)
+    bare = _without_gphotos(library)
+    assert bare != library  # the blocks are really there
+
+    observed = []
+    for variant in (library, bare):
+        _write_files(sandbox, files)  # the same disk for both runs (repair rewrites dummies)
+        mvcommon.save_library(variant)
+        before = _library_bytes(sandbox)
+        result = call()
+        captured = capsys.readouterr()
+        observed.append((result, captured.out, captured.err))
+        assert _entries_json(mvcommon.load_library()) == _entries_json(variant), \
+            f"{command} changed library entries"
+        if not rewrites_library:
+            assert _library_bytes(sandbox) == before, f"{command} rewrote the library"
+    assert not os.path.exists(mvcommon.GPHOTOS_STATE_DIR), f"{command} wrote Google Photos identity state"
+    assert observed[0] == observed[1], f"{command} behaves differently when gphotos blocks are present"

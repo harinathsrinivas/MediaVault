@@ -37,7 +37,7 @@ next natural stop — it must be answered before Step 11.
 | 1 | sync with main (after #60 / after H) | done | orchestrator (Opus 5.5) | 3029f6f | full 971 · smoke 81 | merged origin/main ac563a0 (PR #60) — clean; two-dot diff shows only feature docs; repeat after Step H merges |
 | H | C26 hotfix PR (worktree MediaVault-c26) | done — PR #61 open, awaiting user approval (Checkpoint 1) | fable (executor-fable) | 2893d98 (branch fix/imp_c26_fetch_account_routing) | full 1003 · smoke 82 · disarm 3/3 | +switch guard (close prev Chrome, port 9222 free) beyond plan text; RH after merge; then Step 1 re-merges main |
 | RH | user fills fetch_account_overrides + tests | pending | user | | | after H merges |
-| 2 | gpweb + RPC parsers + fake Google Photos | pending | | | | |
+| 2 | gpweb + RPC parsers + fake Google Photos | done — uncommitted, awaiting the orchestrator's commit | fable (executor-fable, claude-fable-5-1) | | full 1215 · smoke 81 · crawler golden byte-identical · disarm/mutation probes 8/8 | new gpweb.py + tests/gphotos_fake.py + tests/test_gpweb.py; tools/gp_inventory.py delegates; conftest `fake_photos`; VrseUb original_quality not pre-resolved → None (read EWgK9e); dedup_key re-export is a lazy delegate (import-cycle guard for Step 3) |
 | 2b | gprpc read-only RPC client | pending | | | | |
 | 3 | mvcommon identity primitives + failed list | pending | | | | |
 | 4 | ENTRY_TYPE_KEYS + guard | pending | | | | fallback none |
@@ -74,9 +74,14 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 `Step 2 — dispatched 2026-09-28 to executor-fable (fable) · single-executor, dispatch says DO NOT COMMIT (no WIP
 commits; this line is kept on disk only) · resumed 2026-09-28 by fable after a usage-limit reset: no uncommitted
 changes existed · sub-tasks: [x] 2.1 gpweb.py a–i (parsers, hash/time/name/query helpers, TILES_JS/SCROLL_JS) ·
-[x] 2.2 tests/test_gpweb.py parser tables (192 passed; disarm probes 4/4) · [ ] 2.3 tests/gphotos_fake.py (j) +
-conftest `fake_photos` + fake self-tests ← next · [ ] 2.4 crawler golden record (frozen oracle, captured BEFORE the refactor) · [ ] 2.5 tools/gp_inventory.py
-delegates to gpweb · [ ] 2.6 full suite + smoke + self-review`
+[x] 2.2 tests/test_gpweb.py parser tables (192 passed; disarm probes 4/4) · [x] 2.3 tests/gphotos_fake.py (j) +
+conftest `fake_photos` + fake self-tests (test_gpweb.py 218 passed) · [x] 2.4 crawler golden record (frozen oracle,
+captured from the unmodified crawler; 28 passed / 2 expected fails pre-refactor) · [x] 2.5 tools/gp_inventory.py
+delegates to gpweb (248 passed; golden byte-identical; mutation probes all caught) · [x] 2.6 full suite 1215 + smoke
+81 + self-review (resumed once more by fable after a second usage-limit reset: uncommitted 2.1–2.5 changes kept) →
+STEP COMPLETE: the uncommitted files (gpweb.py, tests/gphotos_fake.py, tests/test_gpweb.py, tests/conftest.py,
+tests/test_gp_inventory.py, tools/gp_inventory.py, this file) are the finished, verified step — commit them, do not
+discard.`
 Template — when a step is running (Execution protocol "In-step checkpoints"):
 `Step N — dispatched <time> to <model> · sub-tasks: [x] N.a <what> (wip SHA) · [ ] N.b <what> ← next · [ ] N.c …`
 plus, after a crash, one line `resumed <time> by <model>: uncommitted N.b changes kept|discarded (<files>)`.

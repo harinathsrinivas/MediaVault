@@ -566,6 +566,42 @@ def mock_fetch(mock_device, tmp_path, monkeypatch):
 
 
 @pytest.fixture()
+def fake_photos(tmp_path):
+    """IMP-C25 — the fake Google Photos world (tests/gphotos_fake.py; PLAN Step 2j).
+
+    A deterministic in-memory model of the Google Photos web app for the four accounts (movies renders
+    UK English, tv / anime / others US English), driven through the real Selenium surface MediaVault
+    uses: `fake_photos.driver(account)` returns a driver that selenium's own ActionChains / WebDriverWait
+    and the shared gpweb scripts work against, including the batchexecute emulator (the Step 2b
+    page-context RPC call). Items: `fake_photos.add_item(account, filename, data=..., taken=...)`.
+    Every knob, log and the emulator contract are documented in the module docstring.
+
+    Isolation / hard guards:
+      - no network, no browser, no adb — nothing leaves the process;
+      - every file the fake writes (downloads) must lie under this test's tmp_path: the fake raises
+        AssertionError otherwise, so a CDP download redirect aimed at a real folder fails loudly;
+      - the default download folder is tmp_path/fake_photos/Downloads — never the real ~/Downloads;
+      - delayed-download timers are cancelled at teardown.
+
+    Binding note: this fixture patches NOTHING. A test that drives production code wires the fake in
+    itself (e.g. monkeypatch mainfetch.init_driver to return fake_photos.driver(profile)) and, for the
+    legacy trigger_download, stubs mainfetch's sleeps to keep the run fast.
+
+    Yields: gphotos_fake.FakePhotos.
+    """
+    import gphotos_fake  # lazy: only tests that use the fake import it (and selenium)
+
+    downloads = tmp_path / "fake_photos" / "Downloads"
+    world = gphotos_fake.FakePhotos(tmp_path, downloads_dir=downloads)
+    real_downloads = os.path.abspath(os.path.join(os.path.expanduser("~"), "Downloads"))
+    assert os.path.abspath(world.default_download_dir) != real_downloads, "the fake must never use ~/Downloads"
+    assert tmp_path.resolve() in downloads.resolve().parents, f"fake downloads escaped tmp_path: {downloads}"
+    assert "C:\\Media" not in str(downloads.resolve()), f"fake downloads must never touch C:\\Media: {downloads}"
+    yield world
+    world.close()
+
+
+@pytest.fixture()
 def fake_dummy(monkeypatch):
     """
     Replaces main.make_video_dummy with a stub that writes FAKE_DUMMY_BYTES

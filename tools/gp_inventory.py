@@ -25,7 +25,6 @@ import argparse
 import json
 import os
 import random
-import re
 import subprocess
 import sys
 import time
@@ -33,6 +32,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mainfetch import CHROME_PROFILES, PHOTOS_URL  # noqa: E402  (single source of truth)
+import gpweb  # noqa: E402  (the ONE shared Google Photos parser module — IMP-C25 Step 2)
 
 from selenium import webdriver  # noqa: E402
 from selenium.webdriver.chrome.options import Options  # noqa: E402
@@ -42,21 +42,9 @@ CHROME_EXE = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 DEFAULT_OUT = r"D:\MediaVault_gp_inventory"
 ACCOUNTS = {"movies": "movies", "tv": "tv", "series": "tv", "anime": "anime", "others": "others"}
 
-TILES_JS = """
-const out=[];
-document.querySelectorAll('a[href*="photo/"]').forEach(a=>{ const r=a.getBoundingClientRect();
-  if(a.checkVisibility() && r.width>40) out.push({href:a.getAttribute('href'), label:a.getAttribute('aria-label')}); });
-return out;"""
-SCROLL_JS = """
-const els=[...document.querySelectorAll('*')].filter(e=>{const s=getComputedStyle(e);
-  return (s.overflowY=='auto'||s.overflowY=='scroll')&&e.scrollHeight>e.clientHeight+50&&e.checkVisibility()});
-els.sort((a,b)=>b.scrollHeight-a.scrollHeight);
-const el=els[0]; if(!el){window.scrollBy(0,900);return [window.scrollY, document.body.scrollHeight];}
-el.scrollTop+=Math.max(400, Math.floor(el.clientHeight*0.8)); return [el.scrollTop, el.scrollHeight];"""
-PID_RE = re.compile(r"/photo/([^/?#]+)")
-EXT_LINE_RE = re.compile(r"^[^\n/\\]{1,300}\.[A-Za-z0-9]{2,5}$")
-TZ_RE = re.compile(r"^GMT(?:[+\-]\d{1,2}:\d{2})?$")
-MP_RE = re.compile(r"^\d+(?:\.\d+)?\s?MP$")  # "2.1MP" resolution line, not a filename
+TILES_JS = gpweb.TILES_JS    # visible result/timeline tiles → [{href, label}]
+SCROLL_JS = gpweb.SCROLL_JS  # scroll the virtualised grid → [scrollTop, scrollHeight]
+PID_RE = gpweb.PHOTO_ID_RE
 
 
 class LoggedOut(Exception):
@@ -138,42 +126,22 @@ def enumerate_tiles(driver, tiles_path, log):
 
 
 def parse_details(body):
-    """Pull the info-panel fields out of the page text (the block after 'Details')."""
-    i = body.find("\nDetails\n")
-    if i < 0:
-        i = body.find("Details")
-        if i < 0:
-            return None
-    lines = [l.strip() for l in body[i:].split("\n")[1:40] if l.strip()]
-    out = {"details_text": "\n".join(lines[:14])[:700]}
-    for idx, l in enumerate(lines[:12]):
-        if TZ_RE.match(l):
-            out["tz_text"] = l
-            if idx >= 1:
-                out["time_text"] = lines[idx - 1]
-            if idx >= 2:
-                out["date_text"] = lines[idx - 2]
-            break
-    for l in lines[:14]:
-        if EXT_LINE_RE.match(l) and not MP_RE.match(l) and not l.lower().startswith(("learn more", "original quality")):
-            out["filename"] = l
-            break
+    """The info-panel fields (the block after 'Details') via gpweb.info_panel, in this file's record
+    format: details_text, then tz_text / time_text / date_text / filename when found — or None."""
+    panel = gpweb.info_panel(body)
+    if panel is None:
+        return None
+    out = {"details_text": panel["details_text"]}
+    for key in ("tz_text", "time_text", "date_text", "filename"):
+        if panel[key] is not None:
+            out[key] = panel[key]
     return out
 
 
-# The thumbnail sub-array comes in two observed shapes (2026-09-25): ["<url>",w,h] and
-# ["<url>",w,h,null,…,null,[n]] — so its tail is optional: nulls, numbers or one flat array.
-_RECORD_TAIL = r'(?:,(?:null|-?\d+(?:\.\d+)?|\[[^\[\]]*\]))*'
-
-
 def item_record(page_source, pid):
-    """The item page embeds [<pid>,[<thumb>,w,h,...],taken_ms,"dedupKey",tz_offset_ms,upload_ms,...]."""
-    m = re.search(re.escape(pid) + r'",\["[^"]*",(\d+),(\d+)' + _RECORD_TAIL
-                  + r'\],(-?\d{10,14}),"([A-Za-z0-9_-]{27})",(-?\d+),(\d{12,14})', page_source)
-    if not m:
-        return {}
-    return {"width": int(m.group(1)), "height": int(m.group(2)), "taken_ms": int(m.group(3)),
-            "dedup_key": m.group(4), "tz_offset_ms": int(m.group(5)), "upload_ms": int(m.group(6))}
+    """The record the item page embeds — [<pid>,[<thumb>,w,h,…],taken_ms,"dedupKey",tz_offset_ms,
+    upload_ms,…] — via gpweb.page_record, without its photo_id key (this file's record format)."""
+    return {k: v for k, v in gpweb.page_record(page_source, pid).items() if k != "photo_id"}
 
 
 def open_info_panel(driver):

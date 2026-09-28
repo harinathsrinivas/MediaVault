@@ -27,5 +27,7 @@
   "groq": {
     "_comment_api_key": "Optional GROQ (groq.com) API key for the trivia backfill (IMP-E16/A5): GROQ's LLM distills the EXA web snippets into 2-4 short, source-tagged trivia facts. null/empty = unset (fetch_trivia then no-ops).",
     "api_key": null
-  }
+  },
+  "_comment_fetch_account_overrides": "Optional (IMP-C26): fetch items that live in a DIFFERENT Google account than their id prefix says. Keys are exact manual ids or id prefixes (plain string prefixes); values are account keys: movies | tv | anime | others. The longest matching key wins, so an exact id beats a prefix. Example: {\"tv-en-1994-xfiles-s02e03\": \"movies\", \"tv-en-1995-xfiles-s03\": \"movies\"} — use a prefix only if EVERY item under it lives in that account. A batch spanning accounts runs one Chrome session per account. Empty/absent = route by id prefix (the default); an unknown account prints one warning and that entry is ignored.",
+  "fetch_account_overrides": {}
 }

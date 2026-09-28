@@ -4,6 +4,7 @@ import subprocess
 import shutil
 import time
 import re
+import socket
 import urllib.parse
 from datetime import datetime
 # --- SELENIUM IMPORTS ---
@@ -26,6 +27,7 @@ except ImportError:
 # truth imported by both entry points). load_library is now the loud/strict
 # version (sys.exit(1) on a corrupt library) — mainfetch's old silent-zero-
 # entries behavior is intentionally removed.
+import mvcommon  # [IMP-C26] runtime config is read module-qualified (mvcommon's RUNTIME CONFIG binding-hazard note)
 from mvcommon import RESTORE_DIR_NAME, load_library, calculate_file_hash, fetch_session_lock, episode_num_from_id
 
 # --- AUTOMATION CONFIG ---
@@ -643,36 +645,164 @@ def build_extras_entries(title_entry):
     return entries
 
 
+def _extras_title(lib, manual_id):
+    """(title_id, title_entry) that `manual_id`'s extras hang off, or (None, None).
+
+    Mirrors main._extras_title_id: a season_map is its own title; an episode leaf
+    uses its parent_id season_map; a movie leaf is its own title (multi_ep_alias
+    whose primary is missing -> no title). The ONE copy of this rule in mainfetch,
+    shared by resolve_title_extras (which extras to fetch) and cmd_fetch_route's
+    account routing (IMP-C26: extras route by their title id)."""
+    if manual_id not in lib:
+        return None, None
+    real_id, entry = _resolve_alias(lib, manual_id)
+    if entry.get("type") == "multi_ep_alias":
+        return None, None
+    if entry.get("type") == "season_map":
+        return real_id, entry
+    parent_id = entry.get("parent_id")
+    if parent_id and parent_id in lib:
+        return parent_id, lib[parent_id]
+    return real_id, entry
+
+
 def resolve_title_extras(manual_id):
     """Resolve `manual_id` to its TITLE entry and return that title's
     cloud-resident extras as synthetic fetch entries (all groups), or [] if the
     id is absent or carries no fetchable extras.
 
-    Title resolution mirrors main._extras_title_id: a season_map is its own
-    title; an episode leaf uses its parent_id season_map; a movie leaf is its own
-    title (multi_ep_alias whose primary is missing -> no title). PURE read — only
-    load_library; no browser / device side effects. (A second load_library here,
-    after resolve_targets', is the deliberate cost of leaving resolve_targets
-    byte-for-byte untouched; it only runs when --fetchExtras is set.)"""
-    lib = load_library()
-    if manual_id not in lib:
-        return []
-    real_id, entry = _resolve_alias(lib, manual_id)
-    if entry.get("type") == "multi_ep_alias":
-        return []
-    if entry.get("type") == "season_map":
-        title_entry = entry
+    Title resolution (_extras_title) mirrors main._extras_title_id: a season_map
+    is its own title; an episode leaf uses its parent_id season_map; a movie leaf
+    is its own title (multi_ep_alias whose primary is missing -> no title). PURE
+    read — only load_library; no browser / device side effects. (A second
+    load_library here, after resolve_targets', is the deliberate cost of leaving
+    resolve_targets byte-for-byte untouched; it only runs when --fetchExtras is
+    set.)"""
+    _title_id, title_entry = _extras_title(load_library(), manual_id)
+    return build_extras_entries(title_entry) if title_entry is not None else []
+
+
+# [IMP-C26] Per-object account override. An archived object can live in a
+# DIFFERENT Google account than its id prefix says (the 2026-09-25 inventory
+# mapping found 31 X-Files episodes in the MOVIES account), and prefix routing
+# alone can never fetch it. The gitignored mvconfig.json may therefore carry
+#     "fetch_account_overrides": {"<exact manual id or id prefix>": "<account>"}
+# where <account> is a CHROME_PROFILES key. profile_for_id consults it first
+# (IMP-C25 later adds the learned per-object account beneath it). No key — the
+# default — means today's prefix routing, unchanged.
+_OVERRIDES_CACHE = None  # (raw config value, validated dict) — see _account_overrides
+
+
+def _account_overrides():
+    """The validated fetch_account_overrides map {exact id or id prefix: account}.
+
+    Read at call time through mvcommon._load_config() — module-qualified, per the
+    binding-hazard rule in mvcommon's RUNTIME CONFIG section — and so cached per
+    process like the config itself: each config object is validated once, which
+    means an invalid entry prints ONE warning (stderr, like mvcommon's own config
+    warnings) however often profile_for_id runs, and is then ignored. Invalid =
+    an account that is not a CHROME_PROFILES key, or a blank key (it would match
+    every id). A value that is not a JSON object warns once and is ignored."""
+    global _OVERRIDES_CACHE
+    raw = mvcommon._load_config().get("fetch_account_overrides", {})
+    if _OVERRIDES_CACHE is not None and _OVERRIDES_CACHE[0] is raw:
+        return _OVERRIDES_CACHE[1]
+    valid = {}
+    if not isinstance(raw, dict):
+        print(f"⚠️  mvconfig.json: fetch_account_overrides must be an object "
+              f"{{\"<id or id prefix>\": \"<account>\"}}, got {type(raw).__name__} — ignored.",
+              file=sys.stderr)
     else:
-        parent_id = entry.get("parent_id")
-        title_entry = lib[parent_id] if (parent_id and parent_id in lib) else entry
-    return build_extras_entries(title_entry)
+        for key, account in raw.items():
+            if not key.strip():
+                print("⚠️  mvconfig.json: fetch_account_overrides has a blank key, "
+                      "which would match every id — entry ignored.", file=sys.stderr)
+            elif not (isinstance(account, str) and account in CHROME_PROFILES):
+                print(f"⚠️  mvconfig.json: fetch_account_overrides entry {key!r}: {account!r} "
+                      f"is not an account key ({', '.join(CHROME_PROFILES)}) — entry ignored.",
+                      file=sys.stderr)
+            else:
+                valid[key] = account
+    _OVERRIDES_CACHE = (raw, valid)
+    return valid
 
 
 def profile_for_id(manual_id):
+    # [IMP-C26] An mvconfig.json fetch_account_overrides entry wins: the longest
+    # matching key, so an exact id beats any prefix of it (keys are plain string
+    # prefixes). Otherwise today's id-prefix routing, unchanged.
+    overrides = _account_overrides()
+    best = max((key for key in overrides if manual_id.startswith(key)), key=len, default=None)
+    if best is not None:
+        return overrides[best]
     for prefix, key in ID_PREFIX_PROFILE:
         if manual_id.startswith(prefix):
             return key
     return DEFAULT_PROFILE
+
+
+def _account_groups(manual_id, active_profile, targets, target_ids, extra_entries):
+    """[IMP-C26] Split one fetch batch into per-account groups:
+    [(profile, [(entry, entry_id), ...], [extra_entry, ...]), ...].
+
+    The selector's own account (active_profile) comes first, then the others in
+    CHROME_PROFILES order; each group keeps the batch's original order. A target
+    routes by its own resolved id (one without an id — never produced by
+    resolve_target_ids, tolerated exactly like today's entry_id=None — routes
+    with the selector); the extras route by their TITLE id (_extras_title). With
+    no valid fetch_account_overrides this returns today's single session without
+    routing anything per target, so the no-override path cannot change."""
+    pairs = [(entry, target_ids[i] if i < len(target_ids) else None)
+             for i, entry in enumerate(targets)]
+    if not _account_overrides():
+        return [(active_profile, pairs, list(extra_entries))]
+    groups = {}
+    for entry, entry_id in pairs:
+        groups.setdefault(profile_for_id(entry_id or manual_id), ([], []))[0].append((entry, entry_id))
+    if extra_entries:
+        title_id = _extras_title(load_library(), manual_id)[0] or manual_id
+        groups.setdefault(profile_for_id(title_id), ([], []))[1].extend(extra_entries)
+    order = [active_profile] + [p for p in CHROME_PROFILES if p != active_profile]
+    return [(p, groups[p][0], groups[p][1]) for p in sorted(groups, key=order.index)]
+
+
+def _close_browser_windows(driver):
+    """[IMP-C26] Close every window of the automation Chrome a batch is leaving
+    for another account, so that browser exits and frees init_driver's fixed
+    debug port 9222. In attach mode (debuggerAddress) driver.quit() ends only the
+    Selenium session and can leave the browser running; the next init_driver's
+    Chrome could then not bind 9222 and Selenium would attach to the PREVIOUS
+    account's browser. Best-effort — _debug_port_free() checks the outcome before
+    the next launch. Only called between two account groups, so a single-account
+    batch still ends exactly as before (quit only)."""
+    try:
+        handles = list(driver.window_handles)
+    except Exception:
+        return
+    for handle in handles:
+        try:
+            driver.switch_to.window(handle)
+            driver.close()
+        except Exception:
+            pass
+
+
+def _debug_port_free(port=9222, timeout=15.0):
+    """[IMP-C26] True once nothing accepts connections on 127.0.0.1:<port> —
+    init_driver's fixed Chrome debug port — polling for up to `timeout` seconds;
+    False if something still listens. Gates the account switch inside one batch,
+    so a still-running Chrome of the previous account can never be attached to
+    by mistake (it would silently search the wrong account)."""
+    deadline = time.time() + timeout
+    while True:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=2):
+                pass
+        except OSError:
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.5)
 
 
 def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None):
@@ -697,46 +827,67 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None)
     if extra_entries:
         print(f"   > 📎 + {len(extra_entries)} extra(s) (--fetchExtras)")
 
+    # [IMP-C26] One Chrome session per Google account the batch touches: a single
+    # group (exactly today's session) unless fetch_account_overrides moves items.
+    groups = _account_groups(manual_id, active_profile, targets, target_ids, extra_entries)
+
     # [IMP-C17] Single-flight: only one interactive fetch batch may drive the
     # browser at a time (blocking=True polls then reclaims a stale/contended
     # lock — it never hard-blocks). Placed AFTER the no-targets guard so an
-    # empty batch never touches the lock file.
+    # empty batch never touches the lock file. [IMP-C26] Held across EVERY
+    # account group, so nothing else can take port 9222 between two sessions.
     with fetch_session_lock(blocking=True):
-        # Init Selenium ONCE for the whole batch
-        driver = None
-        try:
-            # Pass the selected profile
-            driver = init_driver(active_profile)
-            if not driver: return
+        for n, (profile, group_targets, group_extras) in enumerate(groups):
+            # Init Selenium ONCE per account group (one group = the whole batch)
+            driver = None
+            try:
+                if profile != active_profile:
+                    print(f"   > [Account] Switching to profile '{profile}' for "
+                          f"{len(group_targets) + len(group_extras)} item(s) "
+                          f"(fetch_account_overrides)")
+                if n and not _debug_port_free():
+                    print(f"❌ Cannot switch to profile '{profile}': Chrome's debug port 9222 "
+                          f"is still in use (the previous account's Chrome did not close). "
+                          f"Close that Chrome window, then re-run — files already fetched "
+                          f"stay in their restore folder and are skipped.")
+                    return
+                # Pass the selected profile
+                driver = init_driver(profile)
+                if not driver: return
 
-            for idx, entry in enumerate(targets):
-                fetch_single_entry(driver, entry, temp_dir=temp_dir,
-                                   entry_id=target_ids[idx] if idx < len(target_ids) else None)
+                for entry, entry_id in group_targets:
+                    fetch_single_entry(driver, entry, temp_dir=temp_dir, entry_id=entry_id)
 
-            # [IMP-D19 Step 5] Extras fetch through the SAME proven mechanism:
-            # each synthetic extra entry stages into its own
-            # <title folder_path>/<group_rel>/restore/ folder.
-            if extra_entries:
-                print(f"\n=== 📎 FETCHING {len(extra_entries)} EXTRA(S) for {manual_id} ===")
-            for ex in extra_entries:
-                fetch_single_entry(driver, ex)
+                # [IMP-D19 Step 5] Extras fetch through the SAME proven mechanism:
+                # each synthetic extra entry stages into its own
+                # <title folder_path>/<group_rel>/restore/ folder.
+                if group_extras:
+                    print(f"\n=== 📎 FETCHING {len(group_extras)} EXTRA(S) for {manual_id} ===")
+                for ex in group_extras:
+                    fetch_single_entry(driver, ex)
 
-        except SessionExpiredError:
-            # [IMP-C6] One logged-out detection aborts the whole batch loudly.
-            print(f"❌ Profile '{active_profile}' is logged out. Open Chrome with "
-                  f"--user-data-dir={CHROME_PROFILES[active_profile]}, sign in to "
-                  f"photos.google.com, then re-run.")
-            return
-        except KeyboardInterrupt:
-            print("\n🛑 Stopped by user.")
-        except Exception as e:
-            print(f"\n❌ Critical Error: {e}")
-        finally:
-            if driver:
-                try:
-                    driver.quit()
-                except:
-                    pass
+                if n + 1 < len(groups):
+                    _close_browser_windows(driver)
+
+            except SessionExpiredError:
+                # [IMP-C6] One logged-out detection aborts the whole batch loudly
+                # (IMP-C26: naming the account group that hit it).
+                print(f"❌ Profile '{profile}' is logged out. Open Chrome with "
+                      f"--user-data-dir={CHROME_PROFILES[profile]}, sign in to "
+                      f"photos.google.com, then re-run.")
+                return
+            except KeyboardInterrupt:
+                print("\n🛑 Stopped by user.")
+                break
+            except Exception as e:
+                print(f"\n❌ Critical Error: {e}")
+                break
+            finally:
+                if driver:
+                    try:
+                        driver.quit()
+                    except:
+                        pass
 
     print("\n✅ Batch Processing Complete.")
 

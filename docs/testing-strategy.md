@@ -275,6 +275,24 @@ def test_extras_push(sandbox_extras, mock_device):
     # .name (never a bracketed pattern; see §8.1)
 ```
 
+### 4.10 `_hermetic_mvconfig` (autouse) — no test reads the real `mvconfig.json`
+
+**File:** `tests/conftest.py`
+**Applies to:** every test, automatically (IMP-C26).
+
+Pins `mvcommon._CONFIG_CACHE` to `{}` so every config getter — and
+`mainfetch.profile_for_id`, which consults `fetch_account_overrides` — sees an
+empty config: exactly what a checkout without `mvconfig.json` sees, whatever the
+operations folder's real (gitignored) file contains. A test that needs config
+sets its own dict; getter patches (`mvcommon.tmdb_api_key` etc.) keep working.
+
+```python
+def test_override_routes_to_movies(monkeypatch):
+    monkeypatch.setattr(mvcommon, "_CONFIG_CACHE",
+                        {"fetch_account_overrides": {"tv-en-2001-demo-s01e02": "movies"}})
+    assert mainfetch.profile_for_id("tv-en-2001-demo-s01e02") == "movies"
+```
+
 ---
 
 ## 5. Fixture selection decision tree

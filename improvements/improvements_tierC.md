@@ -466,3 +466,17 @@
 - If skipped: the exact incident (or worse — a movie/anime entry clobbered by an unrelated series-entry save) can recur at any time two mutating commands overlap, including today's normal usage pattern of running `main.py web` alongside a CLI command.
 - Cross-references: IMP-D23 is what the user was manually working around (avoiding an expensive prep re-hash) when they triggered this incident via a risky parallel `push_group`+`replace` workaround — fixing D23 removes the *motive* for that specific workaround but does not fix the underlying race, which can still occur for other legitimate reasons (e.g. `web` alongside a CLI command, running right now in production). IMP-B1 ("cache library handle across cmd_* calls", `improvements_tierB.md`, pending) proposes the OPPOSITE direction — holding one library handle across an entire season batch — and would make this race's blast radius larger, not smaller, if implemented without C24's lock in place first; B1's own entry already flags it as risk "high" and change-gate-adjacent for this reason.
 - Status: pending
+
+---
+
+## IMP-C26: Fetch routes by id prefix — objects that live in another Google account are unfetchable
+
+- Category: bug
+- Priority: high (Band 0 — breaks restore for real archived items)
+- Files: `mainfetch.py` (`profile_for_id`, `cmd_fetch_route`), `mvconfig.example.json`
+- Current behavior: `mainfetch.profile_for_id` picks the Chrome profile from the id prefix; the 2026-09-25 mapping found 31 X-Files episodes (`tv-en-1994/1995/1996-xfiles`, seasons 2–4) in the MOVIES account (Kuroko's Basketball copies also sit in the TV account besides the anime account).
+- Proposed change: immediate fix (IMP-C25 Step H, its own small PR from main): a local `mvconfig.json` `fetch_account_overrides` list (exact id or prefix → account) consulted first by `profile_for_id`, and `cmd_fetch_route` runs one Chrome session per account for a mixed batch; then IMP-C25 adds the learned per-object `home_account` beneath the override (P-4).
+- Effort estimate: small (hotfix) · Risk: low — no overrides configured ⇒ byte-identical behavior.
+- If skipped: those 31 episodes cannot be restored.
+- Fix applied (`fix/imp_c26_fetch_account_routing`): `mainfetch._account_overrides()` reads `fetch_account_overrides` through `mvcommon._load_config()` (validated once per config object — an unknown account or a blank key prints one warning and is ignored); `profile_for_id` takes the longest matching key (exact id beats prefix), else today's `ID_PREFIX_PROFILE` loop; `cmd_fetch_route` groups a batch by account (extras by their title id) — the selector's account first, then `CHROME_PROFILES` order — and runs one `init_driver` per group under ONE `fetch_session_lock`, closing the previous account's Chrome windows and requiring debug port 9222 to be free before each switch (a busy port stops the batch loudly instead of attaching to the wrong account). No valid overrides ⇒ a single group, byte-identical transcript (frozen oracle captured from the pre-fix code). Tests: `tests/test_fetch_account_routing.py` (31) + smoke `test_fetch_route_mixed_account_batch`; a new autouse `_hermetic_mvconfig` fixture keeps every test off the machine's real `mvconfig.json`. User steps: README fetch note, `docs/OPERATIONS_QA.md` §6b.
+- Status: done (hotfix PR; learned routing follows in IMP-C25)

@@ -587,9 +587,10 @@ def test_drift_pin_push_one_extra_whole_and_split(sandbox_extras, mock_device):
     assert all(n in on_device for n in chunk_names)
     entry = mvcommon.load_library()[title_id]
     extras = [o for o in mvcommon.iter_entry_objects(title_id, entry) if o["kind"].startswith("extra")]
+    # IMP-C25 Step 5: push_one_extra now leaves the item's capture -> pushed + captured = unverified (P-11)
     assert [(o["kind"], o["uploaded_name"], o["cloud_state"]) for o in extras] == [
-        ("extra_whole", whole, "uploaded"), ("extra_chunk", chunk_names[0], "uploaded"),
-        ("extra_chunk", chunk_names[1], "uploaded")]
+        ("extra_whole", whole, "unverified"), ("extra_chunk", chunk_names[0], "unverified"),
+        ("extra_chunk", chunk_names[1], "unverified")]
 
 
 def test_drift_pin_gpcapture_snapshot_names(tmp_path):

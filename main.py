@@ -41,8 +41,9 @@ from mvcommon import (
 # them (or mvcommon.MVTOKENS_PATH) is honoured here — see the binding-hazard note
 # in mvcommon's RUNTIME CONFIG section.
 import mvcommon
-# [IMP-C25] interim identity capture (<folder>/<short_id>.gpcapture.json) — best-effort,
-# called only after cmd_prep / cmd_push succeed; never raises, never journalled.
+# [IMP-C25] identity capture (<folder>/<short_id>.gpcapture.json) — best-effort, called
+# only after cmd_prep / cmd_push succeed, after the extras scan saved and after an extra
+# uploaded; never raises, never journalled.
 import gpcapture
 
 REMOTE_ROOT = "/sdcard/Media"  # Your Pixel Root
@@ -5555,6 +5556,23 @@ def _extras_scan_merge_and_save(library, mid, extras):
         return
     merge_extras_into_title(library, title_id, scanned)
     save_library(library)
+    # [IMP-C25] After the save — best-effort, never journalled (extras have no journal)
+    # and never raising (cmd_prep calls this AFTER its journal committed): record the
+    # identity facts of every item this scan registered or refreshed, the SHA-1 from
+    # the scan's own hash pass. An item the merge did not take (a dummy-sized new file,
+    # a cloud-bearing item kept as stored over its dummy) is skipped — its scanned
+    # bytes are not the ones the library records.
+    try:
+        groups = library[title_id].get("extras", {}).get("groups", {})
+        for group_rel, gdata in scanned.items():
+            stored = {_extras_rel_posix(it.get("sub_rel", "")): it
+                      for it in groups.get(group_rel, {}).get("items", [])}
+            for item in gdata.get("items", []):
+                kept = stored.get(_extras_rel_posix(item["sub_rel"]))
+                if kept is not None and kept.get("hash") and kept.get("hash") == item.get("hash"):
+                    gpcapture.capture_after_extras_scan(title_folder, title_id, group_rel, kept)
+    except Exception:
+        pass
     total = sum(len(g["items"]) for g in scanned.values())
     groups_str = ", ".join(
         f"{k} ({len(v['items'])} item{'s' if len(v['items']) != 1 else ''})"
@@ -5704,10 +5722,12 @@ def cmd_check(manual_id):
     _check_title_extras(library, manual_id)
 
 
-MVMETA_SCHEMA_VERSION = 1
+# v2 (IMP-C25, OD-4 ruling): every v1 key unchanged + optional per-chunk identity keys
+# (gpcapture.MVMETA_KEYS) — see write_remote_mvmeta.
+MVMETA_SCHEMA_VERSION = 2
 
 
-def write_remote_mvmeta(adb_base, remote_target_dir, manual_id, entry):
+def write_remote_mvmeta(adb_base, remote_target_dir, manual_id, entry, identity=None):
     """Write a disaster-recovery `.mvmeta.json` sidecar next to the chunks on the phone.
 
     Mirrors the library entry (split_info + key metadata) so the local library can
@@ -5720,6 +5740,13 @@ def write_remote_mvmeta(adb_base, remote_target_dir, manual_id, entry):
     matching the chunk naming convention). Written for non-split single-file uploads
     too -- in that case `chunks` is a 1-element list referencing the renamed remote
     `<name> [<short_id>]<ext>` name.
+
+    v2 (IMP-C25, OD-4 ruling): every v1 key is unchanged; each `chunks` item may
+    also carry `sha1` + `dedup_key` (Google Photos' content key for those exact
+    bytes), `date_utc` (their Matroska DateUTC, the time Google Photos shows) and
+    `uploaded_name` (the exact name pushed) — only the ones known. `identity` maps
+    a chunk's SHA-256 to those facts (gpcapture.mvmeta_identity); without it the
+    v1 content is written under version 2.
     """
     try:
         short_id = entry.get("short_id", "")
@@ -5745,6 +5772,13 @@ def write_remote_mvmeta(adb_base, remote_target_dir, manual_id, entry):
             total_chunks = 1
             remote_name = f"{base_filename} [{short_id}]{ext}"
             chunks = [{"filename": remote_name, "hash": entry.get("hash")}]
+
+        # [IMP-C25] v2: the known identity facts of each chunk's bytes (OD-4).
+        if isinstance(identity, dict):
+            for chunk in chunks:
+                facts = identity.get(chunk["hash"]) if isinstance(chunk.get("hash"), str) else None
+                if isinstance(facts, dict):
+                    chunk.update((k, facts[k]) for k in gpcapture.MVMETA_KEYS if facts.get(k))
 
         mvmeta = {
             "version": MVMETA_SCHEMA_VERSION,
@@ -5782,6 +5816,26 @@ def write_remote_mvmeta(adb_base, remote_target_dir, manual_id, entry):
     except Exception as e:
         print(f"⚠️ mvmeta sidecar write failed (chunks are safe): {e}")
         return False
+
+
+def _device_facts(adb_base):
+    """[IMP-C25] The pushing device's timezone for the identity capture (PLAN Step
+    5b): ONE best-effort, read-only query `getprop persist.sys.timezone; date +%z`
+    (15 s timeout) through the push's own `adb_base`, so a pinned `-s <serial>`
+    reaches it too. Returns {device_tz, device_tz_offset_min} with only the facts
+    it could read (gpcapture.device_facts_from_output); ANY problem — no device, a
+    timeout, a runner without stdout — gives {}. Called only after a push committed
+    (cmd_push after journal.commit(); push_title_extras after an extra uploaded);
+    never journalled, never raises."""
+    try:
+        result = subprocess.run(adb_base + ["shell", "getprop persist.sys.timezone; date +%z"],
+                                capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=15)
+        if getattr(result, "returncode", None) != 0:
+            return {}
+        return gpcapture.device_facts_from_output(getattr(result, "stdout", None))
+    except Exception:
+        return {}
 
 
 def _verify_chunk_hash(adb_base, remote_path, safe_path, expected_sha256):
@@ -5837,7 +5891,8 @@ def _verify_chunk_hash(adb_base, remote_path, safe_path, expected_sha256):
 # RollbackJournal, mark_point_of_no_return(), or the main O-1/O-2 split.
 
 
-def push_one_extra(library, title_id, group_rel, item, extras_method, extras_val, device_id=None):
+def push_one_extra(library, title_id, group_rel, item, extras_method, extras_val, device_id=None,
+                   device_facts=None):
     """Upload ONE extra item to the device, mirroring cmd_push's per-file upload
     protocol but standalone and stripped to the essentials.
 
@@ -5853,7 +5908,10 @@ def push_one_extra(library, title_id, group_rel, item, extras_method, extras_val
     hashes into the item's `split_info` (BEFORE upload, so a resume has them)
     -> per-chunk `<final>.partial` upload + atomic `mv`, wrapped in
     mvcommon.retry -> delete the local chunk -> best-effort `write_remote_mvmeta`
-    sidecar -> flip the item `uploaded=True`, `status="onboarded"`, and save.
+    sidecar -> flip the item `uploaded=True`, `status="onboarded"`, and save ->
+    [IMP-C25] best-effort identity capture at <extra folder>/<short_id>.gpcapture.json
+    (`device_facts`: an optional zero-arg callable returning the device's timezone
+    facts — push_title_extras passes its once-per-title memo of _device_facts).
 
     O-1 resumable per file: NO point-of-no-return. The per-item chunk dir lives
     at <extra folder>/<SPLIT_DIR_NAME>/<short_id> — nested under SPLIT_DIR_NAME so
@@ -5999,6 +6057,18 @@ def push_one_extra(library, title_id, group_rel, item, extras_method, extras_val
         files_to_upload = [local_file_path]
         item.pop("split_info", None)
 
+    # [IMP-C25] Read-only snapshot of what is about to be uploaded (chunks are deleted
+    # locally as they upload); written to the item's capture file only after success.
+    # parts_dir (not the bare _parts name) marks the chunks: this pusher names by is_split.
+    try:
+        _capture_objs = gpcapture.snapshot_push_objects(
+            files_to_upload, parts_dir, short_id,
+            {c.get("filename"): c.get("hash") for c in (item.get("split_info") or {}).get("chunks", [])
+             if isinstance(c, dict)},
+            item.get("hash"), [], item.get("tech_spec"))
+    except Exception:
+        _capture_objs = []
+
     # UPLOAD LOOP — the duplicated .partial+rename+retry idiom (deliberate, lean).
     all_success = True
     for f in files_to_upload:
@@ -6066,12 +6136,25 @@ def push_one_extra(library, title_id, group_rel, item, extras_method, extras_val
     # folder_path so the mvmeta records where the extra restores to.
     meta_entry = dict(item)
     meta_entry["folder_path"] = extra_folder
+    try:
+        _mvmeta_identity = gpcapture.mvmeta_identity(extra_folder, short_id, _capture_objs)
+    except Exception:
+        _mvmeta_identity = None
     write_remote_mvmeta(adb_base, remote_target_dir,
-                        f"{title_id}::{group_rel}/{item.get('sub_rel')}", meta_entry)
+                        f"{title_id}::{group_rel}/{item.get('sub_rel')}", meta_entry,
+                        identity=_mvmeta_identity)
 
     item["uploaded"] = True
     item["status"] = "onboarded"
     save_library(library)
+    # [IMP-C25] After the success save — best-effort, never journalled (extras have no
+    # journal): the item's identity capture, with the device's timezone facts.
+    try:
+        gpcapture.capture_after_push(extra_folder, gpcapture.extras_label(title_id, group_rel, item.get("sub_rel")),
+                                     short_id, _capture_objs, device_id=device_id, remote_dir=remote_target_dir,
+                                     device_facts=device_facts() if device_facts else None)
+    except Exception:
+        pass
     return True
 
 
@@ -6113,9 +6196,21 @@ def push_title_extras(library, title_id, extras_size, device_id=None, split_meth
     print(f"   > Extras split: {e_method} {e_val}" if (e_method and e_val)
           else "   > Extras: whole-file (no split)")
 
+    # [IMP-C25] The device's timezone facts for the extras captures: ONE best-effort,
+    # read-only query per title (same adb_base as the uploads), made lazily once the
+    # first extra has uploaded — a run where nothing uploads never asks the device.
+    adb_base = ["adb", "-s", device_id] if device_id else ["adb"]
+    facts_memo = []
+
+    def _device_facts_once():
+        if not facts_memo:
+            facts_memo.append(_device_facts(adb_base))
+        return facts_memo[0]
+
     ok = True
     for group_rel, item in pending:
-        if not push_one_extra(library, title_id, group_rel, item, e_method, e_val, device_id=device_id):
+        if not push_one_extra(library, title_id, group_rel, item, e_method, e_val, device_id=device_id,
+                              device_facts=_device_facts_once):
             ok = False
     print(f"=== ✅ EXTRAS UPLOAD COMPLETE for {title_id} ===" if ok
           else f"=== ⚠️  EXTRAS UPLOAD INCOMPLETE for {title_id} (re-run to resume) ===")
@@ -6477,7 +6572,8 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
     try:
         _capture_objs = gpcapture.snapshot_push_objects(
             files_to_upload_paths, SPLIT_DIR_NAME, short_id, _chunk_hashes, entry.get("hash"),
-            library.get(manual_id, {}).get("split_info", {}).get("carried_out_tracks", []))
+            library.get(manual_id, {}).get("split_info", {}).get("carried_out_tracks", []),
+            entry.get("tech_spec"))
     except Exception:
         _capture_objs = []
 
@@ -6591,7 +6687,13 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
         if not chunk_range:
             # Best-effort remote disaster-recovery sidecar. A sidecar miss must
             # NOT fail a fully-successful chunk upload, so its return is ignored.
-            write_remote_mvmeta(adb_base, remote_target_dir, manual_id, library[manual_id])
+            # [IMP-C25] Its v2 identity facts are a read-only lookup (never journalled).
+            try:
+                _mvmeta_identity = gpcapture.mvmeta_identity(local_folder, short_id, _capture_objs)
+            except Exception:
+                _mvmeta_identity = None
+            write_remote_mvmeta(adb_base, remote_target_dir, manual_id, library[manual_id],
+                                identity=_mvmeta_identity)
             library[manual_id]["uploaded"] = True
             library[manual_id]["status"] = "onboarded"
             save_library(library)
@@ -6599,10 +6701,12 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             journal.commit()
             # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
             _warn_if_entry_inconsistent(library[manual_id], manual_id)
-            # [IMP-C25] Post-commit, best-effort, NOT journalled identity capture.
+            # [IMP-C25] Post-commit, best-effort, NOT journalled identity capture (the
+            # device's timezone comes from one read-only adb query, made only now).
             try:
                 gpcapture.capture_after_push(local_folder, manual_id, short_id, _capture_objs,
-                                             device_id=device_id, remote_dir=remote_target_dir)
+                                             device_id=device_id, remote_dir=remote_target_dir,
+                                             device_facts=_device_facts(adb_base))
             except Exception:
                 pass
             print("✅ SUCCESS.\n")
@@ -6613,11 +6717,12 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             journal.commit()
             # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
             _warn_if_entry_inconsistent(library[manual_id], manual_id)
-            # [IMP-C25] Post-commit, best-effort, NOT journalled identity capture.
+            # [IMP-C25] Post-commit, best-effort, NOT journalled identity capture (the
+            # device's timezone comes from one read-only adb query, made only now).
             try:
                 gpcapture.capture_after_push(local_folder, manual_id, short_id, _capture_objs,
                                              device_id=device_id, remote_dir=remote_target_dir,
-                                             chunk_range=chunk_range)
+                                             chunk_range=chunk_range, device_facts=_device_facts(adb_base))
             except Exception:
                 pass
             print(f"✅ Partial Upload Complete (Chunks {chunk_range}).\n")

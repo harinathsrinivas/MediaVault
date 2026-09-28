@@ -1,16 +1,59 @@
 # IMP-C25 — Execution Journal (resumable, cross-session / cross-account)
 - Task: IMP-C25 (+C26 fix, C27 tooling) — exact Google Photos item fetch. Framework: v2.
-- Branch: feature/imp_c25_fetch_exact_gp_item · Worktree: C:\Users\harin\PycharmProjects\MediaVault-c25
-- Plan: docs/feature-fetch-datetime/PLAN.md · Decisions: DECISIONS.md · Python: C:\Users\harin\PycharmProjects\MediaVault\.venv\Scripts\python.exe
+- Branch: feature/imp_c25_fetch_exact_gp_item · **Working folder: C:\Users\harin\PycharmProjects\MediaVault** (the main
+  folder; the branch is checked out HERE since 2026-09-28 ~20:00). This follows a RELAYED instruction (DECISIONS.md
+  §1b W3); first-hand confirmation is pending on the "Work folder" card. The old worktree `MediaVault-c25` is detached
+  at 31e8214, clean and idle — don't dispatch to it; remove it once the card says "keep". `MediaVault-c26` holds only
+  Step H's branch until PR #61 merges.
+- Plan: docs/feature-fetch-datetime/PLAN.md (root copy `PLAN.md`, gitignored, byte-identical) · Decisions: DECISIONS.md ·
+  Execution log: root `STATUS.md` (gitignored, shared across tasks — C25 entries at its end) · Python:
+  C:\Users\harin\PycharmProjects\MediaVault\.venv\Scripts\python.exe
 - Baseline: full 971 passed · smoke 81 passed (70635cb, 2026-09-25) — **re-confirmed 2026-09-28 at `d29bb03`: full 971
-  passed (140 s) · smoke 81 passed (14 s), idle machine, 0 failures** (one pre-existing StarletteDeprecationWarning each)
-- Last updated: 2026-09-28 (Step 0b/0c done by executor-opus; G0 partial)
+  passed (140 s) · smoke 81 passed (14 s), idle machine, 0 failures** (one pre-existing StarletteDeprecationWarning each).
+  Current gate (Step 3, `31e8214`): full 1544 · smoke 81 — re-confirmed in the main folder 2026-09-28 20:04 (full
+  1544 passed in 172 s · smoke 81 passed in 30 s).
+- Last updated: 2026-09-28 20:00 (working location moved to the main folder; Step 3 SHA back-filled; decision cards
+  listed)
+
+## At a glance
+- **Size:** 30 tracked items = **23 agent steps** (0, 1, H, 2, 2b, 3–12, 13, 13b, 13c, 14–18) + **7 user gates**
+  (G0, RH, R0, R1, R2, R3, R4). Stop-points inside steps: the Step H PR approval, 🚦 G12 candidate pick, the Step 17
+  NEXT-pointer question, Checkpoints 1 and 2.
+- **Done:** Steps 0, 1, 2, 2b, 3 (5 of 23) · Step 4 in progress (running in the old worktree — see NEXT ACTION) ·
+  Step H built and green — PR #61 waits for your approval · G0 partial (only P-12 open).
+- **Remaining:** 17 agent steps (4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 13b, 13c, 14, 15, 16, 17, 18) + Step 1 again after
+  PR #61 merges · user gates RH, R0, R1, R2, R3, R4 + the rest of G0.
+- **Roadmap:** foundations 4 → 5 → 6 → 7 → 8 · backfill 9 → 🚦 R1 (your dry-run review) · fetch rebuild 10 → 11
+  (needs P-12) → 12 (3 candidates, 🚦 G12 your pick) → 13 → 13b → 13c → 14 · hardening + live 15 → 🚦 R2 → 🚦 R3 → 16
+  → 🚦 R4 · wrap-up 17 → 18 (PR → Checkpoint 1).
+- **Decisions waiting for you** (asked in chat as decision cards — the answer you pick or type is recorded verbatim
+  in DECISIONS.md): (1) Work folder — keep the C25 branch checked out in your main folder (and how you archive
+  meanwhile) or revert · (2) merge PR #61? · (3) RH — fill `fetch_account_overrides` for you or paste it yourself? ·
+  (4) P-12 download design (before Step 11). Later: PR #60 branch archive (Checkpoint 2, after card 1) · Others
+  account (R0) · Step 12 candidate isolation (before Step 12).
 
 ## ▶ NEXT ACTION
-Step 3 (mvcommon identity primitives + hermetic redirects) — dispatch executor-fable. Parallel: PR #61 (Step H) awaits user approval; after merge → Step 1 re-merge main + 🚦 RH. P-12 question before Step 11.
+**Step 4 is ALREADY RUNNING in the old worktree `MediaVault-c25`.** Evidence: its `main.py` was edited at 20:04:55
+(the ENTRY_TYPE_KEYS `gphotos` documentation, +49/−1). That was minutes AFTER the worktree's HEAD was detached at
+`31e8214` (~20:00, DECISIONS.md §1b W3); no dispatch line had been written here. **Do NOT dispatch Step 4 again.**
+
+When it reports done:
+1. Do NOT commit inside that worktree — its HEAD is detached, so the commit would not land on the branch.
+2. Copy its changed files byte-for-byte into THIS folder: `main.py`, `tests/test_entry_schema_guard.py` and anything
+   else its report lists. None of them changed here since `31e8214`, so the copy is conflict-free.
+3. Merge its PROGRESS row and sub-state into THIS PROGRESS.md, and its STATUS entry into this folder's root STATUS.md.
+4. Run the full suite + smoke here, then make a pathspec commit here.
+5. `git -C C:\Users\harin\PycharmProjects\MediaVault-c25 restore -- <those files>`, then remove the worktree.
+
+Then continue with Step 5 (needs 3–4) here. Present the decision cards in chat.
+
+Parallel: PR #61 (Step H) awaits user approval → after the merge, Step 1 re-merges main here + 🚦 RH. P-12 must be
+answered before Step 11.
 
 ## Resume protocol
-1. Open a session in the worktree; `git status` (do not assume clean; never add -A).
+1. Open a session in the main folder `C:\Users\harin\PycharmProjects\MediaVault` (branch
+   feature/imp_c25_fetch_exact_gp_item — not a worktree; relayed instruction 2026-09-28, confirmation pending —
+   DECISIONS.md §1b W3); `git status` (do not assume clean; never add -A).
 2. Read PLAN.md + DECISIONS.md + this file.
 3. `git log --oneline` must match the SHAs below; trust git on disagreement.
 4. Re-probe fable (.claude/MODEL_WATERFALL.md); record the model used per step.
@@ -18,6 +61,11 @@ Step 3 (mvcommon identity primitives + hermetic redirects) — dispatch executor
 6. If `## In-progress sub-state` names a running step: apply PLAN "In-step checkpoints" rule 3 (keep or discard the
    interrupted sub-task's uncommitted changes, record it) and re-dispatch that step from the named sub-task.
 7. If the operations log shows a live command without a result line: re-run its recorded resume command.
+8. Ask the user every question as an in-chat decision card (options + a free-text answer); the picked or typed
+   answer IS the decision — record it verbatim in DECISIONS.md. Never ask the user to open a .md file to answer.
+   Keep independent steps running while a card is open (user, 2026-09-28 — DECISIONS.md §1b).
+9. Keep root `PLAN.md` byte-identical to docs/feature-fetch-datetime/PLAN.md after any plan edit; executors append
+   their STATUS entries to the root `STATUS.md` of this folder.
 
 ## Step status
 | Step | Description | Status | Model used | Completing SHA | Tests | Notes |
@@ -29,8 +77,8 @@ Step 3 (mvcommon identity primitives + hermetic redirects) — dispatch executor
 | RH | user fills fetch_account_overrides + tests | pending | user | | | after H merges |
 | 2 | gpweb + RPC parsers + fake Google Photos | done | fable (executor-fable, claude-fable-5-1) | eea6759 | full 1215 · smoke 81 · crawler golden byte-identical · disarm/mutation probes 8/8 | new gpweb.py + tests/gphotos_fake.py + tests/test_gpweb.py; tools/gp_inventory.py delegates; conftest `fake_photos`; VrseUb original_quality not pre-resolved → None (read EWgK9e); dedup_key re-export is a lazy delegate (import-cycle guard for Step 3) |
 | 2b | gprpc read-only RPC client | done | fable (executor-fable, claude-fable-5-1) | 18cbb91 | full 1329 · smoke 81 · test_gprpc 114 · disarm/mutation probes 19/19 | new gprpc.py + tests/test_gprpc.py; consumers catch `RpcUnavailable` (base of RpcShapeError/RpcServerError) for the UI fallback, never RpcRefused; pacing + circuit breaker are per browser session (driver); tests that drive gprpc must patch its clock (`clock` fixture in test_gprpc.py) |
-| 3 | mvcommon identity primitives + failed list | done — uncommitted, awaiting the orchestrator's commit | fable (executor-fable, claude-fable-5-1) | | full 1544 · smoke 81 · test_gphotos_primitives 215 · disarm/mutation probes 17/17 | mvcommon section "GOOGLE PHOTOS IDENTITY" + conftest autouse `_hermetic_gphotos_state`; vocab extensions flagged (s0_hash / s3u_user_query stages, learned alternates / quality flags / search_override / via, failed `candidates`, CSV `sha256` column); Step 5 must write extras captures in the same doc shape; producers of proof sha256 set dedup_key = the verified bytes' key |
-| 4 | ENTRY_TYPE_KEYS + guard | pending | | | | fallback none |
+| 3 | mvcommon identity primitives + failed list | done | fable (executor-fable, claude-fable-5-1) | 31e8214 | full 1544 · smoke 81 · test_gphotos_primitives 215 · disarm/mutation probes 17/17 | mvcommon section "GOOGLE PHOTOS IDENTITY" + conftest autouse `_hermetic_gphotos_state`; vocab extensions flagged (s0_hash / s3u_user_query stages, learned alternates / quality flags / search_override / via, failed `candidates`, CSV `sha256` column); Step 5 must write extras captures in the same doc shape; producers of proof sha256 set dedup_key = the verified bytes' key |
+| 4 | ENTRY_TYPE_KEYS + guard | in_progress — running in the detached MediaVault-c25 worktree (observed 20:04:55) | | | | fallback none · bring its files here before committing (NEXT ACTION) |
 | 5 | capture v2 | pending | | | | |
 | 6 | apply engine | pending | | | | |
 | 7 | crawler productization | pending | | | | |
@@ -61,19 +109,13 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 |---|---|---|---|
 
 ## In-progress sub-state
-(Step 2's sub-state is closed — the step was committed as `eea6759`; Step 2b's as `18cbb91`.)
-`Step 3 — dispatched 2026-09-28 to executor-fable (fable, claude-fable-5-1) · single-executor, dispatch says DO NOT
-COMMIT (no WIP commits; this line is kept on disk only) · resumed once after a usage-limit reset (no edits existed) ·
-sub-tasks: [x] 3.1 mvcommon: constants + block helpers + category/home_account (a, b) · [x] 3.2 mvcommon: object
-inventory + remote_upload_name + read_capture (c, d, e) · [x] 3.3 mvcommon: learned store + reducer + apply_learned +
-failed list + CSV + unverified_objects (f) · [x] 3.4 conftest autouse redirect (g) — 3.1–3.4 written, import-checked,
-existing capture/schema/mvcommon tests green · [x] 3.5 tests/test_gphotos_primitives.py (215 passed, final) ·
-[x] 3.6 disarm probes 17/17 caught (10 plugin-injected, re-run on the final code; 7 source-edit, reverted +
-sha256-verified) · [x] 3.7 self-review (2 robustness fixes + 1 export dedupe fix, each with a test) + full suite
-1544 + smoke 81 + STATUS → STEP COMPLETE: the uncommitted files (mvcommon.py, tests/conftest.py,
-tests/test_gphotos_primitives.py, this file) are the finished, verified step — commit them, do not discard ·
-baseline note: a full run at 18cbb91 (before any edit) hit a load-dependent flake in
-tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background (passes 5/5 alone)`
+`Step 4 — running in C:\Users\harin\PycharmProjects\MediaVault-c25 (HEAD detached at 31e8214) · no dispatch line was
+written here · observed 20:04:55: main.py ENTRY_TYPE_KEYS comment +49/−1; no test-file change yet · on completion
+follow ▶ NEXT ACTION (copy its files here; never commit in the detached worktree)`
+Steps 2, 2b and 3 are closed (committed as `eea6759`, `18cbb91`, `31e8214`; Step 3 ran all 7 sub-tasks 3.1–3.7,
+disarm probes 17/17). Known load-dependent flake (from Step 3's baseline run at 18cbb91):
+tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes 5/5 alone; re-run it before
+treating a red full suite as a regression.
 Template — when a step is running (Execution protocol "In-step checkpoints"):
 `Step N — dispatched <time> to <model> · sub-tasks: [x] N.a <what> (wip SHA) · [ ] N.b <what> ← next · [ ] N.c …`
 plus, after a crash, one line `resumed <time> by <model>: uncommitted N.b changes kept|discarded (<files>)`.
@@ -82,4 +124,14 @@ plus, after a crash, one line `resumed <time> by <model>: uncommitted N.b change
 - G0 clarification left: q3 P-12 download design (before Step 11) · Step H PR 🚦 Checkpoint 1 (user approves its
   merge) · RH override list · R0 prerequisites · R1/R2/R3/R4 real-data gates · G12 candidate pick · Step 17
   NEXT-pointer question (OD-16) · Checkpoint 1 · Checkpoint 2
+- Asked as decision cards 2026-09-28 (see "At a glance"): Work folder (confirm the relayed switch + archiving
+  meanwhile, or revert) · PR #61 merge · RH mode · P-12. Later cards: PR #60 branch archive (Checkpoint 2; the branch is no longer checked out anywhere) ·
+  Others account/profile (R0) · Step 12 candidate isolation (the plan uses temporary candidate worktrees outside this
+  folder — confirm, given the 2026-09-28 "leave the work tree approach" instruction).
+- Housekeeping for the orchestrator, once the Work-folder card says "keep":
+  - Remove the old worktree: `git worktree remove C:\Users\harin\PycharmProjects\MediaVault-c25`. Do this only AFTER
+    Step 4's files are brought here and restored there (so it is clean — no --force). Its STATUS.md entries for Steps
+    2/2b/3 are already in this folder's STATUS.md; Step 4's entry still has to be carried over.
+  - PLAN.md still names the worktree as the binding working location → a small planner-v2 revision.
+  - If the card says "revert", follow the procedure in DECISIONS.md §1b W3 instead.
 - (G0 q2 OD-4 was answered 2026-09-28 — "Yes, with --apply only" — and is no longer a blocker.)

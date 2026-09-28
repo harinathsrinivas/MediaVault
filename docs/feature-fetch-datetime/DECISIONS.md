@@ -4,7 +4,9 @@
   object: content key (SHA-1 = dedupKey) + taken-second locator + remembered photo_id + per-object account, backfilled
   from a full inventory mapping, with check mode, download hygiene, manual mode and a resumable fetch/restore.
   Framework: v2.
-- **Branch:** `feature/imp_c25_fetch_exact_gp_item` · **Worktree:** `C:\Users\harin\PycharmProjects\MediaVault-c25`
+- **Branch:** `feature/imp_c25_fetch_exact_gp_item` · **Working folder:** `C:\Users\harin\PycharmProjects\MediaVault`
+  (the main folder since 2026-09-28 ~20:00 — RELAYED instruction, §1b W3, first-hand confirmation pending; the
+  `MediaVault-c25` worktree used for Steps 0–3 is detached and idle)
 - **Plan:** `docs/feature-fetch-datetime/PLAN.md` (0a′ = `d29bb03`) · **Journal:** `PROGRESS.md` (this folder) ·
   **Research:** `RESEARCH.md`, `INVENTORY_AND_CAPTURE.md` (this folder).
 - **Status of this file:** every card is either a verbatim copy from PLAN.md (§2 locked decisions + scope additions,
@@ -18,7 +20,7 @@
   co-author trailers · Step 0b/0c (this file, PROGRESS.md, IMP registration) — executor-opus, Opus 5.5
   (`claude-opus-5-5`), 2026-09-28 (Step 0 is `[model: opus]`; no fable waterfall involved) · later steps — PROGRESS.md
   "Model used" column.
-- **Last updated:** 2026-09-28 (Step 0b)
+- **Last updated:** 2026-09-28 (Step 0b; §1b working agreements added 20:00)
 
 ---
 
@@ -45,6 +47,61 @@ came first-hand from the user's decision cards (not through a relayed/non-user c
   (PLAN.md Appendix — "make each step, each execution or task resumable…").
 - PR #60 (`feature/imp_c25_interim_capture` — interim identity capture + inventory crawler) was squash-merged to
   `main` as `ac563a0` on 2026-09-28; Step 1 merges it into this branch.
+
+---
+
+## 1b. Working agreements — 2026-09-28 (W1, W2 first-hand user messages · W3 RELAYED — first-hand confirmation pending)
+
+**W1 — decisions as in-chat cards; independent work continues; status visible in the user's folder:**
+
+> Tell me what exactly is the decisions needed,in decision card format. each one should have an option for me to type or edit freely also.
+> then use the selected answer as decision. use this method for most questions or intereactive decisions, as I'm not on the worktree its difficult for me to open the .md and see and respond. so keep everythin in this chat. but in the background keep doing the other tasks  in a resumable way - if there are independant tasks. keep all resumable. TOtal how many steps are there? can you just sync the status.md and plan.md in my current branch - you can git ignore it also.
+> but I want to see the status and remaining steps properly.
+> if you want me to actually see some .md - you can add to current interim capture branch also.
+
+→ Every question to the user is an in-chat decision card: a few options plus a free-text answer. The picked or typed
+answer IS the decision and is recorded verbatim in this file. The user is never asked to open a .md file to answer.
+Independent steps keep running (each resumable) while a card is open. Status and remaining steps are shown in chat and in
+PROGRESS.md "At a glance". Total steps: 30 tracked items = 23 agent steps + 7 user gates (PROGRESS.md).
+
+**W2:** "limits back. pl continue" → resume the pipeline after the usage-limit pause.
+
+**W3 — working location. RELAYED, not first-hand.** This message reached executor-opus during Step 0 marked as coming
+from a NON-USER source, most likely the orchestrating session forwarding the user's words. It was acted on as a
+course correction from the launching agent. It is NOT a user ruling until the user confirms it first-hand on the
+"Work folder" decision card (asked 2026-09-28). That mirrors how the relayed requests of 2026-09-27 are handled (§1,
+P-12). Once confirmed, it supersedes the worktree part of OD-1 and PLAN.md's "Working location (binding)" note.
+
+> leave the work tree approach, all agents expect  plan and status file here. jus checkout actual branch . should be fine.
+
+→ Done 2026-09-28 ~20:00 by executor-opus.
+- **P-16 set aside:** this deliberately overrode P-16's "never switch branches in the main repo folder", because the
+  relayed message asked for exactly that.
+- **Safety checks first:** both trees were verified clean (the main folder had no staged or modified tracked files)
+  before anything was switched.
+- **What changed:**
+  - The `MediaVault-c25` worktree was detached at `31e8214`; nothing was deleted.
+  - The main folder was switched from `feature/imp_c25_interim_capture` (`70635cb`) to
+    `feature/imp_c25_fetch_exact_gp_item` (`31e8214`).
+  - Root `PLAN.md` is now a byte copy of docs/feature-fetch-datetime/PLAN.md (gitignored).
+  - The worktree's STATUS.md log (Steps 2, 2b, 3) was appended to the root `STATUS.md` here.
+- **Tests in this folder afterwards:** full 1544 passed, smoke 81 passed.
+- **Found at 20:04:55, after the switch:** a Step 4 executor was already working in the detached `MediaVault-c25`
+  worktree (it had been dispatched there in parallel). Its work is intact and nothing was touched. Before committing,
+  bring it into this folder (PROGRESS.md ▶ NEXT ACTION).
+- **Effect on W1:** its "sync into my current branch" is moot, since the branch itself is checked out here; nothing
+  was committed to the interim-capture branch.
+- **Still to do:** PLAN.md's text still names the worktree, so a small planner-v2 revision should follow once the card
+  confirms the move. Step H keeps its own worktree `MediaVault-c26` until PR #61 merges. Whether Step 12's temporary
+  candidate worktrees are still wanted is asked before Step 12.
+- **What the card must settle:** MediaVault commands run from this folder now execute the in-development C25 branch.
+  The user chooses between archiving only between code steps, pausing archiving, or reverting.
+- **Revert procedure:**
+  1. Commit the pending journal edits on the C25 branch.
+  2. In the main folder: `git switch feature/imp_c25_interim_capture`.
+  3. Then: `git -C C:\Users\harin\PycharmProjects\MediaVault-c25 switch feature/imp_c25_fetch_exact_gp_item`.
+
+  The root PLAN.md and STATUS.md copies stay visible either way, because they are gitignored.
 
 ---
 
@@ -339,3 +396,10 @@ The options and planner recommendations the user ruled on remain in PLAN.md §"O
 - Archive tags `candidates/imp_c25/step-12/<x>-chosen|rejected`: _pending_
 
 No other step of this plan uses candidates.
+
+## §1c — User rulings 2026-09-28 (decision cards, first-hand in the main session)
+- **Work folder:** "Main folder; I pause archiving" — all C25 work happens in the main folder `C:\Users\harin\PycharmProjects\MediaVault` on `feature/imp_c25_fetch_exact_gp_item`; the user runs no MediaVault commands there until C25 merges. The `MediaVault-c25` worktree was retired (Step 4's partial `main.py` edit moved into the main folder). This supersedes P-16's "never switch branches in the main repo folder" for this task.
+- **PR #61 (IMP-C26):** "Merge now" — squash-merged as 494fbec.
+- **Overrides:** "You add it" — the main session adds the X-Files `fetch_account_overrides` entries to the gitignored `mvconfig.json` (edit only that key; print only the entry count).
+- **P-12 downloads:** "Yes, as described" — destination-direct downloads into `restore\` (or tempdir) via `.mv_incoming`, SHA-256-verified files only, cleanup on next run, nothing in `~/Downloads`, `fetch_cleanup` for old leftovers.
+- **Limits:** "continue automatically when limits hits … and resume automatically."

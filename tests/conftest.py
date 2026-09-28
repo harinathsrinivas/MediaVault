@@ -25,6 +25,33 @@ _REAL_MEDIA_BYTES = b"SMOKE-REAL-MEDIA-MASTER\n" * 11000  # ~264 KB > 200_000
 TEST_ENTRY_ID = "mov_test_c9_001"  # "mov" prefix -> goes to LIBRARY_MOVIES
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_gphotos_state(tmp_path, monkeypatch):
+    """IMP-C25 (PLAN Step 3g) — AUTOUSE, every test: redirect the Google Photos identity state into tmp_path.
+
+    mvcommon.GPHOTOS_STATE_DIR (the learned sidecars learned_<account>.jsonl, the failed list failed.jsonl
+    and failed_objects.csv — normally ~/.mediavault/gphotos) and mvcommon.GP_INVENTORY_DIR (the crawler's
+    private inventory — normally D:\\MediaVault_gp_inventory) point under this test's tmp_path, so NO test
+    can read or write the real ones — not even one that forgets a fixture (PLAN P-17). mvcommon derives every
+    state path from these two names at CALL time, and every other module must read them module-qualified
+    (mvcommon.GPHOTOS_STATE_DIR — the binding hazard), so patching mvcommon alone is complete. Nothing is
+    created here: the dirs appear only when code writes state.
+
+    Hard guards: both redirects must resolve under tmp_path and must not be the real locations. Later IMP-C25
+    steps extend THIS fixture (Step 11: mainfetch.FETCH_JOURNAL_DIR; Step 13b: the auto-confirm guard)."""
+    real_state = os.path.normcase(os.path.join(os.path.expanduser("~"), ".mediavault"))
+    real_inventory = os.path.normcase(r"D:\MediaVault_gp_inventory")
+    tmp = tmp_path.resolve()
+    for attr, path in (("GPHOTOS_STATE_DIR", tmp_path / "mv_state" / "gphotos"),
+                       ("GP_INVENTORY_DIR", tmp_path / "mv_gp_inventory")):
+        assert tmp in path.resolve().parents, f"Safety check failed: {attr} redirect escaped tmp_path: {path}"
+        monkeypatch.setattr(mvcommon, attr, str(path))
+        live = os.path.normcase(os.path.abspath(getattr(mvcommon, attr)))
+        assert not live.startswith(real_state) and not live.startswith(real_inventory), \
+            f"Safety check failed: {attr} still points at the real state: {live}"
+    yield
+
+
 @pytest.fixture()
 def sandbox(tmp_path, monkeypatch):
     """

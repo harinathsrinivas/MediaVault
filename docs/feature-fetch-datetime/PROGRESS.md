@@ -28,8 +28,8 @@ Step 3 (mvcommon identity primitives + hermetic redirects) — dispatch executor
 | H | C26 hotfix PR (worktree MediaVault-c26) | done — PR #61 open, awaiting user approval (Checkpoint 1) | fable (executor-fable) | 2893d98 (branch fix/imp_c26_fetch_account_routing) | full 1003 · smoke 82 · disarm 3/3 | +switch guard (close prev Chrome, port 9222 free) beyond plan text; RH after merge; then Step 1 re-merges main |
 | RH | user fills fetch_account_overrides + tests | pending | user | | | after H merges |
 | 2 | gpweb + RPC parsers + fake Google Photos | done | fable (executor-fable, claude-fable-5-1) | eea6759 | full 1215 · smoke 81 · crawler golden byte-identical · disarm/mutation probes 8/8 | new gpweb.py + tests/gphotos_fake.py + tests/test_gpweb.py; tools/gp_inventory.py delegates; conftest `fake_photos`; VrseUb original_quality not pre-resolved → None (read EWgK9e); dedup_key re-export is a lazy delegate (import-cycle guard for Step 3) |
-| 2b | gprpc read-only RPC client | done — uncommitted, awaiting the orchestrator's commit | fable (executor-fable, claude-fable-5-1) | | full 1329 · smoke 81 · test_gprpc 114 · disarm/mutation probes 19/19 | new gprpc.py + tests/test_gprpc.py; consumers catch `RpcUnavailable` (base of RpcShapeError/RpcServerError) for the UI fallback, never RpcRefused; pacing + circuit breaker are per browser session (driver); tests that drive gprpc must patch its clock (`clock` fixture in test_gprpc.py) |
-| 3 | mvcommon identity primitives + failed list | pending | | | | |
+| 2b | gprpc read-only RPC client | done | fable (executor-fable, claude-fable-5-1) | 18cbb91 | full 1329 · smoke 81 · test_gprpc 114 · disarm/mutation probes 19/19 | new gprpc.py + tests/test_gprpc.py; consumers catch `RpcUnavailable` (base of RpcShapeError/RpcServerError) for the UI fallback, never RpcRefused; pacing + circuit breaker are per browser session (driver); tests that drive gprpc must patch its clock (`clock` fixture in test_gprpc.py) |
+| 3 | mvcommon identity primitives + failed list | done — uncommitted, awaiting the orchestrator's commit | fable (executor-fable, claude-fable-5-1) | | full 1544 · smoke 81 · test_gphotos_primitives 215 · disarm/mutation probes 17/17 | mvcommon section "GOOGLE PHOTOS IDENTITY" + conftest autouse `_hermetic_gphotos_state`; vocab extensions flagged (s0_hash / s3u_user_query stages, learned alternates / quality flags / search_override / via, failed `candidates`, CSV `sha256` column); Step 5 must write extras captures in the same doc shape; producers of proof sha256 set dedup_key = the verified bytes' key |
 | 4 | ENTRY_TYPE_KEYS + guard | pending | | | | fallback none |
 | 5 | capture v2 | pending | | | | |
 | 6 | apply engine | pending | | | | |
@@ -61,15 +61,19 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 |---|---|---|---|
 
 ## In-progress sub-state
-(Step 2's sub-state is closed — the step was committed as `eea6759`.)
-`Step 2b — dispatched 2026-09-28 to executor-fable (fable, claude-fable-5-1) · single-executor, dispatch says DO NOT
-COMMIT (no WIP commits; this line is kept on disk only) · baseline at eea6759 re-run: full 1215 passed · sub-tasks:
-[x] 2b.1 gprpc.py — allowlist, page context, `call`, typed errors, pacing/retries/breaker, run summary (a–c, e) ·
-[x] 2b.2 gprpc.py helpers (d: hash_lookup, item_info, batch_info, timeline_at, search, recent_uploads,
-download_url + redacted wrapper, signed_in_account) · [x] 2b.3 tests/test_gprpc.py (fake emulator; patched clock;
-114 passed) · [x] 2b.4 disarm probes (19/19 caught; gprpc.py restored after each source probe, hash- and grep-checked) ·
-[x] 2b.5 full suite 1329 + smoke 81 + self-review → STEP COMPLETE: the uncommitted files (gprpc.py,
-tests/test_gprpc.py, this file) are the finished, verified step — commit them, do not discard.`
+(Step 2's sub-state is closed — the step was committed as `eea6759`; Step 2b's as `18cbb91`.)
+`Step 3 — dispatched 2026-09-28 to executor-fable (fable, claude-fable-5-1) · single-executor, dispatch says DO NOT
+COMMIT (no WIP commits; this line is kept on disk only) · resumed once after a usage-limit reset (no edits existed) ·
+sub-tasks: [x] 3.1 mvcommon: constants + block helpers + category/home_account (a, b) · [x] 3.2 mvcommon: object
+inventory + remote_upload_name + read_capture (c, d, e) · [x] 3.3 mvcommon: learned store + reducer + apply_learned +
+failed list + CSV + unverified_objects (f) · [x] 3.4 conftest autouse redirect (g) — 3.1–3.4 written, import-checked,
+existing capture/schema/mvcommon tests green · [x] 3.5 tests/test_gphotos_primitives.py (215 passed, final) ·
+[x] 3.6 disarm probes 17/17 caught (10 plugin-injected, re-run on the final code; 7 source-edit, reverted +
+sha256-verified) · [x] 3.7 self-review (2 robustness fixes + 1 export dedupe fix, each with a test) + full suite
+1544 + smoke 81 + STATUS → STEP COMPLETE: the uncommitted files (mvcommon.py, tests/conftest.py,
+tests/test_gphotos_primitives.py, this file) are the finished, verified step — commit them, do not discard ·
+baseline note: a full run at 18cbb91 (before any edit) hit a load-dependent flake in
+tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background (passes 5/5 alone)`
 Template — when a step is running (Execution protocol "In-step checkpoints"):
 `Step N — dispatched <time> to <model> · sub-tasks: [x] N.a <what> (wip SHA) · [ ] N.b <what> ← next · [ ] N.c …`
 plus, after a crash, one line `resumed <time> by <model>: uncommitted N.b changes kept|discarded (<files>)`.

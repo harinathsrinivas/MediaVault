@@ -126,6 +126,29 @@ def check_session_alive(driver, profile_key=None):
     return True
 
 
+def profile_preflight(account):
+    """[IMP-C25] Offline pre-flight for one Google account's automation Chrome
+    profile (OD-10: the profiles are prerequisites). Run it BEFORE launching
+    Chrome: pointed at a missing --user-data-dir, Chrome would silently create
+    an EMPTY profile there and land signed out.
+
+    Returns None when `account` is a CHROME_PROFILES key whose profile folder
+    exists, else the one-line remediation to print INSTEAD of launching. It
+    starts nothing and writes nothing. A profile that exists but is signed out
+    is only visible after the launch — check_session_alive catches that.
+    Shared by the inventory crawler (IMP-C25 Step 7) and, later, the
+    per-account fetch/check sessions (Steps 10, 13, 13b, 14)."""
+    user_data_dir = CHROME_PROFILES.get(account)
+    if user_data_dir is None:
+        return (f"unknown Google account {account!r} - expected one of: "
+                f"{', '.join(CHROME_PROFILES)}")
+    if not os.path.isdir(user_data_dir):
+        return (f"the Chrome profile for '{account}' does not exist: {user_data_dir} - "
+                f"create it (launch Chrome once with --user-data-dir={user_data_dir}), "
+                f"sign in to photos.google.com, then re-run")
+    return None
+
+
 def trigger_download(driver, query, index=0):
     """
     RAPID MODE: Navigates, Searches, Clicks, Triggers Download, Exits Player.

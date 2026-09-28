@@ -81,7 +81,7 @@ answered before Step 11.
 | 4 | ENTRY_TYPE_KEYS + guard | in_progress — running in the detached MediaVault-c25 worktree (observed 20:04:55) | | | | fallback none · bring its files here before committing (NEXT ACTION) |
 | 5 | capture v2 | pending | | | | |
 | 6 | apply engine | pending | | | | |
-| 7 | crawler productization | pending | | | | |
+| 7 | crawler productization | done — uncommitted, awaiting the orchestrator's commit | fable (executor-fable, claude-fable-5-1) | | full 1615 · smoke 81 · test_gp_inventory 88 (30 → 88) · disarm/mutation probes 31/31 | tools/gp_inventory.py rpc-first (lcxiM + EzkLib + EWgK9e via gprpc) with auto dom fallback, crawl_lock + progress-driven heartbeat (60 s; yields on takeover), profile pre-flight + landing check, run log `<account>.runs.jsonl` (start / seen / "enumerated" / end), offline reader `inventory_state()` (Steps 9/13) + `--status`; `mainfetch.profile_preflight(account)` → None or a message; reads the real tv/movies/anime files unchanged (checked on a copy; D:\ fingerprint unchanged); rpc upgrades dom records once (+size/quality/exact name); ONE crawl at a time (R0/§M1: run accounts sequentially) |
 | R0 | prerequisites (user) | pending | user | | | others blocked until profile |
 | 8 | device cross-check | pending | | | | |
 | 9 | map_photos | pending | | | | |
@@ -112,6 +112,15 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 `Step 4 — running in C:\Users\harin\PycharmProjects\MediaVault-c25 (HEAD detached at 31e8214) · no dispatch line was
 written here · observed 20:04:55: main.py ENTRY_TYPE_KEYS comment +49/−1; no test-file change yet · on completion
 follow ▶ NEXT ACTION (copy its files here; never commit in the detached worktree)`
+`Step 7 — dispatched 2026-09-28 to executor-fable (fable, claude-fable-5-1) · single-executor, DO NOT COMMIT · runs
+in the main folder in parallel with Step 4 (Step 7 owns tools/gp_inventory.py, mainfetch.py profile_preflight only,
+tests/test_gp_inventory.py) · resumed twice after usage-limit resets (no edits existed) · sub-tasks: [x] 7.1 read
+plan/code + design · [x] 7.2 mainfetch.profile_preflight · [x] 7.3 crawler: storage + lock/heartbeat + run log +
+reader/--status · [x] 7.4 crawler: RPC mode + DOM fallback + CLI · [x] 7.5 tests (test_gp_inventory 88 passed) ·
+[x] 7.6 disarm probes 31/31 (isolated scratch copy, never the real tree) + self-review (3 fixes: clock-free run-log
+order for deletion detection, Ctrl+C during Chrome start closes it, reader contract pinned) + full 1615 + smoke 81 +
+STATUS → STEP COMPLETE: the uncommitted files (tools/gp_inventory.py, mainfetch.py, tests/test_gp_inventory.py,
+this file) are the finished, verified step — commit them, do not discard`
 Steps 2, 2b and 3 are closed (committed as `eea6759`, `18cbb91`, `31e8214`; Step 3 ran all 7 sub-tasks 3.1–3.7,
 disarm probes 17/17). Known load-dependent flake (from Step 3's baseline run at 18cbb91):
 tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes 5/5 alone; re-run it before

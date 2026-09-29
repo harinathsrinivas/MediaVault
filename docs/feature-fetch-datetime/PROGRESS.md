@@ -33,22 +33,10 @@
   account (R0) · Step 12 candidate isolation (before Step 12).
 
 ## ▶ NEXT ACTION
-**Step 4 is ALREADY RUNNING in the old worktree `MediaVault-c25`.** Evidence: its `main.py` was edited at 20:04:55
-(the ENTRY_TYPE_KEYS `gphotos` documentation, +49/−1). That was minutes AFTER the worktree's HEAD was detached at
-`31e8214` (~20:00, DECISIONS.md §1b W3); no dispatch line had been written here. **Do NOT dispatch Step 4 again.**
-
-When it reports done:
-1. Do NOT commit inside that worktree — its HEAD is detached, so the commit would not land on the branch.
-2. Copy its changed files byte-for-byte into THIS folder: `main.py`, `tests/test_entry_schema_guard.py` and anything
-   else its report lists. None of them changed here since `31e8214`, so the copy is conflict-free.
-3. Merge its PROGRESS row and sub-state into THIS PROGRESS.md, and its STATUS entry into this folder's root STATUS.md.
-4. Run the full suite + smoke here, then make a pathspec commit here.
-5. `git -C C:\Users\harin\PycharmProjects\MediaVault-c25 restore -- <those files>`, then remove the worktree.
-
-Then continue with Step 5 (needs 3–4) here. Present the decision cards in chat.
-
-Parallel: PR #61 (Step H) awaits user approval → after the merge, Step 1 re-merges main here + 🚦 RH. P-12 must be
-answered before Step 11.
+**Step 8 (read-only device cross-check) dispatched 2026-09-29 to executor-fable** in the main folder. Steps 0–7 are
+done (Step 6 = `856fd0c`). After Step 8: Step 9 (map_photos) → 🚦 R1 (real-library mapping dry-run, user reads).
+Open user items: 🚦 RH X-Files test fetch (go-ahead pending); IMP-C28 (`_parts` path treated as chunk in cmd_push)
+registration/fix approval.
 
 ## Resume protocol
 1. Open a session in the main folder `C:\Users\harin\PycharmProjects\MediaVault` (branch
@@ -80,10 +68,10 @@ answered before Step 11.
 | 3 | mvcommon identity primitives + failed list | done | fable (executor-fable, claude-fable-5-1) | 31e8214 | full 1544 · smoke 81 · test_gphotos_primitives 215 · disarm/mutation probes 17/17 | mvcommon section "GOOGLE PHOTOS IDENTITY" + conftest autouse `_hermetic_gphotos_state`; vocab extensions flagged (s0_hash / s3u_user_query stages, learned alternates / quality flags / search_override / via, failed `candidates`, CSV `sha256` column); Step 5 must write extras captures in the same doc shape; producers of proof sha256 set dedup_key = the verified bytes' key |
 | 4 | ENTRY_TYPE_KEYS + guard | done | | 04ad2d5 | | fallback none · bring its files here before committing (NEXT ACTION) |
 | 5 | capture v2 | done | | ba2e799 | | |
-| 6 | apply engine | done | fable (executor-fable) | | full 1765 · smoke 82 · disarm 29/29 | edited failed_objects.csv never overwritten (Step 9/14 regenerate after import); home_account stored only when learned; 3 attempts total |
+| 6 | apply engine | done | fable (executor-fable) | 856fd0c | full 1765 · smoke 82 · disarm 29/29 | edited failed_objects.csv never overwritten (Step 9/14 regenerate after import); home_account stored only when learned; 3 attempts total |
 | 7 | crawler productization | done | fable (executor-fable, claude-fable-5-1) | 46d0532 | full 1615 · smoke 81 · test_gp_inventory 88 (30 → 88) · disarm/mutation probes 31/31 | tools/gp_inventory.py rpc-first (lcxiM + EzkLib + EWgK9e via gprpc) with auto dom fallback, crawl_lock + progress-driven heartbeat (60 s; yields on takeover), profile pre-flight + landing check, run log `<account>.runs.jsonl` (start / seen / "enumerated" / end), offline reader `inventory_state()` (Steps 9/13) + `--status`; `mainfetch.profile_preflight(account)` → None or a message; reads the real tv/movies/anime files unchanged (checked on a copy; D:\ fingerprint unchanged); rpc upgrades dom records once (+size/quality/exact name); ONE crawl at a time (R0/§M1: run accounts sequentially) |
 | R0 | prerequisites (user) | pending | user | | | others blocked until profile |
-| 8 | device cross-check | pending | | | | |
+| 8 | device cross-check | in_progress | | | | |
 | 9 | map_photos | pending | | | | |
 | R1 | real mapping dry-run (user) | pending | user | | | |
 | 10 | fetch plumbing + routing | pending | | | | |
@@ -109,22 +97,12 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 |---|---|---|---|
 
 ## In-progress sub-state
-`Step 4 — running in C:\Users\harin\PycharmProjects\MediaVault-c25 (HEAD detached at 31e8214) · no dispatch line was
-written here · observed 20:04:55: main.py ENTRY_TYPE_KEYS comment +49/−1; no test-file change yet · on completion
-follow ▶ NEXT ACTION (copy its files here; never commit in the detached worktree)`
-`Step 7 — dispatched 2026-09-28 to executor-fable (fable, claude-fable-5-1) · single-executor, DO NOT COMMIT · runs
-in the main folder in parallel with Step 4 (Step 7 owns tools/gp_inventory.py, mainfetch.py profile_preflight only,
-tests/test_gp_inventory.py) · resumed twice after usage-limit resets (no edits existed) · sub-tasks: [x] 7.1 read
-plan/code + design · [x] 7.2 mainfetch.profile_preflight · [x] 7.3 crawler: storage + lock/heartbeat + run log +
-reader/--status · [x] 7.4 crawler: RPC mode + DOM fallback + CLI · [x] 7.5 tests (test_gp_inventory 88 passed) ·
-[x] 7.6 disarm probes 31/31 (isolated scratch copy, never the real tree) + self-review (3 fixes: clock-free run-log
-order for deletion detection, Ctrl+C during Chrome start closes it, reader contract pinned) + full 1615 + smoke 81 +
-STATUS → STEP COMPLETE: the uncommitted files (tools/gp_inventory.py, mainfetch.py, tests/test_gp_inventory.py,
-this file) are the finished, verified step — commit them, do not discard`
-Steps 2, 2b and 3 are closed (committed as `eea6759`, `18cbb91`, `31e8214`; Step 3 ran all 7 sub-tasks 3.1–3.7,
-disarm probes 17/17). Known load-dependent flake (from Step 3's baseline run at 18cbb91):
-tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes 5/5 alone; re-run it before
-treating a red full suite as a regression.
+`Step 8 — dispatched 2026-09-29 to executor-fable (fable) · sub-tasks: [ ] 8.a device_inventory(aliases) helper
+(read-only adb find + batched stat; placeholder serials skipped; offline/unauthorized reported) ← next · [ ] 8.b
+per-object classification on_device / freed / absent (all four categories, chunks, holders, extras) · [ ] 8.c tests
+tests/test_device_inventory.py (fake adb) + disarm probes + full + smoke`
+Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes
+alone; re-run it before treating a red full suite as a regression.
 Template — when a step is running (Execution protocol "In-step checkpoints"):
 `Step N — dispatched <time> to <model> · sub-tasks: [x] N.a <what> (wip SHA) · [ ] N.b <what> ← next · [ ] N.c …`
 plus, after a crash, one line `resumed <time> by <model>: uncommitted N.b changes kept|discarded (<files>)`.

@@ -10227,6 +10227,296 @@ def cmd_add_extras(title_id, folders, extras_size=None, device_id=None, no_repla
 
 
 # ==========================================
+#   GOOGLE PHOTOS IDENTITY — READ-ONLY DEVICE CROSS-CHECK (IMP-C25)
+# ==========================================
+# docs/feature-fetch-datetime/PLAN.md Step 8: no "missing from the cloud" verdict (Step 9's mapper, Step 13's
+# check) before looking at the phones themselves. An object Google Photos does not hold may still sit on a
+# Pixel waiting for its backup (on_device); may have been backed up and then removed from the phone — Google
+# Photos' "Free up space" deletes the media but not the `.mvmeta.json` sidecar write_remote_mvmeta pushed next
+# to it (JSON is not media: never backed up, never freed), so a lone sidecar marks an object that reached that
+# phone and is gone from it (freed — possibly LOST when the cloud lacks it too); or may be on no phone at all
+# (absent). Two functions; their docstrings define the return shapes Steps 9, 13 and 13c consume:
+#   * device_inventory(aliases): every file under the Media root of each configured phone — ONE `adb devices`,
+#     then per attached phone ONE `find '/sdcard/Media/' -type f` (the trailing slash makes find follow the
+#     /sdcard symlink; `/storage/emulated/0/Media/` is the fallback root) and `stat -c '%s %Y %n'` in batches
+#     whose device command stays within DEVICE_STAT_BATCH_BYTES;
+#   * classify_device_objects(library, inventory): each uploaded object (mvcommon.iter_uploaded_objects —
+#     whole files, chunks, FLAC holders, extras items and chunks; all four categories) by its exact uploaded
+#     name, with size agreement where a size is known.
+# READ-ONLY by construction, pinned by tests: every adb argv must pass _dev_argv_readonly — an allowlist of
+# exact shapes (`devices`; `shell find` / `shell stat` over the Media roots, every path ONE single-quoted
+# word) — before it runs. Nothing else is ever issued: no push, pull, rm, mv, touch, mkdir, am or pm, and no
+# shell operator outside quotes. Field lessons from the real Pixels: device output ends its lines with CRLF;
+# `adb shell` reads the caller's stdin (in a loop it swallows it), so every call gets stdin=DEVNULL; names
+# carry spaces, apostrophes and unicode, so paths reach the device shell single-quoted ('\'' for a quote —
+# cmd_push's escaping) and output is decoded as UTF-8. An unplugged, offline or unauthorized phone, a missing
+# adb binary, a timeout: reported per device, never raised. Nothing is printed and the library is only read.
+
+DEVICE_LIST_ROOTS = (REMOTE_ROOT + "/", "/storage/emulated/0/Media/")  # find roots, in order (field lesson)
+DEVICE_STAT_FORMAT = "%s %Y %n"   # size in bytes, mtime in epoch seconds, the path exactly as given
+DEVICE_STAT_BATCH_BYTES = 3500    # UTF-8 bytes of ONE stat command: under legacy adb's 4 KiB packet limit
+DEVICE_ADB_TIMEOUT_S = 30         # `adb devices` (it may have to start the adb server first)
+DEVICE_FIND_TIMEOUT_S = 120
+DEVICE_STAT_TIMEOUT_S = 60
+_DEV_PLACEHOLDER_RE = re.compile(r"<[^<>]*>")      # a DEVICE_ALIASES '<NEW_PIXEL_SERIAL>'-style placeholder
+_DEV_SERIAL_RE = re.compile(r"[A-Za-z0-9._:-]+")   # a USB, tcp (host:port) or mDNS adb serial
+_DEV_QUOTED_RE = re.compile(r"'(?:[^']|'\\'')*'")  # ONE single-quoted device-shell word ('\'' = a quote)
+_DEV_STAT_RE = re.compile(r"(\d+) (-?\d+) (/.*)")  # one `stat -c '%s %Y %n'` output line
+
+
+class _DeviceCommandRefused(RuntimeError):
+    """An adb argv outside the device cross-check's read-only allowlist — a bug; it is never run."""
+
+
+def _dev_quote(path):
+    """`path` as ONE single-quoted word for the device shell ('\\'' stands for a quote — cmd_push's escaping)."""
+    return "'" + path.replace("'", "'\\''") + "'"
+
+
+def _dev_unquote(word):
+    """The literal text of a _DEV_QUOTED_RE word."""
+    return word[1:-1].replace("'\\''", "'")
+
+
+def _dev_statable(path):
+    """True for a path a stat batch may carry: one line of text, strictly under a listing root."""
+    return (isinstance(path, str) and not any(c in path for c in "\r\n\0")
+            and any(path.startswith(root) and len(path) > len(root) for root in DEVICE_LIST_ROOTS))
+
+
+def _dev_argv_readonly(argv):
+    """THE read-only allowlist of the device cross-check: True only for these exact adb argv shapes —
+         adb [-s <serial>] devices
+         adb -s <serial> shell find '<root>' -type f             <root> in DEVICE_LIST_ROOTS
+         adb -s <serial> shell stat -c '%s %Y %n' '<path>' ...   every <path> strictly under a root
+    A shell command always names its phone (never "whichever one is attached"). adb joins the words after
+    `shell` with spaces and hands them to the device shell, so each path must be ONE single-quoted word (a
+    quote only as '\\'') — then the command holds no operator (; | & > < ` $( ...) outside quotes. Everything
+    else is refused: push, pull, install, rm, mv, cp, touch, mkdir, am, pm, `find -delete` / `-exec`, an
+    unquoted or out-of-root path, a malformed serial."""
+    if not (isinstance(argv, (list, tuple)) and argv and all(isinstance(a, str) for a in argv)):
+        return False
+    if argv[0] != "adb":
+        return False
+    rest = list(argv[1:])
+    pinned = rest[:1] == ["-s"]
+    if pinned:
+        if len(rest) < 2 or not _DEV_SERIAL_RE.fullmatch(rest[1]):
+            return False
+        rest = rest[2:]
+    if rest == ["devices"]:
+        return True
+    if not pinned or rest[:1] != ["shell"]:
+        return False
+    cmd = rest[1:]
+    if len(cmd) == 4 and cmd[0] == "find" and cmd[2:] == ["-type", "f"]:
+        return cmd[1] in [_dev_quote(root) for root in DEVICE_LIST_ROOTS]
+    if len(cmd) > 3 and cmd[:3] == ["stat", "-c", _dev_quote(DEVICE_STAT_FORMAT)]:
+        return all(_DEV_QUOTED_RE.fullmatch(word) and _dev_statable(_dev_unquote(word)) for word in cmd[3:])
+    return False
+
+
+def _dev_text(data):
+    """Captured adb output as text: bytes decoded as UTF-8 (an undecodable byte becomes U+FFFD); '' for none."""
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return data if isinstance(data, str) else ""
+
+
+def _dev_lines(text):
+    """The non-empty lines of device output without their line-ending CRs (real Pixels end lines with CRLF).
+    Split on '\\n' only: str.splitlines() would also split on unicode separators a file name may hold."""
+    return [line.rstrip("\r") for line in text.split("\n") if line.rstrip("\r")]
+
+
+def _dev_first_line(text):
+    """The first non-blank line of `text`, stripped and cut to 200 characters (an error message), or None."""
+    for line in _dev_lines(text):
+        if line.strip():
+            return line.strip()[:200]
+    return None
+
+
+def _dev_run(argv, timeout):
+    """Run ONE allowlisted adb command -> (returncode, stdout text, stderr text). The allowlist check comes
+    first: an argv off it raises _DeviceCommandRefused and never runs. stdin is DEVNULL (adb shell reads the
+    caller's stdin — inside a loop it would swallow it); output is captured as bytes and decoded by _dev_text.
+    OSError (no adb binary) and subprocess.TimeoutExpired propagate."""
+    if not _dev_argv_readonly(argv):
+        raise _DeviceCommandRefused(repr(argv)[:200])
+    result = subprocess.run(list(argv), stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout)
+    return (getattr(result, "returncode", None), _dev_text(getattr(result, "stdout", None)),
+            _dev_text(getattr(result, "stderr", None)))
+
+
+def _dev_attached(text):
+    """`adb devices` output -> {serial: state} in listing order (device, offline, unauthorized, authorizing,
+    no permissions ...). The header line and the daemon's '* ...' lines carry no tab and are skipped."""
+    attached = {}
+    for line in _dev_lines(text):
+        serial, tab, state = line.partition("\t")
+        if tab and serial.strip():
+            attached[serial.strip()] = state.strip()
+    return attached
+
+
+def _dev_batches(paths):
+    """`paths` in order, packed into stat batches whose device command — `stat -c '%s %Y %n' '<p1>' '<p2>' ...`
+    exactly as adb joins it — stays within DEVICE_STAT_BATCH_BYTES of UTF-8. A single path longer than that
+    gets a batch of its own."""
+    head = len(f"stat -c {_dev_quote(DEVICE_STAT_FORMAT)}".encode("utf-8"))
+    batch, size = [], head
+    for path in paths:
+        cost = 1 + len(_dev_quote(path).encode("utf-8"))
+        if batch and size + cost > DEVICE_STAT_BATCH_BYTES:
+            yield batch
+            batch, size = [], head
+        batch.append(path)
+        size += cost
+    if batch:
+        yield batch
+
+
+def _dev_list(record):
+    """List ONE attached phone into its device_inventory record: `find '<root>' -type f` over the first
+    DEVICE_LIST_ROOTS root that lists any file, then size + mtime by batched stat (a failed batch only leaves
+    its files' size/mtime unknown). When no root lists a file, the phone counts as empty only if EVERY root
+    listed cleanly (exit 0): an error on any root makes it `error` — a locked or failing phone must never
+    read as an empty one. Never raises."""
+    base = ["adb", "-s", record["serial"], "shell"]
+    try:
+        problems, paths = [], []
+        for root in DEVICE_LIST_ROOTS:
+            code, out, err = _dev_run(base + ["find", _dev_quote(root), "-type", "f"], DEVICE_FIND_TIMEOUT_S)
+            listed = {re.sub(r"/{2,}", "/", line) for line in _dev_lines(out)}
+            paths = sorted(p for p in listed if p.startswith(root) and len(p) > len(root))
+            problem = None if code == 0 else (_dev_first_line(err) or f"find exited with status {code}")
+            if paths:
+                record.update(status="ok" if problem is None else "partial", detail=problem, root=root)
+                break
+            if problem:
+                problems.append(f"{root}: {problem}")
+        else:
+            if problems:
+                record.update(status="error", detail="; ".join(problems))
+            else:
+                record.update(status="ok", root=DEVICE_LIST_ROOTS[0])  # every root listed, cleanly and empty
+            return
+        stats = {}
+        for batch in _dev_batches([p for p in paths if _dev_statable(p)]):
+            try:
+                code, out, err = _dev_run(base + ["stat", "-c", _dev_quote(DEVICE_STAT_FORMAT)]
+                                          + [_dev_quote(p) for p in batch], DEVICE_STAT_TIMEOUT_S)
+            except (OSError, subprocess.SubprocessError):
+                continue  # this batch keeps unknown sizes; the listing itself stands
+            wanted = set(batch)
+            for line in _dev_lines(out):
+                m = _DEV_STAT_RE.fullmatch(line)
+                if m and m.group(3) in wanted:
+                    stats[m.group(3)] = (int(m.group(1)), int(m.group(2)))
+        record["files"] = [{"path": p, "name": p.rsplit("/", 1)[1], "size": stats.get(p, (None, None))[0],
+                            "mtime": stats.get(p, (None, None))[1]} for p in paths]
+        record["stat_errors"] = sum(1 for p in paths if p not in stats)
+    except _DeviceCommandRefused as e:
+        record.update(status="error", detail=f"refused a non-read-only adb command (a bug): {e}", files=[])
+    except Exception as e:
+        record.update(status="error", detail=_gp_line(e), files=[])
+
+
+def device_inventory(aliases=None):
+    """The read-only file inventory of the configured phones (PLAN Step 8 — see the section comment above).
+
+    aliases   {alias: serial}; default DEVICE_ALIASES (read at call time). An alias may name a raw serial. A
+              serial that is empty or a '<...>' placeholder (DEVICE_ALIASES' '<NEW_PIXEL_SERIAL>') is skipped:
+              no adb command ever names it.
+
+    Issues ONE `adb devices` (none when every alias is skipped), then, per attached phone, the find + stat
+    commands of the section comment — only argvs _dev_argv_readonly allows. Never raises for anything a phone
+    or adb does (a KeyboardInterrupt still interrupts), prints nothing and writes nothing, anywhere.
+
+    Returns:
+      complete      True only when at least one alias names a real serial and EVERY alias that is not a
+                    placeholder was listed in full (status ok — an invalid serial counts as not listed). Only
+                    then may "on no phone" be read as absent: a phone that was not listed could hold the object
+                    (classify_device_objects answers `unchecked` instead).
+      devices       {alias: record}, in `aliases` order; a record:
+        alias, serial   as configured
+        status          ok             listed in full
+                        partial        listed, but find reported an error (a folder it could not read): its
+                                       files are real evidence, its silence is not
+                        skipped        a placeholder serial — reported as "skipped (placeholder)"
+                        not-connected  `adb devices` does not list it (unplugged, attached to another PC ...)
+                        offline        adb lists it offline (replug the cable / restart adb)
+                        unauthorized   adb lists it unauthorized or authorizing (allow USB debugging on it)
+                        unavailable    any other adb state (recovery, bootloader, sideload, no permissions ...)
+                        adb-missing    the adb binary could not be started
+                        error          anything else — a timeout, `adb devices` failing, find failing on every
+                                       root, an invalid serial; `detail` says what
+        detail          None when ok; otherwise the reason (adb's own first error line when there is one)
+        root            the DEVICE_LIST_ROOTS root the files were listed from (normally '/sdcard/Media/'), else
+                        None
+        files           [{path, name, size, mtime}] sorted by path — path exactly as the phone listed it
+                        (under `root`, so it works in any later read-only adb command), name its last part,
+                        size in bytes and mtime in epoch seconds from stat (None when stat gave nothing). adb
+                        push keeps the PC file's mtime (RESEARCH F3), so a `.mvmeta.json` sidecar's mtime is
+                        its push time
+        stat_errors     how many of `files` got no size / mtime
+      unconfigured  [{serial, state}] — phones `adb devices` lists that `aliases` does not name (e.g. a Pixel
+                    missing from DEVICE_ALIASES): reported, never inventoried
+    """
+    aliases = DEVICE_ALIASES if aliases is None else aliases
+    devices, real = {}, []
+    for alias, serial in aliases.items():
+        record = {"alias": alias, "serial": serial, "status": None, "detail": None, "root": None, "files": [],
+                  "stat_errors": 0}
+        devices[alias] = record
+        text = serial.strip() if isinstance(serial, str) else ""
+        if not text or _DEV_PLACEHOLDER_RE.fullmatch(text):
+            record.update(status="skipped", detail="placeholder")
+        elif not _DEV_SERIAL_RE.fullmatch(serial):
+            record.update(status="error", detail=f"not a valid adb serial: {serial!r}")
+        else:
+            real.append(record)
+    result = {"complete": False, "devices": devices, "unconfigured": []}
+    if not real:
+        return result
+    try:
+        code, out, err = _dev_run(["adb", "devices"], DEVICE_ADB_TIMEOUT_S)
+    except OSError as e:  # FileNotFoundError: no adb binary on PATH
+        for record in real:
+            record.update(status="adb-missing", detail=f"adb could not be started ({_gp_line(e)})")
+        return result
+    except Exception as e:  # a timeout, or anything else adb did
+        for record in real:
+            record.update(status="error", detail=f"adb devices failed ({_gp_line(e)})")
+        return result
+    if code != 0:
+        why = _dev_first_line(err) or _dev_first_line(out) or f"exit status {code}"
+        for record in real:
+            record.update(status="error", detail=f"adb devices failed ({why})")
+        return result
+    attached = _dev_attached(out)
+    named = {record["serial"] for record in devices.values()}
+    result["unconfigured"] = [{"serial": serial, "state": state} for serial, state in attached.items()
+                              if serial not in named]
+    for record in real:
+        state = attached.get(record["serial"])
+        if state == "device":
+            _dev_list(record)
+        elif state is None:
+            record.update(status="not-connected", detail="adb devices does not list it — connect the phone")
+        elif state == "offline":
+            record.update(status="offline", detail="adb lists it offline — replug the cable or restart adb")
+        elif state in ("unauthorized", "authorizing"):
+            record.update(status="unauthorized", detail=f"adb lists it {state} — allow USB debugging on the phone")
+        else:
+            record.update(status="unavailable", detail=f"adb state: {state}")
+    # every configured phone that is not a placeholder — an invalid serial too — must have been listed in full
+    result["complete"] = all(record["status"] in ("ok", "skipped") for record in devices.values())
+    return result
+
+
+# ==========================================
 #      WEB CONSOLE READ-ONLY DATA LAYER
 # ==========================================
 # Five module-level PURE / READ-ONLY helpers behind the `web` operations

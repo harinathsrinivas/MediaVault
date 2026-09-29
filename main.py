@@ -9,6 +9,7 @@ import time
 import stat
 import hashlib
 import difflib
+import copy
 import tempfile
 import webbrowser
 import requests
@@ -45,6 +46,9 @@ import mvcommon
 # only after cmd_prep / cmd_push succeed, after the extras scan saved and after an extra
 # uploaded; never raises, never journalled.
 import gpcapture
+# [IMP-C25] the shared Google Photos parsers (dedupKey helpers) for the apply engine — stdlib-only and
+# already loaded by mvcommon, so this adds no import cost and no cycle.
+import gpweb
 
 REMOTE_ROOT = "/sdcard/Media"  # Your Pixel Root
 FFMPEG_PATH = r"C:\Users\harin\AppData\Roaming\Emby-Server\system\ffmpeg.exe"
@@ -9670,6 +9674,408 @@ def cmd_prep_push_rep_season_enrich(base_id, folder_path, split_method=None, spl
     return True
 
 
+# ==========================================
+#   GOOGLE PHOTOS IDENTITY — THE APPLY ENGINE (IMP-C25)
+# ==========================================
+# THE only writer of `gphotos` blocks (docs/feature-fetch-datetime/PLAN.md Step 6; P-10, OD-2 ruling).
+# Every producer — the fetch (mainfetch stays library-read-only), map_photos, check_photos, the
+# auto-confirm, resolve_photos — only APPENDS what it learned to the per-account learned sidecar
+# (mvcommon.append_learned: the durable record that survives a lost library update, IMP-C24). This engine
+# folds those records, plus each named object's capture facts (mvcommon.read_capture — the file's own
+# facts at prep/push, P-11), into the library. An object is named by a record's manual_id (the owning
+# library id — the TITLE id for extras; an alias resolves one hop to its primary) AND its current SHA-256
+# (the P-2 pin). Per object:
+#   * a TRUSTED block is updated; an absent or untrusted one (other bytes: re-mastered, re-split) is
+#     replaced by a block pinned to the current hash; a block written by NEWER code (v > 1) is never
+#     touched (conflict `block-version`);
+#   * capture facts (sha1 / dedup_key, size_bytes, width / height, duration_s, date_utc, uploaded_name,
+#     pushed) build a new block, and refresh a trusted one (they describe these very bytes) — except a
+#     content key contradicting the block's own (conflict `capture-content-mismatch`: nothing folded);
+#   * account records: mvcommon.apply_learned per account — P-5 proof ladder, alternates, approach
+#     verdicts, dead photo ids, search_override; `confirmed` only from a verified map / check / fetch /
+#     confirm record, never from a capture and never from a manual match alone. Its conflicts are
+#     reported, never applied;
+#   * home_account (P-4's learned layer) = mvcommon.home_account(...) whenever an account holds a verified
+#     (or user-vouched) copy; otherwise the key is absent and routing falls back to the id prefix —
+#     exactly what home_account() answers then. mvconfig overrides stay the caller's top layer;
+#   * nothing but the `gphotos` key of the object's own node ever changes.
+# A capture alone never creates a block: only objects some record names are touched. Records whose object
+# no longer exists (re-split, re-mastered, re-prepped, unknown id) are ORPHANS — reported, never applied.
+# Library I/O: a fresh load_library() per attempt; --apply saves ONCE, guarded by the OD-2 fingerprint
+# (size, mtime_ns, SHA-256 of every library file, taken before the load and re-checked right before the
+# save: changed -> reload + re-patch, which is idempotent; after GPHOTOS_APPLY_ATTEMPTS changes -> abort).
+# No lock and no rollback journal (P-10); switch to mvcommon.save_library_atomic when IMP-C24 lands.
+
+GPHOTOS_APPLY_ATTEMPTS = 3  # OD-2 ruling: the library changed under the engine this many times -> abort
+_GP_BUSY = "library changed by another process — re-run when idle"
+# The block-level facts a capture contributes (P-1 keys; read_capture's other facts — role, index,
+# local_name, mtime_utc, approach_hint, remote_dir — are not block keys).
+_GP_CAPTURE_KEYS = ("sha1", "dedup_key", "size_bytes", "width", "height", "duration_s", "date_utc",
+                    "uploaded_name", "pushed")
+_GP_SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_GP_ABSENT = object()  # a node that has no `gphotos` key at all
+
+
+def _gp_is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _gp_line(exc):
+    """An exception as one line of text (a message may carry newlines)."""
+    return " ".join(f"{type(exc).__name__}: {exc}".split())
+
+
+def _library_fingerprint():
+    """The OD-2 change detector: (size, mtime_ns, SHA-256) of every library file load_library reads — read
+    through mvcommon's OWN LIBRARY_* bindings at call time (the binding hazard; main does not even import
+    LIBRARY_OTHERS) — with None for a file that does not exist. Equal fingerprints = nobody wrote."""
+    prints = []
+    for path in (mvcommon.LIBRARY_MOVIES, mvcommon.LIBRARY_SERIES, mvcommon.LIBRARY_ANIME,
+                 mvcommon.LIBRARY_OTHERS):
+        try:
+            with open(path, "rb") as fh:
+                st = os.fstat(fh.fileno())
+                data = fh.read()
+        except FileNotFoundError:
+            prints.append(None)
+            continue
+        prints.append((st.st_size, st.st_mtime_ns, hashlib.sha256(data).hexdigest()))
+    return tuple(prints)
+
+
+def _gp_content_key(block):
+    """A block's content key — its canonical dedupKey, from dedup_key, else from sha1 — or None."""
+    key = gpweb.normalize_dedup_key(block.get("dedup_key"))
+    sha1 = block.get("sha1")
+    if key is None and isinstance(sha1, str) and _GP_SHA1_RE.match(sha1):
+        key = gpweb.dedup_key(sha1.lower())
+    return key
+
+
+def _gp_confirmed(block):
+    """True when a block holds a confirmed account record (the rule mvcommon's cloud_state uses)."""
+    accounts = block.get("accounts") if isinstance(block, dict) else None
+    return isinstance(accounts, dict) and any(isinstance(r, dict) and r.get("confirmed") is True
+                                              for r in accounts.values())
+
+
+def _gp_fold_capture(block, sha256, facts):
+    """Fold one object's capture facts into its block (P-11: the file's own facts, never proof of cloud
+    presence). block None -> a new block built from them; a trusted block takes the capture's values (they
+    describe these very bytes; `pushed` is the latest push) unless the capture's content key contradicts
+    the block's. -> (block, conflict code or None); on a conflict the block comes back unchanged."""
+    try:
+        cap = mvcommon.new_gphotos_block(sha256, **{k: facts.get(k) for k in _GP_CAPTURE_KEYS})
+    except ValueError:
+        return block, "capture-invalid"
+    if block is None:
+        return cap, None
+    held = _gp_content_key(block)
+    if held and cap.get("dedup_key") and held != cap["dedup_key"]:
+        return block, "capture-content-mismatch"
+    merged = dict(block)
+    merged.update((k, cap[k]) for k in _GP_CAPTURE_KEYS if k in cap)
+    return mvcommon._ordered(merged, mvcommon._BLOCK_KEYS), None  # the writer's own P-1 key order
+
+
+def _gp_with_home(block, manual_id, prefix_map, default):
+    """Set P-4's learned home_account — mvcommon.home_account() computed WITHOUT the stored field, so it
+    always follows the evidence — when an account holds a verified or user-vouched copy (verified_by set);
+    otherwise remove the key: routing then falls back to the id prefix, which is what home_account() answers
+    for such a block anyway. The result stays a pure function of the account records (re-applying the
+    sidecar reproduces it). Keeps the P-1 key order."""
+    rest = {k: v for k, v in block.items() if k != "home_account"}
+    accounts = rest.get("accounts")
+    learned = isinstance(accounts, dict) and any(
+        account in mvcommon.GP_ACCOUNTS and isinstance(r, dict) and r.get("verified_by") in mvcommon.GP_PROOF_LADDER
+        for account, r in accounts.items())
+    if learned:
+        rest["home_account"] = mvcommon.home_account(rest, manual_id, prefix_map, default)
+    return mvcommon._ordered(rest, mvcommon._BLOCK_KEYS)
+
+
+def _gp_fold_object(obj, raw, reds, capture, prefix_map, default):
+    """Fold one object's reduced records ({account: reduced}) and — capture=True — its capture facts into its
+    block. raw = the node's current `gphotos` value (_GP_ABSENT when there is none).
+    -> (the new block, or None to leave the node untouched; action create | replace | update;
+        [(account or None for block level, conflict code)])."""
+    sha256 = obj["sha256"]
+    if isinstance(raw, dict) and _gp_is_int(raw.get("v")) and raw["v"] > mvcommon.GPHOTOS_BLOCK_VERSION:
+        return None, None, [(None, "block-version")]  # written by newer code: never overwritten
+    trusted = mvcommon.block_trusted(raw, sha256)
+    action = "update" if trusted else ("create" if raw is _GP_ABSENT else "replace")
+    block = copy.deepcopy(raw) if trusted else None  # untrusted (P-2): ignored, and replaced below
+    problems = []
+    if capture and isinstance(obj.get("capture"), dict):
+        block, problem = _gp_fold_capture(block, sha256, obj["capture"])
+        if problem:
+            problems.append((None, problem))
+    if block is None:
+        block = mvcommon.new_gphotos_block(sha256)
+    for account in mvcommon.GP_ACCOUNTS:
+        if account in reds:
+            folded, _changed, problem = mvcommon.apply_learned(block, reds[account], account)
+            if problem:
+                problems.append((account, problem))
+            else:
+                block = folded
+    block = _gp_with_home(block, obj["manual_id"], prefix_map, default)
+    if trusted:
+        return (None if block == raw else block), action, problems
+    # A new block that learned nothing beyond its pin carries no fact: not worth a library write.
+    return (block if set(block) - {"v", "sha256"} else None), action, problems
+
+
+def _gp_flat(value, prefix=""):
+    """{dotted path: leaf value} of nested dicts (lists are leaves); {} for a non-dict top level."""
+    if not isinstance(value, dict):
+        return {prefix: value} if prefix else {}
+    out = {}
+    for key, val in value.items():
+        out.update(_gp_flat(val, f"{prefix}.{key}" if prefix else str(key)))
+    return out
+
+
+def _gp_diff(old, new):
+    """{dotted path: [old value, new value]} for every leaf that differs (None = absent): the new block's
+    paths in order, then the removed ones. A non-dict `old` (no block, a garbage value) diffs as empty."""
+    before, after = _gp_flat(old), _gp_flat(new)
+    paths = list(after) + [p for p in before if p not in after]
+    return {p: [before.get(p), after.get(p)] for p in paths if before.get(p) != after.get(p)}
+
+
+def _gp_resolve(library, manual_id):
+    """(real id, entry) for a record's manual_id — a multi_ep_alias resolves ONE hop to its primary
+    (_resolve_alias) — or (manual_id, None) when there is no such entry or the alias dangles."""
+    if not isinstance(library.get(manual_id), dict):
+        return manual_id, None
+    try:
+        real, entry = _resolve_alias(library, manual_id)
+    except (KeyError, TypeError):  # a malformed alias entry
+        return manual_id, None
+    if not isinstance(entry, dict) or entry.get("type") == "multi_ep_alias":
+        return manual_id, None
+    return real, entry
+
+
+def _gp_plan(library, reduced, named, capture, prefix_map, default):
+    """One pass over a freshly loaded library: which nodes get which block, and the per-pass report fields.
+    reduced = mvcommon.reduce_learned(...) {(account, sha256): reduced}; named = {(account, sha256): [every
+    manual_id the records gave]} (reduce keeps only the last one; aliases and duplicates need them all).
+    -> ([(node, new block)], {objects, changed, unchanged, confirmed, conflicts, orphans})."""
+    claims, owners = {}, {}
+    for key, red in reduced.items():
+        account, sha256 = key
+        owners[key] = []
+        for manual_id in named.get(key) or [red["manual_id"]]:
+            real, entry = _gp_resolve(library, manual_id)
+            if entry is None:
+                continue
+            if real not in owners[key]:
+                owners[key].append(real)
+            claims.setdefault(real, {}).setdefault(sha256, {})[account] = red
+    patches, changed, conflicts, matched = [], [], [], set()
+    objects = confirmed = 0
+    for real in sorted(claims):
+        wanted = claims[real]
+        for obj in mvcommon.iter_entry_objects(real, library[real]):
+            reds = wanted.get(obj["sha256"])
+            if not reds:
+                continue
+            objects += 1
+            matched.update((account, obj["sha256"]) for account in reds)
+            node = mvcommon.slot_owner(library, obj["slot"])
+            raw = node.get("gphotos", _GP_ABSENT)
+            block, action, problems = _gp_fold_object(obj, raw, reds, capture, prefix_map, default)
+            where = {"manual_id": real, "label": obj["label"], "kind": obj["kind"], "sha256": obj["sha256"]}
+            conflicts.extend(dict(where, account=account, code=code) for account, code in problems)
+            if block is None:
+                continue
+            patches.append((node, block))
+            confirmed += int(_gp_confirmed(block) and not (action == "update" and _gp_confirmed(raw)))
+            changed.append(dict(where, action=action, fields=_gp_diff(raw, block)))
+    orphans = sorted(({"account": account, "manual_id": reduced[(account, sha256)]["manual_id"],
+                       "sha256": sha256, "label": reduced[(account, sha256)].get("label"),
+                       "reason": "no-object" if owners[(account, sha256)] else "no-entry"}
+                      for account, sha256 in reduced if (account, sha256) not in matched),
+                     key=lambda o: (o["manual_id"], o["account"], o["sha256"]))
+    return patches, {"objects": objects, "changed": changed, "unchanged": objects - len(changed),
+                     "confirmed": confirmed, "conflicts": conflicts, "orphans": orphans}
+
+
+def _gp_csv_edits(path):
+    """How many rows of failed_objects.csv carry a user decision — valid or not: mvcommon.read_failed_csv's
+    notion of an edit — or None when it cannot be read as a failed-objects CSV."""
+    try:
+        rows, errors = mvcommon.read_failed_csv(path)
+    except (OSError, ValueError):
+        return None
+    return len(rows) + len(errors)
+
+
+def _gp_refresh_failed_csv(library, report):
+    """PLAN Step 6 "after every apply: export_failed_csv()": regenerate failed_objects.csv (P-18) from the
+    applied library so objects confirmed now drop off — when a failed list (or its CSV) exists. A CSV that
+    holds the user's edits (decision rows) — or that no longer reads as one — is left as is and reported as
+    failed_csv {path, kept: True, edited_rows}: regenerating empties the editable columns, and the post-fetch
+    merge must never wipe edits waiting to be imported (the importer regenerates it once it consumed them).
+    A write failure (e.g. the CSV is open in Excel) prints one warning line; the apply's result stands."""
+    csv_path = mvcommon.failed_csv_path()
+    if not (os.path.exists(mvcommon.failed_path()) or os.path.exists(csv_path)):
+        return
+    if os.path.exists(csv_path):
+        edits = _gp_csv_edits(csv_path)
+        if edits != 0:
+            report["failed_csv"] = {"path": csv_path, "kept": True, "edited_rows": edits}
+            return
+    try:
+        report["failed_csv"] = mvcommon.export_failed_csv(library)
+    except Exception as e:
+        report["warning"] = (f"⚠️  failed_objects.csv not refreshed ({_gp_line(e)}) — close it if it is "
+                             f"open (e.g. in Excel); the next apply refreshes it.")
+        print(report["warning"])
+
+
+def gphotos_apply(records, capture=True, dry_run=True):
+    """THE apply engine (PLAN Step 6): fold learned records (+ capture facts) into the library's `gphotos`
+    blocks — the only code that writes them. See the section comment above for the per-object rules.
+
+    records   iterable of learned records — complete P-10 lines (v, at, account, ...) exactly as
+              mvcommon.read_learned() returns them or a run's results.jsonl holds them; invalid ones are
+              counted and skipped. They are reduced TOGETHER (mvcommon.reduce_learned), so pass the whole
+              sidecar plus any not-yet-appended run records for the complete picture (merge_learned_gphotos
+              passes the sidecar). manual_id = the owning library id (the TITLE id for extras); an alias id
+              resolves to its primary.
+    capture   also fold each named object's capture facts (P-11).
+    dry_run   True (the default): compute the report and write NOTHING — no library, no sidecar, no CSV.
+              False: save the library ONCE when something changed (fingerprint-guarded, OD-2), then
+              regenerate failed_objects.csv (see _gp_refresh_failed_csv).
+
+    With no valid record the library is not even loaded. Never raises (a KeyboardInterrupt still
+    interrupts): a failure prints ONE warning line and returns status "error". Prints nothing else —
+    callers print their own summary from the report (and tell the user when failed_csv says `kept`).
+
+    Returns the report:
+      status      nothing-to-apply | dry-run | up-to-date | saved | aborted | error
+      dry_run     as given
+      records     valid records given · invalid: records skipped as not valid learned records
+      objects     library objects the records name that exist (manual_id + current SHA-256)
+      changed     [{manual_id, label, kind, sha256, action: create | replace | update,
+                    fields: {dotted path: [old, new]}}] — the objects whose block changes (dry run: would
+                    change; aborted / error: were NOT changed), in library order; None = absent; a
+                    replaced block is diffed against the old one
+      unchanged   named objects left as they are (up to date, nothing learned, or a block-version conflict)
+      confirmed   changed objects that gain their first confirmed account record
+      conflicts   [{manual_id, label, kind, sha256, account (None: block level), code}] — never applied;
+                  codes: block-version, capture-invalid, capture-content-mismatch, and apply_learned's
+                  (content-key-mismatch, dedup-key-mismatch, malformed-block, ...)
+      orphans     [{account, manual_id, sha256, label, reason: no-entry | no-object}] — record groups whose
+                  object no longer exists; never applied
+      saved       True when the library was written
+      attempts    load -> patch -> re-check attempts made (the OD-2 guard)
+      failed_csv  export_failed_csv's result, or {path, kept: True, edited_rows} when an edited CSV was
+                  left alone, or None
+      warning     the warning line printed, or None
+    """
+    report = {"status": None, "dry_run": bool(dry_run), "records": 0, "invalid": 0, "objects": 0,
+              "changed": [], "unchanged": 0, "confirmed": 0, "conflicts": [], "orphans": [],
+              "saved": False, "attempts": 0, "failed_csv": None, "warning": None}
+    saving = False
+    try:
+        valid = []
+        for record in records or ():
+            try:
+                valid.append(mvcommon._normalize_learned(record, fill=False))  # reduce_learned's validator
+            except ValueError:
+                report["invalid"] += 1
+        report["records"] = len(valid)
+        if not valid:
+            report["status"] = "nothing-to-apply"  # nothing to fold: the library is not even read
+            return report
+        reduced = mvcommon.reduce_learned(valid)
+        named = {}
+        for record in valid:
+            ids = named.setdefault((record["account"], record["sha256"]), [])
+            if record["manual_id"] not in ids:
+                ids.append(record["manual_id"])
+        import mainfetch  # P-4's routing constants — their single source; importing it has no side effects
+        prefix_map, default = mainfetch.ID_PREFIX_PROFILE, mainfetch.DEFAULT_PROFILE
+        for attempt in range(1, GPHOTOS_APPLY_ATTEMPTS + 1):
+            report["attempts"] = attempt
+            before = None if dry_run else _library_fingerprint()
+            library = load_library()  # fresh, immediately before patching
+            patches, found = _gp_plan(library, reduced, named, capture, prefix_map, default)
+            report.update(found)
+            if dry_run:
+                report["status"] = "dry-run"
+                return report
+            if patches:
+                if _library_fingerprint() != before:
+                    continue  # another process wrote the library after our load: reload + re-patch
+                for node, block in patches:
+                    node["gphotos"] = block
+                saving = True
+                save_library(library)
+                saving = False
+                report["saved"] = True
+            report["status"] = "saved" if patches else "up-to-date"
+            _gp_refresh_failed_csv(library, report)
+            return report
+        report.update(status="aborted", warning=f"⚠️  Google Photos identity not applied: {_GP_BUSY}.")
+        print(report["warning"])
+        return report
+    except (Exception, SystemExit) as e:  # SystemExit: load_library refuses a corrupt library file
+        what = "the library could not be loaded" if isinstance(e, SystemExit) else _gp_line(e)
+        tail = ("the library save was interrupted — re-run to finish it" if saving
+                else "the library was not changed")
+        report.update(status="error", warning=f"⚠️  Google Photos identity not applied ({what}) — {tail}.")
+        try:
+            print(report["warning"])
+        except Exception:
+            pass
+        return report
+
+
+def merge_learned_gphotos():
+    """The post-fetch merge (PLAN Step 6): fold EVERY learned record — the sidecars the fetch appends to — into
+    the library through the apply engine (capture facts included) and print one summary line when an object
+    changed or a conflict stays unapplied (plus one note when the library changed but an edited
+    failed_objects.csv was left alone). Idempotent: records already folded change nothing. With no learned
+    record it reads and writes nothing and prints nothing. Never raises. Returns the engine's report, or
+    None when nothing was applied."""
+    try:
+        records = mvcommon.read_learned()
+    except Exception as e:  # an unreadable sidecar must never look like an empty one
+        try:
+            print(f"⚠️  Google Photos identity not merged (learned records unreadable: {_gp_line(e)}).")
+        except Exception:
+            pass
+        return None
+    if not records:
+        return None
+    report = gphotos_apply(records, capture=True, dry_run=False)
+    try:
+        parts = []
+        if report["changed"]:
+            parts.append(f"{len(report['changed'])} object(s) updated in the library")
+        if report["confirmed"]:
+            parts.append(f"{report['confirmed']} newly confirmed in Google Photos")
+        if report["conflicts"]:
+            parts.append(f"{len(report['conflicts'])} conflict(s) not applied")
+        if parts and report["status"] in ("saved", "up-to-date"):
+            print("   > Google Photos identity: " + ", ".join(parts) + ".")
+        kept = report["failed_csv"]
+        if report["saved"] and isinstance(kept, dict) and kept.get("kept"):
+            if kept["edited_rows"] is None:
+                print("   > failed_objects.csv no longer reads as the failed list — left as is.")
+            else:
+                print(f"   > failed_objects.csv holds {kept['edited_rows']} edited row(s) — left as is "
+                      f"(it is regenerated once they are imported).")
+    except Exception:
+        pass
+    return report
+
+
 def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False, temp_dir=None):
     # This keeps main.py clean but still lets you run "main.py fetch"
     cmd = ["python", MAINFETCH_SCRIPT, "fetch", manual_id]
@@ -9720,6 +10126,12 @@ def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False, temp_d
             proc.wait()
     except Exception as e:
         print(f"❌ Error running fetch script: {e}")
+
+    # [IMP-C25] The child has exited: fold what it learned — the learned sidecar mainfetch appends to
+    # (P-10) — into the library through the apply engine (PLAN Step 6). The argv and the streaming above
+    # are unchanged; with nothing learned this reads and writes nothing and prints nothing; it never
+    # raises. A Ctrl+C during the fetch skips it (the records wait in the sidecar for the next merge).
+    merge_learned_gphotos()
 
 
 def cmd_fetch_restore(manual_id, episode_range=None, fetch_extras=False, temp_dir=None):

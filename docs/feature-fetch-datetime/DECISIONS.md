@@ -403,3 +403,18 @@ No other step of this plan uses candidates.
 - **Overrides:** "You add it" — the main session adds the X-Files `fetch_account_overrides` entries to the gitignored `mvconfig.json` (edit only that key; print only the entry count).
 - **P-12 downloads:** "Yes, as described" — destination-direct downloads into `restore\` (or tempdir) via `.mv_incoming`, SHA-256-verified files only, cleanup on next run, nothing in `~/Downloads`, `fetch_cleanup` for old leftovers.
 - **Limits:** "continue automatically when limits hits … and resume automatically."
+
+## §1d — User rulings 2026-10-01 (decision cards, first-hand in the main session)
+- **IMP-C28** (`cmd_push` treats any path containing `_parts` as a chunk → untagged upload + local master deleted):
+  "yes fix it" → hotfix branch `fix/imp_c28_push_parts_substring` from main (worktree `MediaVault-c28`), own PR,
+  Checkpoint 1 applies.
+- **🚦 RH test fetch**: "yes do that". Result: routing to `movies` worked (`[Account] Profile … 'movies'`); the search
+  found 0 because Selenium attached to Chrome 154's Gemini side panel (`gemini.google.com/glic` webview) instead of
+  the photos.google.com tab. A read-only probe on the Photos tab found the item under its exact name
+  (Mon 20 Dec 2021, 45:11 = stored taken_ms). RH re-runs after the fix below.
+- **IMP-C29** (fetch attaches to a non-Photos Chrome target): card answer "Own hotfix PR (Recommended)" → branch
+  `fix/imp_c29_fetch_attach_photos_tab` from main, own worktree `MediaVault-c29` and PR; fetch selects the
+  photos.google.com page (or opens one), never a webview; then re-run the X-Files RH fetch.
+- **Device HT74D0202839**: card answer "Extra movies phone" → scan BOTH `FA69H0300200` and `HT74D0202839` for the
+  movies category in the device cross-check. `DEVICE_ALIASES` push semantics stay single-serial (movies →
+  FA69H0300200); the extra serial is a device-check-only addition (implemented with Step 9).

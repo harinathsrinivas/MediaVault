@@ -71,7 +71,7 @@ registration/fix approval.
 | 6 | apply engine | done | fable (executor-fable) | 856fd0c | full 1765 · smoke 82 · disarm 29/29 | edited failed_objects.csv never overwritten (Step 9/14 regenerate after import); home_account stored only when learned; 3 attempts total |
 | 7 | crawler productization | done | fable (executor-fable, claude-fable-5-1) | 46d0532 | full 1615 · smoke 81 · test_gp_inventory 88 (30 → 88) · disarm/mutation probes 31/31 | tools/gp_inventory.py rpc-first (lcxiM + EzkLib + EWgK9e via gprpc) with auto dom fallback, crawl_lock + progress-driven heartbeat (60 s; yields on takeover), profile pre-flight + landing check, run log `<account>.runs.jsonl` (start / seen / "enumerated" / end), offline reader `inventory_state()` (Steps 9/13) + `--status`; `mainfetch.profile_preflight(account)` → None or a message; reads the real tv/movies/anime files unchanged (checked on a copy; D:\ fingerprint unchanged); rpc upgrades dom records once (+size/quality/exact name); ONE crawl at a time (R0/§M1: run accounts sequentially) |
 | R0 | prerequisites (user) | pending | user | | | others blocked until profile |
-| 8 | device cross-check | in_progress | | | | |
+| 8 | device cross-check | done | executor-fable (harness attribution Opus 5.5 = fable fallback for 8.a–8.c; session env claude-fable-5-1) | 8.a ca038b5 · 8.b b55b278 · 8.c 3bebc60 · feat: this step's final commit | full 1879 · smoke 82 · test_device_inventory 114 · disarm/mutation probes 23/23 (scratch copy) · live read-only check 2 phones | main.device_inventory(aliases) + classify_device_objects(library, inventory, objects=None), return shapes in their docstrings; 4th verdict `unchecked` (a configured phone not listed in full → Step 9 must never call such an object missing); a same-named file of other size never counts on_device; Step 13c must NOT widen the read-only allowlist `_dev_argv_readonly` (its pull/push/mv needs its own --apply-gated path); LIVE: HT74D0202839 attached but not in DEVICE_ALIASES, `movies` FA69H0300200 not attached → complete=False until the user decides (see operations log) |
 | 9 | map_photos | pending | | | | |
 | R1 | real mapping dry-run (user) | pending | user | | | |
 | 10 | fetch plumbing + routing | pending | | | | |
@@ -95,18 +95,12 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 ## Operations log (crawls, dry-runs, applies — redacted counts only)
 | When | Command | Result (counts) | Resume command |
 |---|---|---|---|
+| 2026-10-01 | Step 8 read-only live sanity check (scratch script: main.device_inventory + classify_device_objects over the real library; counts only; nothing written) | DEVICE_ALIASES as configured: movies FA69H0300200 not-connected · series FA75V0303405 ok, 431 files (420 sidecars, 11 media, 0 stat errors) · others skipped (placeholder) · 1 attached phone NOT in DEVICE_ALIASES: HT74D0202839 (28 files: 26 sidecars, 2 media) → complete=False; 2,108 uploaded objects: on_device 10 · freed 539 · absent 0 · unchecked 1,559. Both attached phones (ad-hoc aliases): complete → on_device 12 · freed 624 · absent 1,472 · unchecked 0; 12/12 copies size-agree; 32 adb calls (devices 1 · find 2 · stat 29), ~5–10 s | n/a — read-only, re-runnable |
 
 ## In-progress sub-state
-`Step 8 — dispatched 2026-09-29 to executor-fable (fable) · sub-tasks: [x] 8.a device_inventory(aliases) helper
-(read-only adb find + batched stat; placeholder serials skipped; offline/unauthorized reported) + its tests in
-tests/test_device_inventory.py (83 passed, smoke 82) (wip ca038b5) · [x] 8.b classify_device_objects: on_device /
-freed / absent / unchecked (all four categories, chunks, holders, extras; size from block > capture > tech_spec for
-whole objects) + its tests (113 passed, smoke 82) (wip b55b278) · [x] 8.c round-trip drift pin through the real
-cmd_push / push_title_extras on the mock device + swallowed-violation recorder + disarm probes 23/23 (scratch copy) +
-full 1879 · smoke 82 (wip commit "step 8.c") · final: PROGRESS row 8 + STATUS entry + feat commit ← next`
-`resumed 2026-10-01 by fable (usage-limit interruption during 8.b): uncommitted 8.b changes KEPT (main.py,
-tests/test_device_inventory.py) — checkpoint rule 3: the diff was coherent (classifier section + its tests, complete)
-and its targeted tests passed (113) before it was committed`
+`Step 8 complete (2026-10-01) — [x] 8.a ca038b5 · [x] 8.b b55b278 · [x] 8.c 3bebc60 · [x] final: row 8 + STATUS
+entry + the feat commit. Resumed once (usage-limit interruption during 8.b): the uncommitted 8.b diff was KEPT —
+checkpoint rule 3 (coherent: classifier section + its tests; its targeted tests passed, 113).`
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes
 alone; re-run it before treating a red full suite as a regression.
 Template — when a step is running (Execution protocol "In-step checkpoints"):

@@ -101,8 +101,9 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 (read-only adb find + batched stat; placeholder serials skipped; offline/unauthorized reported) + its tests in
 tests/test_device_inventory.py (83 passed, smoke 82) (wip ca038b5) · [x] 8.b classify_device_objects: on_device /
 freed / absent / unchecked (all four categories, chunks, holders, extras; size from block > capture > tech_spec for
-whole objects) + its tests (113 passed, smoke 82) (wip commit "step 8.b") · [ ] 8.c round-trip drift pin on the mock
-device + disarm probes + full + smoke ← next`
+whole objects) + its tests (113 passed, smoke 82) (wip b55b278) · [x] 8.c round-trip drift pin through the real
+cmd_push / push_title_extras on the mock device + swallowed-violation recorder + disarm probes 23/23 (scratch copy) +
+full 1879 · smoke 82 (wip commit "step 8.c") · final: PROGRESS row 8 + STATUS entry + feat commit ← next`
 `resumed 2026-10-01 by fable (usage-limit interruption during 8.b): uncommitted 8.b changes KEPT (main.py,
 tests/test_device_inventory.py) — checkpoint rule 3: the diff was coherent (classifier section + its tests, complete)
 and its targeted tests passed (113) before it was committed`

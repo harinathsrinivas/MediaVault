@@ -183,22 +183,34 @@ def result(code, stdout, stderr):
 class FakeAdb:
     """A fake `adb` over fake phones, installed as main.subprocess.run. Every call must pass assert_readonly
     (this module's allowlist), carry stdin=DEVNULL, capture its output and have a timeout; each is recorded in
-    .calls as (argv, kwargs). missing: no adb binary. devices: None | "fail" | "timeout" for `adb devices`.
+    .calls as (argv, kwargs). A call that breaks a rule raises AssertionError AND is recorded in .violations —
+    the helper's never-raise handlers could swallow the exception, the record they cannot (the fake_adb fixture
+    fails the test on any). missing: no adb binary. devices: None | "fail" | "timeout" for `adb devices`.
     banner: `adb devices` prints the old daemon-start lines on stdout first."""
 
     def __init__(self, phones=None, missing=False, devices=None, banner=False):
         self.phones, self.missing, self.devices_mode, self.banner = dict(phones or {}), missing, devices, banner
-        self.calls = []
+        self.calls, self.violations = [], []
 
-    def run(self, argv, *args, **kwargs):
-        argv = list(argv)
-        self.calls.append((argv, kwargs))
+    @staticmethod
+    def check(argv, args, kwargs):
+        """The rules for ONE adb call -> its device words; AssertionError when one is broken."""
         assert not args, f"positional subprocess.run arguments: {args!r}"
         words = assert_readonly(argv)
         assert kwargs.get("stdin") is subprocess.DEVNULL, f"adb must never read the caller's stdin: {argv!r}"
         assert kwargs.get("capture_output") is True, f"adb output must be captured: {argv!r}"
         assert isinstance(kwargs.get("timeout"), (int, float)) and kwargs["timeout"] > 0, f"no timeout: {argv!r}"
         assert not kwargs.get("check") and not kwargs.get("shell"), f"check/shell set: {argv!r}"
+        return words
+
+    def run(self, argv, *args, **kwargs):
+        argv = list(argv)
+        self.calls.append((argv, kwargs))
+        try:
+            words = self.check(argv, args, kwargs)
+        except AssertionError as e:
+            self.violations.append(str(e))
+            raise
         if self.missing:
             raise FileNotFoundError(2, "The system cannot find the file specified")
         if words == ["devices"]:
@@ -231,12 +243,19 @@ class FakeAdb:
 @pytest.fixture()
 def fake_adb(monkeypatch):
     """install(phones=..., **options) -> the FakeAdb now answering every subprocess.run (main's is the global
-    subprocess module, so nothing can reach a real adb)."""
+    subprocess module, so nothing can reach a real adb). At teardown the test fails if ANY call of any fake it
+    installed broke a rule — even when the code under test caught the AssertionError."""
+    installed = []
+
     def install(phones=None, **options):
         fake = FakeAdb(phones, **options)
+        installed.append(fake)
         monkeypatch.setattr(main.subprocess, "run", fake.run)
         return fake
-    return install
+
+    yield install
+    violations = [v for fake in installed for v in fake.violations]
+    assert violations == [], f"adb calls broke the read-only rules: {violations}"
 
 
 def listed(device):
@@ -853,3 +872,105 @@ def test_classification_is_pure(fake_adb, world, monkeypatch):
         for evidence in o["copies"] + o["sidecars"] + o["partials"]:
             evidence["path"] = "changed"
     assert inv == before_inv
+
+
+# ============================================================================ (d) round trip through the push code
+
+def _seed_parts(folder, names, payload):
+    """Pre-seed a _parts dir so cmd_push / push_one_extra take their RESUME branch (no mkvmerge, no ffmpeg);
+    every file gets its own size. Returns {name: sha256}."""
+    folder.mkdir(parents=True, exist_ok=True)
+    hashes = {}
+    for i, name in enumerate(names, 1):
+        data = payload * (100 * i)
+        (folder / name).write_bytes(data)
+        hashes[name] = hashlib.sha256(data).hexdigest()
+    return hashes
+
+
+def _split_leaf(mid, folder, filename, n_chunks, holder=False):
+    """A local_ready split leaf whose chunks (+ a FLAC holder) wait in <folder>/_parts: cmd_push resumes them."""
+    sid = mvcommon.generate_short_id(mid)
+    stem = os.path.splitext(filename)[0]
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / filename).write_bytes(b"MASTER-" + mid.encode() * 100)
+    chunk_names = [f"{stem} [{sid}].chunk.{i:03d}.mkv" for i in range(1, n_chunks + 1)]
+    holder_name = f"{stem} [{sid}].holder.mkv"
+    hashes = _seed_parts(folder / main.SPLIT_DIR_NAME, chunk_names + [holder_name] * holder, mid.encode())
+    split = {"is_split": True, "method": "SIZE_GB", "val": "4", "total_chunks": n_chunks,
+             "chunks": [{"filename": n, "hash": hashes[n]} for n in chunk_names]}
+    if holder:
+        split["carried_out_tracks"] = [{"track_id": 2, "codec": "A_FLAC", "language": "eng",
+                                        "holder_filename": holder_name, "holder_hash": hashes[holder_name]}]
+    return {"short_id": sid, "filename": filename, "folder_path": str(folder), "status": "local_ready",
+            "uploaded": False, "search_term": f"{stem} [{sid}].mkv", "hash": _sha(mid), "split_info": split}
+
+
+def _tree(root):
+    """{relative path: (size, mtime_ns, sha256)} of every file under `root`."""
+    return {str(p.relative_to(root)): (p.stat().st_size, p.stat().st_mtime_ns, hashlib.sha256(p.read_bytes()).hexdigest())
+            for p in root.rglob("*") if p.is_file()}
+
+
+def test_round_trip_through_the_real_push_code_on_the_mock_device(sandbox_extras, mock_device, make_video,
+                                                                  stub_tech_specs, fake_adb):
+    """Push objects of all four categories with the REAL cmd_push / push_title_extras onto the mock device, then
+    list it read-only: every object on_device (sizes agree with the captures); after "Free up space" (media
+    gone, JSON sidecars kept) every object freed — so the sidecar rule matches what write_remote_mvmeta really
+    pushed; with the sidecars gone too, absent. The listing never changes the phone."""
+    media_root = sandbox_extras["sandbox"]["local_root"]
+    title_id, (bts, trailer) = sandbox_extras["title_id"], sandbox_extras["items"]
+    tv_id, oth_id, ani_id = "tv-en-2015-rtshow-s01e01", "oth-en-2024-rtmatch-e01", "ani-ja-2006-rtanime01"
+    trailer_chunks = [f"Trailer [{trailer['short_id']}].chunk.{i:03d}.mkv" for i in (1, 2)]
+    trailer_hashes = _seed_parts(sandbox_extras["extras_dir"] / main.SPLIT_DIR_NAME / trailer["short_id"],
+                                 trailer_chunks, b"EXTRA-CHUNK")
+    library = mvcommon.load_library()
+    library[title_id]["extras"]["groups"]["Specials"]["items"][1]["split_info"] = {
+        "is_split": True, "method": "COUNT", "val": "2", "total_chunks": 2,
+        "chunks": [{"filename": n, "hash": trailer_hashes[n]} for n in trailer_chunks]}
+    library[tv_id] = _split_leaf(tv_id, media_root / "Series" / "RT Show" / "Season 01", "RT.Show.S01E01.mkv", 2,
+                                 holder=True)
+    library[oth_id] = _split_leaf(oth_id, media_root / "Sports" / "RT Match", "RT.Match.2024.mkv", 3)
+    mvcommon.save_library(library)
+    anime_dir = media_root / "Anime" / "RT Anime"
+    anime_dir.mkdir(parents=True)
+    anime_path, _ = make_video(anime_dir / "RT Anime - 01 [1080p].mkv", marker=b"RT-ANIME\n")
+    assert main.cmd_prep(ani_id, anime_path) is True
+    for mid in (title_id, tv_id, oth_id, ani_id):
+        assert main.cmd_push(mid) is True
+    assert main.push_title_extras(mvcommon.load_library(), title_id, ("NONE", None)) is True
+
+    library = mvcommon.load_library()
+    objects = list(mvcommon.iter_uploaded_objects(library))
+    assert {o["category"] for o in objects} == {"movies", "tv", "anime", "others"}
+    assert sorted(o["kind"] for o in objects) == sorted(
+        ["whole", "extra_whole", "extra_chunk", "extra_chunk", "chunk", "chunk", "holder",
+         "chunk", "chunk", "chunk", "whole"])
+    phone = mock_device / "sdcard" / "Media"
+    fake = fake_adb({MOVIES: Phone(tree=str(phone))})
+    before = _tree(phone)
+
+    def verdicts():
+        res = main.classify_device_objects(library, main.device_inventory({"movies": MOVIES}))
+        assert res["complete"] is True and len(res["objects"]) == len(objects)
+        return res
+
+    res = verdicts()
+    assert {o["state"] for o in res["objects"]} == {"on_device"}
+    for o in res["objects"]:
+        assert o["size_source"] == "capture" and o["expected_size"] > 0
+        assert [(c["name_match"], c["size_match"]) for c in o["copies"]] == [("exact", True)]
+        assert len(o["sidecars"]) == 1 and o["partials"] == []
+    assert _tree(phone) == before                                 # listing the phone changed nothing on it
+
+    for p in [p for p in phone.rglob("*") if p.is_file() and not p.name.endswith(main.MVMETA_SUFFIX)]:
+        p.unlink()                                                # "Free up space": the media goes
+    res = verdicts()
+    assert {o["state"] for o in res["objects"]} == {"freed"}
+    assert {s["name_match"] for o in res["objects"] for s in o["sidecars"]} == {"exact"}
+    assert len({s["path"] for o in res["objects"] for s in o["sidecars"]}) == 6   # 4 entries + 2 extras items
+
+    for p in list(phone.rglob("*" + main.MVMETA_SUFFIX)):
+        p.unlink()
+    assert {o["state"] for o in verdicts()["objects"]} == {"absent"}
+    assert {assert_readonly(argv)[0] for argv in fake.argvs()} == {"devices", "find", "stat"}

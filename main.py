@@ -10567,20 +10567,18 @@ def _dev_sidecar_name(uploaded_name, short_id):
 
 def _dev_expected_size(library, obj):
     """(bytes, source) the object's upload must have: the trusted block's size_bytes, else the capture's (both
-    describe exactly these bytes), else — a WHOLE file or whole extras item only — its owner's
-    tech_spec.size_bytes (prep and the extras scan stat the very file they hash). (None, None) when unknown: a
-    split entry's tech_spec sizes the whole file, never a chunk."""
+    describe exactly these bytes), else the tech_spec.size_bytes of the object's OWN node — its slot owner (prep
+    and the extras scan stat the very file they hash). Only a whole file (the leaf) and a whole extras item (the
+    item) have one: a chunk's or holder's own record carries none, and its entry's tech_spec sizes the whole
+    file, never a chunk. (None, None) when unknown."""
     for source, facts in (("block", obj.get("block")), ("capture", obj.get("capture"))):
         size = facts.get("size_bytes") if isinstance(facts, dict) else None
         if _gp_is_int(size) and size > 0:
             return size, source
-    if obj.get("kind") in ("whole", "extra_whole"):
-        owner = mvcommon.slot_owner(library, obj.get("slot"))
-        tech = owner.get("tech_spec") if isinstance(owner, dict) else None
-        size = tech.get("size_bytes") if isinstance(tech, dict) else None
-        if _gp_is_int(size) and size > 0:
-            return size, "tech_spec"
-    return None, None
+    owner = mvcommon.slot_owner(library, obj.get("slot"))
+    tech = owner.get("tech_spec") if isinstance(owner, dict) else None
+    size = tech.get("size_bytes") if isinstance(tech, dict) else None
+    return (size, "tech_spec") if _gp_is_int(size) and size > 0 else (None, None)
 
 
 def classify_device_objects(library, inventory, objects=None):
@@ -10597,7 +10595,8 @@ def classify_device_objects(library, inventory, objects=None):
                  side): the object is still on a phone, awaiting (or already past) its backup
       freed      no such file, but the `.mvmeta.json` sidecar pushed with it is there: it reached that phone and
                  its media is gone from it ("Free up space" after a backup, or a manual delete). If the cloud
-                 lacks it too it is possibly LOST (Step 9: missing-after-backup)
+                 lacks it too it is possibly LOST (Step 9: missing-after-backup). Positive evidence, so it stands
+                 even when another phone was not listed (only a second push to that phone could change it)
       absent     nothing on any phone — and every configured phone was listed in full (inventory complete)
       unchecked  nothing found, but "absent" cannot be claimed: a configured phone was not listed in full
                  (unplugged, offline, unauthorized, partial ...) or none is configured, or the object has no

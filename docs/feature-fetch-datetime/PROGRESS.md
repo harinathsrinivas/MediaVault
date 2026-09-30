@@ -99,9 +99,13 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 ## In-progress sub-state
 `Step 8 — dispatched 2026-09-29 to executor-fable (fable) · sub-tasks: [x] 8.a device_inventory(aliases) helper
 (read-only adb find + batched stat; placeholder serials skipped; offline/unauthorized reported) + its tests in
-tests/test_device_inventory.py (83 passed, smoke 82) (wip commit "step 8.a") · [ ] 8.b per-object classification
-on_device / freed / absent (all four categories, chunks, holders, extras) + its tests ← next · [ ] 8.c round-trip
-drift pin on the mock device + disarm probes + full + smoke`
+tests/test_device_inventory.py (83 passed, smoke 82) (wip ca038b5) · [x] 8.b classify_device_objects: on_device /
+freed / absent / unchecked (all four categories, chunks, holders, extras; size from block > capture > tech_spec for
+whole objects) + its tests (113 passed, smoke 82) (wip commit "step 8.b") · [ ] 8.c round-trip drift pin on the mock
+device + disarm probes + full + smoke ← next`
+`resumed 2026-10-01 by fable (usage-limit interruption during 8.b): uncommitted 8.b changes KEPT (main.py,
+tests/test_device_inventory.py) — checkpoint rule 3: the diff was coherent (classifier section + its tests, complete)
+and its targeted tests passed (113) before it was committed`
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes
 alone; re-run it before treating a red full suite as a regression.
 Template — when a step is running (Execution protocol "In-step checkpoints"):

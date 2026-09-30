@@ -16,6 +16,9 @@ The fake adb splits the command it is given the way the device's POSIX shell doe
 the file (and an operator outside quotes fails the test) instead of passing silently. Synthetic data only: no
 real adb, phone, C:\\Media or library file.
 """
+import copy
+import hashlib
+import json
 import os
 import re
 import subprocess
@@ -24,6 +27,7 @@ import types
 import pytest
 
 import main
+import mvcommon
 
 MOVIES, SERIES = "FAKEMOV0001", "FAKESER0002"
 ALIASES = {"movies": MOVIES, "series": SERIES, "others": "<NEW_PIXEL_SERIAL>"}
@@ -521,3 +525,331 @@ def test_a_refused_argv_never_runs(monkeypatch):
 def test_list_roots_follow_remote_root():
     assert main.DEVICE_LIST_ROOTS == (main.REMOTE_ROOT + "/", "/storage/emulated/0/Media/") == ROOTS
     assert main.DEVICE_STAT_FORMAT == STAT_FORMAT
+
+
+# ============================================================================ (c) the per-object verdict
+
+MOVIE = "mov-en-2020-devmovie"           # whole leaf + extras: a whole item and a split item
+SPLITMOVIE = "mov-en-2021-devsplit"      # split leaf: 3 chunks + a FLAC holder
+OTHER = "oth-en-2024-devfinal-e01"       # split leaf: 2 chunks (their sizes known from a block / a capture)
+SEASON = "tv-en-2015-devshow-s02"        # season_map with a whole extras item
+EP_WHOLE = "tv-en-2015-devshow-s02e02"
+EP_SPLIT = "tv-en-2015-devshow-s02e03"   # combined-episode file, split
+EP_ALIAS = "tv-en-2015-devshow-s02e04"   # multi_ep_alias -> EP_SPLIT
+ANIME = "ani-ja-2006-devanime07"
+WHOLE_SIZE = 4_000_000_000               # a split entry's tech_spec sizes the WHOLE file — never a chunk
+
+
+def _sha(tag):
+    return hashlib.sha256(tag.encode()).hexdigest()
+
+
+def _leaf(mid, folder, filename, size=None, chunks=0, holder=False):
+    sid = mvcommon.generate_short_id(mid)
+    stem, ext = os.path.splitext(filename)
+    entry = {"short_id": sid, "filename": filename, "folder_path": str(folder), "status": "archived",
+             "uploaded": True, "search_term": f"{stem} [{sid}]{ext}", "hash": _sha(mid)}
+    if size is not None:
+        entry["tech_spec"] = {"resolution": "1080p", "size_bytes": size}
+    if chunks:
+        entry["split_info"] = {"is_split": True, "method": "SIZE_GB", "val": "4", "total_chunks": chunks,
+                               "chunks": [{"filename": f"{stem} [{sid}].chunk.{i:03d}.mkv",
+                                           "hash": _sha(f"{mid}#{i}")} for i in range(1, chunks + 1)]}
+        if holder:
+            entry["split_info"]["carried_out_tracks"] = [{
+                "track_id": 2, "codec": "A_FLAC", "language": "eng",
+                "holder_filename": f"{stem} [{sid}].holder.mkv", "holder_hash": _sha(f"{mid}#holder")}]
+    return entry
+
+
+def _extra(title_id, group_rel, sub_rel, size=None, chunks=0):
+    filename = sub_rel.split("/")[-1]
+    sid = mvcommon.generate_short_id(f"{title_id}::{group_rel}/{sub_rel}")
+    stem, ext = os.path.splitext(filename)
+    item = {"filename": filename, "sub_rel": sub_rel, "short_id": sid, "hash": _sha(f"{title_id}::{sub_rel}"),
+            "status": "archived", "uploaded": True, "search_term": f"{stem} [{sid}]{ext}"}
+    if size is not None:
+        item["tech_spec"] = {"size_bytes": size}
+    if chunks:
+        item["split_info"] = {"is_split": True, "method": "COUNT", "val": str(chunks), "total_chunks": chunks,
+                              "chunks": [{"filename": f"{stem} [{sid}].chunk.{i:03d}.mkv", "hash": _sha(f"{sid}#{i}")}
+                                         for i in range(1, chunks + 1)]}
+    return item
+
+
+def sidecar_of(filename, short_id):
+    """The sidecar name write_remote_mvmeta gives an entry / extras item — its own rule, restated here."""
+    return f"{os.path.splitext(filename)[0]} [{short_id}]{main.MVMETA_SUFFIX}"
+
+
+def names(lib):
+    """{(manual_id, label): uploaded name} of every uploaded object."""
+    return {(o["manual_id"], o["label"]): o["uploaded_name"] for o in mvcommon.iter_uploaded_objects(lib)}
+
+
+@pytest.fixture()
+def world(tmp_path):
+    """An in-memory library over all four prefixes (folders under tmp_path): chunks, a FLAC holder, extras whole
+    + split, a season_map with extras, a multi_ep_alias; OTHER's chunk 1 has a trusted block with its size,
+    chunk 2 a push capture with its size."""
+    root = tmp_path / "Media"
+    other_dir, season_dir = root / "Sports" / "Dev Final", root / "Series" / "Dev Show" / "Season 02"
+    lib = {
+        MOVIE: {**_leaf(MOVIE, root / "Movies" / "Dev Movie (2020)", "Dev.Movie.2020.mkv", size=2_000_000),
+                "extras": {"groups": {"Specials": {"added_date": "2026-09-01", "items": [
+                    _extra(MOVIE, "Specials", "BTS.mkv", size=5000),
+                    _extra(MOVIE, "Specials", "Bonus/Making Of.mkv", size=9000, chunks=2)]}}}},
+        SPLITMOVIE: _leaf(SPLITMOVIE, root / "Movies" / "Dev Split (2021)", "Dev.Split.2021.mkv", size=WHOLE_SIZE,
+                          chunks=3, holder=True),
+        OTHER: _leaf(OTHER, other_dir, "Dev.Final.2024.mkv", size=WHOLE_SIZE, chunks=2),
+        SEASON: {"type": "season_map", "folder_path": str(season_dir), "total_episodes": 3,
+                 "children": [EP_WHOLE, EP_SPLIT, EP_ALIAS],
+                 "extras": {"groups": {"Specials": {"added_date": "2026-09-01", "items": [
+                     _extra(SEASON, "Specials", "Recap.mkv")]}}}},
+        EP_WHOLE: {**_leaf(EP_WHOLE, season_dir, "Dev.Show.S02E02.mkv", size=1_500_000), "parent_id": SEASON},
+        EP_SPLIT: {**_leaf(EP_SPLIT, season_dir, "Dev.Show.S02E03E04.mkv", chunks=2), "parent_id": SEASON},
+        EP_ALIAS: {"type": "multi_ep_alias", "alias_of": EP_SPLIT, "parent_id": SEASON},
+        ANIME: _leaf(ANIME, root / "Anime" / "Dev Anime", "Dev Anime - 07 [1080p].mkv", size=700_000),
+    }
+    chunks = lib[OTHER]["split_info"]["chunks"]
+    chunks[0]["gphotos"] = mvcommon.new_gphotos_block(chunks[0]["hash"], size_bytes=555)
+    other_dir.mkdir(parents=True)
+    capture = {"capture_version": 2, "manual_id": OTHER, "short_id": lib[OTHER]["short_id"], "pushes": [
+        {"captured_at": "2026-09-20T10:00:00Z", "device_id": MOVIES, "objects": [
+            {"role": "chunk", "index": 2, "sha256": chunks[1]["hash"], "uploaded_name": chunks[1]["filename"],
+             "local_name": chunks[1]["filename"], "size_bytes": 777}]}]}
+    (other_dir / f"{lib[OTHER]['short_id']}.gpcapture.json").write_text(json.dumps(capture), encoding="utf-8")
+    return lib
+
+
+def _scenario_phones(lib):
+    """(movies phone files, series phone files) for the scenario whose verdicts are EXPECTED."""
+    n = names(lib)
+    bts, making = lib[MOVIE]["extras"]["groups"]["Specials"]["items"]
+    movies_phone = {
+        "Movies/Dev Movie (2020)/" + n[(MOVIE, "whole")]: (2_000_000, 1),                      # size agrees
+        "Movies/Dev Movie (2020)/Specials/" + n[(MOVIE, "extra Specials/BTS.mkv")]: (4999, 2),  # other bytes
+        "Movies/Dev Movie (2020)/Specials/" + sidecar_of("BTS.mkv", bts["short_id"]): (300, 3),
+        "Movies/Dev Movie (2020)/Specials/Bonus/" + n[(MOVIE, "extra Specials/Bonus/Making Of.mkv chunk 1/2")]:
+            (4500, 4),
+        "Movies/Dev Movie (2020)/Specials/Bonus/" + sidecar_of("Making Of.mkv", making["short_id"]): (300, 5),
+        "Movies/Dev Split (2021)/" + n[(SPLITMOVIE, "chunk 1/3")]: (123, 6),
+        "Movies/Dev Split (2021)/" + sidecar_of(lib[SPLITMOVIE]["filename"], lib[SPLITMOVIE]["short_id"]): (300, 7),
+        "Sports/Dev Final/" + n[(OTHER, "chunk 1/2")]: (555, 8),                               # block: agrees
+        "Sports/Dev Final/" + n[(OTHER, "chunk 2/2")]: (778, 9),                               # capture: 777
+    }
+    series_phone = {
+        "Series/Dev Show/Season 02/Specials/" + n[(SEASON, "extra Specials/Recap.mkv")]: (42, 10),
+        "Anime/Dev Anime/" + sidecar_of(lib[ANIME]["filename"], lib[ANIME]["short_id"]): (300, 11),
+        "Series/Dev Show/Season 02/" + n[(EP_SPLIT, "chunk 1/2")] + main.PARTIAL_SUFFIX: (10, 12),
+    }
+    return movies_phone, series_phone
+
+
+EXPECTED = {
+    (ANIME, "whole"): "freed",                                      # only its sidecar, on the series phone
+    (MOVIE, "whole"): "on_device",
+    (MOVIE, "extra Specials/BTS.mkv"): "freed",                     # a same-named file of OTHER bytes + sidecar
+    (MOVIE, "extra Specials/Bonus/Making Of.mkv chunk 1/2"): "on_device",
+    (MOVIE, "extra Specials/Bonus/Making Of.mkv chunk 2/2"): "freed",
+    (SPLITMOVIE, "chunk 1/3"): "on_device",                         # tech_spec (whole-file size) never compared
+    (SPLITMOVIE, "chunk 2/3"): "freed",
+    (SPLITMOVIE, "chunk 3/3"): "freed",
+    (SPLITMOVIE, "holder"): "freed",
+    (OTHER, "chunk 1/2"): "on_device",
+    (OTHER, "chunk 2/2"): "absent",                                 # other bytes, no sidecar
+    (SEASON, "extra Specials/Recap.mkv"): "on_device",
+    (EP_WHOLE, "whole"): "absent",
+    (EP_SPLIT, "chunk 1/2"): "absent",                              # only a .partial leftover
+    (EP_SPLIT, "chunk 2/2"): "absent",
+}
+
+
+def _classify(fake_adb, lib, movies=None, series=None, aliases=ALIASES, objects=None):
+    movies_phone, series_phone = _scenario_phones(lib)
+    fake_adb({MOVIES: movies or Phone(files=movies_phone), SERIES: series or Phone(files=series_phone)})
+    return main.classify_device_objects(lib, main.device_inventory(aliases), objects=objects)
+
+
+def _states(result):
+    return {(o["manual_id"], o["label"]): o["state"] for o in result["objects"]}
+
+
+def test_every_object_of_all_four_categories_gets_its_verdict(fake_adb, world):
+    res = _classify(fake_adb, world)
+    assert _states(res) == EXPECTED
+    assert list(_states(res)) == [(o["manual_id"], o["label"]) for o in mvcommon.iter_uploaded_objects(world)]
+    assert res["counts"] == {"on_device": 5, "freed": 6, "absent": 4, "unchecked": 0}
+    assert (res["complete"], res["incomplete_devices"]) == (True, {})
+    assert {o["category"] for o in res["objects"]} == {"movies", "tv", "anime", "others"}
+    assert {o["kind"] for o in res["objects"]} == {"whole", "chunk", "holder", "extra_whole", "extra_chunk"}
+    assert tuple(res["counts"]) == main.DEVICE_STATES == ("on_device", "freed", "absent", "unchecked")
+
+
+def test_the_evidence_names_phone_path_size_and_sidecar(fake_adb, world):
+    by = {(o["manual_id"], o["label"]): o for o in _classify(fake_adb, world)["objects"]}
+    for o in by.values():
+        assert set(o) == {"manual_id", "category", "kind", "index", "label", "sha256", "uploaded_name", "slot",
+                          "state", "expected_size", "size_source", "copies", "sidecars", "partials"}
+    whole = by[(MOVIE, "whole")]
+    (found,) = whole["copies"]
+    assert found == {"alias": "movies", "serial": MOVIES, "size": 2_000_000, "mtime": 1, "name_match": "exact",
+                     "size_match": True, "path": "/sdcard/Media/Movies/Dev Movie (2020)/" + whole["uploaded_name"]}
+    assert (whole["expected_size"], whole["size_source"], whole["sha256"]) == (2_000_000, "tech_spec",
+                                                                              world[MOVIE]["hash"])
+    bts = by[(MOVIE, "extra Specials/BTS.mkv")]
+    assert [c["size_match"] for c in bts["copies"]] == [False] and len(bts["sidecars"]) == 1
+    assert (bts["expected_size"], bts["size_source"]) == (5000, "tech_spec")
+    chunk = by[(SPLITMOVIE, "chunk 1/3")]
+    assert (chunk["expected_size"], chunk["size_source"], chunk["copies"][0]["size_match"]) == (None, None, None)
+    holder = by[(SPLITMOVIE, "holder")]
+    assert holder["sidecars"][0]["path"].endswith(
+        "/" + sidecar_of(world[SPLITMOVIE]["filename"], world[SPLITMOVIE]["short_id"]))
+    assert all(by[(SPLITMOVIE, f"chunk {i}/3")]["sidecars"] == holder["sidecars"] for i in (1, 2, 3))
+    c1, c2 = by[(OTHER, "chunk 1/2")], by[(OTHER, "chunk 2/2")]
+    assert (c1["expected_size"], c1["size_source"], c1["copies"][0]["size_match"]) == (555, "block", True)
+    assert (c2["expected_size"], c2["size_source"], c2["copies"][0]["size_match"]) == (777, "capture", False)
+    episode = by[(EP_SPLIT, "chunk 1/2")]
+    assert episode["copies"] == [] and episode["sidecars"] == []
+    assert [(p["alias"], p["path"].endswith(episode["uploaded_name"] + main.PARTIAL_SUFFIX))
+            for p in episode["partials"]] == [("series", True)]
+    anime = by[(ANIME, "whole")]
+    assert [(s["alias"], s["mtime"], s["name_match"]) for s in anime["sidecars"]] == [("series", 11, "exact")]
+    assert by[(OTHER, "chunk 1/2")]["slot"] == (OTHER, "split_info", "chunks", 0)
+
+
+@pytest.mark.parametrize("state", [None, "offline", "unauthorized"], ids=["unplugged", "offline", "unauthorized"])
+def test_an_incomplete_device_check_never_claims_absent(fake_adb, world, state):
+    res = _classify(fake_adb, world, series=Phone(state=state, files=_scenario_phones(world)[1]))
+    expected = {key: ("unchecked" if state == "absent" else state) for key, state in EXPECTED.items()}
+    expected[(ANIME, "whole")] = "unchecked"                   # its sidecar is on the phone that was not listed
+    expected[(SEASON, "extra Specials/Recap.mkv")] = "unchecked"
+    assert _states(res) == expected
+    assert res["complete"] is False and list(res["incomplete_devices"]) == ["series"]
+    assert res["counts"]["absent"] == 0
+
+
+def test_a_partially_listed_phone_keeps_its_evidence_but_blocks_absent(fake_adb, world):
+    res = _classify(fake_adb, world, series=Phone(files=_scenario_phones(world)[1], find={ROOTS[0]: "partial"}))
+    assert _states(res) == {key: ("unchecked" if state == "absent" else state) for key, state in EXPECTED.items()}
+    assert res["incomplete_devices"] == {"series": "partial"}
+
+
+def test_without_a_real_phone_nothing_can_be_absent(fake_adb, world):
+    fake = fake_adb({})
+    res = main.classify_device_objects(world, main.device_inventory({"others": "<NEW_PIXEL_SERIAL>"}))
+    assert fake.calls == [] and res["complete"] is False and res["incomplete_devices"] == {}
+    assert res["counts"] == {"on_device": 0, "freed": 0, "absent": 0, "unchecked": len(EXPECTED)}
+
+
+def test_a_copy_on_any_phone_outranks_a_sidecar_on_another(fake_adb, world):
+    anime = world[ANIME]
+    fake_adb({MOVIES: Phone(files={"Anime/" + sidecar_of(anime["filename"], anime["short_id"]): (300, 1)}),
+              SERIES: Phone(files={"Anime/" + names(world)[(ANIME, "whole")]: (700_000, 2)})})
+    res = main.classify_device_objects(world, main.device_inventory(ALIASES),
+                                       objects=list(mvcommon.iter_uploaded_objects(world, [ANIME])))
+    (obj,) = res["objects"]
+    assert obj["state"] == "on_device"
+    assert [(c["alias"], c["size_match"]) for c in obj["copies"]] == [("series", True)]
+    assert [s["alias"] for s in obj["sidecars"]] == ["movies"]
+
+
+def test_a_normalized_name_match_counts_and_is_flagged_but_exact_wins(fake_adb, world):
+    name = names(world)[(EP_WHOLE, "whole")]
+    mangled = name.lower().replace(" [", "  [")                 # case + a doubled space (PLAN P-6)
+    only = list(mvcommon.iter_uploaded_objects(world, [EP_WHOLE]))
+    fake_adb({SERIES: Phone(files={"Series/" + mangled: (1_500_000, 1)})})
+    (obj,) = main.classify_device_objects(world, main.device_inventory({"series": SERIES}), objects=only)["objects"]
+    assert obj["state"] == "on_device"
+    assert [(c["name_match"], c["size_match"]) for c in obj["copies"]] == [("normalized", True)]
+    fake_adb({SERIES: Phone(files={"Series/" + mangled: (1, 1), "Series/b/" + name: (1_500_000, 2)})})
+    (obj,) = main.classify_device_objects(world, main.device_inventory({"series": SERIES}), objects=only)["objects"]
+    assert [(c["name_match"], c["path"]) for c in obj["copies"]] == [("exact", "/sdcard/Media/Series/b/" + name)]
+
+
+def test_objects_without_an_uploaded_name_or_without_their_short_id_tag(world):
+    ep = world[EP_WHOLE]
+    untagged = ep["filename"]                                  # uploaded under the plain name (IMP-C27 (b))
+    inventory = {"complete": True, "unconfigured": [], "devices": {"series": {
+        "alias": "series", "serial": SERIES, "status": "ok", "detail": None, "root": ROOTS[0], "stat_errors": 0,
+        "files": [{"path": ROOTS[0] + "Series/" + sidecar_of(ep["filename"], ep["short_id"]),
+                   "name": sidecar_of(ep["filename"], ep["short_id"]), "size": 300, "mtime": 1}]}}}
+    (obj,) = mvcommon.iter_uploaded_objects(world, [EP_WHOLE])
+    res = main.classify_device_objects(world, inventory, objects=[dict(obj, uploaded_name=None),
+                                                                  dict(obj, uploaded_name=untagged), obj])
+    assert [o["state"] for o in res["objects"]] == ["unchecked", "absent", "freed"]
+    assert res["objects"][1]["sidecars"] == []                 # an untagged name has no sidecar to find
+    inventory["devices"]["series"]["files"].append(
+        {"path": ROOTS[0] + "Series/" + untagged, "name": untagged, "size": 1_500_000, "mtime": 2})
+    res = main.classify_device_objects(world, inventory, objects=[dict(obj, uploaded_name=untagged)])
+    assert [(o["state"], o["copies"][0]["size_match"]) for o in res["objects"]] == [("on_device", True)]
+
+
+@pytest.mark.parametrize("uploaded_name,short_id,expected", [
+    ("Show.S01E02 [a1b2c3].mkv", "a1b2c3", "Show.S01E02 [a1b2c3].mvmeta.json"),
+    ("Movie.2019 [d4e5f6].chunk.002.mkv", "d4e5f6", "Movie.2019 [d4e5f6].mvmeta.json"),
+    ("Movie.2019 [d4e5f6].holder.mkv", "d4e5f6", "Movie.2019 [d4e5f6].mvmeta.json"),
+    ("Clip.mkv [0a0b0c].mkv", "0a0b0c", "Clip.mkv [0a0b0c].mvmeta.json"),      # the real double extension
+    ("NoExtension [0a0b0c]", "0a0b0c", "NoExtension [0a0b0c].mvmeta.json"),
+    ("X [abc123] [abc123].mkv", "abc123", "X [abc123] [abc123].mvmeta.json"),  # the LAST tag is the push's
+    ("Death Note - 07 [1080p] [abc123].mkv", "abc123", "Death Note - 07 [1080p] [abc123].mvmeta.json"),
+    ("Show.S01E02.mkv", "a1b2c3", None),                                       # untagged
+    ("Show [ffffff].mkv", "a1b2c3", None),                                     # another object's tag
+    (None, "a1b2c3", None), ("x [a1b2c3].mkv", None, None), ("x [a1b2c3].mkv", "", None)])
+def test_sidecar_name_rule(uploaded_name, short_id, expected):
+    assert main._dev_sidecar_name(uploaded_name, short_id) == expected
+
+
+def _pushed_sidecar(monkeypatch, entry, remote_dir="/sdcard/Media/X"):
+    """The sidecar name the REAL write_remote_mvmeta pushes for `entry` (adb recorded, nothing run)."""
+    pushed = []
+    monkeypatch.setattr(main.subprocess, "run",
+                        lambda argv, **kw: pushed.append(list(argv)) or types.SimpleNamespace(returncode=0))
+    assert main.write_remote_mvmeta(["adb", "-s", MOVIES], remote_dir, "label", entry) is True
+    (argv,) = pushed
+    return argv[-1].rsplit("/", 1)[1]
+
+
+@pytest.mark.parametrize("mid", [MOVIE, SPLITMOVIE, OTHER, EP_WHOLE, ANIME])
+def test_drift_pin_sidecar_rule_equals_write_remote_mvmeta_for_leaves(world, monkeypatch, mid):
+    sidecar = _pushed_sidecar(monkeypatch, world[mid])
+    leaf = [o for o in mvcommon.iter_entry_objects(mid, world[mid]) if o["kind"] in ("whole", "chunk", "holder")]
+    assert leaf and {main._dev_sidecar_name(o["uploaded_name"], o["short_id"]) for o in leaf} == {sidecar}
+
+
+def test_drift_pin_sidecar_rule_equals_write_remote_mvmeta_for_extras(world, monkeypatch):
+    for title in (MOVIE, SEASON):
+        for item in world[title]["extras"]["groups"]["Specials"]["items"]:
+            sidecar = _pushed_sidecar(monkeypatch, dict(item, folder_path="x"))   # push_one_extra's meta_entry
+            objs = [o for o in mvcommon.iter_entry_objects(title, world[title]) if o["short_id"] == item["short_id"]]
+            assert objs and {main._dev_sidecar_name(o["uploaded_name"], o["short_id"]) for o in objs} == {sidecar}
+
+
+def test_the_objects_argument_and_alias_safety(fake_adb, world):
+    movies_phone, series_phone = _scenario_phones(world)
+    fake_adb({MOVIES: Phone(files=movies_phone), SERIES: Phone(files=series_phone)})
+    inv = main.device_inventory(ALIASES)
+    via_alias = main.classify_device_objects(world, inv, objects=list(mvcommon.iter_uploaded_objects(world, [EP_ALIAS])))
+    assert [(o["manual_id"], o["label"], o["state"]) for o in via_alias["objects"]] == [
+        (EP_SPLIT, "chunk 1/2", "absent"), (EP_SPLIT, "chunk 2/2", "absent")]
+    assert via_alias["counts"] == {"on_device": 0, "freed": 0, "absent": 2, "unchecked": 0}
+    everything = main.classify_device_objects(world, inv)
+    assert EP_ALIAS not in {o["manual_id"] for o in everything["objects"]}       # the alias is its primary, once
+    assert [o["kind"] for o in everything["objects"] if o["manual_id"] == SEASON] == ["extra_whole"]
+    movie = main.classify_device_objects(world, inv, objects=list(mvcommon.iter_entry_objects(MOVIE, world[MOVIE])))
+    assert [o["state"] for o in movie["objects"]] == ["on_device", "freed", "on_device", "freed"]
+    assert main.classify_device_objects(world, inv, objects=[])["objects"] == []
+
+
+def test_classification_is_pure(fake_adb, world, monkeypatch):
+    movies_phone, series_phone = _scenario_phones(world)
+    fake_adb({MOVIES: Phone(files=movies_phone), SERIES: Phone(files=series_phone)})
+    inv = main.device_inventory(ALIASES)
+    before_lib, before_inv = copy.deepcopy(world), copy.deepcopy(inv)
+    monkeypatch.setattr(main.subprocess, "run", lambda *a, **k: pytest.fail("classification must not run adb"))
+    res = main.classify_device_objects(world, inv)
+    assert world == before_lib and inv == before_inv
+    for o in res["objects"]:                                   # the records are copies, never the inventory's
+        for evidence in o["copies"] + o["sidecars"] + o["partials"]:
+            evidence["path"] = "changed"
+    assert inv == before_inv

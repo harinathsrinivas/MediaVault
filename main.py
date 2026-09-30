@@ -10516,6 +10516,144 @@ def device_inventory(aliases=None):
     return result
 
 
+DEVICE_STATES = ("on_device", "freed", "absent", "unchecked")  # classify_device_objects' verdicts, in order
+
+
+def _dev_index(inventory):
+    """Every listed file of a device_inventory result as a location {alias, serial, path, size, mtime}, indexed
+    three ways: (by exact name, by PLAN P-6 normalized name, by the name a `.partial` upload leftover of an
+    interrupted push would have become)."""
+    exact, normalized, partial = {}, {}, {}
+    devices = inventory.get("devices") if isinstance(inventory, dict) else None
+    for alias, device in (devices or {}).items():
+        if not isinstance(device, dict):
+            continue
+        for f in device.get("files") or ():
+            name = f.get("name") if isinstance(f, dict) else None
+            if not (isinstance(name, str) and name):
+                continue
+            where = {"alias": alias, "serial": device.get("serial"), "path": f.get("path"), "size": f.get("size"),
+                     "mtime": f.get("mtime")}
+            exact.setdefault(name, []).append(where)
+            normalized.setdefault(gpweb.normalize_name(name), []).append(where)
+            if name.endswith(PARTIAL_SUFFIX) and len(name) > len(PARTIAL_SUFFIX):
+                partial.setdefault(name[:-len(PARTIAL_SUFFIX)], []).append(where)
+    return exact, normalized, partial
+
+
+def _dev_matches(index, name):
+    """The locations of the file `name`: its exact matches, else (PLAN P-6) its normalized ones — each copied
+    with name_match exact | normalized. [] for no name."""
+    exact, normalized, _partial = index
+    if not (isinstance(name, str) and name):
+        return []
+    if name in exact:
+        return [dict(where, name_match="exact") for where in exact[name]]
+    return [dict(where, name_match="normalized") for where in normalized.get(gpweb.normalize_name(name), ())]
+
+
+def _dev_sidecar_name(uploaded_name, short_id):
+    """The `.mvmeta.json` write_remote_mvmeta pushed next to an object: '<base> [<short_id>].mvmeta.json', where
+    '<base> [<short_id>]' is the uploaded name up to its LAST ' [<short_id>]' tag — the tag cmd_push /
+    push_one_extra add to a whole file and split_video_file / _carry_out_flac_track put before '.chunk.NNN.mkv'
+    / '.holder.mkv' (so a split entry's chunks and holder share one sidecar). None when the name carries no tag
+    of that short id (e.g. an old upload under an untagged name)."""
+    if not (isinstance(uploaded_name, str) and isinstance(short_id, str) and short_id):
+        return None
+    tag = f" [{short_id}]"
+    at = uploaded_name.rfind(tag)
+    return None if at < 0 else uploaded_name[:at + len(tag)] + MVMETA_SUFFIX
+
+
+def _dev_expected_size(library, obj):
+    """(bytes, source) the object's upload must have: the trusted block's size_bytes, else the capture's (both
+    describe exactly these bytes), else — a WHOLE file or whole extras item only — its owner's
+    tech_spec.size_bytes (prep and the extras scan stat the very file they hash). (None, None) when unknown: a
+    split entry's tech_spec sizes the whole file, never a chunk."""
+    for source, facts in (("block", obj.get("block")), ("capture", obj.get("capture"))):
+        size = facts.get("size_bytes") if isinstance(facts, dict) else None
+        if _gp_is_int(size) and size > 0:
+            return size, source
+    if obj.get("kind") in ("whole", "extra_whole"):
+        owner = mvcommon.slot_owner(library, obj.get("slot"))
+        tech = owner.get("tech_spec") if isinstance(owner, dict) else None
+        size = tech.get("size_bytes") if isinstance(tech, dict) else None
+        if _gp_is_int(size) and size > 0:
+            return size, "tech_spec"
+    return None, None
+
+
+def classify_device_objects(library, inventory, objects=None):
+    """Classify each uploaded object by what the phones hold (PLAN Step 8 — see the section comment above).
+
+    library    the library dict (load_library()); only read
+    inventory  a device_inventory() result
+    objects    the objects to classify — mvcommon.iter_uploaded_objects / iter_entry_objects dicts of THIS
+               library (their slot resolves the owner) — default: every uploaded object of the library
+
+    An object is looked up by its exact uploaded name (PLAN P-6: else its normalized name, flagged) anywhere
+    under the Media root of every listed phone. Verdict, the first that applies:
+      on_device  a file with its uploaded name whose size agrees — or cannot be compared (unknown on either
+                 side): the object is still on a phone, awaiting (or already past) its backup
+      freed      no such file, but the `.mvmeta.json` sidecar pushed with it is there: it reached that phone and
+                 its media is gone from it ("Free up space" after a backup, or a manual delete). If the cloud
+                 lacks it too it is possibly LOST (Step 9: missing-after-backup)
+      absent     nothing on any phone — and every configured phone was listed in full (inventory complete)
+      unchecked  nothing found, but "absent" cannot be claimed: a configured phone was not listed in full
+                 (unplugged, offline, unauthorized, partial ...) or none is configured, or the object has no
+                 uploaded name. A consumer must not call it missing (Step 9, Step 13)
+    A same-named file whose size DISAGREES holds other bytes (e.g. a superseded re-split chunk): it never makes
+    the object on_device and stays listed in `copies` with size_match False. Limits: a split set pushed only by
+    chunk ranges has no sidecar (write_remote_mvmeta runs after a full push), so its freed chunks read absent /
+    unchecked; an object uploaded under a name without its ' [<short_id>]' tag has no sidecar to find.
+
+    Returns:
+      complete            the inventory's `complete`
+      incomplete_devices  {alias: status} of the configured phones not listed in full (placeholders excluded)
+      counts              {state: n} over DEVICE_STATES
+      objects             one record per object, in `objects` order:
+        manual_id, category, kind, index, label, sha256, uploaded_name, slot   the object's identity
+                          (iter_uploaded_objects' fields; (manual_id, label) or slot names it uniquely)
+        state             on_device | freed | absent | unchecked
+        expected_size     bytes its upload must have, or None; size_source: block | capture | tech_spec | None
+        copies            [{alias, serial, path, size, mtime, name_match: exact | normalized,
+                            size_match: True | False | None}] — every file carrying its uploaded name
+        sidecars          [{alias, serial, path, size, mtime, name_match}] — its `.mvmeta.json` wherever found
+                          (its mtime is the push time)
+        partials          [{alias, serial, path, size, mtime}] — '<uploaded name>.partial' leftovers of an
+                          interrupted push (never a copy)
+    No adb, no output, no library write (building the default object list reads the capture files)."""
+    index = _dev_index(inventory)
+    complete = bool(isinstance(inventory, dict) and inventory.get("complete") is True)
+    devices = inventory.get("devices") if isinstance(inventory, dict) else None
+    incomplete = {alias: device.get("status") for alias, device in (devices or {}).items()
+                  if isinstance(device, dict) and device.get("status") not in ("ok", "skipped")}
+    counts = dict.fromkeys(DEVICE_STATES, 0)
+    rows = []
+    for obj in (mvcommon.iter_uploaded_objects(library) if objects is None else objects):
+        name = obj.get("uploaded_name")
+        expected, source = _dev_expected_size(library, obj)
+        copies = [dict(where, size_match=(None if where["size"] is None or expected is None
+                                          else where["size"] == expected))
+                  for where in _dev_matches(index, name)]
+        sidecars = _dev_matches(index, _dev_sidecar_name(name, obj.get("short_id")))
+        partials = [dict(where) for where in index[2].get(name, ())] if isinstance(name, str) else []
+        if any(copy_["size_match"] is not False for copy_ in copies):
+            state = "on_device"
+        elif sidecars:
+            state = "freed"
+        elif complete and isinstance(name, str) and name:
+            state = "absent"
+        else:
+            state = "unchecked"
+        counts[state] += 1
+        rows.append({"manual_id": obj.get("manual_id"), "category": obj.get("category"), "kind": obj.get("kind"),
+                     "index": obj.get("index"), "label": obj.get("label"), "sha256": obj.get("sha256"),
+                     "uploaded_name": name, "slot": obj.get("slot"), "state": state, "expected_size": expected,
+                     "size_source": source, "copies": copies, "sidecars": sidecars, "partials": partials})
+    return {"complete": complete, "incomplete_devices": incomplete, "counts": counts, "objects": rows}
+
+
 # ==========================================
 #      WEB CONSOLE READ-ONLY DATA LAYER
 # ==========================================

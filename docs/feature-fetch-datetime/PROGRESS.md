@@ -33,10 +33,13 @@
   account (R0) · Step 12 candidate isolation (before Step 12).
 
 ## ▶ NEXT ACTION
-**Step 8 (read-only device cross-check) dispatched 2026-09-29 to executor-fable** in the main folder. Steps 0–7 are
-done (Step 6 = `856fd0c`). After Step 8: Step 9 (map_photos) → 🚦 R1 (real-library mapping dry-run, user reads).
-Open user items: 🚦 RH X-Files test fetch (go-ahead pending); IMP-C28 (`_parts` path treated as chunk in cmd_push)
-registration/fix approval.
+**Step 9 (map_photos) dispatched 2026-10-01 to executor-fable** in the main folder. Steps 0–8 done (Step 8 = `bd78a7d`).
+After Step 9: 🚦 R1 (real-library mapping dry-run, user reads).
+Open user items: device `HT74D0202839` is attached but not in DEVICE_ALIASES (movies phone `FA69H0300200` not
+attached) → R1 would show ~1,559 objects `unchecked`; new bug found by the 🚦 RH test fetch 2026-10-01 (routing to
+'movies' worked; Selenium attached to Chrome 154's Gemini panel webview `gemini.google.com/glic` instead of the
+photos.google.com tab → 0 results; item verified present by a read-only probe) → IMP-C29 decision pending.
+Parallel: IMP-C28 hotfix (`fix/imp_c28_push_parts_substring`, worktree MediaVault-c28) running; user approved fix.
 
 ## Resume protocol
 1. Open a session in the main folder `C:\Users\harin\PycharmProjects\MediaVault` (branch
@@ -72,7 +75,7 @@ registration/fix approval.
 | 7 | crawler productization | done | fable (executor-fable, claude-fable-5-1) | 46d0532 | full 1615 · smoke 81 · test_gp_inventory 88 (30 → 88) · disarm/mutation probes 31/31 | tools/gp_inventory.py rpc-first (lcxiM + EzkLib + EWgK9e via gprpc) with auto dom fallback, crawl_lock + progress-driven heartbeat (60 s; yields on takeover), profile pre-flight + landing check, run log `<account>.runs.jsonl` (start / seen / "enumerated" / end), offline reader `inventory_state()` (Steps 9/13) + `--status`; `mainfetch.profile_preflight(account)` → None or a message; reads the real tv/movies/anime files unchanged (checked on a copy; D:\ fingerprint unchanged); rpc upgrades dom records once (+size/quality/exact name); ONE crawl at a time (R0/§M1: run accounts sequentially) |
 | R0 | prerequisites (user) | pending | user | | | others blocked until profile |
 | 8 | device cross-check | done | executor-fable (harness attribution Opus 5.5 = fable fallback for 8.a–8.c; session env claude-fable-5-1) | 8.a ca038b5 · 8.b b55b278 · 8.c 3bebc60 · feat: this step's final commit | full 1879 · smoke 82 · test_device_inventory 114 · disarm/mutation probes 23/23 (scratch copy) · live read-only check 2 phones | main.device_inventory(aliases) + classify_device_objects(library, inventory, objects=None), return shapes in their docstrings; 4th verdict `unchecked` (a configured phone not listed in full → Step 9 must never call such an object missing); a same-named file of other size never counts on_device; Step 13c must NOT widen the read-only allowlist `_dev_argv_readonly` (its pull/push/mv needs its own --apply-gated path); LIVE: HT74D0202839 attached but not in DEVICE_ALIASES, `movies` FA69H0300200 not attached → complete=False until the user decides (see operations log) |
-| 9 | map_photos | pending | | | | |
+| 9 | map_photos | in_progress | | | | |
 | R1 | real mapping dry-run (user) | pending | user | | | |
 | 10 | fetch plumbing + routing | pending | | | | |
 | 11 | download hygiene | pending | | | | needs G0 q3 (P-12) answered first; "no" → STOP + re-dispatch planner-v2 |
@@ -98,9 +101,11 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 | 2026-10-01 | Step 8 read-only live sanity check (scratch script: main.device_inventory + classify_device_objects over the real library; counts only; nothing written) | DEVICE_ALIASES as configured: movies FA69H0300200 not-connected · series FA75V0303405 ok, 431 files (420 sidecars, 11 media, 0 stat errors) · others skipped (placeholder) · 1 attached phone NOT in DEVICE_ALIASES: HT74D0202839 (28 files: 26 sidecars, 2 media) → complete=False; 2,108 uploaded objects: on_device 10 · freed 539 · absent 0 · unchecked 1,559. Both attached phones (ad-hoc aliases): complete → on_device 12 · freed 624 · absent 1,472 · unchecked 0; 12/12 copies size-agree; 32 adb calls (devices 1 · find 2 · stat 29), ~5–10 s | n/a — read-only, re-runnable |
 
 ## In-progress sub-state
-`Step 8 complete (2026-10-01) — [x] 8.a ca038b5 · [x] 8.b b55b278 · [x] 8.c 3bebc60 · [x] final: row 8 + STATUS
-entry + the feat commit. Resumed once (usage-limit interruption during 8.b): the uncommitted 8.b diff was KEPT —
-checkpoint rule 3 (coherent: classifier section + its tests; its targeted tests passed, 113).`
+`Step 9 — dispatched 2026-10-01 to executor-fable (fable) · sub-tasks per PLAN Step 9 details 1–10: [ ] 9.1 freshness
+gate ← next · [ ] 9.2 match ladder · [ ] 9.3 sha1↔dedupKey cross-check · [ ] 9.4 duplicates/re-split sets · [ ] 9.5
+C27 detectors + repairs (split-info, names) · [ ] 9.6 unmatched report · [ ] 9.7 outputs + resolutions_todo.csv ·
+[ ] 9.8 --resolutions · [ ] 9.9 --apply via learned sidecar + apply engine · [ ] 9.10 --devices-only · then tests,
+disarm probes, full + smoke`
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes
 alone; re-run it before treating a red full suite as a regression.
 Template — when a step is running (Execution protocol "In-step checkpoints"):

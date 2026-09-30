@@ -90,6 +90,11 @@ MAINFETCH_SCRIPT = "mainfetch.py"  # Name of the automation script
 # Human-friendly aliases for the user's ADB devices. Maps alias -> serial.
 # Edit this dict when the physical phones change.
 DEVICE_ALIASES = {"movies": "FA69H0300200", "series": "FA75V0303405", "others": "<NEW_PIXEL_SERIAL>"}  # TODO(user): real Others Pixel serial — prerequisite
+# [IMP-C25] Extra phones the READ-ONLY device cross-check also lists, keyed by the DEVICE_ALIASES alias they
+# serve (user ruling 2026-10-01, docs/feature-fetch-datetime/DECISIONS.md §1d: HT74D0202839 is an extra movies
+# phone). Device-check only: pushes keep DEVICE_ALIASES' one serial per alias (resolve_device never reads this).
+# device_check_aliases() merges both for device_inventory(). Edit it when the physical phones change.
+DEVICE_CHECK_EXTRA_SERIALS = {"movies": ["HT74D0202839"]}
 
 # Remote push reliability conventions (rclone "chunker"-style).
 # AUTO-ROLLBACK SEAM: each chunk is uploaded to "<final>.partial" then atomically
@@ -10236,7 +10241,8 @@ def cmd_add_extras(title_id, folders, extras_size=None, device_id=None, no_repla
 # to it (JSON is not media: never backed up, never freed), so a lone sidecar marks an object that reached that
 # phone and is gone from it (freed — possibly LOST when the cloud lacks it too); or may be on no phone at all
 # (absent). Two functions; their docstrings define the return shapes Steps 9, 13 and 13c consume:
-#   * device_inventory(aliases): every file under the Media root of each configured phone — ONE `adb devices`,
+#   * device_inventory(aliases): every file under the Media root of each configured phone (default:
+#     device_check_aliases() — DEVICE_ALIASES plus the check-only DEVICE_CHECK_EXTRA_SERIALS) — ONE `adb devices`,
 #     then per attached phone ONE `find '/sdcard/Media/' -type f` (the trailing slash makes find follow the
 #     /sdcard symlink; `/storage/emulated/0/Media/` is the fallback root) and `stat -c '%s %Y %n'` in batches
 #     whose device command stays within DEVICE_STAT_BATCH_BYTES;
@@ -10423,10 +10429,32 @@ def _dev_list(record):
         record.update(status="error", detail=_gp_line(e), files=[])
 
 
+def device_check_aliases():
+    """{alias: serial} of every phone the device cross-check lists, both tables read at call time:
+    DEVICE_ALIASES in order, then each DEVICE_CHECK_EXTRA_SERIALS serial as '<alias>#2', '<alias>#3', ... (the
+    alias it serves; the next free number when a key is taken). A serial that is already named — by
+    DEVICE_ALIASES or an earlier extra — is listed once; a bare string is taken as a one-serial list and a
+    non-string serial is ignored. The check-only extras never reach resolve_device (DECISIONS.md §1d)."""
+    merged = dict(DEVICE_ALIASES)
+    named = {serial.strip() for serial in merged.values() if isinstance(serial, str)}
+    for alias, serials in DEVICE_CHECK_EXTRA_SERIALS.items():
+        number = 1
+        for serial in [serials] if isinstance(serials, str) else serials:
+            if not isinstance(serial, str) or serial.strip() in named:
+                continue
+            number += 1
+            while f"{alias}#{number}" in merged:
+                number += 1
+            merged[f"{alias}#{number}"] = serial
+            named.add(serial.strip())
+    return merged
+
+
 def device_inventory(aliases=None):
     """The read-only file inventory of the configured phones (PLAN Step 8 — see the section comment above).
 
-    aliases   {alias: serial}; default DEVICE_ALIASES (read at call time). An alias may name a raw serial. A
+    aliases   {alias: serial}; default device_check_aliases() — DEVICE_ALIASES plus the check-only
+              DEVICE_CHECK_EXTRA_SERIALS (both read at call time). An alias may name a raw serial. A
               serial that is empty or a '<...>' placeholder (DEVICE_ALIASES' '<NEW_PIXEL_SERIAL>') is skipped:
               no adb command ever names it.
 
@@ -10462,9 +10490,9 @@ def device_inventory(aliases=None):
                         its push time
         stat_errors     how many of `files` got no size / mtime
       unconfigured  [{serial, state}] — phones `adb devices` lists that `aliases` does not name (e.g. a Pixel
-                    missing from DEVICE_ALIASES): reported, never inventoried
+                    missing from DEVICE_ALIASES and DEVICE_CHECK_EXTRA_SERIALS): reported, never inventoried
     """
-    aliases = DEVICE_ALIASES if aliases is None else aliases
+    aliases = device_check_aliases() if aliases is None else aliases
     devices, real = {}, []
     for alias, serial in aliases.items():
         record = {"alias": alias, "serial": serial, "status": None, "detail": None, "root": None, "files": [],

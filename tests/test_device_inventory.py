@@ -290,7 +290,9 @@ def test_inventory_lists_every_file_with_size_and_mtime_over_crlf_and_hostile_na
 
 
 def test_default_aliases_are_device_aliases_read_at_call_time(fake_adb, monkeypatch):
+    # (DECISIONS.md §1d: the default also lists DEVICE_CHECK_EXTRA_SERIALS — read at call time too; see (e))
     monkeypatch.setattr(main, "DEVICE_ALIASES", {"series": SERIES, "others": "<NEW_PIXEL_SERIAL>"})
+    monkeypatch.setattr(main, "DEVICE_CHECK_EXTRA_SERIALS", {})
     fake_adb({SERIES: Phone(files={"Series/a [abcdef].mkv": (1, 2)})})
     inv = main.device_inventory()
     assert list(inv["devices"]) == ["series", "others"] and inv["complete"] is True
@@ -974,3 +976,103 @@ def test_round_trip_through_the_real_push_code_on_the_mock_device(sandbox_extras
         p.unlink()
     assert {o["state"] for o in verdicts()["objects"]} == {"absent"}
     assert {assert_readonly(argv)[0] for argv in fake.argvs()} == {"devices", "find", "stat"}
+
+
+# ============================================================================ (e) extra device-check phones
+# User ruling 2026-10-01 (docs/feature-fetch-datetime/DECISIONS.md §1d): HT74D0202839 is an EXTRA movies phone.
+# The cross-check lists it next to DEVICE_ALIASES' movies phone (DEVICE_CHECK_EXTRA_SERIALS); pushes keep one
+# serial per alias. "absent" still needs EVERY configured phone — the extra one included — listed in full.
+
+EXTRA = "FAKEXTRA0003"
+
+
+@pytest.fixture()
+def extra_config(monkeypatch):
+    monkeypatch.setattr(main, "DEVICE_ALIASES", dict(ALIASES))
+    monkeypatch.setattr(main, "DEVICE_CHECK_EXTRA_SERIALS", {"movies": [EXTRA]})
+
+
+def test_the_configured_extra_movies_phone_never_changes_push_routing():
+    assert main.DEVICE_CHECK_EXTRA_SERIALS == {"movies": ["HT74D0202839"]}
+    assert main.DEVICE_ALIASES["movies"] == "FA69H0300200" == main.resolve_device("movies")
+    assert "HT74D0202839" not in main.DEVICE_ALIASES.values()
+    assert main.device_check_aliases() == {**main.DEVICE_ALIASES, "movies#2": "HT74D0202839"}
+    assert list(main.device_check_aliases())[:len(main.DEVICE_ALIASES)] == list(main.DEVICE_ALIASES)
+
+
+def test_the_extra_phone_is_listed_and_complete_needs_every_real_phone(fake_adb, extra_config):
+    fake = fake_adb({MOVIES: Phone(files={"Movies/a [aaaaaa].mkv": (1, 2)}),
+                     EXTRA: Phone(files={"Movies/b [bbbbbb].mkv": (3, 4)}),
+                     SERIES: Phone(files={"Series/c [cccccc].mkv": (5, 6)})})
+    inv = main.device_inventory()
+    assert list(inv["devices"]) == ["movies", "series", "others", "movies#2"]
+    extra = inv["devices"]["movies#2"]
+    assert (extra["alias"], extra["serial"], extra["status"], extra["root"]) == ("movies#2", EXTRA, "ok", ROOTS[0])
+    assert [f["name"] for f in extra["files"]] == ["b [bbbbbb].mkv"]
+    assert inv["devices"]["others"]["status"] == "skipped"            # only the Others placeholder is skipped
+    assert inv["complete"] is True and inv["unconfigured"] == []      # the extra phone is configured now
+    assert len(fake.device_calls(EXTRA, "find")) == 1 and len(fake.device_calls(MOVIES, "find")) == 1
+
+
+@pytest.mark.parametrize("missing,alias", [(MOVIES, "movies"), (EXTRA, "movies#2"), (SERIES, "series")])
+def test_any_configured_phone_away_means_incomplete(fake_adb, extra_config, missing, alias):
+    phones = {MOVIES: Phone(files={}), EXTRA: Phone(files={}), SERIES: Phone(files={})}
+    phones[missing] = Phone(state=None)                               # unplugged
+    fake_adb(phones)
+    inv = main.device_inventory()
+    assert inv["complete"] is False and inv["devices"][alias]["status"] == "not-connected"
+    assert all(d["status"] == "ok" for a, d in inv["devices"].items() if a not in (alias, "others"))
+
+
+def test_the_extra_phone_holds_evidence_but_an_absent_primary_blocks_absent(fake_adb, extra_config, world):
+    """Today's live shape: the movies Pixel FA69H0300200 is not attached, the extra one is."""
+    n = names(world)
+    fake_adb({EXTRA: Phone(files={"Movies/Dev Movie (2020)/" + n[(MOVIE, "whole")]: (2_000_000, 1)}),
+              SERIES: Phone(files={}), MOVIES: Phone(state=None)})
+    res = main.classify_device_objects(world, main.device_inventory())
+    by = {(o["manual_id"], o["label"]): o for o in res["objects"]}
+    assert by[(MOVIE, "whole")]["state"] == "on_device"
+    assert [(c["alias"], c["serial"], c["size_match"]) for c in by[(MOVIE, "whole")]["copies"]] == [
+        ("movies#2", EXTRA, True)]
+    assert res["complete"] is False and res["incomplete_devices"] == {"movies": "not-connected"}
+    assert res["counts"] == {"on_device": 1, "freed": 0, "absent": 0, "unchecked": len(EXPECTED) - 1}
+
+
+def test_an_explicit_alias_map_is_taken_as_is(fake_adb, extra_config):
+    fake_adb({SERIES: Phone(files={})})
+    inv = main.device_inventory({"series": SERIES})
+    assert list(inv["devices"]) == ["series"] and inv["complete"] is True
+
+
+def test_a_placeholder_extra_is_skipped_like_any_placeholder(fake_adb, monkeypatch):
+    monkeypatch.setattr(main, "DEVICE_ALIASES", {"series": SERIES})
+    monkeypatch.setattr(main, "DEVICE_CHECK_EXTRA_SERIALS", {"series": ["<SECOND SERIES PIXEL>"]})
+    fake = fake_adb({SERIES: Phone(files={})})
+    inv = main.device_inventory()
+    assert (inv["devices"]["series#2"]["status"], inv["complete"]) == ("skipped", True)
+    assert all("SECOND" not in " ".join(argv) for argv in fake.argvs())
+
+
+@pytest.mark.parametrize("extras,added", [
+    ({}, {}),
+    ({"movies": [EXTRA]}, {"movies#2": EXTRA}),
+    ({"movies": EXTRA}, {"movies#2": EXTRA}),                                  # a bare string = one serial
+    ({"movies": [EXTRA, "FAKEXTRA0004"]}, {"movies#2": EXTRA, "movies#3": "FAKEXTRA0004"}),
+    ({"movies": [MOVIES, EXTRA, EXTRA]}, {"movies#2": EXTRA}),                 # already named -> listed once
+    ({"movies": [EXTRA], "series": [f" {EXTRA} "]}, {"movies#2": EXTRA}),      # across aliases too
+    ({"movies": [None, 7, EXTRA]}, {"movies#2": EXTRA}),                       # non-strings are ignored
+    ({"newphone": ["FAKEXTRA0005"]}, {"newphone#2": "FAKEXTRA0005"}),          # any alias may get extras
+])
+def test_device_check_aliases_numbers_and_dedupes(monkeypatch, extras, added):
+    monkeypatch.setattr(main, "DEVICE_ALIASES", dict(ALIASES))
+    monkeypatch.setattr(main, "DEVICE_CHECK_EXTRA_SERIALS", extras)
+    merged = main.device_check_aliases()
+    assert merged == {**ALIASES, **added} and list(merged)[:len(ALIASES)] == list(ALIASES)
+    assert main.DEVICE_ALIASES == ALIASES                                     # the push table is never touched
+
+
+def test_device_check_aliases_never_overwrites_a_configured_alias(monkeypatch):
+    monkeypatch.setattr(main, "DEVICE_ALIASES", {**ALIASES, "movies#2": "FAKEXTRA0009"})
+    monkeypatch.setattr(main, "DEVICE_CHECK_EXTRA_SERIALS", {"movies": [EXTRA]})
+    merged = main.device_check_aliases()
+    assert (merged["movies#2"], merged["movies#3"]) == ("FAKEXTRA0009", EXTRA)

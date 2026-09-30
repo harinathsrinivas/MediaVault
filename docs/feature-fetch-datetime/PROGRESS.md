@@ -101,8 +101,11 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 | 2026-10-01 | Step 8 read-only live sanity check (scratch script: main.device_inventory + classify_device_objects over the real library; counts only; nothing written) | DEVICE_ALIASES as configured: movies FA69H0300200 not-connected · series FA75V0303405 ok, 431 files (420 sidecars, 11 media, 0 stat errors) · others skipped (placeholder) · 1 attached phone NOT in DEVICE_ALIASES: HT74D0202839 (28 files: 26 sidecars, 2 media) → complete=False; 2,108 uploaded objects: on_device 10 · freed 539 · absent 0 · unchecked 1,559. Both attached phones (ad-hoc aliases): complete → on_device 12 · freed 624 · absent 1,472 · unchecked 0; 12/12 copies size-agree; 32 adb calls (devices 1 · find 2 · stat 29), ~5–10 s | n/a — read-only, re-runnable |
 
 ## In-progress sub-state
-`Step 9 — dispatched 2026-10-01 to executor-fable (fable) · sub-tasks per PLAN Step 9 details 1–10: [ ] 9.1 freshness
-gate ← next · [ ] 9.2 match ladder · [ ] 9.3 sha1↔dedupKey cross-check · [ ] 9.4 duplicates/re-split sets · [ ] 9.5
+`Step 9 — dispatched 2026-10-01 to executor-fable (fable) · resumed after a usage-limit pause (nothing of Step 9 was
+on disk; the read-only calibration was redone) · sub-tasks per PLAN Step 9 details 1–10 plus 9.0 (DECISIONS §1d):
+[x] 9.0 extra movies phone HT74D0202839 in the read-only device cross-check (main.DEVICE_CHECK_EXTRA_SERIALS +
+device_check_aliases(); push aliases unchanged; test_device_inventory 131, smoke 82) (wip commit "step 9.0") ·
+[ ] 9.1 freshness gate ← next · [ ] 9.2 match ladder · [ ] 9.3 sha1↔dedupKey cross-check · [ ] 9.4 duplicates/re-split sets · [ ] 9.5
 C27 detectors + repairs (split-info, names) · [ ] 9.6 unmatched report · [ ] 9.7 outputs + resolutions_todo.csv ·
 [ ] 9.8 --resolutions · [ ] 9.9 --apply via learned sidecar + apply engine · [ ] 9.10 --devices-only · then tests,
 disarm probes, full + smoke`

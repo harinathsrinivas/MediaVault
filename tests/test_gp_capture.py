@@ -167,7 +167,7 @@ def test_snapshot_names_chunks_and_holder_like_cmd_push(tmp_path):
     c2 = _write(parts / "Movie.2020 [abc123].chunk.002.mkv", b"c2")
     holder = _write(parts / "Movie.2020 [abc123].holder.mkv", b"h")
     objs = gpcapture.snapshot_push_objects(
-        [master, c1, c2, holder], main.SPLIT_DIR_NAME, "abc123",
+        [master, c1, c2, holder], str(parts), "abc123",
         {"Movie.2020 [abc123].chunk.001.mkv": "h1", "Movie.2020 [abc123].chunk.002.mkv": "h2"},
         "whole-hash", [{"holder_filename": "Movie.2020 [abc123].holder.mkv", "holder_hash": "hh"}])
     got = [(o["role"], o["index"], o["uploaded_name"], o["sha256"]) for o in objs]

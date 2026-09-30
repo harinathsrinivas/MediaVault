@@ -480,3 +480,52 @@
 - If skipped: those 31 episodes cannot be restored.
 - Fix applied (`fix/imp_c26_fetch_account_routing`): `mainfetch._account_overrides()` reads `fetch_account_overrides` through `mvcommon._load_config()` (validated once per config object — an unknown account or a blank key prints one warning and is ignored); `profile_for_id` takes the longest matching key (exact id beats prefix), else today's `ID_PREFIX_PROFILE` loop; `cmd_fetch_route` groups a batch by account (extras by their title id) — the selector's account first, then `CHROME_PROFILES` order — and runs one `init_driver` per group under ONE `fetch_session_lock`, closing the previous account's Chrome windows and requiring debug port 9222 to be free before each switch (a busy port stops the batch loudly instead of attaching to the wrong account). No valid overrides ⇒ a single group, byte-identical transcript (frozen oracle captured from the pre-fix code). Tests: `tests/test_fetch_account_routing.py` (31) + smoke `test_fetch_route_mixed_account_batch`; a new autouse `_hermetic_mvconfig` fixture keeps every test off the machine's real `mvconfig.json`. User steps: README fetch note, `docs/OPERATIONS_QA.md` §6b.
 - Status: done (hotfix PR; learned routing follows in IMP-C25)
+
+---
+
+## IMP-C28: `cmd_push` treats any path containing `_parts` as a chunk — a whole file from a `Spare_parts (2015)` folder is uploaded untagged, then its local master is deleted
+
+- Category: bug
+- Priority: high (Band 0 — a SUCCESSFUL push deleted the master, the source of truth the auto-rollback contract rests on)
+- Files: `main.py` — `cmd_push`'s upload loop (pre-fix `main.py:6442` rename test, `main.py:6509` local delete) and its IMP-C25 capture call (`main.py:6430`); `gpcapture.py` — `snapshot_push_objects` (pre-fix `gpcapture.py:192`, a copy of the same test); `mvcommon.py` — new `in_parts_dir`. Found by the IMP-C25 Step 5 executor, confirmed with a scratch run on temp dirs, then reproduced hermetically. (Numbering: IMP-C25 and IMP-C27 are registered on `feature/imp_c25_fetch_exact_gp_item`, not yet on `main`.)
+- Current behavior (before fix): the upload loop decided "chunk vs whole file" with `if SPLIT_DIR_NAME not in f:`, a substring test on the WHOLE path. It deleted each uploaded file with `if SPLIT_DIR_NAME in f:`. So a master whose path merely contains `_parts` was treated as a chunk. That covers the title folder (`Spare_parts (2015)`, `Body_parts`) and the file name, case-sensitively. It happened on every route that uploads the master whole:
+  - a plain push;
+  - a split skipped because the file is under the target;
+  - a `tempdir` push without a split;
+  - a `chunk_range` push.
+
+  The hermetic reproduction: the device received `Spare_parts (2015).mkv` instead of `Spare_parts (2015) [<short_id>].mkv`. `cmd_push`'s own post-commit check then printed `⚠️  INTEGRITY: … status=onboarded but on-disk=MISSING`, just before `✅ SUCCESS`. `gpcapture.snapshot_push_objects` copied the test, so the identity capture recorded that master as an untagged `holder` with no `sha256`.
+
+  Two paths were NOT affected:
+  - split pushes, because the master is never in their upload list;
+  - `push_one_extra`, because it names and deletes by `is_split` (see the audit below).
+- Impact:
+  1. **A successful push deleted the master.** The cloud bytes are intact, because the delete ran only after the upload and its rename had succeeded. But the local copy the O-1/O-2 contract relies on was gone, and with `PUSH_VERIFY_REMOTE` off by default, nothing had checked the uploaded bytes.
+     - A following `replace` (the `prep_push_rep` autopilots' next leg) then found no master. It skips its rename when the original is absent (`main.py:6954`), writes the dummy into its place and marks the entry `archived` without complaint. The entry therefore looks healthy.
+  2. **The cloud item lacks its ` [<short_id>]` tag.** `search_term`, the `.mvmeta.json` sidecar (`main.py:5697`) and the identity capture all record the tagged name. So name-based identification cannot tie the item to its entry; IMP-C25's fetch-exact-item work (fetch-by-id) depends on it.
+     - Today's fetch still queries a whole file by its plain local filename (`mainfetch.py:331`) and routes downloads by hash (`mainfetch.py:400-404`). So `fetch_restore` can still bring the master back.
+- Proposed change — implemented (`fix/imp_c28_push_parts_substring`): a file counts as a chunk only if it lives DIRECTLY in THIS push's chunk dir.
+  - The new `mvcommon.in_parts_dir(path, parts_dir)` compares the normalised parent dir (`abspath` + `normcase`) with the `parts_dir` that `cmd_push` computed: `_parts_base(...)` + `SPLIT_DIR_NAME`, tempdir redirect included.
+  - `cmd_push` computes `is_chunk` once per file (`main.py:6443`) and uses it for both the rename and the delete.
+  - `gpcapture.snapshot_push_objects` now takes `parts_dir` (it took `split_dir_name`) and uses the same predicate, so the recorded upload name cannot drift from the device's.
+
+  This is one shared rule, following the mvcommon precedent that ended the IMP-C18/C22/C23 duplicated-parser drift.
+- Audit of every other `SPLIT_DIR_NAME` / `"_parts"` test in `main.py`, `mainfetch.py`, `mvcommon.py` and `gpcapture.py`:
+  - **Fixed:** the two `cmd_push` tests and the `gpcapture` copy.
+  - **Safe, left unchanged:**
+    - `push_one_extra` — delete at `main.py:5998` (`is_split and SPLIT_DIR_NAME in f`), naming at `main.py:5957` (by `is_split`). `is_split` is True only on its resume/split branches, whose files all live in `<extra folder>/_parts/<short_id>`. So the substring conjunct is redundant and never decides, and a whole extra short-circuits on `is_split`.
+    - The `os.walk` prunes compare a whole directory NAME, not a substring: `cmd_recover --scan` (`main.py:1321`), `scan_extras_folders` (`_EXTRAS_EXCLUDE_DIRS`, `main.py:5278`), `cmd_scan_unprepped` (`main.py:8770`) and the reclaim scan (`_RECLAIM_EXCLUDE_DIRS`, `main.py:10097`).
+    - The rest are path construction (`_parts_base`, `parts_dir = os.path.join(...)`), comments, or unrelated names (`slug_parts`, `folder_parts`, `_fp_parts`).
+    - `mainfetch.py` only mentions `_parts_base` in comments, and `mvcommon.py` only defines the constant.
+- Rollback change-gate: not crossed. The fix restores the documented behaviour: push has no PONR, and the master survives it (`docs/feature-auto-rollback/ROLLBACK_MECHANISM.md` §5). The journal format, the PONR placement, what is journalled, the O-1 failure branches and `recover_journal` are all untouched.
+- Tests: `tests/test_push_chunk_classification.py` has 13 hermetic tests (`sandbox` + `mock_device`):
+  - **The reproduction:** 6 whole-file cases, 2 lookalike folders × 3 routes. `Body_parts` ends in `_parts`, which defeats a separator-anchored substring "fix".
+  - **Resumed and fresh splits** (chunk dir in the title, and tempdir-redirected): only this push's chunks are deleted, and the master survives.
+  - **Extras** (whole and split) pushed from a lookalike folder.
+  - **The shared rule:** its unit semantics, and the capture's use of it.
+
+  `tests/test_gp_capture.py` now passes the chunk dir. Disarm probes: 13/13 caught, each failing exactly the expected tests. Full suite 1016 passed; smoke 82 passed.
+- Effort estimate: small · Risk: low. Classification changes only for a file whose path contains `_parts` outside the chunk dir, and that file is now treated as the whole file it is. Every chunk producer writes straight into `parts_dir`. No `ENTRY_TYPE_KEYS` involvement.
+- If skipped: any whole-file push of a title stored under a `…_parts…` folder silently deletes the local master and leaves an untagged copy in the cloud.
+- Merge note for IMP-C25: that branch keeps the substring test in its `snapshot_push_objects`, and its `cmd_push` still passes `SPLIT_DIR_NAME`. When it next merges `main`, keep this rule in both places. Its `push_one_extra` already passes the item's own chunk dir, which `in_parts_dir` accepts as is.
+- Status: done (`fix/imp_c28_push_parts_substring`)

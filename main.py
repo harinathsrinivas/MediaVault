@@ -6427,7 +6427,7 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
     # locally as they upload); written to the capture file only after a successful push.
     try:
         _capture_objs = gpcapture.snapshot_push_objects(
-            files_to_upload_paths, SPLIT_DIR_NAME, short_id, _chunk_hashes, entry.get("hash"),
+            files_to_upload_paths, parts_dir, short_id, _chunk_hashes, entry.get("hash"),
             library.get(manual_id, {}).get("split_info", {}).get("carried_out_tracks", []))
     except Exception:
         _capture_objs = []
@@ -6436,10 +6436,15 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
     all_success = True
     for f in files_to_upload_paths:
         local_fname = os.path.basename(f)
+        # [IMP-C28] A chunk (or FLAC holder) is a file DIRECTLY in this push's
+        # parts_dir (tempdir redirect included), never "the path contains _parts":
+        # a title folder like `Spare_parts (2015)` turned the master into a
+        # "chunk" that was uploaded untagged and then deleted below.
+        is_chunk = mvcommon.in_parts_dir(f, parts_dir)
 
         # [UPDATED] File Renaming Logic for Standard Files
         remote_fname = local_fname
-        if SPLIT_DIR_NAME not in f:  # This is a standard file, not a chunk
+        if not is_chunk:  # This is a standard file, not a chunk
             name, ext = os.path.splitext(local_fname)
             # RENAME ON REMOTE: "MovieName [uid].mkv"
             remote_fname = f"{name} [{short_id}]{ext}"
@@ -6502,11 +6507,12 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
 
             # DELETE LOCAL CHUNK after successful upload+rename.
             # The chunk is "done" only once renamed to its final name.
-            # Safety: Only delete if it's inside the SPLIT_DIR_NAME folder
+            # Safety: only a chunk of THIS push's parts_dir (is_chunk) is ever
+            # deleted, never the master (IMP-C28).
             # [ROLLBACK SPEC] This delete is NOT a PONR (O-1) — the deleted chunk is
             # reproducible from the surviving master via re-split. A push failure
             # after some chunks were uploaded+deleted is the resume-message case.
-            if SPLIT_DIR_NAME in f:
+            if is_chunk:
                 try:
                     os.remove(f);
                 except:

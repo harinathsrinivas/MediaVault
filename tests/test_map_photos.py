@@ -1408,3 +1408,208 @@ def test_objects_resolved_earlier_leave_the_todo_list(mixed, tmp_path):
     todo = {(r["manual_id"], r["object"]) for r in _read_csv(os.path.join(res["run_dir"], "resolutions_todo.csv"))}
     assert (M_WHOLE, "whole") not in todo and (T_EP1, "whole") not in todo and (T_EP2, "whole") in todo
     assert rows[(M_WHOLE, "whole")]["reason"] == "probable"            # still unresolved until check_photos hinted
+
+
+# ============================================================================ 9.9 --apply
+
+def _blocks(library):
+    """{(manual_id, label): trusted block} of every uploaded object."""
+    return {(o["manual_id"], o["label"]): o["block"] for o in mvcommon.iter_uploaded_objects(library)}
+
+
+def _without_gphotos(node):
+    """`node` with every nested `gphotos` key removed."""
+    if isinstance(node, dict):
+        return {k: _without_gphotos(v) for k, v in node.items() if k != "gphotos"}
+    if isinstance(node, list):
+        return [_without_gphotos(v) for v in node]
+    return node
+
+
+def test_a_dry_run_previews_the_apply_and_writes_nothing(world, tmp_path, capsys):
+    world.save().upload_all().save()
+    before = library_files(world.sandbox)
+    res = world.run(out=tmp_path / "run", capsys=capsys)
+    preview = res["preview"]
+    assert (preview["status"], preview["dry_run"], preview["saved"]) == ("dry-run", True, False)
+    assert len(preview["changed"]) == preview["confirmed"] == 12        # every mapped object of the 3 crawled accounts
+    assert library_files(world.sandbox) == before
+    assert not [p for p in state_files() if not p.startswith("map")] and not os.path.exists(mvcommon.learned_path("tv"))
+    out = res["stdout"]
+    assert "Apply preview (dry run — nothing written):" in out
+    assert "  library (dry-run): 12 object(s) would change (12 newly confirmed)" in out
+    assert "Next: python main.py map_photos all --apply" in out
+
+
+def test_apply_records_learned_facts_and_confirms_the_mapped_objects(xfiles, tmp_path, capsys):
+    """PLAN Step 9 (9): the accepted rows go to the learned sidecar (source map) — the durable record — and the apply
+    engine folds them into the library: mapped objects confirmed (filename proof), the X-Files-like block homed in
+    the account that holds them (P-4), nothing else of the library touched."""
+    before = mvcommon.load_library()
+    res = xfiles.run("--apply", out=tmp_path / "run", capsys=capsys)
+    applied = res["applied"]
+    assert applied["error"] is None and applied["engine"]["status"] == "saved"
+    library = mvcommon.load_library()
+    blocks = _blocks(library)
+    episode = blocks[(XFILES[0], "whole")]
+    assert episode["home_account"] == "movies"
+    record = episode["accounts"]["movies"]
+    assert (record["verified_by"], record["source"], record["confirmed"]) == ("filename", "map", True)
+    assert record["gp_filename"] == xfiles.names[(XFILES[0], "whole")] and "approach" not in record
+    assert blocks[(T_EP1, "whole")]["accounts"]["tv"]["confirmed"] is True
+    assert blocks[(O_MATCH, "whole")] is None                                    # stale (never crawled): untouched
+    learned = mvcommon.read_learned("movies")
+    assert {r["manual_id"] for r in learned} >= set(XFILES) and {r["source"] for r in learned} == {"map"}
+    assert json.dumps(_without_gphotos(library)) == json.dumps(_without_gphotos(before))   # only blocks changed
+    out = res["stdout"]
+    assert out.startswith("=== MAP PHOTOS (APPLY) — scope: all")
+    assert "  library (saved): " in out and "Recorded: learned records " in out
+
+
+def test_a_second_apply_records_nothing_twice(mixed, tmp_path, capsys):
+    first = mixed.run("--apply", out=tmp_path / "a")["applied"]
+    assert first["learned"][0] > 0 and first["failed"][0] == 5
+    sizes = {p: os.path.getsize(os.path.join(mvcommon.GPHOTOS_STATE_DIR, p))
+             for p in os.listdir(mvcommon.GPHOTOS_STATE_DIR) if p.endswith(".jsonl")}
+    before = library_files(mixed.sandbox)
+    second = mixed.run("--apply", out=tmp_path / "b")["applied"]
+    assert (second["learned"], second["failed"]) == ((0, first["learned"][0]), (0, 5))
+    assert second["engine"]["status"] == "up-to-date" and library_files(mixed.sandbox) == before
+    assert {p: os.path.getsize(os.path.join(mvcommon.GPHOTOS_STATE_DIR, p)) for p in sizes} == sizes
+
+
+def test_apply_puts_the_unresolved_rows_on_the_failed_list(mixed, tmp_path):
+    res = mixed.run("--apply", out=tmp_path / "run")
+    failed = mvcommon.read_failed()
+    assert {(r["manual_id"], r["label"], r["reason"]) for r in failed} == {
+        (M_WHOLE, "whole", "probable"), (T_EP1, "whole", "ambiguous"), (T_EP2, "whole", "wrong-item"),
+        (A_EP, "whole", "inconsistent"), (M_SPLIT, "chunk 3/3", "partial-set")}
+    assert {r["run"] for r in failed} == {"map-20261001T120000Z"}
+    csv_rows = _read_csv(mvcommon.failed_csv_path())                     # regenerated (P-18)
+    assert len(csv_rows) == 5 and res["applied"]["failed_csv"]["rows"] == 5
+    blocks = _blocks(mvcommon.load_library())                            # nothing unresolved was applied
+    for key in ((M_WHOLE, "whole"), (T_EP1, "whole"), (T_EP2, "whole"), (A_EP, "whole"), (M_SPLIT, "chunk 3/3")):
+        assert blocks[key] is None or not any(r.get("confirmed") for r in blocks[key].get("accounts", {}).values())
+
+
+@pytest.mark.parametrize("flag,issue", [({"partial_upload": True}, "partial-upload"),
+                                        ({"original_quality": False}, "not-original-quality")])
+def test_a_partial_or_non_original_copy_is_never_applied(world, tmp_path, flag, issue):
+    world.save().upload_all(skip={M_WHOLE})
+    world.inv.add("movies", world.names[(M_WHOLE, "whole")], **flag)
+    world.save()
+    world.run("--apply", out=tmp_path / "run")
+    assert _blocks(mvcommon.load_library())[(M_WHOLE, "whole")] is None
+    assert [r["reason"] for r in mvcommon.read_failed()] == ["inconsistent"]
+
+
+def test_repair_names_records_the_real_upload_name(world, tmp_path):
+    world.save().upload_all(skip={M_WHOLE})
+    world.inv.add("movies", world.library[M_WHOLE]["filename"])
+    world.save()
+    world.run("--apply", out=tmp_path / "plain")                     # without the repair: not applied
+    assert _blocks(mvcommon.load_library())[(M_WHOLE, "whole")] is None
+    res = world.run("--apply", "--repair", "names", out=tmp_path / "names")
+    block = _blocks(mvcommon.load_library())[(M_WHOLE, "whole")]
+    assert block["uploaded_name"] == world.library[M_WHOLE]["filename"]
+    assert block["accounts"]["movies"]["verified_by"] == "filename" and block["accounts"]["movies"]["confirmed"]
+    again = by_key(world.run(M_WHOLE, out=tmp_path / "again"))[(M_WHOLE, "whole")]
+    assert (again["status"], again["name_match"]) == ("mapped", "exact")       # the library knows its real name
+    assert res["applied"]["engine"]["status"] == "saved"
+
+
+def test_repair_split_info_writes_the_proven_split_and_maps_its_chunks_in_the_same_run(world, tmp_path):
+    chunks = _split_lost(world)
+    res = world.run(T_WIRE, "--apply", "--repair", "split-info", out=tmp_path / "run")
+    split = res["applied"]["split_info"]
+    assert (split["status"], split["repaired"]) == ("saved", [{"manual_id": T_WIRE, "label": "whole", "chunks": 2}])
+    library = mvcommon.load_library()
+    assert _without_gphotos(library[T_WIRE]["split_info"]) == {"is_split": True, "total_chunks": 2, "chunks": [
+        {"filename": chunks[n][0], "hash": chunks[n][1]} for n in (1, 2)]}
+    rows = by_key(res)
+    assert [(k[1], r["status"]) for k, r in rows.items()] == [("chunk 1/2", "mapped"), ("chunk 2/2", "mapped")]
+    blocks = _blocks(library)
+    assert all(blocks[(T_WIRE, f"chunk {n}/2")]["accounts"]["tv"]["confirmed"] for n in (1, 2))
+    assert "gphotos" not in library[T_WIRE]                                    # P-3: never an entry-level block
+
+
+def test_repair_split_info_without_proof_writes_nothing(world, tmp_path):
+    _split_lost(world, sidecars=(1,))
+    before = mvcommon.load_library()[T_WIRE]
+    res = world.run(T_WIRE, "--apply", "--repair", "split-info", out=tmp_path / "run")
+    assert res["applied"]["split_info"]["status"] == "nothing-to-apply"
+    assert mvcommon.load_library()[T_WIRE] == before
+
+
+def test_accept_probable_records_a_manual_match_that_never_confirms(world, tmp_path):
+    world.save().upload_all(skip={M_WHOLE})
+    renamed = world.inv.add("movies", f"Renamed Title 2019 [{world.library[M_WHOLE]['short_id']}].mkv")
+    world.save()
+    world.run("--apply", out=tmp_path / "plain")
+    assert _blocks(mvcommon.load_library())[(M_WHOLE, "whole")] is None       # OD-14: never without the user
+    world.run("--apply", "--accept-probable", out=tmp_path / "accepted")
+    record = _blocks(mvcommon.load_library())[(M_WHOLE, "whole")]["accounts"]["movies"]
+    assert (record["photo_id"], record["verified_by"], record.get("confirmed")) == (renamed["photo_id"], "manual", None)
+
+
+def test_resolutions_are_recorded_by_apply(mixed, tmp_path):
+    path, url = _filled(mixed, tmp_path)
+    res = mixed.run("--resolutions", str(path), "--apply", out=tmp_path / "second")
+    assert res["applied"]["hints"][0] == 2                                      # url + datetime
+    hints = mvcommon.read_hints()
+    assert {(h["manual_id"], h["kind"]) for h in hints} == {(M_WHOLE, "url"), (T_EP1, "datetime")}
+    blocks = _blocks(mvcommon.load_library())
+    movie = blocks[(M_WHOLE, "whole")]["accounts"]["movies"]
+    assert (movie["photo_id"], movie["verified_by"], movie.get("confirmed")) == (url.rsplit("/", 1)[1], "manual", None)
+    assert blocks[(T_EP2, "whole")]["search_override"]["query"] == "MP Show S02E02 director's cut"
+    failed = {(r["manual_id"], r["label"]) for r in mvcommon.read_failed()}
+    assert failed == {(A_EP, "whole")}                       # decided rows are not listed; the skipped one stays
+
+
+def test_an_imported_failed_objects_csv_is_regenerated_only_when_consumed(mixed, tmp_path):
+    mixed.run("--apply", out=tmp_path / "a")                                    # puts 5 rows on the failed list
+    csv_path = mvcommon.failed_csv_path()
+    _decide(csv_path, {(T_EP2, "whole"): {"decision": "search", "new_search_term": "MP Show two"}})
+    res = mixed.run("--resolutions", csv_path, "--apply", out=tmp_path / "b")
+    assert res["applied"]["failed_csv"]["rows"] == 5                         # consumed -> regenerated
+    assert all(r["decision"] == "" for r in _read_csv(csv_path))
+    _decide(csv_path, {(T_EP1, "whole"): {"decision": "url", "photo_url": "not a link"}})     # an invalid edit
+    res = mixed.run("--resolutions", csv_path, "--apply", out=tmp_path / "c")
+    assert res["applied"]["failed_csv"] == {"path": csv_path, "kept": True, "edited_rows": 1}
+    assert "  failed_objects.csv: kept — it holds 1 edited row(s)" in open(
+        os.path.join(res["run_dir"], "summary.txt"), encoding="utf-8").read()
+
+
+def test_an_edited_failed_objects_csv_survives_a_plain_apply(mixed, tmp_path):
+    mixed.run("--apply", out=tmp_path / "a")
+    csv_path = mvcommon.failed_csv_path()
+    _decide(csv_path, {(T_EP2, "whole"): {"decision": "skip", "note": "later"}})
+    edited = open(csv_path, "rb").read()
+    res = mixed.run("--apply", out=tmp_path / "b")
+    assert open(csv_path, "rb").read() == edited
+    assert res["applied"]["failed_csv"]["kept"] is True
+
+
+def test_a_write_failure_stops_before_the_library(mixed, tmp_path, monkeypatch, capsys):
+    def full_disk(account, record):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(mvcommon, "append_learned", full_disk)
+    before = library_files(mixed.sandbox)
+    res = mixed.run("--apply", out=tmp_path / "run", capsys=capsys)
+    assert res["applied"]["engine"] is None and library_files(mixed.sandbox) == before
+    assert "❌ map_photos --apply stopped: OSError: [Errno 28] No space left on device — the library was not changed" \
+           in res["stdout"]
+
+
+def test_apply_never_opens_a_rollback_journal(world, tmp_path, monkeypatch):
+    """OD-3 / the rollback change-gate: map_photos (like the apply engine) never touches the rollback journal."""
+    class Forbidden:
+        def __init__(self, *_a, **_k):
+            raise AssertionError("map_photos must never open a RollbackJournal")
+
+    monkeypatch.setattr(main, "RollbackJournal", Forbidden)
+    _split_lost(world)
+    res = world.run("--apply", "--repair", "split-info,names", out=tmp_path / "run")
+    assert res["applied"]["engine"]["status"] == "saved"
+    assert not [p for p in tmp_path.rglob("*") if p.name == main.TXN_JOURNAL_NAME]

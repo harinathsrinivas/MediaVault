@@ -140,8 +140,15 @@ verdict, expected_taken_local from the capture); inconsistencies.csv; an edited 
 LOUD "you say not uploaded" + inconsistencies.csv; skip stays; bad rows listed, never imported; NEW mvcommon hints
 store hints.jsonl (append_hint / read_hints / _normalize_hint) for Step 13's `check_photos hinted`; objects decided
 earlier (manual photo_id / search_override in the block, or a hint) leave resolutions_todo.csv; a dry run records
-nothing; test_map_photos 98, primitives 215, smoke 82) (wip commit "step 9.8") · [ ] 9.9 --apply via learned
-sidecar + apply engine ← next · [ ] 9.10 --devices-only · then tests, disarm probes, full + smoke`
+nothing; test_map_photos 98, primitives 215, smoke 82) (wip 93b153f) · [x] 9.9 --apply (command split into
+_mp_compute / _mp_apply / _mp_preview / _mp_finish; proven split_info repairs first + a fresh pass so the chunks map
+in the same run; learned records (source map, no approach verdict) for mapped / normalized / wrong-account (+ copies),
+untagged with --repair names, single-item probables with --accept-probable (proof manual); resolution records +
+hints; failed-list rows for what stays unresolved; everything deduplicated against what is on record; then the
+engine over the whole sidecar + names facts; failed_objects.csv regenerated unless it holds edits this run did not
+consume; a write failure stops before the library; a dry run shows the engine preview + the next command; never a
+rollback journal; test_map_photos 113, adjacent 492 incl. smoke 82) (wip commit "step 9.9") · [ ] 9.10
+--devices-only ← next · then tests, disarm probes, full + smoke`
 `resumed 2026-10-01 by executor-fable (usage-limit pause #2): uncommitted 9.1 changes KEPT (main.py,
 tests/test_map_photos.py) — the diff was coherent; 26/27 green, the 1 failure a test-fixture expectation (fixed)`
 `resumed 2026-10-01 by executor-fable (usage-limit pause #3): uncommitted 9.4 changes KEPT (main.py,

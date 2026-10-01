@@ -11550,18 +11550,23 @@ def _mp_family(obj):
     return obj["manual_id"], obj["kind"].startswith("extra"), obj.get("group_rel"), obj.get("sub_rel")
 
 
-def _mp_device_check(library, objects, rows):
+def _mp_device_check(library, objects, rows, cache=None):
     """PLAN Step 9 (5c/d) with Step 8: the READ-ONLY device check (device_inventory() over device_check_aliases()) for
     every object found in no account: on a phone -> awaiting-backup; only its .mvmeta.json sidecar -> missing-after-
     backup (possible cloud loss); on no phone of a complete check -> missing-everywhere; a configured phone not
     listed -> device-check-incomplete (never "missing"). Such an object of a split whose other members ARE in Google
     Photos is flagged partial_set (IMP-C27 (c)). -> the check's summary, or None when no object needed it (then no
-    adb command runs)."""
+    adb command runs). `cache` (a dict) keeps the phones' listing for a second pass of the same run."""
     todo = [r for r in rows if r["status"] == "not-found"]
     if not todo:
         return None
     objs = {_mp_key(o): o for o in objects}
-    inventory = device_inventory()
+    if cache is not None and "inventory" in cache:
+        inventory = cache["inventory"]
+    else:
+        inventory = device_inventory()
+        if cache is not None:
+            cache["inventory"] = inventory
     result = classify_device_objects(library, inventory, objects=[objs[(r["manual_id"], r["label"])] for r in todo])
     devices = inventory.get("devices") or {}
     away = ", ".join(f"{alias} ({(devices.get(alias) or {}).get('serial')}) {status}"
@@ -11894,12 +11899,65 @@ def _mp_device_lines(devices):
     return lines
 
 
+def _mp_engine_line(report, verb):
+    """One line for an apply-engine report (dry run: what WOULD change)."""
+    if report.get("status") in ("error", "aborted"):
+        return f"  ❌ library: {report.get('warning')}"
+    return (f"  library ({report['status']}): {len(report['changed']):,} object(s) {verb} ({report['confirmed']:,} "
+            f"newly confirmed) · conflict(s) not applied {len(report['conflicts']):,} · orphan(s) "
+            f"{len(report['orphans']):,}")
+
+
+def _mp_apply_lines(ctx):
+    """The report's --apply / preview section -> lines."""
+    lines, rows = [], ctx["rows"]
+    plans = [r for r in rows if (r["repair"] or {}).get("kind") == "split-info"]
+    if plans and "split-info" in ctx["repairs"] and not ctx["apply"]:
+        lines.append("split_info repairs (--repair split-info, dry run):")
+        lines.extend(f"  {r['manual_id']} · {r['label']} — " + (
+            f"proven: {r['repair']['split_info']['total_chunks']} chunk(s) would be written"
+            if r["repair"]["provable"] else f"not provable — {r['repair']['why']}") for r in plans)
+    applied = ctx["applied"]
+    if applied is not None:
+        split = applied["split_info"]
+        if split is not None:
+            lines.append(f"split_info repairs: {split['status']} — repaired {len(split['repaired']):,}"
+                         + "".join(f"; skipped {s['manual_id']} · {s['label']}: {s['why']}" for s in split["skipped"])
+                         + (f" — {split['warning']}" if split["warning"] else ""))
+        if applied["error"]:
+            lines.append(applied["error"])
+            return lines
+        lines.append(f"Recorded: learned records {applied['learned'][0]:,} new ({applied['learned'][1]:,} already on "
+                     f"record) · hints {applied['hints'][0]:,} new ({applied['hints'][1]:,}) · failed list "
+                     f"{applied['failed'][0]:,} new ({applied['failed'][1]:,})")
+        lines.append(_mp_engine_line(applied["engine"], "updated"))
+        lines.extend(f"    conflict: {c['manual_id']} · {c['label']} · {c['account'] or 'block'} — {c['code']}"
+                     for c in applied["engine"].get("conflicts") or [])
+        csv_state = applied["failed_csv"]
+        if csv_state is not None:
+            lines.append(csv_state["warning"] if "warning" in csv_state else
+                         f"  failed_objects.csv: kept — it holds {csv_state['edited_rows']} edited row(s); import them "
+                         f"with --resolutions" if csv_state.get("kept") else
+                         f"  failed_objects.csv: regenerated — {csv_state['rows']:,} row(s)")
+        return lines
+    preview = ctx["preview"]
+    if preview is not None:
+        lines.append("Apply preview (dry run — nothing written):")
+        lines.append(preview["warning"] if preview.get("status") == "error" and "changed" not in preview
+                     else _mp_engine_line(preview, "would change"))
+        flags = " ".join([f"--repair {r}" for r in ctx["repairs"]] + (["--accept-probable"] if ctx["accept_probable"]
+                                                                     else []))
+        lines.append(f"Next: python main.py map_photos {ctx['scope']}{' --account ' + ctx['account'] if ctx['account'] else ''}"
+                     f"{' ' + flags if flags else ''} --apply")
+    return lines
+
+
 def _mp_report(ctx):
-    """The run's text report (printed and saved as summary.txt) -> lines. ctx: scope, account, rows, fresh, devices
-    (the device check's summary or None), run_dir."""
+    """The run's text report (printed and saved as summary.txt) -> lines. ctx: _mp_compute's pass + apply,
+    repairs, accept_probable, applied, preview, files, notes, run_dir."""
     rows, fresh, account = ctx["rows"], ctx["fresh"], ctx["account"]
-    lines = [f"=== MAP PHOTOS (dry-run) — scope: {ctx['scope']}{' · account ' + account if account else ''} — "
-             f"{len(rows):,} object(s) ===",
+    lines = [f"=== MAP PHOTOS ({'APPLY' if ctx['apply'] else 'dry-run'}) — scope: {ctx['scope']}"
+             f"{' · account ' + account if account else ''} — {len(rows):,} object(s) ===",
              f"Inventory ({mvcommon.GP_INVENTORY_DIR}):"]
     for info in fresh.values():
         if info["fresh"]:
@@ -12001,9 +12059,182 @@ def _mp_report(ctx):
         lines.append(f"To resolve: {len(ctx['todo']):,} row(s) in resolutions_todo.csv ({_mp_counts_line(reasons)}) "
                      f"— fill its decision column (url | datetime | search | not_uploaded | skip), then: "
                      f"python main.py map_photos {ctx['scope']} --resolutions <that csv>")
+    lines.extend(_mp_apply_lines(ctx))
     lines.extend(ctx["notes"])
     lines.append(f"Outputs: {ctx['run_dir']} — {', '.join(ctx['files'])}")
     return lines
+
+
+def _mp_record(row, item, proof, account, alternates=()):
+    """The P-10 learned record (source map) that an --apply appends for one row and one item — validated by
+    mvcommon's own normalizer (append_learned's). No approach verdict: matching a name in the inventory is not a
+    Google Photos search, so it must not become the fetch's `approach.best`."""
+    flags = {k: item.get(k) for k in ("original_quality", "partial_upload") if isinstance(item.get(k), bool)}
+    return mvcommon._normalize_learned({
+        "account": account, "manual_id": row["manual_id"], "label": row["label"], "sha256": row["sha256"],
+        "photo_id": item["photo_id"], "taken_ms": item.get("taken_ms"), "tz_offset_ms": item.get("tz_offset_ms"),
+        "upload_ms": item.get("upload_ms"), "dedup_key": item.get("dedup_key"), "gp_filename": item.get("filename"),
+        "width": item.get("width"), "height": item.get("height"), "proof": proof, "source": "map",
+        "alternates": list(alternates) or None, **flags}, account)
+
+
+def _mp_learned(rows, repairs, accept_probable):
+    """PLAN Step 9 (9): the learned records an --apply appends — for mapped / mapped-normalized / wrong-account
+    rows (with their recorded same-bytes copies in other accounts), the old-untagged-name rows when --repair names
+    is given, and — with --accept-probable — a probable row whose candidates are ONE item's bytes in one account
+    (proof manual: it never confirms by itself, P-5). Rows without a verdict (stale-inventory) or without a SHA-256
+    never record anything."""
+    out = []
+    for row in rows:
+        if not row["sha256"]:
+            continue
+        item, proof, alternates = row["item"], row["proof"], row["alternates"]
+        take = row["status"] in ("mapped", "mapped-normalized", "wrong-account")
+        if row["issue"] == "untagged-name" and "names" in repairs:
+            take = True
+        if row["status"] == "probable" and accept_probable:
+            groups = _mp_bytes(row["candidates"])
+            if len(groups) == 1 and len({c["account"] for c in row["candidates"]}) == 1:
+                item, proof, take = _mp_pick(groups[0]), "manual", True
+                alternates = [c["photo_id"] for c in groups[0] if c["photo_id"] != item["photo_id"]]
+        if not take or item is None:
+            continue
+        out.append(_mp_record(row, item, proof, row["account"] if row["status"] != "probable" else item["account"],
+                              alternates))
+        out.extend(_mp_record(row, copy_, proof, copy_["account"]) for copy_ in row["copies"])
+    return out
+
+
+def _mp_names_facts(rows):
+    """--repair names: [{manual_id, sha256, uploaded_name}] — the name each object was REALLY uploaded under, when
+    the inventory proves another than the library's: an old untagged name (IMP-C27 (b)), or the bytes found under
+    another name (content proof)."""
+    facts = []
+    for row in rows:
+        if not row["sha256"]:
+            continue
+        if row["issue"] == "untagged-name":
+            facts.append({"manual_id": row["manual_id"], "sha256": row["sha256"],
+                          "uploaded_name": row["repair"]["uploaded_name"]})
+        elif row["name_match"] == "content" and row["item"] and row["status"] in ("mapped", "wrong-account"):
+            facts.append({"manual_id": row["manual_id"], "sha256": row["sha256"],
+                          "uploaded_name": row["item"]["filename"]})
+    return facts
+
+
+def _mp_fingerprint(record, drop=("v", "at")):
+    return json.dumps({k: v for k, v in record.items() if k not in drop}, sort_keys=True, ensure_ascii=False)
+
+
+def _mp_append_new(records, existing, append):
+    """Append the records not on record yet (same facts, whatever their time) -> (appended, already recorded)."""
+    seen = {_mp_fingerprint(r) for r in existing}
+    added = known = 0
+    for record in records:
+        if _mp_fingerprint(record) in seen:
+            known += 1
+            continue
+        append(record)
+        seen.add(_mp_fingerprint(record))
+        added += 1
+    return added, known
+
+
+def _mp_append_failed(records):
+    """Append the failed-list rows whose object's newest row on the list says something else -> (appended, already
+    listed): a re-run that learned nothing new adds nothing (P-18's list is append-only)."""
+    newest = {}
+    for rec in mvcommon.read_failed():
+        newest[(rec["manual_id"], rec.get("sha256") or "label:" + rec.get("label", ""))] = rec
+    added = known = 0
+    for record in records:
+        key = (record["manual_id"], record.get("sha256") or "label:" + record.get("label", ""))
+        held = newest.get(key)
+        if held is not None and _mp_fingerprint(held, ("at", "run")) == _mp_fingerprint(record, ("at", "run")):
+            known += 1
+            continue
+        mvcommon.append_failed(record)
+        newest[key] = record
+        added += 1
+    return added, known
+
+
+def _mp_refresh_failed_csv(resolution):
+    """P-18 after an --apply: regenerate failed_objects.csv from the failed list — unless it holds the user's edits
+    that this run did NOT consume (it imported exactly that file with no invalid or out-of-scope row: then the edits
+    are recorded and the regenerated list replaces them). -> export_failed_csv's result, {path, kept, edited_rows},
+    {warning}, or None (no failed list)."""
+    csv_path = mvcommon.failed_csv_path()
+    if not (os.path.exists(mvcommon.failed_path()) or os.path.exists(csv_path)):
+        return None
+    consumed = False
+    if resolution is not None and not resolution["fatal"] and os.path.exists(csv_path):
+        try:
+            consumed = (os.path.samefile(resolution["path"], csv_path) and not resolution["errors"]
+                        and not resolution["out_of_scope"])
+        except OSError:
+            consumed = False
+    if os.path.exists(csv_path) and not consumed:
+        edits = _gp_csv_edits(csv_path)
+        if edits != 0:
+            return {"path": csv_path, "kept": True, "edited_rows": edits}
+    try:
+        return mvcommon.export_failed_csv(load_library())
+    except (Exception, SystemExit) as e:
+        return {"warning": f"⚠️  failed_objects.csv not refreshed ({_gp_line(e)}) — close it if it is open (e.g. in "
+                           f"Excel); the next apply refreshes it."}
+
+
+def _mp_preview(ctx, repairs, accept_probable):
+    """A dry run's preview of --apply: the apply engine's dry-run report over the learned sidecar plus this run's
+    records and name facts — nothing is written. None when there is nothing to apply."""
+    records = _mp_learned(ctx["rows"], repairs, accept_probable)
+    if ctx["resolution"]:
+        records += ctx["resolution"]["learned"]
+    names = _mp_names_facts(ctx["rows"]) if "names" in repairs else []
+    if not records and not names:
+        return None
+    try:
+        existing = mvcommon.read_learned()
+    except OSError as e:
+        return {"status": "error", "warning": f"⚠️  no apply preview: the learned sidecar is unreadable ({_gp_line(e)})"}
+    return gphotos_apply(existing + records, capture=True, dry_run=True, names=names)
+
+
+def _mp_apply(ctx, repairs, accept_probable, recompute):
+    """PLAN Step 9 (9) --apply -> (summary, ctx). In order: the PROVEN split_info repairs (--repair split-info), then
+    — when any was written — a fresh mapping pass, so the repaired entries' chunks map in this same run; the learned
+    records (source map) and the user's resolution records appended to the learned sidecars (append_learned — the
+    durable record that survives an IMP-C24 lost update), the hints, the failed-list rows for what stays unresolved
+    (each only when not on record yet); then the apply engine over the whole sidecar (+ the --repair names facts),
+    and failed_objects.csv per P-18. A write failure stops before the engine (one line; re-run --apply)."""
+    summary = {"split_info": None, "learned": (0, 0), "hints": (0, 0), "failed": (0, 0), "engine": None,
+               "failed_csv": None, "error": None}
+    if "split-info" in repairs:
+        plans = [r["repair"] for r in ctx["rows"] if (r["repair"] or {}).get("kind") == "split-info"
+                 and r["repair"]["provable"]]
+        summary["split_info"] = _mp_write_split_info(plans)
+        if summary["split_info"]["repaired"]:
+            ctx = recompute()
+    records = _mp_learned(ctx["rows"], repairs, accept_probable)
+    hints = []
+    if ctx["resolution"] and not ctx["resolution"]["fatal"]:
+        records += ctx["resolution"]["learned"]
+        hints = ctx["resolution"]["hints"]
+    try:
+        summary["learned"] = _mp_append_new(records, mvcommon.read_learned(),
+                                            lambda r: mvcommon.append_learned(r["account"], r))
+        summary["hints"] = _mp_append_new(hints, mvcommon.read_hints(), mvcommon.append_hint)
+        summary["failed"] = _mp_append_failed([record for record, _csv_row in ctx["todo"]])
+        learned = mvcommon.read_learned()
+    except (OSError, ValueError) as e:
+        summary["error"] = (f"❌ map_photos --apply stopped: {_gp_line(e)} — the library was not changed; re-run "
+                            f"--apply (records already appended are not appended twice)")
+        return summary, ctx
+    names = _mp_names_facts(ctx["rows"]) if "names" in repairs else []
+    summary["engine"] = gphotos_apply(learned, capture=True, dry_run=False, names=names)
+    summary["failed_csv"] = _mp_refresh_failed_csv(ctx["resolution"])
+    return summary, ctx
 
 
 def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=None, repairs=(),
@@ -12019,6 +12250,22 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
         if not ids:
             print(f"❌ map_photos: no library id is or starts with {scope!r}.")
             return {"status": "error", "run_dir": None, "rows": [], "fresh": {}}
+    cache = {}
+    ctx = _mp_compute(library, scope, ids, account, resolutions, now, cache)
+    applied = preview = None
+    if apply:
+        applied, ctx = _mp_apply(ctx, repairs, accept_probable,
+                                 lambda: _mp_compute(load_library(), scope, ids, account, resolutions, now, cache))
+    else:
+        preview = _mp_preview(ctx, repairs, accept_probable)
+    ctx.update(apply=apply, repairs=tuple(repairs), accept_probable=accept_probable, applied=applied, preview=preview)
+    return _mp_finish(ctx, out, now)
+
+
+def _mp_compute(library, scope, ids, account, resolutions, now, cache):
+    """One complete, offline (but for the read-only device check) mapping pass over a loaded library -> ctx: scope,
+    account, library, objects, rows (verdicts, reasons, user decisions), fresh, devices, unmatched, resolution,
+    todo, notes, run."""
     import mainfetch  # P-4's routing constants and the validated mvconfig overrides — their single source
     overrides = mainfetch._account_overrides()
     prefix_map, default = mainfetch.ID_PREFIX_PROFILE, mainfetch.DEFAULT_PROFILE
@@ -12031,7 +12278,7 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
     states = _mp_inventory_states()
     fresh = _mp_freshness(states, objects, routes, now)
     rows = _mp_match(objects, routes, _mp_index(states), fresh, library)
-    devices = _mp_device_check(library, objects, rows)
+    devices = _mp_device_check(library, objects, rows, cache)
     unmatched = _mp_unmatched(states, fresh, rows, objects) if scope == "all" and account is None else None
     _mp_reasons(rows)
     decided, hint_problem = _mp_prior_decisions(objects)
@@ -12040,10 +12287,18 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
         key = (row["manual_id"], row["label"])
         row["user_decision"] = (resolution["decisions"].get(key) if resolution else None) or decided.get(key)
     run = "map-" + now.strftime("%Y%m%dT%H%M%SZ")
-    todo = _mp_todo(rows, run)
+    return {"scope": scope, "account": account, "library": library, "objects": objects, "rows": rows,
+            "fresh": fresh, "devices": devices, "unmatched": unmatched, "resolution": resolution,
+            "todo": _mp_todo(rows, run), "notes": [hint_problem], "run": run}
+
+
+def _mp_finish(ctx, out, now):
+    """Write the run directory (mapping.jsonl, inconsistencies.csv, resolutions_todo.csv, unmatched_<account>.csv,
+    summary.txt), print the report -> the command's result."""
+    rows, todo, unmatched = ctx["rows"], ctx["todo"], ctx["unmatched"]
     run_dir = _mp_run_dir(out, now)
     os.makedirs(run_dir, exist_ok=True)
-    files, notes = ["summary.txt", "mapping.jsonl", "inconsistencies.csv"], [hint_problem]
+    files, notes = ["summary.txt", "mapping.jsonl", "inconsistencies.csv"], list(ctx["notes"])
     _mp_write_jsonl(os.path.join(run_dir, "mapping.jsonl"), rows)
     _mp_write_csv(os.path.join(run_dir, "inconsistencies.csv"),
                   ("account", "category", "manual_id", "object", "uploaded_name", "status", "issue", "partial_set",
@@ -12062,13 +12317,12 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
                       ("category", "photo_id", "filename", "taken_utc", "upload_utc", "owner", "note"),
                       [(u["category"], u["item"]["photo_id"], u["item"]["filename"], _mp_utc(u["item"]["taken_ms"]),
                         _mp_utc(u["item"]["upload_ms"]), u["owner"], u["note"]) for u in found])
-    lines = _mp_report({"scope": scope, "account": account, "rows": rows, "fresh": fresh, "devices": devices,
-                        "unmatched": unmatched, "todo": todo, "files": files, "notes": [n for n in notes if n],
-                        "resolution": resolution, "apply": apply, "run_dir": run_dir})
+    lines = _mp_report(dict(ctx, files=files, notes=[n for n in notes if n], run_dir=run_dir))
     _mp_write_text(os.path.join(run_dir, "summary.txt"), "\n".join(lines) + "\n")
     print("\n".join(lines))
-    return {"status": "ok", "run_dir": run_dir, "rows": rows, "fresh": fresh, "devices": devices,
-            "unmatched": unmatched, "todo": [record for record, _csv_row in todo]}
+    return {"status": "ok", "run_dir": run_dir, "rows": rows, "fresh": ctx["fresh"], "devices": ctx["devices"],
+            "unmatched": unmatched, "todo": [record for record, _csv_row in todo], "applied": ctx["applied"],
+            "preview": ctx["preview"]}
 
 
 # ==========================================

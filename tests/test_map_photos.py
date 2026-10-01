@@ -637,3 +637,94 @@ def test_an_override_pointing_away_from_the_item_is_flagged(world, tmp_path, mon
     row = by_key(res)[(T_EP1, "whole")]
     assert (row["status"], row["account"], row["override_check"]) == ("mapped", "tv", "differs")
     assert "⚠️  mvconfig fetch_account_overrides routes 1 object(s) away from the account that holds them:" in res["stdout"]
+
+
+# ============================================================================ 9.3 the content key (SHA-1 = dedupKey)
+
+PUSHED = "2026-09-30T10:00:00Z"                      # before the enumeration: the inventories stay fresh
+
+
+def _sha1(data):
+    return hashlib.sha1(data).hexdigest()
+
+
+def test_a_captured_object_is_proven_by_its_dedup_key(world, tmp_path):
+    world.save().upload_all(skip={M_WHOLE})
+    item = world.inv.add("movies", world.names[(M_WHOLE, "whole")], data=b"the whole movie")
+    world.save()
+    world.capture(M_WHOLE, _h(M_WHOLE), _sha1(b"the whole movie"), PUSHED, world.names[(M_WHOLE, "whole")])
+    row = by_key(world.run(M_WHOLE, out=tmp_path / "run"))[(M_WHOLE, "whole")]
+    assert (row["status"], row["proof"], row["name_match"]) == ("mapped", "dedupkey", "exact")
+    assert row["item"]["photo_id"] == item["photo_id"] and row["content_key"] == _key(b"the whole movie")
+    assert row["cloud_state"] == "unverified"
+
+
+def test_a_same_named_item_with_other_bytes_is_a_conflict_never_a_match(world, tmp_path):
+    """PLAN Step 9 (3): capture sha1 -> dedupKey must equal the item's, else `conflict` (never applied)."""
+    world.save().upload_all(skip={M_WHOLE})
+    other = world.inv.add("movies", world.names[(M_WHOLE, "whole")], data=b"some other bytes")
+    world.save()
+    world.capture(M_WHOLE, _h(M_WHOLE), _sha1(b"the whole movie"), PUSHED, world.names[(M_WHOLE, "whole")])
+    row = by_key(world.run(M_WHOLE, out=tmp_path / "run"))[(M_WHOLE, "whole")]
+    assert (row["status"], row["item"], row["proof"]) == ("conflict", None, None)
+    assert [c["photo_id"] for c in row["candidates"]] == [other["photo_id"]]
+    assert "none holds the object's bytes (dedupKey)" in row["note"]
+
+
+def test_the_bytes_under_another_name_are_proven_and_flagged_for_the_names_repair(world, tmp_path):
+    world.save().upload_all(skip={M_WHOLE})
+    item = world.inv.add("movies", "Something Renamed On The Phone.mkv", data=b"the whole movie")
+    world.save()
+    world.capture(M_WHOLE, _h(M_WHOLE), _sha1(b"the whole movie"), PUSHED, world.names[(M_WHOLE, "whole")])
+    row = by_key(world.run(M_WHOLE, out=tmp_path / "run"))[(M_WHOLE, "whole")]
+    assert (row["status"], row["proof"], row["name_match"]) == ("mapped", "dedupkey", "content")
+    assert row["item"]["photo_id"] == item["photo_id"]
+    assert "uploaded under another name (Something Renamed On The Phone.mkv) — --repair names" in row["note"]
+
+
+def test_content_proof_in_another_account_outranks_a_same_named_item(world, tmp_path):
+    world.save().upload_all(skip={T_EP1})
+    world.inv.add("tv", world.names[(T_EP1, "whole")], data=b"a different encode")
+    proven = world.inv.add("movies", world.names[(T_EP1, "whole")], data=b"episode one")
+    copy_ = world.inv.add("anime", "whatever.mkv", data=b"episode one")
+    world.save()
+    world.capture(T_EP1, _h(T_EP1), _sha1(b"episode one"), PUSHED, world.names[(T_EP1, "whole")])
+    row = by_key(world.run(T_EP1, out=tmp_path / "run"))[(T_EP1, "whole")]
+    assert (row["status"], row["account"], row["proof"]) == ("wrong-account", "movies", "dedupkey")
+    assert row["item"]["photo_id"] == proven["photo_id"]
+    assert [c["photo_id"] for c in row["copies"]] == [copy_["photo_id"]]       # the same bytes, recorded
+    assert "tv: 1 item(s) carry this name, none holds the object's bytes" in row["note"]
+
+
+def test_a_trusted_block_s_content_key_counts_like_a_capture(world, tmp_path):
+    entry = world.library[T_EP2]
+    entry["gphotos"] = mvcommon.new_gphotos_block(entry["hash"], sha1=_sha1(b"episode two"))
+    world.save().upload_all(skip={T_EP2})
+    world.inv.add("tv", world.names[(T_EP2, "whole")], data=b"not episode two")
+    world.save()
+    row = by_key(world.run(T_EP2, out=tmp_path / "run"))[(T_EP2, "whole")]
+    assert (row["status"], row["content_key"]) == ("conflict", _key(b"episode two"))
+    entry["gphotos"] = mvcommon.new_gphotos_block(_h("other bytes: untrusted"), sha1=_sha1(b"episode two"))
+    world.save()                                                  # an UNTRUSTED block (P-2) is ignored
+    row = by_key(world.run(T_EP2, out=tmp_path / "run2"))[(T_EP2, "whole")]
+    assert (row["status"], row["content_key"], row["proof"]) == ("mapped", None, "filename")
+
+
+def test_the_same_bytes_twice_is_one_item_and_an_alternate(world, tmp_path):
+    world.save().upload_all(skip={M_WHOLE})
+    later = world.inv.add("movies", world.names[(M_WHOLE, "whole")], data=b"movie", upload_ms=1_790_000_000_000)
+    first = world.inv.add("movies", world.names[(M_WHOLE, "whole")], data=b"movie", upload_ms=1_780_000_000_000)
+    world.save()
+    world.capture(M_WHOLE, _h(M_WHOLE), _sha1(b"movie"), PUSHED, world.names[(M_WHOLE, "whole")])
+    row = by_key(world.run(M_WHOLE, out=tmp_path / "run"))[(M_WHOLE, "whole")]
+    assert (row["status"], row["item"]["photo_id"], row["duplicate"]) == ("mapped", first["photo_id"], "same-bytes")
+    assert row["alternates"] == [later["photo_id"]]
+
+
+def test_a_content_keyed_object_found_nowhere_is_never_probable(world, tmp_path):
+    world.save().upload_all(skip={M_WHOLE})
+    world.inv.add("movies", f"Renamed [{world.library[M_WHOLE]['short_id']}].mkv", data=b"other bytes")
+    world.save()
+    world.capture(M_WHOLE, _h(M_WHOLE), _sha1(b"the movie"), PUSHED, world.names[(M_WHOLE, "whole")])
+    row = by_key(world.run(M_WHOLE, out=tmp_path / "run"))[(M_WHOLE, "whole")]
+    assert (row["status"], row["candidates"]) == ("not-found", [])

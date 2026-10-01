@@ -10865,14 +10865,15 @@ def _mp_tag_key(name):
 
 def _mp_index(states):
     """Per account, the live inventory items indexed for the ladder: by exact file name, by P-6 normalized name, and
-    by MediaVault `[short_id]` tag ((tag, kind, chunk number) -> [items], the OD-14 probable match). Items absent from
+    by MediaVault `[short_id]` tag ((tag, kind, chunk number) -> [items], the OD-14 probable match), and by dedupKey
+    (the SHA-1 of the uploaded bytes — PLAN Step 9 (3): content proof). Items absent from
     the latest complete enumeration (possibly deleted) never match — they are kept by normalized name under
     `deleted` (reported: an item that was there and is gone). A record without a file name or with a crawl error is
     left out: its id counts in the freshness `gaps`, which withhold every "in no account" verdict."""
     index = {}
     for account, state in states.items():
         gone = set(state["possibly_deleted"])
-        exact, normalized, tags, deleted = {}, {}, {}, {}
+        exact, normalized, tags, dedup, deleted = {}, {}, {}, {}, {}
         for pid in sorted(state["items"]):
             rec = state["items"][pid]
             item = _mp_item(account, rec)
@@ -10888,7 +10889,9 @@ def _mp_index(states):
                 kind, number = _mp_tag_key(name)
                 for tag in dict.fromkeys(_MP_TAG_RE.findall(name)):
                     tags.setdefault((tag, kind, number), []).append(item)
-        index[account] = {"exact": exact, "normalized": normalized, "tags": tags, "deleted": deleted}
+                if item["dedup_key"]:
+                    dedup.setdefault(item["dedup_key"], []).append(item)
+        index[account] = {"exact": exact, "normalized": normalized, "tags": tags, "dedup": dedup, "deleted": deleted}
     return index
 
 
@@ -10949,12 +10952,48 @@ def _mp_decision(kind, name_match, item=None, candidates=(), proof=None, alterna
             "alternates": list(alternates), "duplicate": duplicate, "set": chunk_set, "note": note}
 
 
-def _mp_decide(group, idx):
-    """ONE account's decision for each object of a matching group -> {(manual_id, label): decision or None}: the
-    items carrying the object's exact uploaded name, else its P-6 normalized name — exactly one: mapped (proof
-    filename); several: ambiguous; none: None."""
+def _mp_pick(items):
+    """The one item to record among items holding the SAME bytes: a complete, original-quality, unarchived copy
+    first, then the earliest upload, then the photo id (deterministic) — the others become its alternates."""
+    return sorted(items, key=lambda i: (i.get("partial_upload") is True, i.get("original_quality") is False,
+                                        i.get("archived") is True,
+                                        i["upload_ms"] if isinstance(i.get("upload_ms"), int) else float("inf"),
+                                        i["photo_id"]))[0]
+
+
+def _mp_by_content(obj, idx, content_key):
+    """PLAN Step 9 (3): the decision for an object whose content key is known — the items holding its bytes
+    (dedupKey) prove it (proof dedupkey; name_match exact / normalized, or `content` under another name); without
+    one, same-named items hold OTHER bytes: conflict (never applied). None when neither exists."""
+    named, how = _mp_names(idx, obj["uploaded_name"])
+    hits = idx["dedup"].get(content_key, [])
+    if hits:
+        item = _mp_pick(hits)
+        others = [i["photo_id"] for i in hits if i["photo_id"] != item["photo_id"]]
+        match = gpweb.names_match(item["filename"], obj["uploaded_name"] or "") or "content"
+        decision = _mp_decision("mapped", match, item=item, proof="dedupkey", alternates=others,
+                                duplicate="same-bytes" if others else None)
+        foreign = [i for i in named if i["dedup_key"] != content_key]
+        if foreign:
+            decision["note"] = (f"{len(foreign)} other item(s) carry this name with other bytes (a superseded "
+                                f"upload?) — not recorded")
+        return decision
+    if named:
+        return _mp_decision("conflict", how, candidates=named,
+                            note=f"{len(named)} item(s) carry this name, none holds the object's bytes (dedupKey)")
+    return None
+
+
+def _mp_decide(group, idx, keys):
+    """ONE account's decision for each object of a matching group -> {(manual_id, label): decision or None}. An
+    object with a known content key (keys) is decided by its bytes (_mp_by_content); any other by the items carrying
+    its exact uploaded name, else its P-6 normalized name — exactly one: mapped (proof filename); several:
+    ambiguous; none: None."""
     out = {}
     for obj in group:
+        if keys.get(_mp_key(obj)):
+            out[_mp_key(obj)] = _mp_by_content(obj, idx, keys[_mp_key(obj)])
+            continue
         items, how = _mp_names(idx, obj["uploaded_name"])
         if not items:
             out[_mp_key(obj)] = None
@@ -10995,12 +11034,17 @@ def _mp_preferred(row, accounts):
 
 
 def _mp_settle(row, obj, decisions, fresh, index):
-    """The verdict of one object from every crawled account's decision (PLAN Step 9 (1)-(2)): its default account
+    """The verdict of one object from every crawled account's decision (PLAN Step 9 (1)-(3)): its default account
     first (its normalized name there beats an exact name elsewhere — P-6 ladder order), then another account
-    (wrong-account), then the `[short_id]`-tag probable; an answer that rests on a stale inventory is refused."""
+    (wrong-account), then the `[short_id]`-tag probable; an object with a known content key is decided by its bytes
+    wherever they are. An answer that rests on a stale inventory is refused (stale-inventory)."""
     key, home = _mp_key(obj), row["default_account"]
     if not fresh[home]["fresh"]:
         return _mp_stale(row, home, fresh[home]["reason"])
+    if row["content_key"]:
+        if _mp_settle_by_content(row, key, decisions, fresh):
+            return
+        return _mp_nowhere(row, obj, fresh, index)
     own = decisions[home][key]
     if own is not None:
         _mp_take(row, own, home)
@@ -11026,6 +11070,47 @@ def _mp_settle(row, obj, decisions, fresh, index):
             [elsewhere[a]["item"]] if elsewhere[a]["item"] else elsewhere[a]["candidates"])])
         return _mp_note(row, f"the name is in {len(accounts)} other accounts ({', '.join(accounts)}) with "
                              f"different bytes")
+    return _mp_nowhere(row, obj, fresh, index)
+
+
+def _mp_settle_by_content(row, key, decisions, fresh):
+    """The verdict of a content-keyed object (PLAN Step 9 (3)) -> True when decided. Its bytes in the default account,
+    else in another account (wrong-account; the same bytes in further accounts are recorded copies) — content proof
+    outranks any same-named item; else a same-named item with other bytes -> conflict. False: found nowhere."""
+    home = row["default_account"]
+    order = [home] + _mp_preferred(row, [a for a in decisions if a != home])
+    proven = [a for a in order if decisions[a][key] is not None and decisions[a][key]["kind"] == "mapped"]
+    if proven:
+        if not fresh[proven[0]]["fresh"]:
+            _mp_stale(row, proven[0], f"its bytes are in this account, whose inventory is not fresh "
+                                      f"({fresh[proven[0]]['reason']})")
+            return True
+        _mp_take(row, decisions[proven[0]][key], proven[0])
+        if proven[0] != home:
+            row["status"] = "wrong-account"
+        row["copies"] = [dict(decisions[a][key]["item"]) for a in proven[1:] if fresh[a]["fresh"]]
+        conflict = decisions[home][key]
+        if proven[0] != home and conflict is not None:
+            _mp_note(row, f"{home}: {conflict['note']}")
+        if row["name_match"] == "content":
+            _mp_note(row, f"its bytes were uploaded under another name ({row['item']['filename']}) — "
+                          f"--repair names records it")
+        return True
+    conflicts = [a for a in order if decisions[a][key] is not None]
+    if conflicts:
+        if not fresh[conflicts[0]]["fresh"]:
+            _mp_stale(row, conflicts[0], f"the name is in this account, whose inventory is not fresh "
+                                         f"({fresh[conflicts[0]]['reason']})")
+            return True
+        _mp_take(row, decisions[conflicts[0]][key], conflicts[0])
+        return True
+    return False
+
+
+def _mp_nowhere(row, obj, fresh, index):
+    """An object found in no account by name or bytes: withheld while any crawled inventory is not fresh or not fully
+    detailed; else the `[short_id]`-tag probable (never for a content-keyed object: those items hold other bytes);
+    else not-found (the device check decides), with any possibly-deleted same-named item as evidence."""
     blocked = [a for a in mvcommon.GP_ACCOUNTS if fresh[a]["crawled"] and not fresh[a]["fresh"]]
     gaps = [a for a in mvcommon.GP_ACCOUNTS if fresh[a]["crawled"] and fresh[a]["gaps"]]
     if blocked or gaps:
@@ -11033,7 +11118,7 @@ def _mp_settle(row, obj, decisions, fresh, index):
         why = fresh[a]["reason"] or f"{fresh[a]['gaps']:,} known id(s) without details — re-run the crawl"
         return _mp_stale(row, a, f"not in any account, but that cannot be told while this inventory is not "
                                  f"complete ({why})")
-    probable = _mp_probable(obj, row, index)
+    probable = None if row["content_key"] else _mp_probable(obj, row, index)
     if probable:
         account, items = probable
         row.update(status="probable", account=account, name_match="tag", candidates=[dict(i) for i in items])
@@ -11099,7 +11184,8 @@ def _mp_match(objects, routes, index, fresh):
         rows.append(by_key[_mp_key(obj)])
     crawled = [a for a in mvcommon.GP_ACCOUNTS if fresh[a]["crawled"]]
     for group in _mp_groups(objects):
-        decisions = {a: _mp_decide(group, index[a]) for a in crawled}
+        keys = {_mp_key(obj): by_key[_mp_key(obj)]["content_key"] for obj in group}
+        decisions = {a: _mp_decide(group, index[a], keys) for a in crawled}
         for a in mvcommon.GP_ACCOUNTS:
             decisions.setdefault(a, dict.fromkeys(map(_mp_key, group)))
         for obj in group:

@@ -214,6 +214,10 @@ CATEGORY_ROOTS = {
 # Authoritative in-code spec: mvcommon's "GOOGLE PHOTOS IDENTITY" section
 # (new_gphotos_block / block_trusted / iter_uploaded_objects); decisions:
 # docs/feature-fetch-datetime/DECISIONS.md.
+# - `map_photos --repair split-info` (IMP-C25 Step 9 / IMP-C27 (a)) can write
+#   a `split_info` back onto a leaf (or extras item) that lost it: {is_split,
+#   total_chunks, chunks: [{filename, hash}]} — WITHOUT method / val, which
+#   are unknown after the loss (every reader takes them with .get()).
 #
 # `required` = keys that distinguish the type and are always present; it is the
 # minimal set, not the exhaustive set (leaves also carry hash/metadata/etc.).
@@ -12248,8 +12252,34 @@ def _mp_apply(ctx, repairs, accept_probable, recompute):
 
 def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=None, repairs=(),
                    accept_probable=False, apply=False, out=None):
-    """`map_photos` (PLAN Step 9): map the uploaded library objects to the Google Photos inventory — see the section
-    comment above. A dry run by default. -> {status, run_dir, rows, fresh, devices} (status: ok | error)."""
+    """`map_photos` (PLAN Step 9): map the uploaded library objects to the Google Photos inventory — the per-object
+    rules are in the section comment above. A DRY RUN by default.
+
+    scope             all (the whole library) | a library id | an id prefix (a season id selects its episodes; an
+                      alias id maps its primary)
+    account           only the objects ROUTED to that account (mvconfig override > learned home > id prefix)
+    devices_only      only Step 8's read-only device report (devices.csv): no inventory, nothing recorded
+    resolutions       a filled resolutions_todo.csv / failed_objects.csv: url -> a manual-proof learned record + a
+                      hint, datetime -> a hint (both verified later by `check_photos hinted`), search -> the
+                      object's search_override, not_uploaded -> the LOUD list, skip -> stays unresolved
+    repairs           "split-info": write back a PROVEN lost split_info · "names": record the name an object was
+                      really uploaded under (through the apply engine) — both only with apply
+    accept_probable   also record single-item `[short_id]`-tag matches (proof manual: they never confirm)
+    apply             record: learned sidecars (append_learned), hints, failed list, then the apply engine (the
+                      only writer of `gphotos` blocks) over the whole sidecar; failed_objects.csv per P-18. Nothing
+                      is appended twice. Refused (nothing recorded) when the resolutions file cannot be read.
+    out               the run directory (default <GPHOTOS_STATE_DIR>/map/<UTC timestamp>), created first
+
+    Row status (mapping.jsonl): mapped · mapped-normalized · wrong-account (these three are applied) · probable ·
+    ambiguous · conflict · inconsistent (issue: split-info-lost | untagged-name | partial-upload |
+    not-original-quality | no-uploaded-name) · awaiting-backup · missing-after-backup · missing-everywhere ·
+    device-check-incomplete · stale-inventory (no verdict). Run directory: summary.txt (the printed report),
+    mapping.jsonl, inconsistencies.csv, resolutions_todo.csv (the failed_objects.csv columns),
+    unmatched_<account>.csv (`all` without account only); devices.csv for devices_only.
+
+    -> {status: ok | error, run_dir, rows, fresh, devices, unmatched, todo (the failed-list records of the
+    unresolved rows), applied (the --apply summary: split_info, learned / hints / failed (new, already on record),
+    engine (gphotos_apply's report), failed_csv, error), preview (a dry run's engine report)}."""
     now = mvcommon._now_utc()
     library = load_library()
     if scope in (None, "", "all"):
@@ -12259,18 +12289,32 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
         if not ids:
             print(f"❌ map_photos: no library id is or starts with {scope!r}.")
             return {"status": "error", "run_dir": None, "rows": [], "fresh": {}}
+    run_dir = _mp_run_dir(out, now)
+    try:                              # before anything is recorded: a bad --out must not surface after an --apply
+        os.makedirs(run_dir, exist_ok=True)
+    except OSError as e:
+        print(f"❌ map_photos: cannot create the output directory {run_dir} ({_gp_line(e)}).")
+        return {"status": "error", "run_dir": None, "rows": [], "fresh": {}}
     if devices_only:
-        return _mp_devices_only(library, scope, ids, account, out, now)
+        return _mp_devices_only(library, scope, ids, account, run_dir)
     cache = {}
     ctx = _mp_compute(library, scope, ids, account, resolutions, now, cache)
     applied = preview = None
-    if apply:
+    unread = bool(apply and ctx["resolution"] and ctx["resolution"]["fatal"])
+    if unread:                        # a mistyped --resolutions path must not turn into a half-intended apply
+        ctx["notes"].append("❌ --apply was NOT run: the --resolutions file could not be read — nothing was "
+                            "recorded; fix the path and re-run")
+    elif apply:
         applied, ctx = _mp_apply(ctx, repairs, accept_probable,
                                  lambda: _mp_compute(load_library(), scope, ids, account, resolutions, now, cache))
     else:
         preview = _mp_preview(ctx, repairs, accept_probable)
-    ctx.update(apply=apply, repairs=tuple(repairs), accept_probable=accept_probable, applied=applied, preview=preview)
-    return _mp_finish(ctx, out, now)
+    ctx.update(apply=apply and not unread, repairs=tuple(repairs), accept_probable=accept_probable, applied=applied,
+               preview=preview)
+    result = _mp_finish(ctx, run_dir)
+    if unread or (applied is not None and applied["error"]):
+        result["status"] = "error"
+    return result
 
 
 def _mp_objects(library, ids, account):
@@ -12310,7 +12354,7 @@ def _mp_compute(library, scope, ids, account, resolutions, now, cache):
             "todo": _mp_todo(rows, run), "notes": [hint_problem], "run": run}
 
 
-def _mp_devices_only(library, scope, ids, account, out, now):
+def _mp_devices_only(library, scope, ids, account, run_dir):
     """`map_photos --devices-only` (PLAN Step 9 (10), §M2): ONLY the read-only device check of Step 8 for the objects
     in scope — which are still on a phone (awaiting backup, or not freed yet) and which were freed (only the
     `.mvmeta.json` sidecar is left) — printed, plus devices.csv in the run directory. No inventory, no Google
@@ -12320,8 +12364,6 @@ def _mp_devices_only(library, scope, ids, account, out, now):
     result = classify_device_objects(library, inventory, objects=objects)
     devices = {"complete": result["complete"], "incomplete": result["incomplete_devices"], "counts": result["counts"],
                "devices": inventory.get("devices") or {}, "unconfigured": inventory.get("unconfigured") or []}
-    run_dir = _mp_run_dir(out, now)
-    os.makedirs(run_dir, exist_ok=True)
     phones = lambda places: "; ".join(f"{p['alias']} ({p['serial']}) {p['path']}" for p in places)
     _mp_write_csv(os.path.join(run_dir, "devices.csv"),
                   ("manual_id", "object", "uploaded_name", "state", "copies", "size_match", "sidecars", "partials"),
@@ -12352,12 +12394,10 @@ def _mp_devices_only(library, scope, ids, account, out, now):
     return {"status": "ok", "run_dir": run_dir, "devices": devices, "objects": result["objects"]}
 
 
-def _mp_finish(ctx, out, now):
+def _mp_finish(ctx, run_dir):
     """Write the run directory (mapping.jsonl, inconsistencies.csv, resolutions_todo.csv, unmatched_<account>.csv,
     summary.txt), print the report -> the command's result."""
     rows, todo, unmatched = ctx["rows"], ctx["todo"], ctx["unmatched"]
-    run_dir = _mp_run_dir(out, now)
-    os.makedirs(run_dir, exist_ok=True)
     files, notes = ["summary.txt", "mapping.jsonl", "inconsistencies.csv"], list(ctx["notes"])
     _mp_write_jsonl(os.path.join(run_dir, "mapping.jsonl"), rows)
     _mp_write_csv(os.path.join(run_dir, "inconsistencies.csv"),

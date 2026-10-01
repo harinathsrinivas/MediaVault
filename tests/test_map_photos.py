@@ -1,10 +1,23 @@
 """IMP-C25 Step 9 — `map_photos`: map the uploaded library objects to the Google Photos inventory (PLAN Step 9).
 
 Pinned here, per sub-task:
-  9.1 the freshness gate (no inventory / no complete enumeration / older than 24 h / older than the newest capture
-      push -> stale-inventory + the re-crawl command); the CLI; the scope (all / id / prefix / alias, --account by
-      routing); a dry run writes nothing but its run directory (library files hashed before and after);
-      compatibility with the REAL crawler's files (a crawl of the fake Google Photos).
+  9.1  the freshness gate (no inventory / no complete enumeration / older than 24 h / older than the newest capture
+       push -> stale-inventory + the re-crawl command); the CLI; the scope (all / id / prefix / alias, --account by
+       routing); a dry run writes nothing but its run directory (library files hashed before and after);
+       compatibility with the REAL crawler's files (a crawl of the fake Google Photos).
+  9.2  the name ladder: exact -> P-6 normalized -> another account (a 31-episode wrong-account block + whether the
+       mvconfig overrides cover it; copies; evidence from a stale inventory refused) -> `[short_id]`-tag probable;
+       possibly-deleted items never match.
+  9.3  the content key (capture SHA-1 = dedupKey): proven / conflict / another name / another account.
+  9.4  duplicates: the same bytes twice; re-split uploads (newest complete set, newer-incomplete safety, a pinned
+       set, an extras split).
+  9.5  IMP-C27: split_info lost (+ the proven repair and its writer), old untagged names (+ the apply engine's
+       `names=`), partial / non-original copies, every device verdict (freed vs on a phone vs absent vs unchecked)
+       with partial sets and the LOUD block, the extra movies phone (DECISIONS §1d).
+  9.6  the unmatched-inventory report.   9.7  resolutions_todo.csv / inconsistencies.csv / the failed records.
+  9.8  --resolutions and the hints store.   9.9  --apply (sidecar, engine, failed list, CSV rule, idempotence).
+  9.10 --devices-only.   Plus: all four prefixes end to end, the CLI dispatcher branch.
+Disarm probes (35, on an isolated scratch copy): PROGRESS.md row 9.
 SYNTHETIC data only: photo ids contain FAKE, devices are FAKE serials; the library lives in the `sandbox`, the
 inventory and the Google Photos state in the conftest redirects (tmp_path) — never D:\\ or ~/.mediavault.
 """
@@ -1653,6 +1666,44 @@ def test_devices_only_says_which_phone_was_not_listed(world, tmp_path, capsys):
     assert {o["manual_id"] for o in res["objects"]} == {T_SEASON, T_EP1, T_EP2}
     assert {o["state"] for o in res["objects"]} == {"unchecked"}
     assert "Unchecked (3) — a configured phone was not listed: movies (FAKEMOV0001) not-connected" in res["stdout"]
+
+
+def test_an_unreadable_resolutions_file_stops_an_apply_before_anything_is_recorded(mixed, tmp_path, capsys):
+    """A mistyped --resolutions path must not become a half-intended apply."""
+    before = library_files(mixed.sandbox)
+    res = mixed.run("--apply", "--resolutions", str(tmp_path / "typo.csv"), out=tmp_path / "run", capsys=capsys)
+    assert (res["status"], res["applied"]) == ("error", None)
+    assert library_files(mixed.sandbox) == before and not os.path.exists(mvcommon.GPHOTOS_STATE_DIR)
+    assert "❌ --apply was NOT run: the --resolutions file could not be read" in res["stdout"]
+    assert res["stdout"].startswith("=== MAP PHOTOS (dry-run)")
+
+
+def test_a_bad_out_directory_fails_before_anything_is_recorded(mixed, tmp_path, capsys):
+    blocker = tmp_path / "a-file"
+    blocker.write_text("not a directory", encoding="utf-8")
+    before = library_files(mixed.sandbox)
+    res = mixed.run("--apply", out=blocker / "run", capsys=capsys)
+    assert res["status"] == "error" and "cannot create the output directory" in res["stdout"]
+    assert library_files(mixed.sandbox) == before and not os.path.exists(mvcommon.GPHOTOS_STATE_DIR)
+
+
+# ============================================================================ all four prefixes
+
+def test_an_others_object_maps_and_applies_once_its_account_is_crawled(world, tmp_path):
+    """The fourth prefix end to end: `oth-` objects are withheld only while the Others account has no inventory (the
+    real state today); once crawled they map and apply into library_others.json like any other."""
+    world.inv.enumerated["others"] = ENUMERATED
+    world.save().upload_all(accounts=mvcommon.GP_ACCOUNTS).save()
+    res = world.run("--apply", out=tmp_path / "run")
+    rows = by_key(res)
+    assert {r["category"] for r in rows.values()} == {"movies", "tv", "anime", "others"}
+    assert {r["status"] for r in rows.values()} == {"mapped"}
+    other = rows[(O_MATCH, "whole")]
+    assert (other["account"], other["default_account"], other["proof"]) == ("others", "others", "filename")
+    assert res["fresh"]["others"]["fresh"] is True and set(res["unmatched"]) == set(mvcommon.GP_ACCOUNTS)
+    stored = json.loads(world.sandbox["lib_others"].read_text(encoding="utf-8"))[O_MATCH]["gphotos"]
+    assert stored["home_account"] == "others" and stored["accounts"]["others"]["confirmed"] is True
+    assert [r["manual_id"] for r in mvcommon.read_learned("others")] == [O_MATCH]
 
 
 # ============================================================================ the CLI dispatcher branch

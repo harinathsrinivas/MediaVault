@@ -11374,7 +11374,8 @@ def _mp_split_plan(row, obj, chunks, holders, library):
     prefix = os.path.splitext(row["uploaded_name"])[0] + ".chunk."
     folder = _mp_object_folder(library, obj)
     if len(seconds) > 1 or len(_mp_bytes(chunks)) != len(chunks):
-        plan["why"] = f"its chunks were uploaded more than once ({len(seconds)} taken seconds)"
+        plan["why"] = (f"its chunks were uploaded more than once ({len(seconds)} taken seconds)" if len(seconds) > 1
+                       else "its chunks were uploaded more than once (the same chunk twice)")
     elif numbers != list(range(1, len(chunks) + 1)):
         plan["why"] = f"the chunks in Google Photos are not 1..{len(chunks)} exactly once ({numbers})"
     elif holders:
@@ -11934,11 +11935,17 @@ def _mp_apply_lines(ctx):
         lines.extend(f"    conflict: {c['manual_id']} · {c['label']} · {c['account'] or 'block'} — {c['code']}"
                      for c in applied["engine"].get("conflicts") or [])
         csv_state = applied["failed_csv"]
-        if csv_state is not None:
-            lines.append(csv_state["warning"] if "warning" in csv_state else
-                         f"  failed_objects.csv: kept — it holds {csv_state['edited_rows']} edited row(s); import them "
-                         f"with --resolutions" if csv_state.get("kept") else
-                         f"  failed_objects.csv: regenerated — {csv_state['rows']:,} row(s)")
+        if csv_state is None:
+            pass
+        elif "warning" in csv_state:
+            lines.append(csv_state["warning"])
+        elif csv_state.get("kept") and csv_state["edited_rows"] is None:
+            lines.append("  failed_objects.csv: kept — it no longer reads as the failed list (left as is)")
+        elif csv_state.get("kept"):
+            lines.append(f"  failed_objects.csv: kept — it holds {csv_state['edited_rows']} edited row(s); import them "
+                         f"with --resolutions")
+        else:
+            lines.append(f"  failed_objects.csv: regenerated — {csv_state['rows']:,} row(s)")
         return lines
     preview = ctx["preview"]
     if preview is not None:
@@ -14872,7 +14879,8 @@ if __name__ == "__main__":
             print(f"❌ map_photos: {_mp_err}")
             print(f"   Usage: {MAP_USAGE}")
             sys.exit(1)
-        cmd_map_photos(**_mp_opts)
+        if cmd_map_photos(**_mp_opts).get("status") == "error":
+            sys.exit(1)
 
     elif cmd == "fetch":
         if len(sys.argv) < 3:

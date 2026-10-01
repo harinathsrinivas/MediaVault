@@ -150,8 +150,12 @@ consume; a write failure stops before the library; a dry run shows the engine pr
 rollback journal; test_map_photos 113, adjacent 492 incl. smoke 82) (wip 6c645ab) · [x] 9.10 --devices-only (Step 8's
 read-only device report for the scope / --account: device lines + unconfigured phones, verdict counts, the objects
 still on a phone, freed count, unchecked + which phone was not listed; devices.csv; no inventory, nothing written
-outside the run dir; test_map_photos 115, smoke 82) (wip commit "step 9.10") · [ ] end of step: self-review, live
-dry-run (counts only), disarm probes on a scratch copy, full + smoke ← next`
+outside the run dir; test_map_photos 115, smoke 82) (wip 7b2ce0c) · [x] self-review fixes (exit code 1 for a
+failed run / usage error; wording for an unreadable failed_objects.csv and a chunk uploaded twice; dispatcher
+branch pinned through the compiled __main__ block; test_map_photos 118) (wip commit "step 9 self-review") · [ ] live
+dry-run (counts only), disarm probes on a scratch copy, full + smoke, PROGRESS/STATUS, feat commit ← next`
+`resumed 2026-10-02 by executor-fable (usage-limit pause #5): uncommitted self-review fixes KEPT (main.py) —
+coherent; 115/115 green`
 `resumed 2026-10-01 by executor-fable (usage-limit pause #2): uncommitted 9.1 changes KEPT (main.py,
 tests/test_map_photos.py) — the diff was coherent; 26/27 green, the 1 failure a test-fixture expectation (fixed)`
 `resumed 2026-10-01 by executor-fable (usage-limit pause #3): uncommitted 9.4 changes KEPT (main.py,

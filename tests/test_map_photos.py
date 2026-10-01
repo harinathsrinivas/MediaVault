@@ -1649,3 +1649,66 @@ def test_devices_only_says_which_phone_was_not_listed(world, tmp_path, capsys):
     assert {o["manual_id"] for o in res["objects"]} == {T_SEASON, T_EP1, T_EP2}
     assert {o["state"] for o in res["objects"]} == {"unchecked"}
     assert "Unchecked (3) — a configured phone was not listed: movies (FAKEMOV0001) not-connected" in res["stdout"]
+
+
+# ============================================================================ the CLI dispatcher branch
+
+def _main_guard():
+    """main.py's `if __name__ == "__main__":` body, compiled alone (the harness of test_prep_push_rep_enrich_cli)."""
+    import ast
+    with open(main.__file__, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read(), filename=main.__file__)
+    node = next(n for n in tree.body if isinstance(n, ast.If) and isinstance(n.test, ast.Compare)
+                and getattr(n.test.left, "id", None) == "__name__")
+    return compile(ast.Module(body=node.body, type_ignores=[]), main.__file__, "exec")
+
+
+def _dispatch(argv, status="ok"):
+    """Run the dispatcher with `argv` against a recorder for cmd_map_photos -> its recorded kwargs."""
+    import sys as real_sys
+
+    class Sys:
+        def __init__(self):
+            self.argv = ["main.py", "map_photos", *argv]
+
+        def __getattr__(self, name):
+            return getattr(real_sys, name)
+
+    calls = []
+    namespace = dict(main.__dict__, sys=Sys(),
+                     cmd_map_photos=lambda **kwargs: calls.append(kwargs) or {"status": status})
+    exec(_main_guard(), namespace)
+    return calls
+
+
+def test_the_dispatcher_hands_the_parsed_options_to_cmd_map_photos():
+    calls = _dispatch(["tv-en", "--account", "tv", "--apply", "--repair", "names", "--out", r"Z:\run"])
+    assert calls == [{"scope": "tv-en", "account": "tv", "devices_only": False, "resolutions": None,
+                      "repairs": ("names",), "accept_probable": False, "apply": True, "out": r"Z:\run"}]
+
+
+def test_the_dispatcher_exits_1_on_a_usage_error_or_a_failed_run(capsys):
+    with pytest.raises(SystemExit) as stop:
+        _dispatch(["--frobnicate"])
+    assert stop.value.code == 1
+    out = capsys.readouterr().out
+    assert "❌ map_photos: unknown option --frobnicate" in out and f"   Usage: {main.MAP_USAGE}" in out
+    with pytest.raises(SystemExit) as stop:
+        _dispatch(["tv-xx-none"], status="error")
+    assert stop.value.code == 1
+    assert _dispatch([]) == [dict(main.parse_map_photos_args([]))]           # a good run returns normally
+
+
+def test_report_wording_for_an_unreadable_failed_csv_and_a_chunk_uploaded_twice():
+    ctx = {"rows": [], "repairs": (), "apply": True, "applied": {
+        "split_info": None, "error": None, "learned": (0, 0), "hints": (0, 0), "failed": (0, 0),
+        "engine": {"status": "up-to-date", "changed": [], "confirmed": 0, "conflicts": [], "orphans": []},
+        "failed_csv": {"path": "x", "kept": True, "edited_rows": None}}}
+    assert main._mp_apply_lines(ctx)[-1] == ("  failed_objects.csv: kept — it no longer reads as the failed list "
+                                             "(left as is)")
+    twice = [{"account": "tv", "photo_id": f"AF1QipFAKEtwice{n}xxxxxxxxxx", "filename": "X [aaaaaa].chunk.001.mkv",
+              "taken_ms": 1_000_000, "dedup_key": _key(b"same"), "upload_ms": n} for n in (1, 2)]
+    row = {"account": "tv", "uploaded_name": "X [aaaaaa].mkv"}
+    obj = {"manual_id": "tv-x", "label": "whole", "slot": ("tv-x",), "sha256": _h("x"), "kind": "whole"}
+    plan = main._mp_split_plan(row, obj, twice, [], {})
+    assert (plan["provable"], plan["why"]) == (False, "its chunks were uploaded more than once (the same chunk twice)")

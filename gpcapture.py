@@ -21,6 +21,7 @@ import re
 import tempfile
 from datetime import datetime, timedelta, timezone
 
+import mvcommon
 from mvcommon import cached_sha1
 
 CAPTURE_SUFFIX = ".gpcapture.json"
@@ -179,17 +180,18 @@ def capture_after_prep(folder, manual_id, short_id, filepath, uploaded_name, sha
         return None
 
 
-def snapshot_push_objects(paths, split_dir_name, short_id, chunk_hashes, whole_sha256, holders):
+def snapshot_push_objects(paths, parts_dir, short_id, chunk_hashes, whole_sha256, holders):
     """Read-only facts for each file cmd_push is about to upload — taken BEFORE the upload
-    loop, because uploaded chunks are deleted locally. Mirrors cmd_push's remote naming:
-    a file outside the split dir uploads as '<name> [<short_id>]<ext>'; a chunk or a FLAC
-    holder keeps its own name. Never raises."""
+    loop, because uploaded chunks are deleted locally. Mirrors cmd_push's remote naming by
+    sharing its rule, mvcommon.in_parts_dir (IMP-C28): a file directly in the push's chunk
+    dir `parts_dir` (a chunk or a FLAC holder) keeps its own name; any other file uploads
+    as '<name> [<short_id>]<ext>'. Never raises."""
     objs = []
     try:
         holder_hash = {h.get("holder_filename"): h.get("holder_hash") for h in (holders or []) if isinstance(h, dict)}
         for p in paths or []:
             name = os.path.basename(p)
-            if split_dir_name not in p:
+            if not mvcommon.in_parts_dir(p, parts_dir):
                 base, ext = os.path.splitext(name)
                 role, uploaded, index, sha256 = "whole", f"{base} [{short_id}]{ext}", None, whole_sha256
             else:

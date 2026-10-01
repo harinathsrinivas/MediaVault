@@ -760,6 +760,24 @@ def episode_num_from_id(child_id, base_id):
     return float(m.group(1)) if m else None
 
 
+def in_parts_dir(path, parts_dir):
+    """True iff `path` lives DIRECTLY in `parts_dir`, the chunk dir of ONE push.
+
+    THE rule a push uses to tell a chunk (or FLAC holder) from a whole file: a
+    chunk keeps its own, already-tagged name and is deleted locally once
+    uploaded; anything else is the master, uploaded as "<stem> [<short_id>]<ext>"
+    and never deleted. It compares the normalised parent dir (abspath +
+    normcase) with the chunk dir the caller computed (cmd_push: _parts_base +
+    SPLIT_DIR_NAME, tempdir redirect included). It is NEVER a "_parts"
+    substring test on the path: a title folder such as `Spare_parts (2015)`
+    contains that substring, and the old test uploaded its master untagged and
+    then deleted it (IMP-C28). Shared by main.cmd_push and
+    gpcapture.snapshot_push_objects, so the recorded upload name cannot drift
+    from the pushed one. Pure path arithmetic; never touches the filesystem."""
+    return (os.path.normcase(os.path.abspath(os.path.dirname(path)))
+            == os.path.normcase(os.path.abspath(parts_dir)))
+
+
 # ==========================================
 #         PROVIDER TOKENS (folder names)
 # ==========================================

@@ -10948,6 +10948,21 @@ def _mp_content_key(obj):
     return key or gpweb.normalize_dedup_key((obj.get("capture") or {}).get("dedup_key"))
 
 
+def _mp_expected_local(obj):
+    """The taken time Google Photos will show for an object, from its capture — the file's DateUTC in the pushing
+    phone's timezone: 'YYYY-MM-DD HH:MM:SS GMT+08:00' (UTC when the offset is unknown) — or None (no capture)."""
+    capture = obj.get("capture") or {}
+    when = _mp_when(capture.get("date_utc"))
+    if when is None:
+        return None
+    offset = (capture.get("pushed") or {}).get("device_tz_offset_min")
+    if not isinstance(offset, int) or isinstance(offset, bool):
+        return when.strftime("%Y-%m-%d %H:%M:%S UTC")
+    local = when + timedelta(minutes=offset)
+    sign = "-" if offset < 0 else "+"
+    return local.strftime("%Y-%m-%d %H:%M:%S") + f" GMT{sign}{abs(offset) // 60:02d}:{abs(offset) % 60:02d}"
+
+
 def _mp_row(obj, route):
     """The mapping.jsonl row of one object, before its verdict (status None)."""
     return {"manual_id": obj["manual_id"], "label": obj["label"], "kind": obj["kind"], "category": obj["category"],
@@ -10956,7 +10971,8 @@ def _mp_row(obj, route):
             "routing": route["routing"], "account": route["default"], "status": None, "issue": None,
             "name_match": None, "proof": None, "item": None, "alternates": [], "copies": [], "candidates": [],
             "deleted": [], "override_check": None, "duplicate": None, "set": None, "device": None,
-            "partial_set": False, "content_key": _mp_content_key(obj), "reason": None, "note": None, "repair": None}
+            "partial_set": False, "content_key": _mp_content_key(obj), "expected_taken_local": _mp_expected_local(obj),
+            "reason": None, "note": None, "repair": None}
 
 
 def _mp_names(index_account, name):
@@ -11639,6 +11655,79 @@ def _mp_unmatched(states, fresh, rows, objects):
     return out
 
 
+_MP_REASONS = {"probable": "probable", "ambiguous": "ambiguous", "conflict": "wrong-item", "inconsistent": "inconsistent",
+               "missing-after-backup": "missing-after-backup", "missing-everywhere": "missing-everywhere",
+               "device-check-incomplete": "not-found"}   # status -> P-18 failed-list reason (unresolved rows only)
+
+
+def _mp_reasons(rows):
+    """Set every row's P-18 failed-list `reason` — None for a resolved row (mapped, wrong-account), one awaiting its
+    backup, or one without a verdict (stale-inventory); a lost member of a partially uploaded split: partial-set."""
+    for row in rows:
+        reason = _MP_REASONS.get(row["status"])
+        if reason in ("missing-after-backup", "missing-everywhere") and row["partial_set"]:
+            reason = "partial-set"
+        row["reason"] = reason
+
+
+def _mp_status_text(row):
+    return (row["status"] + (f": {row['issue']}" if row["issue"] else "")
+            + (" (partial set)" if row["partial_set"] else ""))
+
+
+def _mp_failed_record(row, run):
+    """The P-18 failed-list record of an unresolved row — validated by mvcommon (append_failed's own normalizer)."""
+    outcome = {"ambiguous": "ambiguous", "conflict": "wrong-item"}.get(
+        row["status"], "exactly-one" if row["issue"] in ("partial-upload", "not-original-quality") else "not-found")
+    pool = row["candidates"] or ([row["item"]] if row["item"] else [])
+    candidates = list(dict.fromkeys(c["photo_id"] for c in pool
+                                    if isinstance(c.get("photo_id"), str) and gpweb.MEDIA_KEY_RE.match(c["photo_id"])))
+    return mvcommon._normalize_failed({
+        "run": run, "account": row["account"], "category": row["category"], "manual_id": row["manual_id"],
+        "label": row["label"], "sha256": row["sha256"], "uploaded_name": row["uploaded_name"],
+        "expected_taken_local": row["expected_taken_local"],
+        "tried": [{"approach": "exact_name", "outcome": outcome, "n": len(pool)}],
+        "candidates": candidates or None, "reason": row["reason"]})
+
+
+def _mp_todo(rows, run):
+    """[(failed record, resolutions_todo.csv row)] of every unresolved row — the CSV row built by mvcommon's own
+    failed_objects.csv row builder (the same 18 columns, P-18), its status column the mapper's precise verdict."""
+    out = []
+    for row in rows:
+        if row["reason"] is None:
+            continue
+        record = _mp_failed_record(row, run)
+        csv_row = mvcommon._failed_row(record, row)
+        csv_row["status"] = _mp_status_text(row)
+        out.append((record, csv_row))
+    return out
+
+
+def _mp_repair_text(row):
+    repair = row["repair"] or {}
+    if repair.get("kind") == "split-info":
+        return ("--repair split-info (proven)" if repair["provable"]
+                else f"not provable — {repair['why']} (your decision)")
+    if repair.get("kind") == "names":
+        return f"--repair names records '{repair['uploaded_name']}'"
+    return ""
+
+
+def _mp_write_todo(run_dir, csv_rows):
+    """resolutions_todo.csv into the run directory -> (path, note or None). An existing one that holds the user's
+    edits (an --out directory re-used) is never overwritten: this run's list goes to resolutions_todo.new.csv."""
+    path = os.path.join(run_dir, "resolutions_todo.csv")
+    if os.path.exists(path) and _gp_csv_edits(path) != 0:
+        kept = path
+        path = os.path.join(run_dir, "resolutions_todo.new.csv")
+        note = f"⚠️  {kept} holds your edits — kept; this run's list is {os.path.basename(path)}"
+    else:
+        note = None
+    mvcommon.write_failed_csv(path, csv_rows)
+    return path, note
+
+
 def _mp_utc(ms):
     """Epoch milliseconds -> 'YYYY-MM-DD HH:MM:SS UTC', or '' when unknown."""
     if not isinstance(ms, int) or isinstance(ms, bool):
@@ -11684,6 +11773,7 @@ _MP_LOSS_TEXT = {
     "device-check-incomplete": "in no account; a configured phone was not listed — connect it and re-run",
     "awaiting-backup": "in no account but still on a phone — awaiting its backup (do NOT free it yet)",
 }
+_MP_INCONSISTENCY = ("inconsistent", "conflict") + _MP_LOSS     # the rows of inconsistencies.csv (IMP-C27)
 
 
 def _mp_counts_line(counter):
@@ -11800,7 +11890,14 @@ def _mp_report(ctx):
             parts.append(f"{acc} {len(found):,}" + (f" ({_mp_counts_line(kinds)})" if found else ""))
         lines.append("Unmatched inventory items (report only — never touched): "
                      + (" · ".join(parts) or "no fresh account"))
-    lines.append(f"Outputs: {ctx['run_dir']}")
+    if ctx["todo"]:
+        reasons = {reason: sum(1 for record, _csv_row in ctx["todo"] if record["reason"] == reason)
+                   for reason in mvcommon.GP_FAILED_REASONS}
+        lines.append(f"To resolve: {len(ctx['todo']):,} row(s) in resolutions_todo.csv ({_mp_counts_line(reasons)}) "
+                     f"— fill its decision column (url | datetime | search | not_uploaded | skip), then: "
+                     f"python main.py map_photos {ctx['scope']} --resolutions <that csv>")
+    lines.extend(ctx["notes"])
+    lines.append(f"Outputs: {ctx['run_dir']} — {', '.join(ctx['files'])}")
     return lines
 
 
@@ -11831,20 +11928,35 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
     rows = _mp_match(objects, routes, _mp_index(states), fresh, library)
     devices = _mp_device_check(library, objects, rows)
     unmatched = _mp_unmatched(states, fresh, rows, objects) if scope == "all" and account is None else None
+    _mp_reasons(rows)
+    run = "map-" + now.strftime("%Y%m%dT%H%M%SZ")
+    todo = _mp_todo(rows, run)
     run_dir = _mp_run_dir(out, now)
     os.makedirs(run_dir, exist_ok=True)
-    lines = _mp_report({"scope": scope, "account": account, "rows": rows, "fresh": fresh, "devices": devices,
-                        "unmatched": unmatched, "run_dir": run_dir})
+    files, notes = ["summary.txt", "mapping.jsonl", "inconsistencies.csv"], []
     _mp_write_jsonl(os.path.join(run_dir, "mapping.jsonl"), rows)
+    _mp_write_csv(os.path.join(run_dir, "inconsistencies.csv"),
+                  ("account", "category", "manual_id", "object", "uploaded_name", "status", "issue", "partial_set",
+                   "device", "repair", "note"),
+                  [(r["account"], r["category"], r["manual_id"], r["label"], r["uploaded_name"], r["status"],
+                    r["issue"], "yes" if r["partial_set"] else "", (r["device"] or {}).get("state"), _mp_repair_text(r),
+                    r["note"]) for r in rows if r["status"] in _MP_INCONSISTENCY])
+    todo_path, note = _mp_write_todo(run_dir, [csv_row for _record, csv_row in todo])
+    files.append(os.path.basename(todo_path))
+    notes.append(note)
     for acc, found in (unmatched or {}).items():
+        files.append(f"unmatched_{acc}.csv")
         _mp_write_csv(os.path.join(run_dir, f"unmatched_{acc}.csv"),
                       ("category", "photo_id", "filename", "taken_utc", "upload_utc", "owner", "note"),
                       [(u["category"], u["item"]["photo_id"], u["item"]["filename"], _mp_utc(u["item"]["taken_ms"]),
                         _mp_utc(u["item"]["upload_ms"]), u["owner"], u["note"]) for u in found])
+    lines = _mp_report({"scope": scope, "account": account, "rows": rows, "fresh": fresh, "devices": devices,
+                        "unmatched": unmatched, "todo": todo, "files": files, "notes": [n for n in notes if n],
+                        "run_dir": run_dir})
     _mp_write_text(os.path.join(run_dir, "summary.txt"), "\n".join(lines) + "\n")
     print("\n".join(lines))
     return {"status": "ok", "run_dir": run_dir, "rows": rows, "fresh": fresh, "devices": devices,
-            "unmatched": unmatched}
+            "unmatched": unmatched, "todo": [record for record, _csv_row in todo]}
 
 
 # ==========================================

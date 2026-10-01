@@ -1173,3 +1173,103 @@ def test_a_stale_account_gets_no_unmatched_report(world, tmp_path):
     world.save()
     res = world.run(out=tmp_path / "run")
     assert set(res["unmatched"]) == {"movies", "tv"} and res["unmatched"]["movies"] == []
+
+
+# ============================================================================ 9.7 outputs: resolutions_todo.csv & co
+
+@pytest.fixture()
+def mixed(world):
+    """One object per unresolved class: probable, ambiguous, conflict, untagged (inconsistent), a lost member of a
+    partial split (partial-set), missing-everywhere; plus awaiting-backup, wrong-account and mapped (resolved)."""
+    world.save().upload_all(skip={M_WHOLE, T_EP1, T_EP2, A_EP, (M_SPLIT, "chunk 3/3"),
+                                  (M_SPLIT, "extra Specials/BTS.mkv")})
+    world.inv.add("movies", f"Renamed [{world.library[M_WHOLE]['short_id']}].mkv")              # probable
+    world.inv.add("tv", world.names[(T_EP1, "whole")], taken=SEC_A)                               # ambiguous
+    world.inv.add("tv", world.names[(T_EP1, "whole")], taken=SEC_B)
+    world.inv.add("tv", world.names[(T_EP2, "whole")], data=b"other bytes")                      # conflict
+    world.inv.add("anime", world.library[A_EP]["filename"])                                       # untagged
+    world.inv.add("movies", world.names[(M_SPLIT, "extra Specials/BTS.mkv")].replace("BTS", "BTS"), data=b"bts")
+    world.save()
+    world.capture(T_EP2, _h(T_EP2), _sha1(b"episode two"), PUSHED, world.names[(T_EP2, "whole")])
+    world.on_phone("movies", _sidecar(world, (M_SPLIT, "chunk 3/3")))                             # freed
+    return world
+
+
+def test_resolutions_todo_lists_every_unresolved_object_in_the_failed_list_format(mixed, tmp_path, capsys):
+    res = mixed.run(out=tmp_path / "run", capsys=capsys)
+    rows = by_key(res)
+    assert {k: r["reason"] for k, r in rows.items() if r["reason"]} == {
+        (M_WHOLE, "whole"): "probable", (T_EP1, "whole"): "ambiguous", (T_EP2, "whole"): "wrong-item",
+        (A_EP, "whole"): "inconsistent", (M_SPLIT, "chunk 3/3"): "partial-set"}
+    path = os.path.join(res["run_dir"], "resolutions_todo.csv")
+    csv_rows = _read_csv(path)
+    assert tuple(csv_rows[0]) == mvcommon.GP_FAILED_CSV_COLUMNS
+    by_obj = {(r["manual_id"], r["object"]): r for r in csv_rows}
+    assert set(by_obj) == {k for k, r in rows.items() if r["reason"]}
+    ambiguous = by_obj[(T_EP1, "whole")]
+    assert ambiguous["status"] == "ambiguous" and ambiguous["suggested_photo_url"] == ""      # 2 candidates
+    assert ambiguous["candidates"].startswith("exact_name=ambiguous(2) | candidates: AF1QipFAKE")
+    probable = by_obj[(M_WHOLE, "whole")]
+    assert probable["suggested_photo_url"].startswith("https://photos.google.com/photo/AF1QipFAKE")
+    assert probable["set_search_cmd"] == f'python main.py set_search {M_WHOLE} "<new search term>"'
+    assert by_obj[(A_EP, "whole")]["status"] == "inconsistent: untagged-name"
+    assert by_obj[(M_SPLIT, "chunk 3/3")]["status"] == "missing-after-backup (partial set)"
+    conflict = by_obj[(T_EP2, "whole")]
+    assert conflict["expected_taken_local"] == "2024-03-09 14:03:02 GMT+08:00"            # DateUTC + the phone's tz
+    assert conflict["sha256"] == _h(T_EP2) and conflict["decision"] == ""
+    assert mvcommon.read_failed_csv(path) == ([], [])                                      # nothing decided yet
+    assert ("To resolve: 5 row(s) in resolutions_todo.csv (ambiguous 1 · wrong-item 1 · probable 1 · partial-set 1 · "
+            "inconsistent 1)") in res["stdout"]
+    assert f"python main.py map_photos all --resolutions <that csv>" in res["stdout"]
+
+
+def test_the_failed_records_follow_p18(mixed, tmp_path):
+    res = mixed.run(out=tmp_path / "run")
+    records = {(r["manual_id"], r["label"]): r for r in res["todo"]}
+    conflict = records[(T_EP2, "whole")]
+    assert conflict["tried"] == [{"approach": "exact_name", "outcome": "wrong-item", "n": 1}]
+    assert conflict["run"] == "map-20261001T120000Z" and conflict["account"] == "tv" and conflict["category"] == "tv"
+    assert records[(M_SPLIT, "chunk 3/3")]["tried"] == [{"approach": "exact_name", "outcome": "not-found", "n": 0}]
+    assert "candidates" not in records[(M_SPLIT, "chunk 3/3")]
+    for record in res["todo"]:
+        assert mvcommon._normalize_failed(record, fill=False) == record                  # append_failed-valid
+
+
+def test_inconsistencies_csv_lists_the_imp_c27_rows(mixed, tmp_path):
+    res = mixed.run(out=tmp_path / "run")
+    rows = _read_csv(os.path.join(res["run_dir"], "inconsistencies.csv"))
+    assert list(rows[0]) == ["account", "category", "manual_id", "object", "uploaded_name", "status", "issue",
+                             "partial_set", "device", "repair", "note"]
+    got = {(r["manual_id"], r["object"]): (r["status"], r["issue"], r["partial_set"], r["device"]) for r in rows}
+    assert got == {(T_EP2, "whole"): ("conflict", "", "", ""), (A_EP, "whole"): ("inconsistent", "untagged-name", "", ""),
+                   (M_SPLIT, "chunk 3/3"): ("missing-after-backup", "", "yes", "freed")}
+    untagged = next(r for r in rows if r["issue"] == "untagged-name")
+    assert untagged["repair"] == f"--repair names records '{world_name(mixed, A_EP)}'"
+
+
+def world_name(world, mid):
+    return world.library[mid]["filename"]
+
+
+def test_an_edited_todo_in_a_reused_out_dir_is_never_overwritten(mixed, tmp_path, capsys):
+    out = tmp_path / "run"
+    mixed.run(out=out)
+    path = out / "resolutions_todo.csv"
+    rows = _read_csv(path)
+    rows[0].update(decision="skip")
+    mvcommon.write_failed_csv(str(path), rows)
+    edited = path.read_bytes()
+    res = mixed.run(out=out, capsys=capsys)
+    assert path.read_bytes() == edited
+    assert (out / "resolutions_todo.new.csv").exists()
+    assert f"⚠️  {path} holds your edits — kept; this run's list is resolutions_todo.new.csv" in res["stdout"]
+    assert "resolutions_todo.new.csv" in res["stdout"].splitlines()[-1]
+
+
+def test_the_outputs_line_names_every_file(world, tmp_path, capsys):
+    world.save().upload_all().save()
+    res = world.run(out=tmp_path / "run", capsys=capsys)
+    last = res["stdout"].splitlines()[-1]
+    assert last == (f"Outputs: {tmp_path / 'run'} — summary.txt, mapping.jsonl, inconsistencies.csv, "
+                    f"resolutions_todo.csv, unmatched_movies.csv, unmatched_tv.csv, unmatched_anime.csv")
+    assert sorted(os.listdir(res["run_dir"])) == sorted(last.split(" — ")[1].split(", "))

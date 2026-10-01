@@ -130,8 +130,12 @@ movies phone) → awaiting-backup / missing-after-backup / missing-everywhere / 
 device block + LOUD block in the report; test_map_photos 75, engine/device/schema 195, smoke 82) (wip 2b3313a) ·
 [x] 9.6 unmatched report (`map_photos all` without --account, fresh accounts only: superseded-split / duplicate /
 cross-account-copy / mediavault-unknown / non-mediavault / possibly-deleted / errored → unmatched_<account>.csv
-(UTF-8 BOM, CRLF) + one report line; never touched; test_map_photos 78, smoke 82) (wip commit "step 9.6") · [ ] 9.7
-outputs + resolutions_todo.csv ← next · [ ] 9.8 --resolutions · [ ] 9.9 --apply via learned sidecar + apply engine · [ ] 9.10 --devices-only · then tests,
+(UTF-8 BOM, CRLF) + one report line; never touched; test_map_photos 78, smoke 82) (wip 4136cbf) · [x] 9.7 outputs
+(each unresolved row's P-18 reason incl. partial-set; failed records validated by mvcommon's normalizer;
+resolutions_todo.csv = mvcommon._failed_row + write_failed_csv (the failed_objects.csv columns, status = the precise
+verdict, expected_taken_local from the capture); inconsistencies.csv; an edited todo in a reused --out is kept →
+.new.csv; "To resolve" + Outputs lines; test_map_photos 83, smoke 82) (wip commit "step 9.7") · [ ] 9.8
+--resolutions ← next · [ ] 9.9 --apply via learned sidecar + apply engine · [ ] 9.10 --devices-only · then tests,
 disarm probes, full + smoke`
 `resumed 2026-10-01 by executor-fable (usage-limit pause #2): uncommitted 9.1 changes KEPT (main.py,
 tests/test_map_photos.py) — the diff was coherent; 26/27 green, the 1 failure a test-fixture expectation (fixed)`

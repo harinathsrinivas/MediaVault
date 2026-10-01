@@ -120,8 +120,15 @@ same-named item; same bytes twice → one item + alternates; no probable for con
 chunks grouped by taken second ONLY when a chunk name has different-bytes duplicates: the newest complete upload
 when no newer upload exists, the other uploads' items alternates; a newer incomplete upload or no complete one →
 ambiguous; a content-proven sibling pins the upload (other-second items → conflict); unique-name splits map per
-chunk (250/250 real sets sit on one second); test_map_photos 57, smoke 82) (wip commit "step 9.4") · [ ] 9.5 C27
-detectors + repairs (split-info, names) ← next · [ ] 9.6 unmatched report · [ ] 9.7 outputs + resolutions_todo.csv ·
+chunk (250/250 real sets sit on one second); test_map_photos 57, smoke 82) (wip d0f4ad5) · [x] 9.5 C27 detectors +
+repairs ((a) split_info lost: chunks of the whole's name in GP → inconsistent + a repair plan PROVEN only from one
+upload of chunks 1..N, no holder, exact push names and every local checksums/<chunk>.sha256 → _mp_write_split_info
+(fingerprint-guarded, pinned to the unchanged unsplit node); (b) old untagged name → inconsistent + --repair names
+(gphotos_apply gained `names=` — same single writer + OD-2 guard; a name two objects share is ambiguous); (e)
+partial / non-original upload → inconsistent; (c)/(d) read-only device check (device_check_aliases incl. the extra
+movies phone) → awaiting-backup / missing-after-backup / missing-everywhere / device-check-incomplete, partial_set;
+device block + LOUD block in the report; test_map_photos 75, engine/device/schema 195, smoke 82) (wip commit
+"step 9.5") · [ ] 9.6 unmatched report ← next · [ ] 9.7 outputs + resolutions_todo.csv ·
 [ ] 9.8 --resolutions · [ ] 9.9 --apply via learned sidecar + apply engine · [ ] 9.10 --devices-only · then tests,
 disarm probes, full + smoke`
 `resumed 2026-10-01 by executor-fable (usage-limit pause #2): uncommitted 9.1 changes KEPT (main.py,

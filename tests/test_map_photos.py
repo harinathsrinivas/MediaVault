@@ -19,6 +19,7 @@ import pytest
 import main
 import mvcommon
 
+REAL_DEVICE_INVENTORY = main.device_inventory            # (World replaces it with a synthetic check)
 NOW = datetime(2026, 10, 1, 12, 0, 0, tzinfo=timezone.utc)
 ENUMERATED = NOW - timedelta(hours=1)        # a fresh complete enumeration
 
@@ -597,7 +598,7 @@ def test_in_no_account_needs_every_crawled_inventory_fresh_and_detailed(world, t
     assert row["note"].startswith("anime: not in any account, but that cannot be told") and why in row["note"]
     world.inv.enumerated["anime"], world.inv.undetailed["anime"] = ENUMERATED, []
     world.save()
-    assert by_key(world.run(T_EP1, out=tmp_path / "again"))[(T_EP1, "whole")]["status"] == "not-found"
+    assert by_key(world.run(T_EP1, out=tmp_path / "again"))[(T_EP1, "whole")]["status"] == "missing-everywhere"
 
 
 def test_the_short_id_tag_gives_a_probable_match_of_the_same_kind_and_chunk(world, tmp_path):
@@ -625,7 +626,7 @@ def test_a_possibly_deleted_item_never_matches_and_is_reported(world, tmp_path):
     world.inv.unlisted["tv"].add(gone["photo_id"])                 # listed before, absent from the latest enumeration
     world.save()
     row = by_key(world.run(T_EP1, out=tmp_path / "run"))[(T_EP1, "whole")]
-    assert (row["status"], row["item"]) == ("not-found", None)
+    assert (row["status"], row["item"]) == ("missing-everywhere", None)   # (the World's device check: complete)
     assert [d["photo_id"] for d in row["deleted"]] == [gone["photo_id"]]
     assert "absent from the latest enumeration (deleted?)" in row["note"]
 
@@ -727,7 +728,7 @@ def test_a_content_keyed_object_found_nowhere_is_never_probable(world, tmp_path)
     world.save()
     world.capture(M_WHOLE, _h(M_WHOLE), _sha1(b"the movie"), PUSHED, world.names[(M_WHOLE, "whole")])
     row = by_key(world.run(M_WHOLE, out=tmp_path / "run"))[(M_WHOLE, "whole")]
-    assert (row["status"], row["candidates"]) == ("not-found", [])
+    assert (row["status"], row["candidates"]) == ("missing-everywhere", [])
 
 
 # ============================================================================ 9.4 duplicates and re-split sets
@@ -855,3 +856,252 @@ def test_a_whole_file_uploaded_twice_with_the_same_bytes_maps_once(world, tmp_pa
     row = by_key(world.run(M_WHOLE, out=tmp_path / "run"))[(M_WHOLE, "whole")]
     assert (row["status"], row["proof"], row["item"]["photo_id"]) == ("mapped", "filename", first["photo_id"])
     assert (row["alternates"], row["duplicate"]) == ([again["photo_id"]], "same-bytes")
+
+
+# ============================================================================ 9.5 IMP-C27 detectors and repairs
+
+T_WIRE = "tv-en-2003-mpwire-s02e12"        # the library says one whole file; Google Photos holds its 2 chunks
+
+
+def _split_lost(world, sidecars=(1, 2), seconds=(SEC_A, SEC_A), holder=False, numbers=(1, 2)):
+    """T_WIRE: a whole tv episode whose chunks (and maybe a FLAC holder) are in the tv account; the push's local
+    checksums/<chunk>.sha256 sidecars for the chunk numbers in `sidecars` -> {number: (chunk name, sha256)}."""
+    folder = world.folder("Series", "MP Wire", "Season 02")
+    world.library[T_WIRE] = leaf(T_WIRE, folder, "MP.Wire.S02E12.mkv")
+    world.save().upload_all(skip={T_WIRE})
+    stem = os.path.splitext(world.names[(T_WIRE, "whole")])[0]
+    chunks = {}
+    for n, taken in zip(numbers, seconds):
+        name = f"{stem}.chunk.{n:03d}.mkv"
+        world.inv.add("tv", name, taken=taken)
+        chunks[n] = (name, _h(f"wire chunk {n}"))
+    if holder:
+        world.inv.add("tv", f"{stem}.holder.mkv", taken=SEC_A)
+    os.makedirs(folder / "checksums", exist_ok=True)
+    for n in sidecars:
+        name, sha = chunks[n]
+        (folder / "checksums" / f"{name}.sha256").write_text(f"{sha} *{name}", encoding="utf-8")
+    world.save()
+    return chunks
+
+
+def test_split_info_lost_is_detected_and_proven_from_the_local_checksums(world, tmp_path):
+    chunks = _split_lost(world)
+    row = by_key(world.run(T_WIRE, out=tmp_path / "run"))[(T_WIRE, "whole")]
+    assert (row["status"], row["issue"], row["account"], row["name_match"]) == (
+        "inconsistent", "split-info-lost", "tv", "chunks")
+    plan = row["repair"]
+    assert (plan["kind"], plan["provable"], plan["why"], plan["sha256"]) == ("split-info", True, None, _h(T_WIRE))
+    assert plan["split_info"] == {"is_split": True, "total_chunks": 2, "chunks": [
+        {"filename": chunks[1][0], "hash": chunks[1][1]}, {"filename": chunks[2][0], "hash": chunks[2][1]}]}
+    assert plan["slot"] == [T_WIRE] and len(plan["photo_ids"]) == 2
+
+
+@pytest.mark.parametrize("variant,why", [
+    (dict(sidecars=(1,)), "no local checksum sidecar for chunk(s) [2]"),
+    (dict(seconds=(SEC_A, SEC_B)), "its chunks were uploaded more than once"),
+    (dict(holder=True), "a FLAC holder was carried out"),
+    (dict(numbers=(1, 3), sidecars=(1, 3)), "not 1..2 exactly once"),
+])
+def test_split_info_that_cannot_be_proven_stays_a_user_decision(world, tmp_path, variant, why):
+    _split_lost(world, **variant)
+    row = by_key(world.run(T_WIRE, out=tmp_path / "run"))[(T_WIRE, "whole")]
+    assert (row["status"], row["issue"], row["repair"]["provable"], row["repair"]["split_info"]) == (
+        "inconsistent", "split-info-lost", False, None)
+    assert why in row["repair"]["why"]
+
+
+def test_the_split_info_writer_repairs_only_the_unchanged_whole_file(world, tmp_path):
+    chunks = _split_lost(world)
+    plan = by_key(world.run(T_WIRE, out=tmp_path / "run"))[(T_WIRE, "whole")]["repair"]
+    before = mvcommon.load_library()
+    report = main._mp_write_split_info([plan])
+    assert (report["status"], report["repaired"], report["skipped"], report["attempts"]) == (
+        "saved", [{"manual_id": T_WIRE, "label": "whole", "chunks": 2}], [], 1)
+    after = mvcommon.load_library()
+    assert after[T_WIRE]["split_info"] == plan["split_info"]
+    assert {k: v for k, v in after[T_WIRE].items() if k != "split_info"} == before[T_WIRE]   # nothing else
+    assert {k: v for k, v in after.items() if k != T_WIRE} == {k: v for k, v in before.items() if k != T_WIRE}
+    rows = by_key(world.run(T_WIRE, out=tmp_path / "again"))                 # now its chunks map, like any split
+    assert [(k[1], r["status"]) for k, r in rows.items()] == [("chunk 1/2", "mapped"), ("chunk 2/2", "mapped")]
+    assert [r["item"]["filename"] for r in rows.values()] == [chunks[1][0], chunks[2][0]]
+    again = main._mp_write_split_info([plan])                                   # it is split now: skipped
+    assert (again["status"], again["skipped"]) == ("up-to-date", [{"manual_id": T_WIRE, "label": "whole",
+                                                                   "why": "it is split already"}])
+
+
+def test_the_split_info_writer_honours_the_pin_and_unprovable_plans(world, tmp_path, monkeypatch):
+    _split_lost(world)
+    plan = by_key(world.run(T_WIRE, out=tmp_path / "run"))[(T_WIRE, "whole")]["repair"]
+    library = mvcommon.load_library()
+    library[T_WIRE]["hash"] = _h("re-mastered")                                  # the object changed since
+    mvcommon.save_library(library)
+    report = main._mp_write_split_info([plan])
+    assert report["status"] == "up-to-date" and report["skipped"][0]["why"].startswith("the object changed")
+    assert "split_info" not in mvcommon.load_library()[T_WIRE]
+    assert main._mp_write_split_info([dict(plan, provable=False)])["status"] == "nothing-to-apply"
+    saves = []
+    monkeypatch.setattr(main, "save_library", lambda data: saves.append(1))
+    assert main._mp_write_split_info([])["status"] == "nothing-to-apply" and saves == []
+
+
+def test_the_split_info_writer_reloads_when_the_library_changes_under_it(world, tmp_path, monkeypatch):
+    _split_lost(world)
+    plan = by_key(world.run(T_WIRE, out=tmp_path / "run"))[(T_WIRE, "whole")]["repair"]
+    real, loads = main.load_library, []
+
+    def racing():
+        library = real()
+        loads.append(1)
+        if len(loads) == 1:                           # another MediaVault process saves after our first load
+            other = mvcommon.load_library()
+            other[T_EP1]["status"] = "restored_local"
+            mvcommon.save_library(other)
+        return library
+
+    monkeypatch.setattr(main, "load_library", racing)
+    report = main._mp_write_split_info([plan])
+    assert (report["status"], report["attempts"]) == ("saved", 2)
+    after = mvcommon.load_library()
+    assert after[T_EP1]["status"] == "restored_local" and after[T_WIRE]["split_info"]["total_chunks"] == 2
+
+
+def test_an_old_untagged_upload_name_is_found_and_flagged_for_the_names_repair(world, tmp_path):
+    """IMP-C27 (b) (Fanaa): pushed before uploads were tagged, so Google Photos knows the plain file name."""
+    world.save().upload_all(skip={M_WHOLE})
+    plain = world.inv.add("movies", world.library[M_WHOLE]["filename"])
+    world.save()
+    row = by_key(world.run(M_WHOLE, out=tmp_path / "run"))[(M_WHOLE, "whole")]
+    assert (row["status"], row["issue"], row["name_match"], row["proof"]) == (
+        "inconsistent", "untagged-name", "untagged", "filename")
+    assert row["item"]["photo_id"] == plain["photo_id"]
+    assert row["repair"] == {"kind": "names", "uploaded_name": world.library[M_WHOLE]["filename"]}
+
+
+def test_an_untagged_name_two_objects_share_belongs_to_neither(world, tmp_path):
+    twin = "tv-en-2016-mpother-s01e01"
+    world.library[twin] = leaf(twin, world.folder("Series", "MP Other"), "MP.Show.S02E01.mkv")   # T_EP1's name
+    world.save().upload_all(skip={T_EP1, twin})
+    world.inv.add("tv", "MP.Show.S02E01.mkv")
+    world.save()
+    rows = by_key(world.run("tv-en", out=tmp_path / "run"))
+    for key in ((T_EP1, "whole"), (twin, "whole")):
+        assert (rows[key]["status"], rows[key]["item"], rows[key]["repair"]) == ("ambiguous", None, None), key
+        assert "2 library objects share this old untagged name" in rows[key]["note"]
+
+
+@pytest.mark.parametrize("flag,issue", [({"partial_upload": True}, "partial-upload"),
+                                        ({"original_quality": False}, "not-original-quality")])
+def test_a_partial_or_non_original_upload_is_inconsistent_never_applied(world, tmp_path, flag, issue):
+    world.save().upload_all(skip={M_WHOLE})
+    world.inv.add("movies", world.names[(M_WHOLE, "whole")], **flag)
+    world.save()
+    row = by_key(world.run(M_WHOLE, out=tmp_path / "run"))[(M_WHOLE, "whole")]
+    assert (row["status"], row["issue"]) == ("inconsistent", issue) and row["item"] is not None
+    assert "a restore would fail its SHA-256 check" in row["note"]
+
+
+def _sidecar(world, key):
+    return main._dev_sidecar_name(world.names[key], world.library[key[0]]["short_id"])
+
+
+def test_objects_in_no_account_get_their_device_verdict_and_a_loud_block(world, tmp_path, capsys):
+    gone = [(T_EP1, "whole"), (T_EP2, "whole"), (M_WHOLE, "whole"), (M_SPLIT, "chunk 3/3")]
+    world.save().upload_all(skip=set(gone))
+    world.save()
+    world.on_phone("series", world.names[(T_EP1, "whole")])                            # still on a phone
+    world.on_phone("series", _sidecar(world, (T_EP2, "whole")))                        # freed after its backup
+    world.on_phone("movies", _sidecar(world, (M_SPLIT, "chunk 3/3")))                  # (shared by the split)
+    res = world.run(out=tmp_path / "run", capsys=capsys)
+    rows = by_key(res)
+    assert rows[(T_EP1, "whole")]["status"] == "awaiting-backup"
+    assert rows[(T_EP2, "whole")]["status"] == "missing-after-backup"
+    assert rows[(M_WHOLE, "whole")]["status"] == "missing-everywhere"
+    three = rows[(M_SPLIT, "chunk 3/3")]
+    assert (three["status"], three["partial_set"]) == ("missing-after-backup", True)    # chunks 1-2 ARE in GP
+    assert not rows[(M_SPLIT, "chunk 1/3")]["partial_set"]
+    assert three["device"]["state"] == "freed" and three["device"]["sidecars"][0]["alias"] == "movies"
+    assert world.device_calls == 1 and res["devices"]["complete"] is True
+    out = res["stdout"]
+    assert "⚠️⚠️⚠️  NOT IN GOOGLE PHOTOS (IMP-C27): 4 object(s)" in out
+    assert "  missing-after-backup: 2 — in no account and freed from a phone" in out
+    assert "  partial chunk sets: 1 object(s) in 1 entr(y/ies)" in out
+    assert f"    missing-everywhere       {M_WHOLE} · whole — on no phone" in out
+    assert f"    missing-after-backup     {M_SPLIT} · chunk 3/3 [partial set] — sidecar only on movies (FAKEMOV0001)" in out
+    assert f"    awaiting-backup          {T_EP1} · whole — on series (FAKESER0002)" in out
+
+
+def test_an_incomplete_device_check_never_calls_anything_missing(world, tmp_path, capsys):
+    world.save().upload_all(skip={(T_EP1, "whole")})
+    world.save()
+    world.devices["complete"] = False
+    world.devices["devices"]["movies"].update(status="not-connected", detail="adb devices does not list it", files=[])
+    world.devices["unconfigured"] = [{"serial": "FAKEUNCONF09", "state": "device"}]
+    res = world.run(out=tmp_path / "run", capsys=capsys)
+    row = by_key(res)[(T_EP1, "whole")]
+    assert row["status"] == "device-check-incomplete" and "missing" not in row["status"]
+    assert "not listed: movies (FAKEMOV0001) not-connected — connect it and re-run" in row["note"]
+    out = res["stdout"]
+    assert "INCOMPLETE — nothing is called missing-everywhere" in out
+    assert "  movies    FAKEMOV0001        not-connected — adb devices does not list it" in out
+    assert "⚠️  attached but not configured: FAKEUNCONF09 (device)" in out
+
+
+def test_no_device_check_runs_when_every_object_is_somewhere(world, tmp_path):
+    world.save().upload_all().save()
+    res = world.run(out=tmp_path / "run")
+    assert res["devices"] is None and world.device_calls == 0
+
+
+def test_the_device_check_lists_the_extra_movies_phone(world, tmp_path, monkeypatch):
+    """DECISIONS §1d through the real device_inventory (read-only fake adb): an object on the EXTRA movies phone is
+    awaiting backup; with every configured phone listed the check is complete."""
+    from test_device_inventory import FakeAdb, Phone
+    monkeypatch.setattr(main, "device_inventory", REAL_DEVICE_INVENTORY)
+    monkeypatch.setattr(main, "DEVICE_ALIASES", {"movies": "FAKEMOV0001", "series": "FAKESER0002",
+                                                 "others": "<NEW_PIXEL_SERIAL>"})
+    monkeypatch.setattr(main, "DEVICE_CHECK_EXTRA_SERIALS", {"movies": ["FAKEXTRA0003"]})
+    world.save().upload_all(skip={M_WHOLE})
+    world.save()
+    fake = FakeAdb({"FAKEMOV0001": Phone(files={}), "FAKESER0002": Phone(files={}),
+                    "FAKEXTRA0003": Phone(files={"Movies/x/" + world.names[(M_WHOLE, "whole")]: (5, 1)})})
+    monkeypatch.setattr(main.subprocess, "run", fake.run)
+    res = world.run(M_WHOLE, out=tmp_path / "run")
+    row = by_key(res)[(M_WHOLE, "whole")]
+    assert row["status"] == "awaiting-backup" and row["device"]["copies"][0]["alias"] == "movies#2"
+    assert res["devices"]["complete"] is True and fake.violations == []
+
+
+# ============================================================================ 9.5 the apply engine: --repair names
+
+def test_the_engine_records_a_proven_upload_name(world):
+    world.save()
+    sha = world.library[M_WHOLE]["hash"]
+    names = [{"manual_id": M_WHOLE, "sha256": sha, "uploaded_name": "MP.Whole.2019.1080p.mkv"}]
+    preview = main.gphotos_apply([], names=names)                          # dry run: the diff, nothing written
+    assert (preview["status"], preview["records"], preview["objects"]) == ("dry-run", 0, 1)
+    assert preview["changed"][0]["fields"]["uploaded_name"] == [None, "MP.Whole.2019.1080p.mkv"]
+    assert "gphotos" not in mvcommon.load_library()[M_WHOLE]
+    report = main.gphotos_apply([], dry_run=False, names=names)
+    assert report["status"] == "saved"
+    block = mvcommon.load_library()[M_WHOLE]["gphotos"]
+    assert block == {"v": 1, "sha256": sha, "uploaded_name": "MP.Whole.2019.1080p.mkv"}
+    obj = next(mvcommon.iter_uploaded_objects(mvcommon.load_library(), [M_WHOLE]))
+    assert obj["uploaded_name"] == "MP.Whole.2019.1080p.mkv"          # what every later step now searches for
+
+
+def test_a_name_repair_wins_over_the_capture_and_bad_facts_are_counted(world):
+    world.save()
+    sha = world.library[T_EP1]["hash"]
+    world.capture(T_EP1, sha, _sha1(b"ep"), PUSHED, "Predicted [x].mkv")
+    names = [{"manual_id": T_EP1, "sha256": sha, "uploaded_name": "Actual Name.mkv"},
+             {"manual_id": T_EP1, "sha256": "nope", "uploaded_name": "x.mkv"},
+             {"manual_id": T_EP1, "sha256": sha, "uploaded_name": "a/b.mkv"},
+             {"manual_id": "tv-en-1999-gone-s01e01", "sha256": sha, "uploaded_name": "Ghost.mkv"},
+             {"manual_id": T_EP1, "sha256": _h("re-mastered"), "uploaded_name": "Old.mkv"}]
+    report = main.gphotos_apply([], dry_run=False, names=names)
+    assert (report["status"], report["invalid"]) == ("saved", 2)
+    assert mvcommon.load_library()[T_EP1]["gphotos"]["uploaded_name"] == "Actual Name.mkv"
+    assert [(o["manual_id"], o["account"], o["reason"]) for o in report["orphans"]] == [
+        ("tv-en-1999-gone-s01e01", None, "no-entry"), (T_EP1, None, "no-object")]
+    assert main.gphotos_apply([], names=[names[1]])["status"] == "nothing-to-apply"

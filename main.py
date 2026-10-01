@@ -9799,9 +9799,10 @@ def _gp_with_home(block, manual_id, prefix_map, default):
     return mvcommon._ordered(rest, mvcommon._BLOCK_KEYS)
 
 
-def _gp_fold_object(obj, raw, reds, capture, prefix_map, default):
-    """Fold one object's reduced records ({account: reduced}) and — capture=True — its capture facts into its
-    block. raw = the node's current `gphotos` value (_GP_ABSENT when there is none).
+def _gp_fold_object(obj, raw, reds, capture, prefix_map, default, name=None):
+    """Fold one object's reduced records ({account: reduced}), — capture=True — its capture facts and — name — the
+    uploaded name a `map_photos --repair names` proved (it wins over the capture's) into its block. raw = the
+    node's current `gphotos` value (_GP_ABSENT when there is none).
     -> (the new block, or None to leave the node untouched; action create | replace | update;
         [(account or None for block level, conflict code)])."""
     sha256 = obj["sha256"]
@@ -9817,6 +9818,8 @@ def _gp_fold_object(obj, raw, reds, capture, prefix_map, default):
             problems.append((None, problem))
     if block is None:
         block = mvcommon.new_gphotos_block(sha256)
+    if name:
+        block = mvcommon._ordered({**block, "uploaded_name": name}, mvcommon._BLOCK_KEYS)
     for account in mvcommon.GP_ACCOUNTS:
         if account in reds:
             folded, _changed, problem = mvcommon.apply_learned(block, reds[account], account)
@@ -9863,10 +9866,11 @@ def _gp_resolve(library, manual_id):
     return real, entry
 
 
-def _gp_plan(library, reduced, named, capture, prefix_map, default):
+def _gp_plan(library, reduced, named, capture, prefix_map, default, names=()):
     """One pass over a freshly loaded library: which nodes get which block, and the per-pass report fields.
     reduced = mvcommon.reduce_learned(...) {(account, sha256): reduced}; named = {(account, sha256): [every
-    manual_id the records gave]} (reduce keeps only the last one; aliases and duplicates need them all).
+    manual_id the records gave]} (reduce keeps only the last one; aliases and duplicates need them all); names =
+    [{manual_id, sha256, uploaded_name}] — validated `--repair names` facts (gphotos_apply).
     -> ([(node, new block)], {objects, changed, unchanged, confirmed, conflicts, orphans})."""
     claims, owners = {}, {}
     for key, red in reduced.items():
@@ -9879,19 +9883,29 @@ def _gp_plan(library, reduced, named, capture, prefix_map, default):
             if real not in owners[key]:
                 owners[key].append(real)
             claims.setdefault(real, {}).setdefault(sha256, {})[account] = red
-    patches, changed, conflicts, matched = [], [], [], set()
+    renames, rename_owner = {}, {}
+    for spec in names:
+        real, entry = _gp_resolve(library, spec["manual_id"])
+        rename_owner[(spec["manual_id"], spec["sha256"])] = real if entry is not None else None
+        if entry is not None:
+            claims.setdefault(real, {}).setdefault(spec["sha256"], {})
+            renames[(real, spec["sha256"])] = spec["uploaded_name"]
+    patches, changed, conflicts, matched, renamed = [], [], [], set(), set()
     objects = confirmed = 0
     for real in sorted(claims):
         wanted = claims[real]
         for obj in mvcommon.iter_entry_objects(real, library[real]):
             reds = wanted.get(obj["sha256"])
-            if not reds:
+            if reds is None:
                 continue
+            name = renames.get((real, obj["sha256"]))
             objects += 1
             matched.update((account, obj["sha256"]) for account in reds)
+            if name:
+                renamed.add((real, obj["sha256"]))
             node = mvcommon.slot_owner(library, obj["slot"])
             raw = node.get("gphotos", _GP_ABSENT)
-            block, action, problems = _gp_fold_object(obj, raw, reds, capture, prefix_map, default)
+            block, action, problems = _gp_fold_object(obj, raw, reds, capture, prefix_map, default, name)
             where = {"manual_id": real, "label": obj["label"], "kind": obj["kind"], "sha256": obj["sha256"]}
             conflicts.extend(dict(where, account=account, code=code) for account, code in problems)
             if block is None:
@@ -9899,11 +9913,14 @@ def _gp_plan(library, reduced, named, capture, prefix_map, default):
             patches.append((node, block))
             confirmed += int(_gp_confirmed(block) and not (action == "update" and _gp_confirmed(raw)))
             changed.append(dict(where, action=action, fields=_gp_diff(raw, block)))
-    orphans = sorted(({"account": account, "manual_id": reduced[(account, sha256)]["manual_id"],
-                       "sha256": sha256, "label": reduced[(account, sha256)].get("label"),
-                       "reason": "no-object" if owners[(account, sha256)] else "no-entry"}
-                      for account, sha256 in reduced if (account, sha256) not in matched),
-                     key=lambda o: (o["manual_id"], o["account"], o["sha256"]))
+    orphans = [{"account": account, "manual_id": reduced[(account, sha256)]["manual_id"],
+                "sha256": sha256, "label": reduced[(account, sha256)].get("label"),
+                "reason": "no-object" if owners[(account, sha256)] else "no-entry"}
+               for account, sha256 in reduced if (account, sha256) not in matched]
+    orphans += [{"account": None, "manual_id": manual_id, "sha256": sha256, "label": None,  # a names fact, no account
+                 "reason": "no-object" if real is not None else "no-entry"}
+                for (manual_id, sha256), real in rename_owner.items() if (real, sha256) not in renamed]
+    orphans.sort(key=lambda o: (o["manual_id"], o["account"] or "", o["sha256"]))
     return patches, {"objects": objects, "changed": changed, "unchanged": objects - len(changed),
                      "confirmed": confirmed, "conflicts": conflicts, "orphans": orphans}
 
@@ -9941,7 +9958,23 @@ def _gp_refresh_failed_csv(library, report):
         print(report["warning"])
 
 
-def gphotos_apply(records, capture=True, dry_run=True):
+def _gp_valid_names(names):
+    """The valid `names` facts for gphotos_apply -> ([{manual_id, sha256, uploaded_name}], invalid count). A fact
+    names an object (manual_id + its current 64-hex SHA-256) and a non-empty file name without a path separator."""
+    valid, invalid = [], 0
+    for spec in names or ():
+        manual_id = spec.get("manual_id") if isinstance(spec, dict) else None
+        sha256 = spec.get("sha256") if isinstance(spec, dict) else None
+        name = spec.get("uploaded_name") if isinstance(spec, dict) else None
+        if (isinstance(manual_id, str) and manual_id and mvcommon._is_sha256(sha256) and isinstance(name, str)
+                and name.strip() and not any(c in name for c in "/\\\r\n\0")):
+            valid.append({"manual_id": manual_id, "sha256": sha256, "uploaded_name": name})
+        else:
+            invalid += 1
+    return valid, invalid
+
+
+def gphotos_apply(records, capture=True, dry_run=True, names=None):
     """THE apply engine (PLAN Step 6): fold learned records (+ capture facts) into the library's `gphotos`
     blocks — the only code that writes them. See the section comment above for the per-object rules.
 
@@ -9955,15 +9988,20 @@ def gphotos_apply(records, capture=True, dry_run=True):
     dry_run   True (the default): compute the report and write NOTHING — no library, no sidecar, no CSV.
               False: save the library ONCE when something changed (fingerprint-guarded, OD-2), then
               regenerate failed_objects.csv (see _gp_refresh_failed_csv).
+    names     (PLAN Step 9, `map_photos --repair names`) [{manual_id, sha256, uploaded_name}]: the name an object
+              was REALLY uploaded under (proven by the inventory) — stored as the block's `uploaded_name`, over the
+              capture's; the object is named like a record names it (an alias resolves; the sha256 is the pin).
+              Recomputed by the mapper from the inventory on every run, so not kept in a sidecar. Invalid facts
+              count as `invalid`; facts whose object is gone are orphans with account None.
 
-    With no valid record the library is not even loaded. Never raises (a KeyboardInterrupt still
+    With no valid record and no valid name the library is not even loaded. Never raises (a KeyboardInterrupt still
     interrupts): a failure prints ONE warning line and returns status "error". Prints nothing else —
     callers print their own summary from the report (and tell the user when failed_csv says `kept`).
 
     Returns the report:
       status      nothing-to-apply | dry-run | up-to-date | saved | aborted | error
       dry_run     as given
-      records     valid records given · invalid: records skipped as not valid learned records
+      records     valid records given · invalid: records skipped as not valid learned records (+ invalid names)
       objects     library objects the records name that exist (manual_id + current SHA-256)
       changed     [{manual_id, label, kind, sha256, action: create | replace | update,
                     fields: {dotted path: [old, new]}}] — the objects whose block changes (dry run: would
@@ -9994,7 +10032,9 @@ def gphotos_apply(records, capture=True, dry_run=True):
             except ValueError:
                 report["invalid"] += 1
         report["records"] = len(valid)
-        if not valid:
+        renames, bad_names = _gp_valid_names(names)
+        report["invalid"] += bad_names
+        if not valid and not renames:
             report["status"] = "nothing-to-apply"  # nothing to fold: the library is not even read
             return report
         reduced = mvcommon.reduce_learned(valid)
@@ -10009,7 +10049,7 @@ def gphotos_apply(records, capture=True, dry_run=True):
             report["attempts"] = attempt
             before = None if dry_run else _library_fingerprint()
             library = load_library()  # fresh, immediately before patching
-            patches, found = _gp_plan(library, reduced, named, capture, prefix_map, default)
+            patches, found = _gp_plan(library, reduced, named, capture, prefix_map, default, renames)
             report.update(found)
             if dry_run:
                 report["status"] = "dry-run"
@@ -10866,14 +10906,15 @@ def _mp_tag_key(name):
 def _mp_index(states):
     """Per account, the live inventory items indexed for the ladder: by exact file name, by P-6 normalized name, and
     by MediaVault `[short_id]` tag ((tag, kind, chunk number) -> [items], the OD-14 probable match), and by dedupKey
-    (the SHA-1 of the uploaded bytes — PLAN Step 9 (3): content proof). Items absent from
+    (the SHA-1 of the uploaded bytes — PLAN Step 9 (3): content proof); chunk and FLAC-holder items also by the
+    normalized name they were cut from (`stems`: the IMP-C27 (a) split_info-lost detector). Items absent from
     the latest complete enumeration (possibly deleted) never match — they are kept by normalized name under
     `deleted` (reported: an item that was there and is gone). A record without a file name or with a crawl error is
     left out: its id counts in the freshness `gaps`, which withhold every "in no account" verdict."""
     index = {}
     for account, state in states.items():
         gone = set(state["possibly_deleted"])
-        exact, normalized, tags, dedup, deleted = {}, {}, {}, {}, {}
+        exact, normalized, tags, dedup, deleted, stems = {}, {}, {}, {}, {}, {}
         for pid in sorted(state["items"]):
             rec = state["items"][pid]
             item = _mp_item(account, rec)
@@ -10891,7 +10932,11 @@ def _mp_index(states):
                     tags.setdefault((tag, kind, number), []).append(item)
                 if item["dedup_key"]:
                     dedup.setdefault(item["dedup_key"], []).append(item)
-        index[account] = {"exact": exact, "normalized": normalized, "tags": tags, "dedup": dedup, "deleted": deleted}
+                if kind != "whole":                    # a chunk or a holder: indexed by the name it was cut from
+                    cut = name.lower().rfind(".chunk." if kind == "chunk" else ".holder.")
+                    stems.setdefault((kind, gpweb.normalize_name(name[:cut])), []).append(item)
+        index[account] = {"exact": exact, "normalized": normalized, "tags": tags, "dedup": dedup, "deleted": deleted,
+                          "stems": stems}
     return index
 
 
@@ -11133,7 +11178,7 @@ def _mp_preferred(row, accounts):
     return sorted(accounts, key=lambda a: order.index(a) if a in order else len(order))
 
 
-def _mp_settle(row, obj, decisions, fresh, index):
+def _mp_settle(row, obj, decisions, fresh, index, library):
     """The verdict of one object from every crawled account's decision (PLAN Step 9 (1)-(3)): its default account
     first (its normalized name there beats an exact name elsewhere — P-6 ladder order), then another account
     (wrong-account), then the `[short_id]`-tag probable; an object with a known content key is decided by its bytes
@@ -11144,7 +11189,7 @@ def _mp_settle(row, obj, decisions, fresh, index):
     if row["content_key"]:
         if _mp_settle_by_content(row, key, decisions, fresh):
             return
-        return _mp_nowhere(row, obj, fresh, index)
+        return _mp_nowhere(row, obj, fresh, index, library)
     own = decisions[home][key]
     if own is not None:
         _mp_take(row, own, home)
@@ -11170,7 +11215,7 @@ def _mp_settle(row, obj, decisions, fresh, index):
             [elsewhere[a]["item"]] if elsewhere[a]["item"] else elsewhere[a]["candidates"])])
         return _mp_note(row, f"the name is in {len(accounts)} other accounts ({', '.join(accounts)}) with "
                              f"different bytes")
-    return _mp_nowhere(row, obj, fresh, index)
+    return _mp_nowhere(row, obj, fresh, index, library)
 
 
 def _mp_settle_by_content(row, key, decisions, fresh):
@@ -11207,10 +11252,11 @@ def _mp_settle_by_content(row, key, decisions, fresh):
     return False
 
 
-def _mp_nowhere(row, obj, fresh, index):
+def _mp_nowhere(row, obj, fresh, index, library):
     """An object found in no account by name or bytes: withheld while any crawled inventory is not fresh or not fully
-    detailed; else the `[short_id]`-tag probable (never for a content-keyed object: those items hold other bytes);
-    else not-found (the device check decides), with any possibly-deleted same-named item as evidence."""
+    detailed; else, in order, the `[short_id]`-tag probable (never for a content-keyed object: those items hold other
+    bytes), the IMP-C27 (a) split_info lost and (b) old untagged name of a whole file; else not-found (the device
+    check decides), with any possibly-deleted same-named item as evidence."""
     blocked = [a for a in mvcommon.GP_ACCOUNTS if fresh[a]["crawled"] and not fresh[a]["fresh"]]
     gaps = [a for a in mvcommon.GP_ACCOUNTS if fresh[a]["crawled"] and fresh[a]["gaps"]]
     if blocked or gaps:
@@ -11218,11 +11264,43 @@ def _mp_nowhere(row, obj, fresh, index):
         why = fresh[a]["reason"] or f"{fresh[a]['gaps']:,} known id(s) without details — re-run the crawl"
         return _mp_stale(row, a, f"not in any account, but that cannot be told while this inventory is not "
                                  f"complete ({why})")
+    if not row["uploaded_name"]:
+        row.update(status="inconsistent", issue="no-uploaded-name")
+        return _mp_note(row, "the library holds no name it was uploaded under (no short_id)")
     probable = None if row["content_key"] else _mp_probable(obj, row, index)
     if probable:
         account, items = probable
         row.update(status="probable", account=account, name_match="tag", candidates=[dict(i) for i in items])
         return
+    accounts = [row["default_account"]] + [a for a in mvcommon.GP_ACCOUNTS if a != row["default_account"]]
+    if obj["kind"] in ("whole", "extra_whole"):
+        stem = gpweb.normalize_name(os.path.splitext(row["uploaded_name"])[0])
+        for account in accounts:
+            chunks = index[account]["stems"].get(("chunk", stem))
+            if chunks:
+                holders = index[account]["stems"].get(("holder", stem), [])
+                row.update(status="inconsistent", issue="split-info-lost", account=account, name_match="chunks",
+                           candidates=[dict(i) for i in chunks + holders])
+                row["repair"] = _mp_split_plan(row, obj, chunks, holders, library)
+                return _mp_note(row, "the library says one whole file, Google Photos holds its chunks "
+                                     "(split_info lost)")
+        if not row["content_key"]:
+            untagged = _mp_untagged_name(obj)
+            for account in accounts:
+                items, how = _mp_names(index[account], untagged)
+                if items:
+                    groups = _mp_bytes(items)
+                    if len(groups) > 1:
+                        row.update(status="ambiguous", account=account, name_match="untagged",
+                                   candidates=[dict(i) for i in items])
+                        return _mp_note(row, f"{len(groups)} items carry its old untagged name with different bytes")
+                    item = _mp_pick(groups[0])
+                    row.update(status="inconsistent", issue="untagged-name", account=account, name_match="untagged",
+                               proof="filename", item=dict(item),
+                               alternates=[i["photo_id"] for i in groups[0] if i["photo_id"] != item["photo_id"]],
+                               repair={"kind": "names", "uploaded_name": item["filename"]})
+                    return _mp_note(row, f"uploaded under its old untagged name ({item['filename']}) — "
+                                         f"--repair names records it")
     row["status"] = "not-found"
     gone = [dict(i) for a in mvcommon.GP_ACCOUNTS
             for i in index[a]["deleted"].get(gpweb.normalize_name(row["uploaded_name"] or ""), [])]
@@ -11230,6 +11308,128 @@ def _mp_nowhere(row, obj, fresh, index):
         row["deleted"] = gone
         _mp_note(row, "an item with this name was in Google Photos before and is absent from the latest "
                       "enumeration (deleted?)")
+
+
+def _mp_untagged_name(obj):
+    """The name a whole object had BEFORE pushes tagged it with ' [<short_id>]' (IMP-C27 (b)): the file's own name —
+    a leaf's `filename`, an extras item's last sub_rel part (push_one_extra uploads that)."""
+    if obj["kind"] == "extra_whole" and obj.get("sub_rel"):
+        return os.path.basename(obj["sub_rel"].replace("/", os.sep)) or obj.get("filename")
+    return obj.get("filename")
+
+
+def _mp_object_folder(library, obj):
+    """The local folder an object's push ran from — where cmd_push / push_one_extra keep `checksums/` — or None: a
+    leaf's folder_path; an extras item's directory (<title folder>/<group_rel>/<dirname of sub_rel>)."""
+    entry = library.get(obj["manual_id"]) if isinstance(library, dict) else None
+    folder = entry.get("folder_path") if isinstance(entry, dict) else None
+    if not (isinstance(folder, str) and folder):
+        return None
+    if obj["kind"] in ("extra_whole", "extra_chunk"):
+        sub_rel = (obj.get("sub_rel") or "").replace("/", os.sep)
+        return os.path.join(folder, (obj.get("group_rel") or "").replace("/", os.sep), os.path.dirname(sub_rel))
+    return folder
+
+
+def _mp_checksum(folder, chunk_name):
+    """The SHA-256 cmd_push recorded for a chunk in <folder>/checksums/<chunk>.sha256 ('<hex64> *<name>'), or None
+    when the sidecar is missing, unreadable, or names another file."""
+    try:
+        with open(os.path.join(folder, CHECKSUM_DIR_NAME, f"{chunk_name}.sha256"), encoding="utf-8") as fh:
+            text = fh.read().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    m = re.fullmatch(r"([0-9a-fA-F]{64})\s+\*?(.+)", text)
+    return m.group(1).lower() if m and m.group(2) == chunk_name else None
+
+
+def _mp_split_plan(row, obj, chunks, holders, library):
+    """--repair split-info (PLAN Step 9 (5a)) for a whole object whose chunks are in Google Photos: the split_info
+    to write back, PROVEN or not. Provable only when the chunks were uploaded ONCE (one taken second, every chunk
+    1..N exactly once, each under the name the push gave it), no FLAC holder was carried out (its track facts are
+    gone), and every chunk's SHA-256 is in the local checksums/<chunk>.sha256 sidecar cmd_push wrote. Anything less
+    stays a user decision. -> {kind, provable, why, account, slot, sha256, split_info, photo_ids}."""
+    plan = {"kind": "split-info", "provable": False, "why": None, "manual_id": obj["manual_id"], "label": obj["label"],
+            "account": row["account"], "slot": list(obj["slot"]), "sha256": obj["sha256"], "split_info": None,
+            "photo_ids": [i["photo_id"] for i in chunks]}
+    seconds = {_mp_second(i) for i in chunks}
+    numbers = sorted(gpweb.chunk_index(i["filename"]) for i in chunks)
+    prefix = os.path.splitext(row["uploaded_name"])[0] + ".chunk."
+    folder = _mp_object_folder(library, obj)
+    if len(seconds) > 1 or len(_mp_bytes(chunks)) != len(chunks):
+        plan["why"] = f"its chunks were uploaded more than once ({len(seconds)} taken seconds)"
+    elif numbers != list(range(1, len(chunks) + 1)):
+        plan["why"] = f"the chunks in Google Photos are not 1..{len(chunks)} exactly once ({numbers})"
+    elif holders:
+        plan["why"] = "a FLAC holder was carried out — its track facts are not in the library any more"
+    elif not all(i["filename"].startswith(prefix) for i in chunks):
+        plan["why"] = "the chunk names in Google Photos differ from the names the push gave them"
+    elif not obj["sha256"] or folder is None:
+        plan["why"] = "the library entry has no hash or no folder"
+    else:
+        ordered = sorted(chunks, key=lambda i: gpweb.chunk_index(i["filename"]))
+        hashes = [_mp_checksum(folder, i["filename"]) for i in ordered]
+        missing = [gpweb.chunk_index(i["filename"]) for i, h in zip(ordered, hashes) if h is None]
+        if missing:
+            plan["why"] = f"no local checksum sidecar for chunk(s) {missing} (checksums/<chunk>.sha256)"
+        else:
+            plan.update(provable=True, split_info={
+                "is_split": True, "total_chunks": len(ordered),
+                "chunks": [{"filename": i["filename"], "hash": h} for i, h in zip(ordered, hashes)]})
+    return plan
+
+
+def _mp_write_split_info(plans):
+    """--repair split-info --apply (PLAN Step 9 (5a)): write each PROVABLE plan's split_info into its whole-file node
+    — guarded exactly like the apply engine (OD-2: a fresh load, the library fingerprint re-checked right before the
+    ONE save, reload + re-patch up to GPHOTOS_APPLY_ATTEMPTS times) and only while the node still IS that whole file
+    (the same hash, not split). Nothing else of the node changes (its `re_hashed` and `hash` stay: the first restore
+    blesses or verifies the merge — bless_or_verify_merged_hash). No rollback journal (the gphotos-engine rule).
+    Never raises (one warning line). -> {status: nothing-to-apply | saved | up-to-date | aborted | error, repaired,
+    skipped: [{manual_id, label, why}], attempts, warning}."""
+    report = {"status": None, "repaired": [], "skipped": [], "attempts": 0, "warning": None}
+    plans = [p for p in plans if p.get("provable") and p.get("split_info")]
+    if not plans:
+        report["status"] = "nothing-to-apply"
+        return report
+    saving = False
+    try:
+        for attempt in range(1, GPHOTOS_APPLY_ATTEMPTS + 1):
+            report["attempts"] = attempt
+            before = _library_fingerprint()
+            library = load_library()
+            repaired, skipped = [], []
+            for plan in plans:
+                node = mvcommon.slot_owner(library, plan["slot"])
+                split = node.get("split_info") if isinstance(node, dict) else None
+                where = {"manual_id": plan["manual_id"], "label": plan["label"]}
+                if node is None or node.get("hash") != plan["sha256"]:
+                    skipped.append(dict(where, why="the object changed since it was mapped — re-run map_photos"))
+                elif isinstance(split, dict) and split.get("is_split"):
+                    skipped.append(dict(where, why="it is split already"))
+                else:
+                    node["split_info"] = copy.deepcopy(plan["split_info"])
+                    repaired.append(dict(where, chunks=plan["split_info"]["total_chunks"]))
+            if repaired and _library_fingerprint() != before:
+                continue  # another process wrote the library after our load: reload + re-patch
+            if repaired:
+                saving = True
+                save_library(library)
+                saving = False
+            report.update(status="saved" if repaired else "up-to-date", repaired=repaired, skipped=skipped)
+            return report
+        report.update(status="aborted", warning=f"⚠️  split_info not repaired: {_GP_BUSY}.")
+        print(report["warning"])
+        return report
+    except (Exception, SystemExit) as e:
+        what = "the library could not be loaded" if isinstance(e, SystemExit) else _gp_line(e)
+        tail = "the library save was interrupted — re-run to finish it" if saving else "the library was not changed"
+        report.update(status="error", warning=f"⚠️  split_info not repaired ({what}) — {tail}.")
+        try:
+            print(report["warning"])
+        except Exception:
+            pass
+        return report
 
 
 def _mp_copies(row, key, decisions, fresh):
@@ -11276,8 +11476,22 @@ def _mp_override_check(row):
     return "none" if row["status"] == "wrong-account" else None
 
 
-def _mp_match(objects, routes, index, fresh):
-    """The verdict of every object (PLAN Step 9 (1)-(5)) -> rows in object order."""
+def _mp_quality(row):
+    """IMP-C27 (e): an item flagged partial_upload, or not original quality, by the rpc inventory holds other bytes
+    than the upload — a restore would fail its SHA-256 check. Its row becomes `inconsistent` (never applied)."""
+    item = row["item"] or {}
+    issue = ("partial-upload" if item.get("partial_upload") is True
+             else "not-original-quality" if item.get("original_quality") is False else None)
+    if issue is None:
+        return
+    if row["status"] in ("mapped", "mapped-normalized", "wrong-account"):
+        row.update(status="inconsistent", issue=issue)
+    _mp_note(row, f"Google Photos holds a {issue.replace('-', ' ')} copy — a restore would fail its SHA-256 check")
+
+
+def _mp_match(objects, routes, index, fresh, library):
+    """The verdict of every object (PLAN Step 9 (1)-(5)) -> rows in object order. Offline: objects in no account stay
+    `not-found` here; _mp_device_check gives them their device verdict."""
     rows, by_key = [], {}
     for obj in objects:
         by_key[_mp_key(obj)] = _mp_row(obj, routes[_mp_key(obj)])
@@ -11289,10 +11503,76 @@ def _mp_match(objects, routes, index, fresh):
         for a in mvcommon.GP_ACCOUNTS:
             decisions.setdefault(a, dict.fromkeys(map(_mp_key, group)))
         for obj in group:
-            _mp_settle(by_key[_mp_key(obj)], obj, decisions, fresh, index)
+            _mp_settle(by_key[_mp_key(obj)], obj, decisions, fresh, index, library)
+    claims = {}
+    for row in rows:                          # one old untagged name, several library objects: none can claim it
+        if row["issue"] == "untagged-name":
+            claims.setdefault((row["account"], row["item"]["photo_id"]), []).append(row)
+    for claimants in claims.values():
+        if len(claimants) > 1:
+            for row in claimants:
+                row.update(status="ambiguous", issue=None, proof=None, candidates=[row["item"]], item=None,
+                           alternates=[], repair=None)
+                _mp_note(row, f"{len(claimants)} library objects share this old untagged name")
     for row in rows:
+        _mp_quality(row)
         row["override_check"] = _mp_override_check(row)
     return rows
+
+
+_MP_DEVICE_STATUS = {"on_device": "awaiting-backup", "freed": "missing-after-backup", "absent": "missing-everywhere",
+                     "unchecked": "device-check-incomplete"}   # Step 8's verdict -> the mapper's (never "missing" for
+                                                               # `unchecked`: a configured phone was not listed)
+
+
+def _mp_family(obj):
+    """The objects one restore needs together — a split's chunks + its FLAC holders (a leaf's, or one extras item's)
+    — share a family key; a whole file has none."""
+    if obj["kind"] in ("whole", "extra_whole"):
+        return None
+    return obj["manual_id"], obj["kind"].startswith("extra"), obj.get("group_rel"), obj.get("sub_rel")
+
+
+def _mp_device_check(library, objects, rows):
+    """PLAN Step 9 (5c/d) with Step 8: the READ-ONLY device check (device_inventory() over device_check_aliases()) for
+    every object found in no account: on a phone -> awaiting-backup; only its .mvmeta.json sidecar -> missing-after-
+    backup (possible cloud loss); on no phone of a complete check -> missing-everywhere; a configured phone not
+    listed -> device-check-incomplete (never "missing"). Such an object of a split whose other members ARE in Google
+    Photos is flagged partial_set (IMP-C27 (c)). -> the check's summary, or None when no object needed it (then no
+    adb command runs)."""
+    todo = [r for r in rows if r["status"] == "not-found"]
+    if not todo:
+        return None
+    objs = {_mp_key(o): o for o in objects}
+    inventory = device_inventory()
+    result = classify_device_objects(library, inventory, objects=[objs[(r["manual_id"], r["label"])] for r in todo])
+    devices = inventory.get("devices") or {}
+    away = ", ".join(f"{alias} ({(devices.get(alias) or {}).get('serial')}) {status}"
+                     for alias, status in result["incomplete_devices"].items())
+    for row, verdict in zip(todo, result["objects"]):
+        row["status"] = _MP_DEVICE_STATUS[verdict["state"]]
+        row["device"] = {"state": verdict["state"], "expected_size": verdict["expected_size"],
+                         "copies": [{k: c.get(k) for k in ("alias", "serial", "path", "size", "size_match")}
+                                    for c in verdict["copies"]],
+                         "sidecars": [{k: s.get(k) for k in ("alias", "serial", "path", "mtime")}
+                                      for s in verdict["sidecars"]],
+                         "partials": [{k: p.get(k) for k in ("alias", "serial", "path", "size")}
+                                      for p in verdict["partials"]]}
+        if verdict["state"] == "unchecked" and away:
+            _mp_note(row, f"not listed: {away} — connect it and re-run")
+    by_key, families = {(r["manual_id"], r["label"]): r for r in rows}, {}
+    for obj in objects:
+        if _mp_family(obj) is not None:
+            families.setdefault(_mp_family(obj), []).append(by_key[_mp_key(obj)])
+    lost = set(_MP_DEVICE_STATUS.values())
+    for members in families.values():
+        if any(m["status"] in lost for m in members) and any(
+                m["status"] not in lost and m["status"] != "stale-inventory" for m in members):
+            for m in members:
+                if m["status"] in lost:
+                    m["partial_set"] = True
+    return {"complete": result["complete"], "incomplete": result["incomplete_devices"], "counts": result["counts"],
+            "devices": devices, "unconfigured": inventory.get("unconfigured") or []}
 
 
 def _mp_run_dir(out, now):
@@ -11311,13 +11591,54 @@ def _mp_write_jsonl(path, records):
             fh.write(json.dumps(record, ensure_ascii=False, sort_keys=False) + "\n")
 
 
+MAP_STATES = ("mapped", "mapped-normalized", "wrong-account", "probable", "ambiguous", "conflict", "inconsistent",
+              "awaiting-backup", "missing-after-backup", "missing-everywhere", "device-check-incomplete",
+              "stale-inventory")   # every row's final status, in report order
+_MP_LOSS = ("missing-after-backup", "missing-everywhere", "device-check-incomplete", "awaiting-backup")
+_MP_LOSS_TEXT = {
+    "missing-after-backup": "in no account and freed from a phone — only its .mvmeta.json sidecar is left "
+                            "(possible cloud LOSS)",
+    "missing-everywhere": "in no account and on no phone (possible LOSS)",
+    "device-check-incomplete": "in no account; a configured phone was not listed — connect it and re-run",
+    "awaiting-backup": "in no account but still on a phone — awaiting its backup (do NOT free it yet)",
+}
+
+
 def _mp_counts_line(counter):
     return " · ".join(f"{state} {n:,}" for state, n in counter.items() if n)
 
 
-def _mp_report(scope, account, rows, fresh, run_dir):
-    """The run's text report (printed and saved as summary.txt) -> lines."""
-    lines = [f"=== MAP PHOTOS (dry-run) — scope: {scope}{' · account ' + account if account else ''} — "
+def _mp_device_hint(row):
+    """One line of device evidence for a LOUD-block row."""
+    device = row.get("device") or {}
+    copies, sidecars = device.get("copies") or [], device.get("sidecars") or []
+    if row["status"] == "awaiting-backup" and copies:
+        return "on " + ", ".join(sorted({f"{c['alias']} ({c['serial']})" for c in copies}))
+    if row["status"] == "missing-after-backup" and sidecars:
+        return "sidecar only on " + ", ".join(sorted({f"{s['alias']} ({s['serial']})" for s in sidecars}))
+    if row["status"] == "missing-everywhere":
+        return "on no phone"
+    return "a configured phone was not listed"
+
+
+def _mp_device_lines(devices):
+    lines = [f"Device check (read-only; DEVICE_ALIASES + DEVICE_CHECK_EXTRA_SERIALS): "
+             f"{'complete' if devices['complete'] else 'INCOMPLETE — nothing is called missing-everywhere'}"]
+    for alias, d in devices["devices"].items():
+        what = (f"{len(d.get('files') or []):,} file(s)" if d.get("status") in ("ok", "partial") else
+                d.get("detail") or "")
+        lines.append(f"  {alias:<9} {str(d.get('serial')):<18} {d.get('status')} — {what}".rstrip(" —"))
+    for phone in devices["unconfigured"]:
+        lines.append(f"  ⚠️  attached but not configured: {phone['serial']} ({phone['state']}) — add it to "
+                     f"DEVICE_ALIASES or DEVICE_CHECK_EXTRA_SERIALS to include it")
+    return lines
+
+
+def _mp_report(ctx):
+    """The run's text report (printed and saved as summary.txt) -> lines. ctx: scope, account, rows, fresh, devices
+    (the device check's summary or None), run_dir."""
+    rows, fresh, account = ctx["rows"], ctx["fresh"], ctx["account"]
+    lines = [f"=== MAP PHOTOS (dry-run) — scope: {ctx['scope']}{' · account ' + account if account else ''} — "
              f"{len(rows):,} object(s) ===",
              f"Inventory ({mvcommon.GP_INVENTORY_DIR}):"]
     for info in fresh.values():
@@ -11326,6 +11647,8 @@ def _mp_report(scope, account, rows, fresh, run_dir):
                          f"({info['age_h']:.1f} h ago), {info['items']:,} items")
         else:
             lines.append(f"  {info['account']:<7} STALE — {info['reason']} — re-crawl: {info['recrawl']}")
+    statuses = {state: sum(1 for r in rows if r["status"] == state) for state in MAP_STATES}
+    lines.append(f"Verdicts: {_mp_counts_line(statuses) or 'none'}")
     groups = {}
     for row in rows:
         groups.setdefault(f"{row['category']}/{row['account']}", {}).setdefault(row["status"], 0)
@@ -11346,14 +11669,54 @@ def _mp_report(scope, account, rows, fresh, run_dir):
                      f"that holds them:")
         lines.extend(f"     {r['manual_id']} · {r['label']} — override {r['override']}, item in {r['account']}"
                      for r in away)
-    lines.append(f"Outputs: {run_dir}")
+    same = sum(1 for r in rows if r["duplicate"] == "same-bytes" and r["item"])
+    resplit = [r for r in rows if r["duplicate"] == "re-split" and r["item"]]
+    if same or resplit:
+        lines.append(f"Duplicates resolved: same bytes {same:,} · re-split uploads {len(resplit):,} chunk(s) in "
+                     f"{len({r['manual_id'] for r in resplit}):,} entr(y/ies) (the newest complete upload; the "
+                     f"others recorded as alternates)")
+    if statuses["probable"]:
+        lines.append(f"Probable (OD-14 — only the [short_id] tag matches): {statuses['probable']:,} — accept them "
+                     f"with --accept-probable, or decide row by row in resolutions_todo.csv")
+    if statuses["ambiguous"] or statuses["conflict"]:
+        lines.append(f"Needs your decision: ambiguous {statuses['ambiguous']:,} · conflict (the name holds other "
+                     f"bytes) {statuses['conflict']:,}")
+    issues = {}
+    for row in rows:
+        if row["status"] == "inconsistent":
+            issues[row["issue"]] = issues.get(row["issue"], 0) + 1
+    if issues:
+        provable = sum(1 for r in rows if (r["repair"] or {}).get("kind") == "split-info"
+                       and r["repair"]["provable"])
+        lines.append(f"Inconsistent (IMP-C27): {_mp_counts_line(issues)}"
+                     + (f" — split_info repairable from local checksums: {provable:,} (--repair split-info)"
+                        if issues.get("split-info-lost") else ""))
+    if ctx["devices"] is not None:
+        lines.extend(_mp_device_lines(ctx["devices"]))
+    loud = [r for r in rows if r["status"] in _MP_LOSS]
+    if loud:
+        partial = [r for r in loud if r["partial_set"]]
+        lines.append(f"⚠️⚠️⚠️  NOT IN GOOGLE PHOTOS (IMP-C27): {len(loud):,} object(s) — the local copy of an archived "
+                     f"entry is a dummy  ⚠️⚠️⚠️")
+        for state in _MP_LOSS:
+            n = sum(1 for r in loud if r["status"] == state)
+            if n:
+                lines.append(f"  {state}: {n:,} — {_MP_LOSS_TEXT[state]}")
+        if partial:
+            lines.append(f"  partial chunk sets: {len(partial):,} object(s) in "
+                         f"{len({r['manual_id'] for r in partial}):,} entr(y/ies) — the rest of the set IS in Google "
+                         f"Photos")
+        for row in loud:
+            lines.append(f"    {row['status']:<24} {row['manual_id']} · {row['label']}"
+                         f"{' [partial set]' if row['partial_set'] else ''} — {_mp_device_hint(row)}")
+    lines.append(f"Outputs: {ctx['run_dir']}")
     return lines
 
 
 def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=None, repairs=(),
                    accept_probable=False, apply=False, out=None):
     """`map_photos` (PLAN Step 9): map the uploaded library objects to the Google Photos inventory — see the section
-    comment above. A dry run by default. -> {status, run_dir, rows, fresh} (status: ok | error)."""
+    comment above. A dry run by default. -> {status, run_dir, rows, fresh, devices} (status: ok | error)."""
     now = mvcommon._now_utc()
     library = load_library()
     if scope in (None, "", "all"):
@@ -11374,14 +11737,16 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
             routes[(obj["manual_id"], obj["label"])] = route
     states = _mp_inventory_states()
     fresh = _mp_freshness(states, objects, routes, now)
-    rows = _mp_match(objects, routes, _mp_index(states), fresh)
+    rows = _mp_match(objects, routes, _mp_index(states), fresh, library)
+    devices = _mp_device_check(library, objects, rows)
     run_dir = _mp_run_dir(out, now)
     os.makedirs(run_dir, exist_ok=True)
-    lines = _mp_report(scope, account, rows, fresh, run_dir)
+    lines = _mp_report({"scope": scope, "account": account, "rows": rows, "fresh": fresh, "devices": devices,
+                        "run_dir": run_dir})
     _mp_write_jsonl(os.path.join(run_dir, "mapping.jsonl"), rows)
     _mp_write_text(os.path.join(run_dir, "summary.txt"), "\n".join(lines) + "\n")
     print("\n".join(lines))
-    return {"status": "ok", "run_dir": run_dir, "rows": rows, "fresh": fresh}
+    return {"status": "ok", "run_dir": run_dir, "rows": rows, "fresh": fresh, "devices": devices}
 
 
 # ==========================================

@@ -449,3 +449,191 @@ def test_the_real_crawler_files_are_read_through_its_own_reader(world, fake_phot
     item = rows[(M_WHOLE, "whole")]["item"]
     fake = next(i for i in fake_photos.items("movies") if i.filename == world.names[(M_WHOLE, "whole")])
     assert (item["photo_id"], item["dedup_key"], item["taken_ms"]) == (fake.photo_id, fake.dedup_key, fake.taken_ms)
+
+
+# ============================================================================ 9.2 the name ladder
+
+def test_every_object_kind_of_the_crawled_categories_maps_by_its_exact_name(world, tmp_path):
+    world.save().upload_all().save()
+    rows = by_key(world.run(out=tmp_path / "run"))
+    expected_kinds = {"whole", "chunk", "holder", "extra_whole", "extra_chunk"}
+    mapped = {k: r for k, r in rows.items() if r["category"] != "others"}
+    assert {r["kind"] for r in mapped.values()} == expected_kinds
+    for key, row in mapped.items():
+        assert (row["status"], row["name_match"], row["proof"], row["account"]) == (
+            "mapped", "exact", "filename", row["category"]), key
+        assert row["item"]["filename"] == world.names[key] and row["item"]["account"] == row["category"]
+
+
+def test_a_whitespace_near_match_maps_normalized_and_exact_wins(world, tmp_path):
+    """PLAN P-6: the crawler's innerText collapses whitespace runs (the 19 real Tamil movie names)."""
+    mid = "mov-ta-2018-mpspaced"
+    world.library[mid] = leaf(mid, world.folder("Movies", "MP Spaced"), "MP  Spaced  Title.2018.mkv")
+    world.save().upload_all(skip={mid})
+    name = world.names[(mid, "whole")]
+    collapsed = " ".join(name.split())
+    assert collapsed != name
+    world.inv.add("movies", collapsed.upper().replace("MKV", "mkv"))           # case + whitespace: normalized only
+    world.save()
+    row = by_key(world.run(mid, out=tmp_path / "a"))[(mid, "whole")]
+    assert (row["status"], row["name_match"], row["proof"]) == ("mapped-normalized", "normalized", "filename")
+    exact = world.inv.add("movies", name)
+    world.save()
+    row = by_key(world.run(mid, out=tmp_path / "b"))[(mid, "whole")]
+    assert (row["status"], row["name_match"], row["item"]["photo_id"]) == ("mapped", "exact", exact["photo_id"])
+
+
+def test_a_normalized_name_in_the_default_account_beats_an_exact_name_elsewhere(world, tmp_path):
+    world.save().upload_all(skip={M_WHOLE})
+    name = world.names[(M_WHOLE, "whole")]
+    world.inv.add("movies", name.upper())
+    world.inv.add("tv", name)
+    world.save()
+    row = by_key(world.run(M_WHOLE, out=tmp_path / "run"))[(M_WHOLE, "whole")]
+    assert (row["status"], row["account"], row["name_match"]) == ("mapped-normalized", "movies", "normalized")
+    assert row["copies"] == [] and "a same-named item with other bytes is also in tv" in row["note"]
+
+
+XFILES = [f"tv-en-1995-mpxfiles-s02e{n:02d}" for n in range(1, 32)]
+
+
+@pytest.fixture()
+def xfiles(world, monkeypatch):
+    """The IMP-C26 shape: a 31-episode tv block whose items live ONLY in the MOVIES account. Overrides: three prefix
+    keys cover e01-e29, e30 has none, e31's exact key routes to anime (it beats the prefix rule)."""
+    season = world.folder("Series", "MP X", "Season 02")
+    for mid in XFILES:
+        world.library[mid] = leaf(mid, season, f"MP.X.S02E{mid[-2:]}.mkv")
+    world.save().upload_all(skip=set(XFILES))
+    for mid in XFILES:
+        world.inv.add("movies", world.names[(mid, "whole")])
+    world.save()
+    monkeypatch.setattr(mvcommon, "_CONFIG_CACHE", {"fetch_account_overrides": {
+        "tv-en-1995-mpxfiles-s02e0": "movies", "tv-en-1995-mpxfiles-s02e1": "movies",
+        "tv-en-1995-mpxfiles-s02e2": "movies", "tv-en-1995-mpxfiles-s02e31": "anime"}})
+    return world
+
+
+def test_a_wrong_account_block_and_whether_overrides_cover_it(xfiles, tmp_path, capsys):
+    res = xfiles.run("tv-en-1995-mpxfiles", out=tmp_path / "run", capsys=capsys)
+    rows = res["rows"]
+    assert len(rows) == 31
+    assert {(r["status"], r["account"], r["default_account"], r["proof"]) for r in rows} == {
+        ("wrong-account", "movies", "tv", "filename")}
+    checks = {r["manual_id"]: r["override_check"] for r in rows}
+    assert [checks[m] for m in XFILES[:29]] == ["covers"] * 29
+    assert (checks[XFILES[29]], checks[XFILES[30]]) == ("none", "differs")
+    out = res["stdout"]
+    assert ("Wrong account (IMP-C26): 31 object(s) live in another account than their id prefix — mvconfig "
+            "override covers 29 · none 1 · override points elsewhere 1 · learned home already 0") in out
+    assert f"     {XFILES[30]} · whole — override anime, item in movies" in out
+
+
+def test_several_items_with_the_name_in_the_default_account_are_ambiguous(world, tmp_path):
+    world.save().upload_all()
+    world.inv.add("movies", world.names[(M_WHOLE, "whole")], taken="2025-01-01T00:00:00Z")    # other bytes
+    world.save()
+    row = by_key(world.run(M_WHOLE, out=tmp_path / "run"))[(M_WHOLE, "whole")]
+    assert (row["status"], row["item"], len(row["candidates"])) == ("ambiguous", None, 2)
+    assert {c["account"] for c in row["candidates"]} == {"movies"}
+
+
+@pytest.mark.parametrize("same", [True, False])
+def test_a_name_in_two_other_accounts(world, tmp_path, same):
+    world.save().upload_all(skip={T_EP1})
+    name = world.names[(T_EP1, "whole")]
+    a = world.inv.add("movies", name, data=b"EP1 bytes")
+    b = world.inv.add("anime", name, data=b"EP1 bytes" if same else b"other bytes")
+    world.save()
+    row = by_key(world.run(T_EP1, out=tmp_path / "run"))[(T_EP1, "whole")]
+    if same:     # one object, two copies: the first account (GP order, override / home first) + a recorded copy
+        assert (row["status"], row["account"], row["item"]["photo_id"]) == ("wrong-account", "movies", a["photo_id"])
+        assert [c["photo_id"] for c in row["copies"]] == [b["photo_id"]]
+    else:
+        assert (row["status"], row["item"]) == ("ambiguous", None)
+        assert {c["photo_id"] for c in row["candidates"]} == {a["photo_id"], b["photo_id"]}
+
+
+def test_an_extra_copy_with_the_same_bytes_is_recorded_other_bytes_only_noted(world, tmp_path):
+    """PLAN P-4 (the Kuroko copies in TV): the default account's item is the object's; a same-bytes copy elsewhere
+    is recorded, a same-named item with other bytes is not."""
+    world.save().upload_all(skip={A_EP, M_WHOLE})
+    a = world.inv.add("anime", world.names[(A_EP, "whole")], data=b"anime ep")
+    copy_ = world.inv.add("tv", world.names[(A_EP, "whole")], data=b"anime ep")
+    world.inv.add("movies", world.names[(M_WHOLE, "whole")], data=b"movie")
+    world.inv.add("tv", world.names[(M_WHOLE, "whole")], data=b"a re-encode")
+    world.save()
+    rows = by_key(world.run(out=tmp_path / "run"))
+    anime = rows[(A_EP, "whole")]
+    assert (anime["status"], anime["account"], anime["item"]["photo_id"]) == ("mapped", "anime", a["photo_id"])
+    assert [c["photo_id"] for c in anime["copies"]] == [copy_["photo_id"]] and anime["copies"][0]["account"] == "tv"
+    movie = rows[(M_WHOLE, "whole")]
+    assert movie["copies"] == [] and "a same-named item with other bytes is also in tv (not recorded)" in movie["note"]
+
+
+def test_evidence_from_a_stale_inventory_is_refused(world, tmp_path):
+    world.inv.enumerated["movies"] = NOW - timedelta(hours=30)
+    world.save().upload_all(skip={T_EP1})
+    world.inv.add("movies", world.names[(T_EP1, "whole")])
+    world.save()
+    rows = by_key(world.run(out=tmp_path / "run"))
+    row = rows[(T_EP1, "whole")]
+    assert row["status"] == "stale-inventory" and row["item"] is None
+    assert row["note"].startswith("movies: the name is in this account, whose inventory is not fresh")
+    assert rows[(T_EP2, "whole")]["status"] == "mapped"                   # found in its own fresh account
+
+
+@pytest.mark.parametrize("case", ["stale", "gaps"])
+def test_in_no_account_needs_every_crawled_inventory_fresh_and_detailed(world, tmp_path, case):
+    world.save().upload_all(skip={T_EP1})
+    if case == "stale":
+        world.inv.enumerated["anime"] = NOW - timedelta(hours=30)
+    else:
+        world.inv.undetailed["anime"].append("AF1QipFAKEundetailed0001")       # listed, never detailed
+    world.save()
+    row = by_key(world.run(T_EP1, out=tmp_path / "run"))[(T_EP1, "whole")]
+    assert row["status"] == "stale-inventory"
+    why = "the enumeration is 30.0 h old" if case == "stale" else "1 known id(s) without details — re-run the crawl"
+    assert row["note"].startswith("anime: not in any account, but that cannot be told") and why in row["note"]
+    world.inv.enumerated["anime"], world.inv.undetailed["anime"] = ENUMERATED, []
+    world.save()
+    assert by_key(world.run(T_EP1, out=tmp_path / "again"))[(T_EP1, "whole")]["status"] == "not-found"
+
+
+def test_the_short_id_tag_gives_a_probable_match_of_the_same_kind_and_chunk(world, tmp_path):
+    """OD-14: only the `[short_id]` tag matches (e.g. the file was renamed after its push) -> probable, never
+    applied without the user."""
+    world.save().upload_all(skip={M_WHOLE, (M_SPLIT, "chunk 2/3")})
+    sid_whole, sid_split = world.library[M_WHOLE]["short_id"], world.library[M_SPLIT]["short_id"]
+    renamed = world.inv.add("movies", f"Renamed Title 2019 [{sid_whole}].mkv")
+    world.inv.add("movies", f"Renamed Title 2019 [{sid_whole}].chunk.001.mkv")       # another kind: no
+    chunk = world.inv.add("tv", f"Old Split Name [{sid_split}].chunk.002.mkv")          # another account
+    world.inv.add("movies", f"Old Split Name [{sid_split}].chunk.003.mkv")              # another chunk: no
+    world.save()
+    rows = by_key(world.run(out=tmp_path / "run"))
+    whole = rows[(M_WHOLE, "whole")]
+    assert (whole["status"], whole["account"], whole["name_match"]) == ("probable", "movies", "tag")
+    assert [c["photo_id"] for c in whole["candidates"]] == [renamed["photo_id"]] and whole["item"] is None
+    two = rows[(M_SPLIT, "chunk 2/3")]
+    assert (two["status"], two["account"]) == ("probable", "tv")
+    assert [c["photo_id"] for c in two["candidates"]] == [chunk["photo_id"]]
+
+
+def test_a_possibly_deleted_item_never_matches_and_is_reported(world, tmp_path):
+    world.save().upload_all()
+    gone = next(r for r in world.inv.items["tv"] if r["filename"] == world.names[(T_EP1, "whole")])
+    world.inv.unlisted["tv"].add(gone["photo_id"])                 # listed before, absent from the latest enumeration
+    world.save()
+    row = by_key(world.run(T_EP1, out=tmp_path / "run"))[(T_EP1, "whole")]
+    assert (row["status"], row["item"]) == ("not-found", None)
+    assert [d["photo_id"] for d in row["deleted"]] == [gone["photo_id"]]
+    assert "absent from the latest enumeration (deleted?)" in row["note"]
+
+
+def test_an_override_pointing_away_from_the_item_is_flagged(world, tmp_path, monkeypatch, capsys):
+    world.save().upload_all().save()
+    monkeypatch.setattr(mvcommon, "_CONFIG_CACHE", {"fetch_account_overrides": {T_EP1: "anime"}})
+    res = world.run(T_EP1, out=tmp_path / "run", capsys=capsys)
+    row = by_key(res)[(T_EP1, "whole")]
+    assert (row["status"], row["account"], row["override_check"]) == ("mapped", "tv", "differs")
+    assert "⚠️  mvconfig fetch_account_overrides routes 1 object(s) away from the account that holds them:" in res["stdout"]

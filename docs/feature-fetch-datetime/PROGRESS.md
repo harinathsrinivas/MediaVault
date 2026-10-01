@@ -108,8 +108,12 @@ device_check_aliases(); push aliases unchanged; test_device_inventory 131, smoke
 [x] 9.1 scaffold + freshness gate (main.py section "THE MAPPER", CLI `map_photos`, parse_map_photos_args, scope /
 --account by routing, inventory via tools.gp_inventory.inventory_state, stale-inventory + re-crawl command, run dir
 with mapping.jsonl + summary.txt; interim ladder = exact name in the default account; test_map_photos 27, smoke 82)
-(wip commit "step 9.1") · [ ] 9.2 match ladder ← next · [ ] 9.3 sha1↔dedupKey cross-check · [ ] 9.4 duplicates/re-split
-sets · [ ] 9.5 C27 detectors + repairs (split-info, names) · [ ] 9.6 unmatched report · [ ] 9.7 outputs +
+(wip 096ed70) · [x] 9.2 match ladder (matching groups: a split's chunks decided together; default account exact →
+normalized → another account = wrong-account (copies of the same bytes recorded, other bytes noted; answers from a
+stale inventory refused; "in no account" needs every crawled inventory fresh + fully detailed) → `[short_id]`-tag
+probable; possibly-deleted items never match (reported); override coverage covers/none/differs + report lines;
+test_map_photos 41, smoke 82) (wip commit "step 9.2") · [ ] 9.3 sha1↔dedupKey cross-check ← next · [ ] 9.4
+duplicates/re-split sets · [ ] 9.5 C27 detectors + repairs (split-info, names) · [ ] 9.6 unmatched report · [ ] 9.7 outputs +
 resolutions_todo.csv · [ ] 9.8 --resolutions · [ ] 9.9 --apply via learned sidecar + apply engine · [ ] 9.10
 --devices-only · then tests, disarm probes, full + smoke`
 `resumed 2026-10-01 by executor-fable (usage-limit pause #2): uncommitted 9.1 changes KEPT (main.py,

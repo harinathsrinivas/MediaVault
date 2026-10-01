@@ -10718,6 +10718,9 @@ _MP_RECRAWL = "python tools/gp_inventory.py {account} --port <port>"
 # The P-1 item facts an inventory record carries (the crawler's record format, dom and rpc).
 _MP_ITEM_KEYS = ("photo_id", "filename", "taken_ms", "tz_offset_ms", "upload_ms", "dedup_key", "width", "height",
                  "size_bytes", "original_quality", "partial_upload", "archived")
+_MP_TAG_RE = re.compile(r"\[([0-9a-f]{6})\]")                # a MediaVault short_id tag (generate_short_id: 6 hex)
+_MP_HOLDER_RE = re.compile(r"\.holder\.mkv$", re.IGNORECASE)
+_MP_CHUNK_KINDS = ("chunk", "extra_chunk")
 
 
 def parse_map_photos_args(tokens):
@@ -10851,30 +10854,41 @@ def _mp_item(account, rec):
     return item
 
 
+def _mp_tag_key(name):
+    """(kind, chunk number) of a file name for the `[short_id]`-tag index: ('chunk', NNN) for '….chunk.NNN.mkv',
+    ('holder', None) for '….holder.mkv', else ('whole', None)."""
+    number = gpweb.chunk_index(name)
+    if number is not None:
+        return "chunk", number
+    return ("holder", None) if _MP_HOLDER_RE.search(name or "") else ("whole", None)
+
+
 def _mp_index(states):
-    """Per account, the live inventory items indexed for the name ladder: exact file name and P-6 normalized name
-    -> [items]. Items absent from the latest complete enumeration (possibly deleted) never match — they are kept
-    by normalized name under `deleted` (reported); records without a file name or with a crawl error are kept by
-    normalized name under `errored` (an object they could be must not be called missing)."""
+    """Per account, the live inventory items indexed for the ladder: by exact file name, by P-6 normalized name, and
+    by MediaVault `[short_id]` tag ((tag, kind, chunk number) -> [items], the OD-14 probable match). Items absent from
+    the latest complete enumeration (possibly deleted) never match — they are kept by normalized name under
+    `deleted` (reported: an item that was there and is gone). A record without a file name or with a crawl error is
+    left out: its id counts in the freshness `gaps`, which withhold every "in no account" verdict."""
     index = {}
     for account, state in states.items():
         gone = set(state["possibly_deleted"])
-        exact, normalized, deleted, errored = {}, {}, {}, {}
+        exact, normalized, tags, deleted = {}, {}, {}, {}
         for pid in sorted(state["items"]):
             rec = state["items"][pid]
             item = _mp_item(account, rec)
             name = item["filename"] if isinstance(item["filename"], str) and item["filename"].strip() else None
-            key = gpweb.normalize_name(name) if name else None
+            if not name:
+                continue
+            key = gpweb.normalize_name(name)
             if pid in gone:
-                if key:
-                    deleted.setdefault(key, []).append(item)
-            elif rec.get("error") or not name:
-                if key:
-                    errored.setdefault(key, []).append(item)
-            else:
+                deleted.setdefault(key, []).append(item)
+            elif not rec.get("error"):
                 exact.setdefault(name, []).append(item)
                 normalized.setdefault(key, []).append(item)
-        index[account] = {"exact": exact, "normalized": normalized, "deleted": deleted, "errored": errored}
+                kind, number = _mp_tag_key(name)
+                for tag in dict.fromkeys(_MP_TAG_RE.findall(name)):
+                    tags.setdefault((tag, kind, number), []).append(item)
+        index[account] = {"exact": exact, "normalized": normalized, "tags": tags, "deleted": deleted}
     return index
 
 
@@ -10892,8 +10906,8 @@ def _mp_row(obj, route):
             "default_account": route["default"], "override": route["override"], "learned_home": route["home"],
             "routing": route["routing"], "account": route["default"], "status": None, "issue": None,
             "name_match": None, "proof": None, "item": None, "alternates": [], "copies": [], "candidates": [],
-            "duplicate": None, "set": None, "device": None, "partial_set": False,
-            "content_key": _mp_content_key(obj), "reason": None, "note": None, "repair": None}
+            "deleted": [], "override_check": None, "duplicate": None, "set": None, "device": None,
+            "partial_set": False, "content_key": _mp_content_key(obj), "reason": None, "note": None, "repair": None}
 
 
 def _mp_names(index_account, name):
@@ -10907,26 +10921,191 @@ def _mp_names(index_account, name):
     return (list(hits), "normalized") if hits else ([], None)
 
 
-def _mp_set_item(row, item, name_match, proof):
-    row.update(item=dict(item), account=item["account"], name_match=name_match, proof=proof)
+def _mp_key(obj):
+    return obj["manual_id"], obj["label"]
+
+
+def _mp_groups(objects):
+    """The objects as matching groups, in object order: the chunks of ONE split — a leaf's, or one extras item's —
+    are decided together (PLAN Step 9 (4): all chunks of a split share one taken second); every other object is a
+    group of its own."""
+    groups, splits = [], {}
+    for obj in objects:
+        if obj["kind"] in _MP_CHUNK_KINDS:
+            key = (obj["manual_id"], obj["kind"], obj.get("group_rel"), obj.get("sub_rel"))
+            if key not in splits:
+                splits[key] = []
+                groups.append(splits[key])
+            splits[key].append(obj)
+        else:
+            groups.append([obj])
+    return groups
+
+
+def _mp_decision(kind, name_match, item=None, candidates=(), proof=None, alternates=(), duplicate=None,
+                 chunk_set=None, note=None):
+    """One account's answer for one object: mapped (item + proof), ambiguous / conflict (candidates)."""
+    return {"kind": kind, "name_match": name_match, "item": item, "candidates": list(candidates), "proof": proof,
+            "alternates": list(alternates), "duplicate": duplicate, "set": chunk_set, "note": note}
+
+
+def _mp_decide(group, idx):
+    """ONE account's decision for each object of a matching group -> {(manual_id, label): decision or None}: the
+    items carrying the object's exact uploaded name, else its P-6 normalized name — exactly one: mapped (proof
+    filename); several: ambiguous; none: None."""
+    out = {}
+    for obj in group:
+        items, how = _mp_names(idx, obj["uploaded_name"])
+        if not items:
+            out[_mp_key(obj)] = None
+        elif len(items) == 1:
+            out[_mp_key(obj)] = _mp_decision("mapped", how, item=items[0], proof="filename")
+        else:
+            out[_mp_key(obj)] = _mp_decision("ambiguous", how, candidates=items)
+    return out
+
+
+def _mp_take(row, decision, account):
+    """Copy one account's decision into the row: mapped -> mapped / mapped-normalized; ambiguous; conflict."""
+    if decision["kind"] == "mapped":
+        status = "mapped" if decision["name_match"] != "normalized" else "mapped-normalized"
+    else:
+        status = decision["kind"]
+    row.update(status=status, account=account, name_match=decision["name_match"], proof=decision["proof"],
+               item=dict(decision["item"]) if decision["item"] else None,
+               candidates=[dict(c) for c in decision["candidates"]], alternates=list(decision["alternates"]),
+               duplicate=decision["duplicate"], set=decision["set"])
+    if decision["note"]:
+        _mp_note(row, decision["note"])
+
+
+def _mp_note(row, text):
+    row["note"] = text if not row["note"] else f"{row['note']}; {text}"
+
+
+def _mp_stale(row, account, reason):
+    row.update(status="stale-inventory", account=row["default_account"])
+    _mp_note(row, f"{account}: {reason}")
+
+
+def _mp_preferred(row, accounts):
+    """`accounts` with the row's override first, then its learned home, then GP_ACCOUNTS order."""
+    order = [a for a in (row["override"], row["learned_home"]) if a] + list(mvcommon.GP_ACCOUNTS)
+    return sorted(accounts, key=lambda a: order.index(a) if a in order else len(order))
+
+
+def _mp_settle(row, obj, decisions, fresh, index):
+    """The verdict of one object from every crawled account's decision (PLAN Step 9 (1)-(2)): its default account
+    first (its normalized name there beats an exact name elsewhere — P-6 ladder order), then another account
+    (wrong-account), then the `[short_id]`-tag probable; an answer that rests on a stale inventory is refused."""
+    key, home = _mp_key(obj), row["default_account"]
+    if not fresh[home]["fresh"]:
+        return _mp_stale(row, home, fresh[home]["reason"])
+    own = decisions[home][key]
+    if own is not None:
+        _mp_take(row, own, home)
+        if row["item"] is not None:
+            _mp_copies(row, key, decisions, fresh)
+        return
+    elsewhere = {a: d[key] for a, d in decisions.items() if a != home and d[key] is not None}
+    if elsewhere:
+        stale = [a for a in _mp_preferred(row, elsewhere) if not fresh[a]["fresh"]]
+        if stale:
+            return _mp_stale(row, stale[0], f"the name is in this account, whose inventory is not fresh "
+                                            f"({fresh[stale[0]]['reason']})")
+        accounts = _mp_preferred(row, elsewhere)
+        mapped = [a for a in accounts if elsewhere[a]["kind"] == "mapped"]
+        keys = {elsewhere[a]["item"]["dedup_key"] for a in mapped}
+        if len(accounts) == 1 or (len(mapped) == len(accounts) and len(keys) == 1 and None not in keys):
+            _mp_take(row, elsewhere[accounts[0]], accounts[0])
+            if row["item"] is not None:
+                row["status"] = "wrong-account"
+                row["copies"] = [dict(elsewhere[a]["item"]) for a in accounts[1:]]
+            return
+        row.update(status="ambiguous", candidates=[dict(c) for a in accounts for c in (
+            [elsewhere[a]["item"]] if elsewhere[a]["item"] else elsewhere[a]["candidates"])])
+        return _mp_note(row, f"the name is in {len(accounts)} other accounts ({', '.join(accounts)}) with "
+                             f"different bytes")
+    blocked = [a for a in mvcommon.GP_ACCOUNTS if fresh[a]["crawled"] and not fresh[a]["fresh"]]
+    gaps = [a for a in mvcommon.GP_ACCOUNTS if fresh[a]["crawled"] and fresh[a]["gaps"]]
+    if blocked or gaps:
+        a = (blocked or gaps)[0]
+        why = fresh[a]["reason"] or f"{fresh[a]['gaps']:,} known id(s) without details — re-run the crawl"
+        return _mp_stale(row, a, f"not in any account, but that cannot be told while this inventory is not "
+                                 f"complete ({why})")
+    probable = _mp_probable(obj, row, index)
+    if probable:
+        account, items = probable
+        row.update(status="probable", account=account, name_match="tag", candidates=[dict(i) for i in items])
+        return
+    row["status"] = "not-found"
+    gone = [dict(i) for a in mvcommon.GP_ACCOUNTS
+            for i in index[a]["deleted"].get(gpweb.normalize_name(row["uploaded_name"] or ""), [])]
+    if gone:
+        row["deleted"] = gone
+        _mp_note(row, "an item with this name was in Google Photos before and is absent from the latest "
+                      "enumeration (deleted?)")
+
+
+def _mp_copies(row, key, decisions, fresh):
+    """Extra copies (PLAN P-4): the same bytes (same dedupKey) under the object's name in another FRESH account —
+    recorded on apply; a same-named item with other bytes, or one in a stale inventory, is only noted."""
+    for account in _mp_preferred(row, [a for a in decisions if a != row["account"]]):
+        other = decisions[account][key]
+        if other is None:
+            continue
+        item = other["item"]
+        if (other["kind"] == "mapped" and fresh[account]["fresh"] and item["dedup_key"]
+                and item["dedup_key"] == row["item"]["dedup_key"]):
+            row["copies"].append(dict(item))
+        elif not fresh[account]["fresh"]:
+            _mp_note(row, f"a same-named item is also in {account} (inventory not fresh — not recorded)")
+        else:
+            _mp_note(row, f"a same-named item with other bytes is also in {account} (not recorded)")
+
+
+def _mp_probable(obj, row, index):
+    """OD-14: (account, items) of the items carrying the object's `[short_id]` tag — same kind, same chunk number —
+    under ANOTHER name: the default account first, then the others. None without a short_id or a hit."""
+    sid = obj.get("short_id")
+    if not sid:
+        return None
+    kind, number = _mp_tag_key(row["uploaded_name"] or "")
+    wanted = {"whole": "whole", "extra_whole": "whole", "holder": "holder"}.get(obj["kind"], "chunk")
+    if wanted != kind:
+        number = None
+    for account in [row["default_account"]] + [a for a in mvcommon.GP_ACCOUNTS if a != row["default_account"]]:
+        hits = index[account]["tags"].get((sid, wanted, number))
+        if hits:
+            return account, list(hits)
+    return None
+
+
+def _mp_override_check(row):
+    """How the mvconfig override relates to where the item is: covers | differs | none (a wrong-account object no
+    override routes) | None (nothing to check)."""
+    if row["item"] is None:
+        return None
+    if row["override"]:
+        return "covers" if row["override"] == row["account"] else "differs"
+    return "none" if row["status"] == "wrong-account" else None
 
 
 def _mp_match(objects, routes, index, fresh):
     """The verdict of every object (PLAN Step 9 (1)-(5)) -> rows in object order."""
-    rows = []
+    rows, by_key = [], {}
     for obj in objects:
-        row = _mp_row(obj, routes[(obj["manual_id"], obj["label"])])
-        rows.append(row)
-        home = row["default_account"]
-        if not fresh[home]["fresh"]:
-            row.update(status="stale-inventory", note=f"{home}: {fresh[home]['reason']}")
-            continue
-        items, how = _mp_names(index[home], row["uploaded_name"])
-        if len(items) == 1 and how == "exact":
-            _mp_set_item(row, items[0], how, "filename")
-            row["status"] = "mapped"
-        else:
-            row["status"] = "not-found"
+        by_key[_mp_key(obj)] = _mp_row(obj, routes[_mp_key(obj)])
+        rows.append(by_key[_mp_key(obj)])
+    crawled = [a for a in mvcommon.GP_ACCOUNTS if fresh[a]["crawled"]]
+    for group in _mp_groups(objects):
+        decisions = {a: _mp_decide(group, index[a]) for a in crawled}
+        for a in mvcommon.GP_ACCOUNTS:
+            decisions.setdefault(a, dict.fromkeys(map(_mp_key, group)))
+        for obj in group:
+            _mp_settle(by_key[_mp_key(obj)], obj, decisions, fresh, index)
+    for row in rows:
+        row["override_check"] = _mp_override_check(row)
     return rows
 
 
@@ -10968,6 +11147,19 @@ def _mp_report(scope, account, rows, fresh, run_dir):
     lines.append("Per category/account:")
     for key in sorted(groups):
         lines.append(f"  {key}: {sum(groups[key].values()):,} — {_mp_counts_line(groups[key])}")
+    wrong = [r for r in rows if r["status"] == "wrong-account"]
+    if wrong:
+        checks = {c: sum(1 for r in wrong if r["override_check"] == c) for c in ("covers", "none", "differs")}
+        learned = sum(1 for r in wrong if r["learned_home"] == r["account"])
+        lines.append(f"Wrong account (IMP-C26): {len(wrong):,} object(s) live in another account than their id "
+                     f"prefix — mvconfig override covers {checks['covers']:,} · none {checks['none']:,} · "
+                     f"override points elsewhere {checks['differs']:,} · learned home already {learned:,}")
+    away = [r for r in rows if r["override_check"] == "differs"]
+    if away:
+        lines.append(f"⚠️  mvconfig fetch_account_overrides routes {len(away):,} object(s) away from the account "
+                     f"that holds them:")
+        lines.extend(f"     {r['manual_id']} · {r['label']} — override {r['override']}, item in {r['account']}"
+                     for r in away)
     lines.append(f"Outputs: {run_dir}")
     return lines
 

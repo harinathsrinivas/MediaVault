@@ -10,6 +10,7 @@ import stat
 import hashlib
 import difflib
 import copy
+import csv
 import tempfile
 import webbrowser
 import requests
@@ -11575,6 +11576,87 @@ def _mp_device_check(library, objects, rows):
             "devices": devices, "unconfigured": inventory.get("unconfigured") or []}
 
 
+MAP_UNMATCHED = ("superseded-split", "duplicate", "cross-account-copy", "mediavault-unknown", "non-mediavault",
+                 "possibly-deleted", "errored")   # unmatched_<account>.csv categories, in report order
+
+
+def _mp_unmatched(states, fresh, rows, objects):
+    """PLAN Step 9 (6): every inventory item of a FRESH account that no object's verdict uses — categorized for the
+    report, NEVER touched (stale cloud copies are never deleted) -> {account: [{category, item, owner, note}]}.
+    Categories: superseded-split (a chunk name of a library object — another upload of its split), duplicate
+    (another item with a library object's name or `[short_id]` tag in its own account), cross-account-copy (the
+    name of an object that lives in another account), mediavault-unknown (a `[short_id]`-tagged name no library
+    object claims — a removed entry?), non-mediavault (any other upload), possibly-deleted (absent from the latest
+    complete enumeration), errored (a record the crawler could not complete). Only meaningful for the WHOLE
+    library: the caller runs it for `map_photos all` without --account."""
+    used = {}
+    for row in rows:
+        mine = used.setdefault(row["account"], set())
+        if row["item"]:
+            mine.add(row["item"]["photo_id"])
+        mine.update(row["alternates"])
+        for item in row["copies"] + row["candidates"] + row["deleted"]:
+            used.setdefault(item["account"], set()).add(item["photo_id"])
+    by_name = {gpweb.normalize_name(r["uploaded_name"]): r for r in rows if r["uploaded_name"]}
+    by_tag = {}
+    for obj in objects:
+        if obj.get("short_id"):
+            by_tag.setdefault(obj["short_id"], obj)
+    rows_by_key = {(r["manual_id"], r["label"]): r for r in rows}
+    out = {}
+    for account, state in states.items():
+        if not fresh[account]["fresh"]:
+            continue
+        gone, found = set(state["possibly_deleted"]), []
+        for pid in sorted(state["items"]):
+            if pid in used.get(account, ()):
+                continue
+            rec = state["items"][pid]
+            item = _mp_item(account, rec)
+            name = item["filename"] if isinstance(item["filename"], str) else ""
+            owner, note = by_name.get(gpweb.normalize_name(name)) if name else None, None
+            tag_owner = next((by_tag[t] for t in _MP_TAG_RE.findall(name) if t in by_tag), None)
+            if pid in gone:
+                category = "possibly-deleted"
+            elif rec.get("error") or not name.strip():
+                category = "errored"
+            elif owner is not None and owner["account"] != account:
+                category, note = "cross-account-copy", f"the object lives in {owner['account']}"
+            elif owner is not None:
+                category = "superseded-split" if gpweb.chunk_index(name) is not None else "duplicate"
+            elif tag_owner is not None:
+                owner = rows_by_key.get(_mp_key(tag_owner))
+                category, note = "duplicate", "carries the object's [short_id] tag under another name"
+            elif _MP_TAG_RE.search(name):
+                category = "mediavault-unknown"
+            else:
+                category = "non-mediavault"
+            found.append({"category": category, "item": item,
+                          "owner": f"{owner['manual_id']} · {owner['label']}" if owner else None, "note": note})
+        found.sort(key=lambda u: (MAP_UNMATCHED.index(u["category"]), u["item"]["filename"] or "",
+                                  u["item"]["photo_id"]))
+        out[account] = found
+    return out
+
+
+def _mp_utc(ms):
+    """Epoch milliseconds -> 'YYYY-MM-DD HH:MM:SS UTC', or '' when unknown."""
+    if not isinstance(ms, int) or isinstance(ms, bool):
+        return ""
+    try:
+        return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
+def _mp_write_csv(path, header, rows):
+    """An Excel-friendly CSV (UTF-8 with BOM, CRLF) — the failed list's convention (P-18)."""
+    with open(path, "w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.writer(fh, lineterminator="\r\n")
+        writer.writerow(header)
+        writer.writerows([["" if v is None else v for v in row] for row in rows])
+
+
 def _mp_run_dir(out, now):
     """The run directory: --out as given, else <GPHOTOS_STATE_DIR>/map/<UTC timestamp> (read at call time)."""
     return out if out else os.path.join(mvcommon.GPHOTOS_STATE_DIR, "map", now.strftime("%Y%m%dT%H%M%SZ"))
@@ -11709,6 +11791,15 @@ def _mp_report(ctx):
         for row in loud:
             lines.append(f"    {row['status']:<24} {row['manual_id']} · {row['label']}"
                          f"{' [partial set]' if row['partial_set'] else ''} — {_mp_device_hint(row)}")
+    if ctx["unmatched"] is None:
+        lines.append("Unmatched inventory items: reported by `map_photos all` (without --account) only")
+    else:
+        parts = []
+        for acc, found in ctx["unmatched"].items():
+            kinds = {c: sum(1 for u in found if u["category"] == c) for c in MAP_UNMATCHED}
+            parts.append(f"{acc} {len(found):,}" + (f" ({_mp_counts_line(kinds)})" if found else ""))
+        lines.append("Unmatched inventory items (report only — never touched): "
+                     + (" · ".join(parts) or "no fresh account"))
     lines.append(f"Outputs: {ctx['run_dir']}")
     return lines
 
@@ -11739,14 +11830,21 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
     fresh = _mp_freshness(states, objects, routes, now)
     rows = _mp_match(objects, routes, _mp_index(states), fresh, library)
     devices = _mp_device_check(library, objects, rows)
+    unmatched = _mp_unmatched(states, fresh, rows, objects) if scope == "all" and account is None else None
     run_dir = _mp_run_dir(out, now)
     os.makedirs(run_dir, exist_ok=True)
     lines = _mp_report({"scope": scope, "account": account, "rows": rows, "fresh": fresh, "devices": devices,
-                        "run_dir": run_dir})
+                        "unmatched": unmatched, "run_dir": run_dir})
     _mp_write_jsonl(os.path.join(run_dir, "mapping.jsonl"), rows)
+    for acc, found in (unmatched or {}).items():
+        _mp_write_csv(os.path.join(run_dir, f"unmatched_{acc}.csv"),
+                      ("category", "photo_id", "filename", "taken_utc", "upload_utc", "owner", "note"),
+                      [(u["category"], u["item"]["photo_id"], u["item"]["filename"], _mp_utc(u["item"]["taken_ms"]),
+                        _mp_utc(u["item"]["upload_ms"]), u["owner"], u["note"]) for u in found])
     _mp_write_text(os.path.join(run_dir, "summary.txt"), "\n".join(lines) + "\n")
     print("\n".join(lines))
-    return {"status": "ok", "run_dir": run_dir, "rows": rows, "fresh": fresh, "devices": devices}
+    return {"status": "ok", "run_dir": run_dir, "rows": rows, "fresh": fresh, "devices": devices,
+            "unmatched": unmatched}
 
 
 # ==========================================

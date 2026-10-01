@@ -127,9 +127,11 @@ upload of chunks 1..N, no holder, exact push names and every local checksums/<ch
 (gphotos_apply gained `names=` — same single writer + OD-2 guard; a name two objects share is ambiguous); (e)
 partial / non-original upload → inconsistent; (c)/(d) read-only device check (device_check_aliases incl. the extra
 movies phone) → awaiting-backup / missing-after-backup / missing-everywhere / device-check-incomplete, partial_set;
-device block + LOUD block in the report; test_map_photos 75, engine/device/schema 195, smoke 82) (wip commit
-"step 9.5") · [ ] 9.6 unmatched report ← next · [ ] 9.7 outputs + resolutions_todo.csv ·
-[ ] 9.8 --resolutions · [ ] 9.9 --apply via learned sidecar + apply engine · [ ] 9.10 --devices-only · then tests,
+device block + LOUD block in the report; test_map_photos 75, engine/device/schema 195, smoke 82) (wip 2b3313a) ·
+[x] 9.6 unmatched report (`map_photos all` without --account, fresh accounts only: superseded-split / duplicate /
+cross-account-copy / mediavault-unknown / non-mediavault / possibly-deleted / errored → unmatched_<account>.csv
+(UTF-8 BOM, CRLF) + one report line; never touched; test_map_photos 78, smoke 82) (wip commit "step 9.6") · [ ] 9.7
+outputs + resolutions_todo.csv ← next · [ ] 9.8 --resolutions · [ ] 9.9 --apply via learned sidecar + apply engine · [ ] 9.10 --devices-only · then tests,
 disarm probes, full + smoke`
 `resumed 2026-10-01 by executor-fable (usage-limit pause #2): uncommitted 9.1 changes KEPT (main.py,
 tests/test_map_photos.py) — the diff was coherent; 26/27 green, the 1 failure a test-fixture expectation (fixed)`

@@ -1105,3 +1105,71 @@ def test_a_name_repair_wins_over_the_capture_and_bad_facts_are_counted(world):
     assert [(o["manual_id"], o["account"], o["reason"]) for o in report["orphans"]] == [
         ("tv-en-1999-gone-s01e01", None, "no-entry"), (T_EP1, None, "no-object")]
     assert main.gphotos_apply([], names=[names[1]])["status"] == "nothing-to-apply"
+
+
+# ============================================================================ 9.6 the unmatched inventory report
+
+def _read_csv(path):
+    raw = open(path, "rb").read()
+    assert raw.startswith(b"\xef\xbb\xbf") and b"\r\n" in raw and b"\n" not in raw.replace(b"\r\n", b"")
+    import csv as _csv
+    import io as _io
+    return list(_csv.DictReader(_io.StringIO(raw.decode("utf-8-sig"), newline="")))
+
+
+def test_every_unused_inventory_item_is_categorized_never_touched(world, tmp_path, capsys):
+    chunk = world.library[M_SPLIT]["split_info"]["chunks"][0]
+    world.save().upload_all(skip={(M_SPLIT, "chunk 1/3"), M_WHOLE})
+    world.inv.add("movies", chunk["filename"], data=b"chunk one", taken=SEC_B)          # the split's own upload
+    old_chunk = world.inv.add("movies", chunk["filename"], taken=SEC_A)                  # an older upload of it
+    world.inv.add("movies", world.names[(M_WHOLE, "whole")], data=b"movie")
+    dup = world.inv.add("movies", world.names[(M_WHOLE, "whole")], data=b"a re-encode")
+    renamed = world.inv.add("movies", f"Old Name [{world.library[M_WHOLE]['short_id']}].mkv")
+    cross = world.inv.add("tv", world.names[(M_WHOLE, "whole")], data=b"tv copy, other bytes")
+    unknown = world.inv.add("movies", "Removed Entry 2001 [abcdef].mkv")
+    phone = world.inv.add("anime", "PXL_20260101_123456789.mp4")
+    gone = world.inv.add("tv", "Deleted Holiday Clip.mp4")
+    world.inv.unlisted["tv"].add(gone["photo_id"])
+    broken = world.inv.add("tv", "half.mkv", error="incomplete: batch info")
+    world.save()
+    world.capture(M_SPLIT, chunk["hash"], _sha1(b"chunk one"), PUSHED, chunk["filename"], role="chunk", index=1)
+    world.capture(M_WHOLE, _h(M_WHOLE), _sha1(b"movie"), PUSHED, world.names[(M_WHOLE, "whole")])
+    res = world.run(out=tmp_path / "run", capsys=capsys)
+    got = {(acc, u["item"]["photo_id"]): (u["category"], u["owner"], u["note"])
+           for acc, found in res["unmatched"].items() for u in found}
+    assert got == {
+        ("movies", old_chunk["photo_id"]): ("superseded-split", f"{M_SPLIT} · chunk 1/3", None),
+        ("movies", dup["photo_id"]): ("duplicate", f"{M_WHOLE} · whole", None),
+        ("movies", renamed["photo_id"]): ("duplicate", f"{M_WHOLE} · whole",
+                                          "carries the object's [short_id] tag under another name"),
+        ("movies", unknown["photo_id"]): ("mediavault-unknown", None, None),
+        ("tv", cross["photo_id"]): ("cross-account-copy", f"{M_WHOLE} · whole", "the object lives in movies"),
+        ("tv", gone["photo_id"]): ("possibly-deleted", None, None),
+        ("tv", broken["photo_id"]): ("errored", None, None),
+        ("anime", phone["photo_id"]): ("non-mediavault", None, None),
+    }
+    assert set(res["unmatched"]) == {"movies", "tv", "anime"}                  # others: never crawled
+    rows = _read_csv(os.path.join(res["run_dir"], "unmatched_movies.csv"))
+    assert list(rows[0]) == ["category", "photo_id", "filename", "taken_utc", "upload_utc", "owner", "note"]
+    assert [r["category"] for r in rows] == ["superseded-split", "duplicate", "duplicate", "mediavault-unknown"]
+    assert rows[0]["taken_utc"] == "2024-03-09 06:03:02 UTC"
+    assert ("Unmatched inventory items (report only — never touched): movies 4 (superseded-split 1 · duplicate 2 · "
+            "mediavault-unknown 1)") in res["stdout"]
+
+
+def test_the_unmatched_report_needs_the_whole_library(world, tmp_path, capsys):
+    world.save().upload_all().save()
+    for tokens in ((T_SEASON,), ("--account", "tv")):
+        res = world.run(*tokens, out=tmp_path / "-".join(tokens), capsys=capsys)
+        assert res["unmatched"] is None
+        assert "Unmatched inventory items: reported by `map_photos all` (without --account) only" in res["stdout"]
+        assert not [f for f in os.listdir(res["run_dir"]) if f.startswith("unmatched_")]
+
+
+def test_a_stale_account_gets_no_unmatched_report(world, tmp_path):
+    world.inv.enumerated["anime"] = NOW - timedelta(hours=48)
+    world.save().upload_all()
+    world.inv.add("anime", "PXL_20260101_123456789.mp4")
+    world.save()
+    res = world.run(out=tmp_path / "run")
+    assert set(res["unmatched"]) == {"movies", "tv"} and res["unmatched"]["movies"] == []

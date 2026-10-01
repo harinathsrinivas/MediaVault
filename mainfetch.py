@@ -404,6 +404,21 @@ def _fetch_restore_folder(entry, temp_dir, entry_id=None):
     return os.path.join(temp_dir, safe_id, RESTORE_DIR_NAME)
 
 
+def _lost_download_note(lost, saw_download):
+    """[IMP-C29] What the harvester can honestly say about `lost` triggered files
+    that never arrived. It sees only the Downloads folder, never Chrome's verdict.
+    Google Photos downloads carry no ETag or Last-Modified, so Chrome cannot
+    resume a broken one: it restarts from 0 B, then fails it."""
+    if saw_download:
+        return (f"     A download was in progress, but {lost} triggered file(s) never arrived. "
+                f"If chrome://downloads lists it as failed (e.g. 'Failed - Network error'), the "
+                f"transfer broke. Google Photos downloads cannot resume: re-run the fetch "
+                f"(files already fetched are skipped).")
+    return (f"     No download appeared for {lost} triggered file(s). If chrome://downloads lists "
+            f"it as failed, the transfer broke at once: re-run the fetch. If it is not listed, "
+            f"Shift+D started nothing.")
+
+
 def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None):
     """
     Handles the fetch logic for a single library entry (Movie or Episode).
@@ -491,7 +506,8 @@ def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None):
             query = item["specific_query"] if attempt == 0 else item["fallback_query"]
             idx = 0 if attempt == 0 else item["fallback_index"]
 
-            trigger_download(driver, query, idx)
+            # [IMP-C29] Remember whether a download was requested for this file.
+            item["triggered"] = trigger_download(driver, query, idx)
             time.sleep(2)
 
         # Harvest
@@ -500,21 +516,20 @@ def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None):
         base_timeout = 300  # 5 mins initial timeout
 
         processed_files = set()
+        saw_download = False  # [IMP-C29] was a .crdownload ever seen during this wait?
 
         while True:
             # Check Active Downloads
             active_downloads = [f for f in os.listdir(SYSTEM_DOWNLOADS_FOLDER) if f.endswith(".crdownload")]
             is_active = len(active_downloads) > 0
+            saw_download = saw_download or is_active
+            timed_out = time.time() - start_time > base_timeout
 
-            if time.time() - start_time > base_timeout:
-                if is_active:
-                    print(f"   ⏳ Timeout reached, but {len(active_downloads)} files downloading. Extending wait...",
-                          end="\r")
-                    time.sleep(5)
-                    continue  # Keep waiting
-                else:
-                    print("\n   ❌ Timeout (No active downloads).")
-                    break  # Stop waiting
+            if timed_out and is_active:
+                print(f"   ⏳ Timeout reached, but {len(active_downloads)} files downloading. Extending wait...",
+                      end="\r")
+                time.sleep(5)
+                continue  # Keep waiting
 
             # Check Completion
             if all(i["status"] == "done" for i in queue):
@@ -555,6 +570,17 @@ def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None):
                             os.remove(fpath)
                         except:
                             pass
+
+            # [IMP-C29] Give up only AFTER looking. A download that outlives the base
+            # timeout ends with nothing active, and its file must still be collected.
+            # Giving up before the scan left it in Downloads: the next attempt then
+            # downloaded it a second time, and the last attempt reported INCOMPLETE.
+            if timed_out and not found_new:
+                print("\n   ❌ Timeout (No active downloads).")
+                lost = sum(1 for i in queue if i["status"] == "pending" and i.get("triggered"))
+                if lost:
+                    print(_lost_download_note(lost, saw_download))
+                break  # Stop waiting
 
             if not found_new:
                 time.sleep(5)

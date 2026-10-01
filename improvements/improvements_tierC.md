@@ -503,7 +503,7 @@
   1. **A successful push deleted the master.** The cloud bytes are intact, because the delete ran only after the upload and its rename had succeeded. But the local copy the O-1/O-2 contract relies on was gone, and with `PUSH_VERIFY_REMOTE` off by default, nothing had checked the uploaded bytes.
      - A following `replace` (the `prep_push_rep` autopilots' next leg) then found no master. It skips its rename when the original is absent (`main.py:6954`), writes the dummy into its place and marks the entry `archived` without complaint. The entry therefore looks healthy.
   2. **The cloud item lacks its ` [<short_id>]` tag.** `search_term`, the `.mvmeta.json` sidecar (`main.py:5697`) and the identity capture all record the tagged name. So name-based identification cannot tie the item to its entry; IMP-C25's fetch-exact-item work (fetch-by-id) depends on it.
-     - Today's fetch still queries a whole file by its plain local filename (`mainfetch.py:469`) and routes downloads by hash (`mainfetch.py:538-542`). So `fetch_restore` can still bring the master back.
+     - Today's fetch still queries a whole file by its plain local filename (`mainfetch.py:484`) and routes downloads by hash (`mainfetch.py:553-557`). So `fetch_restore` can still bring the master back.
 - Proposed change — implemented (`fix/imp_c28_push_parts_substring`): a file counts as a chunk only if it lives DIRECTLY in THIS push's chunk dir.
   - The new `mvcommon.in_parts_dir(path, parts_dir)` compares the normalised parent dir (`abspath` + `normcase`) with the `parts_dir` that `cmd_push` computed: `_parts_base(...)` + `SPLIT_DIR_NAME`, tempdir redirect included.
   - `cmd_push` computes `is_chunk` once per file (`main.py:6443`) and uses it for both the rename and the delete.
@@ -536,7 +536,7 @@
 
 - Category: bug
 - Priority: high (Band 0 — fetch could fetch nothing; every item read as `Not found`)
-- Files: `mainfetch.py` — `init_driver` (the attach), new `use_photos_tab` / `focus_page` / `_search_page_problem`, `trigger_download._attempt`; `tools/gp_inventory.py` — `main()` launch mode. Found 2026-10-01 by the IMP-C25 gate RH run (`python main.py fetch tv-en-1994-xfiles-s02e05 tempdir D:\MV_fetch`). (Numbering: IMP-C25 and IMP-C27 are registered on `feature/imp_c25_fetch_exact_gp_item`, not yet on `main`.)
+- Files: `mainfetch.py` — `init_driver` (the attach), new `use_photos_tab` / `focus_page` / `_search_page_problem`, `trigger_download._attempt`, and (follow-up) `fetch_single_entry`'s download harvester with new `_lost_download_note`; `tools/gp_inventory.py` — `main()` launch mode. Found 2026-10-01 by the IMP-C25 gate RH run (`python main.py fetch tv-en-1994-xfiles-s02e05 tempdir D:\MV_fetch`). (Numbering: IMP-C25 and IMP-C27 are registered on `feature/imp_c25_fetch_exact_gp_item`, not yet on `main`.)
 - Current behavior (before fix): two independent faults, both verified live against Chrome 154.0.8037.59 with chromedriver 154.0.8037.92 on the movies profile.
   1. **Wrong target.** `init_driver` attached through `debuggerAddress` and returned the driver on whatever window chromedriver chose (pre-fix `mainfetch.py:83-93`). Nothing selected a tab. Chrome 154 exposes its Gemini side panel to Selenium as window handles, a `webview` on `gemini.google.com/glic` and an `other` on `chrome://glic/`, beside the real `page` tab. chromedriver attached to the **webview**, and `trigger_download` navigated and typed in that target (pre-fix `mainfetch.py:144-154`). Both RH attempts printed `⚠️ Not found (Found 0).`, then `❌ ENTRY INCOMPLETE`, and the command exited 0.
   2. **No focus.** Even in the right tab, a Chrome that is not the foreground window renders the Photos tab as `visibilityState=hidden`. The `/` shortcut then leaves focus on `BODY`, so the search box never opens and the page stays on `/`.
@@ -574,6 +574,22 @@
   - `tests/test_gp_inventory_own_tab.py` (2): both crawler modes work in their own tab.
 
   Against the pre-fix code the new tests fail 37/45; the 8 that pass are the existing-flow pins and the already-correct `--attach` mode. Disarm probes on a scratch copy: 26/26 caught. Full suite 1061 passed; smoke 82 passed.
+- Follow-up 2026-10-02 — the live re-run, and the download harvester (second commit on the branch):
+  - **The re-run.** With the tab fix, the real fetch found the item on `ATTEMPT 2` and printed `🚀 Triggered.`, then `❌ Timeout (No active downloads).` and `❌ ENTRY INCOMPLETE`. No file appeared, which read as "the download never starts".
+  - **What happened.** The download did start. `chrome://downloads` lists the item with the right name, 9.1 GB, target folder `C:\Users\harin\Downloads`, and `Failed - Network error` at about 1.1 MB/s.
+    - So the trigger, the clicked item, Shift+D and the download folder were all correct. The profile has no download-directory or prompt override, and no Chrome policy is set.
+    - The transfer broke in transit. Google Photos sends a download without an ETag or Last-Modified, so Chrome cannot resume it: it restarts from 0 B, then fails the download and removes the partial file.
+  - **Reproduction.** The identical production trigger, two hours later, downloaded the same item completely in 267 s at 20–60 MB/s. Its SHA-256 equals the library hash, and it sits in the fetch restore folder.
+  - **Defect 1 (the misleading report).** The harvester only watches the Downloads folder. It printed the same `Timeout (No active downloads)` for "started and failed" as for "never started".
+  - **Defect 2 (deterministic, found while reading the loop).** After the 300 s base timeout, the loop could only leave through its Timeout branch, and that branch sat before the scan of Downloads. A download that took longer than 5 minutes was therefore never collected by the attempt that started it.
+    - Found on `ATTEMPT 1` (a chunk): `ATTEMPT 2` downloaded the file a second time, then collected the first copy. Chrome's history shows it for two earlier titles: a second round of multi-GB downloads began about 15 s after the last download of the first round finished (2026-09-20 and 2026-09-26; on the second, all three chunks were fetched twice).
+    - Found only on `ATTEMPT 2` (a whole file): `❌ ENTRY INCOMPLETE`, with the finished file left in Downloads. The 9.1 GB download above took 267 s, 33 s short of this.
+  - **Fix (`fetch_single_entry`).**
+    - The timeout is now decided AFTER the scan (`mainfetch.py:578`). A finished download is collected, and only "nothing active and nothing new" gives up.
+    - Each item records whether its download was triggered, and the wait records whether a `.crdownload` was ever seen. A timeout then adds one line for the triggered files that never arrived (`_lost_download_note`, `mainfetch.py:407`): either "a download was in progress, but N triggered file(s) never arrived" or "no download appeared", each pointing at `chrome://downloads`.
+    - With nothing triggered, the transcript is byte-identical (frozen oracle captured from the pre-fix code).
+  - **Not changed:** the 300 s base timeout, the unlimited wait while a download is active, hash routing, the duplicate delete and the attempt order. No retry was added.
+  - **Tests:** `tests/test_fetch_harvester.py` (7), hermetic: a tmp Downloads folder, a fake clock, scripted Chrome downloads. Against 6d1a732 they fail 5/7; the 2 that pass are the in-time pin and the frozen transcript. Disarm probes: 9/9 caught, 35/35 with the first commit's. Full suite 1068 passed; smoke 82 passed.
 - Effort estimate: small · Risk: low. Fetch now always works in a proven Photos tab; in a tab that was already correct, the search, wait and click are the same.
 - If skipped: on Chrome 154 every fetch searches the Gemini panel and reports `Not found`, so nothing can be restored from Google Photos.
 - Residual risk / follow-up (not fixed here; it would change which element gets clicked, so it needs a decision):
@@ -581,5 +597,8 @@
   - For about 1–2 s after Enter the URL is already `/search/` while the timeline is still displayed (measured live). Result latency varied from about 2 s to about 7 s.
   - If the results page has not replaced the timeline when the fixed 3 s wait ends, `trigger_download` can click a timeline item and download the wrong file. Hash routing leaves that file in Downloads, so nothing is corrupted.
   - Proposed: poll for the results (or `No results`) instead of a fixed 3 s, and never click a `./photo/` link on a `/search/` page.
+- Open decision — retry a broken transfer (not built):
+  - A transfer that breaks is reported now, but it is not retried. For a whole file only `ATTEMPT 2` finds the item, so one network break ends the entry INCOMPLETE and the user re-runs.
+  - Proposed: re-trigger once a triggered download that never arrived. It needs a decision because a Photos download cannot resume, so every retry is a full re-download.
 - Merge note for IMP-C25: that branch adds `profile_preflight` next to these helpers in `mainfetch.py`; keep both. Its `gp_inventory._session` still opens its own tab only with `--attach`, so apply this rule there too and repoint `tests/test_gp_inventory_own_tab.py` at `_session`.
 - Status: done (`fix/imp_c29_fetch_attach_photos_tab`)

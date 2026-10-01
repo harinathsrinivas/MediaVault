@@ -503,7 +503,7 @@
   1. **A successful push deleted the master.** The cloud bytes are intact, because the delete ran only after the upload and its rename had succeeded. But the local copy the O-1/O-2 contract relies on was gone, and with `PUSH_VERIFY_REMOTE` off by default, nothing had checked the uploaded bytes.
      - A following `replace` (the `prep_push_rep` autopilots' next leg) then found no master. It skips its rename when the original is absent (`main.py:6954`), writes the dummy into its place and marks the entry `archived` without complaint. The entry therefore looks healthy.
   2. **The cloud item lacks its ` [<short_id>]` tag.** `search_term`, the `.mvmeta.json` sidecar (`main.py:5697`) and the identity capture all record the tagged name. So name-based identification cannot tie the item to its entry; IMP-C25's fetch-exact-item work (fetch-by-id) depends on it.
-     - Today's fetch still queries a whole file by its plain local filename (`mainfetch.py:331`) and routes downloads by hash (`mainfetch.py:400-404`). So `fetch_restore` can still bring the master back.
+     - Today's fetch still queries a whole file by its plain local filename (`mainfetch.py:469`) and routes downloads by hash (`mainfetch.py:538-542`). So `fetch_restore` can still bring the master back.
 - Proposed change — implemented (`fix/imp_c28_push_parts_substring`): a file counts as a chunk only if it lives DIRECTLY in THIS push's chunk dir.
   - The new `mvcommon.in_parts_dir(path, parts_dir)` compares the normalised parent dir (`abspath` + `normcase`) with the `parts_dir` that `cmd_push` computed: `_parts_base(...)` + `SPLIT_DIR_NAME`, tempdir redirect included.
   - `cmd_push` computes `is_chunk` once per file (`main.py:6443`) and uses it for both the rename and the delete.
@@ -529,3 +529,57 @@
 - If skipped: any whole-file push of a title stored under a `…_parts…` folder silently deletes the local master and leaves an untagged copy in the cloud.
 - Merge note for IMP-C25: that branch keeps the substring test in its `snapshot_push_objects`, and its `cmd_push` still passes `SPLIT_DIR_NAME`. When it next merges `main`, keep this rule in both places. Its `push_one_extra` already passes the item's own chunk dir, which `in_parts_dir` accepts as is.
 - Status: done (`fix/imp_c28_push_parts_substring`)
+
+---
+
+## IMP-C29: fetch attaches to Chrome's Gemini side panel (Chrome 154), so every search goes nowhere
+
+- Category: bug
+- Priority: high (Band 0 — fetch could fetch nothing; every item read as `Not found`)
+- Files: `mainfetch.py` — `init_driver` (the attach), new `use_photos_tab` / `focus_page` / `_search_page_problem`, `trigger_download._attempt`; `tools/gp_inventory.py` — `main()` launch mode. Found 2026-10-01 by the IMP-C25 gate RH run (`python main.py fetch tv-en-1994-xfiles-s02e05 tempdir D:\MV_fetch`). (Numbering: IMP-C25 and IMP-C27 are registered on `feature/imp_c25_fetch_exact_gp_item`, not yet on `main`.)
+- Current behavior (before fix): two independent faults, both verified live against Chrome 154.0.8037.59 with chromedriver 154.0.8037.92 on the movies profile.
+  1. **Wrong target.** `init_driver` attached through `debuggerAddress` and returned the driver on whatever window chromedriver chose (pre-fix `mainfetch.py:83-93`). Nothing selected a tab. Chrome 154 exposes its Gemini side panel to Selenium as window handles, a `webview` on `gemini.google.com/glic` and an `other` on `chrome://glic/`, beside the real `page` tab. chromedriver attached to the **webview**, and `trigger_download` navigated and typed in that target (pre-fix `mainfetch.py:144-154`). Both RH attempts printed `⚠️ Not found (Found 0).`, then `❌ ENTRY INCOMPLETE`, and the command exited 0.
+  2. **No focus.** Even in the right tab, a Chrome that is not the foreground window renders the Photos tab as `visibilityState=hidden`. The `/` shortcut then leaves focus on `BODY`, so the search box never opens and the page stays on `/`.
+- Impact: every fetch searched nowhere and reported `Not found`, so no restore could get its files back. A healthy session looked like a missing item, and the typed query went to the Gemini panel instead.
+- Proposed change — implemented (`fix/imp_c29_fetch_attach_photos_tab`):
+  - `use_photos_tab(driver)` (`mainfetch.py:187`) keeps the current tab if it is a Photos tab. Otherwise it switches to the first open Photos tab, or opens a new tab and navigates it to `PHOTOS_URL`.
+    - A tab qualifies only as a CDP `page`, over https, on a `photos.google.com` host. A webview, `chrome://`, `devtools://` or glic target never does.
+    - Targets are classified with `Target.getTargetInfo` / `Target.getTargets`, because window handles are the CDP target ids (verified live). So no Gemini target is ever switched into or typed in.
+    - If CDP cannot classify the targets, no open tab is trusted and a new one is opened. A tab closed under the driver is re-entered through the first live handle.
+  - `focus_page(driver)` (`mainfetch.py:178`) sends `Page.bringToFront` and `Emulation.setFocusEmulationEnabled {enabled: true}`, the fix the IMP-C25 crawler uses.
+  - `init_driver` runs `use_photos_tab` right after the unchanged attach and prints which tab it uses. If no Photos tab can be had, it prints `❌ Could not open a photos.google.com tab…`, releases the Selenium session and returns None (`mainfetch.py:94-106`).
+  - `trigger_download` re-asserts the tab and focus at the start of EVERY attempt (`mainfetch.py:272`): after a download, a player Esc, a closed tab, or on the retry.
+  - After the unchanged 3 s wait, `_search_page_problem` (`mainfetch.py:226`) checks that the page is `photos.google.com/search/…`. If not, it reports `❌ Not a Google Photos page: the search went to <type> <url>` or `❌ Search did not run (or had not started yet): Google Photos is still on <path>…`. Neither is reported as `Not found`, and neither clicks anything.
+  - Unchanged:
+    - the keystroke search (`/` + query + Enter). The keystroke search lands on `/search/<base64 token>`, a different URL form from the direct `/search/<text>`, so equivalence was not established and the URL route was not adopted;
+    - the 3 s wait, the CSS-then-XPath lookup, the clicked index, and Shift+D / Esc;
+    - the IMP-C2 single retry, and the IMP-C6 propagation and zero-streak backstop. The new `False` returns count toward the streak.
+- Audit of every Selenium attach in the repo:
+  - **Fixed:**
+    - `mainfetch.init_driver`: the fetch path, and `tools/warm_profiles.py`, which attaches through it;
+    - `tools/gp_inventory.py --port` (launch mode), which crawled in chromedriver's initial target. It now opens its own tab in both modes, as `--attach` already did.
+  - **Safe, left unchanged:**
+    - `tools/gp_inventory.py --attach`: its own tab, plus `front()`.
+    - `mainfetch._close_browser_windows`: it closes every handle, the Gemini ones included, on purpose, so the browser exits and frees port 9222. It never searches.
+    - `main.py` has no Selenium; `cmd_dispatch_fetch` runs `mainfetch.py` as a subprocess (`main.py:9525`).
+    - `gpcapture.py`, `webui/` and the root scripts have no Selenium; the `archive/` copies are never run.
+    - `gpweb.py` / `gprpc.py` are not on `main` (they exist only on the IMP-C25 branch).
+- Rollback change-gate: not crossed. Fetch has no journal, PONR or rollback records, and nothing in the change-gate list is touched. No `ENTRY_TYPE_KEYS` involvement.
+- Live verification (2026-10-01, read-only, no download triggered):
+  - on attach, the driver sat in the Gemini webview; `use_photos_tab` moved it to the Photos page, visible and focused;
+  - running the production search steps, the pushed name (`search_term`) found the item, 2 results through the XPath fallback, usually within 2–3 s;
+  - the plain filename got `No results`, and a home page with no search is classified `Search did not run`.
+- Tests:
+  - `tests/test_fetch_photos_tab.py` (43): tab selection (the live [glic webview, photos] order, only non-Photos targets → a new tab, nine targets that never qualify, CDP failure, a closed tab), focus emulation, `init_driver` through the real attach, the per-attempt re-assert after a closed or moved tab and on the retry, both new error lines (incl. the pre-fix RH Gemini reproduction), and no-regression pins for the keystroke chain, the clicked index, the XPath fallback, `Not found` + the single retry, the logged-out propagation and the zero-streak;
+  - `tests/test_gp_inventory_own_tab.py` (2): both crawler modes work in their own tab.
+
+  Against the pre-fix code the new tests fail 37/45; the 8 that pass are the existing-flow pins and the already-correct `--attach` mode. Disarm probes on a scratch copy: 26/26 caught. Full suite 1061 passed; smoke 82 passed.
+- Effort estimate: small · Risk: low. Fetch now always works in a proven Photos tab; in a tab that was already correct, the search, wait and click are the same.
+- If skipped: on Chrome 154 every fetch searches the Gemini panel and reports `Not found`, so nothing can be restored from Google Photos.
+- Residual risk / follow-up (not fixed here; it would change which element gets clicked, so it needs a decision):
+  - In today's Photos DOM the first selector `a[href*='./photo/']` matches only home-timeline thumbnails. Search results are `./search/<token>/photo/<id>` links, found only by the XPath fallback.
+  - For about 1–2 s after Enter the URL is already `/search/` while the timeline is still displayed (measured live). Result latency varied from about 2 s to about 7 s.
+  - If the results page has not replaced the timeline when the fixed 3 s wait ends, `trigger_download` can click a timeline item and download the wrong file. Hash routing leaves that file in Downloads, so nothing is corrupted.
+  - Proposed: poll for the results (or `No results`) instead of a fixed 3 s, and never click a `./photo/` link on a `/search/` page.
+- Merge note for IMP-C25: that branch adds `profile_preflight` next to these helpers in `mainfetch.py`; keep both. Its `gp_inventory._session` still opens its own tab only with `--attach`, so apply this rule there too and repoint `tests/test_gp_inventory_own_tab.py` at `_session`.
+- Status: done (`fix/imp_c29_fetch_attach_photos_tab`)

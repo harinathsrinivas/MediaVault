@@ -87,10 +87,23 @@ def init_driver(profile_key="movies"):
     try:
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=options)
-        return driver
     except Exception as e:
         print(f"❌ Selenium Connection Error: {e}")
         return None
+
+    # [IMP-C29] Attaching leaves Selenium on whichever target chromedriver picked.
+    # On Chrome 154 that is the Gemini side panel, where every search went nowhere.
+    try:
+        outcome = use_photos_tab(driver)
+    except Exception as e:
+        print(f"❌ Could not open a photos.google.com tab in the attached Chrome: {e}")
+        try:
+            driver.quit()  # attach mode: ends the Selenium session only; Chrome stays open
+        except Exception:
+            pass
+        return None
+    print(f"   > 🗂️ {_TAB_NOTE[outcome]}")
+    return driver
 
 
 # The only signed-in host for the Photos web app. Google redirects an expired
@@ -128,10 +141,119 @@ def check_session_alive(driver, profile_key=None):
     return True
 
 
+# [IMP-C29] Chrome 154 lists its Gemini side panel among Selenium's window handles
+# (a `webview` on gemini.google.com/glic and an `other` on chrome://glic/), and
+# chromedriver attached to that webview, so every fetch search was typed into
+# Gemini. Fetch therefore works only in a target that is provably a normal tab:
+# CDP type "page", https, on a photos.google.com host. Selenium's window handles
+# are the CDP target ids (verified live with chromedriver 154), so a target is
+# classified without switching into it.
+_PHOTOS_SEARCH_PATH = re.compile(r"^(?:/u/\d+)?/search/")  # where a keystroke search lands
+_TAB_NOTE = {"current": "Working in the open photos.google.com tab.",
+             "existing": "Switched to the open photos.google.com tab.",
+             "new": "Opened a new photos.google.com tab."}
+
+
+def _is_photos_host(host):
+    host = (host or "").lower()
+    return host == "photos.google.com" or host.endswith(".photos.google.com")
+
+
+def _is_photos_page(info):
+    """True for the CDP TargetInfo of a normal tab (type "page") showing Google Photos."""
+    if not info or info.get("type") != "page":
+        return False
+    url = urllib.parse.urlparse(info.get("url") or "")
+    return url.scheme == "https" and _is_photos_host(url.hostname)
+
+
+def _target_info(driver):
+    """The CDP TargetInfo of the target the driver is in, or None if CDP cannot say."""
+    try:
+        return driver.execute_cdp_cmd("Target.getTargetInfo", {})["targetInfo"]
+    except Exception:
+        return None
+
+
+def focus_page(driver):
+    """[IMP-C29] Make the current tab act as the visible, focused tab even when
+    Chrome is not the foreground window. Without this, a background Chrome renders
+    the Photos tab as hidden, and its '/' shortcut never opens the search box: the
+    query is lost and the page stays on '/' (verified live on Chrome 154)."""
+    driver.execute_cdp_cmd("Page.bringToFront", {})
+    driver.execute_cdp_cmd("Emulation.setFocusEmulationEnabled", {"enabled": True})
+
+
+def use_photos_tab(driver):
+    """[IMP-C29] Point `driver` at a normal photos.google.com tab, then focus it.
+
+    Keeps the current tab if it already is one. Otherwise it switches to the
+    first open one, or opens a new tab and navigates it to PHOTOS_URL. A webview,
+    chrome://, devtools:// or Gemini (glic) target never qualifies. When CDP
+    cannot classify the targets, no open tab is trusted and a new one is opened.
+    Returns "current", "existing" or "new". A Selenium fault propagates (the
+    browser is gone, or no tab could be opened)."""
+    handles = list(driver.window_handles)
+    try:
+        current = driver.current_window_handle
+    except Exception:  # the tab the driver was in has been closed
+        current = None
+    lost = current not in handles
+    if lost:
+        if not handles:
+            raise RuntimeError("the attached Chrome has no open tab")
+        driver.switch_to.window(handles[0])  # any live target, so CDP can answer
+    if _is_photos_page(_target_info(driver)):
+        outcome = "existing" if lost else "current"
+    else:
+        try:
+            infos = {i.get("targetId"): i
+                     for i in driver.execute_cdp_cmd("Target.getTargets", {})["targetInfos"]}
+        except Exception:
+            infos = {}
+        photos_tabs = [h for h in handles if _is_photos_page(infos.get(h))]
+        if photos_tabs:
+            driver.switch_to.window(photos_tabs[0])
+            outcome = "existing"
+        else:
+            driver.switch_to.new_window("tab")
+            driver.get(PHOTOS_URL)
+            outcome = "new"
+    focus_page(driver)
+    return outcome
+
+
+def _search_page_problem(driver):
+    """[IMP-C29] Why the page after a keystroke search is not a Google Photos
+    search-results page, or None when it is.
+
+    This separates "the search ran and found nothing" (Not found) from "the
+    search never ran in Google Photos". Results only exist under
+    photos.google.com/search/. Anywhere else, a count of 0 means nothing, and so
+    does a count of the home timeline's thumbnails, which the selectors also
+    match. An unreadable URL returns None: as in check_session_alive, a browser
+    glitch is not turned into a diagnosis."""
+    try:
+        url = urllib.parse.urlparse(driver.current_url)
+    except Exception:
+        return None
+    if not _is_photos_host(url.hostname):
+        info = _target_info(driver)
+        kind = f"{info['type']} " if info and info.get("type") else ""
+        where = urllib.parse.urlunparse((url.scheme, url.netloc, url.path, "", "", ""))
+        return f"Not a Google Photos page: the search went to {kind}{where}"
+    if not _PHOTOS_SEARCH_PATH.match(url.path or "/"):
+        return (f"Search did not run (or had not started yet): Google Photos is still on "
+                f"{url.path or '/'}, not on a /search/ results page")
+    return None
+
+
 def trigger_download(driver, query, index=0):
     """
     RAPID MODE: Navigates, Searches, Clicks, Triggers Download, Exits Player.
     Does NOT wait for file to finish. Returns True if trigger sent.
+    [IMP-C29] Every attempt runs in a focused photos.google.com tab, and a search
+    that never reached Google Photos is reported as such, not as "Not found".
     """
     wait = WebDriverWait(driver, 10)
 
@@ -139,8 +261,18 @@ def trigger_download(driver, query, index=0):
 
     def _attempt():
         """One navigate→search→click→Shift+D→Esc pass. Returns True if the
-        trigger was sent, False on a 0-thumbnail miss / index out of range.
+        trigger was sent, False on a 0-thumbnail miss / index out of range, or
+        when the search never ran in Google Photos.
         May raise on a Selenium fault (caught/retried by the caller below)."""
+        # [IMP-C29] Re-assert the photos.google.com tab and focus before every
+        # search. A download or the player's Esc can leave another tab in front,
+        # or close ours, and a tab that is not in front never gets the '/'
+        # shortcut. A stand-in driver without Chrome's DevTools protocol (no
+        # execute_cdp_cmd) is used as it is.
+        if hasattr(driver, "execute_cdp_cmd"):
+            outcome = use_photos_tab(driver)
+            if outcome != "current":
+                print(f"     > 🗂️ {_TAB_NOTE[outcome]}")
         driver.get(PHOTOS_URL)
         wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
         check_session_alive(driver)
@@ -155,6 +287,12 @@ def trigger_download(driver, query, index=0):
 
         # Wait for search results
         time.sleep(3)
+
+        # [IMP-C29] Results exist only on a photos.google.com /search/ page.
+        problem = _search_page_problem(driver)
+        if problem:
+            print(f"     ❌ {problem} — this is not a 'Not found'.")
+            return False
 
         # --- CLICK LOGIC ---
         all_thumbnails = []

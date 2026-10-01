@@ -361,8 +361,8 @@ were never hit.
 **Is anything lost? No bytes.**
 - The delete ran only after the upload and its rename had succeeded (`main.py:6496-6515`), so the
   cloud copy is the master's bytes, and the library `hash` still matches them.
-- Fetch searches a whole file by its plain local filename (`mainfetch.py:331`), which is exactly the
-  name that upload has, and it matches downloads by hash (`mainfetch.py:400-404`). So
+- Fetch searches a whole file by its plain local filename (`mainfetch.py:469`), which is exactly the
+  name that upload has, and it matches downloads by hash (`mainfetch.py:538-542`). So
   `fetch_restore <id>` is the way to get the master back.
 - What stays wrong is the name in the cloud. The `.mvmeta.json` sidecar (`main.py:5697`), the
   `search_term` and the identity capture all record the tagged name, so name-based matching
@@ -551,11 +551,11 @@ token against TMDB and compare the real title to the folder name — that is wha
 ### An episode lives in another Google account — how do I fetch it?
 
 Fetch picks the Chrome profile, and so the Google account, from the **id prefix**
-(`mainfetch.profile_for_id`, `mainfetch.py:730`): `mov-` → movies, `tv-` → tv, `ani-` → anime,
+(`mainfetch.profile_for_id`, `mainfetch.py:868`): `mov-` → movies, `tv-` → tv, `ani-` → anime,
 `oth-` → others. An item that was backed up to a *different* account is never found that way — the
 search runs in the wrong account. A single file ends `❌ ENTRY INCOMPLETE` after two ~5-minute waits
-(`mainfetch.py:362`); in a batch, the third empty search in a row aborts the run with a misleading
-*"Profile … is logged out"* message (`mainfetch.py:228`). The 2026-09-25 inventory mapping found
+(`mainfetch.py:500`); in a batch, the third empty search in a row aborts the run with a misleading
+*"Profile … is logged out"* message (`mainfetch.py:366`). The 2026-09-25 inventory mapping found
 **31 X-Files episodes (seasons 2–4) in the movies account** (IMP-C26).
 
 **Fix — tell fetch where they live**, in your gitignored `mvconfig.json` (repo root):
@@ -568,20 +568,20 @@ search runs in the wrong account. A single file ends `❌ ENTRY INCOMPLETE` afte
 ```
 
 - Keys are **exact manual ids or id prefixes**; values are `movies` / `tv` / `anime` / `others`.
-  The **longest matching key wins**, so an exact id beats a prefix (`mainfetch.py:730`).
+  The **longest matching key wins**, so an exact id beats a prefix (`mainfetch.py:868`).
 - Prefixes are plain string prefixes (`…-s02e1` also matches `…-s02e10`–`s02e19`). Use a season
   prefix **only if every episode of that season lives in that account** — otherwise list the exact
   ids. A season fetch with a prefix that is too broad would send the other episodes to the wrong
   account.
 - An unknown account (e.g. `"series"`) prints **one** `⚠️  mvconfig.json: fetch_account_overrides
   entry …` warning and that entry is ignored; a blank key is refused the same way — it would match
-  every id (`mainfetch.py:696`). Every fetch run re-reads `mvconfig.json` (`main.py fetch` spawns a
+  every id (`mainfetch.py:834`). Every fetch run re-reads `mvconfig.json` (`main.py fetch` spawns a
   fresh `mainfetch.py` process, `main.py:9519`), so an edit applies to the next fetch.
 - Then fetch as usual: `python main.py fetch tv-en-1994-xfiles-s02e03 tempdir D:\MV_fetch` — the
   `[Account] Profile for …` line should now say `'movies'`.
 
 **A season whose episodes span accounts is fetched in one run** — one Chrome session per account,
-one after another, under the same fetch lock (`mainfetch.py:808`). The season's own account goes
+one after another, under the same fetch lock (`mainfetch.py:946`). The season's own account goes
 first with the usual `[Account] Profile for …` line; each further account prints
 `> [Account] Switching to profile '<account>' for N item(s) (fetch_account_overrides)`. Before the
 switch, the previous account's Chrome windows are closed and debug port 9222 must be free; if it
@@ -592,6 +592,70 @@ account is reported by *its own* profile name. `--fetchExtras` extras follow the
 
 No overrides configured → fetch behaves exactly as before. IMP-C25 will learn each item's real
 account automatically; this list stays the manual override on top of it.
+
+---
+
+## 6c. Fetch — when the search finds nothing
+
+### `fetch` says `⚠️ Not found (Found 0)` but the item IS in Google Photos
+
+Check these in order. The output now tells the first two apart from a real miss.
+
+**1. The search ran in Chrome's Gemini side panel, not in Google Photos (IMP-C29, fixed).** Chrome 154
+lists its Gemini panel among Selenium's windows: a `webview` on `gemini.google.com/glic` and an
+`other` on `chrome://glic/`. chromedriver attached to that webview, so `fetch` typed every search
+into Gemini and every item came back `Found 0` (2026-10-01, the X-Files fetch). Since IMP-C29,
+`init_driver` moves to a real `photos.google.com` tab right after attaching (`mainfetch.py:94`),
+either the open one or a new one, and prints which:
+```
+   > 🗂️ Switched to the open photos.google.com tab.
+   > 🗂️ Opened a new photos.google.com tab.
+```
+`trigger_download` re-checks the tab before every search (`mainfetch.py:272`). If no Photos tab can
+be had, the run stops with `❌ Could not open a photos.google.com tab in the attached Chrome: …`. It
+never searches anywhere else.
+
+**2. The keystrokes never reached the search box.** If Chrome is not the foreground window, the
+Photos tab renders as hidden and its `/` shortcut does not open the search box, so the page stays on
+`/`. Fetch now sends `Page.bringToFront` and focus emulation before every search
+(`mainfetch.py:178`). A search that still does not run, or that lands outside Photos, is reported as
+one of:
+```
+     ❌ Search did not run (or had not started yet): Google Photos is still on /, not on a /search/ results page — this is not a 'Not found'.
+     ❌ Not a Google Photos page: the search went to webview https://gemini.google.com/glic — this is not a 'Not found'.
+```
+Neither is a `Not found`, and neither clicks anything; the attempt is retried once. Three searches
+in a row that come back empty or never run stop a batch with the *"… is logged out"* message
+(`mainfetch.py:366`). In that case the session is fine and the `❌` lines above it are the reason.
+
+**3. ATTEMPT 1 of a whole file misses. This is expected.** For an unsplit file, `ATTEMPT 1` searches
+the plain library `filename` (`mainfetch.py:469`). But `push` uploaded it as
+`<name> [<short_id>]<ext>` (`main.py:6450`), which is its `search_term` (`main.py:1492`). Google
+Photos does not match the shorter name. Measured 2026-10-01: `No results` for the plain name, and
+the item for the tagged one. So `ATTEMPT 1` prints `Not found (Found 0)` twice, the harvester waits
+out its 5-minute timeout (`mainfetch.py:500`), and `ATTEMPT 2` searches the `search_term` and finds
+the item. Let the run continue. Split chunks are not affected, because their names already carry
+the tag (`<base> [<short_id>].chunk.NNN.mkv`, `main.py:347`).
+
+**4. The results were slow.** Fetch looks at the page once, a fixed 3 s after pressing Enter
+(`mainfetch.py:289`). Measured 2026-10-01 on the movies account, results usually showed after about
+2–3 s, and once after about 7 s. A slow page reads as `Not found (Found 0)`, and the attempt is
+retried once after 5 s. If it misses again but you can find the item by hand, re-run the fetch.
+Files already fetched are skipped.
+
+**5. The item lives in another Google account.** See §6b (IMP-C26).
+
+**See which tab fetch is driving.** While fetch's Chrome is open, `curl -s http://127.0.0.1:9222/json`
+lists its targets. Fetch works in a `"type": "page"` on `https://photos.google.com/…`. The `webview`
+on `gemini.google.com` and the `other` on `chrome://glic/` are Chrome's Gemini panel.
+
+**⚠️ A video in Downloads that fetch neither moved nor deleted.** For about 1–2 s after Enter, the
+URL already shows the search while the home timeline is still on screen, and fetch's first selector
+matches timeline thumbnails (`mainfetch.py:301`). If the results page has not replaced the timeline
+when the 3 s wait ends, fetch can click a timeline item and download the wrong file. Nothing is
+damaged, because downloads are matched by hash and a stray file is left where it is
+(`mainfetch.py:538-542`). Delete it. This hazard predates IMP-C29; a follow-up is proposed in the
+IMP-C29 entry of `improvements_tierC.md`.
 
 ---
 

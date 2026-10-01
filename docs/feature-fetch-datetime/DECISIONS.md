@@ -418,3 +418,9 @@ No other step of this plan uses candidates.
 - **Device HT74D0202839**: card answer "Extra movies phone" → scan BOTH `FA69H0300200` and `HT74D0202839` for the
   movies category in the device cross-check. `DEVICE_ALIASES` push semantics stay single-serial (movies →
   FA69H0300200); the extra serial is a device-check-only addition (implemented with Step 9).
+- **PR #62 (IMP-C28)**: card answer "Merge now (Recommended)" → squash-merged to main as `1163d23` (Checkpoint 1
+  passed). Read-only real-library check: 0 affected entries. C25 re-syncs main after Step 9 (keep `parts_dir` +
+  `mvcommon.in_parts_dir` at the `cmd_push` capture call). C28 worktree removed.
+- **C28 follow-ups** (`.chunk.` filename substring filters; resume from a `_parts/` holding no chunks may upload
+  nothing yet mark onboarded): card answer "Investigate + fix now" → branch `fix/imp_c28_followups` from main
+  (worktree `MediaVault-c28b`); real bugs register as IMP-C30 / IMP-C31; rollback-adjacent changes stop for a decision.

@@ -10682,6 +10682,331 @@ def classify_device_objects(library, inventory, objects=None):
 
 
 # ==========================================
+#   GOOGLE PHOTOS IDENTITY — THE MAPPER: map_photos (IMP-C25)
+# ==========================================
+# docs/feature-fetch-datetime/PLAN.md Step 9: backfill the ARCHIVED library's Google Photos identity by mapping every
+# uploaded object (mvcommon.iter_uploaded_objects: whole files, chunks, FLAC holders, extras; all four categories)
+# to the crawled inventory — read through the crawler's own offline reader, tools/gp_inventory.inventory_state —
+# then report, let the user resolve what cannot be proven, and apply. READ-ONLY until --apply: a dry run (the
+# default) writes only its own run directory (<GPHOTOS_STATE_DIR>/map/<ts>, or --out) — never the library, the
+# learned sidecars, the hints or the failed list.
+#
+# Per object:
+#   1. freshness gate — a verdict needs every inventory it rests on to be FRESH: crawled, with a complete
+#      enumeration at most MAP_INVENTORY_MAX_AGE_H old that is not older than the newest capture push of the
+#      in-scope objects routed to that account; an "in no account" verdict also needs every crawled account fresh
+#      and fully detailed. Otherwise the row is `stale-inventory` (no verdict) and the re-crawl command is printed.
+#   2. match (PLAN P-6) — the exact uploaded name in the object's DEFAULT account (its id prefix), then the
+#      normalized name; else the name in ANOTHER account (wrong-account); an object whose content key (SHA-1 =
+#      dedupKey: trusted block or capture) is known is found by that key; then the `[short_id]`-tag `probable`.
+#   3. cross-check — a known content key must equal the item's dedupKey, else `conflict` (never applied).
+#   4. duplicates — same bytes: one item, the rest alternates; a re-split set: the chunks' items grouped by taken
+#      second, the newest COMPLETE set chosen when no newer set exists; anything else `ambiguous`.
+#   5. IMP-C27 detectors — split_info lost (--repair split-info), uploaded under the old untagged name (--repair
+#      names), a partial / non-original upload, and for an object in NO account the read-only device check
+#      (Step 8): awaiting-backup / missing-after-backup / missing-everywhere / device-check-incomplete.
+# Outputs, --resolutions, --apply and --devices-only: see cmd_map_photos. Nothing here prints a P-13 web-progress
+# marker; no photo id, dedupKey or URL is printed (they live in the run directory's files only — P-15).
+
+MAP_INVENTORY_MAX_AGE_H = 24  # PLAN Step 9 (1): an enumeration older than this cannot back a verdict
+MAP_REPAIRS = ("split-info", "names")
+MAP_USAGE = ("map_photos [all|<id>|<prefix>] [--account movies|tv|anime|others] [--devices-only] "
+             "[--resolutions <csv>] [--repair split-info|names] [--accept-probable] [--apply] [--out <dir>]")
+_MP_FLAGS = {"--devices-only": "devices_only", "--accept-probable": "accept_probable", "--apply": "apply"}
+_MP_VALUED = ("--account", "--resolutions", "--repair", "--out")
+_MP_RECRAWL = "python tools/gp_inventory.py {account} --port <port>"
+# The P-1 item facts an inventory record carries (the crawler's record format, dom and rpc).
+_MP_ITEM_KEYS = ("photo_id", "filename", "taken_ms", "tz_offset_ms", "upload_ms", "dedup_key", "width", "height",
+                 "size_bytes", "original_quality", "partial_upload", "archived")
+
+
+def parse_map_photos_args(tokens):
+    """The `map_photos` CLI tokens (after the verb) -> cmd_map_photos keyword arguments (MAP_USAGE). Raises
+    ValueError naming the problem: an unknown option, a missing or invalid value, a second scope, or
+    --devices-only combined with an option it does not take."""
+    opts = {"scope": "all", "account": None, "devices_only": False, "resolutions": None, "repairs": (),
+            "accept_probable": False, "apply": False, "out": None}
+    tokens, scope, repairs, i = list(tokens), None, [], 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token in _MP_VALUED:
+            if i + 1 >= len(tokens) or not tokens[i + 1].strip() or tokens[i + 1].startswith("--"):
+                raise ValueError(f"{token} needs a value")
+            value = tokens[i + 1].strip()
+            i += 2
+            if token == "--account":
+                if value not in mvcommon.GP_ACCOUNTS:
+                    raise ValueError(f"--account must be one of {', '.join(mvcommon.GP_ACCOUNTS)} (got {value!r})")
+                opts["account"] = value
+            elif token == "--repair":
+                for part in (p.strip() for p in value.split(",")):
+                    if part not in MAP_REPAIRS:
+                        raise ValueError(f"--repair takes {' / '.join(MAP_REPAIRS)} (got {part!r})")
+                    if part not in repairs:
+                        repairs.append(part)
+            else:
+                opts["resolutions" if token == "--resolutions" else "out"] = value
+        elif token in _MP_FLAGS:
+            opts[_MP_FLAGS[token]] = True
+            i += 1
+        elif token.startswith("--"):
+            raise ValueError(f"unknown option {token}")
+        else:
+            if scope is not None:
+                raise ValueError(f"one scope only (got {scope!r} and {token!r})")
+            scope = token.strip()
+            i += 1
+    opts["scope"] = scope or "all"
+    opts["repairs"] = tuple(repairs)
+    if opts["devices_only"] and (opts["apply"] or opts["resolutions"] or repairs or opts["accept_probable"]):
+        raise ValueError("--devices-only takes only a scope, --account and --out")
+    return opts
+
+
+def _mp_when(value):
+    """An ISO-8601 time — the crawler's '+00:00' form or a capture's 'Z' form — as an aware UTC datetime, or None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        when = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    return (when if when.tzinfo else when.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+
+
+def _mp_iso(when):
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ") if when is not None else None
+
+
+def _mp_inventory_states():
+    """{account: tools/gp_inventory.inventory_state(account)} for every Google account, read from
+    mvcommon.GP_INVENTORY_DIR at call time — the crawler's own offline reader (no Chrome, no lock, nothing
+    written), never a private copy of its format."""
+    from tools import gp_inventory  # lazy: the crawler module imports Selenium
+    return {account: gp_inventory.inventory_state(account, mvcommon.GP_INVENTORY_DIR)
+            for account in mvcommon.GP_ACCOUNTS}
+
+
+def _mp_override(manual_id, overrides):
+    """The mvconfig fetch_account_overrides account for an id — mainfetch.profile_for_id's rule: the longest
+    matching key (an exact id beats any prefix of it) — or None."""
+    best = max((key for key in overrides if manual_id.startswith(key)), key=len, default=None)
+    return overrides[best] if best is not None else None
+
+
+def _mp_route(obj, overrides, prefix_map, default):
+    """An object's account layers (PLAN P-4): its default (id prefix), the mvconfig override, the learned home
+    (the trusted block's home_account) and the routing account they give (override > home > default)."""
+    base = mvcommon.home_account(None, obj["manual_id"], prefix_map, default)
+    home = (obj.get("block") or {}).get("home_account")
+    home = home if home in mvcommon.GP_ACCOUNTS else None
+    override = _mp_override(obj["manual_id"], overrides)
+    return {"default": base, "override": override, "home": home, "routing": override or home or base}
+
+
+def _mp_freshness(states, objects, routes, now):
+    """PLAN Step 9 (1): {account: freshness} — fresh when the account was crawled, has a complete enumeration
+    (inventory_state's latest_complete: its start is the as-of time) at most MAP_INVENTORY_MAX_AGE_H old, and that
+    as-of time is not older than the newest capture push of the in-scope objects ROUTED to the account (such a push
+    may not be backed up yet). Also reported: `gaps` — known ids without a good record (errored, or listed and never
+    detailed) — which blocks every "in no account" verdict, and the re-crawl command."""
+    newest = {}
+    for obj in objects:
+        pushed = (obj.get("capture") or {}).get("pushed") or {}
+        when = _mp_when(pushed.get("at"))
+        account = routes[(obj["manual_id"], obj["label"])]["routing"]
+        if when is not None and (account not in newest or when > newest[account]):
+            newest[account] = when
+    out = {}
+    for account, state in states.items():
+        crawled = bool(state["known_ids"] or state["runs"])
+        latest = state["latest_complete"]
+        as_of = _mp_when(latest["started_at"]) if latest else None
+        age_h = (now - as_of).total_seconds() / 3600.0 if as_of is not None else None
+        push = newest.get(account)
+        if not crawled:
+            reason = "not crawled yet"
+        elif as_of is None:
+            reason = "no complete enumeration yet"
+        elif age_h > MAP_INVENTORY_MAX_AGE_H:
+            reason = f"the enumeration is {age_h:.1f} h old (limit {MAP_INVENTORY_MAX_AGE_H} h)"
+        elif push is not None and push > as_of:
+            reason = f"a push at {_mp_iso(push)} is newer than the enumeration ({_mp_iso(as_of)})"
+        else:
+            reason = None
+        gone = set(state["possibly_deleted"])
+        gaps = sum(1 for pid in state["known_ids"] if pid not in state["detailed"] and pid not in gone)
+        out[account] = {"account": account, "crawled": crawled, "fresh": reason is None, "reason": reason,
+                        "as_of": _mp_iso(as_of), "age_h": age_h, "newest_push": _mp_iso(push),
+                        "items": len(state["items"]), "gaps": gaps, "possibly_deleted": len(gone),
+                        "recrawl": _MP_RECRAWL.format(account=account)}
+    return out
+
+
+def _mp_item(account, rec):
+    """An inventory record as a mapper item: the account + the P-1 item facts it carries (None when unknown)."""
+    item = {"account": account}
+    item.update((key, rec.get(key)) for key in _MP_ITEM_KEYS)
+    item["dedup_key"] = gpweb.normalize_dedup_key(item["dedup_key"])
+    return item
+
+
+def _mp_index(states):
+    """Per account, the live inventory items indexed for the name ladder: exact file name and P-6 normalized name
+    -> [items]. Items absent from the latest complete enumeration (possibly deleted) never match — they are kept
+    by normalized name under `deleted` (reported); records without a file name or with a crawl error are kept by
+    normalized name under `errored` (an object they could be must not be called missing)."""
+    index = {}
+    for account, state in states.items():
+        gone = set(state["possibly_deleted"])
+        exact, normalized, deleted, errored = {}, {}, {}, {}
+        for pid in sorted(state["items"]):
+            rec = state["items"][pid]
+            item = _mp_item(account, rec)
+            name = item["filename"] if isinstance(item["filename"], str) and item["filename"].strip() else None
+            key = gpweb.normalize_name(name) if name else None
+            if pid in gone:
+                if key:
+                    deleted.setdefault(key, []).append(item)
+            elif rec.get("error") or not name:
+                if key:
+                    errored.setdefault(key, []).append(item)
+            else:
+                exact.setdefault(name, []).append(item)
+                normalized.setdefault(key, []).append(item)
+        index[account] = {"exact": exact, "normalized": normalized, "deleted": deleted, "errored": errored}
+    return index
+
+
+def _mp_content_key(obj):
+    """The object's content key — the dedupKey of its own bytes — from its trusted block, else its capture, or None."""
+    block = obj.get("block")
+    key = _gp_content_key(block) if isinstance(block, dict) else None
+    return key or gpweb.normalize_dedup_key((obj.get("capture") or {}).get("dedup_key"))
+
+
+def _mp_row(obj, route):
+    """The mapping.jsonl row of one object, before its verdict (status None)."""
+    return {"manual_id": obj["manual_id"], "label": obj["label"], "kind": obj["kind"], "category": obj["category"],
+            "sha256": obj["sha256"], "uploaded_name": obj["uploaded_name"], "cloud_state": obj["cloud_state"],
+            "default_account": route["default"], "override": route["override"], "learned_home": route["home"],
+            "routing": route["routing"], "account": route["default"], "status": None, "issue": None,
+            "name_match": None, "proof": None, "item": None, "alternates": [], "copies": [], "candidates": [],
+            "duplicate": None, "set": None, "device": None, "partial_set": False,
+            "content_key": _mp_content_key(obj), "reason": None, "note": None, "repair": None}
+
+
+def _mp_names(index_account, name):
+    """(items, name_match) for a name in one account's index: the exact matches, else the P-6 normalized ones."""
+    if not (isinstance(name, str) and name):
+        return [], None
+    hits = index_account["exact"].get(name)
+    if hits:
+        return list(hits), "exact"
+    hits = index_account["normalized"].get(gpweb.normalize_name(name))
+    return (list(hits), "normalized") if hits else ([], None)
+
+
+def _mp_set_item(row, item, name_match, proof):
+    row.update(item=dict(item), account=item["account"], name_match=name_match, proof=proof)
+
+
+def _mp_match(objects, routes, index, fresh):
+    """The verdict of every object (PLAN Step 9 (1)-(5)) -> rows in object order."""
+    rows = []
+    for obj in objects:
+        row = _mp_row(obj, routes[(obj["manual_id"], obj["label"])])
+        rows.append(row)
+        home = row["default_account"]
+        if not fresh[home]["fresh"]:
+            row.update(status="stale-inventory", note=f"{home}: {fresh[home]['reason']}")
+            continue
+        items, how = _mp_names(index[home], row["uploaded_name"])
+        if len(items) == 1 and how == "exact":
+            _mp_set_item(row, items[0], how, "filename")
+            row["status"] = "mapped"
+        else:
+            row["status"] = "not-found"
+    return rows
+
+
+def _mp_run_dir(out, now):
+    """The run directory: --out as given, else <GPHOTOS_STATE_DIR>/map/<UTC timestamp> (read at call time)."""
+    return out if out else os.path.join(mvcommon.GPHOTOS_STATE_DIR, "map", now.strftime("%Y%m%dT%H%M%SZ"))
+
+
+def _mp_write_text(path, text):
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+
+
+def _mp_write_jsonl(path, records):
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        for record in records:
+            fh.write(json.dumps(record, ensure_ascii=False, sort_keys=False) + "\n")
+
+
+def _mp_counts_line(counter):
+    return " · ".join(f"{state} {n:,}" for state, n in counter.items() if n)
+
+
+def _mp_report(scope, account, rows, fresh, run_dir):
+    """The run's text report (printed and saved as summary.txt) -> lines."""
+    lines = [f"=== MAP PHOTOS (dry-run) — scope: {scope}{' · account ' + account if account else ''} — "
+             f"{len(rows):,} object(s) ===",
+             f"Inventory ({mvcommon.GP_INVENTORY_DIR}):"]
+    for info in fresh.values():
+        if info["fresh"]:
+            lines.append(f"  {info['account']:<7} fresh — complete enumeration as of {info['as_of']} "
+                         f"({info['age_h']:.1f} h ago), {info['items']:,} items")
+        else:
+            lines.append(f"  {info['account']:<7} STALE — {info['reason']} — re-crawl: {info['recrawl']}")
+    groups = {}
+    for row in rows:
+        groups.setdefault(f"{row['category']}/{row['account']}", {}).setdefault(row["status"], 0)
+        groups[f"{row['category']}/{row['account']}"][row["status"]] += 1
+    lines.append("Per category/account:")
+    for key in sorted(groups):
+        lines.append(f"  {key}: {sum(groups[key].values()):,} — {_mp_counts_line(groups[key])}")
+    lines.append(f"Outputs: {run_dir}")
+    return lines
+
+
+def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=None, repairs=(),
+                   accept_probable=False, apply=False, out=None):
+    """`map_photos` (PLAN Step 9): map the uploaded library objects to the Google Photos inventory — see the section
+    comment above. A dry run by default. -> {status, run_dir, rows, fresh} (status: ok | error)."""
+    now = mvcommon._now_utc()
+    library = load_library()
+    if scope in (None, "", "all"):
+        scope, ids = "all", None
+    else:
+        ids = sorted(mid for mid in library if isinstance(mid, str) and (mid == scope or mid.startswith(scope)))
+        if not ids:
+            print(f"❌ map_photos: no library id is or starts with {scope!r}.")
+            return {"status": "error", "run_dir": None, "rows": [], "fresh": {}}
+    import mainfetch  # P-4's routing constants and the validated mvconfig overrides — their single source
+    overrides = mainfetch._account_overrides()
+    prefix_map, default = mainfetch.ID_PREFIX_PROFILE, mainfetch.DEFAULT_PROFILE
+    objects, routes = [], {}
+    for obj in mvcommon.iter_uploaded_objects(library, ids):
+        route = _mp_route(obj, overrides, prefix_map, default)
+        if account is None or route["routing"] == account:
+            objects.append(obj)
+            routes[(obj["manual_id"], obj["label"])] = route
+    states = _mp_inventory_states()
+    fresh = _mp_freshness(states, objects, routes, now)
+    rows = _mp_match(objects, routes, _mp_index(states), fresh)
+    run_dir = _mp_run_dir(out, now)
+    os.makedirs(run_dir, exist_ok=True)
+    lines = _mp_report(scope, account, rows, fresh, run_dir)
+    _mp_write_jsonl(os.path.join(run_dir, "mapping.jsonl"), rows)
+    _mp_write_text(os.path.join(run_dir, "summary.txt"), "\n".join(lines) + "\n")
+    print("\n".join(lines))
+    return {"status": "ok", "run_dir": run_dir, "rows": rows, "fresh": fresh}
+
+
+# ==========================================
 #      WEB CONSOLE READ-ONLY DATA LAYER
 # ==========================================
 # Five module-level PURE / READ-ONLY helpers behind the `web` operations
@@ -12502,6 +12827,7 @@ if __name__ == "__main__":
         print("  migrate_provider_tokens [id_or_prefix] [--apply] [--library movies|series|anime|others]  — migrate every folder still on an OLD token format ([tmdbid-…], [tmdb-…], [tmdbid=…], wrong casing) to canonical {tmdb-…}, ancestor-aware (dry-run by default; --apply writes a JSON report under migration_reports/)")
         print("  normalize_season_folders [id_or_prefix] [--apply]  — two-phase structural rename: Phase A gives the show folder its TMDB token, Phase B renames each season folder to '<Show Name> Season NN (air year)' with NO id on the season (dry-run by default; --apply writes a JSON report under migration_reports/)")
         print("  add_extras <title_id> \"<folders>\" [--extras-size <v|none>] [device <id>] [no-replace]  — attach extras (Specials/Trailers/BTS) to an existing title")
+        print(f"  {MAP_USAGE}  — map the uploaded objects to the Google Photos inventory (dry-run by default; --apply writes)")
         print("  web [--port N] [--host H] [--no-browser] [--demo]  — Launch the local web operations console (Disk Reclaim view); --demo = SAFE build, all actions simulated")
         print("  token create [--label \"X\"] [--ttl 1h|8h|12h|1d|3d|7d|30d|never]  — Mint a web access token (default --ttl 7d)")
         print("  token list                                          — List minted web access tokens")
@@ -13166,6 +13492,17 @@ if __name__ == "__main__":
         _er_ae = parse_extras_tokens(_ae_et)
         cmd_add_extras(_ae_title_id, _ae_folders, extras_size=_er_ae["extras_size"],
                        device_id=resolve_device(_ae_dev), no_replace=_ae_no_replace)
+
+    elif cmd == "map_photos":
+        # map_photos [all|<id>|<prefix>] [--account a] [--devices-only] [--resolutions <csv>]
+        #            [--repair split-info|names] [--accept-probable] [--apply] [--out <dir>]  — DRY-RUN by default
+        try:
+            _mp_opts = parse_map_photos_args(sys.argv[2:])
+        except ValueError as _mp_err:
+            print(f"❌ map_photos: {_mp_err}")
+            print(f"   Usage: {MAP_USAGE}")
+            sys.exit(1)
+        cmd_map_photos(**_mp_opts)
 
     elif cmd == "fetch":
         if len(sys.argv) < 3:

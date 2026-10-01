@@ -104,11 +104,16 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 `Step 9 — dispatched 2026-10-01 to executor-fable (fable) · resumed after a usage-limit pause (nothing of Step 9 was
 on disk; the read-only calibration was redone) · sub-tasks per PLAN Step 9 details 1–10 plus 9.0 (DECISIONS §1d):
 [x] 9.0 extra movies phone HT74D0202839 in the read-only device cross-check (main.DEVICE_CHECK_EXTRA_SERIALS +
-device_check_aliases(); push aliases unchanged; test_device_inventory 131, smoke 82) (wip commit "step 9.0") ·
-[ ] 9.1 freshness gate ← next · [ ] 9.2 match ladder · [ ] 9.3 sha1↔dedupKey cross-check · [ ] 9.4 duplicates/re-split sets · [ ] 9.5
-C27 detectors + repairs (split-info, names) · [ ] 9.6 unmatched report · [ ] 9.7 outputs + resolutions_todo.csv ·
-[ ] 9.8 --resolutions · [ ] 9.9 --apply via learned sidecar + apply engine · [ ] 9.10 --devices-only · then tests,
-disarm probes, full + smoke`
+device_check_aliases(); push aliases unchanged; test_device_inventory 131, smoke 82) (wip 5f495b6) ·
+[x] 9.1 scaffold + freshness gate (main.py section "THE MAPPER", CLI `map_photos`, parse_map_photos_args, scope /
+--account by routing, inventory via tools.gp_inventory.inventory_state, stale-inventory + re-crawl command, run dir
+with mapping.jsonl + summary.txt; interim ladder = exact name in the default account; test_map_photos 27, smoke 82)
+(wip commit "step 9.1") · [ ] 9.2 match ladder ← next · [ ] 9.3 sha1↔dedupKey cross-check · [ ] 9.4 duplicates/re-split
+sets · [ ] 9.5 C27 detectors + repairs (split-info, names) · [ ] 9.6 unmatched report · [ ] 9.7 outputs +
+resolutions_todo.csv · [ ] 9.8 --resolutions · [ ] 9.9 --apply via learned sidecar + apply engine · [ ] 9.10
+--devices-only · then tests, disarm probes, full + smoke`
+`resumed 2026-10-01 by executor-fable (usage-limit pause #2): uncommitted 9.1 changes KEPT (main.py,
+tests/test_map_photos.py) — the diff was coherent; 26/27 green, the 1 failure a test-fixture expectation (fixed)`
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes
 alone; re-run it before treating a red full suite as a regression.
 Template — when a step is running (Execution protocol "In-step checkpoints"):

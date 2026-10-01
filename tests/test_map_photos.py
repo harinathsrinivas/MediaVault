@@ -728,3 +728,130 @@ def test_a_content_keyed_object_found_nowhere_is_never_probable(world, tmp_path)
     world.capture(M_WHOLE, _h(M_WHOLE), _sha1(b"the movie"), PUSHED, world.names[(M_WHOLE, "whole")])
     row = by_key(world.run(M_WHOLE, out=tmp_path / "run"))[(M_WHOLE, "whole")]
     assert (row["status"], row["candidates"]) == ("not-found", [])
+
+
+# ============================================================================ 9.4 duplicates and re-split sets
+
+SEC_A, SEC_B, SEC_C = "2024-03-09T06:03:02Z", "2024-06-01T10:00:00Z", "2024-08-15T20:30:45Z"
+SPLIT_CHUNKS = [(M_SPLIT, f"chunk {i}/3") for i in (1, 2, 3)]
+
+
+def _uploads(world, sets, label_names=None):
+    """Upload M_SPLIT's chunks once per (taken, [chunk numbers]) in `sets` -> {(taken, n): record}."""
+    out = {}
+    for taken, numbers in sets:
+        for n in numbers:
+            name = world.names[SPLIT_CHUNKS[n - 1]]
+            out[(taken, n)] = world.inv.add("movies", name, taken=taken)
+    return out
+
+
+def _split_world(world, sets):
+    world.save().upload_all(skip=set(SPLIT_CHUNKS))
+    world.save()
+    items = _uploads(world, sets)
+    world.save()
+    return items
+
+
+def test_a_re_split_uploaded_twice_maps_to_the_newest_complete_set(world, tmp_path):
+    """The 7 real duplicated chunk names: an older upload of 2 of the chunks + a newer complete upload."""
+    items = _split_world(world, [(SEC_A, [1, 2]), (SEC_B, [1, 2, 3])])
+    rows = by_key(world.run(M_SPLIT, out=tmp_path / "run"))
+    for n, key in enumerate(SPLIT_CHUNKS, 1):
+        row = rows[key]
+        assert (row["status"], row["proof"], row["duplicate"]) == ("mapped", "filename", "re-split"), key
+        assert row["item"]["photo_id"] == items[(SEC_B, n)]["photo_id"]
+        assert row["alternates"] == ([items[(SEC_A, n)]["photo_id"]] if n < 3 else [])
+        assert row["set"] == {"taken_s": _ms(SEC_B) // 1000, "uploads": 2, "chunks": 3}
+    assert rows[(M_SPLIT, "holder")]["status"] == "mapped"          # the holder is not part of the chunk set
+
+
+def test_three_uploads_with_one_complete_and_newest(world, tmp_path):
+    items = _split_world(world, [(SEC_A, [2]), (SEC_B, [2]), (SEC_C, [1, 2, 3])])
+    rows = by_key(world.run(M_SPLIT, out=tmp_path / "run"))
+    assert [rows[k]["item"]["photo_id"] for k in SPLIT_CHUNKS] == [items[(SEC_C, n)]["photo_id"] for n in (1, 2, 3)]
+    assert sorted(rows[SPLIT_CHUNKS[1]]["alternates"]) == sorted([items[(SEC_A, 2)]["photo_id"],
+                                                                  items[(SEC_B, 2)]["photo_id"]])
+
+
+@pytest.mark.parametrize("sets,fragment", [
+    ([(SEC_A, [1, 2, 3]), (SEC_B, [1])], "a newer upload of this split is incomplete (2 uploads"),
+    ([(SEC_A, [1, 2]), (SEC_B, [2, 3])], "this split was uploaded 2 times and no upload is complete"),
+], ids=["newer-upload-incomplete", "no-complete-upload"])
+def test_an_unresolvable_re_split_is_ambiguous_for_the_user(world, tmp_path, sets, fragment):
+    """Never map the chunks to an upload that may hold other bytes than the library's split: a newer upload that is
+    still incomplete (perhaps still backing up) blocks the older complete one."""
+    _split_world(world, sets)
+    rows = by_key(world.run(M_SPLIT, out=tmp_path / "run"))
+    for key in SPLIT_CHUNKS:
+        if rows[key]["status"] == "not-found":
+            continue                                   # a chunk with no item at all (case 2 has all three)
+        assert (rows[key]["status"], rows[key]["item"]) == ("ambiguous", None), key
+        assert fragment in rows[key]["note"] and rows[key]["candidates"]
+
+
+def test_one_upload_maps_each_chunk_and_flags_two_byte_versions_at_one_second(world, tmp_path):
+    items = _split_world(world, [(SEC_A, [1, 2, 3])])
+    twin = world.inv.add("movies", world.names[SPLIT_CHUNKS[0]], taken=SEC_A, data=items[(SEC_A, 1)]["photo_id"].encode())
+    same = world.inv.add("movies", world.names[SPLIT_CHUNKS[1]], taken=SEC_A, upload_ms=_ms(SEC_A) + 2 * 86_400_000,
+                         data=b"x")
+    world.inv.items["movies"][-1]["dedup_key"] = items[(SEC_A, 2)]["dedup_key"]      # the same bytes, twice
+    world.save()
+    rows = by_key(world.run(M_SPLIT, out=tmp_path / "run"))
+    assert rows[SPLIT_CHUNKS[0]]["status"] == "ambiguous" and twin["photo_id"] in {
+        c["photo_id"] for c in rows[SPLIT_CHUNKS[0]]["candidates"]}
+    two = rows[SPLIT_CHUNKS[1]]
+    assert (two["status"], two["item"]["photo_id"], two["alternates"], two["duplicate"]) == (
+        "mapped", items[(SEC_A, 2)]["photo_id"], [same["photo_id"]], "same-bytes")
+    assert rows[SPLIT_CHUNKS[2]]["status"] == "mapped"
+
+
+def test_a_content_proven_chunk_pins_its_split_s_upload(world, tmp_path):
+    items = _split_world(world, [(SEC_A, [1, 2, 3])])
+    newer = {n: world.inv.add("movies", world.names[SPLIT_CHUNKS[n - 1]], taken=SEC_B, data=f"new {n}".encode())
+             for n in (1, 2)}
+    world.save()
+    chunk = world.library[M_SPLIT]["split_info"]["chunks"][0]
+    world.capture(M_SPLIT, chunk["hash"], _sha1(b"new 1"), PUSHED, chunk["filename"], role="chunk", index=1)
+    rows = by_key(world.run(M_SPLIT, out=tmp_path / "run"))
+    one, two, three = (rows[k] for k in SPLIT_CHUNKS)
+    assert (one["status"], one["proof"], one["item"]["photo_id"]) == ("mapped", "dedupkey", newer[1]["photo_id"])
+    assert (two["status"], two["proof"], two["item"]["photo_id"]) == ("mapped", "filename", newer[2]["photo_id"])
+    assert "pinned by a chunk proven by its bytes" in two["note"] and two["alternates"] == []
+    assert (three["status"], three["item"]) == ("conflict", None)            # only the OLD upload carries its name
+    assert [c["photo_id"] for c in three["candidates"]] == [items[(SEC_A, 3)]["photo_id"]]
+
+
+def test_an_extras_split_item_is_its_own_set(world, tmp_path):
+    keys = [(M_SPLIT, f"extra Specials/Making Of.mkv chunk {n}/2") for n in (1, 2)]
+    world.save().upload_all(skip=set(keys))
+    world.save()
+    old = world.inv.add("movies", world.names[keys[0]], taken=SEC_A)
+    new = [world.inv.add("movies", world.names[k], taken=SEC_B) for k in keys]
+    world.save()
+    rows = by_key(world.run(M_SPLIT, out=tmp_path / "run"))
+    assert [rows[k]["item"]["photo_id"] for k in keys] == [n["photo_id"] for n in new]
+    assert rows[keys[0]]["alternates"] == [old["photo_id"]] and rows[keys[0]]["duplicate"] == "re-split"
+    assert all(rows[k]["status"] == "mapped" for k in SPLIT_CHUNKS)   # the leaf's own chunks are another set
+
+
+def test_the_set_rule_engages_only_for_different_bytes_duplicates(world, tmp_path):
+    """PLAN Step 9 (4) is about duplicates: a split whose chunk names are unique maps chunk by chunk even if its
+    items carry different seconds (only noted — the real library has none: 250/250 such sets on one second)."""
+    items = _split_world(world, [(SEC_A, [1]), (SEC_B, [2]), (SEC_C, [3])])
+    rows = by_key(world.run(M_SPLIT, out=tmp_path / "run"))
+    for n, key in enumerate(SPLIT_CHUNKS, 1):
+        assert (rows[key]["status"], rows[key]["item"]["photo_id"]) == ("mapped", items[(SEC_A if n == 1 else
+                                                                          SEC_B if n == 2 else SEC_C, n)]["photo_id"])
+        assert "carry 3 different taken seconds (mixed uploads?)" in rows[key]["note"]
+
+
+def test_a_whole_file_uploaded_twice_with_the_same_bytes_maps_once(world, tmp_path):
+    world.save().upload_all(skip={M_WHOLE})
+    first = world.inv.add("movies", world.names[(M_WHOLE, "whole")], data=b"m", upload_ms=1_780_000_000_000)
+    again = world.inv.add("movies", world.names[(M_WHOLE, "whole")], data=b"m", upload_ms=1_790_000_000_000)
+    world.save()
+    row = by_key(world.run(M_WHOLE, out=tmp_path / "run"))[(M_WHOLE, "whole")]
+    assert (row["status"], row["proof"], row["item"]["photo_id"]) == ("mapped", "filename", first["photo_id"])
+    assert (row["alternates"], row["duplicate"]) == ([again["photo_id"]], "same-bytes")

@@ -10984,23 +10984,123 @@ def _mp_by_content(obj, idx, content_key):
     return None
 
 
+def _mp_bytes(items):
+    """`items` grouped by the bytes they hold (dedupKey; an item without one stands alone) -> [[items]], first
+    appearance order."""
+    groups = {}
+    for item in items:
+        groups.setdefault(item["dedup_key"] or ("photo", item["photo_id"]), []).append(item)
+    return list(groups.values())
+
+
+def _mp_second(item):
+    """The taken second of an item (all chunks of one split share it — RESEARCH F4), or None."""
+    taken = item.get("taken_ms")
+    return taken // 1000 if isinstance(taken, int) and not isinstance(taken, bool) else None
+
+
+def _mp_one_of(members, how, alternates=(), duplicate=None, chunk_set=None, note=None):
+    """mapped: the picked item of one group of same-bytes items; the rest of the group + `alternates` (photo ids)."""
+    item = _mp_pick(members)
+    others = [i["photo_id"] for i in members if i["photo_id"] != item["photo_id"]] + list(alternates)
+    return _mp_decision("mapped", how, item=item, proof="filename", alternates=others,
+                        duplicate=duplicate or ("same-bytes" if len(members) > 1 else None), chunk_set=chunk_set,
+                        note=note)
+
+
+def _mp_by_name(items, how):
+    """PLAN Step 9 (4), one object alone: one group of same bytes -> mapped (one item, the rest alternates); several
+    groups of different bytes -> ambiguous."""
+    groups = _mp_bytes(items)
+    if len(groups) == 1:
+        return _mp_one_of(groups[0], how)
+    return _mp_decision("ambiguous", how, candidates=items,
+                        note=f"{len(groups)} items with this name hold different bytes")
+
+
+def _mp_chunk_set(loose, pins, size):
+    """PLAN Step 9 (4), the name-matched chunks of ONE split in one account (`loose`: [(obj, items, name_match)], no
+    content key) -> {key: decision}. All chunks of a split share its taken second (RESEARCH F4), so the candidates are
+    grouped by second (one second = one upload of the split):
+      * `pins` — the seconds of this split's content-PROVEN chunks: one pin decides the set (another second's items
+        are other bytes: conflict); several pins: ambiguous;
+      * no chunk name with different-bytes duplicates: each chunk maps to its own item (seconds that differ are
+        only noted — never seen in the real library: 250 of 250 such sets sit on one second);
+      * one second: each chunk by its own items (same bytes collapse; different bytes: ambiguous);
+      * several seconds (the split was uploaded more than once): the newest COMPLETE set — every chunk of the split
+        exactly once — when no newer upload exists; its chunks map, the other uploads' items become alternates. A
+        newer incomplete upload (perhaps still backing up), or no complete one, leaves every chunk ambiguous."""
+    per = {}
+    for obj, items, _how in loose:
+        by_second = {}
+        for members in _mp_bytes(items):
+            by_second.setdefault(_mp_second(_mp_pick(members)), []).append(members)
+        per[_mp_key(obj)] = by_second
+    seconds = set(pins) | {s for by_second in per.values() for s in by_second}
+    out = {}
+    if pins:
+        for obj, items, how in loose:
+            here = per[_mp_key(obj)].get(next(iter(pins))) if len(pins) == 1 else None
+            if here and len(here) == 1:
+                out[_mp_key(obj)] = _mp_one_of(here[0], how, note="the split's upload is pinned by a chunk proven "
+                                                                  "by its bytes")
+            elif len(pins) == 1 and not here:
+                out[_mp_key(obj)] = _mp_decision("conflict", how, candidates=items,
+                                                 note="only another upload of this split (another taken second) "
+                                                      "carries this name — not the object's bytes")
+            else:
+                out[_mp_key(obj)] = _mp_decision("ambiguous", how, candidates=items,
+                                                 note="this split's chunks cannot be told apart")
+        return out
+    if all(sum(len(groups) for groups in per[_mp_key(o)].values()) == 1 for o, _i, _h in loose):
+        note = (f"this split's chunks carry {len(seconds)} different taken seconds (mixed uploads?)"
+                if len(seconds) > 1 else None)
+        return {_mp_key(obj): _mp_one_of(next(iter(per[_mp_key(obj)].values()))[0], how, note=note)
+                for obj, _items, how in loose}
+    if len(seconds) <= 1:
+        return {_mp_key(obj): _mp_by_name(items, how) for obj, items, how in loose}
+    ordered = sorted(seconds, key=lambda s: float("-inf") if s is None else s)
+    complete = [s for s in ordered if len(loose) == size and all(len(per[_mp_key(o)].get(s, [])) == 1
+                                                                  for o, _i, _h in loose)]
+    if complete and complete[-1] == ordered[-1]:
+        chosen = complete[-1]
+        info = {"taken_s": chosen, "uploads": len(seconds), "chunks": size}
+        for obj, items, how in loose:
+            members = per[_mp_key(obj)][chosen][0]
+            elsewhere = [i["photo_id"] for s, groups in per[_mp_key(obj)].items() if s != chosen
+                         for g in groups for i in g]
+            out[_mp_key(obj)] = _mp_one_of(members, how, alternates=elsewhere, duplicate="re-split",
+                                           chunk_set=info)
+        return out
+    note = (f"a newer upload of this split is incomplete ({len(seconds)} uploads; maybe still backing up)"
+            if complete else f"this split was uploaded {len(seconds)} times and no upload is complete")
+    return {_mp_key(obj): _mp_decision("ambiguous", how, candidates=items, note=note) for obj, items, how in loose}
+
+
 def _mp_decide(group, idx, keys):
     """ONE account's decision for each object of a matching group -> {(manual_id, label): decision or None}. An
     object with a known content key (keys) is decided by its bytes (_mp_by_content); any other by the items carrying
-    its exact uploaded name, else its P-6 normalized name — exactly one: mapped (proof filename); several:
-    ambiguous; none: None."""
-    out = {}
+    its exact uploaded name, else its P-6 normalized name — alone (_mp_by_name), or, for a split's chunks, as one
+    set (_mp_chunk_set). None: no item."""
+    out, loose = {}, []
     for obj in group:
-        if keys.get(_mp_key(obj)):
-            out[_mp_key(obj)] = _mp_by_content(obj, idx, keys[_mp_key(obj)])
+        key = _mp_key(obj)
+        if keys.get(key):
+            out[key] = _mp_by_content(obj, idx, keys[key])
             continue
         items, how = _mp_names(idx, obj["uploaded_name"])
-        if not items:
-            out[_mp_key(obj)] = None
-        elif len(items) == 1:
-            out[_mp_key(obj)] = _mp_decision("mapped", how, item=items[0], proof="filename")
-        else:
-            out[_mp_key(obj)] = _mp_decision("ambiguous", how, candidates=items)
+        out[key] = None
+        if items:
+            loose.append((obj, items, how))
+    if not loose:
+        return out
+    if group[0]["kind"] in _MP_CHUNK_KINDS:
+        pins = {_mp_second(out[_mp_key(o)]["item"]) for o in group
+                if keys.get(_mp_key(o)) and out[_mp_key(o)] and out[_mp_key(o)]["kind"] == "mapped"}
+        out.update(_mp_chunk_set(loose, pins, len(group)))
+    else:
+        for obj, items, how in loose:
+            out[_mp_key(obj)] = _mp_by_name(items, how)
     return out
 
 

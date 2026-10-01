@@ -116,11 +116,18 @@ test_map_photos 41, smoke 82) (wip 1d5cc4c) · [x] 9.3 sha1↔dedupKey cross-che
 capture; found by its bytes in any account — proof dedupkey, name_match exact / normalized / `content` (another
 name → --repair names); same-named items with other bytes → `conflict`, never applied; content proof outranks a
 same-named item; same bytes twice → one item + alternates; no probable for content-keyed objects; test_map_photos
-48, smoke 82) (wip commit "step 9.3") · [ ] 9.4 duplicates/re-split sets ← next · [ ] 9.5 C27 detectors + repairs (split-info, names) · [ ] 9.6 unmatched report · [ ] 9.7 outputs +
-resolutions_todo.csv · [ ] 9.8 --resolutions · [ ] 9.9 --apply via learned sidecar + apply engine · [ ] 9.10
---devices-only · then tests, disarm probes, full + smoke`
+48, smoke 82) (wip 044863d) · [x] 9.4 duplicates/re-split sets (same bytes → one item + alternates; a split's
+chunks grouped by taken second ONLY when a chunk name has different-bytes duplicates: the newest complete upload
+when no newer upload exists, the other uploads' items alternates; a newer incomplete upload or no complete one →
+ambiguous; a content-proven sibling pins the upload (other-second items → conflict); unique-name splits map per
+chunk (250/250 real sets sit on one second); test_map_photos 57, smoke 82) (wip commit "step 9.4") · [ ] 9.5 C27
+detectors + repairs (split-info, names) ← next · [ ] 9.6 unmatched report · [ ] 9.7 outputs + resolutions_todo.csv ·
+[ ] 9.8 --resolutions · [ ] 9.9 --apply via learned sidecar + apply engine · [ ] 9.10 --devices-only · then tests,
+disarm probes, full + smoke`
 `resumed 2026-10-01 by executor-fable (usage-limit pause #2): uncommitted 9.1 changes KEPT (main.py,
 tests/test_map_photos.py) — the diff was coherent; 26/27 green, the 1 failure a test-fixture expectation (fixed)`
+`resumed 2026-10-01 by executor-fable (usage-limit pause #3): uncommitted 9.4 changes KEPT (main.py,
+tests/test_map_photos.py) — coherent; 57/57 green, smoke 82`
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes
 alone; re-run it before treating a red full suite as a regression.
 Template — when a step is running (Execution protocol "In-step checkpoints"):

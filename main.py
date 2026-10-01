@@ -11960,6 +11960,8 @@ def _mp_apply_lines(ctx):
                      else _mp_engine_line(preview, "would change"))
         flags = ([f"--account {ctx['account']}"] if ctx["account"] else []) + [f"--repair {r}" for r in ctx["repairs"]]
         flags += ["--accept-probable"] if ctx["accept_probable"] else []
+        resolution = ctx["resolution"]        # previewed above: the apply must import the same decisions
+        flags += [f'--resolutions "{resolution["path"]}"'] if resolution and not resolution["fatal"] else []
         lines.append(f"Next: python main.py map_photos {ctx['scope']} {' '.join(flags + ['--apply'])}")
     return lines
 

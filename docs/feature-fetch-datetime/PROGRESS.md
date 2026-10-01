@@ -152,8 +152,15 @@ read-only device report for the scope / --account: device lines + unconfigured p
 still on a phone, freed count, unchecked + which phone was not listed; devices.csv; no inventory, nothing written
 outside the run dir; test_map_photos 115, smoke 82) (wip 7b2ce0c) · [x] self-review fixes (exit code 1 for a
 failed run / usage error; wording for an unreadable failed_objects.csv and a chunk uploaded twice; dispatcher
-branch pinned through the compiled __main__ block; test_map_photos 118) (wip commit "step 9 self-review") · [ ] live
-dry-run (counts only), disarm probes on a scratch copy, full + smoke, PROGRESS/STATUS, feat commit ← next`
+branch pinned through the compiled __main__ block; test_map_photos 118) (wip 77109ef) · [x] live read-only
+validation fix-ups (an unmatched chunk item carrying a library object's `[short_id]` tag is a superseded split, not
+a duplicate; lines ≤ 120) (wip 97e6b3b) · [x] fail fast before an apply (the run directory is created first; --apply
+is refused when the --resolutions file cannot be read) + an `oth-` object end to end (test_map_photos 121) (wip
+93cdc51) · [x] final re-read of the whole diff: a dry run's "Next:" command carries the previewed --resolutions file
+(never an unreadable one) (wip commit "step 9 — the Next command carries the previewed resolutions") · [ ] disarm
+probes on the final code, full + smoke, PROGRESS row 9 / STATUS, feat commit ← next`
+`resumed 2026-10-02 by executor-fable (usage-limit pause #6): tree clean at 97e6b3b → 93cdc51; nothing to keep or
+discard`
 `resumed 2026-10-02 by executor-fable (usage-limit pause #5): uncommitted self-review fixes KEPT (main.py) —
 coherent; 115/115 green`
 `resumed 2026-10-01 by executor-fable (usage-limit pause #2): uncommitted 9.1 changes KEPT (main.py,

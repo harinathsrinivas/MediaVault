@@ -1362,6 +1362,7 @@ def test_resolutions_are_validated_and_previewed_by_a_dry_run(mixed, tmp_path, c
     out = res["stdout"]
     assert (f"Resolutions ({path}): 5 decision(s) — url 1 · datetime 1 · search 1 · not_uploaded 1 · skip 1") in out
     assert "  dry run — nothing recorded: add --apply to record them" in out
+    assert f'Next: python main.py map_photos all --resolutions "{path}" --apply' in out   # the previewed decisions
     assert "⚠️⚠️⚠️  YOU SAY NOT UPLOADED (IMP-C27): 1 object(s)" in out
     assert f"    {M_SPLIT} · chunk 3/3 (mapper verdict: missing-after-backup)" in out
     incons = {(r["manual_id"], r["object"]): r["issue"] for r in _read_csv(os.path.join(res["run_dir"],
@@ -1409,6 +1410,8 @@ def test_an_unreadable_resolutions_file_imports_nothing(mixed, tmp_path, capsys)
     res = mixed.run("--resolutions", str(bad), out=tmp_path / "run", capsys=capsys)
     assert f"❌ --resolutions {bad}: ValueError: notes.csv is not a failed-objects / resolutions CSV" in res["stdout"]
     assert all(r["user_decision"] is None for r in res["rows"])
+    (next_line,) = [line for line in res["stdout"].splitlines() if line.startswith("Next: ")]
+    assert next_line == "Next: python main.py map_photos all --apply"    # the command to copy never names the bad file
 
 
 def test_objects_resolved_earlier_leave_the_todo_list(mixed, tmp_path):

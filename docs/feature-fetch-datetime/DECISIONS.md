@@ -424,3 +424,9 @@ No other step of this plan uses candidates.
 - **C28 follow-ups** (`.chunk.` filename substring filters; resume from a `_parts/` holding no chunks may upload
   nothing yet mark onboarded): card answer "Investigate + fix now" → branch `fix/imp_c28_followups` from main
   (worktree `MediaVault-c28b`); real bugs register as IMP-C30 / IMP-C31; rollback-adjacent changes stop for a decision.
+- **PR #63 (IMP-C30 + IMP-C31)**: card answer "Merge now (Recommended)" → squash-merged to main (Checkpoint 1).
+- **IMP-C32** (resume uploads any `.mkv` in a shared `Season/_parts/`, incl. another episode's chunks → wrong entry
+  onboarded, `replace` dummies its master): card answer "Strict resume (Recommended)" — explicit rollback change-gate
+  ruling: a resume uploads only chunks recorded in that entry's `split_info` (names + sizes/hashes) and refuses
+  anything else, listing the strangers; C31's refusal is the empty case. Hotfix branch `fix/imp_c32_strict_resume`
+  from main (worktree `MediaVault-c32`), own PR.

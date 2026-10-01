@@ -134,13 +134,20 @@ cross-account-copy / mediavault-unknown / non-mediavault / possibly-deleted / er
 (each unresolved row's P-18 reason incl. partial-set; failed records validated by mvcommon's normalizer;
 resolutions_todo.csv = mvcommon._failed_row + write_failed_csv (the failed_objects.csv columns, status = the precise
 verdict, expected_taken_local from the capture); inconsistencies.csv; an edited todo in a reused --out is kept →
-.new.csv; "To resolve" + Outputs lines; test_map_photos 83, smoke 82) (wip commit "step 9.7") · [ ] 9.8
---resolutions ← next · [ ] 9.9 --apply via learned sidecar + apply engine · [ ] 9.10 --devices-only · then tests,
-disarm probes, full + smoke`
+.new.csv; "To resolve" + Outputs lines; test_map_photos 83, smoke 82) (wip fd5c4d5) · [x] 9.8 --resolutions
+(read_failed_csv; each row pinned by manual_id + sha256 (else label), alias-resolved, in scope; url → learned
+{photo_id, proof manual, source manual} + hint; datetime → hint; search → learned search_override; not_uploaded →
+LOUD "you say not uploaded" + inconsistencies.csv; skip stays; bad rows listed, never imported; NEW mvcommon hints
+store hints.jsonl (append_hint / read_hints / _normalize_hint) for Step 13's `check_photos hinted`; objects decided
+earlier (manual photo_id / search_override in the block, or a hint) leave resolutions_todo.csv; a dry run records
+nothing; test_map_photos 98, primitives 215, smoke 82) (wip commit "step 9.8") · [ ] 9.9 --apply via learned
+sidecar + apply engine ← next · [ ] 9.10 --devices-only · then tests, disarm probes, full + smoke`
 `resumed 2026-10-01 by executor-fable (usage-limit pause #2): uncommitted 9.1 changes KEPT (main.py,
 tests/test_map_photos.py) — the diff was coherent; 26/27 green, the 1 failure a test-fixture expectation (fixed)`
 `resumed 2026-10-01 by executor-fable (usage-limit pause #3): uncommitted 9.4 changes KEPT (main.py,
 tests/test_map_photos.py) — coherent; 57/57 green, smoke 82`
+`resumed 2026-10-01 by executor-fable (usage-limit pause #4): uncommitted 9.8 changes KEPT (main.py, mvcommon.py,
+tests/test_map_photos.py) — coherent; map 98 + primitives 215 + smoke 82 green`
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes
 alone; re-run it before treating a red full suite as a regression.
 Template — when a step is running (Execution protocol "In-step checkpoints"):

@@ -10972,7 +10972,7 @@ def _mp_row(obj, route):
             "name_match": None, "proof": None, "item": None, "alternates": [], "copies": [], "candidates": [],
             "deleted": [], "override_check": None, "duplicate": None, "set": None, "device": None,
             "partial_set": False, "content_key": _mp_content_key(obj), "expected_taken_local": _mp_expected_local(obj),
-            "reason": None, "note": None, "repair": None}
+            "reason": None, "user_decision": None, "note": None, "repair": None}
 
 
 def _mp_names(index_account, name):
@@ -11691,16 +11691,104 @@ def _mp_failed_record(row, run):
 
 
 def _mp_todo(rows, run):
-    """[(failed record, resolutions_todo.csv row)] of every unresolved row — the CSV row built by mvcommon's own
-    failed_objects.csv row builder (the same 18 columns, P-18), its status column the mapper's precise verdict."""
+    """[(failed record, resolutions_todo.csv row)] of every unresolved row the user has not decided yet (a `skip`
+    stays) — the CSV row built by mvcommon's own failed_objects.csv row builder (the same 18 columns, P-18), its
+    status column the mapper's precise verdict."""
     out = []
     for row in rows:
-        if row["reason"] is None:
+        if row["reason"] is None or row["user_decision"] not in (None, "skip"):
             continue
         record = _mp_failed_record(row, run)
         csv_row = mvcommon._failed_row(record, row)
         csv_row["status"] = _mp_status_text(row)
         out.append((record, csv_row))
+    return out
+
+
+def _mp_prior_decisions(objects):
+    """{(manual_id, label): what} for the objects the user already resolved by hand — a manual photo_id or a search
+    term in the trusted block, or a hint on record (hints.jsonl): they wait for `check_photos hinted` / the next
+    fetch, not for a second decision. An unreadable hints file reads as none (the report says so)."""
+    out, problem = {}, None
+    for obj in objects:
+        block = obj.get("block") or {}
+        accounts = block.get("accounts") if isinstance(block.get("accounts"), dict) else {}
+        if any(isinstance(r, dict) and r.get("verified_by") == "manual" and r.get("photo_id")
+               for r in accounts.values()):
+            out[_mp_key(obj)] = "url (recorded)"
+        elif isinstance(block.get("search_override"), dict):
+            out[_mp_key(obj)] = "search (recorded)"
+    try:
+        hints = mvcommon.read_hints()
+    except OSError as e:
+        hints, problem = [], f"⚠️  hints.jsonl could not be read ({_gp_line(e)}) — earlier decisions not shown"
+    pins = {(o["manual_id"], o["sha256"]): _mp_key(o) for o in objects}
+    for hint in hints:
+        key = pins.get((hint["manual_id"], hint["sha256"]))
+        if key is not None and key not in out:
+            out[key] = f"{hint['kind']} (recorded)"
+    return out, problem
+
+
+def _mp_resolutions(path, library, objects):
+    """--resolutions (PLAN Step 9 (8)): the user's decisions in a resolutions_todo.csv or failed_objects.csv (read by
+    mvcommon.read_failed_csv — Excel-tolerant) for the objects in scope. Each row names its object by manual_id (an
+    alias resolves) and its sha256 (the P-2 pin; else the `object` label):
+      url          -> a learned record {photo_id, proof manual, source manual} (P-5: never confirms by itself) + a hint
+      datetime     -> a hint {taken_ms, gmt_offset_min, taken_local}
+      search       -> a learned record {search_override, source manual} (stage S3u; still verified at fetch/check)
+      not_uploaded -> listed in the IMP-C27 report (the user's word that it never reached Google Photos)
+      skip         -> stays on the failed list
+    Every record is validated by mvcommon (the writers' own normalizers); nothing is written here. ->
+    {path, decisions {key: decision}, learned, hints, counts {decision: n}, out_of_scope, errors [{line, manual_id,
+    error}], fatal (the file could not be read at all)}."""
+    out = {"path": path, "decisions": {}, "learned": [], "hints": [], "out_of_scope": 0, "errors": [], "fatal": None,
+           "counts": dict.fromkeys(mvcommon.GP_DECISIONS, 0)}
+    try:
+        edits, errors = mvcommon.read_failed_csv(path)
+    except (OSError, ValueError) as e:
+        out["fatal"] = _gp_line(e)
+        return out
+    out["errors"].extend(errors)
+    in_scope = {_mp_key(o) for o in objects}
+    for edit in edits:
+        real, entry = _gp_resolve(library, edit["manual_id"])
+        objs = list(mvcommon.iter_entry_objects(real, entry)) if entry is not None else []
+        if edit.get("sha256"):
+            obj = next((o for o in objs if o["sha256"] == edit["sha256"]), None)
+        else:
+            obj = next((o for o in objs if o["label"] == edit.get("object")), None)
+        problem = ("no such library id" if entry is None else
+                   "its object is no longer in the library (re-split or re-mastered?) — make a new list"
+                   if obj is None else "the library holds no SHA-256 for it" if not obj["sha256"] else None)
+        if problem is None and _mp_key(obj) not in in_scope:
+            out["out_of_scope"] += 1
+            continue
+        learned, hints = [], []
+        if problem is None:
+            base = {"account": edit["account"], "manual_id": real, "label": obj["label"], "sha256": obj["sha256"]}
+            try:
+                if edit["decision"] == "url":
+                    learned.append(mvcommon._normalize_learned(
+                        dict(base, photo_id=edit["photo_id"], proof="manual", source="manual"), edit["account"]))
+                    hints.append(mvcommon._normalize_hint(dict(base, kind="url", photo_id=edit["photo_id"])))
+                elif edit["decision"] == "datetime":
+                    hints.append(mvcommon._normalize_hint(dict(
+                        base, kind="datetime", taken_ms=edit["taken_ms"], gmt_offset_min=edit["gmt_offset_min"],
+                        taken_local=edit["taken_local"])))
+                elif edit["decision"] == "search":
+                    learned.append(mvcommon._normalize_learned(
+                        dict(base, source="manual", search_override=edit["search_term"]), edit["account"]))
+            except ValueError as e:
+                problem = str(e)
+        if problem is not None:
+            out["errors"].append({"line": edit["line"], "manual_id": edit["manual_id"], "error": problem})
+            continue
+        out["learned"].extend(learned)
+        out["hints"].extend(hints)
+        out["counts"][edit["decision"]] += 1
+        out["decisions"][_mp_key(obj)] = edit["decision"]
+    out["errors"].sort(key=lambda e: e["line"])
     return out
 
 
@@ -11881,6 +11969,23 @@ def _mp_report(ctx):
         for row in loud:
             lines.append(f"    {row['status']:<24} {row['manual_id']} · {row['label']}"
                          f"{' [partial set]' if row['partial_set'] else ''} — {_mp_device_hint(row)}")
+    told = [r for r in rows if r["user_decision"] == "not_uploaded"]
+    if told:
+        lines.append(f"⚠️⚠️⚠️  YOU SAY NOT UPLOADED (IMP-C27): {len(told):,} object(s) — an archived entry keeps only a "
+                     f"dummy locally  ⚠️⚠️⚠️")
+        lines.extend(f"    {r['manual_id']} · {r['label']} (mapper verdict: {r['status']})" for r in told)
+    resolution = ctx["resolution"]
+    if resolution is not None and resolution["fatal"]:
+        lines.append(f"❌ --resolutions {resolution['path']}: {resolution['fatal']} — nothing imported")
+    elif resolution is not None:
+        extra = ((f" · out of this run's scope {resolution['out_of_scope']:,}" if resolution["out_of_scope"] else "")
+                 + (f" · invalid {len(resolution['errors']):,}" if resolution["errors"] else ""))
+        lines.append(f"Resolutions ({resolution['path']}): {sum(resolution['counts'].values()):,} decision(s) — "
+                     f"{_mp_counts_line(resolution['counts']) or 'none'}{extra}")
+        lines.extend(f"  ❌ line {e['line']} · {e['manual_id'] or '?'} — {e['error']}" for e in resolution["errors"])
+        if not ctx["apply"]:
+            lines.append("  dry run — nothing recorded: add --apply to record them (url / datetime: "
+                         "`check_photos hinted` verifies them before anything is confirmed)")
     if ctx["unmatched"] is None:
         lines.append("Unmatched inventory items: reported by `map_photos all` (without --account) only")
     else:
@@ -11929,18 +12034,25 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
     devices = _mp_device_check(library, objects, rows)
     unmatched = _mp_unmatched(states, fresh, rows, objects) if scope == "all" and account is None else None
     _mp_reasons(rows)
+    decided, hint_problem = _mp_prior_decisions(objects)
+    resolution = _mp_resolutions(resolutions, library, objects) if resolutions else None
+    for row in rows:
+        key = (row["manual_id"], row["label"])
+        row["user_decision"] = (resolution["decisions"].get(key) if resolution else None) or decided.get(key)
     run = "map-" + now.strftime("%Y%m%dT%H%M%SZ")
     todo = _mp_todo(rows, run)
     run_dir = _mp_run_dir(out, now)
     os.makedirs(run_dir, exist_ok=True)
-    files, notes = ["summary.txt", "mapping.jsonl", "inconsistencies.csv"], []
+    files, notes = ["summary.txt", "mapping.jsonl", "inconsistencies.csv"], [hint_problem]
     _mp_write_jsonl(os.path.join(run_dir, "mapping.jsonl"), rows)
     _mp_write_csv(os.path.join(run_dir, "inconsistencies.csv"),
                   ("account", "category", "manual_id", "object", "uploaded_name", "status", "issue", "partial_set",
                    "device", "repair", "note"),
                   [(r["account"], r["category"], r["manual_id"], r["label"], r["uploaded_name"], r["status"],
-                    r["issue"], "yes" if r["partial_set"] else "", (r["device"] or {}).get("state"), _mp_repair_text(r),
-                    r["note"]) for r in rows if r["status"] in _MP_INCONSISTENCY])
+                    r["issue"] or ("user says not uploaded" if r["user_decision"] == "not_uploaded" else None),
+                    "yes" if r["partial_set"] else "", (r["device"] or {}).get("state"), _mp_repair_text(r),
+                    r["note"]) for r in rows
+                   if r["status"] in _MP_INCONSISTENCY or r["user_decision"] == "not_uploaded"])
     todo_path, note = _mp_write_todo(run_dir, [csv_row for _record, csv_row in todo])
     files.append(os.path.basename(todo_path))
     notes.append(note)
@@ -11952,7 +12064,7 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
                         _mp_utc(u["item"]["upload_ms"]), u["owner"], u["note"]) for u in found])
     lines = _mp_report({"scope": scope, "account": account, "rows": rows, "fresh": fresh, "devices": devices,
                         "unmatched": unmatched, "todo": todo, "files": files, "notes": [n for n in notes if n],
-                        "run_dir": run_dir})
+                        "resolution": resolution, "apply": apply, "run_dir": run_dir})
     _mp_write_text(os.path.join(run_dir, "summary.txt"), "\n".join(lines) + "\n")
     print("\n".join(lines))
     return {"status": "ok", "run_dir": run_dir, "rows": rows, "fresh": fresh, "devices": devices,

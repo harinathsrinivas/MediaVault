@@ -1273,3 +1273,138 @@ def test_the_outputs_line_names_every_file(world, tmp_path, capsys):
     assert last == (f"Outputs: {tmp_path / 'run'} — summary.txt, mapping.jsonl, inconsistencies.csv, "
                     f"resolutions_todo.csv, unmatched_movies.csv, unmatched_tv.csv, unmatched_anime.csv")
     assert sorted(os.listdir(res["run_dir"])) == sorted(last.split(" — ")[1].split(", "))
+
+
+# ============================================================================ 9.8 --resolutions and the hints store
+
+HINT = {"account": "tv", "manual_id": T_EP1, "label": "whole", "sha256": _h(T_EP1)}
+
+
+@pytest.mark.parametrize("record", [
+    dict(HINT, kind="url", photo_id="AF1QipFAKEhint0001xxxxxxxxxx"),
+    dict(HINT, kind="datetime", taken_ms=1_644_061_786_000, gmt_offset_min=480, taken_local="2022-02-05T19:49:46"),
+])
+def test_the_hints_store_round_trips(record, monkeypatch):
+    monkeypatch.setattr(mvcommon, "_now_utc", lambda: NOW)
+    written = mvcommon.append_hint(record)
+    assert (written["v"], written["source"], written["at"]) == (1, "resolutions", "2026-10-01T12:00:00Z")
+    assert mvcommon.read_hints() == [written]
+    assert mvcommon.hints_path().startswith(mvcommon.GPHOTOS_STATE_DIR)
+
+
+@pytest.mark.parametrize("record,fragment", [
+    (dict(HINT, kind="url"), "a url hint names the item's photo_id"),
+    (dict(HINT, kind="url", photo_id="AF1QipFAKEhint0001xx", taken_ms=1), "a url hint carries no time"),
+    (dict(HINT, kind="datetime", taken_ms=1, gmt_offset_min=900, taken_local="2022-02-05T19:49:46"), "gmt_offset_min"),
+    (dict(HINT, kind="datetime", taken_ms=1, gmt_offset_min=0, taken_local="5 Feb"), "taken_local"),
+    (dict(HINT, kind="voice"), "kind must be one of"),
+    (dict(HINT, kind="url", photo_id="AF1QipFAKEhint0001xx", account="films"), "account must be one of"),
+    (dict(HINT, kind="url", photo_id="AF1QipFAKEhint0001xx", sha256="short"), "sha256"),
+    (dict(HINT, kind="url", photo_id="AF1QipFAKEhint0001xx", extra=1), "unknown key"),
+])
+def test_the_hints_store_refuses_bad_records(record, fragment):
+    with pytest.raises(ValueError, match=fragment):
+        mvcommon.append_hint(record)
+    assert not os.path.exists(mvcommon.hints_path())
+
+
+def _decide(path, decisions):
+    """Fill the decision columns of a todo / failed CSV: {(manual_id, object): {column: value}}."""
+    rows = _read_csv(path)
+    for row in rows:
+        row.update(decisions.get((row["manual_id"], row["object"]), {}))
+    mvcommon.write_failed_csv(str(path), rows)
+    return path
+
+
+def _filled(mixed, tmp_path):
+    first = mixed.run(out=tmp_path / "first")
+    url = next(r["suggested_photo_url"] for r in _read_csv(os.path.join(first["run_dir"], "resolutions_todo.csv"))
+               if r["manual_id"] == M_WHOLE)
+    return _decide(os.path.join(first["run_dir"], "resolutions_todo.csv"), {
+        (M_WHOLE, "whole"): {"decision": "url", "photo_url": url},
+        (T_EP1, "whole"): {"decision": "datetime", "date": "2022-02-05", "time": "7:49:46 PM", "gmt": "+08:00"},
+        (T_EP2, "whole"): {"decision": "search", "new_search_term": "MP Show S02E02 director's cut"},
+        (M_SPLIT, "chunk 3/3"): {"decision": "not_uploaded", "note": "never pushed this chunk"},
+        (A_EP, "whole"): {"decision": "skip"}}), url
+
+
+def test_resolutions_are_validated_and_previewed_by_a_dry_run(mixed, tmp_path, capsys):
+    path, url = _filled(mixed, tmp_path)
+    capsys.readouterr()
+    before, state = library_files(mixed.sandbox), {k: v for k, v in state_files().items() if not k.startswith("map")}
+    res = mixed.run("--resolutions", str(path), out=tmp_path / "second", capsys=capsys)
+    assert library_files(mixed.sandbox) == before
+    assert {k: v for k, v in state_files().items() if not k.startswith("map")} == state      # nothing recorded
+    rows = by_key(res)
+    assert {k: r["user_decision"] for k, r in rows.items() if r["user_decision"]} == {
+        (M_WHOLE, "whole"): "url", (T_EP1, "whole"): "datetime", (T_EP2, "whole"): "search",
+        (M_SPLIT, "chunk 3/3"): "not_uploaded", (A_EP, "whole"): "skip"}
+    todo = _read_csv(os.path.join(res["run_dir"], "resolutions_todo.csv"))
+    assert [(r["manual_id"], r["object"]) for r in todo] == [(A_EP, "whole")]           # only the skipped one stays
+    out = res["stdout"]
+    assert (f"Resolutions ({path}): 5 decision(s) — url 1 · datetime 1 · search 1 · not_uploaded 1 · skip 1") in out
+    assert "  dry run — nothing recorded: add --apply to record them" in out
+    assert "⚠️⚠️⚠️  YOU SAY NOT UPLOADED (IMP-C27): 1 object(s)" in out
+    assert f"    {M_SPLIT} · chunk 3/3 (mapper verdict: missing-after-backup)" in out
+    incons = {(r["manual_id"], r["object"]): r["issue"] for r in _read_csv(os.path.join(res["run_dir"],
+                                                                                       "inconsistencies.csv"))}
+    assert incons[(M_SPLIT, "chunk 3/3")] == "user says not uploaded"
+
+
+def test_resolutions_build_validated_records(mixed, tmp_path):
+    path, url = _filled(mixed, tmp_path)
+    library = mvcommon.load_library()
+    objects = list(mvcommon.iter_uploaded_objects(library))
+    res = main._mp_resolutions(str(path), library, objects)
+    assert res["errors"] == [] and res["out_of_scope"] == 0 and res["fatal"] is None
+    pid = url.rsplit("/", 1)[1]
+    (url_record, search_record) = res["learned"]
+    assert {k: url_record[k] for k in ("account", "manual_id", "label", "photo_id", "proof", "source")} == {
+        "account": "movies", "manual_id": M_WHOLE, "label": "whole", "photo_id": pid, "proof": "manual",
+        "source": "manual"}
+    assert (search_record["search_override"], search_record["source"], search_record["account"]) == (
+        "MP Show S02E02 director's cut", "manual", "tv")
+    (url_hint, time_hint) = res["hints"]
+    assert (url_hint["kind"], url_hint["photo_id"]) == ("url", pid)
+    assert (time_hint["kind"], time_hint["taken_local"], time_hint["gmt_offset_min"], time_hint["taken_ms"]) == (
+        "datetime", "2022-02-05T19:49:46", 480, 1_644_061_786_000)
+
+
+def test_bad_resolution_rows_are_listed_and_never_imported(mixed, tmp_path, capsys):
+    path, url = _filled(mixed, tmp_path)
+    rows = _read_csv(path)
+    rows.append(dict(rows[0], decision="url", photo_url="not a link", object="whole", sha256=""))
+    rows.append(dict(rows[0], manual_id="tv-en-1999-gone-s01e01", decision="skip", sha256=""))
+    rows.append(dict(rows[0], decision="skip", sha256=_h("bytes before a re-split")))
+    mvcommon.write_failed_csv(str(path), rows)
+    res = mixed.run(T_SEASON, "--resolutions", str(path), out=tmp_path / "scoped", capsys=capsys)
+    out = res["stdout"]
+    assert "decision(s) — datetime 1 · search 1 · out of this run's scope" in out
+    assert "· invalid 3" in out
+    assert "❌ line" in out and "decision url needs photo_url" in out
+    assert "no such library id" in out and "is no longer in the library (re-split or re-mastered?)" in out
+
+
+def test_an_unreadable_resolutions_file_imports_nothing(mixed, tmp_path, capsys):
+    bad = tmp_path / "notes.csv"
+    bad.write_text("name;size\nx;1\n", encoding="utf-8")
+    res = mixed.run("--resolutions", str(bad), out=tmp_path / "run", capsys=capsys)
+    assert f"❌ --resolutions {bad}: ValueError: notes.csv is not a failed-objects / resolutions CSV" in res["stdout"]
+    assert all(r["user_decision"] is None for r in res["rows"])
+
+
+def test_objects_resolved_earlier_leave_the_todo_list(mixed, tmp_path):
+    library = mvcommon.load_library()
+    library[M_WHOLE]["gphotos"] = mvcommon.new_gphotos_block(library[M_WHOLE]["hash"], accounts={"movies": {
+        "photo_id": "AF1QipFAKEmanual0001xxxxxxxx", "verified_by": "manual", "source": "manual",
+        "verified_at": "2026-09-30T10:00:00Z"}})
+    mvcommon.save_library(library)
+    mvcommon.append_hint(dict(HINT, kind="datetime", taken_ms=1, gmt_offset_min=480, taken_local="2022-02-05T19:49:46"))
+    res = mixed.run(out=tmp_path / "run")
+    rows = by_key(res)
+    assert (rows[(M_WHOLE, "whole")]["user_decision"], rows[(T_EP1, "whole")]["user_decision"]) == (
+        "url (recorded)", "datetime (recorded)")
+    todo = {(r["manual_id"], r["object"]) for r in _read_csv(os.path.join(res["run_dir"], "resolutions_todo.csv"))}
+    assert (M_WHOLE, "whole") not in todo and (T_EP1, "whole") not in todo and (T_EP2, "whole") in todo
+    assert rows[(M_WHOLE, "whole")]["reason"] == "probable"            # still unresolved until check_photos hinted

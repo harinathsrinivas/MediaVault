@@ -925,7 +925,9 @@ def has_tmdb_token(name):
 #   * the learned sidecar `learned_<account>.jsonl` (the P-10 learned-record line — every producer writes
 #     through append_learned), its reducer and the PURE apply step the apply engine (PLAN Step 6) uses;
 #   * the failed list `failed.jsonl` with its regenerated Excel view `failed_objects.csv` (P-18), and the
-#     offline pending list (P-11).
+#     offline pending list (P-11);
+#   * the user's manual-resolution hints `hints.jsonl` (map_photos --resolutions; PLAN Step 9 (8)) that
+#     check_photos hinted verifies.
 # Rules: stdlib + gpweb only (never main / mainfetch); library-READ-only — the apply engine is the only
 # writer of `gphotos` blocks; every state path is derived from GPHOTOS_STATE_DIR at call time.
 
@@ -986,6 +988,10 @@ _REDUCED_KEYS = (("account", "sha256", "manual_id", "label", "photo_id") + _ITEM
                  + ("proof", "source", "at", "content_key", "approach", "alternates", "dead", "search_override"))
 _FAILED_KEYS = ("at", "run", "account", "category", "manual_id", "label", "sha256", "uploaded_name",
                 "expected_taken_local", "tried", "candidates", "reason")
+GP_HINT_KINDS = ("url", "datetime")   # the user's manual resolutions (PLAN Step 9 (8)) check_photos hinted verifies
+_HINT_KEYS = ("v", "at", "account", "manual_id", "label", "sha256", "kind", "photo_id", "taken_ms", "gmt_offset_min",
+              "taken_local", "source")
+_TAKEN_LOCAL_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
 _TRIED_KEYS = ("approach", "outcome", "n")
 _OBJECT_KINDS_WHOLE = ("whole", "extra_whole")
 _OBJECT_KINDS_PART = ("chunk", "holder", "extra_chunk")
@@ -2053,6 +2059,76 @@ def read_failed(errors=None):
     """The failed list in append order. Torn-line tolerant exactly like read_learned (skipped lines are
     reported to `errors` when it is a list). [] when there is no failed list."""
     return _read_jsonl(failed_path(), lambda raw: _normalize_failed(raw, fill=False), errors)
+
+
+# ------------------------------------------------------------- the hints (PLAN Step 9 (8))
+
+def hints_path():
+    """~/.mediavault/gphotos/hints.jsonl — the user's manual resolutions (map_photos --resolutions --apply): where an
+    object's Google Photos item is, by the user's word. `check_photos hinted` (PLAN Step 13) verifies them before
+    anything becomes confirmed (P-5: manual is the weakest proof)."""
+    return os.path.join(GPHOTOS_STATE_DIR, "hints.jsonl")
+
+
+def _normalize_hint(record, fill=True):
+    """Validate one hint; -> its canonical form (None values dropped, keys in order). fill: stamp a missing `v` /
+    `at` / `source` (the write path). Raises ValueError."""
+    if not isinstance(record, dict):
+        raise ValueError("hint: expected a dict")
+    unknown = sorted(str(k) for k in record if k not in _HINT_KEYS)
+    if unknown:
+        raise ValueError(f"hint: unknown key(s) {unknown}")
+    r = {k: v for k, v in record.items() if v is not None}
+    if fill:
+        r.setdefault("v", _LEARNED_VERSION)
+        r.setdefault("at", _iso_now())
+        r.setdefault("source", "resolutions")
+    if not (_is_int(r.get("v")) and r["v"] == _LEARNED_VERSION):
+        raise ValueError(f"hint: v must be {_LEARNED_VERSION}")
+    if _parse_at(r.get("at")) is None:
+        raise ValueError("hint: `at` must be an ISO-8601 UTC time ending in Z")
+    if r.get("account") not in GP_ACCOUNTS:
+        raise ValueError(f"hint: account must be one of {GP_ACCOUNTS}")
+    if not _text(r.get("manual_id")):
+        raise ValueError("hint: manual_id is required")
+    if not _is_sha256(r.get("sha256")):
+        raise ValueError("hint: sha256 must be the object's 64-hex SHA-256")
+    if "label" in r and not isinstance(r["label"], str):
+        raise ValueError("hint: label must be a string")
+    if not _text(r.get("source")):
+        raise ValueError("hint: source must be a non-empty string")
+    if r.get("kind") == "url":
+        if not (isinstance(r.get("photo_id"), str) and gpweb.MEDIA_KEY_RE.match(r["photo_id"])):
+            raise ValueError("hint: a url hint names the item's photo_id")
+        if any(k in r for k in ("taken_ms", "gmt_offset_min", "taken_local")):
+            raise ValueError("hint: a url hint carries no time")
+    elif r.get("kind") == "datetime":
+        if not _is_int(r.get("taken_ms")):
+            raise ValueError("hint: a datetime hint needs taken_ms (UTC epoch ms)")
+        if not (_is_int(r.get("gmt_offset_min")) and -14 * 60 <= r["gmt_offset_min"] <= 14 * 60):
+            raise ValueError("hint: gmt_offset_min must be minutes east of UTC (-840..840)")
+        if not (isinstance(r.get("taken_local"), str) and _TAKEN_LOCAL_RE.match(r["taken_local"])):
+            raise ValueError("hint: taken_local must look like YYYY-MM-DDTHH:MM:SS")
+        if "photo_id" in r:
+            raise ValueError("hint: a datetime hint carries no photo_id")
+    else:
+        raise ValueError(f"hint: kind must be one of {GP_HINT_KINDS}")
+    return _ordered(r, _HINT_KEYS)
+
+
+def append_hint(record):
+    """Append one hint to hints.jsonl: {account, manual_id, label, sha256 (the object's CURRENT hash), kind: url
+    (photo_id) | datetime (taken_ms, gmt_offset_min, taken_local)}; `v`, `at` and `source` ('resolutions') are filled.
+    One UTF-8 JSON line, fsynced. Returns the record; ValueError for an invalid one, OSError when it cannot be
+    written. Dry runs never call it."""
+    rec = _normalize_hint(record)
+    _append_jsonl(hints_path(), rec)
+    return rec
+
+
+def read_hints(errors=None):
+    """The hints in append order; torn-line tolerant like read_learned. [] when there are none."""
+    return _read_jsonl(hints_path(), lambda raw: _normalize_hint(raw, fill=False), errors)
 
 
 def write_failed_csv(path, rows):

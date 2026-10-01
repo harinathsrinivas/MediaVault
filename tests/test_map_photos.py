@@ -1613,3 +1613,39 @@ def test_apply_never_opens_a_rollback_journal(world, tmp_path, monkeypatch):
     res = world.run("--apply", "--repair", "split-info,names", out=tmp_path / "run")
     assert res["applied"]["engine"]["status"] == "saved"
     assert not [p for p in tmp_path.rglob("*") if p.name == main.TXN_JOURNAL_NAME]
+
+
+# ============================================================================ 9.10 --devices-only
+
+def test_devices_only_is_just_the_read_only_device_report(world, tmp_path, monkeypatch, capsys):
+    """§M2: which objects are still on a Pixel (awaiting backup) vs freed — no inventory, no Google Photos, nothing
+    written but the run directory."""
+    world.save()
+    world.on_phone("series", world.names[(T_EP1, "whole")])
+    world.on_phone("movies", _sidecar(world, (M_WHOLE, "whole")))
+    monkeypatch.setattr(main, "_mp_inventory_states", lambda: pytest.fail("--devices-only must not read the inventory"))
+    before, state = library_files(world.sandbox), state_files()
+    res = world.run("--devices-only", out=tmp_path / "run", capsys=capsys)
+    assert library_files(world.sandbox) == before and state_files() == state
+    states = {(o["manual_id"], o["label"]): o["state"] for o in res["objects"]}
+    assert states[(T_EP1, "whole")] == "on_device" and states[(M_WHOLE, "whole")] == "freed"
+    assert states[(O_MATCH, "whole")] == "absent"
+    out = res["stdout"]
+    assert out.startswith("=== MAP PHOTOS — device check only (read-only) — scope: all — 13 object(s) ===")
+    assert "Verdicts: on_device 1 · freed 1 · absent 11" in out
+    assert f"    {T_EP1} · whole — on series (FAKESER0002)" in out
+    assert "Freed from a phone (1) — only the .mvmeta.json sidecar is left" in out
+    assert sorted(os.listdir(res["run_dir"])) == ["devices.csv", "summary.txt"]
+    rows = {(r["manual_id"], r["object"]): r for r in _read_csv(os.path.join(res["run_dir"], "devices.csv"))}
+    assert rows[(T_EP1, "whole")]["state"] == "on_device" and "FAKESER0002" in rows[(T_EP1, "whole")]["copies"]
+    assert rows[(M_WHOLE, "whole")]["sidecars"].startswith("movies (FAKEMOV0001) /sdcard/Media/X/")
+
+
+def test_devices_only_says_which_phone_was_not_listed(world, tmp_path, capsys):
+    world.save()
+    world.devices["complete"] = False
+    world.devices["devices"]["movies"].update(status="not-connected", detail="adb devices does not list it", files=[])
+    res = world.run("--devices-only", "--account", "tv", out=tmp_path / "run", capsys=capsys)
+    assert {o["manual_id"] for o in res["objects"]} == {T_SEASON, T_EP1, T_EP2}
+    assert {o["state"] for o in res["objects"]} == {"unchecked"}
+    assert "Unchecked (3) — a configured phone was not listed: movies (FAKEMOV0001) not-connected" in res["stdout"]

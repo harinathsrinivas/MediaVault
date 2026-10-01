@@ -12250,6 +12250,8 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
         if not ids:
             print(f"❌ map_photos: no library id is or starts with {scope!r}.")
             return {"status": "error", "run_dir": None, "rows": [], "fresh": {}}
+    if devices_only:
+        return _mp_devices_only(library, scope, ids, account, out, now)
     cache = {}
     ctx = _mp_compute(library, scope, ids, account, resolutions, now, cache)
     applied = preview = None
@@ -12262,10 +12264,9 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
     return _mp_finish(ctx, out, now)
 
 
-def _mp_compute(library, scope, ids, account, resolutions, now, cache):
-    """One complete, offline (but for the read-only device check) mapping pass over a loaded library -> ctx: scope,
-    account, library, objects, rows (verdicts, reasons, user decisions), fresh, devices, unmatched, resolution,
-    todo, notes, run."""
+def _mp_objects(library, ids, account):
+    """The uploaded objects in scope (ids None: the whole library) whose ROUTING account is `account` (any when None)
+    -> (objects, {(manual_id, label): route})."""
     import mainfetch  # P-4's routing constants and the validated mvconfig overrides — their single source
     overrides = mainfetch._account_overrides()
     prefix_map, default = mainfetch.ID_PREFIX_PROFILE, mainfetch.DEFAULT_PROFILE
@@ -12275,6 +12276,14 @@ def _mp_compute(library, scope, ids, account, resolutions, now, cache):
         if account is None or route["routing"] == account:
             objects.append(obj)
             routes[(obj["manual_id"], obj["label"])] = route
+    return objects, routes
+
+
+def _mp_compute(library, scope, ids, account, resolutions, now, cache):
+    """One complete, offline (but for the read-only device check) mapping pass over a loaded library -> ctx: scope,
+    account, library, objects, rows (verdicts, reasons, user decisions), fresh, devices, unmatched, resolution,
+    todo, notes, run."""
+    objects, routes = _mp_objects(library, ids, account)
     states = _mp_inventory_states()
     fresh = _mp_freshness(states, objects, routes, now)
     rows = _mp_match(objects, routes, _mp_index(states), fresh, library)
@@ -12290,6 +12299,48 @@ def _mp_compute(library, scope, ids, account, resolutions, now, cache):
     return {"scope": scope, "account": account, "library": library, "objects": objects, "rows": rows,
             "fresh": fresh, "devices": devices, "unmatched": unmatched, "resolution": resolution,
             "todo": _mp_todo(rows, run), "notes": [hint_problem], "run": run}
+
+
+def _mp_devices_only(library, scope, ids, account, out, now):
+    """`map_photos --devices-only` (PLAN Step 9 (10), §M2): ONLY the read-only device check of Step 8 for the objects
+    in scope — which are still on a phone (awaiting backup, or not freed yet) and which were freed (only the
+    `.mvmeta.json` sidecar is left) — printed, plus devices.csv in the run directory. No inventory, no Google
+    Photos, no library / sidecar / failed-list write."""
+    objects, _routes = _mp_objects(library, ids, account)
+    inventory = device_inventory()
+    result = classify_device_objects(library, inventory, objects=objects)
+    devices = {"complete": result["complete"], "incomplete": result["incomplete_devices"], "counts": result["counts"],
+               "devices": inventory.get("devices") or {}, "unconfigured": inventory.get("unconfigured") or []}
+    run_dir = _mp_run_dir(out, now)
+    os.makedirs(run_dir, exist_ok=True)
+    phones = lambda places: "; ".join(f"{p['alias']} ({p['serial']}) {p['path']}" for p in places)
+    _mp_write_csv(os.path.join(run_dir, "devices.csv"),
+                  ("manual_id", "object", "uploaded_name", "state", "copies", "size_match", "sidecars", "partials"),
+                  [(o["manual_id"], o["label"], o["uploaded_name"], o["state"], phones(o["copies"]),
+                    ", ".join(str(c["size_match"]) for c in o["copies"]), phones(o["sidecars"]), phones(o["partials"]))
+                   for o in result["objects"]])
+    lines = [f"=== MAP PHOTOS — device check only (read-only) — scope: {scope}"
+             f"{' · account ' + account if account else ''} — {len(objects):,} object(s) ==="]
+    lines.extend(_mp_device_lines(devices))
+    lines.append(f"Verdicts: {_mp_counts_line(result['counts']) or 'none'}")
+    on_phone = [o for o in result["objects"] if o["state"] == "on_device"]
+    if on_phone:
+        lines.append(f"On a phone ({len(on_phone):,}) — awaiting its backup, or backed up and not freed yet:")
+        lines.extend(f"    {o['manual_id']} · {o['label']} — on "
+                     + ", ".join(sorted({f"{c['alias']} ({c['serial']})" for c in o["copies"]
+                                         if c["size_match"] is not False}))
+                     for o in on_phone)
+    if result["counts"]["freed"]:
+        lines.append(f"Freed from a phone ({result['counts']['freed']:,}) — only the .mvmeta.json sidecar is left; "
+                     f"Google Photos must hold them (map_photos tells whether it does) — listed in devices.csv")
+    if result["counts"]["unchecked"]:
+        lines.append(f"Unchecked ({result['counts']['unchecked']:,}) — a configured phone was not listed: "
+                     + ", ".join(f"{a} ({(devices['devices'].get(a) or {}).get('serial')}) {s}"
+                                 for a, s in result["incomplete_devices"].items()))
+    lines.append(f"Outputs: {run_dir} — summary.txt, devices.csv")
+    _mp_write_text(os.path.join(run_dir, "summary.txt"), "\n".join(lines) + "\n")
+    print("\n".join(lines))
+    return {"status": "ok", "run_dir": run_dir, "devices": devices, "objects": result["objects"]}
 
 
 def _mp_finish(ctx, out, now):

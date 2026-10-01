@@ -6179,6 +6179,25 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
     if os.path.exists(parts_dir) and os.listdir(parts_dir):
         files_to_upload_paths = sorted(
             [os.path.join(parts_dir, f) for f in os.listdir(parts_dir) if f.endswith(".mkv")])
+        if not files_to_upload_paths:
+            # [IMP-C31] A non-empty _parts/ holding no .mkv is NOT a resume. The upload
+            # loop would run zero times, all_success would stay True, and the entry would
+            # be marked uploaded/onboarded with nothing sent (the next replace then dummies
+            # the master). Refuse before anything is journalled, like the free-space and
+            # unsplittable pre-flights: this pre-existing _parts/ is never touched (D-6),
+            # the library is not saved, and the journal records nothing. The journal is
+            # already open, so a crashed run's _parts/ was recovered above (IMP-R7).
+            found = sorted(os.listdir(parts_dir))
+            si = entry.get("split_info") or {}
+            resplit = f"{si['method']} {si['val']}" if si.get("method") and si.get("val") else "SIZE_GB <n>"
+            print(f"❌ Cannot resume {manual_id}: {parts_dir} is not empty but holds no chunk (.mkv) to upload.")
+            print(f"   Found: {', '.join(found[:5])}{' …' if len(found) > 5 else ''}")
+            print("   Nothing was uploaded, and the library entry is unchanged.")
+            print("   > If those are leftovers: delete that folder, then push again to re-split the")
+            print(f"     master (it is intact), e.g. push {manual_id} {resplit}")
+            print("   > Only if you have checked that every chunk already reached the device (e.g.")
+            print(f"     after `chunks` range pushes), mark it instead: set_uploaded {manual_id}")
+            return False
         print(f"   > 🔄 Resuming {len(files_to_upload_paths)} chunks found in temp folder.")
 
     # 2. NEW SPLIT LOGIC
@@ -6390,9 +6409,10 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             filtered_files = []
             for f in files_to_upload_paths:
                 # Extract chunk number from filename: .chunk.001.mkv
-                match = re.search(r'\.chunk\.(\d+)\.', os.path.basename(f))
-                if match:
-                    chunk_num = int(match.group(1))
+                # [IMP-C30] Read from the name's END: a title like `the.chunk.2019…`
+                # made the first-match regex number every chunk 2019.
+                chunk_num = mvcommon.chunk_index(os.path.basename(f))
+                if chunk_num is not None:
                     if start <= chunk_num <= end:
                         filtered_files.append(f)
                 else:
@@ -8775,7 +8795,9 @@ def cmd_scan_unprepped():
                     if f.lower().endswith(VIDEO_EXTENSIONS):
                         # Check for system files and chunks
                         if f.endswith(".temp_dummy"): continue
-                        if ".chunk." in f: continue
+                        # [IMP-C30] A chunk by its trailing ".chunk.NNN.mkv", never a
+                        # ".chunk." substring (that hid `the.chunk.2019.1080p.mkv`).
+                        if mvcommon.chunk_index(f) is not None: continue
 
                         full_path = os.path.join(root, f)
                         norm_path = os.path.normpath(full_path).lower()
@@ -10100,7 +10122,8 @@ def collect_reclaimable():
                     continue
                 if f.endswith(".temp_dummy"):
                     continue
-                if ".chunk." in f:
+                # [IMP-C30] Same chunk rule as cmd_scan_unprepped (mvcommon.chunk_index).
+                if mvcommon.chunk_index(f) is not None:
                     continue
                 full_path = os.path.join(root, f)
                 norm_key = os.path.normpath(full_path).lower()

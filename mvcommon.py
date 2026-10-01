@@ -778,6 +778,24 @@ def in_parts_dir(path, parts_dir):
             == os.path.normcase(os.path.abspath(parts_dir)))
 
 
+_CHUNK_NAME_RE = re.compile(r"\.chunk\.(\d+)\.mkv$")
+
+
+def chunk_index(name):
+    """The chunk number of a split-chunk file name, or None if `name` is not one.
+
+    THE rule for "is this file a chunk?". split_video_file writes every chunk as
+    "<stem>[ [<short_id>]].chunk.NNN.mkv", so a chunk name ENDS in
+    ".chunk.<digits>.mkv": the same case-sensitive test split_video_file's own
+    listing applies. It is NEVER a ".chunk." substring test. A real title such
+    as `the.chunk.2019.1080p.mkv` contains that substring, and the walkers that
+    used it (cmd_scan_unprepped, collect_reclaimable) silently skipped such a
+    video. Push's `chunks N-M` filter took the FIRST ".chunk.<digits>." and so
+    numbered every chunk of that title 2019 (IMP-C30). Pure string test."""
+    m = _CHUNK_NAME_RE.search(name)
+    return int(m.group(1)) if m else None
+
+
 # ==========================================
 #         PROVIDER TOKENS (folder names)
 # ==========================================

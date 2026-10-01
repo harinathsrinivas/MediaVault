@@ -529,3 +529,74 @@
 - If skipped: any whole-file push of a title stored under a `…_parts…` folder silently deletes the local master and leaves an untagged copy in the cloud.
 - Merge note for IMP-C25: that branch keeps the substring test in its `snapshot_push_objects`, and its `cmd_push` still passes `SPLIT_DIR_NAME`. When it next merges `main`, keep this rule in both places. Its `push_one_extra` already passes the item's own chunk dir, which `in_parts_dir` accepts as is.
 - Status: done (`fix/imp_c28_push_parts_substring`)
+
+---
+
+## IMP-C30: walkers and the `chunks N-M` filter recognised a chunk by a `.chunk.` substring — a real video named like `the.chunk.2019.1080p.mkv` was hidden from `scan_unprepped` and the reclaim scan, and its chunks were numbered 2019
+
+- Category: bug
+- Priority: medium (Band 0 — a silent wrong result in two read-only reports, plus a misleading refusal; no data loss)
+- Files: `mvcommon.py` — new `chunk_index` (`mvcommon.py:784`). `main.py` — `cmd_scan_unprepped` (pre-fix `main.py:8778`), `collect_reclaimable` PASS 1 (pre-fix `main.py:10103`), and `cmd_push`'s `chunks N-M` filter (pre-fix `main.py:6393`). Found by the IMP-C28 executor's audit. Investigated and fixed on `fix/imp_c28_followups` after the user's 2026-10-01 ruling ("Investigate + fix now").
+- Current behavior (before fix):
+  - `cmd_scan_unprepped` and `collect_reclaimable` skipped every video whose file name contained `.chunk.`. `collect_reclaimable` is the read-only scan behind `web`'s Disk Reclaim view (`/api/reclaim`), and it also supplies the unprepped rows of the web folder tree (`build_tree`, `/api/tree`). The test was case-sensitive, so `The.Chunk.Of.Gold.2004.mkv` was never affected, but a lower-case release name such as `the.chunk.2019.1080p.web.h264.mkv` was. That real, unprepped video was missing from both reports, and `scan_unprepped` could end with `✅ All libraries are completely in sync.`
+  - `cmd_push`'s `chunks N-M` filter took the FIRST `.chunk.<digits>.` in a chunk's name. Every chunk of such a title (`the.chunk.2019.1080p [<short_id>].chunk.001.mkv`) was numbered 2019, so a range push refused with `No chunks found in range`. Only a range covering 2019 would have selected them, all at once.
+  - The skip only ever needed to catch a stray chunk. Real chunks live in `_parts/`, fetched chunks in `restore/`, and extras chunks in `<extra folder>/_parts/<short_id>`, and both walkers prune all of those.
+- Impact: no data loss. The walkers are read-only, and a range push never marks an entry onboarded. A hidden file is simply absent from both reports, so it can go unarchived without anyone noticing. Real-library check (read-only, 2026-10-01): 0 on-disk videos falsely skipped, 0 library or extras file names containing `.chunk.`, and 0 titles whose chunks the old filter would misnumber.
+- Fix (implemented): one shared rule, `mvcommon.chunk_index(name)`. It returns the number in a name that ENDS in `.chunk.<digits>.mkv` (case-sensitive), else None. That is exactly what `split_video_file`'s own listing accepts (`main.py:428`), so the walkers' notion of a chunk is the producer's. Both walkers skip a file only when `chunk_index` returns a number (`main.py:8800`, `main.py:10126`), and the range filter numbers a chunk by it (`main.py:6414`). This follows the IMP-C18/C22/C23/C28 precedent: one shared mvcommon rule instead of drifting copies.
+- Audit of every `.chunk.` test in `main.py`, `mainfetch.py`, `mvcommon.py`, `gpcapture.py`, `tools/` and `webui/` (`gpweb.py` does not exist on `main`):
+  - **Fixed:** the two walkers (`".chunk." in f`) and the `chunks N-M` filter (`re.search(r'\.chunk\.(\d+)\.')`, an unanchored first match).
+  - **Safe, left unchanged:**
+    - `split_video_file`'s listing (`main.py:428`): end-anchored `\.chunk\.\d+\.mkv$`, over its own output dir only. It is the reference the new rule mirrors.
+    - `gpcapture._CHUNK_RE` (`gpcapture.py:32`): end-anchored, and consulted only for a file already inside the push's chunk dir (`in_parts_dir`), to label it chunk or holder.
+    - `push_one_extra`'s resume (`main.py:5875`): selects `.mkv` files inside the item's own chunk dir; no `.chunk.` test.
+    - `mainfetch.py` reads chunk names only from `split_info`, never from a file name. `tools/` has no chunk test, and `webui/server.py` only parses progress lines.
+  - **Not chunk tests:** `cmd_prep_season` (`main.py:5522`) and the season autopilot's pre-flight (`main.py:8911`) list a season folder non-recursively, so `_parts/`, a sub-folder, is never listed.
+- Rollback change-gate: not crossed. The walkers are read-only. The range filter runs before any upload and only selects which files a range push sends. The journal, PONR placement, what is journalled, the O-1 resume message and `recover_journal` are untouched. No `ENTRY_TYPE_KEYS` involvement.
+- Tests: `tests/test_chunk_filename_rule.py` has 17 hermetic tests (`sandbox`, `make_video`, `mock_device`):
+  - **The reproduction:** 2 lookalike names × both walkers, and a resumed range push that must number the chunks 1 and 2, not 2019.
+  - **Regression pins:** a tagged and an untagged (legacy) chunk lying loose in a title folder, plus one inside `_parts/`, are still skipped by both walkers.
+  - **The shared rule:** its unit semantics over 10 names, and a drift pin. The pin drives the real `split_video_file` (mkvmerge stubbed) and proves the rule accepts exactly the files the producer returns.
+
+  Disarm probes: 9/9 caught, each failing exactly the expected tests. Full suite 1033 passed; smoke 82 passed.
+- Effort estimate: small · Risk: low. Only a name that contains `.chunk.` without ending like a chunk changes classification. Every chunk the split ever wrote still matches, including untagged legacy names.
+- If skipped: a real video whose lower-case name contains `.chunk.` stays invisible to both disk reports, and range pushes of such a title stay unusable.
+- Status: done (`fix/imp_c28_followups`)
+
+---
+
+## IMP-C31: `cmd_push` "resumed" a non-empty `_parts/` that held no chunk — it uploaded nothing, marked the entry onboarded, and the next `replace` dummied the master
+
+- Category: bug
+- Priority: high (Band 0 — a "successful" push with nothing uploaded; the autopilot's `replace` leg then destroys the only copy)
+- Files: `main.py` — `cmd_push`'s resume branch (pre-fix `main.py:6178-6182`; the refusal is `main.py:6182-6200`). Found by the IMP-C28 executor while reading that branch. Reproduced and fixed on `fix/imp_c28_followups` after the user's 2026-10-01 ruling ("Investigate + fix now").
+- Current behavior (before fix):
+  - `cmd_push` took the resume branch whenever `<folder>/_parts/` existed and was non-empty, then uploaded only the `.mkv` files in it. If the dir held no `.mkv` at all, the resume list was empty and the upload loop (pre-fix `main.py:6436`) ran zero times. `all_success` stayed True, so the push wrote the remote `.mvmeta.json` sidecar, set `uploaded=True` / `status="onboarded"` and printed `✅ SUCCESS.` (pre-fix `main.py:6547-6565`). With `chunks N-M` it printed `✅ Partial Upload Complete` instead (pre-fix `main.py:6580`).
+  - What can leave such a dir:
+    - the transient FLAC extract (`<base> [<short_id>].flac`, or its `.verify.flac`) that `_carry_out_flac_track` writes into `_parts/`, after a kill in a run whose `_parts/` pre-existed, so the journal never recorded it. A crash the journal DID record is recovered by IMP-R7 when the next push opens its journal, so it never reaches the resume branch;
+    - a stray or OS file (`notes.txt`, `Thumbs.db`, `desktop.ini`) after the chunks were removed by hand;
+    - a sub-folder.
+  - The hermetic end-to-end reproduction ran `prep_push_rep` with `_parts/` holding only `notes.txt`. It printed `🔄 Resuming 0 chunks found in temp folder.`, then `✅ SUCCESS.`, then `✅ Replaced/Archived`. The device held only the `.mvmeta.json` sidecar, the 264,000-byte master had become the 5-byte test dummy, and the entry read `archived` / `uploaded=True`. `cmd_replace` gates only on `uploaded` (pre-fix `main.py:6908`), so nothing stopped it.
+- Impact: total loss of the title. The master is dummied while none of it is in the cloud, and the library says it is archived. Real-library check (read-only, 2026-10-01): no leaf folder has a `_parts/` today and 0 entries are still `local_ready`, so nothing is affected now.
+- Fix (implemented): in the resume branch, when `_parts/` is non-empty but holds no `.mkv`, `cmd_push` refuses and explains (`main.py:6182-6200`). It names the dir, lists what it found, and says nothing was uploaded and the entry is unchanged. It then hands over two commands: delete the folder and re-split the intact master (`push <id> <the recorded split>`), or, only once every chunk is confirmed on the device, `set_uploaded <id>`.
+  - A `_parts/` that holds a chunk, or the FLAC holder, resumes exactly as before. An empty `_parts/` is still not a resume.
+  - This mirrors `push_one_extra`, whose resume already requires at least one `.mkv` (`main.py:5875`). Unlike extras, the main push refuses instead of re-splitting into the pre-existing dir. Chunks created there would never be journalled (D-6), so a later pre-upload failure would pop `split_info` and leave them behind, to be "resumed" without it: the D1 hazard IMP-D21 closed for extras.
+- Rollback change-gate: assessed, not crossed.
+  - The refusal sits after the journal opens (`main.py:6173`), so IMP-R7 still recovers a crashed run's leftover first. It comes before any journalled action. It records nothing, marks no PONR, calls neither `rollback` nor `commit`, never touches the pre-existing `_parts/` (D-6) and does not save the library.
+  - That is the exit shape of the two existing pre-flight refusals, free space (`main.py:6236`) and unsplittable track (`main.py:6251`), down to the zero-record journal they leave (pinned by `tests/test_unsplittable_preflight.py`). Like them it prints its own remedy instead of the O-1 `Resume with: push <id>` line, which would loop straight back into the refusal.
+  - The O-1 failure branches (pre-upload rollback, post-upload resume message), `recover_journal`, PONR placement, the season resume-range messaging and `RollbackHardFail` are untouched.
+  - The only behaviour change: a push that wrongly returned True and marked the entry onboarded with nothing uploaded now returns False and changes nothing. That restores the documented rule ("Only mark as 'onboarded' if we uploaded ALL chunks", `main.py:6567`; O-1: the entry stays `local_ready` until its content is up).
+- Tests: `tests/test_push_resume_needs_chunks.py` has 17 hermetic tests (`sandbox`, `mock_device`, `make_video`; `stub_tech_specs` + `fake_dummy` for the autopilot):
+  - **The reproduction:** 4 leftovers (FLAC extract, stray text file, `.partial` remnant, sub-folder) × 3 calls (plain, with split args, `chunks 1-2`). The push returns False, the library is unchanged, nothing reaches the device, the chunk dir and master are untouched, the journal records nothing, and the refusal names the dir and what it holds. Plus the whole loss through `prep_push_rep`: the master must survive.
+  - **Regression pins:** a stray file beside real chunks does not block their resume; a dir holding only the FLAC holder still resumes; a crashed carry-out's journalled `_parts/` is recovered (IMP-R7) before the resume check and the push re-splits; an empty `_parts/` is not a resume.
+
+  Disarm probes: 10/10 caught, each failing exactly the expected tests. Full suite 1050 passed; smoke 82 passed.
+- Related finding, NOT fixed here (unregistered; it needs a ruling because it changes which files a resume uploads):
+  - `_parts/` belongs to a FOLDER, not an entry. `cmd_prep` sets an episode's `folder_path` to its season folder (`main.py:1416`), so every episode of a season shares `Season NN/_parts/`, and the resume branch uploads every `.mkv` there without checking whose chunks they are.
+  - A hermetic scratch run left episode 1's chunk 002 in the shared dir (an interrupted push). `push <episode 2>` then uploaded episode 1's chunk, marked episode 2 `onboarded` / `uploaded=True`, and a following `replace` dummied episode 2's master.
+  - `push_group` makes this likely, because it ignores a failed `cmd_push` and moves on to the next episode.
+  - Real library: 73 folders are shared by more than one leaf (1131 leaves); 0 are exposed today.
+  - Same root cause, also unfixed: if `_parts/` already existed before a push whose split or first upload then failed, that push's leftovers stay there, because D-6 never records a pre-existing dir. They can be complete chunks whose `split_info` the rollback popped, a partial `.chunk.NNN.mkv` from a failed or killed mkvmerge, or just the FLAC `.holder.mkv` from a killed carry-out. The next push "resumes" them and marks the entry onboarded with no `split_info`. A hermetic scratch run on the FIXED code confirmed it: a holder-only and a partial-chunk remnant each made the push return True and upload only that remnant, and a following `replace` dummied the master.
+  - One rule would close all of these: a resume uploads only the files recorded in this entry's `split_info` (its chunks and carried-out holder) and refuses anything else. IMP-C31's refusal is the empty case of that rule, so it stays valid if the rule is adopted.
+- Effort estimate: small · Risk: low. Only a non-empty `_parts/` with no `.mkv` changes outcome, from a false success to a refusal. Every genuine resume is unchanged. No `ENTRY_TYPE_KEYS` involvement.
+- If skipped: any leftover-only `_parts/` turns the next push of that entry (or of any entry sharing the folder) into a false success, and an autopilot run then destroys the master.
+- Status: done (`fix/imp_c28_followups`)

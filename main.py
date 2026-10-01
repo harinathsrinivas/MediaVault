@@ -6179,6 +6179,25 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
     if os.path.exists(parts_dir) and os.listdir(parts_dir):
         files_to_upload_paths = sorted(
             [os.path.join(parts_dir, f) for f in os.listdir(parts_dir) if f.endswith(".mkv")])
+        if not files_to_upload_paths:
+            # [IMP-C31] A non-empty _parts/ holding no .mkv is NOT a resume. The upload
+            # loop would run zero times, all_success would stay True, and the entry would
+            # be marked uploaded/onboarded with nothing sent (the next replace then dummies
+            # the master). Refuse before anything is journalled, like the free-space and
+            # unsplittable pre-flights: this pre-existing _parts/ is never touched (D-6),
+            # the library is not saved, and the journal records nothing. The journal is
+            # already open, so a crashed run's _parts/ was recovered above (IMP-R7).
+            found = sorted(os.listdir(parts_dir))
+            si = entry.get("split_info") or {}
+            resplit = f"{si['method']} {si['val']}" if si.get("method") and si.get("val") else "SIZE_GB <n>"
+            print(f"❌ Cannot resume {manual_id}: {parts_dir} is not empty but holds no chunk (.mkv) to upload.")
+            print(f"   Found: {', '.join(found[:5])}{' …' if len(found) > 5 else ''}")
+            print("   Nothing was uploaded, and the library entry is unchanged.")
+            print("   > If those are leftovers: delete that folder, then push again to re-split the")
+            print(f"     master (it is intact), e.g. push {manual_id} {resplit}")
+            print("   > Only if you have checked that every chunk already reached the device (e.g.")
+            print(f"     after `chunks` range pushes), mark it instead: set_uploaded {manual_id}")
+            return False
         print(f"   > 🔄 Resuming {len(files_to_upload_paths)} chunks found in temp folder.")
 
     # 2. NEW SPLIT LOGIC

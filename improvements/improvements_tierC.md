@@ -529,3 +529,35 @@
 - If skipped: any whole-file push of a title stored under a `…_parts…` folder silently deletes the local master and leaves an untagged copy in the cloud.
 - Merge note for IMP-C25: that branch keeps the substring test in its `snapshot_push_objects`, and its `cmd_push` still passes `SPLIT_DIR_NAME`. When it next merges `main`, keep this rule in both places. Its `push_one_extra` already passes the item's own chunk dir, which `in_parts_dir` accepts as is.
 - Status: done (`fix/imp_c28_push_parts_substring`)
+
+---
+
+## IMP-C30: walkers and the `chunks N-M` filter recognised a chunk by a `.chunk.` substring — a real video named like `the.chunk.2019.1080p.mkv` was hidden from `scan_unprepped` and the reclaim scan, and its chunks were numbered 2019
+
+- Category: bug
+- Priority: medium (Band 0 — a silent wrong result in two read-only reports, plus a misleading refusal; no data loss)
+- Files: `mvcommon.py` — new `chunk_index` (`mvcommon.py:784`). `main.py` — `cmd_scan_unprepped` (pre-fix `main.py:8778`), `collect_reclaimable` PASS 1 (pre-fix `main.py:10103`), and `cmd_push`'s `chunks N-M` filter (pre-fix `main.py:6393`). Found by the IMP-C28 executor's audit. Investigated and fixed on `fix/imp_c28_followups` after the user's 2026-10-01 ruling ("Investigate + fix now").
+- Current behavior (before fix):
+  - `cmd_scan_unprepped` and `collect_reclaimable` skipped every video whose file name contained `.chunk.`. `collect_reclaimable` is the read-only scan behind `web`'s Disk Reclaim view (`/api/reclaim`), and it also supplies the unprepped rows of the web folder tree (`build_tree`, `/api/tree`). The test was case-sensitive, so `The.Chunk.Of.Gold.2004.mkv` was never affected, but a lower-case release name such as `the.chunk.2019.1080p.web.h264.mkv` was. That real, unprepped video was missing from both reports, and `scan_unprepped` could end with `✅ All libraries are completely in sync.`
+  - `cmd_push`'s `chunks N-M` filter took the FIRST `.chunk.<digits>.` in a chunk's name. Every chunk of such a title (`the.chunk.2019.1080p [<short_id>].chunk.001.mkv`) was numbered 2019, so a range push refused with `No chunks found in range`. Only a range covering 2019 would have selected them, all at once.
+  - The skip only ever needed to catch a stray chunk. Real chunks live in `_parts/`, fetched chunks in `restore/`, and extras chunks in `<extra folder>/_parts/<short_id>`, and both walkers prune all of those.
+- Impact: no data loss. The walkers are read-only, and a range push never marks an entry onboarded. A hidden file is simply absent from both reports, so it can go unarchived without anyone noticing. Real-library check (read-only, 2026-10-01): 0 on-disk videos falsely skipped, 0 library or extras file names containing `.chunk.`, and 0 titles whose chunks the old filter would misnumber.
+- Fix (implemented): one shared rule, `mvcommon.chunk_index(name)`. It returns the number in a name that ENDS in `.chunk.<digits>.mkv` (case-sensitive), else None. That is exactly what `split_video_file`'s own listing accepts (`main.py:428`), so the walkers' notion of a chunk is the producer's. Both walkers skip a file only when `chunk_index` returns a number (`main.py:8781`, `main.py:10107`), and the range filter numbers a chunk by it (`main.py:6395`). This follows the IMP-C18/C22/C23/C28 precedent: one shared mvcommon rule instead of drifting copies.
+- Audit of every `.chunk.` test in `main.py`, `mainfetch.py`, `mvcommon.py`, `gpcapture.py`, `tools/` and `webui/` (`gpweb.py` does not exist on `main`):
+  - **Fixed:** the two walkers (`".chunk." in f`) and the `chunks N-M` filter (`re.search(r'\.chunk\.(\d+)\.')`, an unanchored first match).
+  - **Safe, left unchanged:**
+    - `split_video_file`'s listing (`main.py:428`): end-anchored `\.chunk\.\d+\.mkv$`, over its own output dir only. It is the reference the new rule mirrors.
+    - `gpcapture._CHUNK_RE` (`gpcapture.py:32`): end-anchored, and consulted only for a file already inside the push's chunk dir (`in_parts_dir`), to label it chunk or holder.
+    - `push_one_extra`'s resume (`main.py:5875`): selects `.mkv` files inside the item's own chunk dir; no `.chunk.` test.
+    - `mainfetch.py` reads chunk names only from `split_info`, never from a file name. `tools/` has no chunk test, and `webui/server.py` only parses progress lines.
+  - **Not chunk tests:** `cmd_prep_season` (`main.py:5522`) and the season autopilot's pre-flight (`main.py:8889`) list a season folder non-recursively, so `_parts/`, a sub-folder, is never listed.
+- Rollback change-gate: not crossed. The walkers are read-only. The range filter runs before any upload and only selects which files a range push sends. The journal, PONR placement, what is journalled, the O-1 resume message and `recover_journal` are untouched. No `ENTRY_TYPE_KEYS` involvement.
+- Tests: `tests/test_chunk_filename_rule.py` has 17 hermetic tests (`sandbox`, `make_video`, `mock_device`):
+  - **The reproduction:** 2 lookalike names × both walkers, and a resumed range push that must number the chunks 1 and 2, not 2019.
+  - **Regression pins:** a tagged and an untagged (legacy) chunk lying loose in a title folder, plus one inside `_parts/`, are still skipped by both walkers.
+  - **The shared rule:** its unit semantics over 10 names, and a drift pin. The pin drives the real `split_video_file` (mkvmerge stubbed) and proves the rule accepts exactly the files the producer returns.
+
+  Disarm probes: 9/9 caught, each failing exactly the expected tests. Full suite 1033 passed; smoke 82 passed.
+- Effort estimate: small · Risk: low. Only a name that contains `.chunk.` without ending like a chunk changes classification. Every chunk the split ever wrote still matches, including untagged legacy names.
+- If skipped: a real video whose lower-case name contains `.chunk.` stays invisible to both disk reports, and range pushes of such a title stay unusable.
+- Status: done (`fix/imp_c28_followups`)

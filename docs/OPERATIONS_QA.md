@@ -382,6 +382,26 @@ python -c "import os, mvcommon as m; [print(k, e.get('status')) for k, e in m.lo
 - The one-liner lists every uploaded whole-file entry whose path contains `_parts`, including ones
   `replace` has already archived. Check each one's name on the phone or in Google Photos.
 
+### `scan_unprepped` and the reclaim view skipped a real video named like `the.chunk.2019…` — IMP-C30, fixed
+
+**Symptom.** A real, unprepped video whose lower-case file name contains `.chunk.` was missing from
+`scan_unprepped` and from the web Disk Reclaim view and folder tree. An example is
+`the.chunk.2019.1080p.web.h264.mkv`. `scan_unprepped` could even end with
+`✅ All libraries are completely in sync.` For such a title, `push <id> chunks 1-2` refused with
+`No chunks found in range`.
+
+**Why.** Before IMP-C30, both scans skipped any file whose name merely *contained* `.chunk.`, meaning
+to hide leftover chunks. The `chunks N-M` filter read a chunk's number from the *first*
+`.chunk.<digits>.` in its name, which for that title is the year. The test was case-sensitive, so
+`The.Chunk.…` names were never hit.
+
+**Fixed:** a file is a chunk only if its name ends in `.chunk.<digits>.mkv`, the exact form the split
+writes (`mvcommon.chunk_index`, used at `main.py:8781`, `main.py:10107` and `main.py:6395`). Real
+chunks are still never listed, wherever they lie.
+
+**Is anything lost? No.** Both scans are read-only, and a range push never marks an entry onboarded.
+The file was simply not listed: run `python main.py scan_unprepped` again to see it.
+
 ---
 
 ## 4. CLI traps

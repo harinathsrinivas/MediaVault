@@ -6390,9 +6390,10 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             filtered_files = []
             for f in files_to_upload_paths:
                 # Extract chunk number from filename: .chunk.001.mkv
-                match = re.search(r'\.chunk\.(\d+)\.', os.path.basename(f))
-                if match:
-                    chunk_num = int(match.group(1))
+                # [IMP-C30] Read from the name's END: a title like `the.chunk.2019…`
+                # made the first-match regex number every chunk 2019.
+                chunk_num = mvcommon.chunk_index(os.path.basename(f))
+                if chunk_num is not None:
                     if start <= chunk_num <= end:
                         filtered_files.append(f)
                 else:
@@ -8775,7 +8776,9 @@ def cmd_scan_unprepped():
                     if f.lower().endswith(VIDEO_EXTENSIONS):
                         # Check for system files and chunks
                         if f.endswith(".temp_dummy"): continue
-                        if ".chunk." in f: continue
+                        # [IMP-C30] A chunk by its trailing ".chunk.NNN.mkv", never a
+                        # ".chunk." substring (that hid `the.chunk.2019.1080p.mkv`).
+                        if mvcommon.chunk_index(f) is not None: continue
 
                         full_path = os.path.join(root, f)
                         norm_path = os.path.normpath(full_path).lower()
@@ -10100,7 +10103,8 @@ def collect_reclaimable():
                     continue
                 if f.endswith(".temp_dummy"):
                     continue
-                if ".chunk." in f:
+                # [IMP-C30] Same chunk rule as cmd_scan_unprepped (mvcommon.chunk_index).
+                if mvcommon.chunk_index(f) is not None:
                     continue
                 full_path = os.path.join(root, f)
                 norm_key = os.path.normpath(full_path).lower()

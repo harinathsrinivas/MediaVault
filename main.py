@@ -11605,12 +11605,12 @@ MAP_UNMATCHED = ("superseded-split", "duplicate", "cross-account-copy", "mediava
 def _mp_unmatched(states, fresh, rows, objects):
     """PLAN Step 9 (6): every inventory item of a FRESH account that no object's verdict uses — categorized for the
     report, NEVER touched (stale cloud copies are never deleted) -> {account: [{category, item, owner, note}]}.
-    Categories: superseded-split (a chunk name of a library object — another upload of its split), duplicate
-    (another item with a library object's name or `[short_id]` tag in its own account), cross-account-copy (the
-    name of an object that lives in another account), mediavault-unknown (a `[short_id]`-tagged name no library
-    object claims — a removed entry?), non-mediavault (any other upload), possibly-deleted (absent from the latest
-    complete enumeration), errored (a record the crawler could not complete). Only meaningful for the WHOLE
-    library: the caller runs it for `map_photos all` without --account."""
+    Categories: superseded-split (a chunk with a library object's chunk name or `[short_id]` tag — another upload of
+    it as a split), duplicate (another whole item with a library object's name or tag in its own account),
+    cross-account-copy (the name of an object that lives in another account), mediavault-unknown (a
+    `[short_id]`-tagged name no library object claims — a removed entry?), non-mediavault (any other upload),
+    possibly-deleted (absent from the latest complete enumeration), errored (a record the crawler could not
+    complete). Only meaningful for the WHOLE library: the caller runs it for `map_photos all` without --account."""
     used = {}
     for row in rows:
         mine = used.setdefault(row["account"], set())
@@ -11648,7 +11648,8 @@ def _mp_unmatched(states, fresh, rows, objects):
                 category = "superseded-split" if gpweb.chunk_index(name) is not None else "duplicate"
             elif tag_owner is not None:
                 owner = rows_by_key.get(_mp_key(tag_owner))
-                category, note = "duplicate", "carries the object's [short_id] tag under another name"
+                category = "superseded-split" if gpweb.chunk_index(name) is not None else "duplicate"
+                note = "carries the object's [short_id] tag under another name"
             elif _MP_TAG_RE.search(name):
                 category = "mediavault-unknown"
             else:
@@ -11661,8 +11662,9 @@ def _mp_unmatched(states, fresh, rows, objects):
     return out
 
 
-_MP_REASONS = {"probable": "probable", "ambiguous": "ambiguous", "conflict": "wrong-item", "inconsistent": "inconsistent",
-               "missing-after-backup": "missing-after-backup", "missing-everywhere": "missing-everywhere",
+_MP_REASONS = {"probable": "probable", "ambiguous": "ambiguous", "conflict": "wrong-item",
+               "inconsistent": "inconsistent", "missing-after-backup": "missing-after-backup",
+               "missing-everywhere": "missing-everywhere",
                "device-check-incomplete": "not-found"}   # status -> P-18 failed-list reason (unresolved rows only)
 
 
@@ -11952,10 +11954,9 @@ def _mp_apply_lines(ctx):
         lines.append("Apply preview (dry run — nothing written):")
         lines.append(preview["warning"] if preview.get("status") == "error" and "changed" not in preview
                      else _mp_engine_line(preview, "would change"))
-        flags = " ".join([f"--repair {r}" for r in ctx["repairs"]] + (["--accept-probable"] if ctx["accept_probable"]
-                                                                     else []))
-        lines.append(f"Next: python main.py map_photos {ctx['scope']}{' --account ' + ctx['account'] if ctx['account'] else ''}"
-                     f"{' ' + flags if flags else ''} --apply")
+        flags = ([f"--account {ctx['account']}"] if ctx["account"] else []) + [f"--repair {r}" for r in ctx["repairs"]]
+        flags += ["--accept-probable"] if ctx["accept_probable"] else []
+        lines.append(f"Next: python main.py map_photos {ctx['scope']} {' '.join(flags + ['--apply'])}")
     return lines
 
 
@@ -12036,8 +12037,8 @@ def _mp_report(ctx):
                          f"{' [partial set]' if row['partial_set'] else ''} — {_mp_device_hint(row)}")
     told = [r for r in rows if r["user_decision"] == "not_uploaded"]
     if told:
-        lines.append(f"⚠️⚠️⚠️  YOU SAY NOT UPLOADED (IMP-C27): {len(told):,} object(s) — an archived entry keeps only a "
-                     f"dummy locally  ⚠️⚠️⚠️")
+        lines.append(f"⚠️⚠️⚠️  YOU SAY NOT UPLOADED (IMP-C27): {len(told):,} object(s) — an archived entry keeps only "
+                     f"a dummy locally  ⚠️⚠️⚠️")
         lines.extend(f"    {r['manual_id']} · {r['label']} (mapper verdict: {r['status']})" for r in told)
     resolution = ctx["resolution"]
     if resolution is not None and resolution["fatal"]:
@@ -12204,7 +12205,8 @@ def _mp_preview(ctx, repairs, accept_probable):
     try:
         existing = mvcommon.read_learned()
     except OSError as e:
-        return {"status": "error", "warning": f"⚠️  no apply preview: the learned sidecar is unreadable ({_gp_line(e)})"}
+        return {"status": "error",
+                "warning": f"⚠️  no apply preview: the learned sidecar is unreadable ({_gp_line(e)})"}
     return gphotos_apply(existing + records, capture=True, dry_run=True, names=names)
 
 

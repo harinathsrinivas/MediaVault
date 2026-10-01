@@ -1125,6 +1125,7 @@ def test_every_unused_inventory_item_is_categorized_never_touched(world, tmp_pat
     world.inv.add("movies", world.names[(M_WHOLE, "whole")], data=b"movie")
     dup = world.inv.add("movies", world.names[(M_WHOLE, "whole")], data=b"a re-encode")
     renamed = world.inv.add("movies", f"Old Name [{world.library[M_WHOLE]['short_id']}].mkv")
+    old_split = world.inv.add("movies", f"Old Name [{world.library[M_WHOLE]['short_id']}].chunk.001.mkv")
     cross = world.inv.add("tv", world.names[(M_WHOLE, "whole")], data=b"tv copy, other bytes")
     unknown = world.inv.add("movies", "Removed Entry 2001 [abcdef].mkv")
     phone = world.inv.add("anime", "PXL_20260101_123456789.mp4")
@@ -1142,6 +1143,8 @@ def test_every_unused_inventory_item_is_categorized_never_touched(world, tmp_pat
         ("movies", dup["photo_id"]): ("duplicate", f"{M_WHOLE} · whole", None),
         ("movies", renamed["photo_id"]): ("duplicate", f"{M_WHOLE} · whole",
                                           "carries the object's [short_id] tag under another name"),
+        ("movies", old_split["photo_id"]): ("superseded-split", f"{M_WHOLE} · whole",
+                                            "carries the object's [short_id] tag under another name"),
         ("movies", unknown["photo_id"]): ("mediavault-unknown", None, None),
         ("tv", cross["photo_id"]): ("cross-account-copy", f"{M_WHOLE} · whole", "the object lives in movies"),
         ("tv", gone["photo_id"]): ("possibly-deleted", None, None),
@@ -1151,9 +1154,10 @@ def test_every_unused_inventory_item_is_categorized_never_touched(world, tmp_pat
     assert set(res["unmatched"]) == {"movies", "tv", "anime"}                  # others: never crawled
     rows = _read_csv(os.path.join(res["run_dir"], "unmatched_movies.csv"))
     assert list(rows[0]) == ["category", "photo_id", "filename", "taken_utc", "upload_utc", "owner", "note"]
-    assert [r["category"] for r in rows] == ["superseded-split", "duplicate", "duplicate", "mediavault-unknown"]
-    assert rows[0]["taken_utc"] == "2024-03-09 06:03:02 UTC"
-    assert ("Unmatched inventory items (report only — never touched): movies 4 (superseded-split 1 · duplicate 2 · "
+    assert [r["category"] for r in rows] == ["superseded-split", "superseded-split", "duplicate", "duplicate",
+                                             "mediavault-unknown"]
+    assert {r["taken_utc"] for r in rows} == {"2024-03-09 06:03:02 UTC"}
+    assert ("Unmatched inventory items (report only — never touched): movies 5 (superseded-split 2 · duplicate 2 · "
             "mediavault-unknown 1)") in res["stdout"]
 
 

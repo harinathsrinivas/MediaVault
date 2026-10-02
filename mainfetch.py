@@ -69,6 +69,11 @@ def init_driver(profile_key="movies"):
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-session-crashed-bubble",
+        # [IMP-C29] Downloads must ride TCP. Google serves them over HTTP/3 (QUIC)
+        # when Chrome allows it, and a QUIC download fails for good after a stall
+        # of about 8 s ("Failed - Network error"; a Photos download cannot resume).
+        # Over TCP it survived a 60 s stall and ran 2-3x faster (measured live).
+        "--disable-quic",
         "about:blank"
     ]
 

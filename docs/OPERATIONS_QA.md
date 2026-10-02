@@ -361,8 +361,8 @@ were never hit.
 **Is anything lost? No bytes.**
 - The delete ran only after the upload and its rename had succeeded (`main.py:6496-6515`), so the
   cloud copy is the master's bytes, and the library `hash` still matches them.
-- Fetch searches a whole file by its plain local filename (`mainfetch.py:484`), which is exactly the
-  name that upload has, and it matches downloads by hash (`mainfetch.py:553-557`). So
+- Fetch searches a whole file by its plain local filename (`mainfetch.py:489`), which is exactly the
+  name that upload has, and it matches downloads by hash (`mainfetch.py:558-562`). So
   `fetch_restore <id>` is the way to get the master back.
 - What stays wrong is the name in the cloud. The `.mvmeta.json` sidecar (`main.py:5697`), the
   `search_term` and the identity capture all record the tagged name, so name-based matching
@@ -608,11 +608,11 @@ token against TMDB and compare the real title to the folder name — that is wha
 ### An episode lives in another Google account — how do I fetch it?
 
 Fetch picks the Chrome profile, and so the Google account, from the **id prefix**
-(`mainfetch.profile_for_id`, `mainfetch.py:894`): `mov-` → movies, `tv-` → tv, `ani-` → anime,
+(`mainfetch.profile_for_id`, `mainfetch.py:899`): `mov-` → movies, `tv-` → tv, `ani-` → anime,
 `oth-` → others. An item that was backed up to a *different* account is never found that way — the
 search runs in the wrong account. A single file ends `❌ ENTRY INCOMPLETE` after two ~5-minute waits
-(`mainfetch.py:516`); in a batch, the third empty search in a row aborts the run with a misleading
-*"Profile … is logged out"* message (`mainfetch.py:366`). The 2026-09-25 inventory mapping found
+(`mainfetch.py:521`); in a batch, the third empty search in a row aborts the run with a misleading
+*"Profile … is logged out"* message (`mainfetch.py:371`). The 2026-09-25 inventory mapping found
 **31 X-Files episodes (seasons 2–4) in the movies account** (IMP-C26).
 
 **Fix — tell fetch where they live**, in your gitignored `mvconfig.json` (repo root):
@@ -625,20 +625,20 @@ search runs in the wrong account. A single file ends `❌ ENTRY INCOMPLETE` afte
 ```
 
 - Keys are **exact manual ids or id prefixes**; values are `movies` / `tv` / `anime` / `others`.
-  The **longest matching key wins**, so an exact id beats a prefix (`mainfetch.py:894`).
+  The **longest matching key wins**, so an exact id beats a prefix (`mainfetch.py:899`).
 - Prefixes are plain string prefixes (`…-s02e1` also matches `…-s02e10`–`s02e19`). Use a season
   prefix **only if every episode of that season lives in that account** — otherwise list the exact
   ids. A season fetch with a prefix that is too broad would send the other episodes to the wrong
   account.
 - An unknown account (e.g. `"series"`) prints **one** `⚠️  mvconfig.json: fetch_account_overrides
   entry …` warning and that entry is ignored; a blank key is refused the same way — it would match
-  every id (`mainfetch.py:860`). Every fetch run re-reads `mvconfig.json` (`main.py fetch` spawns a
+  every id (`mainfetch.py:865`). Every fetch run re-reads `mvconfig.json` (`main.py fetch` spawns a
   fresh `mainfetch.py` process, `main.py:9519`), so an edit applies to the next fetch.
 - Then fetch as usual: `python main.py fetch tv-en-1994-xfiles-s02e03 tempdir D:\MV_fetch` — the
   `[Account] Profile for …` line should now say `'movies'`.
 
 **A season whose episodes span accounts is fetched in one run** — one Chrome session per account,
-one after another, under the same fetch lock (`mainfetch.py:972`). The season's own account goes
+one after another, under the same fetch lock (`mainfetch.py:977`). The season's own account goes
 first with the usual `[Account] Profile for …` line; each further account prints
 `> [Account] Switching to profile '<account>' for N item(s) (fetch_account_overrides)`. Before the
 switch, the previous account's Chrome windows are closed and debug port 9222 must be free; if it
@@ -662,20 +662,20 @@ Check these in order. The output now tells the first two apart from a real miss.
 lists its Gemini panel among Selenium's windows: a `webview` on `gemini.google.com/glic` and an
 `other` on `chrome://glic/`. chromedriver attached to that webview, so `fetch` typed every search
 into Gemini and every item came back `Found 0` (2026-10-01, the X-Files fetch). Since IMP-C29,
-`init_driver` moves to a real `photos.google.com` tab right after attaching (`mainfetch.py:94`),
+`init_driver` moves to a real `photos.google.com` tab right after attaching (`mainfetch.py:99`),
 either the open one or a new one, and prints which:
 ```
    > 🗂️ Switched to the open photos.google.com tab.
    > 🗂️ Opened a new photos.google.com tab.
 ```
-`trigger_download` re-checks the tab before every search (`mainfetch.py:272`). If no Photos tab can
+`trigger_download` re-checks the tab before every search (`mainfetch.py:277`). If no Photos tab can
 be had, the run stops with `❌ Could not open a photos.google.com tab in the attached Chrome: …`. It
 never searches anywhere else.
 
 **2. The keystrokes never reached the search box.** If Chrome is not the foreground window, the
 Photos tab renders as hidden and its `/` shortcut does not open the search box, so the page stays on
 `/`. Fetch now sends `Page.bringToFront` and focus emulation before every search
-(`mainfetch.py:178`). A search that still does not run, or that lands outside Photos, is reported as
+(`mainfetch.py:183`). A search that still does not run, or that lands outside Photos, is reported as
 one of:
 ```
      ❌ Search did not run (or had not started yet): Google Photos is still on /, not on a /search/ results page — this is not a 'Not found'.
@@ -683,19 +683,19 @@ one of:
 ```
 Neither is a `Not found`, and neither clicks anything; the attempt is retried once. Three searches
 in a row that come back empty or never run stop a batch with the *"… is logged out"* message
-(`mainfetch.py:366`). In that case the session is fine and the `❌` lines above it are the reason.
+(`mainfetch.py:371`). In that case the session is fine and the `❌` lines above it are the reason.
 
 **3. ATTEMPT 1 of a whole file misses. This is expected.** For an unsplit file, `ATTEMPT 1` searches
-the plain library `filename` (`mainfetch.py:484`). But `push` uploaded it as
+the plain library `filename` (`mainfetch.py:489`). But `push` uploaded it as
 `<name> [<short_id>]<ext>` (`main.py:6470`), which is its `search_term` (`main.py:1492`). Google
 Photos does not match the shorter name. Measured 2026-10-01: `No results` for the plain name, and
 the item for the tagged one. So `ATTEMPT 1` prints `Not found (Found 0)` twice, the harvester waits
-out its 5-minute timeout (`mainfetch.py:516`), and `ATTEMPT 2` searches the `search_term` and finds
+out its 5-minute timeout (`mainfetch.py:521`), and `ATTEMPT 2` searches the `search_term` and finds
 the item. Let the run continue. Split chunks are not affected, because their names already carry
 the tag (`<base> [<short_id>].chunk.NNN.mkv`, `main.py:347`).
 
 **4. The results were slow.** Fetch looks at the page once, a fixed 3 s after pressing Enter
-(`mainfetch.py:289`). Measured 2026-10-01 on the movies account, results usually showed after about
+(`mainfetch.py:294`). Measured 2026-10-01 on the movies account, results usually showed after about
 2–3 s, and once after about 7 s. A slow page reads as `Not found (Found 0)`, and the attempt is
 retried once after 5 s. If it misses again but you can find the item by hand, re-run the fetch.
 Files already fetched are skipped.
@@ -708,37 +708,69 @@ on `gemini.google.com` and the `other` on `chrome://glic/` are Chrome's Gemini p
 
 **⚠️ A video in Downloads that fetch neither moved nor deleted.** For about 1–2 s after Enter, the
 URL already shows the search while the home timeline is still on screen, and fetch's first selector
-matches timeline thumbnails (`mainfetch.py:301`). If the results page has not replaced the timeline
+matches timeline thumbnails (`mainfetch.py:306`). If the results page has not replaced the timeline
 when the 3 s wait ends, fetch can click a timeline item and download the wrong file. Nothing is
 damaged, because downloads are matched by hash and a stray file is left where it is
-(`mainfetch.py:553-557`). Delete it. This hazard predates IMP-C29; a follow-up is proposed in the
+(`mainfetch.py:558-562`). Delete it. This hazard predates IMP-C29; a follow-up is proposed in the
 IMP-C29 entry of `improvements_tierC.md`.
 
 ### `fetch` says `🚀 Triggered.` and then `❌ Timeout (No active downloads).`
 
 The download was requested, but its file never reached Downloads. Fetch only watches that folder; it
 cannot see Chrome's own verdict. Since IMP-C29 the line under the timeout says what it saw
-(`mainfetch.py:407`):
+(`mainfetch.py:412`):
 ```
      A download was in progress, but 1 triggered file(s) never arrived. If chrome://downloads lists it as failed (e.g. 'Failed - Network error'), the transfer broke. Google Photos downloads cannot resume: re-run the fetch (files already fetched are skipped).
      No download appeared for 1 triggered file(s). If chrome://downloads lists it as failed, the transfer broke at once: re-run the fetch. If it is not listed, Shift+D started nothing.
 ```
 
+**What it was on 2026-10-01 and 2026-10-02 (IMP-C29, fixed).** Two real fetches of a 9.1 GB episode
+started downloading and then lost the file. Chrome listed both as `Failed - Network error` at 0 B.
+The cause was the transport:
+- Google serves a Photos download from `video-downloads.googleusercontent.com`. Once Chrome has
+  learned that this host offers HTTP/3, the download runs over QUIC, which is UDP. Chrome remembers
+  that for 30 days.
+- A QUIC download does not survive a stall of a few seconds. Measured 2026-10-02 with fetch's own
+  trigger, freezing the transfer for a set time and then releasing it:
+
+  | Transport | Speed | 2–4 s stall | 8 s stall | 16–60 s stall |
+  |---|---|---|---|---|
+  | QUIC (Chrome's default) | 40–50 MB/s | survives | `Failed - Network error` | not reached |
+  | TCP (`--disable-quic`) | 70–130 MB/s | survives | survives | survives |
+
+**The fix.** Fetch starts its Chrome with `--disable-quic` (`mainfetch.py:76`), so downloads run over
+TCP. That also makes them two to three times faster here.
+
+**⚠️ The switch only works in a Chrome that fetch itself starts.** Fetch leaves its Chrome open when
+it ends, and the next fetch attaches to that same Chrome. A fetch Chrome that was opened before this
+fix keeps using QUIC until it is closed. Close that Chrome window once. To check, open
+`chrome://version` in fetch's Chrome: the `Command Line` row must contain `--disable-quic`.
+
 **Read Chrome's reason.** Open `chrome://downloads` in fetch's Chrome and look at the item.
-- `Failed - Network error`: the transfer broke. On 2026-10-01 the 9.1 GB X-Files episode failed this
-  way at about 1.1 MB/s. The same fetch two hours later ran at 20–60 MB/s and finished in 4.5
-  minutes.
+- `Failed - Network error`: the transfer broke.
+  - The speed Chrome prints next to it (for example `1,121 KB/s`) is its estimate after the stall,
+    not the speed of the line.
+  - Over TCP this takes a real loss of the network: an outage of minutes, or the PC's IP address
+    changing. Re-run the fetch.
 - Not listed at all: Shift+D started nothing. Check the tab with the `curl` line in §6c above.
 
+**Chrome's History has no row for the failed download. It was still not cancelled.** Chrome writes a
+download to its History database only when it is over for good: complete or cancelled. One that
+failed with a network error can still be restarted from `chrome://downloads`, so it stays out of
+History. `chrome://downloads` keeps listing it, also after Chrome restarts. Checked 2026-10-02: the
+four downloads that failed with a network error have no History row, while the two cancelled and the
+three complete ones do. A DevTools client is no help either: `Browser.downloadProgress` reports the
+state `canceled` for a download that failed with a network error.
+
 **Why a broken download is lost entirely.** Google Photos sends a download without an ETag or a
-Last-Modified date, so Chrome cannot resume it. After a break Chrome starts again from 0 B, and after
-a few tries it fails the download and removes the partial file. Re-run the fetch; files already
-fetched are skipped.
+Last-Modified date, so Chrome cannot resume it. Chrome removes the partial file and shows the
+download at 0 B, so nothing of it is left to continue. Re-run the fetch; files already fetched are
+skipped.
 
 **A download slower than 5 minutes used to be thrown away (fixed in IMP-C29).** The harvester
 decided "5 minutes are over and nothing is downloading" before it looked into Downloads. A download
 that took longer than 5 minutes ended exactly in that state, so its finished file was never
-collected by the attempt that started it. The check now runs after the look (`mainfetch.py:578`).
+collected by the attempt that started it. The check now runs after the look (`mainfetch.py:583`).
 Before the fix this had two effects:
 - A file found on `ATTEMPT 1` (a chunk) was downloaded a second time by `ATTEMPT 2`, which then
   collected the first copy. Chrome's history shows it for two earlier titles: a second round of
@@ -746,7 +778,7 @@ Before the fix this had two effects:
   `… (1).mkv` files in Downloads are those second copies. Delete them.
 - A whole file is found only on `ATTEMPT 2`, so it ended `❌ ENTRY INCOMPLETE` with the finished file
   still in Downloads. Re-running the fetch collects such a file from Downloads without downloading
-  it again (`mainfetch.py:539`).
+  it again (`mainfetch.py:544`).
 
 ---
 

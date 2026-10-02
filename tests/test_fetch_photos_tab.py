@@ -8,7 +8,9 @@ webview, so every fetch search was typed into Gemini (2026-10-01, IMP-C25 gate R
     "page", https, photos.google.com host) — never a webview, chrome://, devtools:// or glic
     target — then focus_page() sends Page.bringToFront + Emulation.setFocusEmulationEnabled.
   - mainfetch.init_driver: runs it right after the unchanged debuggerAddress attach, or gives
-    up loudly (returns None) when no Photos tab can be had.
+    up loudly (returns None) when no Photos tab can be had. It launches Chrome with QUIC
+    disabled, so downloads ride TCP (a QUIC download does not survive a stall of a few
+    seconds); the whole launch command is pinned.
   - mainfetch.trigger_download: re-asserts the tab + focus before EVERY attempt, and reports a
     search that never ran in Google Photos as its own error — never as "Not found".
   - No-regression pins for today's flow: the keystroke chain, the CSS-then-XPath thumbnail
@@ -422,6 +424,44 @@ def test_init_driver_gives_up_loudly_without_a_photos_tab(attach, capsys):
     assert "❌ Could not open a photos.google.com tab in the attached Chrome: cannot open a new tab" in out
     assert ("quit",) in attach.driver.log          # the Selenium session is released
     assert not [e for e in attach.driver.log if e[0] in ("get", "keys")]
+
+
+def test_fetch_chrome_is_launched_with_quic_disabled(attach):
+    # Google serves a Photos download over HTTP/3 (QUIC) whenever Chrome allows it. Measured live
+    # (2026-10-02): over QUIC a stall of 8 s fails the download for good ("Failed - Network error",
+    # and a Photos download cannot resume); over TCP it survived 60 s and ran 2-3x faster.
+    attach.driver = _FakeChrome([PHOTOS_TAB], current="PHOTOS-TAB")
+
+    assert mainfetch.init_driver("movies") is attach.driver
+
+    assert len(attach.launched) == 1
+    switches = [a for a in attach.launched[0] if a.startswith("--")]
+    assert "--disable-quic" in switches
+    assert not [s for s in switches if "quic" in s and s != "--disable-quic"]   # nothing turns it back on
+
+
+@pytest.mark.parametrize("profile", list(mainfetch.CHROME_PROFILES))
+def test_the_chrome_launch_command_is_pinned(attach, profile):
+    # The whole command line, frozen. A dropped or changed switch (the debug port the attach needs,
+    # the profile = the Google account, the transport) shows up here; the URL argument stays last.
+    attach.driver = _FakeChrome([PHOTOS_TAB], current="PHOTOS-TAB")
+
+    mainfetch.init_driver(profile)
+
+    argv = attach.launched[0]
+    assert argv[0].endswith("chrome.exe")
+    assert argv[1:] == [
+        f"--user-data-dir={mainfetch.CHROME_PROFILES[profile]}",
+        "--profile-directory=Default",
+        "--remote-debugging-port=9222",
+        "--disable-gpu",
+        "--window-size=1920,1080",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-session-crashed-bubble",
+        "--disable-quic",
+        "about:blank",
+    ]
 
 
 # ---------------------------------------------------------------------------

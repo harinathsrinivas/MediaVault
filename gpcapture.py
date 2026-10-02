@@ -333,14 +333,14 @@ def capture_after_extras_scan(title_folder, title_id, group_rel, item):
         return None
 
 
-def snapshot_push_objects(paths, split_dir_name, short_id, chunk_hashes, whole_sha256, holders, tech_spec=None):
+def snapshot_push_objects(paths, parts_dir, short_id, chunk_hashes, whole_sha256, holders, tech_spec=None):
     """Read-only facts for each file a push is about to upload — taken BEFORE the upload
-    loop, because uploaded chunks are deleted locally. Mirrors the pushers' remote naming:
-    a file whose path does not contain `split_dir_name` (cmd_push passes the `_parts` dir
-    name — its own rule; push_one_extra the item's chunk dir) uploads as
-    '<name> [<short_id>]<ext>'; a chunk or a FLAC holder keeps its own name. width/height
-    come from `tech_spec` (the tech scan's 'WxH' width_height) for whole files and chunks,
-    never for a FLAC holder. Never raises."""
+    loop, because uploaded chunks are deleted locally. Mirrors the pushers' remote naming by
+    sharing cmd_push's rule, mvcommon.in_parts_dir (IMP-C28): a file directly in the push's
+    chunk dir `parts_dir` (cmd_push's `_parts` dir; push_one_extra the item's own chunk dir)
+    is a chunk or a FLAC holder and keeps its own name; any other file uploads as
+    '<name> [<short_id>]<ext>'. width/height come from `tech_spec` (the tech scan's 'WxH'
+    width_height) for whole files and chunks, never for a FLAC holder. Never raises."""
     objs = []
     try:
         holder_hash = {h.get("holder_filename"): h.get("holder_hash") for h in (holders or []) if isinstance(h, dict)}
@@ -349,7 +349,7 @@ def snapshot_push_objects(paths, split_dir_name, short_id, chunk_hashes, whole_s
         width, height = (int(frame.group(1)), int(frame.group(2))) if frame else (None, None)
         for p in paths or []:
             name = os.path.basename(p)
-            if split_dir_name not in p:
+            if not mvcommon.in_parts_dir(p, parts_dir):
                 base, ext = os.path.splitext(name)
                 role, uploaded, index, sha256 = "whole", f"{base} [{short_id}]{ext}", None, whole_sha256
             else:

@@ -11,7 +11,7 @@
 > **Maintenance:** when a question is asked and answered in any Claude session, add it here.
 > See the protocol at the bottom.
 
-**Last updated:** 2026-09-28
+**Last updated:** 2026-10-01
 
 ---
 
@@ -332,6 +332,76 @@ The directory must already exist. Not needed if the source file already sits on 
 
 `SIZE_GB 8` / `SIZE_MB 9600` / `COUNT 4` all work. A 35.6 GB file at `SIZE_MB 9600` → 4 chunks.
 
+### A push deleted my master and uploaded it without its `[short_id]` tag (a `_parts` folder name) — IMP-C28, fixed
+
+**Symptom.** You pushed a title as a whole file, and its folder or file name contains `_parts` in lower
+case (`Spare_parts (2015)`, `Body_parts`). The phone received `Spare_parts (2015).mkv` instead of
+`Spare_parts (2015) [<short_id>].mkv`, and the local master was gone. The push still ended
+`✅ SUCCESS`, right after a line like:
+```
+⚠️  INTEGRITY: <id> status=onboarded but on-disk=MISSING — run 'python main.py verify_library'
+```
+
+**Why.** Before IMP-C28, `cmd_push` decided "chunk or whole file?" by whether the file's *path*
+contained `_parts` (the chunk-dir name) anywhere. A master in such a folder counted as a chunk, so it
+kept its bare name, and after the upload it was deleted the way an uploaded chunk is.
+
+Only pushes that upload the master whole were affected:
+- a plain `push`;
+- a split skipped because the file is under the target size;
+- a `tempdir` push that did not split.
+
+Split pushes and `--extras` were never affected, because extras decide by whether that item was split
+(`main.py:5957`, `main.py:5998`). The test was case-sensitive, so `Spare_Parts` and `Spare Parts`
+were never hit.
+
+**Fixed:** a file is a chunk only if it sits directly in that push's own chunk dir
+(`mvcommon.in_parts_dir`, `main.py:6443`). The identity capture uses the same rule.
+
+**Is anything lost? No bytes.**
+- The delete ran only after the upload and its rename had succeeded (`main.py:6496-6515`), so the
+  cloud copy is the master's bytes, and the library `hash` still matches them.
+- Fetch searches a whole file by its plain local filename (`mainfetch.py:331`), which is exactly the
+  name that upload has, and it matches downloads by hash (`mainfetch.py:400-404`). So
+  `fetch_restore <id>` is the way to get the master back.
+- What stays wrong is the name in the cloud. The `.mvmeta.json` sidecar (`main.py:5697`), the
+  `search_term` and the identity capture all record the tagged name, so name-based matching
+  (IMP-C25) cannot tie that item to its entry.
+
+**⚠️ If `replace` ran afterwards** (for example the `prep_push_rep` autopilot's next leg), it found no
+master. It skips its rename when the original is absent (`main.py:6954`), writes the dummy in its
+place and marks the entry `archived` without complaint. That entry now looks healthy.
+
+**Find the entries that may have been hit.** Both checks are read-only; run them from the repo root:
+```
+python main.py verify_library
+python -c "import os, mvcommon as m; [print(k, e.get('status')) for k, e in m.load_library().items() if e.get('filename') and e.get('uploaded') and '_parts' in os.path.join(e.get('folder_path') or '', e['filename']) and not (e.get('split_info') or {}).get('is_split')]"
+```
+- `verify_library` catches the push-only case: it reports
+  `status=onboarded  on-disk=MISSING (missing)  [onboarded_missing]`.
+- The one-liner lists every uploaded whole-file entry whose path contains `_parts`, including ones
+  `replace` has already archived. Check each one's name on the phone or in Google Photos.
+
+### `scan_unprepped` and the reclaim view skipped a real video named like `the.chunk.2019…` — IMP-C30, fixed
+
+**Symptom.** A real, unprepped video whose lower-case file name contains `.chunk.` was missing from
+`scan_unprepped` and from the web Disk Reclaim view and folder tree. An example is
+`the.chunk.2019.1080p.web.h264.mkv`. `scan_unprepped` could even end with
+`✅ All libraries are completely in sync.` For such a title, `push <id> chunks 1-2` refused with
+`No chunks found in range`.
+
+**Why.** Before IMP-C30, both scans skipped any file whose name merely *contained* `.chunk.`, meaning
+to hide leftover chunks. The `chunks N-M` filter read a chunk's number from the *first*
+`.chunk.<digits>.` in its name, which for that title is the year. The test was case-sensitive, so
+`The.Chunk.…` names were never hit.
+
+**Fixed:** a file is a chunk only if its name ends in `.chunk.<digits>.mkv`, the exact form the split
+writes (`mvcommon.chunk_index`, used at `main.py:8800`, `main.py:10126` and `main.py:6414`). Real
+chunks are still never listed, wherever they lie.
+
+**Is anything lost? No.** Both scans are read-only, and a range push never marks an entry onboarded.
+The file was simply not listed: run `python main.py scan_unprepped` again to see it.
+
 ---
 
 ## 4. CLI traps
@@ -381,6 +451,43 @@ Tracked as **IMP-D23** (add `push_rep` / `push_rep_season`, or make prep detect 
 
 The tool prints *"or simply re-run this same command"* without mentioning it re-hashes. Accurate but
 costly for large files. Unregistered papercut.
+
+### Push refuses: `Cannot resume <id>: …\_parts is not empty but holds no chunk (.mkv) to upload` — IMP-C31
+
+**What it means.** A push resumes from the title folder's `_parts/` whenever that folder is not
+empty, uploading the `.mkv` chunks still in it. Here `_parts/` holds something, but no chunk. Typical
+contents: the `<name> [<short_id>].flac` an interrupted FLAC carry-out leaves behind, a stray file
+(`Thumbs.db`, a note), or a sub-folder. The refusal lists what it found. **Nothing was uploaded, the
+library entry is unchanged, and the master is intact.**
+
+**Why it refuses.** Before IMP-C31 the push "resumed" zero chunks, still printed `✅ SUCCESS` and
+marked the entry `onboarded`. The `prep_push_rep` autopilot then ran `replace`, which swapped the
+master for a dummy although nothing had reached the cloud (`cmd_replace` checks only `uploaded`,
+`main.py:6928`).
+
+**What to do.**
+- Leftovers (the usual case): delete that `_parts` folder, then push again with your split size,
+  e.g. `python main.py push <id> SIZE_GB 8`. The master is re-split from scratch; the refusal
+  suggests the split the entry last used, when it has one.
+- Only if every chunk already reached the device, for example because you finished the title with
+  `chunks N-M` range pushes (which never mark an entry uploaded): check that on the phone or in
+  Google Photos first, then run `python main.py set_uploaded <id>`.
+
+**Seasons share one `_parts/`.** Every episode of a season is pushed through the same
+`Season NN/_parts/`, because an episode's `folder_path` is its season folder (`main.py:1416`). So one
+leftover there blocks every episode's push until it is removed. A related open problem, not fixed
+by IMP-C31: if that shared folder still holds a *different* episode's real chunks, pushing another
+episode uploads them as its own and marks it `onboarded`. Chunk names carry the owning episode's
+`[<short_id>]`. After an interrupted push, re-push that same episode before any other episode of
+the season (`push_group` moves on past a failed episode, so check `_parts/` after such a run).
+
+**A push that failed before any chunk reached the device can leave chunks behind.** If `_parts/`
+already existed when that push started, its rollback leaves the folder alone, because it never
+deletes a folder it did not create. That includes the failed split's own chunks. The next push would
+"resume" them although the entry no longer records a split (the same open problem as above). So
+after a split error, or after `❌ FAILED before any chunk uploaded`, delete any `_parts/` still in
+the title folder before pushing again: the master is intact. On a season folder, first re-push any
+other episode whose chunks are in it.
 
 ---
 

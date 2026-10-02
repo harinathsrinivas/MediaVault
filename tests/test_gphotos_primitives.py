@@ -601,7 +601,7 @@ def test_drift_pin_gpcapture_snapshot_names(tmp_path):
     for f in files:
         f.write_bytes(b"x")
     objects = gpcapture.snapshot_push_objects(
-        [str(f) for f in files], main.SPLIT_DIR_NAME, "abc123",
+        [str(f) for f in files], str(parts), "abc123",
         {"Movie.2020 [abc123].chunk.001.mkv": _h("c1")}, _h("whole"),
         [{"holder_filename": "Movie.2020 [abc123].holder.mkv", "holder_hash": _h("h")}])
     assert [o["role"] for o in objects] == ["whole", "chunk", "holder"]

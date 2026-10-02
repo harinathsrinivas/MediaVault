@@ -262,7 +262,7 @@ def test_snapshot_names_chunks_and_holder_like_cmd_push(tmp_path):
     c2 = _write(parts / "Movie.2020 [abc123].chunk.002.mkv", b"c2")
     holder = _write(parts / "Movie.2020 [abc123].holder.mkv", b"h")
     objs = gpcapture.snapshot_push_objects(
-        [master, c1, c2, holder], main.SPLIT_DIR_NAME, "abc123",
+        [master, c1, c2, holder], str(parts), "abc123",
         {"Movie.2020 [abc123].chunk.001.mkv": "h1", "Movie.2020 [abc123].chunk.002.mkv": "h2"},
         "whole-hash", [{"holder_filename": "Movie.2020 [abc123].holder.mkv", "holder_hash": "hh"}])
     got = [(o["role"], o["index"], o["uploaded_name"], o["sha256"]) for o in objs]
@@ -590,7 +590,8 @@ def test_the_pre_commit_helpers_are_read_only(tmp_path):
     master = _mkv_master(tmp_path / "Movie.mkv", MASTER_DATE, 60.0)
     gpcapture.capture_after_prep(folder, MOVIE_ID, "abc123", master, "Movie [abc123].mkv", "a" * 64)
     before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
-    objects = gpcapture.snapshot_push_objects([master], main.SPLIT_DIR_NAME, "abc123", {}, "a" * 64, [])
+    objects = gpcapture.snapshot_push_objects(
+        [master], os.path.join(folder, main.SPLIT_DIR_NAME), "abc123", {}, "a" * 64, [])
     assert gpcapture.mvmeta_identity(folder, "abc123", objects)["a" * 64]["date_utc"] == "2022-02-05T11:49:46Z"
     assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
 
@@ -811,8 +812,9 @@ def test_a_v1_capture_stays_readable_and_a_v2_push_builds_on_it(tmp_path):
     assert (facts["sha1"], facts["width"], facts["pushed"]) == \
         (sha1, 1920, {"at": "2026-09-20T11:00:00Z", "device_id": "FAKESERIAL01"})
     assert "approach_hint" not in facts and "duration_s" not in facts        # v1 knew neither
-    objects = gpcapture.snapshot_push_objects([master], main.SPLIT_DIR_NAME, "def456", {}, sha256, [],
-                                              {"width_height": "1920x1080"})
+    objects = gpcapture.snapshot_push_objects(
+        [master], os.path.join(folder, main.SPLIT_DIR_NAME), "def456", {}, sha256, [],
+        {"width_height": "1920x1080"})
     assert objects[0]["sha1"] is None                                      # a later process: nothing cached
     assert gpcapture.capture_after_push(folder, "tv-x-s01e01", "def456", objects, device_id="FAKESERIAL01",
                                         remote_dir="/sdcard/Media/Series/Show",

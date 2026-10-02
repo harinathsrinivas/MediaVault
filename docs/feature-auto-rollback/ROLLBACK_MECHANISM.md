@@ -128,7 +128,7 @@ operation is reversible. It is destroyed in **exactly two** places.
 | Command | PONR | Failure handling |
 |---|---|---|
 | `cmd_prep` | **none** — fully reversible | auto-rollback this-run entry/sidecars/parent-link (early-skips create nothing and never roll back) |
-| `cmd_push` | **none (O-1)** — resumable | **resume-message**: leave the partial upload, entry stays `local_ready`/`uploaded=False`, print `push <id>`. Roll back this-run `_parts`/`checksums`/`split_info` **only if** created this run AND failure is *pre-any-upload*. A pre-existing/resume `_parts/` is never deleted |
+| `cmd_push` | **none (O-1)** — resumable | **resume-message**: leave the partial upload, entry stays `local_ready`/`uploaded=False`, print `push <id>`. Roll back this-run `_parts`/`checksums`/`split_info` **only if** created this run AND failure is *pre-any-upload*. A pre-existing/resume `_parts/` is never deleted. A resume uploads only what the entry's own `split_info` records (IMP-C32, §6) |
 | `cmd_replace` | **commit rename** `os.rename(original → .tobedeleted)` | pre-PONR: roll back the dummy temp. At/after: `RollbackHardFail` → `fetch_restore <id>`. C9 stale-sweep self-heals a torn crash on the next `replace` |
 | `cmd_restore` (split) | **merged-chunk delete from `restore/`** | pre-PONR: reuse C11 `quarantine_restore_file` + reproducible-output cleanup. At/after: `RollbackHardFail` → `fetch_restore <id>`. Standard (non-split) path is a single `shutil.move` — no torn window |
 
@@ -152,6 +152,17 @@ bytes are only in the cloud / need a re-fetch, so the hard-fail names the existi
   *before* it rolls back this-run split artifacts; a failure *after* it
   `commit()`s the journal and prints the `push <id>` resume-message (the partial
   upload is now legitimate resumable state).
+  **Resume selection (IMP-C32, user-ruled 2026-10-02).** A non-empty pre-existing
+  `_parts/` is resumed strictly. Only the files the entry's own `split_info`
+  records (its chunks and carried-out holders) are uploaded, and each is checked
+  against its recorded SHA-256 after the `chunks N-M` filter and before the first
+  upload. Anything else in the folder is listed with its likely owner and left in
+  place: a season's episodes share one `_parts/`. With nothing recorded left to
+  upload, or with a recorded chunk whose bytes changed, the push refuses before any
+  upload. That refusal journals nothing, leaves the pre-existing `_parts/` untouched
+  and does not save the library (the empty case is IMP-C31). `split_info` is saved
+  before the first upload, so an interrupted first push resumes under this rule.
+  `push_one_extra` applies the same rule to its per-item chunk dir.
 - **`cmd_replace`** — PONR at the commit rename; the dummy temp is the only
   pre-PONR artifact. `mark_point_of_no_return()` fires right after the rename; a
   later failure → `RollbackHardFail`. C9's stale-sweep is left intact.
@@ -232,6 +243,8 @@ D-4's "not on the happy path" principle is not violated).
 | 12 | file lock during rollback | Plex/Windows Search holds a chunk | partial-rollback reported honestly; journal kept; `recover_journal()` retries later |
 | 13 | **(IMP-R7)** crash → re-run, pre-PONR leftover | user re-runs the command after a hard kill | `RollbackJournal.__init__` detects the leftover, calls `recover_journal()` to finish the interrupted rollback, then the new command proceeds cleanly |
 | 14 | **(IMP-R7)** crash → re-run, post-PONR leftover | user re-runs after a kill that crossed PONR | leftover preserved as `.mediavault_txn.<ts>.json`; new run proceeds; user can inspect / `recover` the preserved journal |
+| 15 | **(IMP-C31/C32)** `push` resume with nothing recorded | pre-existing `_parts/` holds no file this entry's `split_info` records (strays, another episode's chunks, an unrecorded split's leftovers) | refuse before any upload: nothing journalled, `_parts/` untouched, library not saved; the message lists each stranger, its likely owner and the next step |
+| 16 | **(IMP-C32)** `push` resume, recorded chunk changed | a recorded chunk's bytes no longer match its recorded SHA-256 | refuse before any upload, the same clean exit; the chunk is never uploaded |
 
 Scenarios 1–9 behave identically regardless of mechanism; **10–14 are where the
 durable journal earns its place** — the test
@@ -303,6 +316,15 @@ session and sub-agent sees it.
 > inside `RollbackJournal.__init__` when a pre-PONR leftover is detected (its own
 > semantics unchanged). All other journal/PONR/D-4 contracts are unaltered.
 
+> **IMP-C32 (2026-10-02, branch `fix/imp_c32_strict_resume`) passed through this
+> gate** on an explicit user ruling ("Strict resume"). Its single contract delta is
+> resume SELECTION in `cmd_push` (and `push_one_extra`): a resume uploads only the
+> files the entry's own `split_info` records, verified against their recorded
+> hashes, and refuses when none is left (§6, §8 rows 15–16). The journal format,
+> PONR placement, what is recorded, `recover_journal`, the O-1 resume-message, the
+> season resume-range messaging and `RollbackHardFail` are unaltered. IMP-C31 (the
+> empty case) did not need the gate: it only added a pre-flight refusal.
+
 ---
 
 ## 11. Code & test map
@@ -318,3 +340,5 @@ session and sub-agent sees it.
   scenarios) + `tests/test_baseline_happy_path.py` (the D-4 happy-path oracle).
   `pytest -q` → 583 passed (full suite), 60 rollback/recover/restore tests,
   69 smoke tests (as of 2026-06-27).
+- Resume selection (IMP-C31/C32): `tests/test_push_resume_needs_chunks.py` and
+  `tests/test_push_strict_resume.py`.

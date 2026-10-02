@@ -1474,6 +1474,14 @@ Important quirks:
   contains on-disk evidence of cloud chunks (e.g. a `checksums/` dir or a
   `_parts/` remnant). See `improvements/improvements_tierD.md` IMP-D4 and
   `docs/feature-legacy-reconcile/REPORT.md` for the full integrity audit story.
+- **Re-prep keeps the split record of an unchanged file (IMP-C33, 2026-10-03):**
+  an entry that is still local (`local_ready`, not uploaded) is rebuilt on
+  re-prep. When it records a split and the freshly computed hash equals the
+  stored one, the rebuilt entry keeps `split_info` and `re_hashed`, so an
+  interrupted split push still resumes after an autopilot re-run. This is the
+  rule `merge_extras_into_title` applies to an unchanged extra. A changed hash
+  drops both, with a notice; the stale chunks are left in place and the next
+  push refuses them (IMP-C32). Nothing is journalled for this.
 
 ### 6.4a Split-file canonical hash (deterministic re-merge)
 
@@ -1771,7 +1779,11 @@ High-level sequence inside one `cmd_push` call:
      and into `entry["split_info"]["chunks"]`. The library is saved
      **before** any upload begins, so an interrupted push can resume
      against verified hashes.
-   - Else upload the single file as-is.
+   - Else upload the single file as-is. If that completes a first archive
+     (not a `chunks N-M` push) while the entry still records an unfinished
+     split, the record and its `re_hashed` flag are dropped before the remote
+     sidecar is written (IMP-C33), so the entry describes the whole file that
+     was uploaded. An entry that was already uploaded keeps its record.
 5. **Optional chunk-range filter** (`chunks 1-4`): walks the file list
    and keeps only chunks whose 3-digit number is in range
    (`main.py:632-657`). Used for re-pushing specific failed parts.
@@ -2554,8 +2566,9 @@ Hash stays in JSON for the day the user wants to restore.
   `uploaded=False`) are detected on the next `cmd_push` call and the
   chunks are re-uploaded without re-splitting. Since IMP-C32 only the
   chunks that entry's `split_info` records are resumed, each checked
-  against its recorded hash first. This is the primary fault tolerance
-  mechanism — there is no transaction log.
+  against its recorded hash first. A re-prep of an unchanged file keeps
+  that record (IMP-C33), so re-running an autopilot resumes as well. This
+  is the primary fault tolerance mechanism — there is no transaction log.
 - **Replace under load**: 3-retry loop with 1 s back-off and explicit
   `os.chmod(stat.S_IWRITE)` for files Plex/Windows Search have open.
   If all 3 retries fail, leaves both `original` and `original.temp_dummy`

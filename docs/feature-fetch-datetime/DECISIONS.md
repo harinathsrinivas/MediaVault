@@ -430,3 +430,15 @@ No other step of this plan uses candidates.
   ruling: a resume uploads only chunks recorded in that entry's `split_info` (names + sizes/hashes) and refuses
   anything else, listing the strangers; C31's refusal is the empty case. Hotfix branch `fix/imp_c32_strict_resume`
   from main (worktree `MediaVault-c32`), own PR.
+- **PR #64 (IMP-C32 strict resume)**: card answer "Merge now (Recommended)" → squash-merged to main (Checkpoint 1).
+  The C25 branch re-syncs main only after the user's running Dune archive finishes (the main folder's code must not
+  change under a running archive).
+- **Autopilot re-run after an interrupted split push** (C32 now refuses it): card answer "Prep keeps split record
+  (Recommended)" → `cmd_prep` keeps `split_info` when the file's hash is unchanged (as the extras merge does), so the
+  re-run resumes. Follow-up branch `fix/imp_c33_prep_keeps_split_info` from main (worktree `MediaVault-c33`), own PR;
+  registered as IMP-C33. Not a rollback-rule change; if it turns out to touch one, stop and ask.
+- **Dune Part Two archive** (user's own run 2026-10-02 18:15, `prep_push_rep_enrich mov-en-2024-duneparttwo …
+  device FA75V0303405`, i.e. a movie pushed to the series phone / TV account), verbatim: "its only currently being
+  split and archived. let that run in parallel , for now dont touch this. but after plan is done, can revisit all
+  items to confirm ." → do not touch the entry, its folder, `D:\test`, mvconfig routing or the main folder's code
+  while it runs; revisit routing/confirmation of all items after the plan is done (R3/R4).

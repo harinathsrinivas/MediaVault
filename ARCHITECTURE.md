@@ -1756,8 +1756,15 @@ High-level sequence inside one `cmd_push` call:
    `adb shell mkdir` (`main.py:572-576`) — handles titles like
    `Sorcerer's Apprentice`.
 4. **Resume vs new split branch (`main.py:585-630`)**:
-   - If `<folder>/_parts/` exists and has chunks, treat them as
-     pre-existing chunks and resume (no re-split, no re-hash).
+   - If `<folder>/_parts/` exists and is not empty, **resume** (no
+     re-split). The resume is strict (IMP-C32): it uploads only the files
+     this entry's `split_info` records (its chunks and carried-out holders),
+     and only after each one's bytes match the recorded SHA-256. Anything
+     else in the folder is listed with its likely owner and left in place.
+     A season's episodes share one `_parts/`, so the folder alone does not
+     say whose chunks they are. With nothing recorded left to upload, the
+     push refuses and changes nothing (IMP-C31 is that empty case).
+     `push_one_extra` applies the same rule to its per-item chunk dir.
    - Else if `split_method` and `split_val` were passed AND the file is
      bigger than the target chunk size, call `split_video_file` and then
      immediately SHA256-hash every chunk into `checksums/<chunk>.sha256`
@@ -1784,10 +1791,11 @@ High-level sequence inside one `cmd_push` call:
      `.partial` remnant and never a complete-named partial transfer. A
      `mv` failure is treated identically to a push failure.
    - **Critical safety check**: after a successful upload *and* rename,
-     the local chunk is deleted *only if* its path contains the `_parts`
-     segment. The chunk counts as "done" only once it sits at its final
-     name. This protects against accidentally deleting non-chunk source
-     files if logic is ever rearranged.
+     the local chunk is deleted *only if* it sits directly in this push's
+     chunk dir (`mvcommon.in_parts_dir`, IMP-C28; never a `_parts`
+     substring of the path). The chunk counts as "done" only once it sits
+     at its final name. This protects against accidentally deleting
+     non-chunk source files if logic is ever rearranged.
    - On any push or `mv` failure, break the loop and leave `_parts/`
      populated for resume. Resume re-pushes to `.partial`, which
      overwrites any stale partial on the phone (no remote `ls` needed).
@@ -2555,8 +2563,10 @@ Hash stays in JSON for the day the user wants to restore.
 - **Resume semantics for push**: surviving artifacts of an interrupted
   push (`_parts/` populated; `entry["split_info"]` written but
   `uploaded=False`) are detected on the next `cmd_push` call and the
-  chunks are re-uploaded without re-splitting/re-hashing. This is the
-  primary fault tolerance mechanism — there is no transaction log.
+  chunks are re-uploaded without re-splitting. Since IMP-C32 only the
+  chunks that entry's `split_info` records are resumed, each checked
+  against its recorded hash first. This is the primary fault tolerance
+  mechanism — there is no transaction log.
 - **Replace under load**: 3-retry loop with 1 s back-off and explicit
   `os.chmod(stat.S_IWRITE)` for files Plex/Windows Search have open.
   If all 3 retries fail, leaves both `original` and `original.temp_dummy`
@@ -2677,7 +2687,8 @@ failure.
 
 - **O-1 (push = resume-message).** A failed multi-chunk push is reversible/resumable
   because the master survives; `cmd_push` already auto-resumes from a surviving
-  `_parts/`. So a push failure is NOT a PONR — it leaves the partial upload and
+  `_parts/` (strictly: only the chunks the entry's own `split_info` records —
+  IMP-C32). So a push failure is NOT a PONR — it leaves the partial upload and
   prints the exact `push <id>` resume command.
 - **O-2 (the two true PONRs).** `cmd_replace` after the commit rename, and
   `cmd_restore` (split) after the merged-chunk delete. Both hard-fail with a
@@ -2753,6 +2764,18 @@ rollback/storage work is tracked in `improvements/improvements_tierR.md`.
 > after verify/bless (IMP-R6), so the dummy is never zeroed. Because the journal lives
 > in the extras folder, `recover --scan` lists it and
 > `recover "<title folder>\<group_rel>"` finishes it.
+
+> **Strict resume (IMP-C32, user ruling 2026-10-02):** the one user-ruled change to
+> resume behaviour. A resume (`cmd_push`, and `push_one_extra` for extras) uploads
+> only the files the entry's own `split_info` records, each checked against its
+> recorded SHA-256; everything else in the chunk dir is listed and left in place, and
+> with nothing recorded left to upload the push refuses. It changes resume
+> SELECTION only. Every refusal comes before any upload and before anything is
+> journalled, never touches the pre-existing `_parts/` (D-6) and saves nothing. The
+> journal format/durability, the PONR locations, created-this-run scoping,
+> `recover_journal`, the O-1 resume message, the season resume-range messaging and
+> the `RollbackHardFail` contract are unchanged. See
+> `docs/feature-auto-rollback/ROLLBACK_MECHANISM.md` §6/§8/§10.
 
 ---
 

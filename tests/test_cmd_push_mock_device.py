@@ -8,6 +8,7 @@ They catch regressions in path construction, constant imports, and the
 
 No real device. No real C:\\Media. No real library_*.json.
 """
+import hashlib
 import json
 import main
 import mvcommon
@@ -35,7 +36,8 @@ def _make_split_entry(sandbox):
     for i, cn in enumerate(chunk_names, start=1):
         data = f"chunk-{i}-content".encode()
         (parts_dir / cn).write_bytes(data)
-        chunks_meta.append({"filename": cn, "hash": f"fakehash{i}"})
+        # the real sha256, as a split records it: a resume checks the bytes against it (IMP-C32)
+        chunks_meta.append({"filename": cn, "hash": hashlib.sha256(data).hexdigest()})
 
     entry = {
         ENTRY_ID: {

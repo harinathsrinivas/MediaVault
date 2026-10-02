@@ -4,6 +4,7 @@ All ADB interaction is mocked via a fake `subprocess.run` recorder; no real
 device, no real C:\\Media, no real library JSON. Reuses the sandbox fixtures
 from conftest.py (which hard-guard against the real media root).
 """
+import hashlib
 import json
 import os
 import subprocess
@@ -112,8 +113,10 @@ def split_entry(sandbox):
     parts_dir.mkdir()
     chunks_meta = []
     for i, cn in enumerate(chunk_names, start=1):
-        (parts_dir / cn).write_bytes(f"chunk-{i}-bytes".encode())
-        chunks_meta.append({"filename": cn, "hash": f"hash{i}"})
+        data = f"chunk-{i}-bytes".encode()
+        (parts_dir / cn).write_bytes(data)
+        # the real sha256, as a split records it: a resume checks the bytes against it (IMP-C32)
+        chunks_meta.append({"filename": cn, "hash": hashlib.sha256(data).hexdigest()})
 
     entry = {
         SPLIT_ENTRY_ID: {

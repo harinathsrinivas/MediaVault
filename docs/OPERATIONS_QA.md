@@ -352,14 +352,14 @@ Only pushes that upload the master whole were affected:
 - a `tempdir` push that did not split.
 
 Split pushes and `--extras` were never affected, because extras decide by whether that item was split
-(`main.py:5957`, `main.py:5998`). The test was case-sensitive, so `Spare_Parts` and `Spare Parts`
+(`main.py:6096`, `main.py:6137`). The test was case-sensitive, so `Spare_Parts` and `Spare Parts`
 were never hit.
 
 **Fixed:** a file is a chunk only if it sits directly in that push's own chunk dir
-(`mvcommon.in_parts_dir`, `main.py:6443`). The identity capture uses the same rule.
+(`mvcommon.in_parts_dir`, `main.py:6643`). The identity capture uses the same rule.
 
 **Is anything lost? No bytes.**
-- The delete ran only after the upload and its rename had succeeded (`main.py:6496-6515`), so the
+- The delete ran only after the upload and its rename had succeeded (`main.py:6696-6717`), so the
   cloud copy is the master's bytes, and the library `hash` still matches them.
 - Fetch searches a whole file by its plain local filename (`mainfetch.py:489`), which is exactly the
   name that upload has, and it matches downloads by hash (`mainfetch.py:558-562`). So
@@ -369,7 +369,7 @@ were never hit.
   (IMP-C25) cannot tie that item to its entry.
 
 **⚠️ If `replace` ran afterwards** (for example the `prep_push_rep` autopilot's next leg), it found no
-master. It skips its rename when the original is absent (`main.py:6954`), writes the dummy in its
+master. It skips its rename when the original is absent (`main.py:7154`), writes the dummy in its
 place and marks the entry `archived` without complaint. That entry now looks healthy.
 
 **Find the entries that may have been hit.** Both checks are read-only; run them from the repo root:
@@ -396,7 +396,7 @@ to hide leftover chunks. The `chunks N-M` filter read a chunk's number from the 
 `The.Chunk.…` names were never hit.
 
 **Fixed:** a file is a chunk only if its name ends in `.chunk.<digits>.mkv`, the exact form the split
-writes (`mvcommon.chunk_index`, used at `main.py:8800`, `main.py:10126` and `main.py:6414`). Real
+writes (`mvcommon.chunk_index`, used at `main.py:8980`, `main.py:10306` and `main.py:6576`). Real
 chunks are still never listed, wherever they lie.
 
 **Is anything lost? No.** Both scans are read-only, and a range push never marks an entry onboarded.
@@ -435,7 +435,11 @@ in the folder is a different filename (a MediaInfo dump) — no collision.
 
 If prep succeeded and push failed, the entry sits at `status="local_ready"` with the hash already
 stored. **Re-running `prep_push_rep_enrich` re-hashes the entire file** — `local_ready` is not in
-`cmd_prep`'s skip list (`main.py:1056`). For a 75 GB file that is a very expensive no-op.
+`cmd_prep`'s skip list (`main.py:1389`). For a 75 GB file that is a very expensive no-op.
+
+If the push had already split the file and stopped part-way, the re-run is worse than slow: the
+re-prep drops the entry's split record, and since IMP-C32 the push then **refuses** the leftover
+chunks (see "Push refuses" below). `push <id>` resumes them properly.
 
 **Resume from the failed step instead:**
 ```
@@ -452,42 +456,77 @@ Tracked as **IMP-D23** (add `push_rep` / `push_rep_season`, or make prep detect 
 The tool prints *"or simply re-run this same command"* without mentioning it re-hashes. Accurate but
 costly for large files. Unregistered papercut.
 
-### Push refuses: `Cannot resume <id>: …\_parts is not empty but holds no chunk (.mkv) to upload` — IMP-C31
+### Push refuses: `Cannot resume <id>: …\_parts holds no chunk recorded in its split` — IMP-C32 (and IMP-C31)
 
-**What it means.** A push resumes from the title folder's `_parts/` whenever that folder is not
-empty, uploading the `.mkv` chunks still in it. Here `_parts/` holds something, but no chunk. Typical
-contents: the `<name> [<short_id>].flac` an interrupted FLAC carry-out leaves behind, a stray file
-(`Thumbs.db`, a note), or a sub-folder. The refusal lists what it found. **Nothing was uploaded, the
-library entry is unchanged, and the master is intact.**
+**The rule.** A push resumes from `_parts/` whenever that folder is not empty. It uploads only the
+files this entry's own `split_info` records (its chunks and its FLAC holder), after checking each
+one's bytes against the recorded SHA-256 (`main.py:6318-6363`, `main.py:6592-6608`). Everything else
+in the folder is left where it is and listed with its likely owner. If nothing recorded is left to
+upload, the push refuses. **Nothing was uploaded, the library entry is unchanged, and the master is
+intact.** Extras follow the same rule in their own `<extra folder>\_parts\<short_id>`
+(`main.py:5989-6018`).
 
-**Why it refuses.** Before IMP-C31 the push "resumed" zero chunks, still printed `✅ SUCCESS` and
-marked the entry `onboarded`. The `prep_push_rep` autopilot then ran `replace`, which swapped the
-master for a dummy although nothing had reached the cloud (`cmd_replace` checks only `uploaded`,
-`main.py:6928`).
+**Why.** `_parts/` belongs to a folder, not to an entry, and every episode of a season is pushed
+through the same `Season NN/_parts/` (an episode's `folder_path` is its season folder,
+`main.py:1416`). Before IMP-C32 a resume uploaded every `.mkv` it found there and marked the entry
+`onboarded`. That could be another episode's waiting chunks, or chunks that no split records.
+`replace` then swapped the master for a dummy, because it checks only `uploaded` (`main.py:7108`).
+Before IMP-C31 even a folder holding no chunk at all "resumed" and printed `✅ SUCCESS`.
 
-**What to do.**
-- Leftovers (the usual case): delete that `_parts` folder, then push again with your split size,
-  e.g. `python main.py push <id> SIZE_GB 8`. The master is re-split from scratch; the refusal
-  suggests the split the entry last used, when it has one.
+**What to do: read the list the refusal prints.** Each line names a file and says whose it is.
+
+| The note says | What it is | What to do |
+|---|---|---|
+| `a recorded chunk of <other id>` | another episode's interrupted push | `python main.py push <other id>` first, then push this one again |
+| `tagged for this entry, which has no recorded split` | this entry's own chunks, but its split record is gone (see the ⚠️ below) | delete them, then push again with a split size |
+| `…, but not in its recorded split`, `…no library entry has that id`, `no entry tag` | leftovers: a failed split's partial chunk or lone FLAC holder, an old split, a stray file | delete them, then push again with a split size |
+
+- Push again **with a split size**, e.g. `python main.py push <id> SIZE_GB 8`; the refusal suggests
+  one when it knows it. A plain `push <id>` uploads the file whole, and if the entry still records
+  the old split it keeps that stale record (open problem, unregistered).
 - Only if every chunk already reached the device, for example because you finished the title with
   `chunks N-M` range pushes (which never mark an entry uploaded): check that on the phone or in
   Google Photos first, then run `python main.py set_uploaded <id>`.
+- When the folder also holds chunks this entry does record, the push resumes those and only lists
+  the rest (`⚠️ Not part of this entry's recorded split — left in place, not uploaded`).
 
-**Seasons share one `_parts/`.** Every episode of a season is pushed through the same
-`Season NN/_parts/`, because an episode's `folder_path` is its season folder (`main.py:1416`). So one
-leftover there blocks every episode's push until it is removed. A related open problem, not fixed
-by IMP-C31: if that shared folder still holds a *different* episode's real chunks, pushing another
-episode uploads them as its own and marks it `onboarded`. Chunk names carry the owning episode's
-`[<short_id>]`. After an interrupted push, re-push that same episode before any other episode of
-the season (`push_group` moves on past a failed episode, so check `_parts/` after such a run).
+**`… chunk(s) … no longer match the hash its split recorded`.** A recorded chunk's bytes changed
+since the split: a partial write, or a file that was edited or replaced. It is never uploaded.
+Delete this entry's chunks in that folder (the files carrying its `[<short_id>]`), then push again
+with a split size.
 
-**A push that failed before any chunk reached the device can leave chunks behind.** If `_parts/`
-already existed when that push started, its rollback leaves the folder alone, because it never
-deletes a folder it did not create. That includes the failed split's own chunks. The next push would
-"resume" them although the entry no longer records a split (the same open problem as above). So
-after a split error, or after `❌ FAILED before any chunk uploaded`, delete any `_parts/` still in
-the title folder before pushing again: the master is intact. On a season folder, first re-push any
-other episode whose chunks are in it.
+**⚠️ After an interrupted split push, resume with `push <id>`, before anything re-preps the entry.**
+`push <id>` resumes from the recorded split. But `prep` rebuilds a `local_ready` entry from scratch
+(`main.py:1495-1512`), and that drops its split record. Re-running `prep_push_rep`, or the
+`Resume the rest of the season: prep_push_rep_season …` line the season autopilot prints, re-preps
+the interrupted episode first. The push then refuses its leftover chunks as
+`tagged for this entry, which has no recorded split`.
+- Right order: `python main.py push <id>` (it prints `Resuming N chunks`), then the season command
+  for the rest. The season command leaves the pushed episode's prep and push alone and goes on to
+  `replace`.
+- If the re-prep already happened: delete that episode's leftover chunks from `_parts/` and re-run.
+  The episode is split and uploaded again in full. Chunks the interrupted run had already uploaded
+  stay in Google Photos under the same names, so delete those older copies there. A fetch accepts a
+  download only when its hash matches (`mainfetch.py:404`), so a stale copy can make a fetch fail but
+  can never restore the wrong bytes.
+- Whether `prep` should keep the split record of an unchanged file is an open decision (see
+  `improvements_tierC.md` IMP-C32).
+
+**Entries the old behaviour already archived without a split record.** Before IMP-C32 that re-run
+uploaded the leftover chunks and archived the episode with no `split_info`. Its chunks are in the
+cloud, but `fetch_restore` looks for one whole file (`mainfetch.py:286-335`) and cannot find it.
+This read-only check lists uploaded entries that have chunk sidecars in `checksums/` but no recorded
+split (run from the repo root):
+```
+python -c "import os, mvcommon as m; [print(k, e.get('status')) for k, e in m.load_library().items() if e.get('filename') and e.get('uploaded') and not (e.get('split_info') or {}).get('is_split') and os.path.isdir(os.path.join(e['folder_path'], 'checksums')) and any('[%s].chunk.' % e.get('short_id') in n for n in os.listdir(os.path.join(e['folder_path'], 'checksums')))]"
+```
+- On 2026-10-02 it listed three: `tv-en-2003-thewire-s02e12`, `tv-en-2017-dark-s01e10` and
+  `tv-en-2004-battlestargalactica-s01e11`. The Google Photos inventory shows both chunks of each in
+  the TV account, so no bytes are lost.
+- The fix for such an entry is to rebuild its `split_info` from the `checksums/<chunk>.sha256`
+  sidecars, as the legacy reconcile did for 27 entries (`docs/feature-legacy-reconcile/REPORT.md`).
+  No command does this yet (unregistered). A failed split followed by a whole-file push leaves the
+  same sidecars behind, so check the cloud copy before rebuilding.
 
 ---
 

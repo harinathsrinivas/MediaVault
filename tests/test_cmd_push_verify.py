@@ -11,6 +11,7 @@ Candidate A — inline FakeAdbVerify recorder. No real bytes are copied; the
 stored chunk hash is seeded to match (or mismatch). No conftest sha256sum
 branch is used. Library isolation comes from the shared `sandbox` fixture only.
 """
+import hashlib
 import json
 import subprocess
 
@@ -22,7 +23,10 @@ import mvcommon
 
 # Stored/expected hash for the seeded chunk. The recorder emits this verbatim
 # when configured "correct"; tests flip to a different string to force a mismatch.
-GOOD_HASH = "a" * 64
+# It is the REAL sha256 of the seeded chunk, as a split records it: a resume uploads
+# a chunk only while its local bytes still match the recorded hash (IMP-C32).
+CHUNK_BYTES = b"chunk-bytes"
+GOOD_HASH = hashlib.sha256(CHUNK_BYTES).hexdigest()
 BAD_HASH = "b" * 64
 
 ENTRY_ID = "mov_test_c8_verify"
@@ -103,7 +107,7 @@ def split_resume_entry(sandbox):
 
     parts_dir = media_dir / "_parts"
     parts_dir.mkdir()
-    (parts_dir / CHUNK_NAME).write_bytes(b"chunk-bytes")
+    (parts_dir / CHUNK_NAME).write_bytes(CHUNK_BYTES)
 
     entry = {
         ENTRY_ID: {

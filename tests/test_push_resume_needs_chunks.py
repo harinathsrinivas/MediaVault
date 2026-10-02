@@ -14,11 +14,17 @@ pre-flights: the pre-existing `_parts/` is never touched (D-6), the library is
 not saved, and the journal records nothing. A `_parts/` that does hold a chunk
 (or the FLAC holder) resumes exactly as before.
 
+Since IMP-C32 (strict resume) this refusal is the EMPTY CASE of a wider rule: a
+resume uploads only what the entry's split_info records, with its recorded bytes
+(tests/test_push_strict_resume.py). So the genuine-resume pins below record the
+REAL sha256 of their chunks, as a split does.
+
 Fixtures (docs/testing-strategy.md §4): `sandbox`, `mock_device` (uploads really land
 on a fake device, or here must not), `make_video` (> DUMMY_MAX_BYTES), plus
 `stub_tech_specs` + `fake_dummy` for the prep_push_rep autopilot. Device lookups
 index by `.name` (§8.1).
 """
+import hashlib
 import json
 import os
 import types
@@ -55,9 +61,10 @@ def _seed(sandbox, make_video, **extra):
     return folder, master, short_id
 
 
-def _split_info(names):
-    return {"is_split": True, "method": "COUNT", "val": str(len(names)), "total_chunks": len(names),
-            "chunks": [{"filename": n, "hash": f"h{i}"} for i, n in enumerate(names, start=1)]}
+def _split_info(chunk_bytes):
+    """split_info as a split records it: each chunk with the sha256 of its bytes."""
+    return {"is_split": True, "method": "COUNT", "val": str(len(chunk_bytes)), "total_chunks": len(chunk_bytes),
+            "chunks": [{"filename": n, "hash": hashlib.sha256(b).hexdigest()} for n, b in chunk_bytes.items()]}
 
 
 def _tree(root):
@@ -184,11 +191,12 @@ def test_prep_push_rep_keeps_the_master_when_the_chunk_dir_holds_no_chunk(
 def test_a_stray_file_beside_real_chunks_does_not_block_their_resume(sandbox, mock_device, make_video):
     short_id = mvcommon.generate_short_id(ENTRY_ID)
     names = [f"{STEM} [{short_id}].chunk.00{i}.mkv" for i in (1, 2)]
-    folder, master, _ = _seed(sandbox, make_video, split_info=_split_info(names))
+    chunk_bytes = {name: f"chunk-{i}-bytes".encode() for i, name in enumerate(names, start=1)}
+    folder, master, _ = _seed(sandbox, make_video, split_info=_split_info(chunk_bytes))
     parts = folder / main.SPLIT_DIR_NAME
     parts.mkdir()
-    for i, name in enumerate(names, start=1):
-        (parts / name).write_bytes(f"chunk-{i}-bytes".encode())
+    for name, data in chunk_bytes.items():
+        (parts / name).write_bytes(data)
     (parts / "notes.txt").write_text("left behind")
 
     assert main.cmd_push(ENTRY_ID) is True
@@ -204,8 +212,9 @@ def test_a_chunk_dir_holding_only_the_flac_holder_still_resumes(sandbox, mock_de
     """Every chunk went up on an earlier run; only the carried-out FLAC holder is left."""
     short_id = mvcommon.generate_short_id(ENTRY_ID)
     holder = f"{STEM} [{short_id}].holder.mkv"
-    info = _split_info([f"{STEM} [{short_id}].chunk.00{i}.mkv" for i in (1, 2)])
-    info["carried_out_tracks"] = [{"holder_filename": holder, "holder_hash": "hh"}]
+    info = _split_info({f"{STEM} [{short_id}].chunk.00{i}.mkv": f"chunk-{i}-bytes".encode() for i in (1, 2)})
+    info["carried_out_tracks"] = [{"holder_filename": holder,
+                                   "holder_hash": hashlib.sha256(b"holder-bytes").hexdigest()}]
     folder, master, _ = _seed(sandbox, make_video, split_info=info)
     parts = folder / main.SPLIT_DIR_NAME
     parts.mkdir()

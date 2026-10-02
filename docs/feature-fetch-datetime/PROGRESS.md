@@ -41,7 +41,10 @@ check with `python tools/gp_inventory.py all --status`; no push to an account be
 the mapping within 24 h of the crawl; (b) all three phones attached — `FA69H0300200` (movies), `HT74D0202839`
 (movies#2), `FA75V0303405` (series) — check with `python main.py map_photos all --devices-only`; (c) `python main.py
 map_photos all` (read-only; writes only its run directory). What to read: STATUS.md Step 9 "R1 reader guide".
-While R1 waits on the user: Step 10 (fetch plumbing) may start — it does not depend on R1.
+Step 10 (fetch plumbing) does not depend on R1, but it rebuilds the fetch harvester in `mainfetch.py`, which IMP-C29
+is still changing and whose real failure cause is not yet known → HOLD Step 10 until C29 is fixed and merged here
+(orchestrator sequencing decision 2026-10-02). The R1 re-crawls wait for the same reason (C29 is driving the movies
+Chrome; a second Chrome window could confound the reproduction).
 Parallel hotfixes (own worktrees from main, own PRs, Checkpoint 1 each; DECISIONS §1d):
 - IMP-C29 `fix/imp_c29_fetch_attach_photos_tab` (MediaVault-c29, HEAD bcd08c7): tab fix + harvester fix committed;
   the REAL fetch still fails (0/2 on the fixed code: download seen, then vanishes; Chrome History has no row →

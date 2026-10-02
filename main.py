@@ -5770,6 +5770,121 @@ def _verify_chunk_hash(adb_base, remote_path, safe_path, expected_sha256):
 
 
 # ==========================================
+#   IMP-C32 — STRICT RESUME (one rule for cmd_push and push_one_extra)
+# ==========================================
+# USER RULING 2026-10-02, the rollback change-gate decision for resume behaviour:
+# a resume uploads only the files THIS entry's split_info records, its chunks and
+# its carried-out holders, and only while their bytes still match the recorded
+# sha256. Everything else in the chunk dir is a STRANGER: never uploaded, never
+# deleted, always listed with its likely owner. With nothing recorded left to
+# upload, the push refuses (IMP-C31's refusal is that empty case).
+#
+# Why "every .mkv in the dir" was wrong:
+#   - cmd_push's chunk dir belongs to a FOLDER (<folder>/_parts), and every episode
+#     of a season shares its season folder. One episode's push "resumed" another
+#     episode's waiting chunks and was marked onboarded on them.
+#   - A dir can hold chunks that no split_info records: a failed split's partial
+#     chunk or lone FLAC holder, or an interrupted push's leftovers once the entry
+#     was re-prepped (cmd_prep rebuilds the entry, which drops its split_info).
+#     Uploading them left the entry onboarded with no split record.
+#   Either way the next `replace` dummied the master.
+#
+# [ROLLBACK] This changes SELECTION only. Each refusal comes before any upload and
+# before anything is journalled, never touches the pre-existing chunk dir (D-6)
+# and saves nothing: IMP-C31's exit shape. The journal, PONR placement,
+# recover_journal and the season resume-range messaging are untouched.
+
+_SHORT_ID_TAG_RE = re.compile(r"\[([0-9a-f]{6})\]")
+
+
+def _split_recorded_hashes(split_info):
+    """{file name: recorded sha256, or None when none was recorded} for every file a
+    split recorded: its chunks and its carried-out holders. {} without a split_info."""
+    recorded = {}
+    for c in (split_info or {}).get("chunks") or []:
+        if c.get("filename"):
+            recorded[c["filename"]] = c.get("hash")
+    for t in (split_info or {}).get("carried_out_tracks") or []:
+        if isinstance(t, dict) and t.get("holder_filename"):
+            recorded[t["holder_filename"]] = t.get("holder_hash")
+    return recorded
+
+
+def _resume_plan(parts_dir, split_info):
+    """What a resume from `parts_dir` may upload for the entry that owns `split_info`.
+
+    Returns (paths, strangers, recorded):
+      paths     sorted full paths of the recorded files still in `parts_dir`
+                (a recorded file that is missing was uploaded by an earlier run);
+      strangers sorted names of everything else there;
+      recorded  {name: recorded sha256 or None}, for _resume_damaged."""
+    recorded = _split_recorded_hashes(split_info)
+    paths, strangers = [], []
+    for name in sorted(os.listdir(parts_dir)):
+        full = os.path.join(parts_dir, name)
+        if name in recorded and os.path.isfile(full):
+            paths.append(full)
+        else:
+            strangers.append(name)
+    return paths, strangers, recorded
+
+
+def _resume_damaged(paths, recorded, indent="   "):
+    """Names among `paths` whose bytes no longer match the sha256 their split recorded:
+    a partial or altered chunk. A file with no recorded hash passes on its name."""
+    to_check = [p for p in paths if recorded.get(os.path.basename(p))]
+    if to_check:
+        print(f"{indent}> 🔎 Checking {len(to_check)} resumed chunk(s) against the hash their split recorded...")
+    return [os.path.basename(p) for p in to_check
+            if calculate_file_hash(p) != recorded[os.path.basename(p)]]
+
+
+def _resume_stranger_notes(strangers, library, own_short_id, own_has_split, what="entry"):
+    """[(name, note, owner)] for the refusal and warning text. `owner` is the id of
+    ANOTHER entry whose split_info records that file, i.e. its own interrupted push
+    (resumable with `push <owner>`); otherwise None. `what` names the resuming thing
+    in the notes ("entry", or "extra" for push_one_extra)."""
+    if not strangers:
+        return []
+    by_tag = {}
+    for mid, e in library.items():
+        for _group, _path, it in _extras_item_paths(e):
+            if it.get("short_id"):
+                by_tag[it["short_id"]] = (f"an extra of {mid}", None)
+        if e.get("short_id"):
+            by_tag[e["short_id"]] = (mid, _split_recorded_hashes(e.get("split_info")))
+    notes = []
+    for name in strangers:
+        tags = _SHORT_ID_TAG_RE.findall(name)
+        tag = tags[-1] if tags else None
+        owner = None
+        if tag is None:
+            note = "no entry tag"
+        elif tag == own_short_id:
+            note = (f"tagged for this {what}, but not in its recorded split" if own_has_split
+                    else f"tagged for this {what}, which has no recorded split")
+        elif tag not in by_tag:
+            note = f"tagged [{tag}], but no library entry has that id"
+        else:
+            label, their_split = by_tag[tag]
+            if their_split is None:
+                note = f"tagged for {label}"
+            elif name in their_split:
+                note, owner = f"a recorded chunk of {label}", label
+            else:
+                note = f"tagged for {label}, but not in its recorded split"
+        notes.append((name, note, owner))
+    return notes
+
+
+def _print_resume_strangers(indent, notes):
+    for name, note, _owner in notes[:8]:
+        print(f"{indent}  - {name}  ({note})")
+    if len(notes) > 8:
+        print(f"{indent}  … and {len(notes) - 8} more")
+
+
+# ==========================================
 #   IMP-D19 Step 3 — EXTRAS UPLOAD PHASE (isolated, O-1 resumable per file)
 # ==========================================
 # Candidate B = ISOLATED DUPLICATION. push_one_extra re-implements ONLY the
@@ -5873,10 +5988,34 @@ def push_one_extra(library, title_id, group_rel, item, extras_method, extras_val
 
     # 1. RESUME — chunks for this item still on disk: re-push them (no re-split).
     if os.path.isdir(parts_dir) and any(f.endswith(".mkv") for f in os.listdir(parts_dir)):
-        files_to_upload = sorted(
-            os.path.join(parts_dir, f) for f in os.listdir(parts_dir) if f.endswith(".mkv"))
-        is_split = True
+        # [IMP-C32] STRICT RESUME, the same rule as cmd_push (see the block above): only
+        # the chunks this item's split_info records, and only with their recorded bytes.
+        # A failed split's leftover in a pre-existing dir, or stale chunks after a
+        # re-scan dropped split_info, used to be uploaded and the item marked onboarded.
+        files_to_upload, strangers, recorded = _resume_plan(parts_dir, item.get("split_info"))
+        notes = _resume_stranger_notes(strangers, library, short_id, bool(recorded), what="extra")
+        remedy = "        > Delete that folder, then re-run this extras push (the extra's own file is intact)."
+        if not files_to_upload:
+            print(f"     ❌ Cannot resume extra {item.get('filename')}: {parts_dir} holds no chunk "
+                  "recorded in its split.")
+            _print_resume_strangers("        ", notes)
+            print("        Nothing was uploaded for it; it stays uploaded=False.")
+            print(remedy)
+            return False
         print(f"     > 🔄 Resuming {len(files_to_upload)} extra chunk(s) for {item.get('filename')}.")
+        if notes:
+            print("     > ⚠️ Not part of this extra's recorded split — left in place, not uploaded:")
+            _print_resume_strangers("     ", notes)
+        damaged = _resume_damaged(files_to_upload, recorded, indent="     ")
+        if damaged:
+            print(f"     ❌ Cannot resume extra {item.get('filename')}: {len(damaged)} chunk(s) in {parts_dir} "
+                  "no longer match the hash its split recorded:")
+            for name in damaged[:8]:
+                print(f"          - {name}")
+            print("        Nothing was uploaded for it; it stays uploaded=False.")
+            print(remedy)
+            return False
+        is_split = True
     # 2. SPLIT — independent extras chunk size (size-under-target / no method => whole).
     elif _will_split(os.path.getsize(local_file_path), extras_method, extras_val):
         file_size = os.path.getsize(local_file_path)
@@ -6175,30 +6314,53 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
     checksum_preexisted = os.path.exists(checksum_dir)
     split_info_preexisted = "split_info" in library.get(manual_id, {})
     any_upload_done = False
+    resume_recorded = None  # [IMP-C32] set on a resume: {recorded file name: recorded sha256 or None}
     # 1. CHECK FOR RESUME (Existing _parts folder)
     if os.path.exists(parts_dir) and os.listdir(parts_dir):
-        files_to_upload_paths = sorted(
-            [os.path.join(parts_dir, f) for f in os.listdir(parts_dir) if f.endswith(".mkv")])
+        # [IMP-C32] STRICT RESUME (see the block above push_one_extra): only what THIS
+        # entry's split_info records is resumed. The rest of _parts/ are strangers:
+        # another entry's chunks (a season's episodes share this dir), or files that no
+        # split records. They are never uploaded and never deleted.
+        files_to_upload_paths, strangers, resume_recorded = _resume_plan(parts_dir, entry.get("split_info"))
+        notes = _resume_stranger_notes(strangers, library, short_id, bool(resume_recorded))
+        # The split a refusal suggests: this call's, else the one the entry recorded.
+        si = entry.get("split_info") or {}
+        if split_method and split_val:
+            resplit = f"{split_method} {split_val}"
+        elif si.get("method") and si.get("val"):
+            resplit = f"{si['method']} {si['val']}"
+        else:
+            resplit = "SIZE_GB <n>"
         if not files_to_upload_paths:
-            # [IMP-C31] A non-empty _parts/ holding no .mkv is NOT a resume. The upload
-            # loop would run zero times, all_success would stay True, and the entry would
-            # be marked uploaded/onboarded with nothing sent (the next replace then dummies
-            # the master). Refuse before anything is journalled, like the free-space and
-            # unsplittable pre-flights: this pre-existing _parts/ is never touched (D-6),
-            # the library is not saved, and the journal records nothing. The journal is
-            # already open, so a crashed run's _parts/ was recovered above (IMP-R7).
-            found = sorted(os.listdir(parts_dir))
-            si = entry.get("split_info") or {}
-            resplit = f"{si['method']} {si['val']}" if si.get("method") and si.get("val") else "SIZE_GB <n>"
-            print(f"❌ Cannot resume {manual_id}: {parts_dir} is not empty but holds no chunk (.mkv) to upload.")
-            print(f"   Found: {', '.join(found[:5])}{' …' if len(found) > 5 else ''}")
+            # Nothing this entry recorded is left here. IMP-C31's refusal (a _parts/ with
+            # no .mkv at all) is this empty case: the upload loop would run zero times,
+            # all_success would stay True, and the entry would be marked onboarded with
+            # nothing of its own sent. Refuse before anything is journalled, like the
+            # free-space and unsplittable pre-flights: this pre-existing _parts/ is never
+            # touched (D-6), the library is not saved, and the journal records nothing.
+            # The journal is already open, so a crashed run's _parts/ was recovered above
+            # (IMP-R7).
+            pending = list(dict.fromkeys(owner for _name, _note, owner in notes if owner))
+            print(f"❌ Cannot resume {manual_id}: {parts_dir} holds no chunk recorded in its split.")
+            print("   Not part of this entry's recorded split (left in place, nothing uploaded):")
+            _print_resume_strangers("   ", notes)
             print("   Nothing was uploaded, and the library entry is unchanged.")
-            print("   > If those are leftovers: delete that folder, then push again to re-split the")
-            print(f"     master (it is intact), e.g. push {manual_id} {resplit}")
-            print("   > Only if you have checked that every chunk already reached the device (e.g.")
-            print(f"     after `chunks` range pushes), mark it instead: set_uploaded {manual_id}")
+            for owner in pending:
+                print(f"   > {owner} has an interrupted push here. Resume it first: push {owner}")
+            if any(owner is None for _name, _note, owner in notes):
+                print(f"   > {'The rest are' if pending else 'They are'} leftovers: delete them, "
+                      "then push again to re-split the")
+                print(f"     master (it is intact), e.g. push {manual_id} {resplit}")
+            else:
+                print(f"   > Then push {manual_id} again.")
+            if resume_recorded:
+                print("   > Only if you have checked that every chunk already reached the device (e.g.")
+                print(f"     after `chunks` range pushes), mark it instead: set_uploaded {manual_id}")
             return False
         print(f"   > 🔄 Resuming {len(files_to_upload_paths)} chunks found in temp folder.")
+        if notes:
+            print("   > ⚠️ Not part of this entry's recorded split — left in place, not uploaded:")
+            _print_resume_strangers("   ", notes)
 
     # 2. NEW SPLIT LOGIC
     elif split_method and split_val:
@@ -6425,6 +6587,24 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
                 return False
         except ValueError:
             print("❌ Invalid chunk range format. Use '1-4'.")
+            return False
+
+    # [IMP-C32] A resume verifies what it is about to upload against the sha256 its split
+    # recorded: a partial or altered chunk under a recorded name is never sent. This runs
+    # after the range filter, so a `chunks N-M` push hashes only its own range, and
+    # before the first upload, so a mismatch refuses with nothing sent and nothing
+    # changed (the same exit as the refusal in the resume branch).
+    if resume_recorded is not None:
+        damaged = _resume_damaged(files_to_upload_paths, resume_recorded)
+        if damaged:
+            print(f"❌ Cannot resume {manual_id}: {len(damaged)} chunk(s) in {parts_dir} no longer match "
+                  "the hash its split recorded:")
+            for name in damaged[:8]:
+                print(f"     - {name}")
+            print("   A partial or altered chunk is never uploaded. Nothing was uploaded, and the "
+                  "library entry is unchanged.")
+            print(f"   > Delete this entry's chunks there (the files tagged [{short_id}]), then push again to")
+            print(f"     re-split the master (it is intact), e.g. push {manual_id} {resplit}")
             return False
 
     # [IMP-C8] Build expected per-chunk hashes (local_filename -> stored SHA-256)

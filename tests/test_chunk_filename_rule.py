@@ -18,6 +18,7 @@ Fixtures (docs/testing-strategy.md §4): `sandbox` (dual LIBRARY_*/LOCAL_ROOT pa
 the C:\\Media hard-guard), `make_video` (> DUMMY_MAX_BYTES, so a file reads as real
 media), `mock_device` for the push. Device lookups index by `.name` (§8.1).
 """
+import hashlib
 import os
 
 import pytest
@@ -77,15 +78,18 @@ def test_chunks_range_push_numbers_each_chunk_by_its_own_suffix(sandbox, mock_de
     parts = folder / main.SPLIT_DIR_NAME
     parts.mkdir()
     names = [f"{stem} [{short_id}].chunk.00{i}.mkv" for i in (1, 2)]
-    for i, name in enumerate(names, start=1):
-        (parts / name).write_bytes(f"chunk-{i}-bytes".encode())
+    chunk_bytes = {name: f"chunk-{i}-bytes".encode() for i, name in enumerate(names, start=1)}
+    for name, data in chunk_bytes.items():
+        (parts / name).write_bytes(data)
     mvcommon.save_library({entry_id: {
         "short_id": short_id, "filename": filename, "folder_path": str(folder),
         "status": "local_ready", "uploaded": False, "search_term": f"{stem} [{short_id}]{ext}",
         "hash": sha256, "metadata": main.parse_metadata_from_id(entry_id),
         "tech_spec": {"resolution": "1080p", "video_codec": "HEVC"},
+        # real chunk hashes, as a split records them: a resume checks the bytes against them (IMP-C32)
         "split_info": {"is_split": True, "method": "COUNT", "val": "2", "total_chunks": 2,
-                       "chunks": [{"filename": n, "hash": f"h{i}"} for i, n in enumerate(names, start=1)]},
+                       "chunks": [{"filename": n, "hash": hashlib.sha256(b).hexdigest()}
+                                  for n, b in chunk_bytes.items()]},
     }})
 
     assert main.cmd_push(entry_id, chunk_range="1-1") is True

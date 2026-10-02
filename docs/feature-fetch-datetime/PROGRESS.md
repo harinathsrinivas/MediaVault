@@ -157,8 +157,11 @@ validation fix-ups (an unmatched chunk item carrying a library object's `[short_
 a duplicate; lines ≤ 120) (wip 97e6b3b) · [x] fail fast before an apply (the run directory is created first; --apply
 is refused when the --resolutions file cannot be read) + an `oth-` object end to end (test_map_photos 121) (wip
 93cdc51) · [x] final re-read of the whole diff: a dry run's "Next:" command carries the previewed --resolutions file
-(never an unreadable one) (wip commit "step 9 — the Next command carries the previewed resolutions") · [ ] disarm
-probes on the final code, full + smoke, PROGRESS row 9 / STATUS, feat commit ← next`
+(never an unreadable one) (wip 7a41cad) · [x] R1-reader audit (delta 4b): mapping.csv — one row per object: the
+wrong-account list with its override coverage, the near-matches with both names side by side, the duplicates; no
+photo id — and an unwritable report file (a re-used --out open in Excel) ends the run with one line, never a
+traceback (after an apply the records stay; test_map_photos 125) (wip commit "step 9 — mapping.csv for the R1
+reader") · [ ] disarm probes on the final code, full + smoke, PROGRESS row 9 / STATUS, feat commit ← next`
 `resumed 2026-10-02 by executor-fable (usage-limit pause #6): tree clean at 97e6b3b → 93cdc51; nothing to keep or
 discard`
 `resumed 2026-10-02 by executor-fable (usage-limit pause #5): uncommitted self-review fixes KEPT (main.py) —

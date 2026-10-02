@@ -14,10 +14,11 @@ Pinned here, per sub-task:
   9.5  IMP-C27: split_info lost (+ the proven repair and its writer), old untagged names (+ the apply engine's
        `names=`), partial / non-original copies, every device verdict (freed vs on a phone vs absent vs unchecked)
        with partial sets and the LOUD block, the extra movies phone (DECISIONS §1d).
-  9.6  the unmatched-inventory report.   9.7  resolutions_todo.csv / inconsistencies.csv / the failed records.
+  9.6  the unmatched-inventory report.   9.7  resolutions_todo.csv / inconsistencies.csv / the failed records;
+       mapping.csv (the R1 reader's sheet: wrong-account list, near-matches, duplicates); an unwritable report file.
   9.8  --resolutions and the hints store.   9.9  --apply (sidecar, engine, failed list, CSV rule, idempotence).
   9.10 --devices-only.   Plus: all four prefixes end to end, the CLI dispatcher branch.
-Disarm probes (35, on an isolated scratch copy): PROGRESS.md row 9.
+Disarm probes (on an isolated scratch copy): PROGRESS.md row 9.
 SYNTHETIC data only: photo ids contain FAKE, devices are FAKE serials; the library lives in the `sandbox`, the
 inventory and the Google Photos state in the conftest redirects (tmp_path) — never D:\\ or ~/.mediavault.
 """
@@ -1287,9 +1288,88 @@ def test_the_outputs_line_names_every_file(world, tmp_path, capsys):
     world.save().upload_all().save()
     res = world.run(out=tmp_path / "run", capsys=capsys)
     last = res["stdout"].splitlines()[-1]
-    assert last == (f"Outputs: {tmp_path / 'run'} — summary.txt, mapping.jsonl, inconsistencies.csv, "
+    assert last == (f"Outputs: {tmp_path / 'run'} — summary.txt, mapping.jsonl, mapping.csv, inconsistencies.csv, "
                     f"resolutions_todo.csv, unmatched_movies.csv, unmatched_tv.csv, unmatched_anime.csv")
     assert sorted(os.listdir(res["run_dir"])) == sorted(last.split(" — ")[1].split(", "))
+
+
+def test_mapping_csv_lists_the_wrong_account_block_with_its_override_coverage(xfiles, tmp_path):
+    """🚦 R1 reads the wrong-account list here: one row per object, the account that holds it, whether an mvconfig
+    override covers it — and no photo id or dedupKey (those stay in mapping.jsonl)."""
+    res = xfiles.run(out=tmp_path / "run")
+    path = os.path.join(res["run_dir"], "mapping.csv")
+    rows = _read_csv(path)
+    assert list(rows[0]) == ["account", "category", "manual_id", "object", "uploaded_name", "status", "issue",
+                             "name_match", "proof", "gp_filename", "taken_utc", "upload_utc", "duplicate",
+                             "alternates", "copies", "default_account", "override", "override_check",
+                             "learned_home", "device", "partial_set", "user_decision", "note"]
+    assert [(r["manual_id"], r["object"], r["status"]) for r in rows] == [
+        (r["manual_id"], r["label"], r["status"]) for r in res["rows"]]                  # every object, in order
+    wrong = {r["manual_id"]: r for r in rows if r["status"] == "wrong-account"}
+    assert sorted(wrong) == XFILES
+    first = wrong[XFILES[0]]
+    assert (first["account"], first["category"], first["default_account"], first["override"],
+            first["override_check"]) == ("movies", "tv", "tv", "movies", "covers")
+    assert (first["uploaded_name"], first["gp_filename"]) == (xfiles.names[(XFILES[0], "whole")],) * 2
+    assert (first["taken_utc"], first["upload_utc"]) == ("2024-03-09 06:03:02 UTC", "2024-03-10 06:03:02 UTC")
+    assert (wrong[XFILES[29]]["override"], wrong[XFILES[29]]["override_check"]) == ("", "none")
+    assert (wrong[XFILES[30]]["override"], wrong[XFILES[30]]["override_check"]) == ("anime", "differs")
+    text = open(path, encoding="utf-8-sig").read()
+    for account in mvcommon.GP_ACCOUNTS:
+        for rec in xfiles.inv.items[account]:
+            assert rec["photo_id"] not in text and rec["dedup_key"] not in text
+    assert "AF1Qip" not in text
+
+
+def test_mapping_csv_shows_near_matches_duplicates_and_copies(world, tmp_path):
+    world.save().upload_all(skip={M_WHOLE, T_EP1, (M_SPLIT, "chunk 3/3")})
+    name, episode = world.names[(M_WHOLE, "whole")], world.names[(T_EP1, "whole")]
+    world.inv.add("movies", name.upper())                              # a near-match (P-6)
+    for account in ("tv", "tv", "movies"):                             # the same bytes twice + a copy in movies
+        world.inv.add(account, episode, data=b"episode one")
+    world.save()
+    world.on_phone("movies", _sidecar(world, (M_SPLIT, "chunk 3/3")))  # freed: a lost member of a partial set
+    res = world.run(out=tmp_path / "run")
+    rows = {(r["manual_id"], r["object"]): r for r in _read_csv(os.path.join(res["run_dir"], "mapping.csv"))}
+    near = rows[(M_WHOLE, "whole")]
+    assert (near["status"], near["name_match"], near["uploaded_name"], near["gp_filename"]) == (
+        "mapped-normalized", "normalized", name, name.upper())
+    twice = rows[(T_EP1, "whole")]
+    assert (twice["status"], twice["duplicate"], twice["alternates"], twice["copies"]) == (
+        "mapped", "same-bytes", "1", "movies")
+    lost = rows[(M_SPLIT, "chunk 3/3")]
+    assert (lost["status"], lost["gp_filename"], lost["device"], lost["partial_set"]) == (
+        "missing-after-backup", "", "freed", "yes")
+    plain = rows[(A_EP, "whole")]
+    assert (plain["duplicate"], plain["alternates"], plain["copies"], plain["partial_set"], plain["note"]) == ("",) * 5
+
+
+@pytest.mark.parametrize("tokens,tail", [
+    ((), "and re-run."),
+    (("--apply",), "and re-run (what --apply recorded stays on record; a re-run records nothing twice)."),
+])
+def test_an_unwritable_report_file_ends_the_run_with_one_line(mixed, tmp_path, monkeypatch, capsys, tokens, tail):
+    """A report of a re-used --out that is open elsewhere (Excel) must not end the run — least of all an --apply —
+    in a traceback: one ❌ line, status error; what the apply recorded stays, and the re-run records nothing twice."""
+    real = main._mp_write_csv
+
+    def locked(path, header, rows):
+        if os.path.basename(path) == "inconsistencies.csv":
+            raise PermissionError(13, "Permission denied", path)
+        return real(path, header, rows)
+
+    monkeypatch.setattr(main, "_mp_write_csv", locked)
+    res = mixed.run(*tokens, out=tmp_path / "run", capsys=capsys)
+    assert res["status"] == "error"
+    (line,) = [text for text in res["stdout"].splitlines() if text.startswith("❌ map_photos:")]
+    assert line.startswith(f"❌ map_photos: the reports could not be written to {tmp_path / 'run'} (PermissionError:")
+    assert "inconsistencies.csv" in line and line.endswith(tail)
+    assert bool(mvcommon.read_learned()) == bool(tokens)                 # recorded by the apply, never by a dry run
+    monkeypatch.setattr(main, "_mp_write_csv", real)
+    again = mixed.run(*tokens, out=tmp_path / "run", capsys=capsys)
+    assert again["status"] == "ok" and "❌ map_photos:" not in again["stdout"]
+    if tokens:
+        assert again["applied"]["learned"][0] == 0 and again["applied"]["learned"][1] > 0
 
 
 # ============================================================================ 9.8 --resolutions and the hints store

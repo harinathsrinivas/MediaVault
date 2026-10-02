@@ -12276,8 +12276,10 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
     ambiguous · conflict · inconsistent (issue: split-info-lost | untagged-name | partial-upload |
     not-original-quality | no-uploaded-name) · awaiting-backup · missing-after-backup · missing-everywhere ·
     device-check-incomplete · stale-inventory (no verdict). Run directory: summary.txt (the printed report),
-    mapping.jsonl, inconsistencies.csv, resolutions_todo.csv (the failed_objects.csv columns),
-    unmatched_<account>.csv (`all` without account only); devices.csv for devices_only.
+    mapping.jsonl, mapping.csv (its sheet for a reader: one row per object, the names side by side, no photo id),
+    inconsistencies.csv, resolutions_todo.csv (the failed_objects.csv columns), unmatched_<account>.csv (`all`
+    without account only); devices.csv for devices_only. A report file that cannot be written (open in Excel) ends
+    the run with one line and status error — after an apply, what was recorded stays on record.
 
     -> {status: ok | error, run_dir, rows, fresh, devices, unmatched, todo (the failed-list records of the
     unresolved rows), applied (the --apply summary: split_info, learned / hints / failed (new, already on record),
@@ -12313,7 +12315,14 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
         preview = _mp_preview(ctx, repairs, accept_probable)
     ctx.update(apply=apply and not unread, repairs=tuple(repairs), accept_probable=accept_probable, applied=applied,
                preview=preview)
-    result = _mp_finish(ctx, run_dir)
+    try:
+        result = _mp_finish(ctx, run_dir)
+    except OSError as e:              # e.g. a report of a re-used --out is open in Excel: one line, never a traceback
+        print(f"❌ map_photos: the reports could not be written to {run_dir} ({_gp_line(e)}) — close the file if it "
+              f"is open (e.g. in Excel) or use another --out, and re-run"
+              + (" (what --apply recorded stays on record; a re-run records nothing twice)." if applied is not None
+                 else "."))
+        return {"status": "error", "run_dir": run_dir, "rows": ctx["rows"], "fresh": ctx["fresh"]}
     if unread or (applied is not None and applied["error"]):
         result["status"] = "error"
     return result
@@ -12396,12 +12405,35 @@ def _mp_devices_only(library, scope, ids, account, run_dir):
     return {"status": "ok", "run_dir": run_dir, "devices": devices, "objects": result["objects"]}
 
 
+# mapping.csv — every object's verdict as a sheet for the 🚦 R1 reader: the wrong-account list (status, account,
+# override_check), the near-matches (uploaded_name next to gp_filename) and the duplicates are filters on it. The
+# items' photo ids and dedupKeys stay in mapping.jsonl.
+_MP_CSV_COLUMNS = ("account", "category", "manual_id", "object", "uploaded_name", "status", "issue", "name_match",
+                   "proof", "gp_filename", "taken_utc", "upload_utc", "duplicate", "alternates", "copies",
+                   "default_account", "override", "override_check", "learned_home", "device", "partial_set",
+                   "user_decision", "note")
+
+
+def _mp_csv_row(row):
+    """One mapping.csv row (_MP_CSV_COLUMNS): gp_filename / taken_utc / upload_utc describe the item the object maps
+    to, `alternates` counts its other items (duplicates), `copies` names the other accounts holding the same bytes."""
+    item = row["item"] or {}
+    return (row["account"], row["category"], row["manual_id"], row["label"], row["uploaded_name"], row["status"],
+            row["issue"], row["name_match"], row["proof"], item.get("filename"), _mp_utc(item.get("taken_ms")),
+            _mp_utc(item.get("upload_ms")), row["duplicate"], len(row["alternates"]) or None,
+            ", ".join(c["account"] for c in row["copies"]) or None, row["default_account"], row["override"],
+            row["override_check"], row["learned_home"], (row["device"] or {}).get("state"),
+            "yes" if row["partial_set"] else None, row["user_decision"], row["note"])
+
+
 def _mp_finish(ctx, run_dir):
-    """Write the run directory (mapping.jsonl, inconsistencies.csv, resolutions_todo.csv, unmatched_<account>.csv,
-    summary.txt), print the report -> the command's result."""
+    """Write the run directory (mapping.jsonl, mapping.csv, inconsistencies.csv, resolutions_todo.csv,
+    unmatched_<account>.csv, summary.txt), print the report -> the command's result. Raises OSError when a file
+    cannot be written (cmd_map_photos turns it into one line)."""
     rows, todo, unmatched = ctx["rows"], ctx["todo"], ctx["unmatched"]
-    files, notes = ["summary.txt", "mapping.jsonl", "inconsistencies.csv"], list(ctx["notes"])
+    files, notes = ["summary.txt", "mapping.jsonl", "mapping.csv", "inconsistencies.csv"], list(ctx["notes"])
     _mp_write_jsonl(os.path.join(run_dir, "mapping.jsonl"), rows)
+    _mp_write_csv(os.path.join(run_dir, "mapping.csv"), _MP_CSV_COLUMNS, [_mp_csv_row(r) for r in rows])
     _mp_write_csv(os.path.join(run_dir, "inconsistencies.csv"),
                   ("account", "category", "manual_id", "object", "uploaded_name", "status", "issue", "partial_set",
                    "device", "repair", "note"),

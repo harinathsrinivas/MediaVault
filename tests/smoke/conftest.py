@@ -31,6 +31,7 @@ treated by cmd_check / cmd_restore / cmd_prep as already-archived dummies and EA
 place we WANT the dummy path (cmd_repair_dummies regenerating an archived dummy) writes
 a <200 KB file on purpose and asserts the regenerate path — both are valid smokes.
 """
+import hashlib
 import os
 
 import pytest
@@ -68,8 +69,8 @@ def seed_split_parts():
 
     Lets the split-push smoke RESUME from existing chunks (main.py:1299) instead of
     invoking a real split (no ffmpeg/mkvmerge on the hot path — the plan's speed lever).
-    The chunk hashes are placeholders; that is fine because PUSH_VERIFY_REMOTE is False
-    by default, so cmd_push never hashes the chunks on the push path.
+    The chunk hashes are the REAL sha256 of the seeded bytes, as a split records them:
+    a resume uploads only chunks whose bytes match the recorded hash (IMP-C32).
 
     Returns seed(media_dir, short_id, base_name, n_chunks=3) -> dict:
         {"parts_dir": Path, "chunk_names": [str, ...], "split_info": {...}}
@@ -83,8 +84,9 @@ def seed_split_parts():
         chunk_names = [f"{stem} [{short_id}].chunk.{i:03d}.mkv" for i in range(1, n_chunks + 1)]
         chunks_meta = []
         for i, cn in enumerate(chunk_names, start=1):
-            (parts_dir / cn).write_bytes(f"smoke-chunk-{i}-bytes".encode())
-            chunks_meta.append({"filename": cn, "hash": f"smokehash{i}"})
+            data = f"smoke-chunk-{i}-bytes".encode()
+            (parts_dir / cn).write_bytes(data)
+            chunks_meta.append({"filename": cn, "hash": hashlib.sha256(data).hexdigest()})
         split_info = {
             "is_split": True,
             "method": "SIZE_MB",

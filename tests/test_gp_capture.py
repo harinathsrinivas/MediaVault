@@ -508,11 +508,11 @@ def test_a_resumed_push_keeps_what_the_earlier_partial_push_knew(sandbox, tech_1
     assert partial["device_tz"] == resume["device_tz"] == "Asia/Singapore"   # both capture branches ask
     ((p1,), (p2,)) = partial["objects"], resume["objects"]
     assert (p1["uploaded_name"], p1["sha1"], p1["approach_hint"]) == (first, _sha1(made[first]), "hash")
-    # chunk 2 was hashed only by the run that did not upload it: unknown now -> the DateUTC hint
-    assert (p2["uploaded_name"], p2["sha1"], p2["approach_hint"]) == (second, None, "taken_second")
+    # chunk 2 is re-hashed by the resume's own strict check (IMP-C32), so its SHA-1 is known too
+    assert (p2["uploaded_name"], p2["sha1"], p2["approach_hint"]) == (second, _sha1(made[second]), "hash")
     meta = {c["filename"]: c for c in _device_mvmeta(mock_device)["chunks"]}
     assert meta[first]["sha1"] == _sha1(made[first])            # from the partial push's record
-    assert "sha1" not in meta[second] and "dedup_key" not in meta[second]   # unknown -> not written
+    assert meta[second]["sha1"] == _sha1(made[second])          # from the resume's strict check
     assert (meta[second]["date_utc"], meta[second]["uploaded_name"]) == ("2026-09-24T06:03:02Z", second)
     assert sum(a[-1:] == [DEVICE_QUERY] for a in calls) == 2
     assert all(a[1:3] == ["-s", SERIAL] for a in calls if a and a[0] == "adb")

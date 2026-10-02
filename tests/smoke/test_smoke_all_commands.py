@@ -1230,7 +1230,8 @@ def test_push_real_split(sandbox, mkvmerge_split_chunks, mock_device):
     import shutil as _sh
     for c in chunks:
         _sh.copy2(c, parts_dir / c.name)
-        chunks_meta.append({"filename": c.name, "hash": "x"})
+        # the hash a real split records: a resume checks the chunk's bytes against it (IMP-C32)
+        chunks_meta.append({"filename": c.name, "hash": hashlib.sha256(c.read_bytes()).hexdigest()})
     entry_id = "mov-en-2024-realsplit"
     library = {
         entry_id: {

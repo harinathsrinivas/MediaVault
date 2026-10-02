@@ -24,6 +24,7 @@ Test names are long and keep "_parts" out of their first 30 characters. pytest
 builds tmp_path from the first 30 characters of the test name, so no path here
 carries the substring by accident: every "_parts" below is put there on purpose.
 """
+import hashlib
 import json
 import os
 import types
@@ -185,9 +186,10 @@ def test_resumed_split_push_deletes_only_chunks_never_the_master(sandbox, mock_d
     for i, name in enumerate(names, start=1):
         chunk_bytes[name] = f"chunk-{i}-bytes".encode()
         (parts / name).write_bytes(chunk_bytes[name])
+    # Real chunk hashes, as a split records them: a resume checks the bytes against them (IMP-C32).
     _seed_movie(title, "Spare_parts (2015).mkv", sha256, split_info={
         "is_split": True, "method": "COUNT", "val": "2", "total_chunks": 2,
-        "chunks": [{"filename": n, "hash": f"hash{i}"} for i, n in enumerate(names, start=1)],
+        "chunks": [{"filename": n, "hash": hashlib.sha256(chunk_bytes[n]).hexdigest()} for n in names],
     })
 
     assert main.cmd_push(ENTRY_ID) is True

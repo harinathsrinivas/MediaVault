@@ -859,6 +859,8 @@ def title_short_id_query(filename, short_id, category):
 # Shared page-context scripts (the crawler's, verbatim). TILES_JS lists the visible result/timeline
 # tiles as [{href, label}] (a[href*="photo/"], checkVisibility, width > 40 — RESEARCH F14); SCROLL_JS
 # scrolls the largest scrollable pane (the virtualised grid) and returns [scrollTop, scrollHeight].
+# SEARCH_STATE_JS / TIMELINE_LINKS_JS are the fetch's search wait and timeline guard (IMP-C35 — see
+# mainfetch._await_search_results / _drop_timeline; every UI search path uses them, IMP-C25 Step 12).
 
 TILES_JS = """
 const out=[];
@@ -871,3 +873,26 @@ const els=[...document.querySelectorAll('*')].filter(e=>{const s=getComputedStyl
 els.sort((a,b)=>b.scrollHeight-a.scrollHeight);
 const el=els[0]; if(!el){window.scrollBy(0,900);return [window.scrollY, document.body.scrollHeight];}
 el.scrollTop+=Math.max(400, Math.floor(el.clientHeight*0.8)); return [el.scrollTop, el.scrollHeight];"""
+
+# One look at a search page -> {results, timeline, empty}. A visible link to an item (TILES_JS's rule) is
+# either a search RESULT — its href runs through the search: ./search/<token>/photo/<id> — or a home-TIMELINE
+# thumbnail (./photo/<id>), which Google Photos keeps showing for 1-2 s after Enter. `empty`: the page says
+# "No results" — display text, so a hint that only ends a wait early (P-7).
+SEARCH_STATE_JS = r"""
+let results = 0, timeline = 0;
+for (const a of document.querySelectorAll('a[href*="photo/"]')) {
+  const r = a.getBoundingClientRect();
+  if (!(a.checkVisibility() && r.width > 40)) continue;
+  if (/(^|\/)search\//.test(a.getAttribute('href') || '')) results++; else timeline++;
+}
+const text = document.body ? document.body.innerText : '';
+return {results: results, timeline: timeline, empty: /\bno results\b/i.test(text)};"""
+
+# arguments[0] = elements -> one boolean each: is it — or does it sit inside — a link to an item that is NOT a
+# search result (a home-timeline thumbnail)?
+TIMELINE_LINKS_JS = r"""
+return arguments[0].map(e => {
+  const a = e.closest('a');
+  const h = a ? (a.getAttribute('href') || '') : '';
+  return /photo\//.test(h) && !/(^|\/)search\//.test(h);
+});"""

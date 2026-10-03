@@ -291,30 +291,8 @@ def _search_page_problem(driver):
 # is ever clicked on a search page.
 SEARCH_RESULTS_WAIT_S = 10.0  # the longest a search may take to show its results
 SEARCH_POLL_S = 0.5           # how often the page is looked at while waiting
-
-# One page-context look at a search page. A visible link to an item ('photo/' in
-# its href, checkVisibility, wider than 40 px — gpweb.TILES_JS's rule) is either a
-# search RESULT (its href runs through the search: ./search/<token>/photo/<id>) or
-# a home-TIMELINE thumbnail (./photo/<id>). `empty`: Google Photos says "No
-# results" — display text, so only a hint that ends the wait early (P-7).
-_SEARCH_STATE_JS = r"""
-let results = 0, timeline = 0;
-for (const a of document.querySelectorAll('a[href*="photo/"]')) {
-  const r = a.getBoundingClientRect();
-  if (!(a.checkVisibility() && r.width > 40)) continue;
-  if (/(^|\/)search\//.test(a.getAttribute('href') || '')) results++; else timeline++;
-}
-const text = document.body ? document.body.innerText : '';
-return {results: results, timeline: timeline, empty: /\bno results\b/i.test(text)};"""
-
-# For each element: is it — or does it sit inside — a link to an item that is NOT
-# a search result (a home-timeline thumbnail)?
-_TIMELINE_LINKS_JS = r"""
-return arguments[0].map(e => {
-  const a = e.closest('a');
-  const h = a ? (a.getAttribute('href') || '') : '';
-  return /photo\//.test(h) && !/(^|\/)search\//.test(h);
-});"""
+# The page scripts are the shared ones: gpweb.SEARCH_STATE_JS (results vs timeline
+# links, "No results") and gpweb.TIMELINE_LINKS_JS (is an element a timeline link?).
 
 
 def _await_search_results(driver):
@@ -339,7 +317,7 @@ def _await_search_results(driver):
         if problem:
             continue  # not (yet) on a /search/ page
         try:
-            looked = driver.execute_script(_SEARCH_STATE_JS)
+            looked = driver.execute_script(gpweb.SEARCH_STATE_JS)
         except Exception:
             continue  # the page was busy (still navigating): look again
         if not isinstance(looked, dict):
@@ -368,7 +346,7 @@ def _drop_timeline(driver, elements):
     a Selenium fault, which the IMP-C2 retry handles."""
     if not elements:
         return elements
-    timeline = driver.execute_script(_TIMELINE_LINKS_JS, elements)
+    timeline = driver.execute_script(gpweb.TIMELINE_LINKS_JS, elements)
     if timeline is None:
         return elements
     return [el for el, is_timeline in zip(elements, timeline) if not is_timeline]

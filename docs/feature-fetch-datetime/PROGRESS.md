@@ -133,7 +133,12 @@ Resumed 2026-10-03 after a usage-limit pause: the uncommitted mainfetch.py diff 
 fix (the _run_locator_phase contract docstring for Step 12; the IMP-C26 comment now names _object_account) — NOT a probe
 leak (probes only ever edit a tempfile.mkdtemp copy): kept, tested, committed. Disarm run #1: 26/28 — P14 (second loss
 ends the object) and P17 (reads before the results settle) exposed TEST gaps, closed by a seam test (two lost requests
-in Step 12's stages → no legacy request) and no-retry assertions; re-run on a fresh copy: both caught.
+in Step 12's stages → no legacy request) and no-retry assertions; re-run on a fresh copy: both caught (wip 77773f4);
+disarm run #2 (fresh copy of 77773f4): 28/28. Full suite #1: 1 real failure — test_gpweb's fake-driven legacy
+trigger_download: Step 2's fake refuses unknown page scripts → the two C35 page scripts moved into gpweb §9 as the
+shared SEARCH_STATE_JS / TIMELINE_LINKS_JS (the plan's no-private-copies rule; Step 12 reuses them), the fake answers
+them from its DOM model (+ gpweb pins + a fake self-test); wait digest re-pinned 0ef58135 → 9b2abbc2, trigger_download
+digest unchanged (49578db2).
 Pre-change oracles captured from HEAD b1cff7d before any edit (scratch harness, C29 fakes) — pasted into the Step 10
 tests as frozen transcripts.
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes

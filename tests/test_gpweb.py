@@ -584,6 +584,17 @@ def test_dom_snippets_select_visible_photo_tiles_and_scroll_the_grid():
     assert "scrollTop" in gpweb.SCROLL_JS and "return [el.scrollTop, el.scrollHeight]" in gpweb.SCROLL_JS
 
 
+def test_dom_snippets_tell_search_results_from_the_timeline():
+    # IMP-C35 (IMP-C25 Step 10): a visible item link (TILES_JS's rule) is a search RESULT when its href runs
+    # through the search, else a home-timeline thumbnail; "No results" only ends a wait; nothing is clicked.
+    assert "a[href*=\"photo/\"]" in gpweb.SEARCH_STATE_JS and "checkVisibility" in gpweb.SEARCH_STATE_JS
+    assert "r.width > 40" in gpweb.SEARCH_STATE_JS and r"/(^|\/)search\//" in gpweb.SEARCH_STATE_JS
+    assert r"/\bno results\b/i" in gpweb.SEARCH_STATE_JS
+    assert "e.closest('a')" in gpweb.TIMELINE_LINKS_JS and r"/(^|\/)search\//" in gpweb.TIMELINE_LINKS_JS
+    for script in (gpweb.SEARCH_STATE_JS, gpweb.TIMELINE_LINKS_JS):
+        assert "click" not in script
+
+
 # ============================================================================ fake Google Photos self-tests
 # The fake renders pages, tile labels, panels and RPC answers from its OWN facts; gpweb must parse them
 # back to exactly those facts — so the fake and the parsers check each other.
@@ -722,6 +733,28 @@ def test_fake_search_page_hides_the_timeline_anchors_like_the_real_one(fake_phot
     assert [t["href"].startswith("./search/") for t in d.execute_script(gpweb.TILES_JS)] == [True]
     divs = d.find_elements(By.XPATH, BG_DIVS)
     assert len(divs) == 1 and divs[0].is_displayed() and divs[0].size["width"] > 50
+
+
+def test_fake_answers_the_search_wait_scripts_like_the_real_page(fake_photos):
+    """IMP-C35: on the home page every visible item link is a timeline thumbnail; on a search page only the
+    results are visible (the timeline behind them is hidden — F14) and a background-image div belongs to its
+    result's link; an empty search says "No results"."""
+    fake_photos.add_item("tv", "Sample.Show.S01E01 [a1b2c3].mkv")
+    fake_photos.add_item("tv", "Sample.Show.S01E02 [b2c3d4].mkv")
+    d = _signed_in(fake_photos)
+    assert d.execute_script(gpweb.SEARCH_STATE_JS) == {"results": 0, "timeline": 2, "empty": False}
+    home = d.find_elements(By.XPATH, BG_DIVS) + d.find_elements(By.CSS_SELECTOR, "a[href*='./photo/']")
+    assert d.execute_script(gpweb.TIMELINE_LINKS_JS, home) == [True] * 4
+    _press(d, "/", "Sample.Show", Keys.ENTER)
+    assert d.execute_script(gpweb.SEARCH_STATE_JS) == {"results": 2, "timeline": 0, "empty": False}
+    divs = d.find_elements(By.XPATH, BG_DIVS)
+    hidden_timeline = d.find_elements(By.CSS_SELECTOR, "a[href*='./photo/']")
+    assert d.execute_script(gpweb.TIMELINE_LINKS_JS, divs + hidden_timeline) == [False, False, True, True]
+    with pytest.raises(StaleElementReferenceException):          # a page change makes the old elements stale
+        d.get(PHOTOS)
+        d.execute_script(gpweb.TIMELINE_LINKS_JS, divs)
+    _press(d, "/", "nothing like this", Keys.ENTER)
+    assert d.execute_script(gpweb.SEARCH_STATE_JS) == {"results": 0, "timeline": 0, "empty": True}
 
 
 def test_fake_logged_out_modes(fake_photos):

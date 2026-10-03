@@ -31,7 +31,9 @@ DRIVER SURFACE — get · current_url · page_source · title · find_element(s)
 anchors (`a[href*='…']` — search pages show `./search/<token>/photo/<id>` tiles while the `./photo/<id>`
 timeline anchors behind them are hidden: RESEARCH F14), `//div[contains(@style,'background-image')]`
 thumbnails, `[aria-label='Open info']`-style buttons · execute_script: gpweb.TILES_JS, gpweb.SCROLL_JS,
-"arguments[0].click();", scripts naming WIZ_global_data, document.visibilityState / hasFocus() — any other
+gpweb.SEARCH_STATE_JS / gpweb.TIMELINE_LINKS_JS (IMP-C35: results vs timeline links; a background-image div
+sits inside its tile's link), "arguments[0].click();", scripts naming WIZ_global_data,
+document.visibilityState / hasFocus() — any other
 script raises NotImplementedError (extend the fake explicitly) · execute_async_script: the batchexecute
 emulator · execute_cdp_cmd: Page.bringToFront, Emulation.setFocusEmulationEnabled,
 Browser/Page.setDownloadBehavior, Network.enable, Network.getResponseBody · get_log("performance") ·
@@ -83,7 +85,7 @@ from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.remote.command import Command
 from selenium.webdriver.remote.webelement import WebElement
 
-import gpweb  # the SHARED page scripts only (TILES_JS / SCROLL_JS); every fact below is computed here
+import gpweb  # the SHARED page scripts only (TILES_JS / SCROLL_JS / SEARCH_STATE_JS / TIMELINE_LINKS_JS); every fact below is computed here
 
 PHOTOS_URL = "https://photos.google.com"
 ACCOUNT_LOCALES = {"movies": "UK", "tv": "US", "anime": "US", "others": "US"}
@@ -918,6 +920,10 @@ class FakeDriver:
                     for a in self._anchors() if a.is_displayed() and a.size["width"] > 40]
         if script == gpweb.SCROLL_JS:
             return self._scroll()
+        if script == gpweb.SEARCH_STATE_JS:
+            return self._search_state()
+        if script == gpweb.TIMELINE_LINKS_JS:
+            return [self._is_timeline_link(el) for el in (args[0] if args else [])]
         if re.fullmatch(r"arguments\[0\]\.click\(\);?", s) and args:
             self._click(args[0])
             return None
@@ -929,6 +935,38 @@ class FakeDriver:
             return bool(self.focus_emulated)
         raise NotImplementedError(f"FakeDriver.execute_script: unsupported script {s[:70]!r} — "
                                   "extend tests/gphotos_fake.py explicitly")
+
+    def _search_state(self):
+        """gpweb.SEARCH_STATE_JS: the VISIBLE links to items (TILES_JS's rule) counted as search results
+        (./search/<token>/photo/<id>) or home-timeline thumbnails (./photo/<id>), and whether the page says
+        "No results". On a search page the timeline anchors behind the results are hidden (RESEARCH F14)."""
+        results = timeline = 0
+        for a in self._anchors():
+            href = a.attrs.get("href") or ""
+            if not (a.is_displayed() and a.size["width"] > 40 and "photo/" in href):
+                continue
+            if re.search(r"(^|/)search/", href):
+                results += 1
+            else:
+                timeline += 1
+        return {"results": results, "timeline": timeline,
+                "empty": re.search(r"\bno results\b", self._body_text(), re.IGNORECASE) is not None}
+
+    def _is_timeline_link(self, el):
+        """gpweb.TIMELINE_LINKS_JS for one element: is it — or does it sit inside — a link to an item that is not
+        a search result? An anchor answers by its own href; a background-image div by its tile's link (on a
+        search page ./search/<token>/photo/<id> — the link its click opens — elsewhere ./photo/<id>)."""
+        if not isinstance(el, FakeElement) or el.parent is not self:
+            raise WebDriverException("fake: not an element of this driver")
+        if el.page_serial != self._page_serial:
+            raise StaleElementReferenceException("fake: stale element reference (the page changed)")
+        href = ""
+        if el.kind == "anchor":
+            href = el.attrs.get("href") or ""
+        elif el.kind == "bgdiv" and el.target:
+            href = (f"./search/{self.page['token']}/photo/{el.target}" if self.page["kind"] == "search"
+                    else f"./photo/{el.target}")
+        return "photo/" in href and not re.search(r"(^|/)search/", href)
 
     def _scroll(self):
         n, view = len(self._grid()), self.world.viewport_tiles

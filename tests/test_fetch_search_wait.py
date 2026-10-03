@@ -20,6 +20,7 @@ import inspect
 
 import pytest
 
+import gpweb
 import mainfetch
 
 QUERY = "Show.S01E01 [abc123].mkv"
@@ -45,7 +46,7 @@ class _El:
 
 
 class _Page:
-    """The Photos tab during a keystroke search. `states` = what each look at the page (_SEARCH_STATE_JS) sees,
+    """The Photos tab during a keystroke search. `states` = what each look at the page (gpweb.SEARCH_STATE_JS) sees,
     one per look, the last repeating; the page SHOWS what the latest look saw (before any look: the first state).
     Shown timeline: ./photo/<id> links (the CSS selector) and their background-image divs; shown results:
     background-image divs inside ./search/<token>/photo/<id> links (the XPath selector only)."""
@@ -67,7 +68,7 @@ class _Page:
         return self.states[min(max(self.looks - 1, 0), len(self.states) - 1)]
 
     def execute_script(self, script, *args):
-        if script == mainfetch._SEARCH_STATE_JS:
+        if script == gpweb.SEARCH_STATE_JS:
             self.scripts.append("look")
             if self.busy_looks:
                 self.busy_looks -= 1
@@ -75,7 +76,7 @@ class _Page:
             state = self.states[min(self.looks, len(self.states) - 1)]
             self.looks += 1
             return dict(state)
-        if script == mainfetch._TIMELINE_LINKS_JS:
+        if script == gpweb.TIMELINE_LINKS_JS:
             self.scripts.append("classify")
             return [el.timeline for el in args[0]]
         if "click" in script:
@@ -233,7 +234,7 @@ def test_a_stand_in_without_page_scripts_is_read_at_once(sleeps):
 
 
 def test_the_page_scripts_click_nothing_and_the_wait_is_bounded():
-    for script in (mainfetch._SEARCH_STATE_JS, mainfetch._TIMELINE_LINKS_JS):
+    for script in (gpweb.SEARCH_STATE_JS, gpweb.TIMELINE_LINKS_JS):
         assert "click" not in script and "submit" not in script
     assert mainfetch.SEARCH_RESULTS_WAIT_S >= 7                         # IMP-C29 saw results take up to ~7 s
     assert int(mainfetch.SEARCH_RESULTS_WAIT_S / mainfetch.SEARCH_POLL_S) == 20
@@ -248,7 +249,7 @@ def _digest(*parts):
 
 
 TRIGGER_DOWNLOAD_DIGEST = "49578db2312de37da50de0554c4051f9b7bdb30a21e5340f5bff01e1b95e62af"
-SEARCH_WAIT_DIGEST = "0ef58135dfd6eb5c43cf5f3ef9a179424656cbb40d5b153ec805904f9c2ae320"
+SEARCH_WAIT_DIGEST = "9b2abbc2470e6638f694e071a4b863b934fca78f30fe31a7b0048e96de7131ef"
 
 
 def test_trigger_download_source_is_pinned():
@@ -258,5 +259,5 @@ def test_trigger_download_source_is_pinned():
 
 def test_the_search_wait_it_relies_on_is_pinned():
     assert _digest(mainfetch._await_search_results, mainfetch._drop_timeline, mainfetch._search_page_problem,
-                   mainfetch._SEARCH_STATE_JS, mainfetch._TIMELINE_LINKS_JS) == SEARCH_WAIT_DIGEST, (
+                   gpweb.SEARCH_STATE_JS, gpweb.TIMELINE_LINKS_JS) == SEARCH_WAIT_DIGEST, (
         "the search wait / timeline guard changed — re-pin only as a reviewed decision")

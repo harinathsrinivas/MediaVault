@@ -84,7 +84,7 @@ User's own archive `mov-en-2024-duneparttwo` (series phone = TV account) — han
 | 8 | device cross-check | done | executor-fable (harness attribution Opus 5.5 = fable fallback for 8.a–8.c; session env claude-fable-5-1) | 8.a ca038b5 · 8.b b55b278 · 8.c 3bebc60 · feat: this step's final commit | full 1879 · smoke 82 · test_device_inventory 114 · disarm/mutation probes 23/23 (scratch copy) · live read-only check 2 phones | main.device_inventory(aliases) + classify_device_objects(library, inventory, objects=None), return shapes in their docstrings; 4th verdict `unchecked` (a configured phone not listed in full → Step 9 must never call such an object missing); a same-named file of other size never counts on_device; Step 13c must NOT widen the read-only allowlist `_dev_argv_readonly` (its pull/push/mv needs its own --apply-gated path); LIVE: HT74D0202839 attached but not in DEVICE_ALIASES, `movies` FA69H0300200 not attached → complete=False until the user decides (see operations log) |
 | 9 | map_photos | done | executor-fable (harness attribution Claude Opus 5.5 at all 16 WIP commits = fable fallback, as in Step 8; session env claude-fable-5-1; no MODEL-FALLBACK banner in the dispatch) | 9.0 5f495b6 · 9.1 096ed70 · 9.2 1d5cc4c · 9.3 044863d · 9.4 d0f4ad5 · 9.5 2b3313a · 9.6 4136cbf · 9.7 fd5c4d5 · 9.8 93b153f · 9.9 6c645ab · 9.10 7b2ce0c · review 77109ef · 97e6b3b · 93cdc51 · 7a41cad · abbf96e · feat: this step's final commit | full 2021 · smoke 82 · test_map_photos 125 · test_device_inventory 131 (114 → 131) · disarm/mutation probes 43/43 (scratch copy) · live read-only runs (operations log) | CLI `map_photos [all\|<id>\|<prefix>] [--account …] [--devices-only] [--resolutions <csv>] [--repair split-info\|names] [--accept-probable] [--apply] [--out <dir>]`, dry-run default; run dir `~/.mediavault/gphotos/map/<ts>/` or --out: summary.txt · mapping.jsonl · mapping.csv · inconsistencies.csv · resolutions_todo.csv · unmatched_<account>.csv (devices.csv for --devices-only). **R1 needs first:** a re-crawl of movies / tv / anime (the Sep-25 inventories have no run log → every object reads `stale-inventory`) and all three phones attached (FA69H0300200 + HT74D0202839 + FA75V0303405). DEVIATIONS / assumptions (full list: STATUS.md Step 9): files beyond the plan's list — mvcommon.py (NEW hints store hints.jsonl: append_hint / read_hints, the Step 13 `check_photos hinted` input) and tests/test_device_inventory.py (9.0, DECISIONS §1d: DEVICE_CHECK_EXTRA_SERIALS + device_check_aliases(); push aliases untouched) · extra output mapping.csv (the R1 reader's sheet) · gphotos_apply gained `names=` (--repair names; still the only writer of blocks, same OD-2 guard) · --repair split-info has its own fingerprint-guarded writer (split_info is not a gphotos block) and writes {is_split, total_chunks, chunks} without method/val · wrong-account is relative to the id prefix, each row says whether an mvconfig override covers it · freshness is strict (no verdict from a stale inventory; "in no account" needs every crawled account fresh and fully detailed) · a re-split maps to the newest complete upload only when no newer upload exists (else ambiguous) · `unchecked` → device-check-incomplete, never missing · learned map records carry no approach verdict · partial / non-original items are never applied · awaiting-backup rows are not put on the failed list · a dry run records nothing (pinned: library bytes + mtime, state dir) · no rollback journal, ENTRY_TYPE_KEYS literal unchanged (comment only) · mainfetch / gpweb / gpcapture / cmd_push untouched · main NOT merged (the orchestrator re-syncs #62/#63) |
 | R1 | real mapping dry-run (user) | pending | user | | | |
-| 10 | fetch plumbing + routing | pending | | | | |
+| 10 | fetch plumbing + routing | in_progress | | | | |
 | 11 | download hygiene | pending | | | | needs G0 q3 (P-12) answered first; "no" → STOP + re-dispatch planner-v2 |
 | 12 | locator engine (3 candidates) | pending | | | | 🚦 G12 |
 | 13 | check_photos | pending | | | | |
@@ -111,82 +111,11 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 | 2026-10-02 | Step 9 gate-BYPASSED validation (scratch script: main._mp_compute + the engine's dry-run preview over the real library and the Sep-25 inventories; movies / tv / anime treated as fresh; NOTHING written; counts only) — what R1 would have shown on the old inventories | mapped 1,926 · mapped-normalized 19 (movies; whitespace only) · wrong-account 31 (tv ids in movies; mvconfig override covers 31, none 0, differs 0) · inconsistent 4 (split-info-lost 3, all 3 provable from local checksums; untagged-name 1) · awaiting-backup 12 · missing-after-backup 29 · device-check-incomplete 52 · stale-inventory 35 (others) · probable / ambiguous / conflict 0. Re-split: 13 chunks in 3 entries (8 alternates); copies in another account on 18 rows; content-proven 1 of 72 captured. LOUD block 93 = 71 captured objects pushed after the Sep-25 crawl (12 entries) + 22 legacy (20 tv episodes + 2 last chunks = partial sets in 2 entries). Device check INCOMPLETE (movies not-connected): on_device 12 · freed 29 · unchecked 52. Unmatched: movies 42 (mediavault-unknown 13 · non-mediavault 29) · tv 18 (superseded-split 14 · duplicate 4) · anime 0. To resolve 85 (not-found 52 · missing-after-backup 29 · inconsistent 4). Apply preview: 1,976 objects would change / be confirmed (1,994 records; 0 conflicts, 0 orphans); 1,977 with --repair names | n/a — R1 replaces it |
 
 ## In-progress sub-state
-**No step is running — Step 9 finished 2026-10-02 (all sub-tasks committed; nothing uncommitted). The lines below are
-its record; replace them when the next step is dispatched.**
-`Step 9 — dispatched 2026-10-01 to executor-fable (fable) · resumed after a usage-limit pause (nothing of Step 9 was
-on disk; the read-only calibration was redone) · sub-tasks per PLAN Step 9 details 1–10 plus 9.0 (DECISIONS §1d):
-[x] 9.0 extra movies phone HT74D0202839 in the read-only device cross-check (main.DEVICE_CHECK_EXTRA_SERIALS +
-device_check_aliases(); push aliases unchanged; test_device_inventory 131, smoke 82) (wip 5f495b6) ·
-[x] 9.1 scaffold + freshness gate (main.py section "THE MAPPER", CLI `map_photos`, parse_map_photos_args, scope /
---account by routing, inventory via tools.gp_inventory.inventory_state, stale-inventory + re-crawl command, run dir
-with mapping.jsonl + summary.txt; interim ladder = exact name in the default account; test_map_photos 27, smoke 82)
-(wip 096ed70) · [x] 9.2 match ladder (matching groups: a split's chunks decided together; default account exact →
-normalized → another account = wrong-account (copies of the same bytes recorded, other bytes noted; answers from a
-stale inventory refused; "in no account" needs every crawled inventory fresh + fully detailed) → `[short_id]`-tag
-probable; possibly-deleted items never match (reported); override coverage covers/none/differs + report lines;
-test_map_photos 41, smoke 82) (wip 1d5cc4c) · [x] 9.3 sha1↔dedupKey cross-check (content key = trusted block, else
-capture; found by its bytes in any account — proof dedupkey, name_match exact / normalized / `content` (another
-name → --repair names); same-named items with other bytes → `conflict`, never applied; content proof outranks a
-same-named item; same bytes twice → one item + alternates; no probable for content-keyed objects; test_map_photos
-48, smoke 82) (wip 044863d) · [x] 9.4 duplicates/re-split sets (same bytes → one item + alternates; a split's
-chunks grouped by taken second ONLY when a chunk name has different-bytes duplicates: the newest complete upload
-when no newer upload exists, the other uploads' items alternates; a newer incomplete upload or no complete one →
-ambiguous; a content-proven sibling pins the upload (other-second items → conflict); unique-name splits map per
-chunk (250/250 real sets sit on one second); test_map_photos 57, smoke 82) (wip d0f4ad5) · [x] 9.5 C27 detectors +
-repairs ((a) split_info lost: chunks of the whole's name in GP → inconsistent + a repair plan PROVEN only from one
-upload of chunks 1..N, no holder, exact push names and every local checksums/<chunk>.sha256 → _mp_write_split_info
-(fingerprint-guarded, pinned to the unchanged unsplit node); (b) old untagged name → inconsistent + --repair names
-(gphotos_apply gained `names=` — same single writer + OD-2 guard; a name two objects share is ambiguous); (e)
-partial / non-original upload → inconsistent; (c)/(d) read-only device check (device_check_aliases incl. the extra
-movies phone) → awaiting-backup / missing-after-backup / missing-everywhere / device-check-incomplete, partial_set;
-device block + LOUD block in the report; test_map_photos 75, engine/device/schema 195, smoke 82) (wip 2b3313a) ·
-[x] 9.6 unmatched report (`map_photos all` without --account, fresh accounts only: superseded-split / duplicate /
-cross-account-copy / mediavault-unknown / non-mediavault / possibly-deleted / errored → unmatched_<account>.csv
-(UTF-8 BOM, CRLF) + one report line; never touched; test_map_photos 78, smoke 82) (wip 4136cbf) · [x] 9.7 outputs
-(each unresolved row's P-18 reason incl. partial-set; failed records validated by mvcommon's normalizer;
-resolutions_todo.csv = mvcommon._failed_row + write_failed_csv (the failed_objects.csv columns, status = the precise
-verdict, expected_taken_local from the capture); inconsistencies.csv; an edited todo in a reused --out is kept →
-.new.csv; "To resolve" + Outputs lines; test_map_photos 83, smoke 82) (wip fd5c4d5) · [x] 9.8 --resolutions
-(read_failed_csv; each row pinned by manual_id + sha256 (else label), alias-resolved, in scope; url → learned
-{photo_id, proof manual, source manual} + hint; datetime → hint; search → learned search_override; not_uploaded →
-LOUD "you say not uploaded" + inconsistencies.csv; skip stays; bad rows listed, never imported; NEW mvcommon hints
-store hints.jsonl (append_hint / read_hints / _normalize_hint) for Step 13's `check_photos hinted`; objects decided
-earlier (manual photo_id / search_override in the block, or a hint) leave resolutions_todo.csv; a dry run records
-nothing; test_map_photos 98, primitives 215, smoke 82) (wip 93b153f) · [x] 9.9 --apply (command split into
-_mp_compute / _mp_apply / _mp_preview / _mp_finish; proven split_info repairs first + a fresh pass so the chunks map
-in the same run; learned records (source map, no approach verdict) for mapped / normalized / wrong-account (+ copies),
-untagged with --repair names, single-item probables with --accept-probable (proof manual); resolution records +
-hints; failed-list rows for what stays unresolved; everything deduplicated against what is on record; then the
-engine over the whole sidecar + names facts; failed_objects.csv regenerated unless it holds edits this run did not
-consume; a write failure stops before the library; a dry run shows the engine preview + the next command; never a
-rollback journal; test_map_photos 113, adjacent 492 incl. smoke 82) (wip 6c645ab) · [x] 9.10 --devices-only (Step 8's
-read-only device report for the scope / --account: device lines + unconfigured phones, verdict counts, the objects
-still on a phone, freed count, unchecked + which phone was not listed; devices.csv; no inventory, nothing written
-outside the run dir; test_map_photos 115, smoke 82) (wip 7b2ce0c) · [x] self-review fixes (exit code 1 for a
-failed run / usage error; wording for an unreadable failed_objects.csv and a chunk uploaded twice; dispatcher
-branch pinned through the compiled __main__ block; test_map_photos 118) (wip 77109ef) · [x] live read-only
-validation fix-ups (an unmatched chunk item carrying a library object's `[short_id]` tag is a superseded split, not
-a duplicate; lines ≤ 120) (wip 97e6b3b) · [x] fail fast before an apply (the run directory is created first; --apply
-is refused when the --resolutions file cannot be read) + an `oth-` object end to end (test_map_photos 121) (wip
-93cdc51) · [x] final re-read of the whole diff: a dry run's "Next:" command carries the previewed --resolutions file
-(never an unreadable one) (wip 7a41cad) · [x] R1-reader audit (delta 4b): mapping.csv — one row per object: the
-wrong-account list with its override coverage, the near-matches with both names side by side, the duplicates; no
-photo id — and an unwritable report file (a re-used --out open in Excel) ends the run with one line, never a
-traceback (after an apply the records stay; test_map_photos 125) (wip abbf96e) · [x] end of step on abbf96e: disarm
-probes 43/43 caught on a scratch copy · full 2021 passed (one earlier run had the known gpweb flake alone — it passes
-alone and the re-run was clean) · smoke 82 · live read-only runs (operations log) · PROGRESS row 9 + STATUS entry
-(feat: the step's final commit)`
-`resumed 2026-10-02 by executor-fable (usage-limit pause #7): tree clean at 7a41cad; nothing to keep or discard`
-`resumed 2026-10-02 by executor-fable (usage-limit pause #6): tree clean at 97e6b3b → 93cdc51; nothing to keep or
-discard`
-`resumed 2026-10-02 by executor-fable (usage-limit pause #5): uncommitted self-review fixes KEPT (main.py) —
-coherent; 115/115 green`
-`resumed 2026-10-01 by executor-fable (usage-limit pause #2): uncommitted 9.1 changes KEPT (main.py,
-tests/test_map_photos.py) — the diff was coherent; 26/27 green, the 1 failure a test-fixture expectation (fixed)`
-`resumed 2026-10-01 by executor-fable (usage-limit pause #3): uncommitted 9.4 changes KEPT (main.py,
-tests/test_map_photos.py) — coherent; 57/57 green, smoke 82`
-`resumed 2026-10-01 by executor-fable (usage-limit pause #4): uncommitted 9.8 changes KEPT (main.py, mvcommon.py,
-tests/test_map_photos.py) — coherent; map 98 + primitives 215 + smoke 82 green`
+`Step 10 — dispatched 2026-10-03 to executor-fable (fable) · sub-tasks: [ ] 10.a cmd_fetch_route per-object account
+routing ← next · [ ] 10.b build_fetch_queue + locator dict (parity oracle) · [ ] 10.c harvest_downloads (on the
+merged C29 harvester) + learn-on-fetch · [ ] 10.d locator seam + EXACT_LOCATOR_ENABLED · [ ] 10.e A8 deletions ·
+[ ] 10.f parse_fetch_options/--manual · [ ] 10.g IMP-C34 one retry of a lost download · [ ] 10.h IMP-C35 never click
+the home timeline · [ ] 10.i IMP-C36 unbuffered child output · then disarm probes, full + smoke`
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes
 alone; re-run it before treating a red full suite as a regression.
 Template — when a step is running (Execution protocol "In-step checkpoints"):

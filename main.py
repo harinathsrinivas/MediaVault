@@ -1507,6 +1507,32 @@ def cmd_prep(manual_id, filepath, parent_id=None, extras=None, extras_size=None)
         if parent_id:
             entry_data["parent_id"] = parent_id
 
+        # [IMP-C33] A re-prep of an UNCHANGED file keeps its split record (user ruling
+        # 2026-10-02). Reaching here with an existing entry means it is still local
+        # (the cloud-bearing guard above returned otherwise), so a split_info on it is
+        # the record of a split push that has not finished. The rebuild above would drop
+        # it, and the next push would then refuse the entry's own leftover chunks as
+        # unrecorded (IMP-C32). Same rule as merge_extras_into_title: same hash keeps
+        # the record (and `re_hashed`, the split's blessing flag); a changed hash drops
+        # both, as before, because the old chunks describe other bytes.
+        # [ROLLBACK] Nothing is journalled for this and nothing new can fail: the kept
+        # record is part of entry_data, which is what a rollback after the assignment
+        # below persists. Chunks are never touched here: a season's episodes share one
+        # chunk dir, and a tempdir redirect is not known to prep.
+        prior = library.get(manual_id) or {}
+        if prior.get("split_info"):
+            if prior.get("hash") == file_hash:
+                for key in ("split_info", "re_hashed"):
+                    if key in prior:
+                        entry_data[key] = prior[key]
+                kept = len(prior["split_info"].get("chunks") or [])
+                print(f"   > 🔁 File unchanged since it was split: keeping its split record "
+                      f"({kept} chunk{'' if kept == 1 else 's'}), so the next push can resume.")
+            else:
+                print("   > ⚠️ The file changed since it was split: its old split record is dropped.")
+                print(f"     Chunks of the old file still in {SPLIT_DIR_NAME}/ (or your tempdir) are stale. "
+                      "Delete them before pushing.")
+
         if manual_id not in library:
             journal.record_create_entry(manual_id)
         library[manual_id] = entry_data
@@ -5785,8 +5811,9 @@ def _verify_chunk_hash(adb_base, remote_path, safe_path, expected_sha256):
 #     episode's waiting chunks and was marked onboarded on them.
 #   - A dir can hold chunks that no split_info records: a failed split's partial
 #     chunk or lone FLAC holder, or an interrupted push's leftovers once the entry
-#     was re-prepped (cmd_prep rebuilds the entry, which drops its split_info).
-#     Uploading them left the entry onboarded with no split record.
+#     lost its split record (until IMP-C33 every re-prep dropped it; now only a
+#     re-prep of a CHANGED file does). Uploading them left the entry onboarded
+#     with no split record.
 #   Either way the next `replace` dummied the master.
 #
 # [ROLLBACK] This changes SELECTION only. Each refusal comes before any upload and
@@ -6746,6 +6773,24 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
 
         # Only mark as 'onboarded' if we uploaded ALL chunks (no range filter)
         if not chunk_range:
+            # [IMP-C33] A FIRST archive that uploaded the master ITSELF must not go on
+            # recording a split. On an entry that never completed an upload, a split_info
+            # belongs to a split this push did not use: an interrupted one whose leftovers
+            # are gone (cmd_prep keeps it across a re-prep of the same file). Left in place, the
+            # sidecar below and fetch_restore would describe chunks the cloud does not
+            # fully hold, and replace would promote a staged canonical hash that belongs
+            # to them. The record goes with its `re_hashed` flag, so the entry reads like
+            # any whole-file archive (push_one_extra likewise drops an extra's record on
+            # a whole-file push). An entry that was already uploaded keeps its record:
+            # it describes a complete copy.
+            # [ROLLBACK] Dropped only here, after every upload succeeded, so a failed
+            # push leaves the entry untouched. Not journalled: nothing after this point
+            # rolls back, and no failure path sees the change.
+            if (files_to_upload_paths == [local_file_path] and not library[manual_id].get("uploaded")
+                    and "split_info" in library[manual_id]):
+                library[manual_id].pop("split_info")
+                library[manual_id].pop("re_hashed", None)
+                print("   > ℹ️  This push uploaded the file whole: the entry's unfinished split record is dropped.")
             # Best-effort remote disaster-recovery sidecar. A sidecar miss must
             # NOT fail a fully-successful chunk upload, so its return is ignored.
             write_remote_mvmeta(adb_base, remote_target_dir, manual_id, library[manual_id])

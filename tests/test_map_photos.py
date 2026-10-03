@@ -12,8 +12,11 @@ Pinned here, per sub-task:
   9.4  duplicates: the same bytes twice; re-split uploads (newest complete set, newer-incomplete safety, a pinned
        set, an extras split).
   9.5  IMP-C27: split_info lost (+ the proven repair and its writer), old untagged names (+ the apply engine's
-       `names=`), partial / non-original copies, every device verdict (freed vs on a phone vs absent vs unchecked)
-       with partial sets and the LOUD block, the extra movies phone (DECISIONS §1d).
+       `names=`), partial / non-original copies, partial sets and the LOUD block; with --devices (opt-in) every
+       device verdict (freed vs on a phone vs absent vs unchecked), the extra movies phone (DECISIONS §1d).
+  9b   no phone for a verdict (DECISIONS §1e): without --devices no adb command runs; an object in no account is
+       not-backed-up-yet (pushed after its account's crawl began or in the 7 days before) or possible-loss (earlier,
+       or no capture); a push newer than a crawl is proven only by its bytes; pushes no longer stale an account.
   9.6  the unmatched-inventory report.   9.7  resolutions_todo.csv / inconsistencies.csv / the failed records;
        mapping.csv (the R1 reader's sheet: wrong-account list, near-matches, duplicates); an unwritable report file.
   9.8  --resolutions and the hints store.   9.9  --apply (sidecar, engine, failed list, CSV rule, idempotence).
@@ -244,7 +247,8 @@ class World:
                               "device_tz_offset_min": 480, "remote_dir": "/sdcard/Media/X", "chunk_range": None,
                               "complete": True, "objects": [{
                                   "role": role, "index": index, "sha256": sha256, "sha1": sha1,
-                                  "dedup_key": base64.urlsafe_b64encode(bytes.fromhex(sha1)).decode().rstrip("="),
+                                  "dedup_key": (base64.urlsafe_b64encode(bytes.fromhex(sha1)).decode().rstrip("=")
+                                                if sha1 else None),
                                   "uploaded_name": uploaded_name, "size_bytes": 1000,
                                   "date_utc": "2024-03-09T06:03:02Z"}]})
         with open(path, "w", encoding="utf-8") as fh:
@@ -297,10 +301,11 @@ def state_files():
     (["--repair", "names,split-info,names", "--accept-probable", "--out", r"D:\out"],
      {"repairs": ("names", "split-info"), "accept_probable": True, "out": r"D:\out"}),
     (["all", "--devices-only", "--account", "movies"], {"devices_only": True, "account": "movies"}),
+    (["all", "--devices", "--apply"], {"devices": True, "apply": True}),
 ])
 def test_the_cli_parses_every_documented_option(tokens, expected):
-    defaults = {"scope": "all", "account": None, "devices_only": False, "resolutions": None, "repairs": (),
-                "accept_probable": False, "apply": False, "out": None}
+    defaults = {"scope": "all", "account": None, "devices": False, "devices_only": False, "resolutions": None,
+                "repairs": (), "accept_probable": False, "apply": False, "out": None}
     assert main.parse_map_photos_args(tokens) == {**defaults, **expected}
 
 
@@ -313,6 +318,7 @@ def test_the_cli_parses_every_documented_option(tokens, expected):
     (["mov-a", "mov-b"], "one scope only"),
     (["--devices-only", "--apply"], "--devices-only takes only"),
     (["--devices-only", "--repair", "names"], "--devices-only takes only"),
+    (["--devices-only", "--devices"], "--devices-only takes only"),
 ])
 def test_the_cli_refuses_what_it_does_not_know(tokens, fragment):
     with pytest.raises(ValueError, match=fragment.replace("-", r"\-")):
@@ -320,9 +326,9 @@ def test_the_cli_refuses_what_it_does_not_know(tokens, fragment):
 
 
 def test_the_usage_line_documents_the_plan_cli():
-    assert main.MAP_USAGE == ("map_photos [all|<id>|<prefix>] [--account movies|tv|anime|others] [--devices-only] "
-                              "[--resolutions <csv>] [--repair split-info|names] [--accept-probable] [--apply] "
-                              "[--out <dir>]")
+    assert main.MAP_USAGE == ("map_photos [all|<id>|<prefix>] [--account movies|tv|anime|others] [--devices] "
+                              "[--devices-only] [--resolutions <csv>] [--repair split-info|names] [--accept-probable] "
+                              "[--apply] [--out <dir>]")
 
 
 # ============================================================================ 9.1 the freshness gate
@@ -346,18 +352,14 @@ def test_a_fresh_inventory_gives_verdicts(world, tmp_path, capsys):
 @pytest.mark.parametrize("case,reason", [
     ("legacy", "no complete enumeration yet"),                      # the files crawled before the run log existed
     ("old", "the enumeration is 25.0 h old (limit 24 h)"),
-    ("push", "a push at 2026-10-01T11:30:00Z is newer than the enumeration (2026-10-01T11:00:00Z)"),
 ])
 def test_a_stale_account_gives_no_verdict_and_names_the_recrawl(world, tmp_path, capsys, case, reason):
     world.save().upload_all()
     if case == "legacy":
         world.inv.enumerated["tv"] = None
-    elif case == "old":
+    else:
         world.inv.enumerated["tv"] = NOW - timedelta(hours=25)
     world.save()
-    if case == "push":   # a capture push of an in-scope tv object after the enumeration: it may not be backed up yet
-        world.capture(T_EP1, _h(T_EP1), hashlib.sha1(b"ep1").hexdigest(), "2026-10-01T11:30:00Z",
-                      world.names[(T_EP1, "whole")])
     res = world.run(out=tmp_path / "run", capsys=capsys)
     rows = by_key(res)
     for key, row in rows.items():
@@ -368,16 +370,24 @@ def test_a_stale_account_gives_no_verdict_and_names_the_recrawl(world, tmp_path,
     assert f"  tv      STALE — {reason} — re-crawl: python tools/gp_inventory.py tv --port <port>" in res["stdout"]
 
 
-def test_a_push_counts_for_the_account_it_is_routed_to(world, tmp_path, monkeypatch):
-    """The capture push of a tv id that an mvconfig override routes to MOVIES makes the movies inventory stale, not
-    the tv one (the object will be backed up to the account of the phone it was pushed from)."""
-    world.save().upload_all().save()
-    monkeypatch.setattr(mvcommon, "_CONFIG_CACHE", {"fetch_account_overrides": {T_EP1: "movies"}})
-    world.capture(T_EP1, _h(T_EP1), hashlib.sha1(b"ep1").hexdigest(), "2026-10-01T11:30:00Z",
-                  world.names[(T_EP1, "whole")])
-    fresh = world.run(out=tmp_path / "run")["fresh"]
-    assert (fresh["movies"]["fresh"], fresh["tv"]["fresh"]) == (False, True)
-    assert fresh["movies"]["newest_push"] == "2026-10-01T11:30:00Z"
+@pytest.mark.parametrize("override,status", [(None, "not-backed-up-yet"), ("movies", "possible-loss")])
+def test_recency_counts_from_the_crawl_of_the_account_it_is_routed_to(world, tmp_path, monkeypatch, override,
+                                                                      status):
+    """Step 9b: the object's backup lands in the account it is ROUTED to, so that account's crawl start is the
+    anchor: pushed 2026-09-24T00:00Z — within the 7 days before the tv crawl (2026-09-30T16:00Z) but not before
+    the movies crawl (2026-10-01T11:00Z). A push newer than an enumeration no longer stales it."""
+    world.inv.enumerated["tv"] = NOW - timedelta(hours=20)
+    world.save().upload_all(skip={T_EP1}).save()
+    if override:
+        monkeypatch.setattr(mvcommon, "_CONFIG_CACHE", {"fetch_account_overrides": {T_EP1: override}})
+    world.capture(T_EP1, _h(T_EP1), _sha1(b"ep1"), "2026-09-24T00:00:00Z", world.names[(T_EP1, "whole")])
+    world.capture(T_EP2, _h(T_EP2), _sha1(b"ep2"), "2026-10-01T11:30:00Z", world.names[(T_EP2, "whole")])
+    res = world.run(out=tmp_path / "run")
+    row = by_key(res)[(T_EP1, "whole")]
+    assert (row["status"], row["account"], row["recent"]) == (status, override or "tv", status != "possible-loss")
+    fresh = res["fresh"]
+    assert (fresh["movies"]["fresh"], fresh["tv"]["fresh"]) == (True, True)       # pushes after a crawl stale nothing
+    assert fresh["tv"]["newest_push"] == "2026-10-01T11:30:00Z"
 
 
 def test_an_out_of_scope_push_does_not_block_a_scoped_run(world, tmp_path):
@@ -612,7 +622,17 @@ def test_in_no_account_needs_every_crawled_inventory_fresh_and_detailed(world, t
     assert row["note"].startswith("anime: not in any account, but that cannot be told") and why in row["note"]
     world.inv.enumerated["anime"], world.inv.undetailed["anime"] = ENUMERATED, []
     world.save()
-    assert by_key(world.run(T_EP1, out=tmp_path / "again"))[(T_EP1, "whole")]["status"] == "missing-everywhere"
+    assert by_key(world.run(T_EP1, out=tmp_path / "again"))[(T_EP1, "whole")]["status"] == "possible-loss"
+
+
+def test_in_no_account_needs_the_account_it_is_routed_to_crawled(world, tmp_path, monkeypatch):
+    """Routed (mvconfig override) to an account never crawled, an object found nowhere else could be there: no
+    verdict."""
+    world.save().upload_all(skip={T_EP1}).save()
+    monkeypatch.setattr(mvcommon, "_CONFIG_CACHE", {"fetch_account_overrides": {T_EP1: "others"}})
+    row = by_key(world.run(T_EP1, out=tmp_path / "run"))[(T_EP1, "whole")]
+    assert (row["status"], row["note"]) == (
+        "stale-inventory", "others: not in any crawled account, and the account it is routed to was never crawled")
 
 
 def test_the_short_id_tag_gives_a_probable_match_of_the_same_kind_and_chunk(world, tmp_path):
@@ -640,7 +660,7 @@ def test_a_possibly_deleted_item_never_matches_and_is_reported(world, tmp_path):
     world.inv.unlisted["tv"].add(gone["photo_id"])                 # listed before, absent from the latest enumeration
     world.save()
     row = by_key(world.run(T_EP1, out=tmp_path / "run"))[(T_EP1, "whole")]
-    assert (row["status"], row["item"]) == ("missing-everywhere", None)   # (the World's device check: complete)
+    assert (row["status"], row["item"]) == ("possible-loss", None)        # no capture: push time unknown
     assert [d["photo_id"] for d in row["deleted"]] == [gone["photo_id"]]
     assert "absent from the latest enumeration (deleted?)" in row["note"]
 
@@ -656,7 +676,8 @@ def test_an_override_pointing_away_from_the_item_is_flagged(world, tmp_path, mon
 
 # ============================================================================ 9.3 the content key (SHA-1 = dedupKey)
 
-PUSHED = "2026-09-30T10:00:00Z"                      # before the enumeration: the inventories stay fresh
+PUSHED = "2026-09-30T10:00:00Z"            # 25 h before the enumeration: recent (Step 9b) — absent means "not yet"
+OLD_PUSH = "2026-09-20T10:00:00Z"          # 11 days before it: absent means possible loss, another upload a conflict
 
 
 def _sha1(data):
@@ -679,11 +700,33 @@ def test_a_same_named_item_with_other_bytes_is_a_conflict_never_a_match(world, t
     world.save().upload_all(skip={M_WHOLE})
     other = world.inv.add("movies", world.names[(M_WHOLE, "whole")], data=b"some other bytes")
     world.save()
-    world.capture(M_WHOLE, _h(M_WHOLE), _sha1(b"the whole movie"), PUSHED, world.names[(M_WHOLE, "whole")])
+    world.capture(M_WHOLE, _h(M_WHOLE), _sha1(b"the whole movie"), OLD_PUSH, world.names[(M_WHOLE, "whole")])
     row = by_key(world.run(M_WHOLE, out=tmp_path / "run"))[(M_WHOLE, "whole")]
     assert (row["status"], row["item"], row["proof"]) == ("conflict", None, None)
     assert [c["photo_id"] for c in row["candidates"]] == [other["photo_id"]]
     assert "none holds the object's bytes (dedupKey)" in row["note"]
+
+
+@pytest.mark.parametrize("pushed,note", [
+    (PUSHED, "another upload holds its name in Google Photos (other bytes) — this push is not in the inventory yet"),
+    ("2026-10-01T11:30:00Z", "pushed 2026-10-01T11:30:00Z, after the crawl that shows its name began "
+                             "(2026-10-01T11:00:00Z) — what Google Photos shows under its name predates this push"),
+])
+def test_a_recent_push_under_a_name_another_upload_holds_waits_for_its_backup(world, tmp_path, capsys, pushed, note):
+    """Step 9b: a re-push (other bytes under the same name) within the recent window, or after the crawl began, is not
+    a conflict yet — its upload may not be in the inventory: not-backed-up-yet, never on the todo list."""
+    world.save().upload_all(skip={M_WHOLE})
+    other = world.inv.add("movies", world.names[(M_WHOLE, "whole")], data=b"the first upload")
+    world.save()
+    world.capture(M_WHOLE, _h(M_WHOLE), _sha1(b"the re-pushed movie"), pushed, world.names[(M_WHOLE, "whole")])
+    res = world.run(M_WHOLE, out=tmp_path / "run", capsys=capsys)
+    row = by_key(res)[(M_WHOLE, "whole")]
+    assert (row["status"], row["item"], row["proof"], row["reason"], row["recent"]) == (
+        "not-backed-up-yet", None, None, None, True)
+    assert [c["photo_id"] for c in row["candidates"]] == [other["photo_id"]] and row["note"].endswith(note)
+    assert _read_csv(os.path.join(res["run_dir"], "resolutions_todo.csv")) == []
+    assert f"    not-backed-up-yet    {M_WHOLE} · whole — pushed {pushed[:10]} {pushed[11:16]} UTC (capture)" in (
+        res["stdout"])
 
 
 def test_the_bytes_under_another_name_are_proven_and_flagged_for_the_names_repair(world, tmp_path):
@@ -742,7 +785,7 @@ def test_a_content_keyed_object_found_nowhere_is_never_probable(world, tmp_path)
     world.save()
     world.capture(M_WHOLE, _h(M_WHOLE), _sha1(b"the movie"), PUSHED, world.names[(M_WHOLE, "whole")])
     row = by_key(world.run(M_WHOLE, out=tmp_path / "run"))[(M_WHOLE, "whole")]
-    assert (row["status"], row["candidates"]) == ("missing-everywhere", [])
+    assert (row["status"], row["candidates"]) == ("not-backed-up-yet", [])               # (pushed recently)
 
 
 # ============================================================================ 9.4 duplicates and re-split sets
@@ -1019,52 +1062,171 @@ def _sidecar(world, key):
     return main._dev_sidecar_name(world.names[key], world.library[key[0]]["short_id"])
 
 
-def test_objects_in_no_account_get_their_device_verdict_and_a_loud_block(world, tmp_path, capsys):
-    gone = [(T_EP1, "whole"), (T_EP2, "whole"), (M_WHOLE, "whole"), (M_SPLIT, "chunk 3/3")]
-    world.save().upload_all(skip=set(gone))
+GONE = [(T_EP1, "whole"), (T_EP2, "whole"), (M_WHOLE, "whole"), (M_SPLIT, "chunk 3/3")]
+
+
+def _gone_world(world):
+    """Four objects in no account, none captured (pre-capture pushes: old): T_EP1 still on a phone, T_EP2 and chunk
+    3/3 freed (only their .mvmeta.json sidecars left), M_WHOLE on no phone."""
+    world.save().upload_all(skip=set(GONE))
     world.save()
     world.on_phone("series", world.names[(T_EP1, "whole")])                            # still on a phone
     world.on_phone("series", _sidecar(world, (T_EP2, "whole")))                        # freed after its backup
     world.on_phone("movies", _sidecar(world, (M_SPLIT, "chunk 3/3")))                  # (shared by the split)
+    return world
+
+
+def test_without_devices_no_phone_is_asked_and_objects_in_no_account_are_possible_losses(world, tmp_path, capsys,
+                                                                                        monkeypatch):
+    """Step 9b (DECISIONS §1e): a verdict is library <-> Google Photos only — no adb command runs at all, not even
+    `adb devices` (the real device_inventory is restored and its one adb runner refuses), and an object Google
+    Photos does not show is possible-loss when it was pushed before the recent window or has no push time."""
+    _gone_world(world)
+    monkeypatch.setattr(main, "device_inventory", REAL_DEVICE_INVENTORY)
+    adb = []
+
+    def refuse(argv, timeout):                    # device_inventory swallows errors: the list is the pin
+        adb.append(argv)
+        raise AssertionError("map_photos ran adb without --devices")
+
+    monkeypatch.setattr(main, "_dev_run", refuse)
     res = world.run(out=tmp_path / "run", capsys=capsys)
+    assert adb == [] and res["devices"] is None
     rows = by_key(res)
-    assert rows[(T_EP1, "whole")]["status"] == "awaiting-backup"
-    assert rows[(T_EP2, "whole")]["status"] == "missing-after-backup"
-    assert rows[(M_WHOLE, "whole")]["status"] == "missing-everywhere"
+    assert {key: (rows[key]["status"], rows[key]["device"], rows[key]["pushed_at"]) for key in GONE} == {
+        key: ("possible-loss", None, None) for key in GONE}
     three = rows[(M_SPLIT, "chunk 3/3")]
-    assert (three["status"], three["partial_set"]) == ("missing-after-backup", True)    # chunks 1-2 ARE in GP
-    assert not rows[(M_SPLIT, "chunk 1/3")]["partial_set"]
+    assert (three["partial_set"], three["reason"]) == (True, "partial-set")             # chunks 1-2 ARE in GP
+    assert not rows[(M_SPLIT, "chunk 1/3")]["partial_set"] and rows[(T_EP1, "whole")]["reason"] == "not-found"
+    out = res["stdout"]
+    assert "Device check" not in out
+    assert "⚠️⚠️⚠️  NOT IN GOOGLE PHOTOS — POSSIBLE LOSS (IMP-C27): 4 object(s)" in out
+    assert ("  possible-loss: 4 — in no account, pushed over 7 days before its account's crawl began or with no push "
+            "time (no capture) — possible LOSS") in out
+    assert "  (no phone was checked — add --devices to see which of these are still on a phone" in out
+    assert rows[(M_WHOLE, "whole")]["library_position"] == "1/2 in library_movies.json"   # a hint, never a verdict
+    assert (f"    possible-loss        {M_WHOLE} · whole — push time unknown (no capture) · entry 1/2 in "
+            f"library_movies.json") in out
+    todo = {(r["manual_id"], r["object"]): r["status"]
+            for r in _read_csv(os.path.join(res["run_dir"], "resolutions_todo.csv"))}
+    assert todo == {(T_EP1, "whole"): "possible-loss", (T_EP2, "whole"): "possible-loss",
+                    (M_WHOLE, "whole"): "possible-loss", (M_SPLIT, "chunk 3/3"): "possible-loss (partial set)"}
+
+
+def test_with_devices_an_old_object_gets_the_phones_verdict(world, tmp_path, capsys):
+    """--devices (opt-in): Step 8's verdicts refine the OLD objects — on a phone -> awaiting-backup, only the sidecar
+    left -> missing-after-backup, on no phone of a complete check -> missing-everywhere."""
+    _gone_world(world)
+    res = world.run("--devices", out=tmp_path / "run", capsys=capsys)
+    rows = by_key(res)
+    assert {key: rows[key]["status"] for key in GONE} == {
+        (T_EP1, "whole"): "awaiting-backup", (T_EP2, "whole"): "missing-after-backup",
+        (M_WHOLE, "whole"): "missing-everywhere", (M_SPLIT, "chunk 3/3"): "missing-after-backup"}
+    three = rows[(M_SPLIT, "chunk 3/3")]
+    assert (three["partial_set"], three["reason"]) == (True, "partial-set")
     assert three["device"]["state"] == "freed" and three["device"]["sidecars"][0]["alias"] == "movies"
+    assert rows[(T_EP1, "whole")]["reason"] is None                       # safe on a phone: not on the failed list
     assert world.device_calls == 1 and res["devices"]["complete"] is True
     out = res["stdout"]
-    assert "⚠️⚠️⚠️  NOT IN GOOGLE PHOTOS (IMP-C27): 4 object(s)" in out
+    assert "⚠️⚠️⚠️  NOT IN GOOGLE PHOTOS — POSSIBLE LOSS (IMP-C27): 4 object(s)" in out
     assert "  missing-after-backup: 2 — in no account and freed from a phone" in out
-    assert "  partial chunk sets: 1 object(s) in 1 entr(y/ies)" in out
-    assert f"    missing-everywhere       {M_WHOLE} · whole — on no phone" in out
-    assert f"    missing-after-backup     {M_SPLIT} · chunk 3/3 [partial set] — sidecar only on movies (FAKEMOV0001)" in out
-    assert f"    awaiting-backup          {T_EP1} · whole — on series (FAKESER0002)" in out
+    assert "  awaiting-backup: 1 — in no account but still on a phone although pushed over 7 days" in out
+    assert "  partial chunk sets: 1 object(s) in 1 entr(y/ies)" in out and "no phone was checked" not in out
+    assert f"    missing-everywhere   {M_WHOLE} · whole — push time unknown (no capture)" in out
+    assert out.count(" · on no phone") == 1
+    assert f"{M_SPLIT} · chunk 3/3 [partial set] — push time unknown (no capture)" in out
+    assert "· sidecar only on movies (FAKEMOV0001)" in out and "· on series (FAKESER0002)" in out
+    assert "Next: python main.py map_photos all --devices --apply" in out
 
 
-def test_an_incomplete_device_check_never_calls_anything_missing(world, tmp_path, capsys):
-    world.save().upload_all(skip={(T_EP1, "whole")})
+def test_with_devices_a_recent_object_keeps_its_verdict_and_an_unchecked_phone_only_annotates(world, tmp_path,
+                                                                                               capsys):
+    """--devices never makes a recent object a loss (its backup may simply come after the crawl) and a phone that
+    was not listed never blocks or downgrades a verdict: both only annotate."""
+    world.save().upload_all(skip={(T_EP1, "whole"), (T_EP2, "whole")})
     world.save()
+    world.capture(T_EP2, _h(T_EP2), _sha1(b"ep two"), PUSHED, world.names[(T_EP2, "whole")])
+    world.on_phone("series", _sidecar(world, (T_EP2, "whole")))                        # freed, but pushed recently
     world.devices["complete"] = False
     world.devices["devices"]["movies"].update(status="not-connected", detail="adb devices does not list it", files=[])
     world.devices["unconfigured"] = [{"serial": "FAKEUNCONF09", "state": "device"}]
-    res = world.run(out=tmp_path / "run", capsys=capsys)
-    row = by_key(res)[(T_EP1, "whole")]
-    assert row["status"] == "device-check-incomplete" and "missing" not in row["status"]
-    assert "not listed: movies (FAKEMOV0001) not-connected — connect it and re-run" in row["note"]
+    res = world.run("--devices", out=tmp_path / "run", capsys=capsys)
+    rows = by_key(res)
+    old, recent = rows[(T_EP1, "whole")], rows[(T_EP2, "whole")]
+    assert (old["status"], old["device"]["state"], old["reason"]) == ("possible-loss", "unchecked", "not-found")
+    assert "device check incomplete — not listed: movies (FAKEMOV0001) not-connected (the verdict stands)" in (
+        old["note"])
+    assert (recent["status"], recent["device"]["state"], recent["reason"]) == ("not-backed-up-yet", "freed", None)
     out = res["stdout"]
     assert "INCOMPLETE — nothing is called missing-everywhere" in out
     assert "  movies    FAKEMOV0001        not-connected — adb devices does not list it" in out
     assert "⚠️  attached but not configured: FAKEUNCONF09 (device)" in out
+    assert f"{T_EP1} · whole — push time unknown (no capture) · entry 2/4 in library_series.json · device check " \
+           f"incomplete" in out
+    assert (f"    not-backed-up-yet    {T_EP2} · whole — pushed 2026-09-30 10:00 UTC (capture) · sidecar only on "
+            f"series (FAKESER0002)") in out
 
 
 def test_no_device_check_runs_when_every_object_is_somewhere(world, tmp_path):
     world.save().upload_all().save()
-    res = world.run(out=tmp_path / "run")
+    res = world.run("--devices", out=tmp_path / "run")
     assert res["devices"] is None and world.device_calls == 0
+
+
+# ============================================================================ 9b recent vs possible loss — no phone
+
+def test_an_object_in_no_account_is_recent_or_a_possible_loss_by_its_capture_push_time(world, tmp_path, capsys):
+    """Step 9b (DECISIONS §1e): its capture push time against the crawl start of the account it is routed to
+    (2026-10-01T11:00Z here) — pushed after it, or in the 7 days before it -> not-backed-up-yet (not a problem yet:
+    no todo row, no failed-list row); earlier, or no capture (push time unknown) -> possible-loss."""
+    pushes = {(M_WHOLE, "whole"): "2026-10-01T11:30:00Z",          # after the crawl began
+              (T_EP1, "whole"): "2026-09-24T11:00:00Z",            # exactly 7 days before it: still recent
+              (T_EP2, "whole"): "2026-09-24T10:59:59Z",            # a second earlier: a possible loss
+              (A_EP, "whole"): None}                               # no capture: push time unknown
+    world.save().upload_all(skip=set(pushes))
+    world.save()
+    for (mid, label), pushed in pushes.items():
+        if pushed:
+            world.capture(mid, _h(mid), _sha1(mid.encode()), pushed, world.names[(mid, label)])
+    res = world.run(out=tmp_path / "run", capsys=capsys)
+    rows = by_key(res)
+    assert {k: (rows[k]["status"], rows[k]["recent"], rows[k]["reason"]) for k in pushes} == {
+        (M_WHOLE, "whole"): ("not-backed-up-yet", True, None), (T_EP1, "whole"): ("not-backed-up-yet", True, None),
+        (T_EP2, "whole"): ("possible-loss", False, "not-found"), (A_EP, "whole"): ("possible-loss", None, "not-found")}
+    out = res["stdout"]
+    assert "not-backed-up-yet 2 · possible-loss 2" in out
+    assert "⚠️⚠️⚠️  NOT IN GOOGLE PHOTOS — POSSIBLE LOSS (IMP-C27): 2 object(s)" in out
+    assert f"    possible-loss        {T_EP2} · whole — pushed 2026-09-24 10:59 UTC (capture)" in out
+    assert (f"    possible-loss        {A_EP} · whole — push time unknown (no capture) · entry 1/1 in "
+            f"library_anime.json") in out
+    assert ("Not backed up yet (recent — not a problem yet): 2 object(s) pushed after their account's crawl began or "
+            "in the 7 days before it — a later crawl should list them") in out
+    assert f"    not-backed-up-yet    {M_WHOLE} · whole — pushed 2026-10-01 11:30 UTC (capture)" in out
+    todo = {(r["manual_id"], r["object"]) for r in _read_csv(os.path.join(res["run_dir"], "resolutions_todo.csv"))}
+    assert todo == {(T_EP2, "whole"), (A_EP, "whole")} == {(r["manual_id"], r["label"]) for r in res["todo"]}
+
+
+@pytest.mark.parametrize("where,status", [("tv", "not-backed-up-yet"), ("movies", "wrong-account")])
+def test_a_push_after_a_crawl_is_proven_only_by_its_bytes_or_a_later_crawl(world, tmp_path, where, status):
+    """Step 9b: a push newer than the crawl that shows its name cannot be that item (the inventory predates it) —
+    only its own bytes (dedupKey) prove it; a crawl that began after the push may hold it. T_EP1's capture has no
+    SHA-1 (name evidence only); it was pushed 2026-10-01T02:00Z, between the tv crawl (2026-09-30T16:00Z) and the
+    movies crawl (2026-10-01T11:00Z)."""
+    world.inv.enumerated["tv"] = NOW - timedelta(hours=20)
+    world.save().upload_all(skip={T_EP1, M_WHOLE})
+    world.inv.add(where, world.names[(T_EP1, "whole")])
+    same = world.inv.add("movies", world.names[(M_WHOLE, "whole")], data=b"the movie")
+    world.save()
+    world.capture(T_EP1, _h(T_EP1), None, "2026-10-01T02:00:00Z", world.names[(T_EP1, "whole")])
+    world.capture(M_WHOLE, _h(M_WHOLE), _sha1(b"the movie"), "2026-10-01T11:30:00Z", world.names[(M_WHOLE, "whole")])
+    rows = by_key(world.run(out=tmp_path / "run"))
+    row = rows[(T_EP1, "whole")]
+    assert (row["status"], row["content_key"]) == (status, None)
+    if status == "not-backed-up-yet":
+        assert row["item"] is None and len(row["candidates"]) == 1 and row["account"] == "tv"
+        assert "after the crawl that shows its name began (2026-09-30T16:00:00Z)" in row["note"]
+    movie = rows[(M_WHOLE, "whole")]          # pushed after every crawl, but the same bytes ARE there (dedup)
+    assert (movie["status"], movie["proof"], movie["item"]["photo_id"]) == ("mapped", "dedupkey", same["photo_id"])
 
 
 def test_the_device_check_lists_the_extra_movies_phone(world, tmp_path, monkeypatch):
@@ -1080,7 +1242,7 @@ def test_the_device_check_lists_the_extra_movies_phone(world, tmp_path, monkeypa
     fake = FakeAdb({"FAKEMOV0001": Phone(files={}), "FAKESER0002": Phone(files={}),
                     "FAKEXTRA0003": Phone(files={"Movies/x/" + world.names[(M_WHOLE, "whole")]: (5, 1)})})
     monkeypatch.setattr(main.subprocess, "run", fake.run)
-    res = world.run(M_WHOLE, out=tmp_path / "run")
+    res = world.run(M_WHOLE, "--devices", out=tmp_path / "run")
     row = by_key(res)[(M_WHOLE, "whole")]
     assert row["status"] == "awaiting-backup" and row["device"]["copies"][0]["alias"] == "movies#2"
     assert res["devices"]["complete"] is True and fake.violations == []
@@ -1197,8 +1359,9 @@ def test_a_stale_account_gets_no_unmatched_report(world, tmp_path):
 
 @pytest.fixture()
 def mixed(world):
-    """One object per unresolved class: probable, ambiguous, conflict, untagged (inconsistent), a lost member of a
-    partial split (partial-set), missing-everywhere; plus awaiting-backup, wrong-account and mapped (resolved)."""
+    """One object per unresolved class: probable, ambiguous, conflict (an OLD push: a recent one would wait — Step
+    9b), untagged (inconsistent), a lost member of a partial split (possible-loss -> partial-set; its sidecar on a
+    phone only matters with --devices); plus the mapped objects (resolved)."""
     world.save().upload_all(skip={M_WHOLE, T_EP1, T_EP2, A_EP, (M_SPLIT, "chunk 3/3"),
                                   (M_SPLIT, "extra Specials/BTS.mkv")})
     world.inv.add("movies", f"Renamed [{world.library[M_WHOLE]['short_id']}].mkv")              # probable
@@ -1208,7 +1371,7 @@ def mixed(world):
     world.inv.add("anime", world.library[A_EP]["filename"])                                       # untagged
     world.inv.add("movies", world.names[(M_SPLIT, "extra Specials/BTS.mkv")].replace("BTS", "BTS"), data=b"bts")
     world.save()
-    world.capture(T_EP2, _h(T_EP2), _sha1(b"episode two"), PUSHED, world.names[(T_EP2, "whole")])
+    world.capture(T_EP2, _h(T_EP2), _sha1(b"episode two"), OLD_PUSH, world.names[(T_EP2, "whole")])
     world.on_phone("movies", _sidecar(world, (M_SPLIT, "chunk 3/3")))                             # freed
     return world
 
@@ -1231,7 +1394,7 @@ def test_resolutions_todo_lists_every_unresolved_object_in_the_failed_list_forma
     assert probable["suggested_photo_url"].startswith("https://photos.google.com/photo/AF1QipFAKE")
     assert probable["set_search_cmd"] == f'python main.py set_search {M_WHOLE} "<new search term>"'
     assert by_obj[(A_EP, "whole")]["status"] == "inconsistent: untagged-name"
-    assert by_obj[(M_SPLIT, "chunk 3/3")]["status"] == "missing-after-backup (partial set)"
+    assert by_obj[(M_SPLIT, "chunk 3/3")]["status"] == "possible-loss (partial set)"
     conflict = by_obj[(T_EP2, "whole")]
     assert conflict["expected_taken_local"] == "2024-03-09 14:03:02 GMT+08:00"            # DateUTC + the phone's tz
     assert conflict["sha256"] == _h(T_EP2) and conflict["decision"] == ""
@@ -1260,7 +1423,7 @@ def test_inconsistencies_csv_lists_the_imp_c27_rows(mixed, tmp_path):
                              "partial_set", "device", "repair", "note"]
     got = {(r["manual_id"], r["object"]): (r["status"], r["issue"], r["partial_set"], r["device"]) for r in rows}
     assert got == {(T_EP2, "whole"): ("conflict", "", "", ""), (A_EP, "whole"): ("inconsistent", "untagged-name", "", ""),
-                   (M_SPLIT, "chunk 3/3"): ("missing-after-backup", "", "yes", "freed")}
+                   (M_SPLIT, "chunk 3/3"): ("possible-loss", "", "yes", "")}
     untagged = next(r for r in rows if r["issue"] == "untagged-name")
     assert untagged["repair"] == f"--repair names records '{world_name(mixed, A_EP)}'"
 
@@ -1302,7 +1465,8 @@ def test_mapping_csv_lists_the_wrong_account_block_with_its_override_coverage(xf
     assert list(rows[0]) == ["account", "category", "manual_id", "object", "uploaded_name", "status", "issue",
                              "name_match", "proof", "gp_filename", "taken_utc", "upload_utc", "duplicate",
                              "alternates", "copies", "default_account", "override", "override_check",
-                             "learned_home", "device", "partial_set", "user_decision", "note"]
+                             "learned_home", "pushed_utc", "library_position", "device", "partial_set",
+                             "user_decision", "note"]
     assert [(r["manual_id"], r["object"], r["status"]) for r in rows] == [
         (r["manual_id"], r["label"], r["status"]) for r in res["rows"]]                  # every object, in order
     wrong = {r["manual_id"]: r for r in rows if r["status"] == "wrong-account"}
@@ -1322,13 +1486,14 @@ def test_mapping_csv_lists_the_wrong_account_block_with_its_override_coverage(xf
 
 
 def test_mapping_csv_shows_near_matches_duplicates_and_copies(world, tmp_path):
-    world.save().upload_all(skip={M_WHOLE, T_EP1, (M_SPLIT, "chunk 3/3")})
+    world.save().upload_all(skip={M_WHOLE, T_EP1, (M_SPLIT, "chunk 2/3"), (M_SPLIT, "chunk 3/3")})
     name, episode = world.names[(M_WHOLE, "whole")], world.names[(T_EP1, "whole")]
     world.inv.add("movies", name.upper())                              # a near-match (P-6)
     for account in ("tv", "tv", "movies"):                             # the same bytes twice + a copy in movies
         world.inv.add(account, episode, data=b"episode one")
     world.save()
-    world.on_phone("movies", _sidecar(world, (M_SPLIT, "chunk 3/3")))  # freed: a lost member of a partial set
+    two = world.library[M_SPLIT]["split_info"]["chunks"][1]           # chunk 2/3: pushed recently, not backed up yet
+    world.capture(M_SPLIT, two["hash"], _sha1(b"chunk two"), PUSHED, two["filename"], role="chunk", index=2)
     res = world.run(out=tmp_path / "run")
     rows = {(r["manual_id"], r["object"]): r for r in _read_csv(os.path.join(res["run_dir"], "mapping.csv"))}
     near = rows[(M_WHOLE, "whole")]
@@ -1337,11 +1502,19 @@ def test_mapping_csv_shows_near_matches_duplicates_and_copies(world, tmp_path):
     twice = rows[(T_EP1, "whole")]
     assert (twice["status"], twice["duplicate"], twice["alternates"], twice["copies"]) == (
         "mapped", "same-bytes", "1", "movies")
-    lost = rows[(M_SPLIT, "chunk 3/3")]
-    assert (lost["status"], lost["gp_filename"], lost["device"], lost["partial_set"]) == (
-        "missing-after-backup", "", "freed", "yes")
+    lost, waiting = rows[(M_SPLIT, "chunk 3/3")], rows[(M_SPLIT, "chunk 2/3")]
+    assert (lost["status"], lost["gp_filename"], lost["device"], lost["partial_set"], lost["pushed_utc"]) == (
+        "possible-loss", "", "", "yes", "")
+    assert lost["library_position"] == "2/2 in library_movies.json"
+    assert (waiting["status"], waiting["partial_set"], waiting["pushed_utc"]) == (
+        "not-backed-up-yet", "yes", "2026-09-30 10:00:00 UTC")
     plain = rows[(A_EP, "whole")]
     assert (plain["duplicate"], plain["alternates"], plain["copies"], plain["partial_set"], plain["note"]) == ("",) * 5
+    assert plain["library_position"] == "1/1 in library_anime.json"
+    todo = {(r["manual_id"], r["object"]) for r in _read_csv(os.path.join(res["run_dir"], "resolutions_todo.csv"))}
+    assert todo == {(M_SPLIT, "chunk 3/3")}                          # the recent chunk is not a problem yet
+    incons = {(r["manual_id"], r["object"]) for r in _read_csv(os.path.join(res["run_dir"], "inconsistencies.csv"))}
+    assert incons == {(M_SPLIT, "chunk 3/3")}
 
 
 @pytest.mark.parametrize("tokens,tail", [
@@ -1444,7 +1617,7 @@ def test_resolutions_are_validated_and_previewed_by_a_dry_run(mixed, tmp_path, c
     assert "  dry run — nothing recorded: add --apply to record them" in out
     assert f'Next: python main.py map_photos all --resolutions "{path}" --apply' in out   # the previewed decisions
     assert "⚠️⚠️⚠️  YOU SAY NOT UPLOADED (IMP-C27): 1 object(s)" in out
-    assert f"    {M_SPLIT} · chunk 3/3 (mapper verdict: missing-after-backup)" in out
+    assert f"    {M_SPLIT} · chunk 3/3 (mapper verdict: possible-loss)" in out
     incons = {(r["manual_id"], r["object"]): r["issue"] for r in _read_csv(os.path.join(res["run_dir"],
                                                                                        "inconsistencies.csv"))}
     assert incons[(M_SPLIT, "chunk 3/3")] == "user says not uploaded"
@@ -1820,8 +1993,8 @@ def _dispatch(argv, status="ok"):
 
 
 def test_the_dispatcher_hands_the_parsed_options_to_cmd_map_photos():
-    calls = _dispatch(["tv-en", "--account", "tv", "--apply", "--repair", "names", "--out", r"Z:\run"])
-    assert calls == [{"scope": "tv-en", "account": "tv", "devices_only": False, "resolutions": None,
+    calls = _dispatch(["tv-en", "--account", "tv", "--apply", "--repair", "names", "--devices", "--out", r"Z:\run"])
+    assert calls == [{"scope": "tv-en", "account": "tv", "devices": True, "devices_only": False, "resolutions": None,
                       "repairs": ("names",), "accept_probable": False, "apply": True, "out": r"Z:\run"}]
 
 

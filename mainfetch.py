@@ -444,21 +444,31 @@ def _fetch_restore_folder(entry, temp_dir, entry_id=None):
 class FetchContext:
     """What one fetch run shares across its accounts, entries and stages (`ctx`).
 
-    run_id   'fetch-<UTC yyyymmddThhmmssZ>-<pid>' — the run named in the failed
-             list (P-18) and, later, the fetch journal (Step 11)
-    manual   --manual was given (parse_fetch_options; acted on by Step 14)
-    account  the Google account (CHROME_PROFILES key) of the Chrome session now
-             running; None outside a session (a stand-alone fetch_single_entry)
+    run_id     'fetch-<UTC yyyymmddThhmmssZ>-<pid>' — the run named in the failed
+               list (P-18) and, later, the fetch journal (Step 11)
+    manual     --manual was given (parse_fetch_options; acted on by Step 14)
+    account    the Google account (CHROME_PROFILES key) of the Chrome session now
+               running; None outside a session (a stand-alone fetch_single_entry)
+    downloads  {name: (size, mtime_ns)} of the Downloads folder when this session's
+               first entry began — the files this session did NOT fetch (None until
+               then; start_session resets it)
+    hashed     {path: ((size, mtime_ns), sha256, sha1)} — every Downloads file
+               hashed this run, so none is hashed twice (IMP-B10)
+    stats      what the run counts: learned = records appended to the learned sidecar
     """
 
     def __init__(self, manual=False, run_id=None):
         self.run_id = run_id or f"fetch-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{os.getpid()}"
         self.manual = bool(manual)
         self.account = None
+        self.downloads = None
+        self.hashed = {}
+        self.stats = {"learned": 0}
 
     def start_session(self, account):
         """A Chrome session for `account` is up: the run now fetches in it."""
         self.account = account
+        self.downloads = None  # snapshot again: an earlier session's files are not this one's
 
 
 # The objects a library leaf uploads itself (a movie leaf's extras are fetched as
@@ -677,6 +687,194 @@ def _lost_download_note(lost, saw_download):
             f"Shift+D started nothing.")
 
 
+def _downloads_snapshot():
+    """{name: (size, mtime_ns)} of every file in the Downloads folder now; {} when
+    it cannot be listed (the harvest loop reports that itself)."""
+    snapshot = {}
+    try:
+        names = os.listdir(SYSTEM_DOWNLOADS_FOLDER)
+    except OSError:
+        return snapshot
+    for name in names:
+        try:
+            st = os.stat(os.path.join(SYSTEM_DOWNLOADS_FOLDER, name))
+        except OSError:
+            continue
+        snapshot[name] = (st.st_size, st.st_mtime_ns)
+    return snapshot
+
+
+def _arrived_this_session(name, path, ctx):
+    """True when the Downloads file `name` was not there — as it is now — when this
+    session's snapshot was taken (ctx.downloads): this Chrome session fetched it,
+    so what it proves can be credited to the session's account."""
+    if ctx.downloads is None:
+        return False
+    before = ctx.downloads.get(name)
+    if before is None:
+        return True
+    try:
+        st = os.stat(path)
+    except OSError:
+        return False
+    return before != (st.st_size, st.st_mtime_ns)
+
+
+def _hash_download(name, path, ctx):
+    """(sha256, sha1, cached) of one finished download, hashed at most once per run
+    (IMP-B10): a file met before — same path, size and mtime — reuses ctx.hashed;
+    a new one gets today's `🔎 Checking:` line and calculate_file_hash, and its
+    SHA-1 (computed in the same read pass) is taken before the file can move."""
+    try:
+        st = os.stat(path)
+        stamp = (st.st_size, st.st_mtime_ns)
+    except OSError:
+        stamp = None
+    known = ctx.hashed.get(path)
+    if stamp is not None and known is not None and known[0] == stamp:
+        return known[1], known[2], True
+    print(f"\n   > 🔎 Checking: {name}")
+    fhash = calculate_file_hash(path)
+    sha1 = mvcommon.cached_sha1(path) if fhash else None
+    if fhash and stamp is not None:
+        ctx.hashed[path] = (stamp, fhash, sha1)
+    return fhash, sha1, False
+
+
+def _learn_from_download(item, sha1, ctx):
+    """[IMP-C25 Step 10 c] Learn-on-fetch (PLAN D4, P-10): append what a SHA-256-
+    verified download proved to the learned sidecar of the session's account — the
+    object (manual_id, sha256, label), proof sha256, source fetch, its content key
+    (the dedupKey of the verified bytes' SHA-1) and — ONLY when an exact-item
+    stage's trigger record (item['_trigger']['record'], IMP-C25 Step 12) names an
+    item whose dedupKey is exactly that key — that item's photo_id and facts, with
+    the stage's approach verdict when it gives one (item['_trigger']['approach']).
+    The apply engine folds the record in after the run (main.merge_learned_gphotos).
+    Silent; a failed write prints one warning line and the fetch goes on. Nothing is
+    learned outside a session or for an object without an owning id."""
+    loc = item.get("locator") or {}
+    if ctx.account not in mvcommon.GP_ACCOUNTS or not loc.get("manual_id"):
+        return
+    key = gpweb.dedup_key(sha1) if sha1 else None
+    record = {"manual_id": loc["manual_id"], "label": loc.get("label"), "sha256": item["hash"],
+              "proof": "sha256", "source": "fetch", "dedup_key": key}
+    trigger = item.get("_trigger") if isinstance(item.get("_trigger"), dict) else {}
+    found = trigger.get("record") if isinstance(trigger.get("record"), dict) else {}
+    if key and found.get("photo_id") and gpweb.dedup_keys_equal(found.get("dedup_key"), key):
+        record["photo_id"] = found["photo_id"]
+        for k in ("taken_ms", "tz_offset_ms", "upload_ms", "width", "height"):
+            record[k] = found.get(k)
+        record["gp_filename"] = found.get("gp_filename") or found.get("filename")
+        if isinstance(trigger.get("approach"), dict):
+            record["approach"] = trigger["approach"]
+    try:
+        mvcommon.append_learned(ctx.account, record)
+    except (OSError, ValueError) as e:
+        print(f"     ⚠️ Not recorded in the learned sidecar ({type(e).__name__}: {e}) — "
+              f"the file itself is fetched.")
+        return
+    ctx.stats["learned"] += 1
+
+
+def harvest_downloads(queue, ctx):
+    """[IMP-C25 Step 10 c] One harvest round over the Downloads folder — today's
+    loop, its timeouts, extensions and prints (IMP-C29: the timeout is decided
+    after the scan): every finished .mkv / .mp4 is SHA-256-routed to a pending
+    queue item and moved into its `dest` (`✅ MOVED:`); a copy of an item already
+    fetched is deleted; anything else is left alone. Returns once no item is
+    pending, or once the base timeout has passed with nothing downloading and
+    nothing new — then IMP-C29's note names the requested files that never came.
+
+    Step 10 adds, silently:
+      * IMP-B10 — every file is hashed at most once per run (_hash_download): one
+        met in an earlier round or entry is re-checked against this queue without
+        re-hashing, and named again only when it now matches or duplicates an item;
+      * learn-on-fetch — a match that arrived during this Chrome session is
+        recorded in the learned sidecar (_learn_from_download). A file that was
+        already there may come from another account's session: it is still
+        moved, but proves nothing about this account.
+    Returns {"timed_out": bool, "saw_download": bool} for the caller's bookkeeping."""
+    print("   > Watching Downloads (Infinite wait if active)...")
+    start_time = time.time()
+    base_timeout = 300  # 5 mins initial timeout
+
+    processed_files = set()  # this round's files ([IMP-B10] their hashes outlive it in ctx.hashed)
+    saw_download = False  # [IMP-C29] was a .crdownload ever seen during this wait?
+
+    while True:
+        # Check Active Downloads
+        active_downloads = [f for f in os.listdir(SYSTEM_DOWNLOADS_FOLDER) if f.endswith(".crdownload")]
+        is_active = len(active_downloads) > 0
+        saw_download = saw_download or is_active
+        timed_out = time.time() - start_time > base_timeout
+
+        if timed_out and is_active:
+            print(f"   ⏳ Timeout reached, but {len(active_downloads)} files downloading. Extending wait...",
+                  end="\r")
+            time.sleep(5)
+            continue  # Keep waiting
+
+        # Check Completion ([IMP-C25] nothing pending: an item a stage gave up on is 'failed')
+        if not any(i["status"] == "pending" for i in queue):
+            return {"timed_out": False, "saw_download": saw_download}
+
+        found_new = False
+        for f in os.listdir(SYSTEM_DOWNLOADS_FOLDER):
+            if f.endswith(".crdownload") or not (f.endswith(".mkv") or f.endswith(".mp4")): continue
+
+            fpath = os.path.join(SYSTEM_DOWNLOADS_FOLDER, f)
+            if fpath in processed_files: continue
+
+            # Stability Check
+            try:
+                if os.path.getsize(fpath) == 0: continue
+                time.sleep(0.5)
+            except:
+                continue
+
+            fhash, sha1, cached = _hash_download(f, fpath, ctx)
+            processed_files.add(fpath)
+            arrived = _arrived_this_session(f, fpath, ctx)
+
+            # Match
+            matched = next((i for i in queue if i["hash"] == fhash and i["status"] == "pending"), None)
+            if matched:
+                if cached:
+                    print(f"\n   > 🔎 Checking: {f}")
+                dest = os.path.join(matched["dest"], matched["filename"])
+                if os.path.exists(dest): os.remove(dest)
+                shutil.move(fpath, dest)
+                print(f"     ✅ MOVED: {matched['filename']}")
+                matched["status"] = "done"
+                found_new = True
+                if arrived:
+                    _learn_from_download(matched, sha1, ctx)
+            else:
+                # Duplicate check
+                if any(i["hash"] == fhash for i in queue):
+                    if cached:
+                        print(f"\n   > 🔎 Checking: {f}")
+                    print("     ⚠️ Duplicate. Deleting.")
+                    try:
+                        os.remove(fpath)
+                    except:
+                        pass
+
+        # [IMP-C29] Give up only AFTER looking. A download that outlives the base
+        # timeout ends with nothing active, and its file must still be collected.
+        # Giving up before the scan left it in Downloads: the next attempt then
+        # downloaded it a second time, and the last attempt reported INCOMPLETE.
+        if timed_out and not found_new:
+            print("\n   ❌ Timeout (No active downloads).")
+            lost = sum(1 for i in queue if i["status"] == "pending" and i.get("triggered"))
+            if lost:
+                print(_lost_download_note(lost, saw_download))
+            return {"timed_out": True, "saw_download": saw_download}
+
+        if not found_new:
+            time.sleep(5)
+
+
 def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None, ctx=None):
     """
     Handles the fetch logic for a single library entry (Movie or Episode).
@@ -698,6 +896,11 @@ def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None, ctx=None):
     if not queue:
         print("   ✅ All files already exist.")
         return
+
+    # [IMP-C25] What is in Downloads before this session requests anything: no file
+    # that was already there may teach the learned sidecar about this account.
+    if ctx.downloads is None:
+        ctx.downloads = _downloads_snapshot()
 
     # [IMP-C25 P-14] The exact-item stages first (a no-op until Step 12); today's two
     # attempts below run unchanged for whatever is still pending.
@@ -724,79 +927,7 @@ def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None, ctx=None):
             time.sleep(2)
 
         # Harvest
-        print("   > Watching Downloads (Infinite wait if active)...")
-        start_time = time.time()
-        base_timeout = 300  # 5 mins initial timeout
-
-        processed_files = set()
-        saw_download = False  # [IMP-C29] was a .crdownload ever seen during this wait?
-
-        while True:
-            # Check Active Downloads
-            active_downloads = [f for f in os.listdir(SYSTEM_DOWNLOADS_FOLDER) if f.endswith(".crdownload")]
-            is_active = len(active_downloads) > 0
-            saw_download = saw_download or is_active
-            timed_out = time.time() - start_time > base_timeout
-
-            if timed_out and is_active:
-                print(f"   ⏳ Timeout reached, but {len(active_downloads)} files downloading. Extending wait...",
-                      end="\r")
-                time.sleep(5)
-                continue  # Keep waiting
-
-            # Check Completion ([IMP-C25] nothing pending: an item a stage gave up on is 'failed')
-            if not any(i["status"] == "pending" for i in queue):
-                break
-
-            found_new = False
-            for f in os.listdir(SYSTEM_DOWNLOADS_FOLDER):
-                if f.endswith(".crdownload") or not (f.endswith(".mkv") or f.endswith(".mp4")): continue
-
-                fpath = os.path.join(SYSTEM_DOWNLOADS_FOLDER, f)
-                if fpath in processed_files: continue
-
-                # Stability Check
-                try:
-                    if os.path.getsize(fpath) == 0: continue
-                    time.sleep(0.5)
-                except:
-                    continue
-
-                print(f"\n   > 🔎 Checking: {f}")
-                fhash = calculate_file_hash(fpath)
-                processed_files.add(fpath)
-
-                # Match
-                matched = next((i for i in queue if i["hash"] == fhash and i["status"] == "pending"), None)
-                if matched:
-                    dest = os.path.join(matched["dest"], matched["filename"])
-                    if os.path.exists(dest): os.remove(dest)
-                    shutil.move(fpath, dest)
-                    print(f"     ✅ MOVED: {matched['filename']}")
-                    matched["status"] = "done"
-                    found_new = True
-                else:
-                    # Duplicate check
-                    if any(i["hash"] == fhash for i in queue):
-                        print("     ⚠️ Duplicate. Deleting.")
-                        try:
-                            os.remove(fpath)
-                        except:
-                            pass
-
-            # [IMP-C29] Give up only AFTER looking. A download that outlives the base
-            # timeout ends with nothing active, and its file must still be collected.
-            # Giving up before the scan left it in Downloads: the next attempt then
-            # downloaded it a second time, and the last attempt reported INCOMPLETE.
-            if timed_out and not found_new:
-                print("\n   ❌ Timeout (No active downloads).")
-                lost = sum(1 for i in queue if i["status"] == "pending" and i.get("triggered"))
-                if lost:
-                    print(_lost_download_note(lost, saw_download))
-                break  # Stop waiting
-
-            if not found_new:
-                time.sleep(5)
+        harvest_downloads(queue, ctx)
 
     # Final Report
     if all(i["status"] == "done" for i in queue):

@@ -501,3 +501,229 @@ def test_objects_the_seam_settles_skip_todays_attempts(world, monkeypatch, capsy
     assert "=== ATTEMPT 1 (1 files) ===" in out and "ATTEMPT 2" not in out
     assert f"✅ MOVED: {h}" in out and "Timeout" not in out   # nothing pending: the round ends at once
     assert "❌ ENTRY INCOMPLETE." in out                    # the failed chunk keeps the entry incomplete
+
+
+# ---------------------------------------------------------------------------
+# 10.c — harvest_downloads: every file hashed once per run (IMP-B10), learn-on-fetch
+# ---------------------------------------------------------------------------
+WEB_MARKERS = ("🔹 PROCESSING:", "Detected Split File", "✅ MOVED:", "✅ ENTRY COMPLETE.")   # PLAN P-13
+EP_ID = "tv-en-2001-show-s01e01"
+PHOTO = "AF1QipFAKEstep10harvest01"   # synthetic photo id
+
+
+def _session(account):
+    ctx = mainfetch.FetchContext()
+    ctx.start_session(account)
+    return ctx
+
+
+def _count_hashes(monkeypatch):
+    """Record every file the harvester hashes (the real hash runs: cached_sha1 must be filled as in production)."""
+    names = []
+
+    def counting(path, *a, **k):
+        names.append(pathlib.Path(path).name)
+        return mvcommon.calculate_file_hash(path, *a, **k)
+
+    monkeypatch.setattr(mainfetch, "calculate_file_hash", counting)
+    return names
+
+
+def _key(payload):
+    return gpweb.dedup_key(hashlib.sha1(payload).hexdigest())
+
+
+# Captured at HEAD b1cff7d: a foreign .mkv sits in Downloads for the whole run — today it is hashed and named in
+# BOTH attempts. IMP-B10 (absorbed by IMP-C25 Step 10) deliberately drops the second, identical check.
+TODAY_FOREIGN_FILE = '\n🔹 PROCESSING: Show.S01E01.mkv (abc123)\n\n   === ATTEMPT 1 (1 files) ===\n   > Watching Downloads (Infinite wait if active)...\n\n   > 🔎 Checking: Holiday.mkv\n\r  🔍 Holiday.mkv  [████████████████████████] 4.00 KB / 4.00 KB \n\n   ❌ Timeout (No active downloads).\n\n   === ATTEMPT 2 (1 files) ===\n   > Watching Downloads (Infinite wait if active)...\n\n   > 🔎 Checking: Holiday.mkv\n\r  🔍 Holiday.mkv  [████████████████████████] 4.00 KB / 4.00 KB \n\n   ❌ Timeout (No active downloads).\n\n   ❌ ENTRY INCOMPLETE.\n'
+FOREIGN_CHECK = '\n   > 🔎 Checking: Holiday.mkv\n\r  🔍 Holiday.mkv  [████████████████████████] 4.00 KB / 4.00 KB \n'
+
+
+def test_a_foreign_file_is_hashed_once_per_run_not_once_per_attempt(world, monkeypatch, capsys):
+    (world.downloads / "Holiday.mkv").write_bytes(b"F" * 4096)
+    hashed = _count_hashes(monkeypatch)
+    _script(monkeypatch, lambda q, i: False)
+
+    mainfetch.fetch_single_entry(None, _whole_entry(world.tmp))
+
+    assert hashed == ["Holiday.mkv"]
+    first = TODAY_FOREIGN_FILE.index(FOREIGN_CHECK)
+    second = TODAY_FOREIGN_FILE.index(FOREIGN_CHECK, first + 1)
+    assert capsys.readouterr().out == TODAY_FOREIGN_FILE[:second] + TODAY_FOREIGN_FILE[second + len(FOREIGN_CHECK):]
+    assert (world.downloads / "Holiday.mkv").read_bytes() == b"F" * 4096   # a foreign file is never touched
+
+
+def test_a_file_met_in_one_entry_completes_a_later_one_without_rehashing(world, monkeypatch, capsys, sandbox):
+    # S01E01's blind ATTEMPT 2 click downloads S01E02's item: no match for E01, so it stays in Downloads — and
+    # completes E02 when E02's harvest meets it, without hashing it again (today it was re-hashed per attempt).
+    _seed_demo_season(sandbox, world, extra=False)
+    hashed = _count_hashes(monkeypatch)
+    calls = _script(monkeypatch, lambda q, i: world.chrome.start("S01E02 [bbb222].mkv", PAYLOAD_B, 30)
+                    if q == "S01E01 [aaa111].mkv" else False)
+    _route_stubs(monkeypatch)
+
+    mainfetch.cmd_fetch_route(SEASON)
+
+    out = capsys.readouterr().out
+    assert hashed == ["S01E02 [bbb222].mkv"]
+    assert out.count("🔎 Checking: S01E02 [bbb222].mkv") == 2       # hashed under E01, named again where it matches
+    assert out.count("✅ MOVED: S01E02.mkv") == 1 and "MOVED: S01E01.mkv" not in out
+    assert calls == [("S01E01.mkv", 0), ("S01E01 [aaa111].mkv", 0), ("S01E02.mkv", 0)]
+    # It arrived during this session, so it also teaches the session's account about E02.
+    assert [(r["manual_id"], r["label"]) for r in mvcommon.read_learned("tv")] == [(SEASON + "e02", "whole")]
+
+
+def test_a_verified_download_teaches_the_session_account_silently(world, monkeypatch, capsys):
+    ctx = _session("tv")
+    entry = _whole_entry(world.tmp)
+    _script(monkeypatch, lambda q, i: world.chrome.start("Show.S01E01 [abc123].mkv", PAYLOAD_A, 100)
+            if q == entry["search_term"] else False)
+
+    mainfetch.fetch_single_entry(None, entry, entry_id=EP_ID, ctx=ctx)
+
+    assert capsys.readouterr().out == ORACLES["whole_attempt2"]      # learning prints nothing
+    [record] = mvcommon.read_learned("tv")
+    assert {k: v for k, v in record.items() if k != "at"} == {
+        "v": 1, "account": "tv", "manual_id": EP_ID, "label": "whole", "sha256": _sha(PAYLOAD_A),
+        "dedup_key": _key(PAYLOAD_A), "proof": "sha256", "source": "fetch"}
+    assert ctx.stats["learned"] == 1
+    assert [mvcommon.read_learned(a) for a in ("movies", "anime", "others")] == [[], [], []]
+
+
+@pytest.mark.parametrize("same_bytes", [True, False], ids=["record-holds-these-bytes", "record-holds-other-bytes"])
+def test_a_photo_id_is_learned_only_when_the_trigger_record_holds_these_bytes(world, monkeypatch, same_bytes):
+    # Step 12's trigger record names the item it downloaded; the bytes that arrived decide whether it was right.
+    ctx = _session("movies")
+    record_key = _key(PAYLOAD_A if same_bytes else PAYLOAD_B)
+    stage = {"tried": "s0_photo_id", "outcome": "exactly-one", "n": 1, "via": "rpc"}
+
+    def seam(driver, queue, ctx):
+        queue[0]["_trigger"] = {"method": "direct", "approach": stage, "record": {
+            "photo_id": PHOTO, "dedup_key": record_key, "taken_ms": 1644061786000, "tz_offset_ms": 28800000,
+            "upload_ms": 1700000000000, "width": 1920, "height": 1080, "filename": "Show.S01E01 [abc123].mkv"}}
+
+    monkeypatch.setattr(mainfetch, "_run_locator_phase", seam)
+    entry = _whole_entry(world.tmp)
+    _script(monkeypatch, lambda q, i: world.chrome.start("Show.S01E01 [abc123].mkv", PAYLOAD_A, 50)
+            if q == entry["search_term"] else False)
+
+    mainfetch.fetch_single_entry(None, entry, entry_id=EP_ID, ctx=ctx)
+
+    [record] = mvcommon.read_learned("movies")
+    assert record["dedup_key"] == _key(PAYLOAD_A)                     # always the verified bytes' key
+    if same_bytes:
+        assert {k: record[k] for k in ("photo_id", "taken_ms", "tz_offset_ms", "upload_ms", "width", "height",
+                                       "gp_filename", "approach")} == {
+            "photo_id": PHOTO, "taken_ms": 1644061786000, "tz_offset_ms": 28800000, "upload_ms": 1700000000000,
+            "width": 1920, "height": 1080, "gp_filename": "Show.S01E01 [abc123].mkv", "approach": stage}
+    else:
+        assert not {"photo_id", "taken_ms", "upload_ms", "gp_filename", "approach"} & set(record)
+
+
+def test_a_file_already_in_downloads_is_moved_but_proves_nothing_about_this_account(world, monkeypatch, capsys):
+    # e.g. a finished download an earlier run (perhaps in another account's session) left behind
+    (world.downloads / "Show.S01E01 [abc123].mkv").write_bytes(PAYLOAD_A)
+    ctx = _session("tv")
+    calls = _script(monkeypatch, lambda q, i: False)
+
+    mainfetch.fetch_single_entry(None, _whole_entry(world.tmp), entry_id=EP_ID, ctx=ctx)
+
+    out = capsys.readouterr().out
+    assert "✅ MOVED: Show.S01E01.mkv" in out and "✅ ENTRY COMPLETE." in out
+    assert calls == [("Show.S01E01.mkv", 0)]
+    assert mvcommon.read_learned() == [] and ctx.stats["learned"] == 0
+
+
+@pytest.mark.parametrize("session, entry_id", [(None, EP_ID), ("tv", None)], ids=["no-session", "no-owning-id"])
+def test_nothing_is_learned_without_a_session_account_or_an_owning_id(world, monkeypatch, session, entry_id):
+    ctx = _session(session) if session else mainfetch.FetchContext()
+    entry = _whole_entry(world.tmp)
+    _script(monkeypatch, lambda q, i: world.chrome.start("Show.S01E01 [abc123].mkv", PAYLOAD_A, 10)
+            if q == entry["search_term"] else False)
+
+    mainfetch.fetch_single_entry(None, entry, entry_id=entry_id, ctx=ctx)
+
+    assert mvcommon.read_learned() == []
+
+
+def test_a_learned_sidecar_failure_warns_once_and_the_fetch_goes_on(world, monkeypatch, capsys):
+    def boom(account, record):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(mvcommon, "append_learned", boom)
+    entry = _whole_entry(world.tmp)
+    _script(monkeypatch, lambda q, i: world.chrome.start("Show.S01E01 [abc123].mkv", PAYLOAD_A, 10)
+            if q == entry["search_term"] else False)
+
+    mainfetch.fetch_single_entry(None, entry, entry_id=EP_ID, ctx=_session("tv"))
+
+    out = capsys.readouterr().out
+    warning = ("     ⚠️ Not recorded in the learned sidecar (OSError: [Errno 28] No space left on device) — "
+               "the file itself is fetched.")
+    assert out.count(warning) == 1
+    assert "✅ MOVED: Show.S01E01.mkv" in out and "✅ ENTRY COMPLETE." in out
+    assert not any(marker in warning for marker in WEB_MARKERS)
+    assert _restored(entry, "Show.S01E01.mkv").read_bytes() == PAYLOAD_A
+
+
+@pytest.mark.parametrize("enabled", [True, False], ids=["kill-switch-on", "kill-switch-off"])
+def test_every_chunk_and_holder_is_learned_under_its_own_label(world, monkeypatch, enabled):
+    monkeypatch.setattr(mainfetch, "EXACT_LOCATOR_ENABLED", enabled)   # P-14: learning stays on either way
+    ctx = _session("movies")
+    entry = _movie_entry(world)
+    c1, c2, h = "Movie [abc123].chunk.001.mkv", "Movie [abc123].chunk.002.mkv", "Movie [abc123].holder.mkv"
+    payload = {c1: PAYLOAD_A, c2: PAYLOAD_B, h: PAYLOAD_H}
+    _script(monkeypatch, lambda q, i: world.chrome.start(q, payload[q], 20) if q in payload else False)
+
+    mainfetch.fetch_single_entry(None, entry, entry_id="mov-en-2020-movie", ctx=ctx)
+
+    learned = {r["label"]: r for r in mvcommon.read_learned("movies")}
+    assert set(learned) == {"chunk 1/2", "chunk 2/2", "holder"}
+    for label, data in (("chunk 1/2", PAYLOAD_A), ("chunk 2/2", PAYLOAD_B), ("holder", PAYLOAD_H)):
+        assert (learned[label]["sha256"], learned[label]["dedup_key"]) == (_sha(data), _key(data))
+        assert learned[label]["manual_id"] == "mov-en-2020-movie"
+
+
+def test_an_extra_is_learned_under_its_title_and_extras_label(world, monkeypatch, sandbox):
+    _seed_demo_season(sandbox, world)
+    [extra] = mainfetch.resolve_title_extras(SEASON)
+    _script(monkeypatch, lambda q, i: world.chrome.start("Trailer [e1e1e1].mkv", PAYLOAD_C, 10)
+            if q == "Trailer [e1e1e1].mkv" else False)
+
+    mainfetch.fetch_single_entry(None, extra, ctx=_session("tv"))
+
+    [record] = mvcommon.read_learned("tv")
+    assert (record["manual_id"], record["label"], record["sha256"]) == (SEASON, "extra Specials/Trailer.mkv",
+                                                                         _sha(PAYLOAD_C))
+
+
+def test_what_a_fetch_learned_routes_the_next_fetch(world, monkeypatch, sandbox, capsys):
+    # End to end through the apply engine: an episode fetched in the MOVIES account's session (an X-Files-like
+    # object) teaches its block that it lives there; the next fetch routes it to movies without any override.
+    import main
+    folder = world.tmp / "Series" / "Show" / "Season 01"
+    folder.mkdir(parents=True)
+    mvcommon.save_library({EP_ID: {"filename": "Show.S01E01.mkv", "short_id": "abc123", "folder_path": str(folder),
+                                   "hash": _sha(PAYLOAD_A), "search_term": "Show.S01E01 [abc123].mkv",
+                                   "status": "archived", "uploaded": True}})
+    _script(monkeypatch, lambda q, i: world.chrome.start("Show.S01E01 [abc123].mkv", PAYLOAD_A, 10)
+            if q == "Show.S01E01 [abc123].mkv" else False)
+    mainfetch.fetch_single_entry(None, mvcommon.load_library()[EP_ID], entry_id=EP_ID, ctx=_session("movies"))
+
+    report = main.merge_learned_gphotos()
+
+    assert report["status"] == "saved"
+    block = mvcommon.load_library()[EP_ID]["gphotos"]
+    assert block["home_account"] == "movies" and block["dedup_key"] == _key(PAYLOAD_A)
+    assert block["accounts"]["movies"]["verified_by"] == "sha256" and "confirmed" not in block["accounts"]["movies"]
+    [item] = mainfetch.build_fetch_queue(mvcommon.load_library()[EP_ID], str(folder / "fresh"), entry_id=EP_ID)
+    assert item["locator"]["route"] == {"account": "movies", "reason": "learned"}
+
+
+def test_harvest_downloads_reports_how_its_round_ended(world, monkeypatch, capsys):
+    queue = [{"filename": "x.mkv", "hash": _sha(PAYLOAD_A), "dest": str(world.tmp), "status": "pending",
+              "triggered": False}]
+    assert mainfetch.harvest_downloads(queue, mainfetch.FetchContext()) == {"timed_out": True, "saw_download": False}
+    queue[0]["status"] = "done"
+    assert mainfetch.harvest_downloads(queue, mainfetch.FetchContext()) == {"timed_out": False, "saw_download": False}
+    assert capsys.readouterr().out.count("❌ Timeout (No active downloads).") == 1

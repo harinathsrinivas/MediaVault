@@ -21,14 +21,24 @@ to the pre-fix code (frozen oracle).
 Hermetic: Downloads is a tmp folder (never the real one), mainfetch's `time` is a fake clock
 whose sleep() only advances it and fires the scripted Chrome download events, and
 trigger_download is a script. No browser, no real C:\\Media, no library I/O.
+
+IMP-C25 Step 10 (docs/feature-fetch-datetime/PLAN.md Step 10 c, d, g) adds, with the same fakes:
+today's transcripts frozen (captured from HEAD b1cff7d before any Step 10 edit) and replayed with the
+kill switch off and on; the locator seam; harvest_downloads' hash-once rule (IMP-B10); learn-on-fetch
+(the learned sidecar, redirected into tmp_path by the autouse _hermetic_gphotos_state); and the
+one-retry rule for a lost download (IMP-C34) with its failed-list row. Libraries, where a test needs
+one, come from `sandbox`.
 """
+import contextlib
 import hashlib
 import pathlib
 import types
 
 import pytest
 
+import gpweb
 import mainfetch
+import mvcommon
 
 PAYLOAD_A = b"A" * 4096
 PAYLOAD_B = b"B" * 4096
@@ -267,4 +277,173 @@ def test_chunks_one_collected_one_lost_then_refetched_past_the_timeout(world, mo
     assert "✅ ENTRY COMPLETE." in out
     assert _restored(entry, c1).read_bytes() == PAYLOAD_A
     assert _restored(entry, c2).read_bytes() == PAYLOAD_B
+    assert list(world.downloads.iterdir()) == []
+
+
+# ===========================================================================
+# IMP-C25 Step 10 — today's transcripts, FROZEN
+# ===========================================================================
+# Captured from mainfetch at HEAD b1cff7d (before any Step 10 edit) by running exactly these scenario
+# bodies with exactly these fakes. With no learned data, no lost download and no foreign file in
+# Downloads, Step 10 must reproduce them byte for byte — with the exact-item kill switch off AND on.
+# Do not edit an oracle to make a failing test pass: a diff means today's fetch output changed.
+PAYLOAD_C, PAYLOAD_H = b"C" * 4096, b"D" * 4096
+
+ORACLES = {
+    'whole_attempt2': '\n🔹 PROCESSING: Show.S01E01.mkv (abc123)\n\n   === ATTEMPT 1 (1 files) ===\n   > Watching Downloads (Infinite wait if active)...\n\n   ❌ Timeout (No active downloads).\n\n   === ATTEMPT 2 (1 files) ===\n   > Watching Downloads (Infinite wait if active)...\n\n   > 🔎 Checking: Show.S01E01 [abc123].mkv\n\r  🔍 Show.S01E01 [abc123].mkv  [████████████████████████] 4.00 KB / 4.00 KB \n     ✅ MOVED: Show.S01E01.mkv\n\n   ✅ ENTRY COMPLETE.\n',
+    'split_holder': '\n🔹 PROCESSING: Movie.mkv (abc123)\n   > Detected Split File (2 chunks)\n\n   === ATTEMPT 1 (3 files) ===\n   > Watching Downloads (Infinite wait if active)...\n\n   > 🔎 Checking: Movie [abc123].holder.mkv\n\r  🔍 Movie [abc123].holder.mkv  [████████████████████████] 4.00 KB / 4.00 KB \n     ✅ MOVED: Movie [abc123].holder.mkv\n\n   > 🔎 Checking: Movie [abc123].chunk.001.mkv\n\r  🔍 Movie [abc123].chunk.001.mkv  [████████████████████████] 4.00 KB / 4.00 KB \n     ✅ MOVED: Movie [abc123].chunk.001.mkv\n\n   ❌ Timeout (No active downloads).\n\n   === ATTEMPT 2 (1 files) ===\n   > Watching Downloads (Infinite wait if active)...\n\n   > 🔎 Checking: Movie [abc123].chunk.002.mkv\n\r  🔍 Movie [abc123].chunk.002.mkv  [████████████████████████] 4.00 KB / 4.00 KB \n     ✅ MOVED: Movie [abc123].chunk.002.mkv\n\n   ✅ ENTRY COMPLETE.\n',
+    'split_partly_staged': '\n🔹 PROCESSING: Movie.mkv (abc123)\n   > Detected Split File (2 chunks)\n\n   === ATTEMPT 1 (1 files) ===\n   > Watching Downloads (Infinite wait if active)...\n\n   > 🔎 Checking: Movie [abc123].chunk.002.mkv\n\r  🔍 Movie [abc123].chunk.002.mkv  [████████████████████████] 4.00 KB / 4.00 KB \n     ✅ MOVED: Movie [abc123].chunk.002.mkv\n\n   ✅ ENTRY COMPLETE.\n',
+    'all_present': '\n🔹 PROCESSING: Show.S01E02.mkv (def456)\n   ✅ All files already exist.\n',
+    'slow_whole_extending': '\n🔹 PROCESSING: Show.S01E01.mkv (abc123)\n\n   === ATTEMPT 1 (1 files) ===\n   > Watching Downloads (Infinite wait if active)...\n\n   ❌ Timeout (No active downloads).\n\n   === ATTEMPT 2 (1 files) ===\n   > Watching Downloads (Infinite wait if active)...\n   ⏳ Timeout reached, but 1 files downloading. Extending wait...\r   ⏳ Timeout reached, but 1 files downloading. Extending wait...\r   ⏳ Timeout reached, but 1 files downloading. Extending wait...\r\n   > 🔎 Checking: Show.S01E01 [abc123].mkv\n\r  🔍 Show.S01E01 [abc123].mkv  [████████████████████████] 4.00 KB / 4.00 KB \n     ✅ MOVED: Show.S01E01.mkv\n\n   ✅ ENTRY COMPLETE.\n',
+    'route_season_with_extra': "--- FETCH ROUTER: tv-en-2001-demo-s01 ---\n   > [Account] Profile for tv-en-2001-demo-s01: 'tv' (C:\\Media\\Utils\\ChromeProfile_TV)\n   > 📂 Season Map detected. Resolving children...\n   > 📋 Processing 2 items...\n   > 📎 + 1 extra(s) (--fetchExtras)\n\n🔹 PROCESSING: S01E01.mkv (aaa111)\n\n   === ATTEMPT 1 (1 files) ===\n   > Watching Downloads (Infinite wait if active)...\n\n   > 🔎 Checking: S01E01 [aaa111].mkv\n\r  🔍 S01E01 [aaa111].mkv  [████████████████████████] 4.00 KB / 4.00 KB \n     ✅ MOVED: S01E01.mkv\n\n   ✅ ENTRY COMPLETE.\n\n🔹 PROCESSING: S01E02.mkv (bbb222)\n\n   === ATTEMPT 1 (1 files) ===\n   > Watching Downloads (Infinite wait if active)...\n\n   ❌ Timeout (No active downloads).\n\n   === ATTEMPT 2 (1 files) ===\n   > Watching Downloads (Infinite wait if active)...\n\n   > 🔎 Checking: S01E02 [bbb222].mkv\n\r  🔍 S01E02 [bbb222].mkv  [████████████████████████] 4.00 KB / 4.00 KB \n     ✅ MOVED: S01E02.mkv\n\n   ✅ ENTRY COMPLETE.\n\n=== 📎 FETCHING 1 EXTRA(S) for tv-en-2001-demo-s01 ===\n\n🔹 PROCESSING: Trailer.mkv (e1e1e1)\n\n   === ATTEMPT 1 (1 files) ===\n   > Watching Downloads (Infinite wait if active)...\n\n   ❌ Timeout (No active downloads).\n\n   === ATTEMPT 2 (1 files) ===\n   > Watching Downloads (Infinite wait if active)...\n\n   > 🔎 Checking: Trailer [e1e1e1].mkv\n\r  🔍 Trailer [e1e1e1].mkv  [████████████████████████] 4.00 KB / 4.00 KB \n     ✅ MOVED: Trailer.mkv\n\n   ✅ ENTRY COMPLETE.\n\n✅ Batch Processing Complete.\n",
+}
+
+ORACLE_CALLS = {
+    "whole_attempt2": [("Show.S01E01.mkv", 0), ("Show.S01E01 [abc123].mkv", 0)],
+    "split_holder": [("Movie [abc123].chunk.001.mkv", 0), ("Movie [abc123].chunk.002.mkv", 0),
+                     ("Movie [abc123].holder.mkv", 0), ("Movie [abc123].mkv", 1)],
+    "split_partly_staged": [("Movie [abc123].chunk.002.mkv", 0)],
+    "all_present": [],
+    "slow_whole_extending": [("Show.S01E01.mkv", 0), ("Show.S01E01 [abc123].mkv", 0)],
+    "route_season_with_extra": [("S01E01.mkv", 0), ("S01E02.mkv", 0), ("S01E02 [bbb222].mkv", 0),
+                                ("Trailer.mkv", 0), ("Trailer [e1e1e1].mkv", 0)],
+}
+
+
+def _scenario_whole_attempt2(world, monkeypatch, sandbox=None):
+    entry = _whole_entry(world.tmp)
+    calls = _script(monkeypatch, lambda q, i: world.chrome.start("Show.S01E01 [abc123].mkv", PAYLOAD_A, 100)
+                    if q == entry["search_term"] else False)
+    mainfetch.fetch_single_entry(None, entry)
+    return calls
+
+
+def _movie_entry(world, chunks=2, holder=True):
+    folder = world.tmp / "movie"
+    folder.mkdir(exist_ok=True)
+    names = [f"Movie [abc123].chunk.00{n}.mkv" for n in range(1, chunks + 1)]
+    payloads = [PAYLOAD_A, PAYLOAD_B, PAYLOAD_C][:chunks]
+    split = {"is_split": True, "total_chunks": chunks,
+             "chunks": [{"filename": n, "hash": _sha(p)} for n, p in zip(names, payloads)]}
+    if holder:
+        split["carried_out_tracks"] = [{"holder_filename": "Movie [abc123].holder.mkv", "holder_hash": _sha(PAYLOAD_H)}]
+    return {"filename": "Movie.mkv", "short_id": "abc123", "folder_path": str(folder), "hash": "unused",
+            "search_term": "Movie [abc123].mkv", "split_info": split}
+
+
+def _scenario_split_holder(world, monkeypatch, sandbox=None):
+    entry = _movie_entry(world)
+    c1, c2, h = "Movie [abc123].chunk.001.mkv", "Movie [abc123].chunk.002.mkv", "Movie [abc123].holder.mkv"
+
+    def script(q, i):
+        if q == c1:
+            return world.chrome.start(c1, PAYLOAD_A, 100)
+        if q == h:
+            return world.chrome.start(h, PAYLOAD_H, 80)
+        if q == "Movie [abc123].mkv" and i == 1:
+            return world.chrome.start(c2, PAYLOAD_B, 50)
+        return False
+
+    calls = _script(monkeypatch, script)
+    mainfetch.fetch_single_entry(None, entry)
+    return calls
+
+
+def _scenario_split_partly_staged(world, monkeypatch, sandbox=None):
+    entry = _movie_entry(world, holder=False)
+    c1, c2 = "Movie [abc123].chunk.001.mkv", "Movie [abc123].chunk.002.mkv"
+    (world.tmp / "movie" / "restore").mkdir(parents=True)
+    (world.tmp / "movie" / "restore" / c1).write_bytes(PAYLOAD_A)
+    calls = _script(monkeypatch, lambda q, i: world.chrome.start(c2, PAYLOAD_B, 30) if q == c2 else False)
+    mainfetch.fetch_single_entry(None, entry)
+    return calls
+
+
+def _scenario_all_present(world, monkeypatch, sandbox=None):
+    folder = world.tmp / "title"
+    (folder / "restore").mkdir(parents=True)
+    (folder / "restore" / "Show.S01E02.mkv").write_bytes(PAYLOAD_A)
+    entry = {"filename": "Show.S01E02.mkv", "short_id": "def456", "folder_path": str(folder),
+             "hash": _sha(PAYLOAD_A), "search_term": "Show.S01E02 [def456].mkv"}
+    calls = _script(monkeypatch, lambda q, i: True)
+    mainfetch.fetch_single_entry(None, entry)
+    return calls
+
+
+def _scenario_slow_whole_extending(world, monkeypatch, sandbox=None):
+    entry = _whole_entry(world.tmp)
+    calls = _script(monkeypatch, lambda q, i: world.chrome.start("Show.S01E01 [abc123].mkv", PAYLOAD_A, 320)
+                    if q == entry["search_term"] else False)
+    mainfetch.fetch_single_entry(None, entry)
+    return calls
+
+
+SEASON = "tv-en-2001-demo-s01"
+
+
+def _seed_demo_season(sandbox, world, extra=True):
+    folder = world.tmp / "Series" / "Demo" / "Season 01"
+    folder.mkdir(parents=True)
+    ep1, ep2 = SEASON + "e01", SEASON + "e02"
+    library = {SEASON: {"type": "season_map", "folder_path": str(folder), "total_episodes": 2, "children": [ep1, ep2]},
+               ep1: {"filename": "S01E01.mkv", "folder_path": str(folder), "hash": _sha(PAYLOAD_A), "parent_id": SEASON,
+                     "status": "archived", "uploaded": True, "short_id": "aaa111", "search_term": "S01E01 [aaa111].mkv"},
+               ep2: {"filename": "S01E02.mkv", "folder_path": str(folder), "hash": _sha(PAYLOAD_B), "parent_id": SEASON,
+                     "status": "archived", "uploaded": True, "short_id": "bbb222", "search_term": "S01E02 [bbb222].mkv"}}
+    if extra:
+        library[SEASON]["extras"] = {"groups": {"Specials": {"items": [{
+            "filename": "Trailer.mkv", "sub_rel": "Trailer.mkv", "hash": _sha(PAYLOAD_C), "uploaded": True,
+            "status": "archived", "short_id": "e1e1e1", "search_term": "Trailer [e1e1e1].mkv"}]}}}
+    mvcommon.save_library(library)
+    return folder
+
+
+def _route_stubs(monkeypatch):
+    events = []
+
+    class _Driver:
+        def quit(self):
+            events.append("quit")
+
+    def _init(profile_key="movies"):
+        events.append(("init", profile_key))
+        return _Driver()
+
+    monkeypatch.setattr(mainfetch, "init_driver", _init)
+    monkeypatch.setattr(mainfetch, "fetch_session_lock", lambda *a, **k: contextlib.nullcontext())
+    return events
+
+
+def _scenario_route_season_with_extra(world, monkeypatch, sandbox=None):
+    _seed_demo_season(sandbox, world)
+
+    def script(q, i):
+        if q == "S01E01.mkv":
+            return world.chrome.start("S01E01 [aaa111].mkv", PAYLOAD_A, 60)
+        if q == "S01E02 [bbb222].mkv":
+            return world.chrome.start("S01E02 [bbb222].mkv", PAYLOAD_B, 70)
+        if q == "Trailer [e1e1e1].mkv":
+            return world.chrome.start("Trailer [e1e1e1].mkv", PAYLOAD_C, 40)
+        return False
+
+    calls = _script(monkeypatch, script)
+    events = _route_stubs(monkeypatch)
+    mainfetch.cmd_fetch_route(SEASON, fetch_extras=True, temp_dir=str(world.tmp / "T"))
+    assert events == [("init", "tv"), "quit"]
+    return calls
+
+
+SCENARIOS = {"whole_attempt2": _scenario_whole_attempt2, "split_holder": _scenario_split_holder,
+             "split_partly_staged": _scenario_split_partly_staged, "all_present": _scenario_all_present,
+             "slow_whole_extending": _scenario_slow_whole_extending,
+             "route_season_with_extra": _scenario_route_season_with_extra}
+
+
+@pytest.mark.parametrize("enabled", [False, True], ids=["kill-switch-off", "kill-switch-on"])
+@pytest.mark.parametrize("name", list(SCENARIOS))
+def test_todays_transcript_and_trigger_sequence_are_frozen(world, monkeypatch, capsys, sandbox, name, enabled):
+    monkeypatch.setattr(mainfetch, "EXACT_LOCATOR_ENABLED", enabled, raising=False)
+    calls = SCENARIOS[name](world, monkeypatch, sandbox)
+    assert capsys.readouterr().out == ORACLES[name]
+    assert calls == ORACLE_CALLS[name]
     assert list(world.downloads.iterdir()) == []

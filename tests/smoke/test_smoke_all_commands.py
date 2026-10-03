@@ -971,7 +971,7 @@ class TestEachCommand:
             return _types.SimpleNamespace(profile=profile_key, window_handles=[],
                                           quit=lambda: None)
 
-        def _fake_fetch(driver, entry, temp_dir=None, entry_id=None):
+        def _fake_fetch(driver, entry, temp_dir=None, entry_id=None, ctx=None):  # ctx: IMP-C25 Step 10
             fetched.append((driver.profile, entry_id))
 
         monkeypatch.setattr(mainfetch, "init_driver", _fake_init_driver)

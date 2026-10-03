@@ -6,7 +6,7 @@ import time
 import re
 import socket
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timezone
 # --- SELENIUM IMPORTS ---
 try:
     from selenium import webdriver
@@ -28,6 +28,7 @@ except ImportError:
 # version (sys.exit(1) on a corrupt library) — mainfetch's old silent-zero-
 # entries behavior is intentionally removed.
 import mvcommon  # [IMP-C26] runtime config is read module-qualified (mvcommon's RUNTIME CONFIG binding-hazard note)
+import gpweb  # [IMP-C25] the shared Google Photos name / hash helpers (stdlib only)
 from mvcommon import RESTORE_DIR_NAME, load_library, calculate_file_hash, fetch_session_lock, episode_num_from_id
 
 # --- AUTOMATION CONFIG ---
@@ -422,40 +423,162 @@ def _fetch_restore_folder(entry, temp_dir, entry_id=None):
     return os.path.join(temp_dir, safe_id, RESTORE_DIR_NAME)
 
 
-def _lost_download_note(lost, saw_download):
-    """[IMP-C29] What the harvester can honestly say about `lost` triggered files
-    that never arrived. It sees only the Downloads folder, never Chrome's verdict.
-    Google Photos downloads carry no ETag or Last-Modified, so Chrome cannot
-    resume a broken one: it restarts from 0 B, then fails it."""
-    if saw_download:
-        return (f"     A download was in progress, but {lost} triggered file(s) never arrived. "
-                f"If chrome://downloads lists it as failed (e.g. 'Failed - Network error'), the "
-                f"transfer broke. Google Photos downloads cannot resume: re-run the fetch "
-                f"(files already fetched are skipped).")
-    return (f"     No download appeared for {lost} triggered file(s). If chrome://downloads lists "
-            f"it as failed, the transfer broke at once: re-run the fetch. If it is not listed, "
-            f"Shift+D started nothing.")
+# ==========================================
+#   IMP-C25 STEP 10 — THE FETCH RUN, ITS QUEUE AND LOCATORS
+# ==========================================
+# docs/feature-fetch-datetime/PLAN.md Step 10. One fetch run = one FetchContext,
+# handed to every stage: fetch_single_entry -> build_fetch_queue (today's queue +
+# a `locator` per object) -> the exact-item stages (_run_locator_phase, IMP-C25
+# Step 12) -> today's two legacy attempts. Later steps extend the context (Step 11
+# the fetch journal, Step 12 the RPC client and record cache, Step 14 --manual).
+# mainfetch stays library-READ-only: what a fetch learns goes to the learned
+# sidecar (mvcommon.append_learned) and the apply engine folds it in afterwards.
 
+class FetchContext:
+    """What one fetch run shares across its accounts, entries and stages (`ctx`).
 
-def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None):
+    run_id   'fetch-<UTC yyyymmddThhmmssZ>-<pid>' — the run named in the failed
+             list (P-18) and, later, the fetch journal (Step 11)
+    manual   --manual was given (parse_fetch_options; acted on by Step 14)
+    account  the Google account (CHROME_PROFILES key) of the Chrome session now
+             running; None outside a session (a stand-alone fetch_single_entry)
     """
-    Handles the fetch logic for a single library entry (Movie or Episode).
-    Refactored to use PARALLEL TRIGGER + HARVESTER for large files.
-    """
-    print(f"\n🔹 PROCESSING: {entry['filename']} ({entry.get('short_id', 'N/A')})")
 
-    restore_folder = _fetch_restore_folder(entry, temp_dir, entry_id)
-    os.makedirs(restore_folder, exist_ok=True)
+    def __init__(self, manual=False, run_id=None):
+        self.run_id = run_id or f"fetch-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{os.getpid()}"
+        self.manual = bool(manual)
+        self.account = None
 
-    # 1. Build Queue
-    queue = []
+    def start_session(self, account):
+        """A Chrome session for `account` is up: the run now fetches in it."""
+        self.account = account
 
-    # Determine Fallback Search Term
+
+# The objects a library leaf uploads itself (a movie leaf's extras are fetched as
+# entries of their own — build_extras_entries).
+_OWN_OBJECT_KINDS = ("whole", "chunk", "holder")
+
+
+def _entry_objects(entry, owner_id):
+    """{sha256: object} for the objects ONE fetch entry uploads, as
+    mvcommon.iter_entry_objects describes them (trusted block, capture facts,
+    exact uploaded name, label): a library leaf's whole file, or its chunks and
+    FLAC holders. For a build_extras_entries synthetic entry the same objects
+    carry the title's extras naming ('extra_whole' / 'extra_chunk',
+    'extra <group_rel>/<sub_rel>[ chunk n/N]'), exactly as the mapper and the
+    apply engine name them. Reads the entry's capture file; never the library."""
+    extra = entry.get("label") if "group_rel" in entry else None
+    objects = {}
+    for obj in mvcommon.iter_entry_objects(owner_id or "", entry):
+        if obj["kind"] not in _OWN_OBJECT_KINDS:
+            continue
+        if extra and obj["kind"] == "whole":
+            obj = dict(obj, kind="extra_whole", label=extra)
+        elif extra and obj["kind"] == "chunk":
+            obj = dict(obj, kind="extra_chunk", label=f"{extra} {obj['label']}")
+        if obj["sha256"]:
+            objects.setdefault(obj["sha256"], obj)
+    return objects
+
+
+def _ms_from_date_utc(date_utc):
+    """A DateUTC 'YYYY-MM-DDTHH:MM:SSZ' — the time Google Photos dates the item by
+    (RESEARCH F1/F20) — as epoch milliseconds, or None."""
+    try:
+        when = datetime.strptime(date_utc, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+    return int(when.timestamp()) * 1000
+
+
+def _locator(item, obj, owner_id, kind, index, label, short_id, account):
+    """The `locator` of one queue item — what the exact-item stages (Step 12),
+    check_photos (Step 13) and the learned sidecar need to know about the object
+    — from its TRUSTED gphotos block, else its capture facts (P-2, P-11); a key
+    whose fact is unknown is None (lists are empty). `account` = the account of
+    the session that fetches it (cmd_fetch_route runs each object in its routed
+    account); without a session, the routed account. The shape is documented on
+    build_fetch_queue."""
+    block = obj["block"] if obj else None
+    capture = (obj.get("capture") if obj else None) or {}
+    facts = block or {}
+    routed, reason = _object_account(owner_id or "", block)
+    account = account or routed
+    record = mvcommon.account_record(block, account) or {}
+    approach = record.get("approach") if isinstance(record.get("approach"), dict) else {}
+    override = facts.get("search_override")
+    search_override = override.get("query") if isinstance(override, dict) else None
+    pushed = facts.get("pushed") or capture.get("pushed") or {}
+    sha1 = facts.get("sha1") or capture.get("sha1")
+    date_utc = facts.get("date_utc") or capture.get("date_utc")
+    taken = record.get("taken_ms")
+    short_id = (obj or {}).get("short_id") or short_id
+    category = mvcommon.category_for_id(owner_id) if owner_id else None
+    uploaded = (obj or {}).get("uploaded_name") or gpweb.exact_name_query(
+        {"filename": item["filename"], "short_id": short_id})
+    title_query = gpweb.title_short_id_query(item["filename"], short_id, category)
+    return {
+        "manual_id": owner_id, "kind": kind, "index": index, "label": label, "sha256": item["hash"],
+        "category": category, "short_id": short_id, "filename": item["filename"], "uploaded_name": uploaded,
+        "cloud_state": (obj or {}).get("cloud_state"),
+        "sha1": sha1, "dedup_key": facts.get("dedup_key") or capture.get("dedup_key"),
+        "hash_b64": gpweb.sha1_hex_to_std_b64(sha1) if sha1 else None,
+        "date_utc": date_utc,
+        "taken_ms": taken if isinstance(taken, int) else _ms_from_date_utc(date_utc),
+        "tz_offset_ms": record.get("tz_offset_ms"),
+        "device_tz_offset_min": pushed.get("device_tz_offset_min"),
+        "account": account,
+        "route": {"account": routed, "reason": reason},
+        "photo_id": record.get("photo_id"),
+        "alternates": list(record.get("alternates") or []),
+        "approach_best": approach.get("best") or capture.get("approach_hint"),
+        "search_override": search_override,
+        "queries": {"s2": [uploaded] if uploaded else [],
+                    "s3": [title_query] if title_query else [],
+                    "s3u": [search_override] if search_override else [],
+                    "s4": [[item["specific_query"], 0], [item["fallback_query"], item["fallback_index"]]]},
+    }
+
+
+def build_fetch_queue(entry, restore_folder, ctx=None, entry_id=None):
+    """[IMP-C25 Step 10 b] The fetch queue of ONE entry: each uploaded object whose
+    file is not in `restore_folder` yet, in today's order — a split entry's chunks,
+    then its FLAC holders; otherwise the whole file.
+
+    Each item carries today's keys and values, unchanged (pinned against a frozen
+    copy of the old inline builder):
+      filename, hash, dest, specific_query, fallback_query, fallback_index,
+      status ('pending'; the stages set 'done' or 'failed')
+    plus `locator` (_locator) for the exact-item stages:
+      manual_id   the owning library id (entry_id; a synthetic extra names its
+                  title in entry['manual_id']) — None when unknown
+      kind, index, label   whole | chunk | holder | extra_whole | extra_chunk,
+                  1-based position, 'whole' · 'chunk 2/3' · 'holder' ·
+                  'extra Specials/BTS.mkv' (mvcommon's object naming)
+      sha256      = the item's hash (the P-2 pin)
+      category, short_id, filename, uploaded_name (the exact name in Google
+                  Photos), cloud_state (mvcommon: confirmed | unverified |
+                  uploaded | local)
+      sha1, dedup_key, hash_b64   the content key (block, else capture); hash_b64
+                  = the swbisb lookup form (standard base64, padded)
+      date_utc, taken_ms, tz_offset_ms, device_tz_offset_min   the taken second
+                  (learned record, else from DateUTC) and the offsets known
+      account     the account whose session fetches it; route {account, reason}
+                  = P-4's answer (override | learned | prefix)
+      photo_id, alternates, approach_best   that account's learned record
+                  (approach_best falls back to the capture's approach_hint)
+      search_override   the user's failed-list search term (stage S3u) or None
+      queries     {s2: [exact uploaded name], s3: [title + short_id],
+                   s3u: [search_override], s4: [[query, index] x today's two
+                   attempts]}
+    entry_id = the resolved library id of a target. Reads the entry's capture
+    file; never prints and never touches the library or the browser."""
     fallback_term = entry.get("search_term")
     if not fallback_term: fallback_term = entry["filename"]
+    extra = "group_rel" in entry  # a build_extras_entries synthetic entry
+    queue, names = [], []  # names: the (kind, index, label) used when no object matches
 
     if entry.get("split_info") and entry["split_info"].get("is_split"):
-        print(f"   > Detected Split File ({entry['split_info']['total_chunks']} chunks)")
         chunks = entry["split_info"]["chunks"]
         for i, chunk in enumerate(chunks):
             fname = chunk["filename"]
@@ -472,6 +595,7 @@ def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None):
                 "fallback_index": i,
                 "status": "pending"
             })
+            names.append(("extra_chunk" if extra else "chunk", i + 1, f"chunk {i + 1}/{len(chunks)}"))
 
         # [FLAC-CARRYOUT] Each carried-out track's holder is fetched like a chunk:
         # same hash-routing, staged into restore/ beside the chunks. The holder is
@@ -492,6 +616,7 @@ def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None):
                 "fallback_index": 0,
                 "status": "pending"
             })
+            names.append(("holder", None, "holder"))
     else:
         fname = entry["filename"]
         if not os.path.exists(os.path.join(restore_folder, fname)):
@@ -504,6 +629,53 @@ def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None):
                 "fallback_index": 0,
                 "status": "pending"
             })
+            names.append(("extra_whole" if extra else "whole", None, "whole"))
+
+    owner_id = entry_id or entry.get("manual_id")
+    objects = _entry_objects(entry, owner_id) if queue else {}
+    account = ctx.account if ctx is not None else None
+    for item, (kind, index, label) in zip(queue, names):
+        obj = objects.get(item["hash"])
+        if obj:
+            kind, index, label = obj["kind"], obj["index"], obj["label"]
+        elif extra:
+            label = entry["label"] if kind == "extra_whole" else f"{entry['label']} {label}"
+        item["locator"] = _locator(item, obj, owner_id, kind, index, label, entry.get("short_id"), account)
+    return queue
+
+
+def _lost_download_note(lost, saw_download):
+    """[IMP-C29] What the harvester can honestly say about `lost` triggered files
+    that never arrived. It sees only the Downloads folder, never Chrome's verdict.
+    Google Photos downloads carry no ETag or Last-Modified, so Chrome cannot
+    resume a broken one: it restarts from 0 B, then fails it."""
+    if saw_download:
+        return (f"     A download was in progress, but {lost} triggered file(s) never arrived. "
+                f"If chrome://downloads lists it as failed (e.g. 'Failed - Network error'), the "
+                f"transfer broke. Google Photos downloads cannot resume: re-run the fetch "
+                f"(files already fetched are skipped).")
+    return (f"     No download appeared for {lost} triggered file(s). If chrome://downloads lists "
+            f"it as failed, the transfer broke at once: re-run the fetch. If it is not listed, "
+            f"Shift+D started nothing.")
+
+
+def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None, ctx=None):
+    """
+    Handles the fetch logic for a single library entry (Movie or Episode).
+    Refactored to use PARALLEL TRIGGER + HARVESTER for large files.
+    [IMP-C25 Step 10] ctx = the run's FetchContext (cmd_fetch_route passes one;
+    a stand-alone call gets a fresh one); the queue comes from build_fetch_queue.
+    """
+    ctx = ctx if ctx is not None else FetchContext()
+    print(f"\n🔹 PROCESSING: {entry['filename']} ({entry.get('short_id', 'N/A')})")
+
+    restore_folder = _fetch_restore_folder(entry, temp_dir, entry_id)
+    os.makedirs(restore_folder, exist_ok=True)
+
+    # 1. Build Queue
+    if entry.get("split_info") and entry["split_info"].get("is_split"):
+        print(f"   > Detected Split File ({entry['split_info']['total_chunks']} chunks)")
+    queue = build_fetch_queue(entry, restore_folder, ctx, entry_id=entry_id)
 
     if not queue:
         print("   ✅ All files already exist.")
@@ -860,18 +1032,52 @@ def _account_overrides():
     return valid
 
 
-def profile_for_id(manual_id):
-    # [IMP-C26] An mvconfig.json fetch_account_overrides entry wins: the longest
-    # matching key, so an exact id beats any prefix of it (keys are plain string
-    # prefixes). Otherwise today's id-prefix routing, unchanged.
+def _override_account(manual_id):
+    """[IMP-C26] The fetch_account_overrides account for an id — the longest
+    matching key, so an exact id beats any prefix of it (keys are plain string
+    prefixes) — or None when no key matches."""
     overrides = _account_overrides()
     best = max((key for key in overrides if manual_id.startswith(key)), key=len, default=None)
-    if best is not None:
-        return overrides[best]
+    return overrides[best] if best is not None else None
+
+
+def _prefix_profile(manual_id):
+    """Today's id-prefix routing: the first ID_PREFIX_PROFILE match, else DEFAULT_PROFILE."""
     for prefix, key in ID_PREFIX_PROFILE:
         if manual_id.startswith(prefix):
             return key
     return DEFAULT_PROFILE
+
+
+def profile_for_id(manual_id):
+    # [IMP-C26] An mvconfig.json fetch_account_overrides entry wins: the longest
+    # matching key, so an exact id beats any prefix of it (keys are plain string
+    # prefixes). Otherwise today's id-prefix routing, unchanged.
+    return _override_account(manual_id) or _prefix_profile(manual_id)
+
+
+def _object_account(owner_id, block):
+    """[IMP-C25 P-4] The Google account one uploaded object is fetched in, and why:
+    (account, "override" | "learned" | "prefix").
+
+      1. the mvconfig.json fetch_account_overrides match for its owning id (the
+         user's escape hatch, IMP-C26 — always wins);
+      2. the account its TRUSTED gphotos block learned — mvcommon.home_account(),
+         the account that holds a verified (or user-vouched) copy — when that is
+         not simply the prefix default;
+      3. the id prefix (profile_for_id without an override).
+    owner_id = the owning library id (the TITLE id for an extra); block = the
+    object's trusted block or None (mvcommon.iter_entry_objects gives only
+    trusted blocks — P-2)."""
+    override = _override_account(owner_id)
+    if override:
+        return override, "override"
+    prefix = _prefix_profile(owner_id)
+    if block is not None:
+        home = mvcommon.home_account(block, owner_id, ID_PREFIX_PROFILE, DEFAULT_PROFILE)
+        if home != prefix:
+            return home, "learned"
+    return prefix, "prefix"
 
 
 def _account_groups(manual_id, active_profile, targets, target_ids, extra_entries):
@@ -963,6 +1169,7 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None)
     # [IMP-C26] One Chrome session per Google account the batch touches: a single
     # group (exactly today's session) unless fetch_account_overrides moves items.
     groups = _account_groups(manual_id, active_profile, targets, target_ids, extra_entries)
+    ctx = FetchContext()  # [IMP-C25 Step 10] the run's shared state, handed to every entry
 
     # [IMP-C17] Single-flight: only one interactive fetch batch may drive the
     # browser at a time (blocking=True polls then reclaims a stale/contended
@@ -987,9 +1194,10 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None)
                 # Pass the selected profile
                 driver = init_driver(profile)
                 if not driver: return
+                ctx.start_session(profile)
 
                 for entry, entry_id in group_targets:
-                    fetch_single_entry(driver, entry, temp_dir=temp_dir, entry_id=entry_id)
+                    fetch_single_entry(driver, entry, temp_dir=temp_dir, entry_id=entry_id, ctx=ctx)
 
                 # [IMP-D19 Step 5] Extras fetch through the SAME proven mechanism:
                 # each synthetic extra entry stages into its own
@@ -997,7 +1205,7 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None)
                 if group_extras:
                     print(f"\n=== 📎 FETCHING {len(group_extras)} EXTRA(S) for {manual_id} ===")
                 for ex in group_extras:
-                    fetch_single_entry(driver, ex)
+                    fetch_single_entry(driver, ex, ctx=ctx)
 
                 if n + 1 < len(groups):
                     _close_browser_windows(driver)

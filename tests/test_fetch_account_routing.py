@@ -102,7 +102,7 @@ def stubs(monkeypatch):
         print(f"[init {profile_key}]")
         return None if profile_key in st.init_fail else _FakeDriver(profile_key, st.events)
 
-    def _fetch(driver, entry, temp_dir=None, entry_id=None):
+    def _fetch(driver, entry, temp_dir=None, entry_id=None, ctx=None):  # ctx: the run's FetchContext (IMP-C25 Step 10)
         st.events.append(("fetch", driver.profile, entry["filename"], entry_id, temp_dir))
         print(f"[fetch {driver.profile} {entry['filename']} id={entry_id} temp={temp_dir}]")
         exc = st.raise_on.get((driver.profile, entry["filename"]))

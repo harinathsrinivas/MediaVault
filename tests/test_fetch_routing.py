@@ -716,3 +716,74 @@ def test_a_session_whose_objects_are_all_staged_says_so_and_hands_over(sandbox, 
                 "🔸 CONTINUING: Film.mkv (f1f1f1) — its file(s) in the 'tv' account",
                 "   > [Account] 1 of its 3 file(s) live in another account — fetched in the 'tv' session."):
         assert not any(marker in new for marker in WEB_MARKERS)          # P-13: no new line carries a web marker
+
+
+# ---------------------------------------------------------------------------
+# 10.f — --manual: parse_fetch_options, and main.py forwards it only when given
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("argv, manual", [
+    (["mainfetch.py", "fetch", "tv-x"], False),
+    (["mainfetch.py", "fetch", "tv-x", "--manual"], True),
+    (["mainfetch.py", "fetch", "tv-x", "episodes", "1-3", "--manual", "tempdir", "D:\\t"], True),
+    (["mainfetch.py", "fetch", "--manual"], False),                    # the id slot is never an option
+    (["mainfetch.py", "fetch", "tv-x", "--manual-ish"], False),
+])
+def test_parse_fetch_options_reads_manual_anywhere_after_the_id(argv, manual):
+    assert mainfetch.parse_fetch_options(argv) == {"manual": manual}
+
+
+def test_parse_fetch_args_keeps_its_four_tuple_with_manual_present():
+    assert mainfetch.parse_fetch_args(["mainfetch.py", "fetch", "tv-x", "--manual", "episodes", "1-3"]) == (
+        "tv-x", "1-3", False, None)
+
+
+@pytest.mark.parametrize("extra, manual", [([], False), (["--manual"], True)])
+def test_the_mainfetch_command_line_carries_manual_into_the_run(monkeypatch, extra, manual):
+    seen = []
+    monkeypatch.setattr(mainfetch, "cmd_fetch_route", lambda *a, **k: seen.append((a, k)))
+    mainfetch.cli(["mainfetch.py", "fetch", "tv-x", "episodes", "1-3", "--fetchExtras", "tempdir", "D:\\t"] + extra)
+    assert seen == [(("tv-x", "1-3", True), {"temp_dir": "D:\\t", "manual": manual})]
+
+
+def test_one_run_context_carries_manual_to_every_entry(sandbox, route, monkeypatch):
+    _seed(sandbox)
+    contexts = []
+    monkeypatch.setattr(mainfetch, "fetch_single_entry",
+                        lambda driver, entry, temp_dir=None, entry_id=None, ctx=None: contexts.append(ctx))
+    mainfetch.cmd_fetch_route(SEASON, manual=True)
+    assert len(contexts) == 2 and contexts[0] is contexts[1] and contexts[0].manual is True
+
+
+def test_the_fetch_child_gets_manual_only_when_given(monkeypatch):
+    import main
+    spawned = []
+
+    class _Child:
+        stdout = []
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(main.subprocess, "Popen", lambda cmd, **k: spawned.append(list(cmd)) or _Child())
+    monkeypatch.setattr(main, "merge_learned_gphotos", lambda: None)
+    main.cmd_dispatch_fetch("tv-x", "1-3", fetch_extras=True, temp_dir="D:\\t")
+    main.cmd_dispatch_fetch("tv-x", "1-3", fetch_extras=True, temp_dir="D:\\t", manual=True)
+    base = ["python", "mainfetch.py", "fetch", "tv-x", "episodes", "1-3", "--fetchExtras", "tempdir", "D:\\t"]
+    assert spawned == [base, base + ["--manual"]]                       # without it: byte-for-byte today's argv
+
+
+@pytest.mark.parametrize("command, target", [("fetch", "cmd_dispatch_fetch"), ("fetch_restore", "cmd_fetch_restore")])
+def test_the_main_command_line_forwards_manual_only_when_given(command, target):
+    # main.py's own dispatcher block, driven with recorders (tests/test_prep_push_rep_enrich_cli.py's harness).
+    from test_prep_push_rep_enrich_cli import parse_argv
+    assert parse_argv(["main.py", command, "tv-x", "episodes", "1-3"]) == (target, {
+        "manual_id": "tv-x", "episode_range": "1-3", "fetch_extras": False, "temp_dir": None, "manual": False})
+    assert parse_argv(["main.py", command, "tv-x", "--manual", "tempdir", "D:\\t"]) == (target, {
+        "manual_id": "tv-x", "episode_range": None, "fetch_extras": False, "temp_dir": "D:\\t", "manual": True})
+
+
+def test_the_web_ui_never_passes_manual():
+    import inspect
+    web = pytest.importorskip("webui.server")
+    source = inspect.getsource(web._run_fetch_restore)
+    assert "manual" not in source and "cmd_fetch_restore(" in source

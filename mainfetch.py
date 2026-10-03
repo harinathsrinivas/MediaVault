@@ -1538,7 +1538,8 @@ def _debug_port_free(port=9222, timeout=15.0):
         time.sleep(0.5)
 
 
-def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None):
+def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None, manual=False):
+    # [IMP-C25] manual = --manual (parse_fetch_options), carried in the run's FetchContext for Step 14.
     print(f"--- FETCH ROUTER: {manual_id} ---")
 
     active_profile = profile_for_id(manual_id)
@@ -1563,7 +1564,7 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None)
     # [IMP-C26, IMP-C25 P-4] One Chrome session per Google account the batch's
     # objects live in: a single group (exactly today's session) unless
     # fetch_account_overrides or learned accounts move objects.
-    ctx = FetchContext()  # [IMP-C25 Step 10] the run's shared state, handed to every entry
+    ctx = FetchContext(manual=manual)  # [IMP-C25 Step 10] the run's shared state, handed to every entry
     groups = _account_groups(manual_id, active_profile, targets, target_ids, extra_entries, ctx)
 
     # [IMP-C17] Single-flight: only one interactive fetch batch may drive the
@@ -1673,6 +1674,21 @@ def parse_fetch_args(argv):
     return (mid, epr, fetch_extras, temp_dir)
 
 
+def parse_fetch_options(argv):
+    """[IMP-C25 Step 10 f] The fetch options beyond parse_fetch_args' pinned
+    4-tuple, from the same full argv: {"manual": bool} — `--manual` anywhere after
+    the id (Step 14's manual mode; main.py forwards it only when the user gives it,
+    the web UI never does). Pure; never exits — parse_fetch_args validates argv."""
+    return {"manual": "--manual" in list(argv)[3:]}
+
+
+def cli(argv):
+    """`python mainfetch.py fetch <id> [episodes <range>] [tempdir <path>]
+    [--fetchExtras] [--manual]` — parse argv, then run the fetch."""
+    mid, epr, fetch_extras, temp_dir = parse_fetch_args(argv)
+    options = parse_fetch_options(argv)
+    cmd_fetch_route(mid, epr, fetch_extras, temp_dir=temp_dir, manual=options["manual"])
+
+
 if __name__ == "__main__":
-    mid, epr, fetch_extras, temp_dir = parse_fetch_args(sys.argv)
-    cmd_fetch_route(mid, epr, fetch_extras, temp_dir=temp_dir)
+    cli(sys.argv)

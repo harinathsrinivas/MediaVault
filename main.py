@@ -10379,7 +10379,7 @@ def merge_learned_gphotos():
     return report
 
 
-def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False, temp_dir=None):
+def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False, temp_dir=None, manual=False):
     # This keeps main.py clean but still lets you run "main.py fetch"
     cmd = ["python", MAINFETCH_SCRIPT, "fetch", manual_id]
 
@@ -10400,6 +10400,11 @@ def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False, temp_d
     # media volume (mirrors push's tempdir redirect).
     if temp_dir:
         cmd += ["tempdir", temp_dir]
+    # [IMP-C25 Step 10 f] --manual (IMP-C25 Step 14's manual mode) is forwarded only
+    # when given, so without it the argv stays byte-for-byte today's. The web UI
+    # never passes it.
+    if manual:
+        cmd.append("--manual")
 
     try:
         # Force the child's stdio to UTF-8 — a PIPEd child defaults to cp1252 on Windows and would crash printing mainfetch's emoji.
@@ -10437,12 +10442,12 @@ def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False, temp_d
     merge_learned_gphotos()
 
 
-def cmd_fetch_restore(manual_id, episode_range=None, fetch_extras=False, temp_dir=None):
+def cmd_fetch_restore(manual_id, episode_range=None, fetch_extras=False, temp_dir=None, manual=False):
     # [NEW] Automated Fetch -> Restore Pipeline
     print(f"=== 🔄 AUTO-PILOT: FETCH -> RESTORE for {manual_id} ===")
 
-    # 1. FETCH
-    cmd_dispatch_fetch(manual_id, episode_range, fetch_extras=fetch_extras, temp_dir=temp_dir)
+    # 1. FETCH ([IMP-C25] manual = --manual, forwarded only when given)
+    cmd_dispatch_fetch(manual_id, episode_range, fetch_extras=fetch_extras, temp_dir=temp_dir, manual=manual)
     # IMP-D19 Step 5: fetch extras when fetch_extras (forwarded above to mainfetch)
 
     # 2. DETECT & RESTORE
@@ -15231,7 +15236,8 @@ if __name__ == "__main__":
                 ftdir = _fetch_tokens[_ft_i + 1]
             _ft_i += 1
 
-        cmd_dispatch_fetch(mid, epr, fetch_extras=_fetch_extras, temp_dir=ftdir)
+        cmd_dispatch_fetch(mid, epr, fetch_extras=_fetch_extras, temp_dir=ftdir,
+                           manual="--manual" in _fetch_tokens)  # [IMP-C25] forwarded only when given
 
     elif cmd == "fetch_restore":
         # [NEW] Usage: fetch_restore [id] [OPT: episodes 1-3] [tempdir <path>] [--fetchExtras]
@@ -15253,7 +15259,8 @@ if __name__ == "__main__":
                 frdir = _fr_tokens[_fr_i + 1]
             _fr_i += 1
 
-        cmd_fetch_restore(mid, epr, fetch_extras=_fetch_extras, temp_dir=frdir)
+        cmd_fetch_restore(mid, epr, fetch_extras=_fetch_extras, temp_dir=frdir,
+                          manual="--manual" in _fr_tokens)  # [IMP-C25] forwarded only when given
 
     elif cmd == "token":
         # Web access token management (IMP-E15): create / list / revoke.

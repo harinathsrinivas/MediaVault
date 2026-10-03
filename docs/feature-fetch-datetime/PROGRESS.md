@@ -121,9 +121,10 @@ dict (parity oracle; FetchContext; ctx threaded through cmd_fetch_route — the 
 credited only to files that arrived in this Chrome session) (wip b82cf43) · [x] 10.d locator seam + EXACT_LOCATOR_ENABLED (+
 'failed' item state: a round ends when nothing is pending) (wip dac4082) · [x] 10.e A8 deletions +
 build_extras_entries forwards gphotos/labels/title (wip 85866bc) ·
-[ ] 10.f parse_fetch_options/--manual ← next · [x] 10.g IMP-C34 one retry of a lost download (a round where a wrong
+[x] 10.f parse_fetch_options/--manual (mainfetch.cli(argv) entry point; main.py fetch/fetch_restore forward --manual
+only when given; ctx.manual) · [x] 10.g IMP-C34 one retry of a lost download (a round where a wrong
 item arrived counts no loss; second loss → failed list, NEW P-18 reason `download-lost` in mvcommon.GP_FAILED_REASONS)
-(wip dd410ed) · [ ] 10.h IMP-C35 never click
+(wip dd410ed) · 10.a (wip 9f4ab09) · [ ] 10.h IMP-C35 never click ← next
 the home timeline · [ ] 10.i IMP-C36 unbuffered child output · then disarm probes, full + smoke`
 Pre-change oracles captured from HEAD b1cff7d before any edit (scratch harness, C29 fakes) — pasted into the Step 10
 tests as frozen transcripts.

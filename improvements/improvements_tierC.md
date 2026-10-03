@@ -656,10 +656,12 @@
   - For about 1–2 s after Enter the URL is already `/search/` while the timeline is still displayed (measured live). Result latency varied from about 2 s to about 7 s.
   - If the results page has not replaced the timeline when the fixed 3 s wait ends, `trigger_download` can click a timeline item and download the wrong file. Hash routing leaves that file in Downloads, so nothing is corrupted.
   - Proposed: poll for the results (or `No results`) instead of a fixed 3 s, and never click a `./photo/` link on a `/search/` page.
+  - Since settled: the user ruled "Inside C25" on 2026-10-03 (`docs/feature-fetch-datetime/DECISIONS.md` §1e). Registered as **IMP-C35**, built in IMP-C25 Step 10 (item h).
 - Open decision — retry a broken transfer (not built):
   - A transfer that breaks is reported now, but it is not retried. For a whole file only `ATTEMPT 2` finds the item, so one network break ends the entry INCOMPLETE and the user re-runs.
   - With downloads on TCP the known cause of broken transfers is gone, so this matters less than it did.
   - Proposed: re-trigger once a triggered download that never arrived. It needs a decision because a Photos download cannot resume, so every retry is a full re-download.
+  - Since settled: the user ruled "Inside C25" on 2026-10-03 (same section). Registered as **IMP-C34**, built in IMP-C25 Step 10 (item g).
 - Merge note for IMP-C25: that branch adds `profile_preflight` next to these helpers in `mainfetch.py`; keep both. Its `gp_inventory._session` still opens its own tab only with `--attach`, so apply this rule there too and repoint `tests/test_gp_inventory_own_tab.py` at `_session`. Any new Chrome launcher that downloads through fetch must carry `--disable-quic` as `init_driver` does; the crawler's own launcher does not download and does not need it.
 - Status: done (`fix/imp_c29_fetch_attach_photos_tab`)
 
@@ -822,7 +824,7 @@
   - Unchanged: the journal format, what prep and push record, PONR placement, `recover_journal`, the O-1 resume message, the season resume-range messaging and `RollbackHardFail`.
   - One consequence of the unchanged D-6 scoping is visible. The push journal records `split_info` only when the run itself created it. A re-run that has to split afresh (the leftovers are gone) now finds a record already there, because prep kept it. If that run fails before any upload, rollback removes its own `_parts/` and `checksums/` and leaves the record in place. A plain `push <id> <split>` re-run always behaved this way; the autopilot path used to pop the record, because its re-prep had cleared it first. The next push splits again, or uploads the file whole and drops the record. Pinned.
 - The `_enrich` autopilots: checked, no mismatch is possible. They run the plain autopilot first and enrich only once the entry is `archived` (`main.py:9570`, `main.py:9717`), so no folder is renamed between the interrupted run and the re-run. The record stores chunk file names, not paths, so it still matches the cloud after the rename that follows the archive. Pinned end to end for the movie and the season command, including a restore from the renamed folder.
-- Found here, not changed (unregistered; needs a decision):
+- Found here, not changed (needs a decision; the first is since registered as **IMP-C37**):
   - **The season resume line leaves out `tempdir` and `rehash`.** `_season_resume_cmd` (`main.py:9183-9215`) rebuilds the command from the split, `episodes`, `device`, `--extras` and `--extras-size`. After a season run that used `tempdir`, the printed line pushes without the redirect, so it does not look in `<tempdir>\<id>\_parts`: it splits the interrupted episode again in the season folder and uploads it from the start, and the old chunks stay in the tempdir. Adding `tempdir <dir>` to the printed line by hand resumes properly. Without `rehash`, the remaining episodes are split with a deferred canonical hash instead of an eager one. This is the change-gated season resume-range messaging, so it is not touched here.
   - A re-prep still re-hashes the whole file (IMP-D23), so `push <id>` remains the cheaper resume.
 - Tests: `tests/test_prep_keeps_split_record.py` has 26 hermetic tests (`sandbox`, `mock_device`, `make_video`, `stub_tech_specs`, `fake_dummy`). 13 of them fail on `main`.
@@ -840,3 +842,79 @@
 - Effort estimate: small · Risk: low. Only a re-prep of a still-local entry that records a split changes, and a whole-file first archive of one. A first prep, an entry that was never split and every uploaded entry behave as before. No `ENTRY_TYPE_KEYS` involvement.
 - If skipped: after an interrupted split push, re-running the autopilot or the season's printed resume command is refused, and the leftovers have to be deleted and the title split and uploaded again from the start.
 - Status: done (`fix/imp_c33_prep_keeps_split_info`)
+
+---
+
+## IMP-C34: fetch does not retry a lost download — a Google Photos download cannot resume, so one broken transfer leaves the entry INCOMPLETE
+
+- Category: robustness (the open decision IMP-C29 left: retry a broken transfer)
+- Priority: high (Band 1 — a robustness gap with no data loss: the entry ends INCOMPLETE and the user re-runs the fetch)
+- Files: `mainfetch.py` — `fetch_single_entry`'s download harvester and `_lost_download_note`. Found by IMP-C29 ("Open decision — retry a broken transfer"). The user ruled "Inside C25" on 2026-10-03 (`docs/feature-fetch-datetime/DECISIONS.md` §1e), so it is built as IMP-C25 Step 10 item g (`docs/feature-fetch-datetime/PLAN.md`).
+- Current behavior:
+  - Google Photos downloads cannot resume. A transfer that breaks shows `Failed - Network error` at 0 B in `chrome://downloads`.
+  - Since IMP-C29, fetch names the loss: a timeout adds `_lost_download_note`'s line for the triggered files that never arrived. It does not re-trigger them, so one break leaves the entry INCOMPLETE.
+- Proposed change (IMP-C25 Step 10 item g): re-trigger a lost download ONCE per object per run (whole files, chunks, holders, extras), never while a download for that object is still active. The retry is printed and counted. A second loss puts the object on the failed list.
+- Effort estimate: small (inside IMP-C25 Step 10) · Risk: low — at most one more trigger per lost object, and hash routing still decides what is kept. Every retry is a full re-download, because a Photos download cannot resume.
+- If skipped: one broken transfer ends the entry INCOMPLETE, and the user re-runs the fetch (files already fetched are skipped).
+- Status: in_progress (IMP-C25 Step 10 item g, `feature/imp_c25_fetch_exact_gp_item`; user ruling 2026-10-03 "Inside C25")
+
+---
+
+## IMP-C35: fetch can click the home timeline instead of a search result — a slow search lets `trigger_download` download the wrong file
+
+- Category: bug (IMP-C29's residual risk)
+- Priority: high (Band 1 — no data loss, but the attempt is wasted on a wrong download)
+- Files: `mainfetch.py` — `trigger_download` (its fixed 3 s wait and its first thumbnail selector, `a[href*='./photo/']`). Found by IMP-C29 ("Residual risk / follow-up"). The user ruled "Inside C25" on 2026-10-03 (`docs/feature-fetch-datetime/DECISIONS.md` §1e): IMP-C25 Step 10 item h, and Step 12 for items whose photo_id is known.
+- Current behavior:
+  - `trigger_download` reads the thumbnails after a fixed 3 s sleep.
+  - For about 1–2 s after Enter the home timeline is still shown, and it matches the first selector, so a slow search can click a timeline item. IMP-C29 measured result latency from about 2 s to about 7 s. Its page check does not catch this, because the URL already reads `/search/`.
+  - Hash routing prevents damage: it leaves the wrong file in Downloads. But the attempt is wasted and a wrong file is downloaded.
+- Proposed change (IMP-C25 Step 10 item h): a bounded poll for a `/search/` results page, instead of the fixed 3 s sleep, before reading thumbnails; never click a `./photo/` link that is not inside the search results. An item whose photo_id is known is opened by its URL, never by clicking (Step 12).
+- Effort estimate: small (inside IMP-C25 Step 10) · Risk: low-medium — it changes which element gets clicked (the reason it needed a ruling), so the `trigger_download` digest pin is re-pinned on purpose.
+- If skipped: whenever the results page is slower than the fixed wait, fetch can download a wrong file and lose that attempt.
+- Status: in_progress (IMP-C25 Step 10 item h, `feature/imp_c25_fetch_exact_gp_item`; user ruling 2026-10-03 "Inside C25")
+
+---
+
+## IMP-C36: `python main.py fetch` shows mainfetch's output only in bursts — the child's stdout is block-buffered through the pipe
+
+- Category: bug (operability)
+- Priority: low (Band 1 — output timing only: nothing appears for minutes, then everything at once)
+- Files: `main.py` — `cmd_dispatch_fetch` (the child environment of its `subprocess.Popen`). The user ruled "Inside C25" on 2026-10-03 (`docs/feature-fetch-datetime/DECISIONS.md` §1e): IMP-C25 Step 10 item i.
+- Current behavior: `cmd_dispatch_fetch` runs `mainfetch.py` as a child process and re-prints each line of its piped output as it arrives. The child's stdout is block-buffered through the pipe, so nothing appears for minutes and then everything at once.
+- Proposed change (IMP-C25 Step 10 item i): set `PYTHONUNBUFFERED=1` in the child environment in `cmd_dispatch_fetch`. The step covers every other mainfetch child spawn too.
+- Effort estimate: small · Risk: low — one environment variable for the child; its argv is unchanged.
+- If skipped: during a long fetch, `python main.py fetch` stays silent for minutes, then prints everything at once.
+- Status: in_progress (IMP-C25 Step 10 item i, `feature/imp_c25_fetch_exact_gp_item`; user ruling 2026-10-03 "Inside C25")
+
+---
+
+## IMP-C37: the season autopilot's printed resume line omits `tempdir` and `rehash` — after an interrupted `tempdir` season run it re-splits the interrupted episode in the season folder
+
+- Category: bug (change-gated messaging)
+- Priority: medium (Band 1 🚦 — any change needs the user's explicit ruling; observed in a hermetic run only, and a workaround is documented)
+- Files: `main.py` — `_season_resume_cmd`, nested in `cmd_prep_push_rep_season`. It builds the printed `Resume the rest of the season: prep_push_rep_season …` line from the split, `episodes`, `device`, `--extras` and `--extras-size`, not from the run's `tempdir` or `rehash`. Found during IMP-C33 (its "Found here, not changed" note).
+- Current behavior:
+  - After a `tempdir` season run is interrupted, the printed resume command has no `tempdir`. It re-splits the interrupted episode in the season folder (it needs the free space there) and uploads it from the start, and the old chunks stay in the tempdir.
+  - Without `rehash`, the remaining episodes are split with a deferred canonical hash instead of an eager one (IMP-C33).
+  - Observed in a hermetic run only, during IMP-C33. Workaround: add `tempdir <dir>` to the printed line by hand (`docs/OPERATIONS_QA.md` §5).
+- Rollback change-gate: the line is the season resume-range messaging, which `CLAUDE.md` ("Auto-rollback is load-bearing") and `docs/feature-auto-rollback/ROLLBACK_MECHANISM.md` §10 gate. Any change needs the user's explicit ruling first.
+- Proposed change (for that ruling): print `tempdir <dir>` and `rehash` in the resume line when the run used them, as it already does for `--extras` and `--extras-size`.
+- Effort estimate: small · Risk: low to build; 🚦 gated.
+- If skipped: a `tempdir` season run resumed with the printed line, as printed, splits and uploads the interrupted episode again from the start and leaves the old chunks in the tempdir.
+- Status: pending (🚦 change-gated — needs the user's ruling)
+
+---
+
+## IMP-C38: two pre-existing tests are not hermetic — one runs a real `adb shell mkdir`, the other opens the real `C:\Media\library_movies.json`
+
+- Category: code quality (test isolation)
+- Priority: low (Band 1 — cheap test hygiene, beside IMP-A11; no production code is involved)
+- Files: `tests/test_rehash.py` — `test_disk_preflight_stops_before_parts_dir_created`; `tests/test_session_detector.py` — `test_cmd_fetch_route_prints_remediation_on_logout`. Found during IMP-C33, whose full-suite run deselected the second one.
+- Current behavior:
+  - `test_disk_preflight_stops_before_parts_dir_created` runs a real `adb shell mkdir`. `cmd_push` creates the remote folder over ADB before its disk pre-flight, and the test patches only `_free_space_ok`, with no device fixture. Read from the code, not run: without a reachable device that `mkdir` fails and `cmd_push` returns False at `❌ Error: ADB Connection Failed`, so the test also passes without reaching the pre-flight it pins.
+  - `test_cmd_fetch_route_prints_remediation_on_logout` opens the real `C:\Media\library_movies.json`. It stubs `resolve_targets` but not `resolve_target_ids`, whose `load_library()` reads the real library.
+- Proposed change: run the first under `mock_device` and assert that it stopped at the disk pre-flight; give the second `sandbox` (or stub `resolve_target_ids` too). Tests only.
+- Effort estimate: small · Risk: none to production code.
+- If skipped: each full-suite run sends a real `adb shell mkdir -p` to a connected phone and reads the real library, and on a machine with no device the first test proves nothing about the pre-flight.
+- Status: pending

@@ -442,8 +442,62 @@ SCENARIOS = {"whole_attempt2": _scenario_whole_attempt2, "split_holder": _scenar
 @pytest.mark.parametrize("enabled", [False, True], ids=["kill-switch-off", "kill-switch-on"])
 @pytest.mark.parametrize("name", list(SCENARIOS))
 def test_todays_transcript_and_trigger_sequence_are_frozen(world, monkeypatch, capsys, sandbox, name, enabled):
-    monkeypatch.setattr(mainfetch, "EXACT_LOCATOR_ENABLED", enabled, raising=False)
+    monkeypatch.setattr(mainfetch, "EXACT_LOCATOR_ENABLED", enabled)
     calls = SCENARIOS[name](world, monkeypatch, sandbox)
     assert capsys.readouterr().out == ORACLES[name]
     assert calls == ORACLE_CALLS[name]
     assert list(world.downloads.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# 10.d — the locator seam and the kill switch (P-14)
+# ---------------------------------------------------------------------------
+def test_the_exact_item_stages_are_on_by_default_and_the_seam_is_a_no_op():
+    assert mainfetch.EXACT_LOCATOR_ENABLED is True
+    queue = [{"filename": "x.mkv", "hash": "h", "status": "pending", "locator": {}}]
+    before = [dict(i) for i in queue]
+    assert mainfetch._run_locator_phase(None, queue, mainfetch.FetchContext()) is None
+    assert queue == before
+
+
+@pytest.mark.parametrize("enabled, runs", [(True, 1), (False, 0)])
+def test_the_seam_runs_before_todays_attempts_only_when_enabled(world, monkeypatch, enabled, runs):
+    monkeypatch.setattr(mainfetch, "EXACT_LOCATOR_ENABLED", enabled)
+    seen = []
+    calls = _script(monkeypatch, lambda q, i: seen.append(("trigger", q)) or False)
+
+    def seam(driver, queue, ctx):
+        seen.append(("seam", driver, [i["locator"]["label"] for i in queue], ctx.run_id))
+
+    monkeypatch.setattr(mainfetch, "_run_locator_phase", seam)
+    ctx = mainfetch.FetchContext()
+    mainfetch.fetch_single_entry("DRIVER", _whole_entry(world.tmp), ctx=ctx)
+
+    assert [e for e in seen if e[0] == "seam"] == [("seam", "DRIVER", ["whole"], ctx.run_id)] * runs
+    if runs:
+        assert seen[0][0] == "seam"                        # before the first legacy trigger
+    assert calls == [("Show.S01E01.mkv", 0), ("Show.S01E01 [abc123].mkv", 0)]   # today's attempts, unchanged
+
+
+def test_objects_the_seam_settles_skip_todays_attempts(world, monkeypatch, capsys):
+    # Step 12's contract: an object it fetched is 'done', one it must not hand to the legacy attempts (OD-5) is
+    # 'failed'; only what is still 'pending' gets today's attempts.
+    entry = _movie_entry(world)
+    c1, h = "Movie [abc123].chunk.001.mkv", "Movie [abc123].holder.mkv"
+
+    def seam(driver, queue, ctx):
+        restore = pathlib.Path(queue[0]["dest"])
+        (restore / c1).write_bytes(PAYLOAD_A)
+        queue[0]["status"] = "done"                         # fetched by an exact-item stage
+        queue[1]["status"] = "failed"                       # every candidate proven different (OD-5)
+
+    monkeypatch.setattr(mainfetch, "_run_locator_phase", seam)
+    calls = _script(monkeypatch, lambda q, i: world.chrome.start(h, PAYLOAD_H, 30) if q == h else False)
+
+    mainfetch.fetch_single_entry(None, entry)
+
+    out = capsys.readouterr().out
+    assert calls == [(h, 0)]                                # neither the done nor the failed chunk is searched
+    assert "=== ATTEMPT 1 (1 files) ===" in out and "ATTEMPT 2" not in out
+    assert f"✅ MOVED: {h}" in out and "Timeout" not in out   # nothing pending: the round ends at once
+    assert "❌ ENTRY INCOMPLETE." in out                    # the failed chunk keeps the entry incomplete

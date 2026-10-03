@@ -45,6 +45,13 @@ DEFAULT_PROFILE = "movies"
 CHROME_PROFILE_NAME = "Default"
 SYSTEM_DOWNLOADS_FOLDER = os.path.join(os.path.expanduser("~"), "Downloads")
 
+# [IMP-C25 P-14] Kill switch for the exact-item stages (the locator phase,
+# docs/feature-fetch-datetime/PLAN.md Step 12). False runs today's two legacy
+# attempts only — the fetch selection from before IMP-C25. Learning (the learned
+# sidecar), the lost-download retry (IMP-C34) and the search-results wait
+# (IMP-C35) stay on either way.
+EXACT_LOCATOR_ENABLED = True
+
 
 # ==========================================
 #      AUTOMATION LOGIC (SELENIUM)
@@ -644,6 +651,17 @@ def build_fetch_queue(entry, restore_folder, ctx=None, entry_id=None):
     return queue
 
 
+def _run_locator_phase(driver, queue, ctx):
+    """[IMP-C25 Step 10 d — the seam IMP-C25 Step 12 fills] The exact-item stages,
+    run before today's two legacy attempts when EXACT_LOCATOR_ENABLED (P-14).
+    `queue` = the items this session fetches (build_fetch_queue, each with its
+    locator). Step 12 locates each object and requests its download; an object it
+    settles is marked 'done', one it may not hand to the legacy attempts (OD-5)
+    'failed'. Every item still 'pending' afterwards gets today's attempts
+    unchanged. Until Step 12 lands: nothing."""
+    return None
+
+
 def _lost_download_note(lost, saw_download):
     """[IMP-C29] What the harvester can honestly say about `lost` triggered files
     that never arrived. It sees only the Downloads folder, never Chrome's verdict.
@@ -680,6 +698,11 @@ def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None, ctx=None):
     if not queue:
         print("   ✅ All files already exist.")
         return
+
+    # [IMP-C25 P-14] The exact-item stages first (a no-op until Step 12); today's two
+    # attempts below run unchanged for whatever is still pending.
+    if EXACT_LOCATOR_ENABLED:
+        _run_locator_phase(driver, queue, ctx)
 
     # 2. Execute Queue (Smart Retry Loop)
     # Attempt 0: Precision Search
@@ -721,8 +744,8 @@ def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None, ctx=None):
                 time.sleep(5)
                 continue  # Keep waiting
 
-            # Check Completion
-            if all(i["status"] == "done" for i in queue):
+            # Check Completion ([IMP-C25] nothing pending: an item a stage gave up on is 'failed')
+            if not any(i["status"] == "pending" for i in queue):
                 break
 
             found_new = False

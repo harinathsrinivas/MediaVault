@@ -115,8 +115,9 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 `Step 10 — dispatched 2026-10-03 to executor-fable (fable) · executing in dependency order e → b → d → c → g → a →
 f → h → i · sub-tasks: [ ] 10.a cmd_fetch_route per-object account routing · [x] 10.b build_fetch_queue + locator
 dict (parity oracle; FetchContext; ctx threaded through cmd_fetch_route — the C26/smoke fetch stubs gained `ctx=None`)
-· [ ] 10.c harvest_downloads (on the merged C29 harvester) + learn-on-fetch · [ ] 10.d locator seam +
-EXACT_LOCATOR_ENABLED ← next · [x] 10.e A8 deletions + build_extras_entries forwards gphotos/labels/title (wip 85866bc) ·
+(wip 772122c) · [ ] 10.c harvest_downloads (on the merged C29 harvester) + learn-on-fetch ← next · [x] 10.d locator
+seam + EXACT_LOCATOR_ENABLED (+ 'failed' item state: a round ends when nothing is pending) · [x] 10.e A8 deletions +
+build_extras_entries forwards gphotos/labels/title (wip 85866bc) ·
 [ ] 10.f parse_fetch_options/--manual · [ ] 10.g IMP-C34 one retry of a lost download · [ ] 10.h IMP-C35 never click
 the home timeline · [ ] 10.i IMP-C36 unbuffered child output · then disarm probes, full + smoke`
 Pre-change oracles captured from HEAD b1cff7d before any edit (scratch harness, C29 fakes) — pasted into the Step 10

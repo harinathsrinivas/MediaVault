@@ -10,7 +10,12 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import main      # repo root ensured on sys.path above
+import mainfetch  # fetch: its Chrome profile map is snapshotted below (_hermetic_chrome_profiles)
 import mvcommon  # authoritative home of LIBRARY_* + load_library/save_library
+
+# The real Chrome profile folders, as mainfetch declares them (C:\Media\Utils\ChromeProfile*) — read once, before any
+# test can patch the map.
+_REAL_CHROME_PROFILES = dict(mainfetch.CHROME_PROFILES)
 
 FAKE_ORIGINAL_BYTES = b"ORIGINAL-MASTER-BYTES"
 FAKE_DUMMY_BYTES    = b"DUMMY"
@@ -65,6 +70,26 @@ def _hermetic_gphotos_state(tmp_path, monkeypatch):
         assert not live.startswith(real_state) and not live.startswith(real_inventory), \
             f"Safety check failed: {attr} still points at the real state: {live}"
     yield
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_chrome_profiles(monkeypatch):
+    """IMP-C25 (PLAN Step 10a) — AUTOUSE, every test: the fetch never depends on this machine's real profile folders.
+
+    cmd_fetch_route pre-flights each account's Chrome profile folder (mainfetch.profile_preflight, OD-10) before it
+    launches Chrome. Whether C:\\Media\\Utils\\ChromeProfile* exist on the machine running the suite must not decide a
+    test, so for an account whose CHROME_PROFILES path is still the real one the pre-flight answers "present" (tests
+    never launch Chrome — init_driver is always stubbed). A test that points CHROME_PROFILES at its own folder (under
+    tmp_path) gets the real check, as the crawler's and the fetch's pre-flight tests do; an unknown account is always
+    checked for real. Patches the module attribute every caller reads (mainfetch.profile_preflight)."""
+    real_check = mainfetch.profile_preflight
+
+    def preflight(account):
+        if account in _REAL_CHROME_PROFILES and mainfetch.CHROME_PROFILES.get(account) == _REAL_CHROME_PROFILES[account]:
+            return None
+        return real_check(account)
+
+    monkeypatch.setattr(mainfetch, "profile_preflight", preflight)
 
 
 @pytest.fixture()

@@ -458,6 +458,12 @@ class FetchContext:
                sidecar; retried / recovered = lost downloads requested once more /
                that then arrived; lost_twice = objects whose download was lost
                twice (IMP-C34)
+    plans      {_entry_key: {"accounts": [session order], "by_sha": {sha256:
+               account}, "default": account}} — the entries whose objects live in
+               more than one account (_account_groups): each of those sessions
+               fetches only its own objects of the entry
+    reasons    {account: {"override" | "learned" | "prefix"}} — why the batch's
+               objects were routed to each account (the Switching line)
     """
 
     def __init__(self, manual=False, run_id=None):
@@ -467,11 +473,35 @@ class FetchContext:
         self.downloads = None
         self.hashed = {}
         self.stats = {"learned": 0, "retried": 0, "recovered": 0, "lost_twice": 0}
+        self.plans = {}
+        self.reasons = {}
 
     def start_session(self, account):
         """A Chrome session for `account` is up: the run now fetches in it."""
         self.account = account
         self.downloads = None  # snapshot again: an earlier session's files are not this one's
+
+    def plan_for(self, entry, entry_id):
+        """The entry's multi-account plan when THIS session is one of its accounts, else None (the session
+        fetches the whole entry — today's flow)."""
+        plan = self.plans.get(_entry_key(entry, entry_id))
+        return plan if plan is not None and self.account in plan["accounts"] else None
+
+    def switch_reason(self, account):
+        """Why the batch switches to `account` — the Switching line's parenthesis (IMP-C26's text when the
+        overrides split the batch)."""
+        reasons = self.reasons.get(account, set())
+        named = [text for key, text in (("override", "fetch_account_overrides"), ("learned", "learned account"))
+                 if key in reasons]
+        if named:
+            return " + ".join(named)
+        return "fetch_account_overrides" if _account_overrides() else "learned account"
+
+
+def _entry_key(entry, entry_id):
+    """The identity of one fetch entry across the account sessions of a run: its id (a synthetic extra: its title
+    id) with its folder and file name."""
+    return (entry_id or entry.get("manual_id"), entry.get("folder_path"), entry.get("filename"))
 
 
 # The objects a library leaf uploads itself (a movie leaf's extras are fetched as
@@ -988,28 +1018,9 @@ def _lost_downloads_line(ctx):
             f"{s['lost_twice']} lost twice — see the failed list.")
 
 
-def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None, ctx=None):
-    """
-    Handles the fetch logic for a single library entry (Movie or Episode).
-    Refactored to use PARALLEL TRIGGER + HARVESTER for large files.
-    [IMP-C25 Step 10] ctx = the run's FetchContext (cmd_fetch_route passes one;
-    a stand-alone call gets a fresh one); the queue comes from build_fetch_queue.
-    """
-    ctx = ctx if ctx is not None else FetchContext()
-    print(f"\n🔹 PROCESSING: {entry['filename']} ({entry.get('short_id', 'N/A')})")
-
-    restore_folder = _fetch_restore_folder(entry, temp_dir, entry_id)
-    os.makedirs(restore_folder, exist_ok=True)
-
-    # 1. Build Queue
-    if entry.get("split_info") and entry["split_info"].get("is_split"):
-        print(f"   > Detected Split File ({entry['split_info']['total_chunks']} chunks)")
-    queue = build_fetch_queue(entry, restore_folder, ctx, entry_id=entry_id)
-
-    if not queue:
-        print("   ✅ All files already exist.")
-        return
-
+def _fetch_items(driver, queue, ctx):
+    """Fetch the pending items of one entry in the running session: the exact-item
+    stages, today's two legacy attempts, then IMP-C34's one retry."""
     # [IMP-C25] What is in Downloads before this session requests anything: no file
     # that was already there may teach the learned sidecar about this account.
     if ctx.downloads is None:
@@ -1046,11 +1057,66 @@ def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None, ctx=None):
     # [IMP-C34] A download lost and not requested since gets its one retry.
     _retry_lost_downloads(queue, ctx)
 
+
+def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None, ctx=None):
+    """
+    Handles the fetch logic for a single library entry (Movie or Episode).
+    Refactored to use PARALLEL TRIGGER + HARVESTER for large files.
+    [IMP-C25 Step 10] ctx = the run's FetchContext (cmd_fetch_route passes one;
+    a stand-alone call gets a fresh one); the queue comes from build_fetch_queue.
+    An entry whose objects live in several Google accounts (ctx.plans) is fetched
+    in each of those sessions, each taking only its own objects: the first prints
+    today's header (the web UI counts it), a later one a CONTINUING header; the
+    last one gives the entry's verdict over every object, the others say what is
+    left for the next session.
+    """
+    ctx = ctx if ctx is not None else FetchContext()
+    plan = ctx.plan_for(entry, entry_id)
+    first = plan is None or plan["accounts"][0] == ctx.account
+    last = plan is None or plan["accounts"][-1] == ctx.account
+    if first:
+        print(f"\n🔹 PROCESSING: {entry['filename']} ({entry.get('short_id', 'N/A')})")
+    else:
+        print(f"\n🔸 CONTINUING: {entry['filename']} ({entry.get('short_id', 'N/A')}) — "
+              f"its file(s) in the '{ctx.account}' account")
+
+    restore_folder = _fetch_restore_folder(entry, temp_dir, entry_id)
+    os.makedirs(restore_folder, exist_ok=True)
+
+    # 1. Build Queue
+    if first and entry.get("split_info") and entry["split_info"].get("is_split"):
+        print(f"   > Detected Split File ({entry['split_info']['total_chunks']} chunks)")
+    queue = build_fetch_queue(entry, restore_folder, ctx, entry_id=entry_id)
+    mine = queue if plan is None else [i for i in queue
+                                       if plan["by_sha"].get(i["hash"], plan["default"]) == ctx.account]
+    if plan is not None and first:
+        elsewhere = sum(1 for account in plan["by_sha"].values() if account != ctx.account)
+        print(f"   > [Account] {elsewhere} of its {len(plan['by_sha'])} file(s) live in another account — "
+              f"fetched in the {_session_names(plan['accounts'][1:])} session.")
+
+    if mine:
+        _fetch_items(driver, mine, ctx)
+    elif plan is None:
+        print("   ✅ All files already exist.")
+        return
+    else:
+        print("   ✅ Nothing left to fetch in this account.")
+
     # Final Report
+    if not last:
+        later = plan["accounts"][plan["accounts"].index(ctx.account) + 1:]
+        left = len(queue) - len(mine)
+        print(f"\n   ⏸️ {left} file(s) left for the {_session_names(later)} session.")
+        return
     if all(i["status"] == "done" for i in queue):
         print("\n   ✅ ENTRY COMPLETE.")
     else:
         print("\n   ❌ ENTRY INCOMPLETE.")
+
+
+def _session_names(accounts):
+    """'tv' · 'tv' and 'anime' — account sessions named in fetch_single_entry's lines."""
+    return " and ".join(f"'{account}'" for account in accounts)
 
 
 def _resolve_alias(lib, mid):
@@ -1351,28 +1417,85 @@ def _object_account(owner_id, block):
     return prefix, "prefix"
 
 
-def _account_groups(manual_id, active_profile, targets, target_ids, extra_entries):
-    """[IMP-C26] Split one fetch batch into per-account groups:
+def _route_entry(entry, owner_id):
+    """[IMP-C25 P-4] Route every uploaded object of ONE fetch entry on its own
+    (_object_account):
+      default       the account of an object the library cannot name (no object
+                    matches its hash): the owning id's override, else its prefix
+      by_sha        {sha256: account} for every object the library names
+      accounts      every account the entry's objects use, in object order
+      reasons       {account: {"override" | "learned" | "prefix"}}
+      contradicted  [(override account, verified account)] for each object whose
+                    VERIFIED copy lives elsewhere than the override says"""
+    owner_id = owner_id or ""
+    default = _object_account(owner_id, None)
+    route = {"default": default[0], "by_sha": {}, "accounts": [], "reasons": {}, "contradicted": []}
+    for sha256, obj in _entry_objects(entry, owner_id).items():
+        account, reason = _object_account(owner_id, obj["block"])
+        route["by_sha"][sha256] = account
+        if account not in route["accounts"]:
+            route["accounts"].append(account)
+        route["reasons"].setdefault(account, set()).add(reason)
+        held = (obj["block"] or {}).get("accounts")
+        verified = {a for a, r in (held if isinstance(held, dict) else {}).items()
+                    if isinstance(r, dict) and r.get("verified_by") in mvcommon._VERIFIED_PROOFS}
+        if reason == "override" and verified and account not in verified:
+            route["contradicted"].append(
+                (account, mvcommon.home_account(obj["block"], owner_id, ID_PREFIX_PROFILE, DEFAULT_PROFILE)))
+    if not route["accounts"]:
+        route["accounts"].append(default[0])
+        route["reasons"][default[0]] = {default[1]}
+    return route
+
+
+def _account_groups(manual_id, active_profile, targets, target_ids, extra_entries, ctx=None):
+    """[IMP-C26; IMP-C25 P-4] Split one fetch batch into per-account groups:
     [(profile, [(entry, entry_id), ...], [extra_entry, ...]), ...].
 
-    The selector's own account (active_profile) comes first, then the others in
-    CHROME_PROFILES order; each group keeps the batch's original order. A target
-    routes by its own resolved id (one without an id — never produced by
-    resolve_target_ids, tolerated exactly like today's entry_id=None — routes
-    with the selector); the extras route by their TITLE id (_extras_title). With
-    no valid fetch_account_overrides this returns today's single session without
-    routing anything per target, so the no-override path cannot change."""
+    Every uploaded OBJECT is routed on its own (_route_entry: the mvconfig
+    fetch_account_overrides match > the account its trusted gphotos block learned
+    > the id prefix). An entry joins the group of every account that holds one of
+    its objects; an entry whose objects span accounts is recorded in ctx.plans, so
+    each of those sessions fetches only its own objects (fetch_single_entry). The
+    selector's own account (active_profile) comes first, then CHROME_PROFILES
+    order; each group keeps the batch's original order. A target routes by its
+    own resolved id (one without an id — never produced by resolve_target_ids,
+    tolerated exactly like today's entry_id=None — routes with the selector); an
+    extra by its TITLE id. An override that contradicts an object's verified
+    account prints one warning line per entry; the override wins (P-4). With no
+    valid override and no learned account that differs from the prefix, this is
+    today's single session, so that path cannot change."""
+    ctx = ctx if ctx is not None else FetchContext()
     pairs = [(entry, target_ids[i] if i < len(target_ids) else None)
              for i, entry in enumerate(targets)]
-    if not _account_overrides():
-        return [(active_profile, pairs, list(extra_entries))]
-    groups = {}
-    for entry, entry_id in pairs:
-        groups.setdefault(profile_for_id(entry_id or manual_id), ([], []))[0].append((entry, entry_id))
-    if extra_entries:
+    title_id = None
+    if extra_entries and not all(ex.get("manual_id") for ex in extra_entries):
         title_id = _extras_title(load_library(), manual_id)[0] or manual_id
-        groups.setdefault(profile_for_id(title_id), ([], []))[1].extend(extra_entries)
+    routed = [(entry, entry_id, False, _route_entry(entry, entry_id or manual_id)) for entry, entry_id in pairs]
+    routed += [(ex, None, True, _route_entry(ex, ex.get("manual_id") or title_id)) for ex in extra_entries]
+    learned = any("learned" in reasons for *_, route in routed for reasons in route["reasons"].values())
+    if not _account_overrides() and not learned:
+        return [(active_profile, pairs, list(extra_entries))]
+
     order = [active_profile] + [p for p in CHROME_PROFILES if p != active_profile]
+    groups = {}
+    for entry, entry_id, is_extra, route in routed:
+        if route["contradicted"]:
+            override, verified = route["contradicted"][0]
+            owner = (entry.get("manual_id") if is_extra else entry_id) or manual_id
+            print(f"   > ⚠️ override '{override}' for {owner} differs from the verified account '{verified}' "
+                  f"({len(route['contradicted'])} file(s)) — the override wins.")
+        accounts = sorted(route["accounts"], key=order.index)
+        for account in accounts:
+            members = groups.setdefault(account, ([], []))
+            if is_extra:
+                members[1].append(entry)
+            else:
+                members[0].append((entry, entry_id))
+            ctx.reasons.setdefault(account, set()).update(route["reasons"][account])
+        if len(accounts) > 1:
+            ctx.plans[_entry_key(entry, entry_id)] = {"accounts": accounts, "by_sha": route["by_sha"],
+                                                      "default": route["default"]}
     return [(p, groups[p][0], groups[p][1]) for p in sorted(groups, key=order.index)]
 
 
@@ -1437,10 +1560,11 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None)
     if extra_entries:
         print(f"   > 📎 + {len(extra_entries)} extra(s) (--fetchExtras)")
 
-    # [IMP-C26] One Chrome session per Google account the batch touches: a single
-    # group (exactly today's session) unless fetch_account_overrides moves items.
-    groups = _account_groups(manual_id, active_profile, targets, target_ids, extra_entries)
+    # [IMP-C26, IMP-C25 P-4] One Chrome session per Google account the batch's
+    # objects live in: a single group (exactly today's session) unless
+    # fetch_account_overrides or learned accounts move objects.
     ctx = FetchContext()  # [IMP-C25 Step 10] the run's shared state, handed to every entry
+    groups = _account_groups(manual_id, active_profile, targets, target_ids, extra_entries, ctx)
 
     # [IMP-C17] Single-flight: only one interactive fetch batch may drive the
     # browser at a time (blocking=True polls then reclaims a stale/contended
@@ -1455,7 +1579,13 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None)
                 if profile != active_profile:
                     print(f"   > [Account] Switching to profile '{profile}' for "
                           f"{len(group_targets) + len(group_extras)} item(s) "
-                          f"(fetch_account_overrides)")
+                          f"({ctx.switch_reason(profile)})")
+                # [IMP-C25 OD-10] Never launch Chrome on a missing profile folder: it
+                # would come up as a new, empty, signed-out profile.
+                problem = profile_preflight(profile)
+                if problem:
+                    print(f"❌ {problem[:1].upper()}{problem[1:]}")
+                    return
                 if n and not _debug_port_free():
                     print(f"❌ Cannot switch to profile '{profile}': Chrome's debug port 9222 "
                           f"is still in use (the previous account's Chrome did not close). "

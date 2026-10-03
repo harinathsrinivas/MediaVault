@@ -113,15 +113,17 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 
 ## In-progress sub-state
 `Step 10 — dispatched 2026-10-03 to executor-fable (fable) · executing in dependency order e → b → d → c → g → a →
-f → h → i · sub-tasks: [ ] 10.a cmd_fetch_route per-object account routing · [x] 10.b build_fetch_queue + locator
+f → h → i · sub-tasks: [x] 10.a cmd_fetch_route per-object account routing (override > learned home > prefix;
+split-across-accounts entries fetched per session with one PROCESSING header + one verdict; ⚠️ override-vs-verified
+line; profile pre-flight per account; conftest autouse _hermetic_chrome_profiles) · [x] 10.b build_fetch_queue + locator
 dict (parity oracle; FetchContext; ctx threaded through cmd_fetch_route — the C26/smoke fetch stubs gained `ctx=None`)
 (wip 772122c) · [x] 10.c harvest_downloads (on the merged C29 harvester; hashed once per run — B10; learn-on-fetch
 credited only to files that arrived in this Chrome session) (wip b82cf43) · [x] 10.d locator seam + EXACT_LOCATOR_ENABLED (+
 'failed' item state: a round ends when nothing is pending) (wip dac4082) · [x] 10.e A8 deletions +
 build_extras_entries forwards gphotos/labels/title (wip 85866bc) ·
-[ ] 10.f parse_fetch_options/--manual · [x] 10.g IMP-C34 one retry of a lost download (a round where a wrong item
-arrived counts no loss; second loss → failed list, NEW P-18 reason `download-lost` in mvcommon.GP_FAILED_REASONS) ·
-10.a ← next · [ ] 10.h IMP-C35 never click
+[ ] 10.f parse_fetch_options/--manual ← next · [x] 10.g IMP-C34 one retry of a lost download (a round where a wrong
+item arrived counts no loss; second loss → failed list, NEW P-18 reason `download-lost` in mvcommon.GP_FAILED_REASONS)
+(wip dd410ed) · [ ] 10.h IMP-C35 never click
 the home timeline · [ ] 10.i IMP-C36 unbuffered child output · then disarm probes, full + smoke`
 Pre-change oracles captured from HEAD b1cff7d before any edit (scratch harness, C29 fakes) — pasted into the Step 10
 tests as frozen transcripts.

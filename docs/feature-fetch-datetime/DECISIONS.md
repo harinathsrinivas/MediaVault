@@ -452,3 +452,11 @@ No other step of this plan uses candidates.
   registered as IMP-C34 / IMP-C35 / IMP-C36.
 - **Test copies of X-Files S02E05 on D:** "Delete both (Recommended)" → both deleted 2026-10-03; logs kept.
 - **PR #66 (IMP-C33)**: "Merge now (Recommended)" → squash-merged to main `bfb9833` (Checkpoint 1).
+- **🚦 R1 dry-run read (2026-10-03, output `D:\MediaVault_gp_inventory\map_r1_20261003_1221\`)** — user's answer to
+  "does the report look right / how to settle the 15 device-check-incomplete rows", verbatim: "why do you need the
+  phone for this? you only focus on the library, and the google , others new ones at last of json , will mostly be
+  just added , so not yet in google photos. you dont need to check that." → **Step 9b**: map_photos verdicts are
+  library ↔ Google Photos only; the device check becomes opt-in (`--devices`), never a precondition for a verdict.
+  An object in no account is reported as "not in Google Photos", split by recency: pushed recently (after, or shortly
+  before, the inventory crawl — the newly added entries) → "not backed up yet (recent)"; otherwise → "not in Google
+  Photos (possible loss)". No phone needed. Step 8 code stays (used only with `--devices` and by later steps).

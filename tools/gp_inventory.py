@@ -822,8 +822,9 @@ def _session(a, account, out_dir, log, heartbeat):
             time.sleep(CHROME_START_WAIT_S)
         driver = connect(a.attach if attach else a.port)
         user_handles = list(driver.window_handles)
-        if attach:
-            driver.switch_to.new_window("tab")  # work in our own tab; the user's tabs are left alone
+        # Work in our own tab in BOTH modes. Attached, that leaves the user's tabs alone; launched, it
+        # avoids chromedriver's initial target, which on Chrome 154 is the Gemini side panel (IMP-C29).
+        driver.switch_to.new_window("tab")
         front(driver)
         landing_check(driver, account)
         crawl(driver, account, out_dir, a.mode, a.phase, a.max, log, heartbeat)

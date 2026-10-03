@@ -33,28 +33,20 @@
   account (R0) · Step 12 candidate isolation (before Step 12).
 
 ## ▶ NEXT ACTION
-**Steps 0–9 done; Step 1 re-sync #4 done (2026-10-02: main `faa62e5` = PRs #62 IMP-C28, #63 IMP-C30/C31, #64
-IMP-C32 merged here; full 2094 · smoke 82).** Next: **🚦 R1** — the real-library mapping dry-run the user reads. R1 needs, in order:
-(a) a re-crawl of each crawled account, one at a time (the Sep-25 inventories have no run log, so the freshness gate
-gives no verdict): `python tools/gp_inventory.py movies --port 9223` · `… tv --port 9225` · `… anime --port 9224`,
-check with `python tools/gp_inventory.py all --status`; no push to an account between its crawl and the mapping, and
-the mapping within 24 h of the crawl; (b) all three phones attached — `FA69H0300200` (movies), `HT74D0202839`
-(movies#2), `FA75V0303405` (series) — check with `python main.py map_photos all --devices-only`; (c) `python main.py
-map_photos all` (read-only; writes only its run directory). What to read: STATUS.md Step 9 "R1 reader guide".
-Step 10 (fetch plumbing) does not depend on R1, but it rebuilds the fetch harvester in `mainfetch.py`, which IMP-C29
-is still changing and whose real failure cause is not yet known → HOLD Step 10 until C29 is fixed and merged here
-(orchestrator sequencing decision 2026-10-02). The R1 re-crawls wait for the same reason (C29 is driving the movies
-Chrome; a second Chrome window could confound the reproduction).
-Parallel hotfixes (own worktrees from main, own PRs, Checkpoint 1 each; DECISIONS §1d):
-- IMP-C29 `fix/imp_c29_fetch_attach_photos_tab` (MediaVault-c29, HEAD bcd08c7): tab fix + harvester fix committed;
-  the REAL fetch still fails (0/2 on the fixed code: download seen, then vanishes; Chrome History has no row →
-  looks cancelled). Executor re-investigating through the real command path. PR not opened. 🚦 RH stays open.
-- IMP-C32 strict resume: MERGED (#64, `faa62e5`) and synced here. Its resume re-hash also gives the identity
-  capture the SHA-1 of chunks pushed in a later run (the Step 5 gap) — pinned in tests/test_gp_capture.py.
-- IMP-C33 `fix/imp_c33_prep_keeps_split_info` (MediaVault-c33): cmd_prep keeps split_info when the hash is
-  unchanged (user ruling) — executor finishing. PR not opened.
-- User's own archive `mov-en-2024-duneparttwo` (pushed to the series phone = TV account) finished 2026-10-02;
-  hands-off; routing/confirmation of all items is revisited after the plan is done (DECISIONS §1d).
+**Steps 0–9 done; Step 1 re-sync #5 done (2026-10-03: main `bfb9833` = PRs #65 IMP-C29 + #66 IMP-C33 merged here;
+full 2177 · smoke 82).** All hotfixes found during C25 are merged to main: #61 C26, #62 C28, #63 C30/C31, #64 C32,
+#65 C29, #66 C33. 🚦 RH PASSED 2026-10-03 (X-Files S02E05 from the movies account: `✅ MOVED`, SHA-256 = library hash,
+twice incl. a cold Chrome start; test copies deleted per the user).
+Next, in parallel:
+1. **Step 10** (fetch plumbing) — unblocked. Carries three extra requirements by user ruling 2026-10-03 (DECISIONS
+   §1e): retry a broken transfer once; never click the home timeline (poll for real results / locate by photo_id);
+   unbuffered child output in `cmd_dispatch_fetch` (`PYTHONUNBUFFERED=1`). Registered as IMP-C34/C35/C36.
+2. **🚦 R1 prerequisites** — re-crawl movies / tv / anime one at a time (`python tools/gp_inventory.py <acct> --port
+   9223|9225|9224`, then `… all --status`); the user attaches all three phones (`FA69H0300200`, `HT74D0202839`,
+   `FA75V0303405`); then `python main.py map_photos all --devices-only` and `python main.py map_photos all`
+   (dry-run) → the user reads the report (STATUS.md Step 9 "R1 reader guide"). No push to an account between its
+   crawl and the mapping; map within 24 h of the crawl.
+User's own archive `mov-en-2024-duneparttwo` (series phone = TV account) — hands-off; revisit after the plan.
 
 ## Resume protocol
 1. Open a session in the main folder `C:\Users\harin\PycharmProjects\MediaVault` (branch
@@ -78,7 +70,7 @@ Parallel hotfixes (own worktrees from main, own PRs, Checkpoint 1 each; DECISION
 |---|---|---|---|---|---|---|
 | 0 | plan (0a 16e292c/5fd4843 + 0a′ d29bb03) + journal + IMP registration | done | opus (executor-opus, claude-opus-5-5) | 16e292c · 5fd4843 · d29bb03 · 0b 20a10ae · 0c c2085e3 | full 971 · smoke 81 (baseline re-run 2026-09-28) | 0a = 16e292c (rev-1 draft) + 5fd4843 (rev-1 final pass); 0a′ = d29bb03 (revisions 2–6); root PLAN.md == tracked copy (cmp) · 0b = PROGRESS + DECISIONS · 0c = IMP-C25 + IMP-C27 registered (tier C, PRIORITY Band 0/1, graph TASKS 136 · EDGES 76 · badTasks 0 · badEdges 0); C5/A8/B10 → in_progress (absorbed); B4 note; C26 comes via Step H; both NEXT pointers untouched (OD-16) |
 | G0 | rulings recorded (2026-09-25) + clarifications | partial (P-12 pending before Step 11) | user | 20a10ae | | plan approved 2026-09-28 · OD-1: H confirmed, PR STOPS for user approval (decision card 2026-09-28; supersedes the auto-merge wording) · q2 OD-4 ANSWERED 2026-09-28: "Yes, with --apply only" — mvmeta_upgrade may rewrite phone sidecars with --apply only (dry-run default) · q3 P-12 download design PENDING — ask before Step 11 |
-| 1 | sync with main (after #60 / after H / after #62+#63 / after #64) | done (4×) | orchestrator (Opus 5.5) | 3029f6f (ac563a0/#60) · 5ec9ef0 (494fbec/#61) · re-sync #3 = this merge commit (e35b624/#62+#63) | full 2068 · smoke 82 (re-sync #3) | #61 merge resolved tierC/PRIORITY/graph/conftest keeping both sides; C25→C26 edge added; graph 137/78/0/0 |
+| 1 | sync with main (after #60 / H / #62+#63 / #64 / #65+#66) | done (5×) | orchestrator (Opus 5.5) | 3029f6f (ac563a0/#60) · 5ec9ef0 (494fbec/#61) · re-sync #3 = this merge commit (e35b624/#62+#63) | full 2068 · smoke 82 (re-sync #3) | #61 merge resolved tierC/PRIORITY/graph/conftest keeping both sides; C25→C26 edge added; graph 137/78/0/0 |
 | H | C26 hotfix PR (worktree MediaVault-c26) | done — PR #61 open, awaiting user approval (Checkpoint 1) | fable (executor-fable) | 2893d98 (branch fix/imp_c26_fetch_account_routing) | full 1003 · smoke 82 · disarm 3/3 | +switch guard (close prev Chrome, port 9222 free) beyond plan text; RH after merge; then Step 1 re-merges main |
 | RH | user fills fetch_account_overrides + tests | pending | user | | | after H merges |
 | 2 | gpweb + RPC parsers + fake Google Photos | done | fable (executor-fable, claude-fable-5-1) | eea6759 | full 1215 · smoke 81 · crawler golden byte-identical · disarm/mutation probes 8/8 | new gpweb.py + tests/gphotos_fake.py + tests/test_gpweb.py; tools/gp_inventory.py delegates; conftest `fake_photos`; VrseUb original_quality not pre-resolved → None (read EWgK9e); dedup_key re-export is a lazy delegate (import-cycle guard for Step 3) |

@@ -7,9 +7,9 @@ marked the entry onboarded. Two shapes made that wrong:
       shares `Season NN/_parts/`, so pushing episode 2 while episode 1's chunks
       waited there uploaded episode 1's chunks and marked episode 2 onboarded.
   (b) Chunks no split_info records: a failed split's partial chunk, a lone FLAC
-      holder, or the leftovers of an interrupted push whose entry was re-prepped
-      (cmd_prep rebuilds the entry, which drops its split_info). The entry ended
-      onboarded with no split record.
+      holder, or the leftovers of an interrupted push whose entry lost its split
+      record (before IMP-C33 every re-prep dropped it; now only a changed file
+      does). The entry ended onboarded with no split record.
 
 Either way the next `replace` swapped the master for a dummy.
 
@@ -287,14 +287,21 @@ def test_push_refuses_chunks_that_no_split_info_records(sandbox, mock_device, ma
     assert f"push {MOVIE} {resplit}" in out, "the safe next step is a fresh split of the intact master"
 
 
-def test_season_resume_command_no_longer_archives_an_episode_whose_split_record_is_gone(
+def test_season_autopilot_never_archives_an_episode_whose_split_record_is_gone(
         sandbox, mock_device, make_video, stub_tech_specs, fake_dummy, capsys):
-    """The real route to shape (b). The season autopilot prints `prep_push_rep_season …
-    episodes N-M` after an interrupted split push. That command re-preps the episode,
-    and cmd_prep rebuilds the entry without its split_info. Before the fix the push
-    then "resumed" the leftover chunk and `replace` dummied the master: an archived
-    entry with no split record."""
+    """Shape (b) through the season autopilot: an episode's own chunk waits in the
+    chunk dir, but the entry no longer records a split. Before the fix the push
+    "resumed" the leftover chunk and `replace` dummied the master: an archived entry
+    with no split record.
+
+    This is how every re-run of the season command ended before IMP-C33, because
+    re-prepping dropped the record. Since IMP-C33 an unchanged file keeps it and the
+    re-run resumes (tests/test_prep_keeps_split_record.py), so the record is removed
+    here by hand to reach the state."""
     folder, masters, parts, names, _ = _interrupted_episode_one(sandbox, make_video)
+    library = mvcommon.load_library()
+    del library[EP1]["split_info"]
+    mvcommon.save_library(library)
     master_bytes = _read(masters[EP1])
 
     main.cmd_prep_push_rep_season(SEASON, str(folder), episode_range="1-1")

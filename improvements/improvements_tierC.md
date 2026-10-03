@@ -531,7 +531,7 @@
   1. **A successful push deleted the master.** The cloud bytes are intact, because the delete ran only after the upload and its rename had succeeded. But the local copy the O-1/O-2 contract relies on was gone, and with `PUSH_VERIFY_REMOTE` off by default, nothing had checked the uploaded bytes.
      - A following `replace` (the `prep_push_rep` autopilots' next leg) then found no master. It skips its rename when the original is absent (`main.py:7154`), writes the dummy into its place and marks the entry `archived` without complaint. The entry therefore looks healthy.
   2. **The cloud item lacks its ` [<short_id>]` tag.** `search_term`, the `.mvmeta.json` sidecar (`main.py:5697`) and the identity capture all record the tagged name. So name-based identification cannot tie the item to its entry; IMP-C25's fetch-exact-item work (fetch-by-id) depends on it.
-     - Today's fetch still queries a whole file by its plain local filename (`mainfetch.py:331`) and routes downloads by hash (`mainfetch.py:400-404`). So `fetch_restore` can still bring the master back.
+     - Today's fetch still queries a whole file by its plain local filename (`mainfetch.py:489`) and routes downloads by hash (`mainfetch.py:558-562`). So `fetch_restore` can still bring the master back.
 - Proposed change — implemented (`fix/imp_c28_push_parts_substring`): a file counts as a chunk only if it lives DIRECTLY in THIS push's chunk dir.
   - The new `mvcommon.in_parts_dir(path, parts_dir)` compares the normalised parent dir (`abspath` + `normcase`) with the `parts_dir` that `cmd_push` computed: `_parts_base(...)` + `SPLIT_DIR_NAME`, tempdir redirect included.
   - `cmd_push` computes `is_chunk` once per file (`main.py:6643`) and uses it for both the rename and the delete.
@@ -559,6 +559,109 @@
 - Status: done (`fix/imp_c28_push_parts_substring`)
 
 ---
+
+## IMP-C29: fetch attaches to Chrome's Gemini side panel (Chrome 154), so every search goes nowhere
+
+- Category: bug
+- Priority: high (Band 0 — fetch could fetch nothing; every item read as `Not found`)
+- Files: `mainfetch.py` — `init_driver` (the attach, and in the second follow-up its Chrome launch command), new `use_photos_tab` / `focus_page` / `_search_page_problem`, `trigger_download._attempt`, and (follow-up) `fetch_single_entry`'s download harvester with new `_lost_download_note`; `tools/gp_inventory.py` — `main()` launch mode. Found 2026-10-01 by the IMP-C25 gate RH run (`python main.py fetch tv-en-1994-xfiles-s02e05 tempdir D:\MV_fetch`). (Numbering: IMP-C25 and IMP-C27 are registered on `feature/imp_c25_fetch_exact_gp_item`, not yet on `main`.)
+- Current behavior (before fix): two independent faults, both verified live against Chrome 154.0.8037.59 with chromedriver 154.0.8037.92 on the movies profile.
+  1. **Wrong target.** `init_driver` attached through `debuggerAddress` and returned the driver on whatever window chromedriver chose (pre-fix `mainfetch.py:83-93`). Nothing selected a tab. Chrome 154 exposes its Gemini side panel to Selenium as window handles, a `webview` on `gemini.google.com/glic` and an `other` on `chrome://glic/`, beside the real `page` tab. chromedriver attached to the **webview**, and `trigger_download` navigated and typed in that target (pre-fix `mainfetch.py:144-154`). Both RH attempts printed `⚠️ Not found (Found 0).`, then `❌ ENTRY INCOMPLETE`, and the command exited 0.
+  2. **No focus.** Even in the right tab, a Chrome that is not the foreground window renders the Photos tab as `visibilityState=hidden`. The `/` shortcut then leaves focus on `BODY`, so the search box never opens and the page stays on `/`.
+- Impact: every fetch searched nowhere and reported `Not found`, so no restore could get its files back. A healthy session looked like a missing item, and the typed query went to the Gemini panel instead.
+- Proposed change — implemented (`fix/imp_c29_fetch_attach_photos_tab`):
+  - `use_photos_tab(driver)` (`mainfetch.py:192`) keeps the current tab if it is a Photos tab. Otherwise it switches to the first open Photos tab, or opens a new tab and navigates it to `PHOTOS_URL`.
+    - A tab qualifies only as a CDP `page`, over https, on a `photos.google.com` host. A webview, `chrome://`, `devtools://` or glic target never does.
+    - Targets are classified with `Target.getTargetInfo` / `Target.getTargets`, because window handles are the CDP target ids (verified live). So no Gemini target is ever switched into or typed in.
+    - If CDP cannot classify the targets, no open tab is trusted and a new one is opened. A tab closed under the driver is re-entered through the first live handle.
+  - `focus_page(driver)` (`mainfetch.py:183`) sends `Page.bringToFront` and `Emulation.setFocusEmulationEnabled {enabled: true}`, the fix the IMP-C25 crawler uses.
+  - `init_driver` runs `use_photos_tab` right after the unchanged attach and prints which tab it uses. If no Photos tab can be had, it prints `❌ Could not open a photos.google.com tab…`, releases the Selenium session and returns None (`mainfetch.py:99-111`).
+  - `trigger_download` re-asserts the tab and focus at the start of EVERY attempt (`mainfetch.py:277`): after a download, a player Esc, a closed tab, or on the retry.
+  - After the unchanged 3 s wait, `_search_page_problem` (`mainfetch.py:231`) checks that the page is `photos.google.com/search/…`. If not, it reports `❌ Not a Google Photos page: the search went to <type> <url>` or `❌ Search did not run (or had not started yet): Google Photos is still on <path>…`. Neither is reported as `Not found`, and neither clicks anything.
+  - Unchanged:
+    - the keystroke search (`/` + query + Enter). The keystroke search lands on `/search/<base64 token>`, a different URL form from the direct `/search/<text>`, so equivalence was not established and the URL route was not adopted;
+    - the 3 s wait, the CSS-then-XPath lookup, the clicked index, and Shift+D / Esc;
+    - the IMP-C2 single retry, and the IMP-C6 propagation and zero-streak backstop. The new `False` returns count toward the streak.
+- Audit of every Selenium attach in the repo:
+  - **Fixed:**
+    - `mainfetch.init_driver`: the fetch path, and `tools/warm_profiles.py`, which attaches through it;
+    - `tools/gp_inventory.py --port` (launch mode), which crawled in chromedriver's initial target. It now opens its own tab in both modes, as `--attach` already did.
+  - **Safe, left unchanged:**
+    - `tools/gp_inventory.py --attach`: its own tab, plus `front()`.
+    - `mainfetch._close_browser_windows`: it closes every handle, the Gemini ones included, on purpose, so the browser exits and frees port 9222. It never searches.
+    - `main.py` has no Selenium; `cmd_dispatch_fetch` runs `mainfetch.py` as a subprocess (`main.py:9547`).
+    - `gpcapture.py`, `webui/` and the root scripts have no Selenium; the `archive/` copies are never run.
+    - `gpweb.py` / `gprpc.py` are not on `main` (they exist only on the IMP-C25 branch).
+- Rollback change-gate: not crossed. Fetch has no journal, PONR or rollback records, and nothing in the change-gate list is touched. No `ENTRY_TYPE_KEYS` involvement.
+- Live verification (2026-10-01, read-only, no download triggered):
+  - on attach, the driver sat in the Gemini webview; `use_photos_tab` moved it to the Photos page, visible and focused;
+  - running the production search steps, the pushed name (`search_term`) found the item, 2 results through the XPath fallback, usually within 2–3 s;
+  - the plain filename got `No results`, and a home page with no search is classified `Search did not run`.
+- Tests:
+  - `tests/test_fetch_photos_tab.py` (43): tab selection (the live [glic webview, photos] order, only non-Photos targets → a new tab, nine targets that never qualify, CDP failure, a closed tab), focus emulation, `init_driver` through the real attach, the per-attempt re-assert after a closed or moved tab and on the retry, both new error lines (incl. the pre-fix RH Gemini reproduction), and no-regression pins for the keystroke chain, the clicked index, the XPath fallback, `Not found` + the single retry, the logged-out propagation and the zero-streak;
+  - `tests/test_gp_inventory_own_tab.py` (2): both crawler modes work in their own tab.
+
+  Against the pre-fix code the new tests fail 37/45; the 8 that pass are the existing-flow pins and the already-correct `--attach` mode. Disarm probes on a scratch copy: 26/26 caught. Full suite 1061 passed; smoke 82 passed.
+- Follow-up 2026-10-02 — the live re-run, and the download harvester (second commit on the branch):
+  - **The re-run.** With the tab fix, the real fetch found the item on `ATTEMPT 2` and printed `🚀 Triggered.`, then `❌ Timeout (No active downloads).` and `❌ ENTRY INCOMPLETE`. No file appeared, which read as "the download never starts".
+  - **What happened.** The download did start. `chrome://downloads` lists the item with the right name, 9.1 GB, target folder `C:\Users\harin\Downloads`, and `Failed - Network error` at about 1.1 MB/s.
+    - So the trigger, the clicked item, Shift+D and the download folder were all correct. The profile has no download-directory or prompt override, and no Chrome policy is set.
+    - Google Photos sends a download without an ETag or Last-Modified, so Chrome cannot resume it: it removes the partial file and shows the download at 0 B. Why the transfer broke is in the next follow-up.
+  - **Reproduction.** The identical production trigger, two hours later, downloaded the same item completely in 267 s at 20–60 MB/s. Its SHA-256 equals the library hash.
+  - **Defect 1 (the misleading report).** The harvester only watches the Downloads folder. It printed the same `Timeout (No active downloads)` for "started and failed" as for "never started".
+  - **Defect 2 (deterministic, found while reading the loop).** After the 300 s base timeout, the loop could only leave through its Timeout branch, and that branch sat before the scan of Downloads. A download that took longer than 5 minutes was therefore never collected by the attempt that started it.
+    - Found on `ATTEMPT 1` (a chunk): `ATTEMPT 2` downloaded the file a second time, then collected the first copy. Chrome's history shows it for two earlier titles: a second round of multi-GB downloads began about 15 s after the last download of the first round finished (2026-09-20 and 2026-09-26; on the second, all three chunks were fetched twice).
+    - Found only on `ATTEMPT 2` (a whole file): `❌ ENTRY INCOMPLETE`, with the finished file left in Downloads. The 9.1 GB download above took 267 s, 33 s short of this.
+  - **Fix (`fetch_single_entry`).**
+    - The timeout is now decided AFTER the scan (`mainfetch.py:583`). A finished download is collected, and only "nothing active and nothing new" gives up.
+    - Each item records whether its download was triggered, and the wait records whether a `.crdownload` was ever seen. A timeout then adds one line for the triggered files that never arrived (`_lost_download_note`, `mainfetch.py:412`): either "a download was in progress, but N triggered file(s) never arrived" or "no download appeared", each pointing at `chrome://downloads`.
+    - With nothing triggered, the transcript is byte-identical (frozen oracle captured from the pre-fix code).
+  - **Not changed:** the 300 s base timeout, the unlimited wait while a download is active, hash routing, the duplicate delete and the attempt order. No retry was added.
+  - **Tests:** `tests/test_fetch_harvester.py` (7), hermetic: a tmp Downloads folder, a fake clock, scripted Chrome downloads. Against 6d1a732 they fail 5/7; the 2 that pass are the in-time pin and the frozen transcript. Disarm probes: 9/9 caught, 35/35 with the first commit's. Full suite 1068 passed; smoke 82 passed.
+- Follow-up 2026-10-02 (second) — why the transfers broke: the download rode QUIC (third commit on the branch):
+  - **A third real run failed the same way.** On the harvester fix (01:23–01:34) the item was found and triggered, a download was seen, and then it was gone. Chrome's History database had no row for it or for the first failure, which read as "cancelled".
+  - **It was not cancelled.** `chrome://downloads` lists both as interrupted, `Failed - Network error`, at 0 B. Chrome writes a download to History only when it is over for good:
+    - the four downloads that failed with a network error (the two real runs and two experiments) have no row;
+    - the two cancelled and the three complete ones do.
+    - A DevTools client is no help: `Browser.downloadProgress` reports the state `canceled` for a network failure too.
+  - **The real command works when the transfer holds.** Run end to end from the worktree with no code change (15:08–15:22): `✅ MOVED`, `✅ ENTRY COMPLETE`, SHA-256 equal to the library hash. Its download took 325 s, which only the harvester fix above lets through.
+  - **Cause: the transport.**
+    - Google serves the download from `video-downloads.googleusercontent.com` and advertises HTTP/3. Once the Chrome profile has learned that (it keeps it for 30 days), the download runs over QUIC, which is UDP. Measured during a download: 35–48 thousand UDP datagrams a second, against about 100 TCP segments.
+    - A QUIC download does not survive a stall of a few seconds. With the production trigger, Chrome's network process was frozen for a set time and then released:
+
+      | Transport | Speed | 2–4 s stall | 8 s stall | 16–60 s stall |
+      |---|---|---|---|---|
+      | QUIC (Chrome's default) | 40–50 MB/s | survives | `Failed - Network error` | not reached |
+      | TCP (`--disable-quic`) | 70–130 MB/s | survives | survives | survives |
+
+    - The failed QUIC case reproduces the production signature exactly: `Failed - Network error`, 0 B, the partial file removed, no History row.
+    - Two downloads in one Chrome WITHOUT the switch gave the control. The first ran over TCP, because the profile had no HTTP/3 memory at that moment, and survived 4, 8 and 16 s at about 100 MB/s. The second ran over QUIC and failed at 8 s.
+  - **What stalled the two real runs is not identified.**
+    - In both failed runs the PC's remote-desktop session was reconnecting: four reconnects during the first download, one 37 s before the second. Neither good run had one.
+    - A four-hour passive watch covered 12 further RDP drops: pings to the gateway and the internet every second, IP-table notifications and the Wi-Fi state. It showed no outage of 3 s or more and no IPv4 address change. So a reconnect does not visibly disturb this PC's network, and its link to the two failures is unproven.
+    - Apart from start-up, the Wi-Fi driver logged a single event in three days. It came 69 s into the first failed download.
+  - **Fix.** `init_driver` starts Chrome with `--disable-quic` (`mainfetch.py:76`), so downloads run over TCP.
+  - **Limits.**
+    - The switch applies only to a Chrome that fetch itself starts. A fetch Chrome opened before this fix keeps QUIC until it is closed.
+    - Over TCP a transfer can still break on an outage of minutes or on an IP address change. That is still reported, not retried.
+  - **Acceptance.** The real command, run end to end from the worktree on this fix (23:28–23:39):
+    - fetch started Chrome with `--disable-quic`, and the download ran over TCP (about 3,000 TCP segments a second, against 5 UDP datagrams);
+    - it took 140 s, against 267 s and 325 s over QUIC;
+    - the run ended `✅ MOVED` and `✅ ENTRY COMPLETE`, and the file in `restore` has the library's SHA-256.
+  - **Tests:** `tests/test_fetch_photos_tab.py` gains 5 (48 now): the switch is in the launch command, and the whole command line is pinned for every profile. Against bcd08c7 they fail 5/5. Disarm probes: 6/6 new, 41/41 in total. Full suite 1107 passed; smoke 82 passed.
+- Effort estimate: small · Risk: low. Fetch now always works in a proven Photos tab; in a tab that was already correct, the search, wait and click are the same.
+- If skipped: on Chrome 154 every fetch searches the Gemini panel and reports `Not found`, so nothing can be restored from Google Photos.
+- Residual risk / follow-up (not fixed here; it would change which element gets clicked, so it needs a decision):
+  - In today's Photos DOM the first selector `a[href*='./photo/']` matches only home-timeline thumbnails. Search results are `./search/<token>/photo/<id>` links, found only by the XPath fallback.
+  - For about 1–2 s after Enter the URL is already `/search/` while the timeline is still displayed (measured live). Result latency varied from about 2 s to about 7 s.
+  - If the results page has not replaced the timeline when the fixed 3 s wait ends, `trigger_download` can click a timeline item and download the wrong file. Hash routing leaves that file in Downloads, so nothing is corrupted.
+  - Proposed: poll for the results (or `No results`) instead of a fixed 3 s, and never click a `./photo/` link on a `/search/` page.
+- Open decision — retry a broken transfer (not built):
+  - A transfer that breaks is reported now, but it is not retried. For a whole file only `ATTEMPT 2` finds the item, so one network break ends the entry INCOMPLETE and the user re-runs.
+  - With downloads on TCP the known cause of broken transfers is gone, so this matters less than it did.
+  - Proposed: re-trigger once a triggered download that never arrived. It needs a decision because a Photos download cannot resume, so every retry is a full re-download.
+- Merge note for IMP-C25: that branch adds `profile_preflight` next to these helpers in `mainfetch.py`; keep both. Its `gp_inventory._session` still opens its own tab only with `--attach`, so apply this rule there too and repoint `tests/test_gp_inventory_own_tab.py` at `_session`. Any new Chrome launcher that downloads through fetch must carry `--disable-quic` as `init_driver` does; the crawler's own launcher does not download and does not need it.
+- Status: done (`fix/imp_c29_fetch_attach_photos_tab`)
 
 ## IMP-C30: walkers and the `chunks N-M` filter recognised a chunk by a `.chunk.` substring — a real video named like `the.chunk.2019.1080p.mkv` was hidden from `scan_unprepped` and the reclaim scan, and its chunks were numbered 2019
 
@@ -657,7 +760,7 @@
 - Rollback change-gate: this change IS the gated one, and the user ruled on it. Its scope is resume selection.
   - Every refusal comes before any upload and before anything is journalled. It records nothing, marks no PONR, calls neither `rollback` nor `commit`, never touches the pre-existing chunk dir (D-6) and saves nothing: IMP-C31's exit shape, including the empty journal every pre-flight refusal leaves.
   - Untouched: the journal format, PONR placement, what is journalled, the O-1 failure branches and resume message, `recover_journal`, the season resume-range messaging and `RollbackHardFail`. `cmd_prep` is untouched too.
-- **Needs a decision (not changed here): autopilot re-runs after an interrupted split push.**
+- **Needed a decision (not changed here): autopilot re-runs after an interrupted split push.** Since settled: the user chose option 2 on 2026-10-02 and **IMP-C33** implements it, together with the stale-record fix. The text below describes the behaviour as IMP-C32 shipped it.
   - What happens. A re-run of `prep_push_rep`, or the season autopilot's printed `Resume the rest of the season: prep_push_rep_season … episodes N-M` line, re-preps the interrupted entry first, and the re-prep drops its recorded split. Before this fix the push then uploaded the leftover chunks and archived the entry with no split record. Now the push refuses them: the leftovers must be deleted, and the episode is re-split and re-uploaded in full. `push <id>` BEFORE any re-prep resumes properly, and the season command then carries on (pinned by a test).
   - This is a workflow the user runs: the real library shows it (see the real-library check below).
   - Options:
@@ -666,7 +769,7 @@
     3. Make the season message name `push <id>` first.
 
     Option 2 changes `cmd_prep`, and option 3 changes the change-gated season resume-range messaging, so both are outside this ruling.
-  - Related, pre-existing and unregistered: a whole-file push keeps a stale `split_info`. After a refusal, deleting the leftovers and running a plain `push <id>` (no split size) uploads the file whole while the entry still records the old split (confirmed by a scratch run). The refusal therefore always suggests a split size. Option 2 makes that state easier to reach, so the two belong together.
+  - Related and pre-existing (fixed since, with IMP-C33): a whole-file push keeps a stale `split_info`. After a refusal, deleting the leftovers and running a plain `push <id>` (no split size) uploads the file whole while the entry still records the old split (confirmed by a scratch run). The refusal therefore always suggests a split size. Option 2 makes that state easier to reach, so the two belong together.
 - Tests: `tests/test_push_strict_resume.py` has 26 hermetic tests (`sandbox`, `mock_device`, `make_video`, `sandbox_extras`; `stub_tech_specs` + `fake_dummy` for the season autopilot).
   - **Reproductions (20, all failing before the fix):** another episode's chunk × 3 calls; the `push_group` cascade end to end; unrecorded leftovers (lone holder, partial chunk, complete-looking chunks) × 3 calls; the season autopilot's printed resume command; a recorded chunk or holder with changed bytes; recorded chunks beside four kinds of stranger; a damaged chunk in a later range; two extras shapes.
   - **Genuine resumes pinned:** an interrupted first push of the same entry; `push <id>` followed by the season command (the documented recovery); `chunks N-M` ranges; a recorded FLAC holder (beside a chunk, and alone); the `tempdir` redirect; an interrupted extras push; `push_group` on a season, second run; a recorded chunk with no recorded hash.
@@ -687,3 +790,53 @@
 - Effort estimate: small-medium · Risk: low-medium. A resume now reads each resumed chunk once more to hash it before uploading. Every recorded, intact resume behaves as before. No `ENTRY_TYPE_KEYS` involvement.
 - If skipped: a push in a shared season folder can be marked onboarded on another episode's chunks, and any unrecorded leftover turns the next push into an archive that cannot be restored.
 - Status: done (`fix/imp_c32_strict_resume`)
+
+---
+
+## IMP-C33: re-running an autopilot after an interrupted split push was refused — `cmd_prep` rebuilt the entry without its split record; prep now keeps the record of an unchanged file, and a whole-file first archive drops an unfinished one
+
+- Category: bug (the follow-up decision IMP-C32 left open)
+- Priority: high (Band 0 — the natural way to continue an interrupted archive, re-running the autopilot or the season autopilot's own printed resume command, could not resume: it was refused since IMP-C32, and archived the entry with no split record before it)
+- Files: `main.py` — the keep rule in `cmd_prep`'s entry rebuild (`main.py:1510-1534`) and the whole-file rule in `cmd_push`'s success block (`main.py:6776-6793`). The user ruled on a decision card on 2026-10-02: "Prep keeps split record (Recommended): cmd_prep keeps split_info when the file's hash is unchanged (extras already do this). Re-running the autopilot then resumes correctly. Small follow-up PR; changes cmd_prep, not the rollback rules." Branch `fix/imp_c33_prep_keeps_split_info`.
+- Current behavior (before fix):
+  - An interrupted split push leaves the entry `local_ready`, with the split recorded in `split_info` (saved before the first upload, `main.py:6584`) and the chunks not yet uploaded in `_parts/`. `push <id>` resumes them under the strict rule.
+  - Every autopilot preps first. `cmd_prep` rebuilt an existing `local_ready` entry from scratch (`main.py:1495-1508`), which dropped `split_info` and `re_hashed`. The push that followed found the entry's own leftover chunks with no record of them and refused (`tagged for this entry, which has no recorded split`). Before IMP-C32 it uploaded them and archived the entry with no split record.
+  - That covered a re-run of `prep_push_rep`; the `Resume the rest of the season: prep_push_rep_season … episodes N-M` line the season autopilot prints for exactly this case; either one with `tempdir`; and both `_enrich` autopilots, which run the same archive step (the movie one prints `(or simply re-run this same command)` when the archive does not finish, `main.py:9573`).
+  - Reproduced hermetically on `main` (`faa62e5`) for all five: interrupt the push at chunk 2, run the same command again, and the entry is still `local_ready` with its chunk waiting in `_parts/`.
+- Fix (implemented):
+  - **Keep rule (`cmd_prep`).** A re-prep that finds a split recorded on the existing entry compares the hash it has just computed with the stored one. If they are equal, the rebuilt entry keeps `split_info` whole (chunks, method and size, carried-out FLAC holder, a staged canonical hash) and its `re_hashed` flag, and the next push resumes the recorded chunks. `merge_extras_into_title` already treats an unchanged extra this way (`main.py:5507`).
+  - Only a still-local entry can reach that point. The IMP-D4 guard returns first for anything uploaded or carrying a cloud-bearing status (`main.py:1389`). It is untouched, and both of its arms are now pinned.
+  - The hash decides, not the file name. The same bytes under a new name keep the record, because the record names chunks and those do not move.
+  - **A changed file** drops the record and the flag, as before. Prep now says so, and says the old chunks are stale. It does not delete them: a season's episodes share one `_parts/`, and with `tempdir` prep does not know where they are. The next push refuses them by name (IMP-C32): `<chunk>  (tagged for this entry, which has no recorded split)`, then `They are leftovers: delete them, then push again to re-split the master (it is intact), e.g. push <id> COUNT 2`. Pinned, text included.
+  - **A whole-file first archive drops an unfinished split record (`cmd_push`).** See the verdict below.
+- Stale `split_info` on a whole-file push: same root, fixed here.
+  - The hazard (found during IMP-C32, never registered). An entry still records an interrupted split, its leftover chunks are gone, and a push uploads the file whole: no split size was given, or the file is under the size given. The push completed with the old record in place. The remote `.mvmeta.json` then described a split, `replace` promoted that split's staged canonical hash to the entry's hash (after a `rehash` run, `main.py:7249-7256`), and `fetch_restore` looked for chunks the cloud does not fully hold.
+  - It is the same root as the refusal above: a split record that does not describe what is on disk or in the cloud. The keep rule alone would also have widened it. Deleting the leftovers and re-running the autopilot without a split size used to be safe only because the re-prep cleared the record.
+  - Fix: when a push that is not a `chunks N-M` range completes by uploading the master itself, and the entry had never completed an upload, the record and its `re_hashed` flag are dropped before the remote sidecar is written. The entry then reads exactly like a whole-file archive of a file that was never split. `push_one_extra` already drops an extra's record on a whole-file push (`main.py:6117`).
+  - Left alone on purpose: an entry that was already uploaded (a restored split entry's chunks are a complete cloud copy), a `chunks N-M` push (it never marks an entry uploaded), and any push that fails.
+  - **One residual, for awareness.** "Records a split, no leftovers, not uploaded" also describes a title finished with `chunks N-M` range pushes. The step after those is `set_uploaded <id>`, as the refusals already say. A plain `push <id>` in that state uploads the whole file and now drops the record of the chunks; before, it kept it. The entry then points at the whole-file upload, which is a complete copy only if Google Photos takes a file of that size. A stricter rule (refuse a whole-file push while the entry records an unfinished split) would cover both cases, but it needs a way to clear a record on purpose, so it is left as a decision.
+- Rollback change-gate: assessed, not crossed.
+  - `cmd_prep` journals what it did before. A first prep records its two sidecars and its entry; a re-prep of an existing entry records nothing (pinned with a spy on the journal).
+  - The kept record is part of the entry `cmd_prep` builds. After the keep decision only the library save can fail. Prep's rollback then saves the library it holds, so the entry on disk equals the previous one, split record included (pinned). A failure before the decision, such as the hash, leaves the entry untouched (pinned).
+  - `cmd_push` drops the record in memory after every upload has succeeded, and the save that marks the entry onboarded persists it. Push has no PONR and nothing after that point rolls back. A whole-file push that fails leaves the entry and its record untouched (pinned).
+  - Unchanged: the journal format, what prep and push record, PONR placement, `recover_journal`, the O-1 resume message, the season resume-range messaging and `RollbackHardFail`.
+  - One consequence of the unchanged D-6 scoping is visible. The push journal records `split_info` only when the run itself created it. A re-run that has to split afresh (the leftovers are gone) now finds a record already there, because prep kept it. If that run fails before any upload, rollback removes its own `_parts/` and `checksums/` and leaves the record in place. A plain `push <id> <split>` re-run always behaved this way; the autopilot path used to pop the record, because its re-prep had cleared it first. The next push splits again, or uploads the file whole and drops the record. Pinned.
+- The `_enrich` autopilots: checked, no mismatch is possible. They run the plain autopilot first and enrich only once the entry is `archived` (`main.py:9570`, `main.py:9717`), so no folder is renamed between the interrupted run and the re-run. The record stores chunk file names, not paths, so it still matches the cloud after the rename that follows the archive. Pinned end to end for the movie and the season command, including a restore from the renamed folder.
+- Found here, not changed (unregistered; needs a decision):
+  - **The season resume line leaves out `tempdir` and `rehash`.** `_season_resume_cmd` (`main.py:9183-9215`) rebuilds the command from the split, `episodes`, `device`, `--extras` and `--extras-size`. After a season run that used `tempdir`, the printed line pushes without the redirect, so it does not look in `<tempdir>\<id>\_parts`: it splits the interrupted episode again in the season folder and uploads it from the start, and the old chunks stay in the tempdir. Adding `tempdir <dir>` to the printed line by hand resumes properly. Without `rehash`, the remaining episodes are split with a deferred canonical hash instead of an eager one. This is the change-gated season resume-range messaging, so it is not touched here.
+  - A re-prep still re-hashes the whole file (IMP-D23), so `push <id>` remains the cheaper resume.
+- Tests: `tests/test_prep_keeps_split_record.py` has 26 hermetic tests (`sandbox`, `mock_device`, `make_video`, `stub_tech_specs`, `fake_dummy`). 13 of them fail on `main`.
+  - **End-to-end reproductions (5):** `prep_push_rep` interrupted at chunk 2 and run again; the season autopilot's own printed resume line, run through `main.py`'s real CLI dispatcher; `prep_push_rep` with `tempdir`; `prep_push_rep_enrich`; `prep_push_rep_season_enrich`. Each must resume the remaining chunks, finish, replace, and end `archived` with its split record intact and matching the cloud. A real `cmd_restore` from the device's objects must then give back the original bytes.
+  - **Carried-out FLAC holder (1):** an interrupted carry-out push left its holder beside the last chunk. The re-run uploads both, and the entry still records `carried_out_tracks`.
+  - **Keep rule (4):** an unchanged file keeps every field of the record (chunks, method and size, staged canonical hash, carried-out tracks) and its flag, and the entry is identical after the re-prep; a renamed file keeps it; a changed file drops it, leaves the chunks alone, and the next push refuses them with the right text; an entry that was never split preps exactly as before, with no new output.
+  - **IMP-D4 guard (7):** every cloud-bearing state, by the `uploaded` flag alone and by each status alone, is still never rebuilt.
+  - **Rollback (4):** the journal spy, the two failed re-preps, and the fresh split that fails before any upload.
+  - **Whole-file push (5):** the stale record and its flag are dropped, the sidecar says whole file, `replace` promotes no canonical hash and the restore works; an already-uploaded split entry keeps its record; the autopilot re-run without a split size ends as a restorable whole-file archive; a failed whole-file push and a range push leave the record alone.
+  - One IMP-C32 test changed. Its season-autopilot reproduction reached "split record gone" through the re-prep. That route is closed, so the test now removes the record by hand. Its assertions are unchanged.
+
+  Disarm probes: 29/29 caught. Full suite 1101 passed, with the one pre-existing test that opens the real library deselected for this run; smoke 82 passed.
+- Real-library check (read-only, 2026-10-02; one read of the four library files, no folder access): nothing is affected today. All 1322 physical leaves are uploaded, so prep rebuilds none of them and no entry records an unfinished split. 270 leaves record a split and every one is uploaded, so the whole-file rule cannot touch them. No leaf carries `re_hashed` without a split record.
+- Merge note for IMP-C25: that branch replaces the `write_remote_mvmeta` call two lines below the new block in `cmd_push`. Keep the drop before that call, so the sidecar describes the whole file. The branch does not touch `cmd_prep`.
+- Effort estimate: small · Risk: low. Only a re-prep of a still-local entry that records a split changes, and a whole-file first archive of one. A first prep, an entry that was never split and every uploaded entry behave as before. No `ENTRY_TYPE_KEYS` involvement.
+- If skipped: after an interrupted split push, re-running the autopilot or the season's printed resume command is refused, and the leftovers have to be deleted and the title split and uploaded again from the start.
+- Status: done (`fix/imp_c33_prep_keeps_split_info`)

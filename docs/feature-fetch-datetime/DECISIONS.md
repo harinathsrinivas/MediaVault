@@ -442,3 +442,13 @@ No other step of this plan uses candidates.
   split and archived. let that run in parallel , for now dont touch this. but after plan is done, can revisit all
   items to confirm ." → do not touch the entry, its folder, `D:\test`, mvconfig routing or the main folder's code
   while it runs; revisit routing/confirmation of all items after the plan is done (R3/R4).
+
+## §1e — User rulings 2026-10-03 (decision cards, first-hand in the main session)
+- **PR #65 (IMP-C29)**: "Merge now (Recommended)" → squash-merged to main `c1e254a` (Checkpoint 1). Final cause: the
+  Gemini-panel attach, a harvester that gave up on downloads > 5 min, and QUIC downloads that die on an ~8 s stall
+  (fix: `--disable-quic`). 🚦 RH passed (two real runs, incl. a cold start; SHA-256 = library hash).
+- **Three remaining fetch issues** (no retry of a broken transfer; the home timeline can be clicked for 1–2 s after a
+  search; `main.py fetch` output arrives in bursts): "Inside C25 (Recommended)" → explicit requirements of Steps 10–12,
+  registered as IMP-C34 / IMP-C35 / IMP-C36.
+- **Test copies of X-Files S02E05 on D:** "Delete both (Recommended)" → both deleted 2026-10-03; logs kept.
+- **PR #66 (IMP-C33)**: "Merge now (Recommended)" → squash-merged to main `bfb9833` (Checkpoint 1).

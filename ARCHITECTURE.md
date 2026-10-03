@@ -2156,7 +2156,7 @@ def profile_for_id(manual_id):
     return DEFAULT_PROFILE
 ```
 
-### 8.2 Selenium + Chrome attach-mode setup (`init_driver`, lines 105-147)
+### 8.2 Selenium + Chrome attach-mode setup (`init_driver`, lines 51-111)
 
 Rather than letting Selenium spawn Chrome with `--user-data-dir`
 (Chrome refuses to load some Google sessions when launched by Selenium
@@ -2166,13 +2166,24 @@ in headful mode), `init_driver`:
    "--profile-directory=Default", "--remote-debugging-port=9222",
    "--disable-gpu", "--window-size=1920,1080", "--no-first-run",
    "--no-default-browser-check", "--disable-session-crashed-bubble",
-   "about:blank"])`
+   "--disable-quic", "about:blank"])`
+   - `--disable-quic` (IMP-C29) keeps downloads on TCP. Google serves a
+     Photos download over HTTP/3 (QUIC) when Chrome allows it, and a QUIC
+     download fails for good after a stall of about 8 s; over TCP it
+     survives a 60 s stall. The switch only applies when this call
+     starts the browser: a Chrome that is already running keeps the
+     options it was started with.
 2. `time.sleep(3)` — give Chrome time to bind port 9222.
 3. Build a Selenium `Options` with
    `add_experimental_option("debuggerAddress", "127.0.0.1:9222")`.
 4. `ChromeDriverManager().install()` to fetch/cache a matching driver.
 5. `webdriver.Chrome(service=service, options=options)` — Selenium
    attaches to the already-running Chrome over the DevTools protocol.
+6. `use_photos_tab(driver)` (IMP-C29) — move the driver into a normal
+   `photos.google.com` tab (the open one, or a new one) and give it
+   focus. chromedriver attaches to whichever target it finds first; on
+   Chrome 154 that is the Gemini side panel. If no Photos tab can be
+   had, `init_driver` returns `None`.
 
 This means **all cookies, saved logins, and Google Photos session state
 live in `C:\Media\Utils\ChromeProfile*`** and persist across runs. The

@@ -112,11 +112,14 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 - 2026-10-03 R1 re-crawl started by the orchestrator, one account at a time (rpc mode, read-only): movies → tv → anime. Resume command (re-run the same; progress is kept): `python tools/gp_inventory.py <movies|tv|anime> --port <9223|9225|9224>`; check with `python tools/gp_inventory.py all --status`. Logs: D:\MediaVault_gp_inventory\<account>.log + crawl_r1_<account>.out.
 
 ## In-progress sub-state
-`Step 10 — dispatched 2026-10-03 to executor-fable (fable) · sub-tasks: [ ] 10.a cmd_fetch_route per-object account
-routing ← next · [ ] 10.b build_fetch_queue + locator dict (parity oracle) · [ ] 10.c harvest_downloads (on the
-merged C29 harvester) + learn-on-fetch · [ ] 10.d locator seam + EXACT_LOCATOR_ENABLED · [ ] 10.e A8 deletions ·
+`Step 10 — dispatched 2026-10-03 to executor-fable (fable) · executing in dependency order e → b → d → c → g → a →
+f → h → i · sub-tasks: [ ] 10.a cmd_fetch_route per-object account routing · [ ] 10.b build_fetch_queue + locator
+dict (parity oracle) ← next · [ ] 10.c harvest_downloads (on the merged C29 harvester) + learn-on-fetch · [ ] 10.d
+locator seam + EXACT_LOCATOR_ENABLED · [x] 10.e A8 deletions + build_extras_entries forwards gphotos/labels/title ·
 [ ] 10.f parse_fetch_options/--manual · [ ] 10.g IMP-C34 one retry of a lost download · [ ] 10.h IMP-C35 never click
 the home timeline · [ ] 10.i IMP-C36 unbuffered child output · then disarm probes, full + smoke`
+Pre-change oracles captured from HEAD b1cff7d before any edit (scratch harness, C29 fakes) — pasted into the Step 10
+tests as frozen transcripts.
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes
 alone; re-run it before treating a red full suite as a regression.
 Template — when a step is running (Execution protocol "In-step checkpoints"):

@@ -405,16 +405,6 @@ def trigger_download(driver, query, index=0):
     return result
 
 
-def wait_for_download(filename_snippet, timeout=300):
-    # Kept for compatibility, but updated logic uses harvester_loop
-    return None
-
-
-def automation_download_file(driver, search_queries, filename_expected, dest_folder, target_index=0):
-    # Kept for compatibility
-    return False
-
-
 # ==========================================
 #             CORE LOGIC
 # ==========================================
@@ -722,67 +712,6 @@ def resolve_target_ids(manual_id, ep_range=None):
     return [real_id]
 
 
-def build_download_queue(entries):
-    queue = []
-
-    for entry in entries:
-        restore_folder = os.path.join(entry["folder_path"], RESTORE_DIR_NAME)
-        os.makedirs(restore_folder, exist_ok=True)
-
-        fallback_term = entry.get("search_term")
-        if not fallback_term: fallback_term = entry["filename"]
-
-        if entry.get("split_info") and entry["split_info"].get("is_split"):
-            chunks = entry["split_info"]["chunks"]
-            for i, chunk in enumerate(chunks):
-                fname = chunk["filename"]
-                if os.path.exists(os.path.join(restore_folder, fname)): continue
-
-                queue.append({
-                    "filename": fname,
-                    "hash": chunk["hash"],
-                    "dest": restore_folder,
-                    "specific_query": fname,
-                    "fallback_query": fallback_term,
-                    "fallback_index": i,
-                    "status": "pending"
-                })
-
-            # [FLAC-CARRYOUT] enqueue each carried-out track's holder (same
-            # hash-routing, staged into restore/ beside the chunks).
-            for ct in entry.get("split_info", {}).get("carried_out_tracks", []):
-                hname = ct.get("holder_filename")
-                hhash = ct.get("holder_hash")
-                if not hname or not hhash:
-                    continue
-                if os.path.exists(os.path.join(restore_folder, hname)):
-                    continue
-                queue.append({
-                    "filename": hname,
-                    "hash": hhash,
-                    "dest": restore_folder,
-                    "specific_query": hname,
-                    "fallback_query": fallback_term,
-                    "fallback_index": 0,
-                    "status": "pending"
-                })
-        else:
-            fname = entry["filename"]
-            if os.path.exists(os.path.join(restore_folder, fname)): continue
-
-            queue.append({
-                "filename": fname,
-                "hash": entry["hash"],
-                "dest": restore_folder,
-                "specific_query": fname,
-                "fallback_query": fallback_term,
-                "fallback_index": 0,
-                "status": "pending"
-            })
-
-    return queue
-
-
 # ==========================================
 #   IMP-D19 Step 5 — EXTRAS FETCH QUEUE (Card C, flag-only)
 # ==========================================
@@ -803,10 +732,10 @@ def build_download_queue(entries):
 # merged/verified file back at <title folder_path>/<group_rel>/<sub_rel>.
 
 
-def build_extras_entries(title_entry):
+def build_extras_entries(title_entry, title_id=None):
     """Flatten a title entry's extras.groups into synthetic leaf-shaped fetch
     entries — one per CLOUD-RESIDENT (uploaded=True) extra item — that
-    fetch_single_entry / build_download_queue consume VERBATIM.
+    fetch_single_entry / build_fetch_queue consume VERBATIM.
 
     Each synthetic entry's `folder_path` is the extra's own on-disk folder
     (os.path.dirname(<title folder_path>/<group_rel>/<sub_rel>)), so the proven
@@ -814,7 +743,14 @@ def build_extras_entries(title_entry):
     extra carries the item `hash`; a SPLIT extra carries `split_info`
     (is_split / chunks[{filename, hash}]) so each chunk is queued by hash —
     identical to a split leaf. Items not yet uploaded are skipped (nothing to
-    fetch in the cloud). PURE: no library / browser / device I/O."""
+    fetch in the cloud). PURE: no library / browser / device I/O.
+
+    [IMP-C25 Step 10] Each entry also forwards what names its objects for the
+    exact-item stages and the learned sidecar: the item's `gphotos` block (a
+    split item's chunk blocks travel inside its split_info), `group_rel`,
+    `sub_rel`, `label` ('extra <group_rel>/<sub_rel>', the label
+    mvcommon.iter_entry_objects gives the item) and `manual_id` = title_id —
+    an extra's objects are owned by its TITLE id (None when not given)."""
     title_folder = title_entry.get("folder_path", "")
     groups = title_entry.get("extras", {}).get("groups", {})
     entries = []
@@ -833,6 +769,11 @@ def build_extras_entries(title_entry):
                 "search_term": item.get("search_term"),
                 "short_id": item.get("short_id"),
                 "split_info": item.get("split_info"),
+                "gphotos": item.get("gphotos"),
+                "manual_id": title_id,
+                "group_rel": group_rel,
+                "sub_rel": sub_rel,
+                "label": f"extra {group_rel}/{sub_rel}",
             })
     return entries
 
@@ -869,9 +810,9 @@ def resolve_title_extras(manual_id):
     read — only load_library; no browser / device side effects. (A second
     load_library here, after resolve_targets', is the deliberate cost of leaving
     resolve_targets byte-for-byte untouched; it only runs when --fetchExtras is
-    set.)"""
-    _title_id, title_entry = _extras_title(load_library(), manual_id)
-    return build_extras_entries(title_entry) if title_entry is not None else []
+    set.) [IMP-C25] Each entry names its title id (build_extras_entries)."""
+    title_id, title_entry = _extras_title(load_library(), manual_id)
+    return build_extras_entries(title_entry, title_id) if title_entry is not None else []
 
 
 # [IMP-C26] Per-object account override. An archived object can live in a

@@ -803,6 +803,19 @@ inconsistencies. Defects found here become Step 9b fix-ups (recorded in PROGRESS
      `gphotos` + labels.
   f. `parse_fetch_options(argv)` (new; `parse_fetch_args` unchanged) → `{manual: bool}`; main.py forwards `--manual` only
      when given (spawned argv otherwise byte-identical).
+  g. (IMP-C34 — user ruling 2026-10-03, DECISIONS §1e) A triggered download that Chrome lost (IMP-C29's
+     `_lost_download_note` case: a download was seen and vanished, or none appeared) is re-triggered ONCE per object
+     per run — whole files, chunks, holders, extras — never while a download for that object is still active; the
+     retry is printed and counted; a second loss puts the object on the failed list (P-18). Pin both branches.
+  h. (IMP-C35 — same ruling) Never click the home timeline: `trigger_download` (and every later search path, Step 12)
+     waits — bounded poll, not the fixed 3 s sleep — until the page is a `/search/` results page with results rendered
+     before reading thumbnails, and never clicks a `./photo/` link that is not inside the search results. An item
+     whose photo_id is known is opened by its URL (Step 12), never by clicking. This intentionally changes the
+     `trigger_download` digest pin: re-pin it with the new body and record the change in STATUS.
+  i. (IMP-C36 — same ruling) `cmd_dispatch_fetch` and every other mainfetch child spawn set `PYTHONUNBUFFERED=1` in the
+     child environment so progress streams live; `webui.server._parse_progress` counts stay unchanged (pin).
+  Base the harvester on the CURRENT code (IMP-C29 merged: timeout decided after the scan, `_lost_download_note`,
+  `use_photos_tab`, `--disable-quic`), not on the pre-C29 loop the text above calls "today's".
 - Tests: routing (X-Files-like wrong-account objects fetched in the right account; mixed batch → two sessions), parity,
   harvester golden transcript + `webui.server._parse_progress` counts unchanged, learned records, A8 deletions,
   `EXACT_LOCATOR_ENABLED=False` call sequence identical to today, `trigger_download` source digest pinned.

@@ -10379,6 +10379,16 @@ def merge_learned_gphotos():
     return report
 
 
+def _mainfetch_child_env():
+    """[IMP-C36] The environment of every mainfetch child process (cmd_dispatch_fetch;
+    IMP-C25 Steps 13 / 13b spawn their check_photos children with it too): the
+    parent's own, plus UTF-8 stdio — a PIPEd child defaults to cp1252 on Windows and
+    would crash printing mainfetch's emoji — and UNBUFFERED output: a PIPEd child's
+    print() is block-buffered, so its progress reached the terminal and the web UI
+    only in bursts."""
+    return {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+
+
 def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False, temp_dir=None, manual=False):
     # This keeps main.py clean but still lets you run "main.py fetch"
     cmd = ["python", MAINFETCH_SCRIPT, "fetch", manual_id]
@@ -10407,8 +10417,9 @@ def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False, temp_d
         cmd.append("--manual")
 
     try:
-        # Force the child's stdio to UTF-8 — a PIPEd child defaults to cp1252 on Windows and would crash printing mainfetch's emoji.
-        child_env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        # Force the child's stdio to UTF-8 (a PIPEd child defaults to cp1252 on Windows and would crash printing
+        # mainfetch's emoji) and unbuffered ([IMP-C36] so its progress streams live, not in bursts).
+        child_env = _mainfetch_child_env()
         # Stream the child's combined stdout/stderr line-by-line through the
         # CURRENT sys.stdout. A blocking run would inherit the OS-level fd and
         # bypass any in-process redirect_stdout (used by the web worker to tee

@@ -274,8 +274,9 @@ def main():
     driver = webdriver.Chrome(options=opts)
     user_handles = list(driver.window_handles)
     try:
-        if a.attach:
-            driver.switch_to.new_window("tab")  # work in our own tab; the user's tabs are left alone
+        # Work in our own tab in BOTH modes. Attached, that leaves the user's tabs alone; launched, it
+        # avoids chromedriver's initial target, which on Chrome 154 is the Gemini side panel (IMP-C29).
+        driver.switch_to.new_window("tab")
         front(driver)
         if a.phase in ("enumerate", "all"):
             enumerate_tiles(driver, tiles_path, log)

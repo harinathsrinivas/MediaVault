@@ -790,10 +790,22 @@ def _run_locator_phase(driver, queue, ctx):
     """[IMP-C25 Step 10 d — the seam IMP-C25 Step 12 fills] The exact-item stages,
     run before today's two legacy attempts when EXACT_LOCATOR_ENABLED (P-14).
     `queue` = the items this session fetches (build_fetch_queue, each with its
-    locator). Step 12 locates each object and requests its download; an object it
-    settles is marked 'done', one it may not hand to the legacy attempts (OD-5)
-    'failed'. Every item still 'pending' afterwards gets today's attempts
-    unchanged. Until Step 12 lands: nothing."""
+    locator; ctx.account = the session's account). Until Step 12 lands: nothing.
+
+    The contract Step 12 fills it to:
+      * request each download through _fire(item, fire) — fire() -> truthy when a
+        download was requested — so IMP-C34's one retry covers it, then harvest
+        with harvest_downloads(queue, ctx) and book losses with
+        _note_losses(queue, <its result>, ctx);
+      * name what it requested in item['_trigger'] = {'method': 'direct' |
+        'shift_d' | …, 'record': the item's record (gpweb page / RPC shape:
+        photo_id, dedup_key, taken_ms, tz_offset_ms, upload_ms, width, height,
+        filename), 'approach': {tried, outcome, n, via} (a P-10 approach)}: a
+        SHA-256 match then teaches the learned sidecar that photo_id
+        (_learn_from_download — only when the record's dedupKey is the bytes');
+      * leave an object it settled 'done', one it may not hand to the legacy
+        attempts (OD-5) 'failed'; every item still 'pending' afterwards gets
+        today's two attempts unchanged."""
     return None
 
 
@@ -1421,9 +1433,9 @@ def resolve_title_extras(manual_id):
 # mapping found 31 X-Files episodes in the MOVIES account), and prefix routing
 # alone can never fetch it. The gitignored mvconfig.json may therefore carry
 #     "fetch_account_overrides": {"<exact manual id or id prefix>": "<account>"}
-# where <account> is a CHROME_PROFILES key. profile_for_id consults it first
-# (IMP-C25 later adds the learned per-object account beneath it). No key — the
-# default — means today's prefix routing, unchanged.
+# where <account> is a CHROME_PROFILES key. profile_for_id consults it first;
+# IMP-C25 adds the learned per-object account beneath it (_object_account). No key
+# — the default — means today's prefix routing, unchanged.
 _OVERRIDES_CACHE = None  # (raw config value, validated dict) — see _account_overrides
 
 

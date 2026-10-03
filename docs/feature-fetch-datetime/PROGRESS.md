@@ -127,8 +127,13 @@ item arrived counts no loss; second loss → failed list, NEW P-18 reason `downl
 (wip dd410ed) · 10.a (wip 9f4ab09) · 10.f (wip b2f9c7f) · [x] 10.h IMP-C35 never click
 the home timeline (bounded poll replaces the fixed 3 s; timeline thumbnails dropped; trigger_download digest re-pinned
 6e64c9cf… → 49578db2…) (wip e673b10) · [x] 10.i IMP-C36 unbuffered child output (main._mainfetch_child_env() —
-PYTHONUNBUFFERED=1 + PYTHONIOENCODING=utf-8; Steps 13/13b spawn with it; AST pin) · then disarm probes, full + smoke
-← next`
+PYTHONUNBUFFERED=1 + PYTHONIOENCODING=utf-8; Steps 13/13b spawn with it; AST pin) (wip e333c3d) · [x] self-review +
+disarm probes (scratch copy) · then full + smoke ← next`
+Resumed 2026-10-03 after a usage-limit pause: the uncommitted mainfetch.py diff (+19/−7) was the DELIBERATE self-review
+fix (the _run_locator_phase contract docstring for Step 12; the IMP-C26 comment now names _object_account) — NOT a probe
+leak (probes only ever edit a tempfile.mkdtemp copy): kept, tested, committed. Disarm run #1: 26/28 — P14 (second loss
+ends the object) and P17 (reads before the results settle) exposed TEST gaps, closed by a seam test (two lost requests
+in Step 12's stages → no legacy request) and no-retry assertions; re-run on a fresh copy: both caught.
 Pre-change oracles captured from HEAD b1cff7d before any edit (scratch harness, C29 fakes) — pasted into the Step 10
 tests as frozen transcripts.
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes

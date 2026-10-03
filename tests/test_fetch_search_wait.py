@@ -186,12 +186,14 @@ def test_no_results_ends_the_wait_early_and_reads_as_not_found(sleeps, capsys):
     assert sleeps.count(mainfetch.SEARCH_POLL_S) == 1
 
 
-def test_it_reads_the_results_only_once_they_stop_growing():
+def test_it_reads_the_results_only_once_they_stop_growing(sleeps, capsys):
     page = _Page([results(2), results(5)])
 
     assert mainfetch.trigger_download(page, QUERY, index=4) is True
 
     assert page.clicked == ["result-4"]                  # read too early, index 4 would have been "Not found"
+    out = capsys.readouterr().out                        # ...and found on the FIRST pass — not rescued by the
+    assert "Retry 2/2" not in out and "Not found" not in out and 5 not in sleeps   # IMP-C2 retry
 
 
 def test_a_busy_page_is_simply_looked_at_again():

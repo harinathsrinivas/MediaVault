@@ -917,6 +917,31 @@ def test_a_duplicate_is_not_a_lost_download(world, monkeypatch, capsys):
     assert "❌ ENTRY INCOMPLETE." in out
 
 
+def test_after_a_second_loss_no_later_stage_requests_the_object_again(world, monkeypatch, capsys):
+    # Step 12's stages run before today's attempts (the seam): two lost requests there — a direct download, then
+    # Shift+D — end the object for this run, so the legacy attempts and the retry round must leave it alone.
+    entry = _whole_entry(world.tmp)
+    stage_requests = []
+
+    def seam(driver, queue, ctx):
+        for method in ("direct", "shift_d"):
+            mainfetch._fire(queue[0], lambda m=method: stage_requests.append(m) or world.chrome.start("x", None, 30))
+            mainfetch._note_losses(queue, mainfetch.harvest_downloads(queue, ctx), ctx)
+
+    monkeypatch.setattr(mainfetch, "_run_locator_phase", seam)
+    calls = _script(monkeypatch, lambda q, i: True)
+    ctx = _session("tv")
+
+    mainfetch.fetch_single_entry(None, entry, entry_id=EP_ID, ctx=ctx)
+
+    out = capsys.readouterr().out
+    assert stage_requests == ["direct", "shift_d"]
+    assert calls == [] and "ATTEMPT" not in out and "RETRY" not in out    # never requested a third time
+    assert out.count(_lost_twice("Show.S01E01.mkv")) == 1 and "❌ ENTRY INCOMPLETE." in out
+    [row] = mvcommon.read_failed()
+    assert (row["manual_id"], row["reason"]) == (EP_ID, "download-lost")
+
+
 def test_the_retry_starts_only_once_nothing_is_downloading(world, monkeypatch, capsys):
     entry = _whole_entry(world.tmp)
     stamps = []

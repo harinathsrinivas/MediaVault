@@ -284,12 +284,104 @@ def _search_page_problem(driver):
     return None
 
 
+# [IMP-C35] For 1-2 s after Enter the page already reads /search/ while it still
+# SHOWS the home timeline, whose thumbnails the selectors match too, and results
+# took 2-7 s to appear (IMP-C29, measured live). So a search waits for its results
+# — a bounded poll that replaces the fixed 3 s sleep — and no timeline thumbnail
+# is ever clicked on a search page.
+SEARCH_RESULTS_WAIT_S = 10.0  # the longest a search may take to show its results
+SEARCH_POLL_S = 0.5           # how often the page is looked at while waiting
+
+# One page-context look at a search page. A visible link to an item ('photo/' in
+# its href, checkVisibility, wider than 40 px — gpweb.TILES_JS's rule) is either a
+# search RESULT (its href runs through the search: ./search/<token>/photo/<id>) or
+# a home-TIMELINE thumbnail (./photo/<id>). `empty`: Google Photos says "No
+# results" — display text, so only a hint that ends the wait early (P-7).
+_SEARCH_STATE_JS = r"""
+let results = 0, timeline = 0;
+for (const a of document.querySelectorAll('a[href*="photo/"]')) {
+  const r = a.getBoundingClientRect();
+  if (!(a.checkVisibility() && r.width > 40)) continue;
+  if (/(^|\/)search\//.test(a.getAttribute('href') || '')) results++; else timeline++;
+}
+const text = document.body ? document.body.innerText : '';
+return {results: results, timeline: timeline, empty: /\bno results\b/i.test(text)};"""
+
+# For each element: is it — or does it sit inside — a link to an item that is NOT
+# a search result (a home-timeline thumbnail)?
+_TIMELINE_LINKS_JS = r"""
+return arguments[0].map(e => {
+  const a = e.closest('a');
+  const h = a ? (a.getAttribute('href') || '') : '';
+  return /photo\//.test(h) && !/(^|\/)search\//.test(h);
+});"""
+
+
+def _await_search_results(driver):
+    """[IMP-C35] Wait — a bounded poll, not a fixed sleep — for a keystroke
+    search's results before any thumbnail is read.
+
+    Ready (returns None) once the page is a photos.google.com /search/ page that
+    shows result thumbnails and no timeline thumbnail, with the same number of
+    results on two looks in a row (the grid has settled), or once Google Photos
+    says it found nothing and the timeline is gone. After SEARCH_RESULTS_WAIT_S it
+    reads whatever results are shown — but returns the problem line instead when
+    the page never reached /search/ (_search_page_problem's diagnosis) or shows
+    nothing but the home timeline: nothing may be clicked then. A driver that runs
+    no page script (a test stand-in: execute_script returns nothing) is ready once
+    the URL check passes, exactly as before this wait existed. Shared by every
+    search path (trigger_download; IMP-C25 Step 12's UI stages)."""
+    problem = state = None
+    for poll in range(int(SEARCH_RESULTS_WAIT_S / SEARCH_POLL_S) + 1):
+        if poll:
+            time.sleep(SEARCH_POLL_S)
+        problem = _search_page_problem(driver)
+        if problem:
+            continue  # not (yet) on a /search/ page
+        try:
+            looked = driver.execute_script(_SEARCH_STATE_JS)
+        except Exception:
+            continue  # the page was busy (still navigating): look again
+        if not isinstance(looked, dict):
+            return None  # a stand-in without page scripts: read the page as before
+        previous, state = state, looked
+        if state.get("timeline"):
+            continue  # the home timeline is still shown
+        if state.get("results"):
+            if previous and not previous.get("timeline") and previous.get("results") == state["results"]:
+                return None  # results shown, and settled
+        elif state.get("empty"):
+            return None  # "No results": a genuine miss — the read finds nothing
+    if problem:
+        return problem
+    if state and state.get("timeline") and not state.get("results"):
+        return (f"Search results did not replace the home timeline within {SEARCH_RESULTS_WAIT_S:g} s; "
+                f"nothing was clicked")
+    return None
+
+
+def _drop_timeline(driver, elements):
+    """[IMP-C35] `elements` without every one that is — or sits inside — a link to
+    an item that is not a search result (a home-timeline thumbnail): on a search
+    page such an element is never clicked. One page-context call; a driver that
+    runs no page script (a test stand-in) keeps them all. A failing call raises —
+    a Selenium fault, which the IMP-C2 retry handles."""
+    if not elements:
+        return elements
+    timeline = driver.execute_script(_TIMELINE_LINKS_JS, elements)
+    if timeline is None:
+        return elements
+    return [el for el, is_timeline in zip(elements, timeline) if not is_timeline]
+
+
 def trigger_download(driver, query, index=0):
     """
     RAPID MODE: Navigates, Searches, Clicks, Triggers Download, Exits Player.
     Does NOT wait for file to finish. Returns True if trigger sent.
     [IMP-C29] Every attempt runs in a focused photos.google.com tab, and a search
     that never reached Google Photos is reported as such, not as "Not found".
+    [IMP-C35] It waits for the search's results (_await_search_results) instead of
+    a fixed 3 s, and never clicks a home-timeline thumbnail (_drop_timeline).
     """
     wait = WebDriverWait(driver, 10)
 
@@ -321,11 +413,9 @@ def trigger_download(driver, query, index=0):
         actions.send_keys(Keys.ENTER)
         actions.perform()
 
-        # Wait for search results
-        time.sleep(3)
-
-        # [IMP-C29] Results exist only on a photos.google.com /search/ page.
-        problem = _search_page_problem(driver)
+        # Wait for search results ([IMP-C35] a bounded poll until they are shown;
+        # [IMP-C29] results exist only on a photos.google.com /search/ page).
+        problem = _await_search_results(driver)
         if problem:
             print(f"     ❌ {problem} — this is not a 'Not found'.")
             return False
@@ -340,6 +430,7 @@ def trigger_download(driver, query, index=0):
                     all_thumbnails.append(link)
         except:
             pass
+        all_thumbnails = _drop_timeline(driver, all_thumbnails)  # [IMP-C35] search results only
 
         if not all_thumbnails:
             try:
@@ -349,6 +440,7 @@ def trigger_download(driver, query, index=0):
                         all_thumbnails.append(el)
             except:
                 pass
+            all_thumbnails = _drop_timeline(driver, all_thumbnails)  # [IMP-C35] search results only
 
         if len(all_thumbnails) > index:
             target_el = all_thumbnails[index]

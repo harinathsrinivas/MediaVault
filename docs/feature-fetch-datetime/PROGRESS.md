@@ -124,8 +124,9 @@ build_extras_entries forwards gphotos/labels/title (wip 85866bc) ·
 [x] 10.f parse_fetch_options/--manual (mainfetch.cli(argv) entry point; main.py fetch/fetch_restore forward --manual
 only when given; ctx.manual) · [x] 10.g IMP-C34 one retry of a lost download (a round where a wrong
 item arrived counts no loss; second loss → failed list, NEW P-18 reason `download-lost` in mvcommon.GP_FAILED_REASONS)
-(wip dd410ed) · 10.a (wip 9f4ab09) · [ ] 10.h IMP-C35 never click ← next
-the home timeline · [ ] 10.i IMP-C36 unbuffered child output · then disarm probes, full + smoke`
+(wip dd410ed) · 10.a (wip 9f4ab09) · 10.f (wip b2f9c7f) · [x] 10.h IMP-C35 never click
+the home timeline (bounded poll replaces the fixed 3 s; timeline thumbnails dropped; trigger_download digest re-pinned
+6e64c9cf… → 49578db2…) · [ ] 10.i IMP-C36 unbuffered child output ← next · then disarm probes, full + smoke`
 Pre-change oracles captured from HEAD b1cff7d before any edit (scratch harness, C29 fakes) — pasted into the Step 10
 tests as frozen transcripts.
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes

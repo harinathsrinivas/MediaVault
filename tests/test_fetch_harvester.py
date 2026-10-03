@@ -723,7 +723,252 @@ def test_what_a_fetch_learned_routes_the_next_fetch(world, monkeypatch, sandbox,
 def test_harvest_downloads_reports_how_its_round_ended(world, monkeypatch, capsys):
     queue = [{"filename": "x.mkv", "hash": _sha(PAYLOAD_A), "dest": str(world.tmp), "status": "pending",
               "triggered": False}]
-    assert mainfetch.harvest_downloads(queue, mainfetch.FetchContext()) == {"timed_out": True, "saw_download": False}
+    assert mainfetch.harvest_downloads(queue, mainfetch.FetchContext()) == {
+        "timed_out": True, "saw_download": False, "unmatched": 0}
     queue[0]["status"] = "done"
-    assert mainfetch.harvest_downloads(queue, mainfetch.FetchContext()) == {"timed_out": False, "saw_download": False}
+    assert mainfetch.harvest_downloads(queue, mainfetch.FetchContext()) == {
+        "timed_out": False, "saw_download": False, "unmatched": 0}
     assert capsys.readouterr().out.count("❌ Timeout (No active downloads).") == 1
+
+
+# ---------------------------------------------------------------------------
+# 10.g — IMP-C34: a lost download is requested once more; a second loss lands on the failed list
+# ---------------------------------------------------------------------------
+RETRY_1 = "   === RETRY (1 file(s) whose download was lost — requested once more) ==="
+SHOW_TERM = "Show.S01E01 [abc123].mkv"
+
+
+def _lost_twice(name, listed=True):
+    tail = "added to the failed list; " if listed else ""
+    return f"     ❌ Download lost twice: {name} — {tail}re-run the fetch to try again."
+
+
+def test_a_lost_whole_file_is_requested_once_more_and_arrives(world, monkeypatch, capsys):
+    # The live case: ATTEMPT 1 (the plain name) never finds a whole file; ATTEMPT 2 finds it and its transfer breaks.
+    entry = _whole_entry(world.tmp)
+    sent = []
+
+    def script(q, i):
+        if q != SHOW_TERM:
+            return False
+        sent.append(q)
+        return world.chrome.start(SHOW_TERM, None if len(sent) == 1 else PAYLOAD_A, 60)   # the first one breaks
+
+    calls = _script(monkeypatch, script)
+    ctx = _session("tv")
+
+    mainfetch.fetch_single_entry(None, entry, entry_id=EP_ID, ctx=ctx)
+
+    out = capsys.readouterr().out
+    assert calls == [("Show.S01E01.mkv", 0), (SHOW_TERM, 0), (SHOW_TERM, 0)]
+    assert out.count(RETRY_1) == 1
+    assert out.index(IN_PROGRESS_NOTE) < out.index(RETRY_1) < out.index("✅ MOVED: Show.S01E01.mkv")
+    assert "✅ ENTRY COMPLETE." in out and "lost twice" not in out
+    assert ctx.stats == {"learned": 1, "retried": 1, "recovered": 1, "lost_twice": 0}
+    assert mvcommon.read_failed() == []
+    assert _restored(entry, "Show.S01E01.mkv").read_bytes() == PAYLOAD_A
+
+
+def test_a_second_loss_ends_the_object_and_lands_on_the_failed_list(world, monkeypatch, capsys, sandbox):
+    entry = _whole_entry(world.tmp)
+    mvcommon.save_library({EP_ID: dict(entry, status="archived", uploaded=True)})
+    calls = _script(monkeypatch, lambda q, i: world.chrome.start("x", None, 60) if q == SHOW_TERM else False)
+    ctx = _session("tv")
+
+    mainfetch.fetch_single_entry(None, entry, entry_id=EP_ID, ctx=ctx)
+
+    out = capsys.readouterr().out
+    assert calls == [("Show.S01E01.mkv", 0), (SHOW_TERM, 0), (SHOW_TERM, 0)]     # one retry, never a third request
+    assert out.count(RETRY_1) == 1 and out.count(_lost_twice("Show.S01E01.mkv")) == 1
+    assert out.index(RETRY_1) < out.index(_lost_twice("Show.S01E01.mkv")) < out.index("❌ ENTRY INCOMPLETE.")
+    [row] = mvcommon.read_failed()
+    assert {k: v for k, v in row.items() if k != "at"} == {
+        "run": ctx.run_id, "account": "tv", "category": "tv", "manual_id": EP_ID, "label": "whole",
+        "sha256": _sha(PAYLOAD_A), "uploaded_name": SHOW_TERM, "reason": "download-lost"}
+    assert ctx.stats == {"learned": 0, "retried": 1, "recovered": 0, "lost_twice": 1}
+    # The Excel view the user works from names the reason in its status column.
+    exported = mvcommon.export_failed_csv(mvcommon.load_library())
+    assert exported["rows"] == 1
+    assert "download-lost" in pathlib.Path(exported["path"]).read_text(encoding="utf-8-sig")
+
+
+def test_a_chunk_lost_and_then_missed_by_attempt_2_is_requested_again_as_it_was_found(world, monkeypatch, capsys):
+    entry = _movie_entry(world, holder=False)
+    c1, c2 = "Movie [abc123].chunk.001.mkv", "Movie [abc123].chunk.002.mkv"
+    sent = []
+
+    def script(q, i):
+        if q == c1:
+            return world.chrome.start(c1, PAYLOAD_A, 20)
+        if q == c2:
+            sent.append(q)
+            return world.chrome.start(c2, None if len(sent) == 1 else PAYLOAD_B, 40)
+        return False                                        # ATTEMPT 2's blind fallback finds nothing
+
+    calls = _script(monkeypatch, script)
+
+    mainfetch.fetch_single_entry(None, entry)               # stand-alone: retried all the same, nothing recorded
+
+    out = capsys.readouterr().out
+    assert calls == [(c1, 0), (c2, 0), ("Movie [abc123].mkv", 1), (c2, 0)]
+    assert out.count(RETRY_1) == 1 and f"✅ MOVED: {c2}" in out and "✅ ENTRY COMPLETE." in out
+    assert mvcommon.read_failed() == []
+
+
+def test_attempt_2_is_the_one_re_request_of_a_chunk_lost_in_attempt_1(world, monkeypatch, capsys):
+    entry = _movie_entry(world, holder=False)
+    c1, c2 = "Movie [abc123].chunk.001.mkv", "Movie [abc123].chunk.002.mkv"
+    calls = _script(monkeypatch, lambda q, i: world.chrome.start(c1, PAYLOAD_A, 20) if q == c1
+                    else world.chrome.start(c2, None, 40))  # c2's transfer breaks whoever requests it
+
+    mainfetch.fetch_single_entry(None, entry, entry_id="mov-en-2020-movie", ctx=_session("movies"))
+
+    out = capsys.readouterr().out
+    assert calls == [(c1, 0), (c2, 0), ("Movie [abc123].mkv", 1)]           # never a third request for c2
+    assert "RETRY" not in out and out.count(_lost_twice(c2)) == 1
+    [row] = mvcommon.read_failed()
+    assert (row["account"], row["manual_id"], row["label"], row["reason"]) == (
+        "movies", "mov-en-2020-movie", "chunk 2/2", "download-lost")
+
+
+def test_a_lost_holder_is_requested_again_by_its_name(world, monkeypatch, capsys):
+    entry = _movie_entry(world)
+    c1, c2, h = "Movie [abc123].chunk.001.mkv", "Movie [abc123].chunk.002.mkv", "Movie [abc123].holder.mkv"
+    sent = []
+
+    def script(q, i):
+        if q in (c1, c2):
+            return world.chrome.start(q, PAYLOAD_A if q == c1 else PAYLOAD_B, 20)
+        if q == h:
+            sent.append(q)
+            return world.chrome.start(h, None if len(sent) == 1 else PAYLOAD_H, 30)
+        return False
+
+    calls = _script(monkeypatch, script)
+
+    mainfetch.fetch_single_entry(None, entry)
+
+    out = capsys.readouterr().out
+    assert calls[-2:] == [("Movie [abc123].mkv", 0), (h, 0)]      # ATTEMPT 2 missed it; the retry asks by name
+    assert out.count(RETRY_1) == 1 and f"✅ MOVED: {h}" in out and "✅ ENTRY COMPLETE." in out
+
+
+def test_a_lost_extra_is_requested_once_more(world, monkeypatch, capsys, sandbox):
+    _seed_demo_season(sandbox, world)
+    [extra] = mainfetch.resolve_title_extras(SEASON)
+    sent = []
+
+    def script(q, i):
+        if q != "Trailer [e1e1e1].mkv":
+            return False
+        sent.append(q)
+        return world.chrome.start(q, None if len(sent) == 1 else PAYLOAD_C, 30)
+
+    calls = _script(monkeypatch, script)
+    ctx = _session("tv")
+
+    mainfetch.fetch_single_entry(None, extra, ctx=ctx)
+
+    out = capsys.readouterr().out
+    assert calls == [("Trailer.mkv", 0), ("Trailer [e1e1e1].mkv", 0), ("Trailer [e1e1e1].mkv", 0)]
+    assert out.count(RETRY_1) == 1 and "✅ MOVED: Trailer.mkv" in out
+    assert (ctx.stats["retried"], ctx.stats["recovered"]) == (1, 1)
+
+
+# Captured at HEAD b1cff7d: ATTEMPT 2's click downloads ANOTHER item (hash mismatch, left in Downloads).
+TODAY_WRONG_ITEM = "\n🔹 PROCESSING: Show.S01E01.mkv (abc123)\n\n   === ATTEMPT 1 (1 files) ===\n   > Watching Downloads (Infinite wait if active)...\n\n   ❌ Timeout (No active downloads).\n\n   === ATTEMPT 2 (1 files) ===\n   > Watching Downloads (Infinite wait if active)...\n\n   > 🔎 Checking: Other [zzz999].mkv\n\r  🔍 Other [zzz999].mkv  [████████████████████████] 4.00 KB / 4.00 KB \n\n   ❌ Timeout (No active downloads).\n     A download was in progress, but 1 triggered file(s) never arrived. If chrome://downloads lists it as failed (e.g. 'Failed - Network error'), the transfer broke. Google Photos downloads cannot resume: re-run the fetch (files already fetched are skipped).\n\n   ❌ ENTRY INCOMPLETE.\n"
+
+
+def test_a_wrong_item_is_not_a_lost_download(world, monkeypatch, capsys):
+    # The request worked — it fetched a different item. Requesting it again would download that item again.
+    calls = _script(monkeypatch, lambda q, i: world.chrome.start("Other [zzz999].mkv", PAYLOAD_B, 60)
+                    if q == SHOW_TERM else False)
+    ctx = _session("tv")
+
+    mainfetch.fetch_single_entry(None, _whole_entry(world.tmp), entry_id=EP_ID, ctx=ctx)
+
+    assert capsys.readouterr().out == TODAY_WRONG_ITEM          # exactly today: no retry, no new line
+    assert calls == [("Show.S01E01.mkv", 0), (SHOW_TERM, 0)]
+    assert mvcommon.read_failed() == [] and ctx.stats["retried"] == 0
+
+
+def test_a_duplicate_is_not_a_lost_download(world, monkeypatch, capsys):
+    # c2's transfer breaks; ATTEMPT 2's blind index then fetches c1's item again (a duplicate, deleted).
+    entry = _movie_entry(world, holder=False)
+    c1, c2 = "Movie [abc123].chunk.001.mkv", "Movie [abc123].chunk.002.mkv"
+
+    def script(q, i):
+        if q == c1:
+            return world.chrome.start(c1, PAYLOAD_A, 20)
+        if q == c2:
+            return world.chrome.start(c2, None, 40)
+        if q == "Movie [abc123].mkv" and i == 1:
+            return world.chrome.start("Movie [abc123].chunk.001 (1).mkv", PAYLOAD_A, 30)
+        return False
+
+    calls = _script(monkeypatch, script)
+
+    mainfetch.fetch_single_entry(None, entry, entry_id="mov-en-2020-movie", ctx=_session("movies"))
+
+    out = capsys.readouterr().out
+    assert "     ⚠️ Duplicate. Deleting." in out
+    assert calls == [(c1, 0), (c2, 0), ("Movie [abc123].mkv", 1)]
+    assert "RETRY" not in out and "lost twice" not in out and mvcommon.read_failed() == []
+    assert "❌ ENTRY INCOMPLETE." in out
+
+
+def test_the_retry_starts_only_once_nothing_is_downloading(world, monkeypatch, capsys):
+    entry = _whole_entry(world.tmp)
+    stamps = []
+
+    def script(q, i):
+        if q != SHOW_TERM:
+            return False
+        stamps.append(world.clock.now)
+        if len(stamps) == 1:
+            return world.chrome.start("x", None, 700)       # still active well past the base timeout, then breaks
+        return world.chrome.start(SHOW_TERM, PAYLOAD_A, 30)
+
+    _script(monkeypatch, script)
+
+    mainfetch.fetch_single_entry(None, entry)
+
+    out = capsys.readouterr().out
+    first, again = stamps
+    assert again - first > 700                               # requested again only after the broken one was gone
+    assert "Extending wait" in out and out.count(RETRY_1) == 1 and "✅ ENTRY COMPLETE." in out
+
+
+def test_the_batch_ends_with_one_line_about_lost_downloads(world, monkeypatch, capsys, sandbox):
+    _seed_demo_season(sandbox, world, extra=False)
+    sent = []
+
+    def script(q, i):
+        if q == "S01E01 [aaa111].mkv":
+            sent.append(q)
+            return world.chrome.start(q, None if len(sent) == 1 else PAYLOAD_A, 30)   # breaks, then arrives
+        if q == "S01E02 [bbb222].mkv":
+            return world.chrome.start("x", None, 30)                                   # lost every time
+        return False
+
+    _script(monkeypatch, script)
+    _route_stubs(monkeypatch)
+
+    mainfetch.cmd_fetch_route(SEASON)
+
+    out = capsys.readouterr().out
+    line = "   > 🔁 Lost downloads: 2 requested once more (1 arrived); 1 lost twice — see the failed list."
+    assert out.count(line) == 1 and out.index(line) < out.index("✅ Batch Processing Complete.")
+    [row] = mvcommon.read_failed()
+    assert (row["account"], row["manual_id"], row["reason"]) == ("tv", SEASON + "e02", "download-lost")
+    for new in (line, RETRY_1, _lost_twice("S01E02.mkv")):          # P-13: no new line carries a web marker
+        assert not any(marker in new for marker in WEB_MARKERS)
+    web = pytest.importorskip("webui.server")
+    assert web._parse_progress(out) == {"done": 1, "total": 2}
+
+
+def test_download_lost_is_a_failed_list_reason():
+    assert "download-lost" in mvcommon.GP_FAILED_REASONS
+    assert mvcommon.GP_FAILED_REASONS[:9] == ("not-found", "ambiguous", "wrong-item", "s4-skipped", "probable",
+                                              "missing-after-backup", "missing-everywhere", "partial-set",
+                                              "inconsistent")             # P-18's reasons keep their order

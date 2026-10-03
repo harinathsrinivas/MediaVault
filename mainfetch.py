@@ -454,7 +454,10 @@ class FetchContext:
                then; start_session resets it)
     hashed     {path: ((size, mtime_ns), sha256, sha1)} — every Downloads file
                hashed this run, so none is hashed twice (IMP-B10)
-    stats      what the run counts: learned = records appended to the learned sidecar
+    stats      what the run counts: learned = records appended to the learned
+               sidecar; retried / recovered = lost downloads requested once more /
+               that then arrived; lost_twice = objects whose download was lost
+               twice (IMP-C34)
     """
 
     def __init__(self, manual=False, run_id=None):
@@ -463,7 +466,7 @@ class FetchContext:
         self.account = None
         self.downloads = None
         self.hashed = {}
-        self.stats = {"learned": 0}
+        self.stats = {"learned": 0, "retried": 0, "recovered": 0, "lost_twice": 0}
 
     def start_session(self, account):
         """A Chrome session for `account` is up: the run now fetches in it."""
@@ -793,13 +796,19 @@ def harvest_downloads(queue, ctx):
         recorded in the learned sidecar (_learn_from_download). A file that was
         already there may come from another account's session: it is still
         moved, but proves nothing about this account.
-    Returns {"timed_out": bool, "saw_download": bool} for the caller's bookkeeping."""
+    Returns, for the caller's bookkeeping (IMP-C34):
+      {"timed_out": bool,     the round ended on the timeout, nothing downloading
+       "saw_download": bool,  a .crdownload was seen during the round (IMP-C29)
+       "unmatched": int}      files that ARRIVED in this round (new to the session)
+                              and matched no pending item — a request fetched a
+                              wrong item (another one, or one already fetched)"""
     print("   > Watching Downloads (Infinite wait if active)...")
     start_time = time.time()
     base_timeout = 300  # 5 mins initial timeout
 
     processed_files = set()  # this round's files ([IMP-B10] their hashes outlive it in ctx.hashed)
     saw_download = False  # [IMP-C29] was a .crdownload ever seen during this wait?
+    unmatched = 0  # [IMP-C34] arrivals of this round that matched no pending item
 
     while True:
         # Check Active Downloads
@@ -816,7 +825,7 @@ def harvest_downloads(queue, ctx):
 
         # Check Completion ([IMP-C25] nothing pending: an item a stage gave up on is 'failed')
         if not any(i["status"] == "pending" for i in queue):
-            return {"timed_out": False, "saw_download": saw_download}
+            return {"timed_out": False, "saw_download": saw_download, "unmatched": unmatched}
 
         found_new = False
         for f in os.listdir(SYSTEM_DOWNLOADS_FOLDER):
@@ -850,6 +859,8 @@ def harvest_downloads(queue, ctx):
                 if arrived:
                     _learn_from_download(matched, sha1, ctx)
             else:
+                if arrived and not cached:
+                    unmatched += 1  # [IMP-C34] a request fetched a wrong item
                 # Duplicate check
                 if any(i["hash"] == fhash for i in queue):
                     if cached:
@@ -869,10 +880,112 @@ def harvest_downloads(queue, ctx):
             lost = sum(1 for i in queue if i["status"] == "pending" and i.get("triggered"))
             if lost:
                 print(_lost_download_note(lost, saw_download))
-            return {"timed_out": True, "saw_download": saw_download}
+            return {"timed_out": True, "saw_download": saw_download, "unmatched": unmatched}
 
         if not found_new:
             time.sleep(5)
+
+
+# ==========================================
+#   IMP-C34 — A LOST DOWNLOAD IS REQUESTED ONCE MORE
+# ==========================================
+# A Google Photos download cannot resume (no ETag / Last-Modified): a broken
+# transfer shows "Failed - Network error" at 0 B and nothing arrives (IMP-C29).
+# User ruling 2026-10-03 (DECISIONS.md §1e, PLAN Step 10 g): request such a
+# download again ONCE per object per run — whole files, chunks, holders, extras —
+# never while anything still downloads; print and count the retry; a second loss
+# puts the object on the failed list (P-18). Every request goes through _fire, so
+# the exact-item stages (IMP-C25 Step 12) get the same rule for their downloads.
+
+def _fire(item, fire):
+    """Request one object's download — fire() is truthy when a download was
+    requested (trigger_download's contract) — and keep IMP-C34's books on the
+    item: `triggered` (requested in this round, IMP-C29), `_retrigger` (how to
+    request it again) and `_retriggered` (this request follows a lost download:
+    the object's one re-request is used). Returns what fire() returned."""
+    item["triggered"] = fire()
+    if item["triggered"]:
+        item["_retrigger"] = fire
+        if item.get("_losses"):
+            item["_retriggered"] = True
+    return item["triggered"]
+
+
+def _record_lost_twice(item, ctx):
+    """[IMP-C34] One failed-list row (P-18, reason download-lost) for an object whose
+    download was lost twice: run, account, manual_id, label, uploaded_name and the
+    sha256 pin. True when written. Needs the session account and the owning id — a
+    stand-alone call has neither and writes nothing; a failed write prints one
+    warning line."""
+    loc = item.get("locator") or {}
+    if ctx.account not in mvcommon.GP_ACCOUNTS or not loc.get("manual_id"):
+        return False
+    sha256 = item.get("hash") if mvcommon._is_sha256(item.get("hash")) else None
+    try:
+        mvcommon.append_failed({"run": ctx.run_id, "account": ctx.account, "manual_id": loc["manual_id"],
+                                "label": loc.get("label"), "sha256": sha256,
+                                "uploaded_name": loc.get("uploaded_name"), "reason": "download-lost"})
+    except (OSError, ValueError) as e:
+        print(f"     ⚠️ Not recorded in the failed list ({type(e).__name__}: {e}).")
+        return False
+    return True
+
+
+def _note_losses(queue, rnd, ctx):
+    """[IMP-C34] After a harvest round (`rnd`, harvest_downloads' result): one LOSS
+    for every pending object whose download was requested in that round and never
+    came — counted only when the round ended on the timeout with nothing
+    downloading and nothing that arrived went unmatched. A file that arrived and
+    matched no pending object means a request fetched a WRONG item, which no
+    re-request fixes (and which request it was cannot be told), so such a round
+    counts no loss. A second loss ends the object for this run: status 'failed',
+    one line, one failed-list row."""
+    if not rnd.get("timed_out") or rnd.get("unmatched"):
+        return
+    for item in queue:
+        if item["status"] != "pending" or not item.get("triggered"):
+            continue
+        item["_losses"] = item.get("_losses", 0) + 1
+        if item["_losses"] < 2:
+            continue
+        item["status"] = "failed"
+        ctx.stats["lost_twice"] += 1
+        listed = "added to the failed list; " if _record_lost_twice(item, ctx) else ""
+        print(f"     ❌ Download lost twice: {item['filename']} — {listed}re-run the fetch to try again.")
+
+
+def _retry_lost_downloads(queue, ctx):
+    """[IMP-C34] Request again — ONCE — every download that was lost and has not been
+    requested since (e.g. a whole file whose only finding attempt, ATTEMPT 2, lost
+    its transfer; a chunk lost in ATTEMPT 1 was already requested again by ATTEMPT
+    2). It repeats the request that started the lost download (`_retrigger`), so
+    each retry is a full re-download. Runs after the last round, which ended with
+    nothing downloading, then harvests one more round; a second loss ends the
+    object (_note_losses)."""
+    retry = [i for i in queue if i["status"] == "pending" and i.get("_losses") == 1
+             and not i.get("_retriggered") and i.get("_retrigger")]
+    if not retry:
+        return
+    print(f"\n   === RETRY ({len(retry)} file(s) whose download was lost — requested once more) ===")
+    for item in queue:
+        if item["status"] == "pending":
+            item["triggered"] = False  # only this round's requests count
+    for item in retry:
+        ctx.stats["retried"] += 1
+        _fire(item, item["_retrigger"])
+        time.sleep(2)
+    _note_losses(queue, harvest_downloads(queue, ctx), ctx)
+    ctx.stats["recovered"] += sum(1 for i in retry if i["status"] == "done")
+
+
+def _lost_downloads_line(ctx):
+    """[IMP-C34] The run's one closing line about lost downloads, or None when
+    nothing was requested again and nothing was lost twice."""
+    s = ctx.stats
+    if not (s["retried"] or s["lost_twice"]):
+        return None
+    return (f"   > 🔁 Lost downloads: {s['retried']} requested once more ({s['recovered']} arrived); "
+            f"{s['lost_twice']} lost twice — see the failed list.")
 
 
 def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None, ctx=None):
@@ -923,11 +1036,15 @@ def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None, ctx=None):
             idx = 0 if attempt == 0 else item["fallback_index"]
 
             # [IMP-C29] Remember whether a download was requested for this file.
-            item["triggered"] = trigger_download(driver, query, idx)
+            # ([IMP-C34] _fire also keeps how to request it again.)
+            _fire(item, lambda query=query, idx=idx: trigger_download(driver, query, idx))
             time.sleep(2)
 
         # Harvest
-        harvest_downloads(queue, ctx)
+        _note_losses(queue, harvest_downloads(queue, ctx), ctx)
+
+    # [IMP-C34] A download lost and not requested since gets its one retry.
+    _retry_lost_downloads(queue, ctx)
 
     # Final Report
     if all(i["status"] == "done" for i in queue):
@@ -1384,6 +1501,9 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None)
                     except:
                         pass
 
+    lost_line = _lost_downloads_line(ctx)  # [IMP-C34] only when a download was lost
+    if lost_line:
+        print(f"\n{lost_line}")
     print("\n✅ Batch Processing Complete.")
 
 

@@ -986,7 +986,8 @@ GP_STAGES = {"s0_photo_id": "photo_id", "s0_hash": "hash", "s1_taken_second": "t
              "s4_legacy": "legacy"}
 GP_OUTCOMES = ("exactly-one", "ambiguous", "not-found", "wrong-item", "error")
 GP_FAILED_REASONS = ("not-found", "ambiguous", "wrong-item", "s4-skipped", "probable", "missing-after-backup",
-                     "missing-everywhere", "partial-set", "inconsistent")
+                     "missing-everywhere", "partial-set", "inconsistent",
+                     "download-lost")  # IMP-C34 (PLAN Step 10 g): the item was found, its download lost twice
 GP_DECISIONS = ("url", "datetime", "search", "not_uploaded", "skip")
 # failed_objects.csv (P-18) == map_photos' resolutions_todo.csv (PLAN Step 9): the plan's 17 columns plus
 # `sha256` last — the exact object key, so an edited row maps back to its object even if labels shift.

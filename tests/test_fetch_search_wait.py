@@ -197,6 +197,17 @@ def test_it_reads_the_results_only_once_they_stop_growing(sleeps, capsys):
     assert "Retry 2/2" not in out and "Not found" not in out and 5 not in sleeps   # IMP-C2 retry
 
 
+def test_it_never_reads_while_the_timeline_is_shown(sleeps):
+    # Results already visible, then the timeline flashes back (the page re-renders): ready only after two
+    # looks at results with no timeline in either — never on the look that still shows the timeline.
+    page = _Page([results(3), {"results": 3, "timeline": 2, "empty": False}, results(3)])
+
+    assert mainfetch.trigger_download(page, QUERY) is True
+
+    assert page.clicked == ["result-0"]
+    assert sleeps.count(mainfetch.SEARCH_POLL_S) == 3 and page.looks == 4
+
+
 def test_a_busy_page_is_simply_looked_at_again():
     page = _Page([results(3)], busy_looks=2)
 

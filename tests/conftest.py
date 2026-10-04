@@ -66,9 +66,9 @@ def _hermetic_gphotos_state(tmp_path, monkeypatch):
     IMP-C25 Step 11 (download hygiene) adds, for mainfetch — read module-qualified everywhere, so patching mainfetch
     alone is complete: FETCH_JOURNAL_DIR -> tmp_path/mv_state/fetch_journal (the fetch journal; real:
     ~/.mediavault/fetch_journal), SYSTEM_DOWNLOADS_FOLDER -> tmp_path/mv_downloads (NOT created: a test that harvests
-    or cleans a Downloads folder sets its own; nothing can read or delete in the real ~/Downloads), and
+    or cleans a Downloads folder sets its own; nothing can read or delete in the real ~/Downloads),
     _short_incoming_root -> a tmp folder (the long-path fallback would otherwise create <drive>:\\MV_incoming on a
-    real drive root)."""
+    real drive root), and PROCESS_TABLE -> _InertProcessTable (no real process is ever queried or terminated)."""
     real_state = os.path.normcase(os.path.join(os.path.expanduser("~"), ".mediavault"))
     real_inventory = os.path.normcase(r"D:\MediaVault_gp_inventory")
     tmp = tmp_path.resolve()
@@ -93,7 +93,20 @@ def _hermetic_gphotos_state(tmp_path, monkeypatch):
             f"Safety check failed: {what} points at the real Downloads: {path}"
     monkeypatch.setattr(mainfetch, "SYSTEM_DOWNLOADS_FOLDER", str(downloads))
     monkeypatch.setattr(mainfetch, "_short_incoming_root", lambda dest: str(short_root))
+    monkeypatch.setattr(mainfetch, "PROCESS_TABLE", _InertProcessTable())
     yield
+
+
+class _InertProcessTable:
+    """IMP-C25 Step 11 — the autouse stand-in for mainfetch.PROCESS_TABLE: it can tell nothing about any process (so
+    no real pid is ever judged alive, ours or a fetch's) and refuses to terminate one. A test of the start-up or the
+    interruption cleanup installs its own fake process table."""
+
+    def query(self, pid):
+        return None, None
+
+    def terminate(self, pid):
+        raise AssertionError(f"a test tried to terminate a real process (pid {pid})")
 
 
 @pytest.fixture()

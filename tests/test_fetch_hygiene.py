@@ -911,6 +911,290 @@ def test_a_fallback_run_journals_its_downloads_snapshot(world, monkeypatch):
     assert (entry["mode"], entry["incoming"], entry["names"]) == ("fallback", None, [SHOW_UP])
 
 
+# ===========================================================================
+# 11.e — the start-up cleanup after an interrupted fetch
+# ===========================================================================
+TV_PROFILE = mainfetch.CHROME_PROFILES["tv"]
+CHROME_TV = (f'"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" --user-data-dir={TV_PROFILE} '
+             f'--profile-directory=Default --remote-debugging-port=9222 --disable-quic about:blank')
+
+
+class _Procs:
+    """A fake process table: `alive` {pid: command line or None}; every other pid has ended. terminate() ends a
+    pid (and lets go of the files it held: on_terminate)."""
+
+    def __init__(self, alive=None):
+        self.alive = dict(alive or {})
+        self.queried, self.terminated = [], []
+        self.on_terminate = lambda pid: None
+
+    def query(self, pid):
+        self.queried.append(pid)
+        return (True, self.alive[pid]) if pid in self.alive else (False, None)
+
+    def terminate(self, pid):
+        self.terminated.append(pid)
+        self.alive.pop(pid, None)
+        self.on_terminate(pid)
+        return True
+
+
+def _procs(monkeypatch, alive=None):
+    table = _Procs(alive)
+    monkeypatch.setattr(mainfetch, "PROCESS_TABLE", table)
+    return table
+
+
+def _held_until_killed(monkeypatch, procs, pid, *names):
+    """These files stay held (undeletable) until the Chrome `pid` is terminated."""
+    locked = set(names)
+    real = mainfetch._delete_download
+    monkeypatch.setattr(mainfetch, "_delete_download",
+                        lambda path: False if os.path.basename(path) in locked else real(path))
+    procs.on_terminate = lambda p: locked.clear() if p == pid else None
+
+
+def _crashed_journal(run_id, **fields):
+    """A journal as a killed fetch leaves it (state running, its own pid 7001)."""
+    doc = {"v": 1, "run_id": run_id, "started_at": "2026-10-04T10:00:00Z", "updated_at": "2026-10-04T10:05:00Z",
+           "pid": 7001, "state": "running", "interrupted": False, "mode": "incoming", "sessions": [], "entries": [],
+           "pending_delete": []}
+    doc.update(fields)
+    path = pathlib.Path(mainfetch.FETCH_JOURNAL_DIR) / f"{run_id}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return path
+
+
+def _incoming_with(folder, *files):
+    incoming = folder / "restore" / ".mv_incoming"
+    assert mainfetch._make_incoming(str(incoming))
+    for name, data in files:
+        (incoming / name).write_bytes(data)
+    return incoming
+
+
+def test_the_next_start_terminates_only_the_recorded_chrome_and_cleans_only_named_marked_folders(
+        world, monkeypatch, capsys):
+    a = _incoming_with(world.tmp / "A", ("S01E01 [aaa111].mkv.crdownload", b"p" * 100), ("Wrong [x].mkv", b"w" * 50))
+    unmarked = world.tmp / "B" / "restore" / ".mv_incoming"                  # named, but without the marker
+    unmarked.mkdir(parents=True)
+    (unmarked / "x.mkv").write_bytes(b"x")
+    (a.parent / "keep.mkv").write_bytes(b"k")                                # beside the incoming folder: not ours
+    procs = _procs(monkeypatch, {7002: CHROME_TV,                            # the crashed run's Chrome, still running
+                                 7003: CHROME_TV.replace(TV_PROFILE, r"C:\Users\x\ChromeProfile_TV2")})
+    _held_until_killed(monkeypatch, procs, 7002, "S01E01 [aaa111].mkv.crdownload")
+    path = _crashed_journal("fetch-20261004T100000Z-7001", sessions=[
+        {"account": "tv", "chrome_pid": 7002, "user_data_dir": TV_PROFILE},
+        {"account": "movies", "chrome_pid": 7003, "user_data_dir": TV_PROFILE + "2"}],   # pid 7003 runs another dir
+        entries=[{"incoming": str(a), "cleaned": False, "mode": "incoming", "names": []},
+                 {"incoming": str(unmarked), "cleaned": False, "mode": "incoming", "names": []}])
+    ctx = mainfetch.FetchContext(run_id="fetch-20261004T120000Z-9999")
+
+    with monkeypatch.context() as m:
+        _forbid(m, world.downloads)                                           # an incoming run: ~/Downloads untouched
+        mainfetch._startup_cleanup(ctx)
+
+    out = capsys.readouterr().out
+    assert procs.terminated == [7002]                                         # never 7003: its command line differs
+    assert not a.exists() and (a.parent / "keep.mkv").exists()
+    assert (unmarked / "x.mkv").exists()                                      # no marker: never emptied
+    journal = json.loads(path.read_text(encoding="utf-8"))
+    assert (journal["state"], journal["recovered_by"], journal["pending_delete"]) == (
+        "recovered", "fetch-20261004T120000Z-9999", [])
+    assert "   > 🛑 Closed the Chrome an interrupted fetch left running (pid 7002)." in out
+    assert "   > 🧹 Cleaned 2 leftover file(s) from an interrupted fetch (0.0 GB)" in out
+
+
+@pytest.mark.parametrize("owner_cmdline, live", [
+    ("python mainfetch.py fetch tv-en-2001-demo-s01", True),     # another fetch is still running: hands off
+    (None, True),                                                 # alive, command line unreadable: cannot tell
+    ("C:\\Windows\\notepad.exe", False),                          # the pid was reused: that fetch is gone
+])
+def test_a_fetch_that_may_still_run_is_left_alone(world, monkeypatch, capsys, owner_cmdline, live):
+    a = _incoming_with(world.tmp / "A", ("x.mkv.crdownload", b"p"))
+    procs = _procs(monkeypatch, {7001: owner_cmdline, 7002: CHROME_TV})
+    path = _crashed_journal("fetch-20261004T100000Z-7001",
+                            sessions=[{"account": "tv", "chrome_pid": 7002, "user_data_dir": TV_PROFILE}],
+                            entries=[{"incoming": str(a), "cleaned": False, "mode": "incoming", "names": []}])
+
+    mainfetch._startup_cleanup(mainfetch.FetchContext())
+
+    assert (procs.terminated, (a / "x.mkv.crdownload").exists()) == (([], True) if live else ([7002], False))
+    assert json.loads(path.read_text(encoding="utf-8"))["state"] == ("running" if live else "recovered")
+
+
+def test_a_fallback_runs_leftovers_are_only_its_run_new_family_files(world, monkeypatch, capsys):
+    pre = {"Holiday.mkv": b"h", "Show.S01E01 [abc123] (1).mkv": b"old"}                   # there before that run
+    new = {"Show.S01E01 [abc123].mkv.crdownload": b"p", "Show.S01E01 [abc123] (2).mkv": b"x",   # that run's family
+           "Other [zzz999].mkv": b"o", "Unconfirmed 12345.crdownload": b"u", "notes.txt": b"n"}  # never provably ours
+    for name, data in {**pre, **new}.items():
+        (world.downloads / name).write_bytes(data)
+    _procs(monkeypatch)
+    path = _crashed_journal("fetch-20261004T100000Z-7001", mode="fallback",
+                            downloads_snapshot={name: [len(data), 1] for name, data in pre.items()},
+                            entries=[{"incoming": None, "cleaned": True, "mode": "fallback", "names": [SHOW_UP]}])
+
+    mainfetch._startup_cleanup(mainfetch.FetchContext())
+
+    assert sorted(p.name for p in world.downloads.iterdir()) == sorted(
+        ["Holiday.mkv", "Show.S01E01 [abc123] (1).mkv", "Other [zzz999].mkv", "Unconfirmed 12345.crdownload",
+         "notes.txt"])
+    assert json.loads(path.read_text(encoding="utf-8"))["state"] == "recovered"
+    assert "Cleaned 2 leftover file(s)" in capsys.readouterr().out
+
+
+def test_files_still_held_keep_the_journal_pending_for_the_next_start(world, monkeypatch, capsys):
+    a = _incoming_with(world.tmp / "A", ("x.mkv.crdownload", b"p"))
+    _procs(monkeypatch)                                   # its Chrome is gone, yet something still holds the file
+    _held(monkeypatch, "x.mkv.crdownload")
+    path = _crashed_journal("fetch-20261004T100000Z-7001", state="pending",
+                            entries=[{"incoming": str(a), "cleaned": False, "mode": "incoming", "names": []}])
+
+    mainfetch._startup_cleanup(mainfetch.FetchContext(run_id="fetch-20261004T110000Z-1"))
+
+    journal = json.loads(path.read_text(encoding="utf-8"))
+    assert (journal["state"], journal["pending_delete"]) == ("pending", [str(a / "x.mkv.crdownload")])
+    assert "1 leftover file(s) of an interrupted fetch are still in use — the next fetch tries again." in \
+        capsys.readouterr().out
+    monkeypatch.setattr(mainfetch, "_delete_download", lambda p: (os.remove(p), True)[1])   # let go at last
+
+    mainfetch._startup_cleanup(mainfetch.FetchContext(run_id="fetch-20261004T120000Z-2"))
+
+    assert json.loads(path.read_text(encoding="utf-8"))["state"] == "recovered" and not a.exists()
+    assert "Cleaned 1 leftover file(s)" in capsys.readouterr().out
+
+
+def test_finished_journals_need_nothing_and_an_unreadable_one_is_left_alone(world, monkeypatch, capsys):
+    procs = _procs(monkeypatch, {7002: CHROME_TV})
+    for state in ("clean", "recovered"):
+        _crashed_journal(f"fetch-2026100{4 if state == 'clean' else 3}T100000Z-1", state=state,
+                         sessions=[{"account": "tv", "chrome_pid": 7002, "user_data_dir": TV_PROFILE}])
+    bad = pathlib.Path(mainfetch.FETCH_JOURNAL_DIR) / "fetch-20261004T090000Z-2.json"
+    bad.write_text("{not json", encoding="utf-8")
+
+    mainfetch._startup_cleanup(mainfetch.FetchContext())
+
+    assert procs.queried == [] and procs.terminated == []
+    assert bad.read_text(encoding="utf-8") == "{not json"
+    assert capsys.readouterr().out == "   > ⚠️ An unreadable fetch journal was left alone: fetch-20261004T090000Z-2.json\n"
+
+
+def test_a_journal_naming_foreign_places_deletes_nothing(world, monkeypatch, capsys):
+    # Every delete asks the folder's name AND marker, or the run's own ~/Downloads snapshot: a damaged journal that
+    # names arbitrary places cannot delete there.
+    documents = world.tmp / "Documents"
+    documents.mkdir()
+    (documents / "thesis.docx").write_bytes(b"d")
+    (documents / mainfetch.INCOMING_MARKER).write_text("x", encoding="utf-8")        # a marker alone is not enough
+    (world.downloads / "Holiday.mkv").write_bytes(b"h")
+    _procs(monkeypatch)
+    _crashed_journal("fetch-20261004T100000Z-7001", downloads_snapshot={"Holiday.mkv": [1, 1]},
+                     entries=[{"incoming": str(documents), "cleaned": False, "mode": "fallback", "names": ["Holiday.mkv"]}],
+                     pending_delete=[str(documents / "thesis.docx"), str(world.downloads / "Holiday.mkv"),
+                                     str(world.tmp / "elsewhere.mkv")])
+    (world.tmp / "elsewhere.mkv").write_bytes(b"e")
+
+    mainfetch._startup_cleanup(mainfetch.FetchContext())
+
+    assert (documents / "thesis.docx").exists() and (world.downloads / "Holiday.mkv").exists()
+    assert (world.tmp / "elsewhere.mkv").exists()
+    assert "Cleaned" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("cmdline, expected", [
+    (CHROME_TV, TV_PROFILE),
+    (f'chrome.exe "--user-data-dir={TV_PROFILE}" --x', TV_PROFILE),                 # quoted whole argument
+    (f'chrome.exe --user-data-dir="C:\\Media\\Utils\\Chrome Profile" --x', r"C:\Media\Utils\Chrome Profile"),
+    ("chrome.exe --profile-directory=Default", None),
+])
+def test_the_profile_a_command_line_names(cmdline, expected):
+    got = mainfetch._cmdline_user_data_dir(cmdline)
+    assert got == (os.path.normcase(os.path.abspath(expected)) if expected else None)
+
+
+def test_only_a_chrome_on_exactly_that_profile_is_ours(monkeypatch):
+    _procs(monkeypatch, {1: CHROME_TV, 2: CHROME_TV.replace(TV_PROFILE, TV_PROFILE + "2"), 3: None,
+                         4: CHROME_TV.upper()})
+    assert mainfetch._chrome_still_ours(1, TV_PROFILE) is True
+    assert mainfetch._chrome_still_ours(2, TV_PROFILE) is False          # ChromeProfile_TV2 shares a prefix only
+    assert mainfetch._chrome_still_ours(3, TV_PROFILE) is False          # command line unknown: never killed
+    assert mainfetch._chrome_still_ours(4, TV_PROFILE) is True           # Windows paths: case-insensitive
+    assert mainfetch._chrome_still_ours(5, TV_PROFILE) is False          # gone
+    assert mainfetch._chrome_still_ours(None, TV_PROFILE) is False
+
+
+class _Run:
+    def __init__(self, returncode=0, stdout=""):
+        self.returncode, self.stdout = returncode, stdout
+
+
+@pytest.mark.parametrize("answer, expected", [
+    (_Run(0, "ALIVE\r\nchrome.exe --user-data-dir=C:\\x\r\n"), (True, "chrome.exe --user-data-dir=C:\\x")),
+    (_Run(0, "\ufeffALIVE\n\n"), (True, None)),
+    (_Run(0, "GONE\n"), (False, None)),
+    (_Run(1, "GONE\n"), (None, None)),
+    (_Run(0, "Get-CimInstance : Access denied\n"), (None, None)),
+    (OSError("powershell not found"), (None, None)),
+])
+def test_the_windows_process_query_never_guesses(monkeypatch, answer, expected):
+    seen = []
+
+    def run(argv, **kwargs):
+        seen.append(argv)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(mainfetch.subprocess, "run", run)
+    assert mainfetch._ProcessTable().query(4321) == expected
+    assert seen[0][:4] == ["powershell", "-NoProfile", "-NonInteractive", "-Command"]
+    assert "ProcessId=4321" in seen[0][4]
+    assert mainfetch._ProcessTable().query("4321; rm -r") == (None, None)       # only an int ever reaches a shell
+
+
+def test_the_windows_terminate_ends_the_process_tree(monkeypatch):
+    seen = []
+    monkeypatch.setattr(mainfetch.subprocess, "run", lambda argv, **k: seen.append(argv) or _Run(0))
+    assert mainfetch._ProcessTable().terminate(4321) is True
+    assert seen == [["taskkill", "/PID", "4321", "/T", "/F"]]
+    assert mainfetch._ProcessTable().terminate(0) is False and len(seen) == 1
+
+
+def test_the_start_up_cleanup_runs_inside_the_lock_after_the_pre_flight_before_chrome(world, monkeypatch, sandbox):
+    _seed_season(sandbox)
+    events = []
+
+    @contextlib.contextmanager
+    def lock(*a, **k):
+        events.append("lock")
+        yield
+        events.append("unlock")
+
+    real_preflight = mainfetch.profile_preflight
+    monkeypatch.setattr(mainfetch, "fetch_session_lock", lock)
+    monkeypatch.setattr(mainfetch, "profile_preflight", lambda a: events.append("preflight") or real_preflight(a))
+    monkeypatch.setattr(mainfetch, "_startup_cleanup", lambda ctx: events.append("cleanup"))
+    monkeypatch.setattr(mainfetch, "init_driver", lambda p="movies": events.append("init") or world.browser)
+    _script(monkeypatch, lambda q, i: False)
+
+    mainfetch.cmd_fetch_route(SEASON)
+
+    assert events[:4] == ["lock", "preflight", "cleanup", "init"] and events[-1] == "unlock"
+
+
+def test_no_start_up_cleanup_when_the_profile_is_missing(world, monkeypatch, sandbox, tmp_path):
+    _seed_season(sandbox)
+    ran = []
+    monkeypatch.setattr(mainfetch, "CHROME_PROFILES", {**mainfetch.CHROME_PROFILES, "tv": str(tmp_path / "nope")})
+    monkeypatch.setattr(mainfetch, "_startup_cleanup", lambda ctx: ran.append(ctx))
+    _route(monkeypatch, lambda profile: world.browser)
+
+    mainfetch.cmd_fetch_route(SEASON)
+
+    assert ran == [] and _journals() == []
+
+
 def test_a_driver_without_devtools_keeps_todays_downloads_flow(world, tmp_path):
     # Only a test stand-in lacks execute_cdp_cmd (a real Chrome driver always has it): today's flow, frozen in
     # tests/test_fetch_harvester.py — no redirect, no folder, no pre-flight.

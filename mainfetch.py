@@ -998,6 +998,248 @@ def _finish_downloads(driver, ctx):
         ctx.journal.end_entry(target.get("journal"), cleaned, ctx.pending_delete)
 
 
+class _ProcessTable:
+    """[IMP-C25 Step 11 e] The OS process table, as far as the fetch cleanup needs it. Windows only
+    (PowerShell's Win32_Process query, taskkill); elsewhere it can tell nothing and kills nothing.
+    tests/conftest.py replaces PROCESS_TABLE for every test with an inert stand-in."""
+
+    def query(self, pid):
+        """(alive, command line) of `pid`: (True, text or None) while it runs, (False, None) when
+        there is no such process, (None, None) when that cannot be told — never a guess."""
+        if os.name != "nt" or not mvcommon._is_int(pid) or pid <= 0:
+            return None, None
+        script = ("[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+                  f"$p = Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}'; "
+                  "if ($p) { 'ALIVE'; $p.CommandLine } else { 'GONE' }")
+        try:
+            run = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return None, None
+        lines = (run.stdout or "").lstrip("﻿").splitlines()
+        head = lines[0].strip() if lines else ""
+        if run.returncode != 0 or head not in ("ALIVE", "GONE"):
+            return None, None
+        if head == "GONE":
+            return False, None
+        return True, "\n".join(lines[1:]).strip() or None
+
+    def terminate(self, pid):
+        """End `pid` and the processes it started (taskkill /T /F); True when taskkill succeeded."""
+        if os.name != "nt" or not mvcommon._is_int(pid) or pid <= 0:
+            return False
+        try:
+            run = subprocess.run(["taskkill", "/PID", str(int(pid)), "/T", "/F"], capture_output=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return run.returncode == 0
+
+
+PROCESS_TABLE = _ProcessTable()
+_UNLOCK_WAIT_S = 10.0   # how long a cleanup waits for a terminated Chrome to let go of its files
+_UNLOCK_POLL_S = 0.5
+
+
+def _cmdline_args(cmdline):
+    """The arguments of a Windows command line: whitespace splits them outside double quotes; the
+    quotes themselves are dropped."""
+    args, current, quoted, started = [], [], False, False
+    for ch in cmdline:
+        if ch == '"':
+            quoted, started = not quoted, True
+        elif ch.isspace() and not quoted:
+            if started:
+                args.append("".join(current))
+                current, started = [], False
+        else:
+            current.append(ch)
+            started = True
+    if started:
+        args.append("".join(current))
+    return args
+
+
+def _cmdline_user_data_dir(cmdline):
+    """The --user-data-dir a command line names (normalised for comparison), or None."""
+    for arg in _cmdline_args(cmdline or ""):
+        if arg.lower().startswith("--user-data-dir="):
+            return os.path.normcase(os.path.abspath(arg[len("--user-data-dir="):]))
+    return None
+
+
+def _chrome_still_ours(pid, user_data_dir):
+    """True only when `pid` still runs AND its command line names exactly `user_data_dir` — the
+    automation Chrome a fetch launched on that profile, not a process that reused its pid."""
+    if not mvcommon._is_int(pid) or not isinstance(user_data_dir, str) or not user_data_dir:
+        return False
+    alive, cmdline = PROCESS_TABLE.query(pid)
+    return (alive is True and cmdline is not None
+            and _cmdline_user_data_dir(cmdline) == os.path.normcase(os.path.abspath(user_data_dir)))
+
+
+def read_fetch_journals():
+    """[(path, doc)] of every fetch journal in FETCH_JOURNAL_DIR, oldest first (run ids sort by
+    time); doc is None for a file that does not read as a journal. Read-only."""
+    try:
+        names = sorted(n for n in os.listdir(FETCH_JOURNAL_DIR) if n.endswith(".json"))
+    except OSError:
+        return []
+    journals = []
+    for name in names:
+        path = os.path.join(FETCH_JOURNAL_DIR, name)
+        try:
+            with open(path, encoding="utf-8") as fh:
+                doc = json.load(fh)
+        except (OSError, ValueError):
+            doc = None
+        journals.append((path, doc if isinstance(doc, dict) and doc.get("run_id") else None))
+    return journals
+
+
+def _journal_unfinished(doc):
+    return isinstance(doc, dict) and doc.get("state") not in _JOURNAL_DONE
+
+
+def _journal_is_live(doc):
+    """True while the run that writes `doc` may still be going: a 'running' journal whose process
+    still runs mainfetch, or cannot be told apart — then it is left alone. (A journal of this very
+    process is not live: one process runs one fetch at a time.)"""
+    if doc.get("state") != "running":
+        return False
+    pid = doc.get("pid")
+    if not mvcommon._is_int(pid) or pid == os.getpid():
+        return False
+    alive, cmdline = PROCESS_TABLE.query(pid)
+    if alive is None:
+        return True
+    return alive and (cmdline is None or "mainfetch" in cmdline.lower())
+
+
+def _journal_files(doc):
+    """What a journal's run may have left behind, by P-12's rules — (incoming folders, pending
+    paths, run-new expected-family files in ~/Downloads). The fallback part needs the journal's
+    ~/Downloads snapshot (without one nothing there is touched) and reads ~/Downloads only then."""
+    folders, seen = [], set()
+    for entry in doc.get("entries") or []:
+        path = entry.get("incoming") if isinstance(entry, dict) else None
+        if isinstance(path, str) and path and not entry.get("cleaned") and os.path.normcase(path) not in seen:
+            seen.add(os.path.normcase(path))
+            folders.append(path)
+    pending = [p for p in doc.get("pending_delete") or [] if isinstance(p, str) and p]
+    downloads = []
+    snapshot = doc.get("downloads_snapshot")
+    family = sorted({name for entry in doc.get("entries") or [] if isinstance(entry, dict)
+                     and entry.get("mode") == "fallback" for name in entry.get("names") or [] if isinstance(name, str)})
+    if isinstance(snapshot, dict) and family:
+        before = {_family_key(name) for name in snapshot}
+        try:
+            names = sorted(os.listdir(SYSTEM_DOWNLOADS_FOLDER))
+        except OSError:
+            names = []
+        downloads = [os.path.join(SYSTEM_DOWNLOADS_FOLDER, n) for n in names
+                     if _family_key(n) not in before and _in_family(n, family)
+                     and os.path.isfile(os.path.join(SYSTEM_DOWNLOADS_FOLDER, n))]
+    return folders, pending, downloads
+
+
+def _may_delete_pending(path, doc):
+    """A journal's pending path may go only if it still lies in a marked incoming folder, or is
+    a run-new expected-family file directly in ~/Downloads (a fallback run's)."""
+    folder = os.path.dirname(os.path.abspath(path))
+    if _is_incoming_dir(folder):
+        return True
+    snapshot = doc.get("downloads_snapshot")
+    if os.path.normcase(folder) != os.path.normcase(os.path.abspath(SYSTEM_DOWNLOADS_FOLDER)) \
+            or not isinstance(snapshot, dict):
+        return False
+    name = os.path.basename(path)
+    family = [n for e in doc.get("entries") or [] if isinstance(e, dict) and e.get("mode") == "fallback"
+              for n in e.get("names") or [] if isinstance(n, str)]
+    return _family_key(name) not in {_family_key(n) for n in snapshot} and _in_family(name, family)
+
+
+def _clean_journal_files(doc):
+    """Delete what `doc`'s run left (see _journal_files), waiting up to _UNLOCK_WAIT_S for files a
+    just-terminated Chrome still holds. Returns (deleted [(path, size)], still held [path])."""
+    folders, pending, downloads = _journal_files(doc)
+    deleted, held = [], []
+    deadline = time.time() + _UNLOCK_WAIT_S
+    while True:
+        held = []
+        for folder in folders:
+            gone, locked = _empty_incoming(folder)
+            deleted += [(os.path.join(folder, name), size) for name, size in gone]
+            held += locked
+            if not locked:
+                _remove_incoming(folder)
+        for path in pending + downloads:
+            allowed = path in downloads or _may_delete_pending(path, doc)   # downloads: vetted by _journal_files
+            if not allowed or not os.path.isfile(path):
+                continue
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = 0
+            if _delete_download(path):
+                deleted.append((path, size))
+            else:
+                held.append(path)
+        pending = [p for p in pending if p in held]
+        downloads = [p for p in downloads if p in held]
+        if not held or time.time() >= deadline:
+            return deleted, held
+        time.sleep(_UNLOCK_POLL_S)
+
+
+def _startup_cleanup(ctx):
+    """[IMP-C25 Step 11 e — P-12 rule 3] Before a fetch run's first Chrome session (inside the
+    fetch lock): finish what an interrupted earlier fetch left. For every unfinished journal
+    (not clean / recovered) that is not a fetch still running:
+      * its Chrome is terminated — only a recorded pid that still runs AND whose command line
+        names that session's profile folder (_chrome_still_ours);
+      * the leftovers of every incoming folder it names (marked folders only), its pending files,
+        and — for a ~/Downloads fallback run — ONLY files that appeared during that run and belong
+        to its expected-name family are deleted; emptied incoming folders are removed;
+      * it is marked recovered (or stays pending, listing what Chrome still holds, for the next run).
+    One summary line when something was deleted. An unreadable journal is reported and left alone.
+    Never raises (a cleanup must not stop the fetch)."""
+    total, size, terminated = 0, 0, []
+    for path, doc in read_fetch_journals():
+        if doc is None:
+            print(f"   > ⚠️ An unreadable fetch journal was left alone: {os.path.basename(path)}")
+            continue
+        if doc.get("run_id") == ctx.run_id or not _journal_unfinished(doc):
+            continue
+        try:
+            if _journal_is_live(doc):
+                continue
+            for session in doc.get("sessions") or []:
+                pid = session.get("chrome_pid") if isinstance(session, dict) else None
+                if _chrome_still_ours(pid, session.get("user_data_dir")) and PROCESS_TABLE.terminate(pid):
+                    terminated.append(pid)
+            deleted, held = _clean_journal_files(doc)
+        except Exception as e:  # a cleanup problem must never stop the fetch
+            print(f"   > ⚠️ Could not clean up after the interrupted fetch {doc.get('run_id')}: {e}")
+            continue
+        total += len(deleted)
+        size += sum(s for _, s in deleted)
+        doc["pending_delete"] = held
+        doc["state"] = "pending" if held else "recovered"
+        doc["recovered_by"] = ctx.run_id
+        doc["updated_at"] = _utc_now()
+        try:
+            _write_json_atomic(path, doc)
+        except OSError as e:
+            print(f"   > ⚠️ Could not update the fetch journal {os.path.basename(path)}: {e}")
+        if held:
+            print(f"   > ⏳ {len(held)} leftover file(s) of an interrupted fetch are still in use — the next fetch "
+                  f"tries again.")
+    for pid in terminated:
+        print(f"   > 🛑 Closed the Chrome an interrupted fetch left running (pid {pid}).")
+    if total:
+        print(f"   > 🧹 Cleaned {total} leftover file(s) from an interrupted fetch ({size / 1024 ** 3:.1f} GB)")
+
+
 def _journal_sync(ctx, queue):
     """[11 d] Bring the current entry's object states up to date in the fetch journal (a no-op without one)."""
     if ctx.journal is not None and ctx.target is not None:
@@ -2380,7 +2622,9 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None,
                               f"stay in their restore folder and are skipped.")
                         return
                     if not n:
-                        # [IMP-C25 Step 11 d] The run's journal exists before its first Chrome starts.
+                        # [IMP-C25 Step 11 e] An interrupted earlier fetch is cleaned up first (P-12 rule 3),
+                        # [11 d] and this run's journal exists before its first Chrome starts.
+                        _startup_cleanup(ctx)
                         ctx.journal = FetchJournal(ctx.run_id)
                     # Pass the selected profile
                     driver = init_driver(profile)

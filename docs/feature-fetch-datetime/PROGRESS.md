@@ -112,10 +112,11 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 ## In-progress sub-state
 `Step 11 — dispatched 2026-10-04 to executor-fable (fable) · sub-tasks: [x] 11.a incoming dir + long-path + disk
 pre-flight + _set_download_dir (a29d604) · [x] 11.b harvester modes incoming / fallback / legacy, wired into
-_fetch_items + conftest redirects of ~/Downloads and the long-path root (the commit that ticks this) · [ ] 11.c
-end-of-entry cleanup + pending_delete ← next · [ ] 11.d fetch journal · [ ] 11.e start-up cleanup · [ ] 11.f
-interruption handling · [ ] 11.g fetch_cleanup [--apply] · [ ] 11.h verify_restore tempdir · then disarm probes,
-full + smoke`
+_fetch_items + conftest redirects of ~/Downloads and the long-path root (60cf774) · [x] 11.c end-of-entry cleanup
+(leftovers deleted + listed, held files → ctx.pending_delete, entry-start sweep of a shared folder; the commit that
+ticks this) · [ ] 11.d fetch journal ← next · [ ] 11.e start-up cleanup · [ ] 11.f interruption handling (+ the
+run-end retry of pending_delete after Chrome closes) · [ ] 11.g fetch_cleanup [--apply] · [ ] 11.h verify_restore
+tempdir · then disarm probes, full + smoke`
 `resumed 2026-10-04 by executor-fable after a usage-limit pause (tree clean at c01be08; nothing to keep or discard)`
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes
 alone; re-run it before treating a red full suite as a regression.

@@ -287,6 +287,8 @@ class _Browser(_CdpDriver):
         self.saved.append((str(folder), final))
 
         def finish():
+            if not partial.exists():
+                return                   # deleted while still downloading: that transfer is over
             partial.unlink()
             if payload is not None:
                 (folder / final).write_bytes(payload)
@@ -655,6 +657,114 @@ def test_without_any_incoming_folder_the_entry_points_chrome_at_downloads(world,
     assert world.browser.saved == [(str(world.downloads), SHOW_UP)]
     assert "✅ MOVED: Show.S01E01.mkv" in out
     assert (_restore(entry) / ".mv_incoming").read_bytes() == b"a file is in the way"   # not ours: untouched
+
+
+def _held(monkeypatch, *names):
+    """Chrome still holds these files (a download still running): deleting them fails."""
+    real = mainfetch._delete_download
+
+    def delete(path):
+        return False if os.path.basename(path) in names else real(path)
+
+    monkeypatch.setattr(mainfetch, "_delete_download", delete)
+
+
+# ===========================================================================
+# 11.c — the end of an entry: the incoming folder is emptied and removed; what Chrome holds is pending
+# ===========================================================================
+def test_a_surplus_download_still_running_at_the_end_is_deleted_and_listed(world, monkeypatch, capsys):
+    entry = _whole_entry(world.tmp)
+
+    def script(q, i):
+        if q != SHOW_UP:
+            return False
+        world.browser.start("Extra [qqq999].mkv", PAYLOAD_X, 1000)   # a surplus download, still running at the end
+        return world.browser.start(SHOW_UP, PAYLOAD_A, 10)
+
+    _script(monkeypatch, script)
+    ctx = _session("tv")
+
+    mainfetch.fetch_single_entry(world.browser, entry, entry_id=EP_ID, ctx=ctx)
+
+    out = capsys.readouterr().out
+    assert "   > 🧹 Deleted 1 unfinished or surplus download(s): Extra [qqq999].mkv.crdownload (7.00 B)" in out
+    assert out.index("✅ MOVED: Show.S01E01.mkv") < out.index("🧹 Deleted") < out.index("✅ ENTRY COMPLETE.")
+    assert sorted(p.name for p in _restore(entry).iterdir()) == ["Show.S01E01.mkv"]   # folder empty, so removed
+    assert ctx.pending_delete == []
+    world.clock.sleep(2000)                               # the surplus transfer ends; nothing reappears
+    assert sorted(p.name for p in _restore(entry).iterdir()) == ["Show.S01E01.mkv"]
+
+
+def test_a_file_chrome_still_holds_is_pending_and_its_folder_stays(world, monkeypatch, capsys):
+    entry = _whole_entry(world.tmp)
+    _held(monkeypatch, "Extra [qqq999].mkv.crdownload")
+
+    def script(q, i):
+        if q != SHOW_UP:
+            return False
+        world.browser.start("Extra [qqq999].mkv", PAYLOAD_X, 1000)
+        return world.browser.start(SHOW_UP, PAYLOAD_A, 10)
+
+    _script(monkeypatch, script)
+    ctx = _session("tv")
+
+    mainfetch.fetch_single_entry(world.browser, entry, entry_id=EP_ID, ctx=ctx)
+
+    out = capsys.readouterr().out
+    incoming = _restore(entry) / ".mv_incoming"
+    held = incoming / "Extra [qqq999].mkv.crdownload"
+    assert ctx.pending_delete == [str(held)]
+    assert f"   > ⏳ 1 file(s) in {incoming} are still in use by Chrome — deleted once Chrome has closed." in out
+    assert sorted(p.name for p in incoming.iterdir()) == [mainfetch.INCOMING_MARKER, held.name]   # kept, marked
+    assert "✅ ENTRY COMPLETE." in out
+
+
+def test_an_earlier_entrys_held_leftover_is_never_taken_for_this_entrys_download(world, monkeypatch, capsys):
+    # The episodes of a season share one restore folder, so one incoming folder: E01's surplus download is still
+    # running when E02 begins. It is not E02's — never hashed, never counted as a wrong item for IMP-C34.
+    folder = world.tmp / "season"
+    folder.mkdir()
+    incoming = folder / "restore" / ".mv_incoming"
+    assert mainfetch._make_incoming(str(incoming))
+    leftover = incoming / "S01E01 [aaa111] (1).mkv.crdownload"
+    leftover.write_bytes(b"partial")
+    stale = incoming / "S01E01 [aaa111].mkv.crdownload"                 # a dead partial: deleted at once
+    stale.write_bytes(b"")
+    _held(monkeypatch, leftover.name)
+    e02 = {"filename": "S01E02.mkv", "short_id": "bbb222", "folder_path": str(folder), "hash": _sha(PAYLOAD_B),
+           "search_term": "S01E02 [bbb222].mkv"}
+    queue = mainfetch.build_fetch_queue(e02, str(folder / "restore"), entry_id=SEASON + "e02")
+    ctx = _session("tv")
+
+    assert mainfetch._prepare_downloads(world.browser, queue, ctx, e02, SEASON + "e02") is True
+    out = capsys.readouterr().out
+    assert f"   > 🧹 Deleted 1 leftover file(s) from {incoming}: {stale.name} (0 B)" in out
+    assert ctx.pending_delete == [str(leftover)]
+    leftover.rename(incoming / "S01E01 [aaa111] (1).mkv")               # E01's surplus transfer finishes now
+    (incoming / "S01E01 [aaa111] (1).mkv").write_bytes(PAYLOAD_A)
+    queue[0]["triggered"] = True                                        # E02's own request never delivers
+
+    result = mainfetch.harvest_downloads(queue, ctx)
+
+    assert result == {"timed_out": True, "saw_download": False, "unmatched": 0}   # so C34 may book E02's loss
+    assert "Checking: S01E01" not in capsys.readouterr().out
+    mainfetch._finish_downloads(world.browser, ctx)                     # now unheld: deleted, folder removed
+    assert not incoming.exists()
+
+
+def test_a_held_file_in_the_downloads_fallback_is_pending_not_reported_deleted(world, monkeypatch, capsys):
+    path = world.downloads / SHOW_UP
+    path.write_bytes(PAYLOAD_X)
+    _held(monkeypatch, SHOW_UP)
+    ctx = mainfetch.FetchContext()
+    ctx.run_downloads = {}                                              # it appeared during the run
+    target = {"mode": "fallback", "dir": str(world.downloads), "family": [SHOW_UP], "handled": set()}
+
+    mainfetch._drop_unmatched(SHOW_UP, str(path), False, False, target, ctx)
+
+    assert path.exists() and ctx.pending_delete == [str(path)]
+    assert "still in use, deleted once Chrome has closed: Show.S01E01 [abc123].mkv (4.00 KB)" in \
+        capsys.readouterr().out
 
 
 def test_a_driver_without_devtools_keeps_todays_downloads_flow(world, tmp_path):

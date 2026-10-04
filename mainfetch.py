@@ -725,6 +725,44 @@ def _remove_incoming(path):
     return True
 
 
+def _empty_incoming(path):
+    """[P-12 rules 1–2] Delete every file directly in the incoming folder `path` except its marker —
+    all of them disposable (unverified partials, surplus or wrong downloads). Returns (deleted
+    [(name, size)], locked [paths Chrome still holds]). Does nothing unless _is_incoming_dir(path);
+    never descends into a sub-folder (Chrome creates none); never raises."""
+    deleted, locked = [], []
+    if not _is_incoming_dir(path):
+        return deleted, locked
+    try:
+        names = sorted(os.listdir(path))
+    except OSError:
+        return deleted, locked
+    for name in names:
+        full = os.path.join(path, name)
+        if name == INCOMING_MARKER or not os.path.isfile(full):
+            continue
+        try:
+            size = os.path.getsize(full)
+        except OSError:
+            size = 0
+        if _delete_download(full):
+            deleted.append((name, size))
+        else:
+            locked.append(full)
+    return deleted, locked
+
+
+def _listing(files):
+    """'a.mkv (1.00 GB), b.mkv.crdownload (0 B)' for [(name, size)]."""
+    return ", ".join(f"{name} ({mvcommon.human_readable_size(size)})" for name, size in files)
+
+
+def _add_pending(ctx, paths):
+    for path in paths:
+        if path not in ctx.pending_delete:
+            ctx.pending_delete.append(path)
+
+
 def _prepare_downloads(driver, queue, ctx, entry=None, owner_id=None):
     """[IMP-C25 Step 11 a] Before the entry's first request: decide where its downloads land and
     point Chrome there (P-12). Sets ctx.target (FetchContext) with one of three modes:
@@ -742,7 +780,7 @@ def _prepare_downloads(driver, queue, ctx, entry=None, owner_id=None):
     dest = queue[0]["dest"]
     family = _expected_names(queue)
     target = {"mode": "legacy", "dir": SYSTEM_DOWNLOADS_FOLDER, "dest": dest, "incoming": None,
-              "family": family, "handled": set()}
+              "family": family, "handled": set(), "foreign": set()}
     if not hasattr(driver, "execute_cdp_cmd"):
         ctx.target = target
         return True
@@ -752,6 +790,14 @@ def _prepare_downloads(driver, queue, ctx, entry=None, owner_id=None):
     if not ctx.redirect_refused:
         incoming = _incoming_location(dest, family + [item["filename"] for item in queue])
         if incoming is not None and _make_incoming(incoming):
+            # [11 c] The folder may still hold an earlier entry's leftovers (the episodes of a season share one
+            # restore folder) or a crashed run's: disposable — deleted now; one Chrome still writes is never taken
+            # for this entry's download (target["foreign"]) and is deleted later.
+            swept, locked = _empty_incoming(incoming)
+            if swept:
+                print(f"   > 🧹 Deleted {len(swept)} leftover file(s) from {incoming}: {_listing(swept)}")
+            _add_pending(ctx, locked)
+            target["foreign"] = {_family_key(os.path.basename(p)) for p in locked}
             if _point_downloads(driver, incoming):
                 target.update(mode="incoming", dir=incoming, incoming=incoming)
                 driver._mv_download_dir = incoming   # re-applied on every Photos tab (use_photos_tab)
@@ -773,12 +819,26 @@ def _prepare_downloads(driver, queue, ctx, entry=None, owner_id=None):
 
 
 def _finish_downloads(driver, ctx):
-    """[IMP-C25 Step 11 c] The end of an entry's part in this session (after IMP-C34's retry round):
-    the driver is disarmed and the incoming folder, empty again, is removed. Clears ctx.target."""
+    """[IMP-C25 Step 11 c] The end of an entry's part in this session (after IMP-C34's retry round,
+    whose harvest is the last look): the driver is disarmed; the incoming folder must be empty —
+    whatever is still in it (a partial of a broken transfer, a surplus download) is deleted and
+    listed, and the folder removed; a file Chrome still holds (a download still running) goes to
+    ctx.pending_delete and the folder stays until it is deleted (after Chrome closes, else at the
+    next start-up). Called once per session for an entry split across accounts, so each session
+    starts with an empty folder. Clears ctx.target."""
     target, ctx.target = ctx.target, None
     if getattr(driver, "_mv_download_dir", None):
         driver._mv_download_dir = None
-    if target and target["mode"] == "incoming":
+    if not target or target["mode"] != "incoming":
+        return
+    deleted, locked = _empty_incoming(target["incoming"])
+    if deleted:
+        print(f"   > 🧹 Deleted {len(deleted)} unfinished or surplus download(s): {_listing(deleted)}")
+    if locked:
+        _add_pending(ctx, locked)
+        print(f"   > ⏳ {len(locked)} file(s) in {target['incoming']} are still in use by Chrome — deleted once "
+              f"Chrome has closed.")
+    else:
         _remove_incoming(target["incoming"])
 
 
@@ -795,10 +855,14 @@ def _watched_names(folder, mode):
 
 def _harvestable(name, mode, target):
     """Whether the harvester looks at the finished file `name`: legacy — a .mkv / .mp4, as before;
-    incoming — any file but the marker (chunks, FLAC holders, extras of any extension); fallback —
-    a .mkv / .mp4 or a name of the entry's expected-name family."""
+    incoming — any file but the marker (chunks, FLAC holders, extras of any extension) and but an
+    earlier entry's leftover Chrome still held when this entry began, or what that partial became
+    (target["foreign"] — never this entry's download; deleted when the entry ends); fallback — a
+    .mkv / .mp4 or a name of the entry's expected-name family."""
     if mode == "incoming":
-        return name != INCOMING_MARKER
+        key = _family_key(name)
+        foreign = target.get("foreign") or ()
+        return name != INCOMING_MARKER and key not in foreign and key + _CRDOWNLOAD not in foreign
     if name.endswith(".mkv") or name.endswith(".mp4"):
         return True
     return mode == "fallback" and _in_family(name, target["family"])
@@ -834,17 +898,19 @@ def _drop_unmatched(name, path, duplicate, cached, target, ctx):
     if target["mode"] == "fallback":
         run_new = ctx.run_downloads is not None and _family_key(name) not in ctx.run_downloads
         deletable = run_new and _in_family(name, target["family"])
+    gone = _delete_download(path) if deletable else False
+    if deletable and not gone:
+        _add_pending(ctx, [path])  # Chrome still holds it: deleted once Chrome has closed
     if duplicate:
         if cached:
             print(f"\n   > 🔎 Checking: {name}")
         if deletable:
             print("     ⚠️ Duplicate. Deleting.")
-            _delete_download(path)
         else:
             print("     ⚠️ Duplicate — left in Downloads (not provably this fetch's download).")
     elif deletable:
-        _delete_download(path)
-        print(f"     🗑️ Not an expected file — deleted: {name} ({mvcommon.human_readable_size(size)})")
+        what = "deleted" if gone else "still in use, deleted once Chrome has closed"
+        print(f"     🗑️ Not an expected file — {what}: {name} ({mvcommon.human_readable_size(size)})")
     if not deletable and run_new:
         ctx.left[name] = size
 
@@ -921,6 +987,9 @@ class FetchContext:
                first used the fallback — a name not in it appeared during the run
     left       {name: size} — files that appeared in ~/Downloads during the run (the
                fallback) and were neither moved nor deleted: listed when the run ends
+    pending_delete  [path] — files the run had to delete but Chrome still held (a
+               download still running when its entry ended): retried once Chrome is
+               closed, else by the next run's start-up cleanup
     """
 
     def __init__(self, manual=False, run_id=None):
@@ -936,6 +1005,7 @@ class FetchContext:
         self.redirect_refused = False
         self.run_downloads = None
         self.left = {}
+        self.pending_delete = []
         self.hinted = False  # the incoming-mode "Chrome ignored the folder?" hint was printed
 
     def start_session(self, account):

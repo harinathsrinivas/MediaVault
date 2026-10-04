@@ -1364,6 +1364,192 @@ def test_the_windows_debug_port_query_never_guesses(monkeypatch, stdout, code, e
     assert "Get-NetTCPConnection -LocalPort 9222 -State Listen" in seen[0][4]
 
 
+# ===========================================================================
+# 11.g — fetch_cleanup [--apply]
+# ===========================================================================
+MOVIE_ID, LOCAL_ID, ALIAS_ID = "mov-en-2020-film", "mov-en-2021-local", SEASON + "e03"
+
+
+@pytest.fixture()
+def lock_in_tmp(tmp_path, monkeypatch):
+    """The fetch lock file under tmp_path (never ~/.mediavault/locks)."""
+    lock_dir = tmp_path / "mv_locks"
+    monkeypatch.setattr(mvcommon, "MV_LOCK_DIR", str(lock_dir))
+    monkeypatch.setattr(mvcommon, "FETCH_SESSION_LOCK", str(lock_dir / "fetch_session.lock"))
+    return lock_dir / "fetch_session.lock"
+
+
+def _tree(root):
+    """{path: "dir" | (size, mtime_ns)} of everything under root."""
+    out = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        for d in dirnames:
+            out[os.path.join(dirpath, d)] = "dir"
+        for f in filenames:
+            st = os.stat(os.path.join(dirpath, f))
+            out[os.path.join(dirpath, f)] = (st.st_size, st.st_mtime_ns)
+    return out
+
+
+def _seed_cleanup_world(sandbox, world):
+    """A library (a season with an alias and an extra, a split movie, a local-only movie) plus everything a cleanup
+    may meet; returns (expected plan paths, things that must survive)."""
+    root = sandbox["local_root"]
+    season, movie, local = (root / "Series" / "Demo" / "Season 01", root / "Movies" / "Film (2020)",
+                            root / "Movies" / "Local (2021)")
+    for folder in (season, movie, local):
+        folder.mkdir(parents=True)
+    ep1, ep2 = SEASON + "e01", SEASON + "e02"
+    archived = {"status": "archived", "uploaded": True}
+    mvcommon.save_library({
+        SEASON: {"type": "season_map", "folder_path": str(season), "total_episodes": 3, "children": [ep1, ep2, ALIAS_ID],
+                 "extras": {"groups": {"Specials": {"items": [dict(
+                     archived, filename="Trailer.mkv", sub_rel="Trailer.mkv", hash=_sha("trailer"), short_id="e1e1e1",
+                     search_term="Trailer [e1e1e1].mkv")]}}}},
+        ep1: dict(archived, filename="S01E01.mkv", folder_path=str(season), hash=_sha("e1"), parent_id=SEASON,
+                  short_id="aaa111"),
+        ep2: dict(archived, filename="S01E02.mkv", folder_path=str(season), hash=_sha("e2"), parent_id=SEASON,
+                  short_id="bbb222"),
+        ALIAS_ID: {"type": "multi_ep_alias", "alias_of": ep2, "parent_id": SEASON},
+        MOVIE_ID: dict(archived, filename="Film.mkv", folder_path=str(movie), hash=_sha("film"), short_id="f1f1f1",
+                       split_info={"is_split": True, "total_chunks": 2, "chunks": [
+                           {"filename": "Film [f1f1f1].chunk.001.mkv", "hash": _sha("c1")},
+                           {"filename": "Film [f1f1f1].chunk.002.mkv", "hash": _sha("c2")}]}),
+        LOCAL_ID: {"filename": "Local.mkv", "folder_path": str(local), "hash": _sha("local"), "short_id": "l0l0l0",
+                   "status": "local_ready", "uploaded": False},
+    })
+    d = world.downloads
+    expected = [d / "S01E01 [aaa111].mkv", d / "S01E02 [bbb222] (1).mkv", d / "Film [f1f1f1].chunk.002.mkv.crdownload",
+                d / "Trailer [e1e1e1].mkv"]
+    survive = [d / "Local [l0l0l0].mkv",          # never uploaded: no download is named like it
+               d / "S01E01.mkv", d / "Holiday.mkv", d / "Unconfirmed 123.crdownload", d / "notes.txt"]
+    for path in expected + survive:
+        path.write_bytes(b"leftover")
+    (d / "S01E01 [aaa111] (2).mkv").mkdir()       # a folder, even with such a name, is never a leftover file
+    season_in = _incoming_with(season, ("S01E02 [bbb222].mkv.crdownload", b"partial"))
+    (season / "restore" / "S01E01.mkv").write_bytes(b"staged")                     # beside it: a restore file
+    extras_in = _incoming_with(season / "Specials")                                # marked, empty
+    unmarked = movie / "restore" / ".mv_incoming"                                  # no marker: never touched
+    unmarked.mkdir(parents=True)
+    (unmarked / "x.mkv").write_bytes(b"x")
+    temp_in = _incoming_with(world.tmp / "T" / "tv-en-2001-demo-s01e01", ("S01E01 [aaa111].mkv.crdownload", b"p"))
+    short_root = pathlib.Path(mainfetch._short_incoming_root(str(season)))
+    short_in = short_root / "0a1b2c3d"
+    assert mainfetch._make_incoming(str(short_in))
+    (short_in / "y.mkv").write_bytes(b"y")
+    (short_root / "mine").mkdir()
+    (short_root / "mine" / "z.txt").write_bytes(b"z")
+    _crashed_journal("fetch-20261004T100000Z-7001", entries=[
+        {"incoming": str(temp_in), "cleaned": False, "mode": "incoming", "names": []}])    # only a journal knows it
+    _crashed_journal("fetch-20261003T100000Z-7000", state="clean",
+                     entries=[{"incoming": str(world.tmp / "gone"), "cleaned": True, "mode": "incoming"}])
+    expected += [season_in / "S01E02 [bbb222].mkv.crdownload", temp_in / "S01E01 [aaa111].mkv.crdownload",
+                 short_in / "y.mkv"]
+    survive += [season / "restore" / "S01E01.mkv", unmarked / "x.mkv", short_root / "mine" / "z.txt"]
+    return {"expected": sorted(str(p) for p in expected), "survive": survive, "folders": [season_in, extras_in, temp_in,
+            short_in], "unmarked": [unmarked, short_root / "mine"]}
+
+
+def test_the_fetch_cleanup_dry_run_lists_exactly_the_leftovers_and_writes_nothing(
+        world, sandbox, lock_in_tmp, monkeypatch, capsys):
+    seeded = _seed_cleanup_world(sandbox, world)
+    _procs(monkeypatch)
+    import main
+    before = _tree(world.tmp)
+
+    plan = main.cmd_fetch_cleanup()
+
+    assert _tree(world.tmp) == before and not lock_in_tmp.exists()      # writes nothing: no file, folder or lock
+    assert sorted(f["path"] for f in plan["files"]) == seeded["expected"]
+    assert sorted(plan["folders"]) == sorted(str(p) for p in seeded["folders"])
+    assert sorted(plan["skipped"]) == sorted(str(p) for p in seeded["unmarked"])
+    assert [j["doc"]["run_id"] for j in plan["journals"]] == ["fetch-20261004T100000Z-7001"]
+    out = capsys.readouterr().out
+    assert out.startswith("=== FETCH CLEANUP — dry run: nothing is deleted ===")
+    assert "     S01E01 [aaa111].mkv · 8.00 B · named like tv-en-2001-demo-s01e01 (whole)" in out
+    assert "     Trailer [e1e1e1].mkv · 8.00 B · named like tv-en-2001-demo-s01 (extra Specials/Trailer.mkv)" in out
+    assert "   Total: 7 file(s), " in out and "python main.py fetch_cleanup --apply" in out
+
+
+def test_fetch_cleanup_apply_deletes_exactly_the_dry_run_list(world, sandbox, lock_in_tmp, monkeypatch, capsys):
+    seeded = _seed_cleanup_world(sandbox, world)
+    _procs(monkeypatch)                                        # the journal's fetch (pid 7001) is gone
+    import main
+    listed = sorted(f["path"] for f in main.cmd_fetch_cleanup()["files"])
+    before = _tree(world.tmp)
+
+    result = main.cmd_fetch_cleanup(apply=True)
+
+    assert sorted(p for p, _ in result["deleted"]) == listed == seeded["expected"]
+    after = _tree(world.tmp)
+    gone = sorted(set(before) - set(after))
+    marked = [str(p) for p in seeded["folders"]] + [str(p / mainfetch.INCOMING_MARKER) for p in seeded["folders"]]
+    assert gone == sorted(listed + marked)                    # the files listed + the emptied marked folders, no more
+    assert all(p.exists() for p in seeded["survive"]) and all(p.exists() for p in seeded["unmarked"])
+    assert (result["folders_removed"], result["journals_recovered"]) == (4, 1)
+    assert [json.loads(p.read_text(encoding="utf-8"))["state"]
+            for p in sorted(pathlib.Path(mainfetch.FETCH_JOURNAL_DIR).glob("*.json"))] == ["clean", "recovered"]
+    assert not lock_in_tmp.exists()                           # the lock is released again
+    assert "✅ Deleted 7 file(s)" in capsys.readouterr().out
+
+
+def test_fetch_cleanup_apply_re_checks_every_file_before_deleting(world, sandbox, lock_in_tmp, monkeypatch, capsys):
+    seeded = _seed_cleanup_world(sandbox, world)
+    plan = mainfetch.fetch_cleanup_plan(mvcommon.load_library())
+    grown, vanished = world.downloads / "S01E01 [aaa111].mkv", world.downloads / "Trailer [e1e1e1].mkv"
+    grown.write_bytes(b"grew since the listing")
+    vanished.unlink()
+    season_in = seeded["folders"][0]
+    (season_in / mainfetch.INCOMING_MARKER).unlink()          # no longer a MediaVault download folder
+
+    result = mainfetch.fetch_cleanup_apply(plan)
+
+    kept = dict(result["kept"])
+    assert kept == {str(grown): "changed since it was listed", str(vanished): "already gone",
+                    str(season_in / "S01E02 [bbb222].mkv.crdownload"):
+                        "its folder is no longer a MediaVault download folder"}
+    assert grown.exists() and (season_in / "S01E02 [bbb222].mkv.crdownload").exists()
+    assert len(result["deleted"]) == 4
+
+
+def test_fetch_cleanup_apply_is_refused_while_a_fetch_holds_the_lock(world, sandbox, lock_in_tmp, monkeypatch, capsys):
+    seeded = _seed_cleanup_world(sandbox, world)
+    lock_in_tmp.parent.mkdir(parents=True)
+    lock_in_tmp.write_text(f"{os.getpid()} 0\n", encoding="utf-8")          # held, and fresh
+    import main
+    before = _tree(world.tmp)
+
+    assert main.cmd_fetch_cleanup(apply=True) is None
+
+    assert _tree(world.tmp) == before
+    assert "❌ A fetch is running (the fetch lock is held)" in capsys.readouterr().out
+    assert main.cmd_fetch_cleanup()["lock"] is True                      # the dry run says so too
+    assert "A fetch seems to be running" in capsys.readouterr().out
+    assert all(p.exists() for p in map(pathlib.Path, seeded["expected"]))
+
+
+def test_fetch_cleanup_apply_leaves_a_running_fetchs_folder_alone(world, sandbox, lock_in_tmp, monkeypatch, capsys):
+    _seed_cleanup_world(sandbox, world)
+    _procs(monkeypatch, {7001: "python mainfetch.py fetch tv-en-2001-demo-s01"})   # that journal's fetch still runs
+    temp_partial = world.tmp / "T" / "tv-en-2001-demo-s01e01" / "restore" / ".mv_incoming" / \
+        "S01E01 [aaa111].mkv.crdownload"
+    import main
+
+    result = main.cmd_fetch_cleanup(apply=True)
+
+    assert temp_partial.exists() and str(temp_partial) not in [p for p, _ in result["deleted"]]
+    assert "Left alone — a fetch still running: fetch-20261004T100000Z-7001" in capsys.readouterr().out
+    assert result["journals_recovered"] == 0
+
+
+def test_the_fetch_cleanup_command_line():
+    from test_prep_push_rep_enrich_cli import parse_argv
+    assert parse_argv(["main.py", "fetch_cleanup"]) == ("cmd_fetch_cleanup", {"apply": False})
+    assert parse_argv(["main.py", "fetch_cleanup", "--apply"]) == ("cmd_fetch_cleanup", {"apply": True})
+    with pytest.raises(SystemExit):
+        parse_argv(["main.py", "fetch_cleanup", "--aply"])           # a typo never runs a cleanup
+
+
 def test_a_driver_without_devtools_keeps_todays_downloads_flow(world, tmp_path):
     # Only a test stand-in lacks execute_cdp_cmd (a real Chrome driver always has it): today's flow, frozen in
     # tests/test_fetch_harvester.py — no redirect, no folder, no pre-flight.

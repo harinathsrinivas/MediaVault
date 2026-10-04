@@ -10502,6 +10502,34 @@ def cmd_fetch_restore(manual_id, episode_range=None, fetch_extras=False, temp_di
         print("\n✅✅✅ FETCH & RESTORE COMPLETE.")
 
 
+def cmd_fetch_cleanup(apply=False):
+    """[IMP-C25 Step 11 g] `fetch_cleanup [--apply]` — the one-time cleanup of fetch leftovers, never automatic
+    (docs/feature-fetch-datetime/PLAN.md P-12): files in ~/Downloads named like a library object's upload (fetches
+    from before IMP-C25 left them there), files in MediaVault's download folders (.mv_incoming) and unfinished
+    fetch journals. The rules live with the fetch (mainfetch.fetch_cleanup_plan / fetch_cleanup_apply).
+
+    Dry run (default): lists name/path, size and reason of every file and writes nothing (no lock, no journal,
+    no folder). --apply: refused while a fetch holds the fetch lock; under the lock it lists again — leaving out
+    the folders of a fetch that still runs — and deletes exactly that list, each file re-checked right before.
+    Returns the plan (dry run), the apply result, or None when refused. Reads the library; never writes it."""
+    import mainfetch  # the fetch's own delete rules (P-12); importing it has no side effects
+    library = load_library()
+    if not apply:
+        plan = mainfetch.fetch_cleanup_plan(library)
+        mainfetch.print_fetch_cleanup(plan)
+        return plan
+    try:
+        with mvcommon.fetch_session_lock(blocking=False):
+            plan = mainfetch.fetch_cleanup_plan(library, check_live=True)
+            mainfetch.print_fetch_cleanup(plan, apply=True)
+            result = mainfetch.fetch_cleanup_apply(plan)
+            mainfetch.print_fetch_cleanup_result(result)
+            return result
+    except mvcommon.LockHeldError:
+        print("❌ A fetch is running (the fetch lock is held) — run fetch_cleanup --apply when it has finished.")
+        return None
+
+
 def cmd_add_extras(title_id, folders, extras_size=None, device_id=None, no_replace=False):
     """Attach extras to an existing / archived / local-only title entry.
 
@@ -14687,6 +14715,7 @@ if __name__ == "__main__":
         print("  restore_group [id] [tempdir <path>]")
         print("  sort")
         print("  fetch [id] [tempdir <path>]")
+        print("  fetch_cleanup [--apply]  — list (dry run) / delete fetch leftovers: ~/Downloads files named like a library upload, MediaVault download folders (.mv_incoming), unfinished fetch journals")
         print("  recover [id|folder]  (or: recover --scan)")
         print("  rename_folder [id|folder] \"<NewName {tmdb-12345}>\"  — rename a show/season folder + rewrite every descendant folder_path (crash-safe, no rehash)")
         print("  migrate_provider_tokens [id_or_prefix] [--apply] [--library movies|series|anime|others]  — migrate every folder still on an OLD token format ([tmdbid-…], [tmdb-…], [tmdbid=…], wrong casing) to canonical {tmdb-…}, ancestor-aware (dry-run by default; --apply writes a JSON report under migration_reports/)")
@@ -15414,6 +15443,14 @@ if __name__ == "__main__":
 
         cmd_fetch_restore(mid, epr, fetch_extras=_fetch_extras, temp_dir=frdir,
                           manual="--manual" in _fr_tokens)  # [IMP-C25] forwarded only when given
+
+    elif cmd == "fetch_cleanup":
+        # [IMP-C25 Step 11 g] fetch_cleanup [--apply] — a dry run unless --apply is given
+        _fc_args = sys.argv[2:]
+        if any(_a != "--apply" for _a in _fc_args):
+            print("❌ Usage: fetch_cleanup [--apply]")
+            sys.exit(1)
+        cmd_fetch_cleanup(apply="--apply" in _fc_args)
 
     elif cmd == "token":
         # Web access token management (IMP-E15): create / list / revoke.

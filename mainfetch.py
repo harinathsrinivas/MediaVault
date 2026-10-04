@@ -718,24 +718,30 @@ def _expected_names(queue):
                    if isinstance(loc.get("uploaded_name"), str) and loc["uploaded_name"]})
 
 
-def _in_family(name, family):
-    """True when the file `name` belongs to the expected-name family `family` (base names): one of
-    them, Chrome's ' (n)' variant of one ('<stem> (2)<ext>' — Chrome numbers before the last
-    extension), or the '.crdownload' partial of either. Case-insensitive, like Windows names.
-    'Unconfirmed NNN.crdownload' (a partial Chrome has not named yet) never belongs: nothing ties
-    it to an entry."""
+_UNIQUIFIED = re.compile(r"^(?P<stem>.*) \((?P<n>\d+)\)(?P<ext>\.[^.\\/]*)?$")   # Chrome's '<stem> (2)<ext>'
+
+
+def _family_bases(name):
+    """The base names (Windows case) the file `name` can belong to: itself without a trailing
+    '.crdownload', and — for Chrome's ' (n)' variant ('<stem> (2)<ext>': Chrome numbers before
+    the last extension) — the name without the number."""
     key = _family_key(name)
     if key.endswith(_CRDOWNLOAD):
         key = key[:-len(_CRDOWNLOAD)]
-    for base in family:
-        base_key = _family_key(base)
-        if key == base_key:
-            return True
-        stem, ext = os.path.splitext(base_key)
-        if (key.startswith(stem + " (") and key.endswith(")" + ext)
-                and key[len(stem) + 2:len(key) - len(ext) - 1].isdigit()):
-            return True
-    return False
+    bases = [key]
+    numbered = _UNIQUIFIED.match(key)
+    if numbered:
+        bases.append(numbered.group("stem") + (numbered.group("ext") or ""))
+    return bases
+
+
+def _in_family(name, family):
+    """True when the file `name` belongs to the expected-name family `family` (base names): one of
+    them, Chrome's ' (n)' variant of one, or the '.crdownload' partial of either (_family_bases).
+    Case-insensitive, like Windows names. 'Unconfirmed NNN.crdownload' (a partial Chrome has not
+    named yet) never belongs: nothing ties it to an entry."""
+    keys = {_family_key(base) for base in family}
+    return any(base in keys for base in _family_bases(name))
 
 
 def _short_incoming_root(dest):
@@ -1254,6 +1260,206 @@ def _startup_cleanup(ctx):
         print(f"   > 🛑 Closed the Chrome an interrupted fetch left running (pid {pid}).")
     if total:
         print(f"   > 🧹 Cleaned {total} leftover file(s) from an interrupted fetch ({size / 1024 ** 3:.1f} GB)")
+
+
+# ------------------------------------------------------------------ fetch_cleanup (Step 11 g)
+def _size_of(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def _library_family(library):
+    """{base name (Windows case): (manual_id, label)} — the expected-name family of every object the
+    library believes is in Google Photos (mvcommon.iter_uploaded_objects: alias-safe, extras
+    included): its exact uploaded name."""
+    family = {}
+    for obj in mvcommon.iter_uploaded_objects(library):
+        name = obj.get("uploaded_name")
+        if isinstance(name, str) and name:
+            family.setdefault(_family_key(name), (obj["manual_id"], obj["label"]))
+    return family
+
+
+def _library_incoming_folders(library):
+    """<folder>\\restore\\.mv_incoming for every library entry's folder (a season's episodes share
+    one) and every uploaded extras item's folder. Alias-safe (a multi_ep_alias has no folder of its
+    own). Pure path arithmetic."""
+    folders = {}
+    for manual_id, entry in library.items():
+        if not isinstance(entry, dict) or entry.get("type") == "multi_ep_alias":
+            continue
+        for folder in [entry.get("folder_path")] + [ex["folder_path"] for ex in build_extras_entries(entry, manual_id)]:
+            if isinstance(folder, str) and folder:
+                path = os.path.join(folder, RESTORE_DIR_NAME, INCOMING_DIR_NAME)
+                folders.setdefault(os.path.normcase(path), path)
+    return list(folders.values())
+
+
+def fetch_cleanup_plan(library, check_live=False):
+    """[IMP-C25 Step 11 g] What `fetch_cleanup` would delete — read-only: it writes, creates and
+    deletes nothing, and starts no process unless `check_live` (--apply asks whether a journaled
+    fetch still runs). The dict:
+      files     [{"path", "size", "where", "reason"}]:
+                where "downloads" — a file directly in ~/Downloads whose name belongs to the
+                expected-name family of a library object believed to be in Google Photos (its exact
+                uploaded name, Chrome's ' (n)' variant, the '.crdownload' partial of either): the
+                leftovers of fetches from before IMP-C25;
+                where "incoming" — every file in a MARKED incoming folder (_is_incoming_dir): under the
+                library's restore folders, named by an unfinished journal (a tempdir location), or
+                under the <drive>:\\MV_incoming root of a drive they use
+      folders   the marked incoming folders found (--apply removes each once it is empty)
+      skipped   folders found where an incoming folder would be, WITHOUT the marker — never touched
+      journals  [{"path", "doc"}] — unfinished fetch journals (not clean / recovered)
+      running   run ids of journals whose fetch still runs (check_live): their folders are left out
+      lock      the fetch lock file exists (a fetch may be running)"""
+    family = _library_family(library)
+    plan = {"files": [], "folders": [], "skipped": [], "journals": [], "running": [],
+            "lock": os.path.exists(mvcommon.FETCH_SESSION_LOCK)}
+    try:
+        names = sorted(os.listdir(SYSTEM_DOWNLOADS_FOLDER))
+    except OSError:
+        names = []
+    for name in names:
+        path = os.path.join(SYSTEM_DOWNLOADS_FOLDER, name)
+        owner = next((family[base] for base in _family_bases(name) if base in family), None)
+        if owner and os.path.isfile(path):
+            plan["files"].append({"path": path, "size": _size_of(path), "where": "downloads",
+                                  "reason": f"named like {owner[0]} ({owner[1]})"})
+    candidates, live = _library_incoming_folders(library), set()
+    for path, doc in read_fetch_journals():
+        if doc is None or not _journal_unfinished(doc):
+            continue
+        named = [e["incoming"] for e in doc.get("entries") or []
+                 if isinstance(e, dict) and isinstance(e.get("incoming"), str) and e["incoming"]]
+        if check_live and _journal_is_live(doc):
+            plan["running"].append(doc.get("run_id"))
+            live.update(os.path.normcase(os.path.abspath(p)) for p in named)
+            continue
+        plan["journals"].append({"path": path, "doc": doc})
+        candidates += named
+    roots = {}
+    for path in candidates:
+        root = _short_incoming_root(path)
+        if root:
+            roots.setdefault(os.path.normcase(root), root)
+    for root in roots.values():
+        try:
+            candidates += [os.path.join(root, sub) for sub in sorted(os.listdir(root))]
+        except OSError:
+            continue
+    seen = set()
+    for folder in candidates:
+        key = os.path.normcase(os.path.abspath(folder))
+        if key in seen or key in live or not os.path.isdir(folder):
+            continue
+        seen.add(key)
+        if not _is_incoming_dir(folder):
+            plan["skipped"].append(folder)
+            continue
+        plan["folders"].append(folder)
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(folder, name)
+            if name != INCOMING_MARKER and os.path.isfile(path):
+                plan["files"].append({"path": path, "size": _size_of(path), "where": "incoming",
+                                      "reason": "unfinished fetch download"})
+    return plan
+
+
+def _recheck(listed):
+    """Why a listed file may NOT be deleted now (None: it may) — re-checked right before each delete."""
+    path = listed["path"]
+    if not os.path.isfile(path):
+        return "already gone"
+    if _size_of(path) != listed["size"]:
+        return "changed since it was listed"
+    folder = os.path.dirname(os.path.abspath(path))
+    if listed["where"] == "incoming":
+        return None if _is_incoming_dir(folder) else "its folder is no longer a MediaVault download folder"
+    same = os.path.normcase(folder) == os.path.normcase(os.path.abspath(SYSTEM_DOWNLOADS_FOLDER))
+    return None if same else "not in Downloads any more"
+
+
+def fetch_cleanup_apply(plan):
+    """[IMP-C25 Step 11 g] Delete exactly the plan's files — each re-checked right before (_recheck:
+    still there with the size listed, still where the rule allows) — then remove each listed
+    incoming folder left empty, and mark each listed journal recovered once none of its folders or
+    pending files remains. Returns {"deleted": [(path, size)], "kept": [(path, why)],
+    "folders_removed": int, "journals_recovered": int}."""
+    deleted, kept = [], []
+    for listed in plan["files"]:
+        why = _recheck(listed)
+        if why:
+            kept.append((listed["path"], why))
+        elif _delete_download(listed["path"]):
+            deleted.append((listed["path"], listed["size"]))
+        else:
+            kept.append((listed["path"], "in use"))
+    removed = sum(1 for folder in plan["folders"] if os.path.isdir(folder) and _remove_incoming(folder))
+    recovered = 0
+    for journal in plan["journals"]:
+        doc = journal["doc"]
+        folders = [e.get("incoming") for e in doc.get("entries") or [] if isinstance(e, dict) and e.get("incoming")]
+        left = [p for p in folders + list(doc.get("pending_delete") or []) if isinstance(p, str) and os.path.exists(p)]
+        if left:
+            continue
+        doc.update(state="recovered", recovered_by="fetch_cleanup", pending_delete=[], updated_at=_utc_now())
+        try:
+            _write_json_atomic(journal["path"], doc)
+            recovered += 1
+        except OSError as e:
+            kept.append((journal["path"], f"journal not updated: {e}"))
+    return {"deleted": deleted, "kept": kept, "folders_removed": removed, "journals_recovered": recovered}
+
+
+def print_fetch_cleanup(plan, apply=False):
+    """The fetch_cleanup listing: name / path, size and reason of every file, then the totals."""
+    size = mvcommon.human_readable_size
+    print("=== FETCH CLEANUP — " + ("--apply: deleting exactly the files below ===" if apply
+                                   else "dry run: nothing is deleted ==="))
+    if plan["lock"] and not apply:
+        print("   > ⚠️ A fetch seems to be running (its lock file exists) — its download folders may be listed "
+              "below; run --apply only after it has finished.")
+    downloads = [f for f in plan["files"] if f["where"] == "downloads"]
+    incoming = [f for f in plan["files"] if f["where"] == "incoming"]
+    print(f"   ~/Downloads — files named like a library object's upload (leftovers of earlier fetches): "
+          f"{len(downloads)}")
+    for f in downloads:
+        print(f"     {os.path.basename(f['path'])} · {size(f['size'])} · {f['reason']}")
+    print(f"   MediaVault download folders (.mv_incoming) — unfinished fetch downloads: {len(incoming)} file(s) "
+          f"in {len(plan['folders'])} folder(s)")
+    for f in incoming:
+        print(f"     {f['path']} · {size(f['size'])} · {f['reason']}")
+    if plan["skipped"]:
+        print(f"   Not touched — no MediaVault marker in: {len(plan['skipped'])} folder(s)")
+        for folder in plan["skipped"]:
+            print(f"     {folder}")
+    if plan["running"]:
+        print(f"   Left alone — a fetch still running: {', '.join(str(r) for r in plan['running'])}")
+    print(f"   Unfinished fetch journals: {len(plan['journals'])}")
+    for journal in plan["journals"]:
+        doc = journal["doc"]
+        folders = sum(1 for e in doc.get("entries") or [] if isinstance(e, dict) and e.get("incoming"))
+        print(f"     {doc.get('run_id')} · {doc.get('state')} · started {doc.get('started_at')} · "
+              f"{folders} download folder(s)")
+    total = sum(f["size"] for f in plan["files"])
+    print(f"   Total: {len(plan['files'])} file(s), {size(total)}.")
+    if not apply and (plan["files"] or plan["folders"] or plan["journals"]):
+        print("   Delete exactly these with: python main.py fetch_cleanup --apply")
+
+
+def print_fetch_cleanup_result(result):
+    size = mvcommon.human_readable_size
+    for path, why in result["kept"]:
+        print(f"     ⏭️ Kept {path} — {why}")
+    print(f"✅ Deleted {len(result['deleted'])} file(s) ({size(sum(s for _, s in result['deleted']))}); removed "
+          f"{result['folders_removed']} empty download folder(s); {result['journals_recovered']} journal(s) "
+          f"marked recovered.")
 
 
 def _journal_sync(ctx, queue):

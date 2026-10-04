@@ -120,9 +120,15 @@ sessions / entries / object states / snapshot; conftest redirect; 1b4de0d) · [x
 pid whose command line names that profile; marked incoming folders / pending / fallback run-new family files; a live
 fetch is left alone; 7ad720c) · [x] 11.f interruption handling (_end_run: Ctrl+C / error → session Chrome terminated
 via its kept Popen handle (a handed-over Chrome: the debug-port 9222 listener, profile-checked) → this run's leftovers
-deleted → journal clean or pending; a finished run with held files closes Chrome, then deletes; the commit that ticks
-this) · [ ] 11.g fetch_cleanup [--apply] ← next · [ ] 11.h verify_restore tempdir · then disarm probes, full + smoke`
+deleted → journal clean or pending; a finished run with held files closes Chrome, then deletes; 395b130) · [x] 11.g
+fetch_cleanup [--apply] (mainfetch.fetch_cleanup_plan / _apply / print + main.cmd_fetch_cleanup + CLI + usage; one
+shared name rule _family_bases; the commit that ticks this) · [ ] 11.h verify_restore tempdir ← next · [ ] 11.i fetch
+closes its tabs and the Chrome it launched at the normal end of every run, only once no download is active (user
+requirement 2026-10-04, PLAN Step 11 item i, added by 7aa032b) · then disarm probes, full + smoke`
 `resumed 2026-10-04 by executor-fable after a usage-limit pause (tree clean at c01be08; nothing to keep or discard)`
+`resumed 2026-10-04 by executor-fable after a second usage-limit pause (HEAD 7aa032b): uncommitted 11.g changes KEPT
+(main.py, mainfetch.py, tests/test_fetch_hygiene.py — coherent; hygiene + fetch suites 495 passed, smoke 82);
+DECISIONS.md shows modified only through a stale stat cache (blob = HEAD) — left alone, not committed`
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes
 alone; re-run it before treating a red full suite as a regression.
 Template — when a step is running (Execution protocol "In-step checkpoints"):

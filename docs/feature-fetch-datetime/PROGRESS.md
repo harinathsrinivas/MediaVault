@@ -12,7 +12,7 @@
   passed (140 s) · smoke 81 passed (14 s), idle machine, 0 failures** (one pre-existing StarletteDeprecationWarning each).
   Current gate (Step 3, `31e8214`): full 1544 · smoke 81 — re-confirmed in the main folder 2026-09-28 20:04 (full
   1544 passed in 172 s · smoke 81 passed in 30 s).
-- Last updated: 2026-10-02 (Step 9 done → Step 1 re-sync with main, then 🚦 R1; "At a glance" below is older — the
+- Last updated: 2026-10-04 (Step 10 done → Step 11 next; 🚦 R1 continues; "At a glance" below is older — the
   Step status table is authoritative)
 
 ## At a glance
@@ -33,14 +33,15 @@
   account (R0) · Step 12 candidate isolation (before Step 12).
 
 ## ▶ NEXT ACTION
-**Steps 0–9 done; Step 1 re-sync #5 done (2026-10-03: main `bfb9833` = PRs #65 IMP-C29 + #66 IMP-C33 merged here;
-full 2177 · smoke 82).** All hotfixes found during C25 are merged to main: #61 C26, #62 C28, #63 C30/C31, #64 C32,
+**Steps 0–10 done (Step 10: 2026-10-04, full 2293 · smoke 82); Step 1 re-sync #5 done (2026-10-03: main `bfb9833` =
+PRs #65 IMP-C29 + #66 IMP-C33 merged here; full 2177 · smoke 82).** All hotfixes found during C25 are merged to main: #61 C26, #62 C28, #63 C30/C31, #64 C32,
 #65 C29, #66 C33. 🚦 RH PASSED 2026-10-03 (X-Files S02E05 from the movies account: `✅ MOVED`, SHA-256 = library hash,
 twice incl. a cold Chrome start; test copies deleted per the user).
 Next, in parallel:
-1. **Step 10** (fetch plumbing) — unblocked. Carries three extra requirements by user ruling 2026-10-03 (DECISIONS
-   §1e): retry a broken transfer once; never click the home timeline (poll for real results / locate by photo_id);
-   unbuffered child output in `cmd_dispatch_fetch` (`PYTHONUNBUFFERED=1`). Registered as IMP-C34/C35/C36.
+1. **Step 10 DONE** (2026-10-04 — row 10; full 2293 · smoke 82 · disarm 29/29), incl. IMP-C34/C35/C36 (DECISIONS
+   §1e). Next code step: **Step 11** (download hygiene; P-12 was confirmed 2026-09-28 — DECISIONS §1c "Yes, as
+   described"). It builds on harvest_downloads / FetchContext / build_fetch_queue (contracts: STATUS.md Step 10 and
+   their docstrings); then Step 12 (3 candidates) fills `_run_locator_phase`.
 2. **🚦 R1 prerequisites** — re-crawl movies / tv / anime one at a time (`python tools/gp_inventory.py <acct> --port
    9223|9225|9224`, then `… all --status`); the user attaches all three phones (`FA69H0300200`, `HT74D0202839`,
    `FA75V0303405`); then `python main.py map_photos all --devices-only` and `python main.py map_photos all`
@@ -84,7 +85,7 @@ User's own archive `mov-en-2024-duneparttwo` (series phone = TV account) — han
 | 8 | device cross-check | done | executor-fable (harness attribution Opus 5.5 = fable fallback for 8.a–8.c; session env claude-fable-5-1) | 8.a ca038b5 · 8.b b55b278 · 8.c 3bebc60 · feat: this step's final commit | full 1879 · smoke 82 · test_device_inventory 114 · disarm/mutation probes 23/23 (scratch copy) · live read-only check 2 phones | main.device_inventory(aliases) + classify_device_objects(library, inventory, objects=None), return shapes in their docstrings; 4th verdict `unchecked` (a configured phone not listed in full → Step 9 must never call such an object missing); a same-named file of other size never counts on_device; Step 13c must NOT widen the read-only allowlist `_dev_argv_readonly` (its pull/push/mv needs its own --apply-gated path); LIVE: HT74D0202839 attached but not in DEVICE_ALIASES, `movies` FA69H0300200 not attached → complete=False until the user decides (see operations log) |
 | 9 | map_photos | done | executor-fable (harness attribution Claude Opus 5.5 at all 16 WIP commits = fable fallback, as in Step 8; session env claude-fable-5-1; no MODEL-FALLBACK banner in the dispatch) | 9.0 5f495b6 · 9.1 096ed70 · 9.2 1d5cc4c · 9.3 044863d · 9.4 d0f4ad5 · 9.5 2b3313a · 9.6 4136cbf · 9.7 fd5c4d5 · 9.8 93b153f · 9.9 6c645ab · 9.10 7b2ce0c · review 77109ef · 97e6b3b · 93cdc51 · 7a41cad · abbf96e · feat: this step's final commit | full 2021 · smoke 82 · test_map_photos 125 · test_device_inventory 131 (114 → 131) · disarm/mutation probes 43/43 (scratch copy) · live read-only runs (operations log) | CLI `map_photos [all\|<id>\|<prefix>] [--account …] [--devices-only] [--resolutions <csv>] [--repair split-info\|names] [--accept-probable] [--apply] [--out <dir>]`, dry-run default; run dir `~/.mediavault/gphotos/map/<ts>/` or --out: summary.txt · mapping.jsonl · mapping.csv · inconsistencies.csv · resolutions_todo.csv · unmatched_<account>.csv (devices.csv for --devices-only). **R1 needs first:** a re-crawl of movies / tv / anime (the Sep-25 inventories have no run log → every object reads `stale-inventory`) and all three phones attached (FA69H0300200 + HT74D0202839 + FA75V0303405). DEVIATIONS / assumptions (full list: STATUS.md Step 9): files beyond the plan's list — mvcommon.py (NEW hints store hints.jsonl: append_hint / read_hints, the Step 13 `check_photos hinted` input) and tests/test_device_inventory.py (9.0, DECISIONS §1d: DEVICE_CHECK_EXTRA_SERIALS + device_check_aliases(); push aliases untouched) · extra output mapping.csv (the R1 reader's sheet) · gphotos_apply gained `names=` (--repair names; still the only writer of blocks, same OD-2 guard) · --repair split-info has its own fingerprint-guarded writer (split_info is not a gphotos block) and writes {is_split, total_chunks, chunks} without method/val · wrong-account is relative to the id prefix, each row says whether an mvconfig override covers it · freshness is strict (no verdict from a stale inventory; "in no account" needs every crawled account fresh and fully detailed) · a re-split maps to the newest complete upload only when no newer upload exists (else ambiguous) · `unchecked` → device-check-incomplete, never missing · learned map records carry no approach verdict · partial / non-original items are never applied · awaiting-backup rows are not put on the failed list · a dry run records nothing (pinned: library bytes + mtime, state dir) · no rollback journal, ENTRY_TYPE_KEYS literal unchanged (comment only) · mainfetch / gpweb / gpcapture / cmd_push untouched · main NOT merged (the orchestrator re-syncs #62/#63) |
 | R1 | real mapping dry-run (user) | pending | user | | | |
-| 10 | fetch plumbing + routing | in_progress | | | | |
+| 10 | fetch plumbing + routing | done | executor-fable (harness attribution Claude Opus 5.5 at all 12 WIP commits and the feat commit = fable fallback, as in Steps 8/9 — the reminder named Fable 5.1 at times mid-step; session env claude-fable-5-1, fable re-probed OK at every resume; no MODEL-FALLBACK banner) | 10.e 85866bc · 10.b 772122c · 10.d dac4082 · 10.c b82cf43 · 10.g dd410ed · 10.a 9f4ab09 · 10.f b2f9c7f · 10.h e673b10 · 10.i e333c3d · review 77773f4 · 10.h follow-up 77984d3 · review 0bacf01 · feat: this step's final commit | full 2293 (2177 + 116) · smoke 82 · test_fetch_harvester 7 → 49 · test_fetch_routing 56 · test_fetch_search_wait 12 · test_fetch_child_stream 4 · test_gpweb +2 · disarm/mutation probes 29/29 (scratch copies) · frozen pre-change transcripts (b1cff7d) replayed with the kill switch off + on | cmd_fetch_route routes every OBJECT (P-4: override > the trusted block's learned home > prefix); an entry whose objects span accounts is fetched in each session (its own objects; one PROCESSING header, CONTINUING later, one verdict); ⚠️ override-vs-verified line; profile_preflight per account (conftest autouse `_hermetic_chrome_profiles`) · `FetchContext` threaded through `fetch_single_entry(…, ctx=None)` · `build_fetch_queue(entry, restore_folder, ctx=None, entry_id=None)` = today's queue (frozen-copy parity) + `locator` (shape in its docstring) · `_run_locator_phase(driver, queue, ctx)` seam behind `EXACT_LOCATOR_ENABLED`, its Step 12 contract in the docstring; item status pending/done/failed · `harvest_downloads(queue, ctx)` → {timed_out, saw_download, unmatched}; IMP-B10 hash-once; learn-on-fetch (proof sha256 + the bytes' dedupKey; photo_id only from item['_trigger']['record'] holding those bytes; only files that arrived in this Chrome session) · IMP-C34 `_fire`/`_note_losses`/`_retry_lost_downloads`: once per object per run, never while downloading, a round where a wrong item arrived counts no loss, second loss → failed list (NEW P-18 reason `download-lost`), RETRY header + one batch line · IMP-C35 `_await_search_results` (bounded 10 s poll) + `_drop_timeline`, page scripts `gpweb.SEARCH_STATE_JS`/`TIMELINE_LINKS_JS`; trigger_download digest re-pinned 6e64c9cf → 49578db2 · IMP-C36 `main._mainfetch_child_env()` · `--manual`: `parse_fetch_options` + `mainfetch.cli(argv)`, forwarded only when given · A8 deleted. DEVIATIONS (full list: STATUS.md Step 10): files beyond the plan's list — mvcommon.py (the reason), gpweb.py (§9 scripts), tests/gphotos_fake.py (answers them), tests/conftest.py, tests/test_gpweb.py (+2), two new test files; the C26 + smoke fetch stubs gained `ctx=None`; B10 no longer re-announces an unchanged foreign file; the Switching line names its reason. The REAL libraries were written three times during the step (10-03 15:03:14; 10-04 17:05:33 and 17:36:18) by real archive work — five movie entries archived 10-03/10-04, the 17:36:18 write matching, to the second, the real TMDB metadata cache storing one of those movies; no fixture marker in the library — not by this step's runs (evidence: STATUS) |
 | 11 | download hygiene | pending | | | | needs G0 q3 (P-12) answered first; "no" → STOP + re-dispatch planner-v2 |
 | 12 | locator engine (3 candidates) | pending | | | | 🚦 G12 |
 | 13 | check_photos | pending | | | | |
@@ -112,35 +113,8 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 - 2026-10-03 R1 re-crawl started by the orchestrator, one account at a time (rpc mode, read-only): movies → tv → anime. Resume command (re-run the same; progress is kept): `python tools/gp_inventory.py <movies|tv|anime> --port <9223|9225|9224>`; check with `python tools/gp_inventory.py all --status`. Logs: D:\MediaVault_gp_inventory\<account>.log + crawl_r1_<account>.out.
 
 ## In-progress sub-state
-`Step 10 — dispatched 2026-10-03 to executor-fable (fable) · executing in dependency order e → b → d → c → g → a →
-f → h → i · sub-tasks: [x] 10.a cmd_fetch_route per-object account routing (override > learned home > prefix;
-split-across-accounts entries fetched per session with one PROCESSING header + one verdict; ⚠️ override-vs-verified
-line; profile pre-flight per account; conftest autouse _hermetic_chrome_profiles) · [x] 10.b build_fetch_queue + locator
-dict (parity oracle; FetchContext; ctx threaded through cmd_fetch_route — the C26/smoke fetch stubs gained `ctx=None`)
-(wip 772122c) · [x] 10.c harvest_downloads (on the merged C29 harvester; hashed once per run — B10; learn-on-fetch
-credited only to files that arrived in this Chrome session) (wip b82cf43) · [x] 10.d locator seam + EXACT_LOCATOR_ENABLED (+
-'failed' item state: a round ends when nothing is pending) (wip dac4082) · [x] 10.e A8 deletions +
-build_extras_entries forwards gphotos/labels/title (wip 85866bc) ·
-[x] 10.f parse_fetch_options/--manual (mainfetch.cli(argv) entry point; main.py fetch/fetch_restore forward --manual
-only when given; ctx.manual) · [x] 10.g IMP-C34 one retry of a lost download (a round where a wrong
-item arrived counts no loss; second loss → failed list, NEW P-18 reason `download-lost` in mvcommon.GP_FAILED_REASONS)
-(wip dd410ed) · 10.a (wip 9f4ab09) · 10.f (wip b2f9c7f) · [x] 10.h IMP-C35 never click
-the home timeline (bounded poll replaces the fixed 3 s; timeline thumbnails dropped; trigger_download digest re-pinned
-6e64c9cf… → 49578db2…) (wip e673b10) · [x] 10.i IMP-C36 unbuffered child output (main._mainfetch_child_env() —
-PYTHONUNBUFFERED=1 + PYTHONIOENCODING=utf-8; Steps 13/13b spawn with it; AST pin) (wip e333c3d) · [x] self-review +
-disarm probes (scratch copy) · then full + smoke ← next`
-Resumed 2026-10-03 after a usage-limit pause: the uncommitted mainfetch.py diff (+19/−7) was the DELIBERATE self-review
-fix (the _run_locator_phase contract docstring for Step 12; the IMP-C26 comment now names _object_account) — NOT a probe
-leak (probes only ever edit a tempfile.mkdtemp copy): kept, tested, committed. Disarm run #1: 26/28 — P14 (second loss
-ends the object) and P17 (reads before the results settle) exposed TEST gaps, closed by a seam test (two lost requests
-in Step 12's stages → no legacy request) and no-retry assertions; re-run on a fresh copy: both caught (wip 77773f4);
-disarm run #2 (fresh copy of 77773f4): 28/28. Full suite #1: 1 real failure — test_gpweb's fake-driven legacy
-trigger_download: Step 2's fake refuses unknown page scripts → the two C35 page scripts moved into gpweb §9 as the
-shared SEARCH_STATE_JS / TIMELINE_LINKS_JS (the plan's no-private-copies rule; Step 12 reuses them), the fake answers
-them from its DOM model (+ gpweb pins + a fake self-test); wait digest re-pinned 0ef58135 → 9b2abbc2, trigger_download
-digest unchanged (49578db2).
-Pre-change oracles captured from HEAD b1cff7d before any edit (scratch harness, C29 fakes) — pasted into the Step 10
-tests as frozen transcripts.
+_(none)_ — Step 10 done 2026-10-04 (row 10; its sub-task log — e → b → d → c → g → a → f → h → i, the resumes, the
+disarm rounds and the gpweb follow-up — is in STATUS.md Step 10).
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes
 alone; re-run it before treating a red full suite as a regression.
 Template — when a step is running (Execution protocol "In-step checkpoints"):

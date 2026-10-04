@@ -121,9 +121,14 @@ def test_a_destination_without_a_drive_has_no_short_folder(monkeypatch, real_sho
 
 
 def test_no_test_can_reach_a_real_drive_root_or_the_real_downloads(tmp_path):
-    # tests/conftest.py (autouse): the long-path folder and ~/Downloads are redirected under tmp_path.
+    # tests/conftest.py (autouse): the long-path folder, ~/Downloads and the fetch journal are redirected under
+    # tmp_path, and the process table can tell nothing (so no test can judge or terminate a real process).
     assert mainfetch._short_incoming_root(r"D:\anything").startswith(str(tmp_path))
     assert mainfetch.SYSTEM_DOWNLOADS_FOLDER.startswith(str(tmp_path))
+    assert mainfetch.FETCH_JOURNAL_DIR.startswith(str(tmp_path))
+    assert mainfetch.PROCESS_TABLE.query(os.getpid()) == (None, None)       # the real table would say: alive
+    with pytest.raises(AssertionError):
+        mainfetch.PROCESS_TABLE.terminate(os.getpid())
 
 
 def test_the_incoming_folder_is_created_with_its_marker(tmp_path):

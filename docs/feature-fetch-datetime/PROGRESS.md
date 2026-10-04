@@ -12,8 +12,8 @@
   passed (140 s) · smoke 81 passed (14 s), idle machine, 0 failures** (one pre-existing StarletteDeprecationWarning each).
   Current gate (Step 3, `31e8214`): full 1544 · smoke 81 — re-confirmed in the main folder 2026-09-28 20:04 (full
   1544 passed in 172 s · smoke 81 passed in 30 s).
-- Last updated: 2026-10-04 (Step 10 done → Step 11 next; 🚦 R1 continues; "At a glance" below is older — the
-  Step status table is authoritative)
+- Last updated: 2026-10-05 (Step 11 done → Step 12 next; "At a glance" below is older — the Step status table is
+  authoritative)
 
 ## At a glance
 - **Size:** 30 tracked items = **23 agent steps** (0, 1, H, 2, 2b, 3–12, 13, 13b, 13c, 14–18) + **7 user gates**
@@ -33,15 +33,21 @@
   account (R0) · Step 12 candidate isolation (before Step 12).
 
 ## ▶ NEXT ACTION
-**Steps 0–10 + 9b done.** Step 10 (2026-10-04, `0690546`): full 2293 · smoke 82 · disarm 29/29, incl. IMP-C34/C35/C36.
+**Steps 0–11 + 9b done.** Step 11 (2026-10-05, the `feat(imp-c25): Step 11 …` commit): download hygiene a–i — full 2421 ·
+smoke 82 · disarm 32/32 · live `fetch_cleanup` dry run 0 leftovers. Next: **Step 12** (locator engine, 3 candidates →
+🚦 G12) on Step 11's contracts (STATUS.md Step 11 + the docstrings of `_prepare_downloads`, `harvest_downloads`,
+`_rearm_downloads`, `_run_locator_phase`, `FetchJournal`). Open for the user (from the Step 11 report): the CDP download
+redirect is unverified live until 🚦 R2 §M6–M7, yet this folder's fetches (CLI and the running `main.py web`) already
+use it; `tools/warm_profiles.py` warming several profiles attaches to the first one's still-open Chrome (pre-existing,
+a follow-up IMP candidate).
+Step 10 (2026-10-04, `0690546`): full 2293 · smoke 82 · disarm 29/29, incl. IMP-C34/C35/C36.
 Step 9b (2026-10-04, `3fd911a`, merged here): map_photos verdicts need no phone (user R1 ruling, DECISIONS §1e) —
 `not-backed-up-yet` (pushed after / within `MAP_RECENT_DAYS = 7` before the routed account's crawl) vs `possible-loss`;
 `--devices` opt-in; full 2302 · smoke 82 · disarm 63/63. Step 1 re-sync #5 (main `bfb9833`) done; all C25-found
 hotfixes are on main (#61–#66). 🚦 RH PASSED. 🚦 R1 DONE (2026-10-03): read by the user; re-run with 9b at
 `D:\MediaVault_gp_inventory\map_r1b_20261003_1714` — mapped 2,020 · wrong-account 31 (covered) · inconsistent 4 ·
 not-backed-up-yet 23 · possible-loss 15 · others stale 35 · apply preview 2,051 / 0 conflicts. No apply until 🚦 R3.
-Next: **Step 11** (download hygiene; P-12 confirmed 2026-09-28, DECISIONS §1c) on Step 10's contracts (STATUS.md Step 10
-+ docstrings), then Step 12 (3 candidates → 🚦 G12), 13, 13b, 13c, 14, 15 → 🚦 R2/R3 → 16–18.
+Then Step 12 (3 candidates → 🚦 G12), 13, 13b, 13c, 14, 15 → 🚦 R2/R3 → 16–18.
 The user archives from this folder (5 movies on 10-03/10-04 + Dune) — check for a running `main.py` before any
 fast-forward/merge here; the user's archive `mov-en-2024-duneparttwo` stays hands-off until after the plan.
 
@@ -83,7 +89,7 @@ fast-forward/merge here; the user's archive `mov-en-2024-duneparttwo` stays hand
 | 9b | map_photos: no phone (R1 ruling) | done | executor-fable (harness attribution Opus 5.5) | 3fd911a · merge = this commit | full 2302 · smoke 82 · disarm 63/63 | device check opt-in (`--devices`); `not-backed-up-yet` vs `possible-loss` by capture push time vs routed account's crawl, MAP_RECENT_DAYS = 7; PLAN updated 96689ec |
 | R1 | real mapping dry-run (user) | pending | user | | | |
 | 10 | fetch plumbing + routing | done | executor-fable (harness attribution Claude Opus 5.5 at all 12 WIP commits and the feat commit = fable fallback, as in Steps 8/9 — the reminder named Fable 5.1 at times mid-step; session env claude-fable-5-1, fable re-probed OK at every resume; no MODEL-FALLBACK banner) | 10.e 85866bc · 10.b 772122c · 10.d dac4082 · 10.c b82cf43 · 10.g dd410ed · 10.a 9f4ab09 · 10.f b2f9c7f · 10.h e673b10 · 10.i e333c3d · review 77773f4 · 10.h follow-up 77984d3 · review 0bacf01 · feat: this step's final commit | full 2293 (2177 + 116) · smoke 82 · test_fetch_harvester 7 → 49 · test_fetch_routing 56 · test_fetch_search_wait 12 · test_fetch_child_stream 4 · test_gpweb +2 · disarm/mutation probes 29/29 (scratch copies) · frozen pre-change transcripts (b1cff7d) replayed with the kill switch off + on | cmd_fetch_route routes every OBJECT (P-4: override > the trusted block's learned home > prefix); an entry whose objects span accounts is fetched in each session (its own objects; one PROCESSING header, CONTINUING later, one verdict); ⚠️ override-vs-verified line; profile_preflight per account (conftest autouse `_hermetic_chrome_profiles`) · `FetchContext` threaded through `fetch_single_entry(…, ctx=None)` · `build_fetch_queue(entry, restore_folder, ctx=None, entry_id=None)` = today's queue (frozen-copy parity) + `locator` (shape in its docstring) · `_run_locator_phase(driver, queue, ctx)` seam behind `EXACT_LOCATOR_ENABLED`, its Step 12 contract in the docstring; item status pending/done/failed · `harvest_downloads(queue, ctx)` → {timed_out, saw_download, unmatched}; IMP-B10 hash-once; learn-on-fetch (proof sha256 + the bytes' dedupKey; photo_id only from item['_trigger']['record'] holding those bytes; only files that arrived in this Chrome session) · IMP-C34 `_fire`/`_note_losses`/`_retry_lost_downloads`: once per object per run, never while downloading, a round where a wrong item arrived counts no loss, second loss → failed list (NEW P-18 reason `download-lost`), RETRY header + one batch line · IMP-C35 `_await_search_results` (bounded 10 s poll) + `_drop_timeline`, page scripts `gpweb.SEARCH_STATE_JS`/`TIMELINE_LINKS_JS`; trigger_download digest re-pinned 6e64c9cf → 49578db2 · IMP-C36 `main._mainfetch_child_env()` · `--manual`: `parse_fetch_options` + `mainfetch.cli(argv)`, forwarded only when given · A8 deleted. DEVIATIONS (full list: STATUS.md Step 10): files beyond the plan's list — mvcommon.py (the reason), gpweb.py (§9 scripts), tests/gphotos_fake.py (answers them), tests/conftest.py, tests/test_gpweb.py (+2), two new test files; the C26 + smoke fetch stubs gained `ctx=None`; B10 no longer re-announces an unchanged foreign file; the Switching line names its reason. The REAL libraries were written three times during the step (10-03 15:03:14; 10-04 17:05:33 and 17:36:18) by real archive work — five movie entries archived 10-03/10-04, the 17:36:18 write matching, to the second, the real TMDB metadata cache storing one of those movies; no fixture marker in the library — not by this step's runs (evidence: STATUS) |
-| 11 | download hygiene | in_progress | | | | P-12 confirmed 2026-09-28 (DECISIONS §1c) |
+| 11 | download hygiene | done | executor-fable (harness attribution Claude Opus 5.5 at every WIP commit and the feat commit = fable fallback, as in Steps 8–10 — the reminder named Fable 5.1 at times mid-step; session env claude-fable-5-1; no MODEL-FALLBACK banner) | 11.a a29d604 · 11.b 60cf774 · 11.c 7bf8b91 · 11.d 1b4de0d · 11.e 7ad720c · 11.f 395b130 · 11.g b3375b6 · 11.h 7c94b06 · 11.i 8c3368e · review 505dada · feat: this step's final commit | full 2421 (2302 + 119) · smoke 82 · test_fetch_hygiene 119 · disarm/mutation probes 32/32 (scratch copy; baseline + restored 360 green) · live read-only fetch_cleanup dry run: 0 leftovers, nothing written | P-12 confirmed 2026-09-28 (DECISIONS §1c); item i (close Chrome + tabs) added 2026-10-04. Downloads land in `<dest>\.mv_incoming\` (marked; `<drive>:\MV_incoming\<8 hex>` past 240 chars), CDP Browser.setDownloadBehavior → Page fallback, re-applied on every Photos tab; refusal → ~/Downloads fallback for the run (P-12 delete rules: run-new + expected-family + not moved). A stand-in driver without execute_cdp_cmd keeps today's flow (frozen Step 10 oracles untouched). Journal `~/.mediavault/fetch_journal/<run_id>.json`; start-up cleanup + interruption terminate only a LAUNCHED Chrome whose command line names the profile (PowerShell Win32_Process + taskkill /T /F; inert in tests); an attached Chrome is never terminated. 11.i: each session closes its Chrome once no download grows (Browser.close → terminate after 10 s if ours); attached → only this run's tabs. `fetch_cleanup [--apply]` (dry run writes nothing; --apply under the fetch lock, per-file re-check). `verify_restore [id] [tempdir <path>]`. Contracts for Steps 12–14 + deviations: STATUS.md Step 11 |
 | 12 | locator engine (3 candidates) | pending | | | | 🚦 G12 |
 | 13 | check_photos | pending | | | | |
 | 13b | auto-confirm on next push | pending | | | | |
@@ -108,8 +114,10 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 | 2026-10-02 | Step 9 `python main.py map_photos all --devices-only --out <scratchpad>` (read-only adb) | movies FA69H0300200 not-connected · series FA75V0303405 ok 431 files · others skipped (placeholder) · movies#2 HT74D0202839 ok 28 files (no longer "unconfigured") → INCOMPLETE; 2,108 objects: on_device 12 · freed 624 · absent 0 · unchecked 1,472; 12–32 s | re-run with FA69H0300200 attached |
 | 2026-10-02 | Step 9 gate-BYPASSED validation (scratch script: main._mp_compute + the engine's dry-run preview over the real library and the Sep-25 inventories; movies / tv / anime treated as fresh; NOTHING written; counts only) — what R1 would have shown on the old inventories | mapped 1,926 · mapped-normalized 19 (movies; whitespace only) · wrong-account 31 (tv ids in movies; mvconfig override covers 31, none 0, differs 0) · inconsistent 4 (split-info-lost 3, all 3 provable from local checksums; untagged-name 1) · awaiting-backup 12 · missing-after-backup 29 · device-check-incomplete 52 · stale-inventory 35 (others) · probable / ambiguous / conflict 0. Re-split: 13 chunks in 3 entries (8 alternates); copies in another account on 18 rows; content-proven 1 of 72 captured. LOUD block 93 = 71 captured objects pushed after the Sep-25 crawl (12 entries) + 22 legacy (20 tv episodes + 2 last chunks = partial sets in 2 entries). Device check INCOMPLETE (movies not-connected): on_device 12 · freed 29 · unchecked 52. Unmatched: movies 42 (mediavault-unknown 13 · non-mediavault 29) · tv 18 (superseded-split 14 · duplicate 4) · anime 0. To resolve 85 (not-found 52 · missing-after-backup 29 · inconsistent 4). Apply preview: 1,976 objects would change / be confirmed (1,994 records; 0 conflicts, 0 orphans); 1,977 with --repair names | n/a — R1 replaces it |
 - 2026-10-03 R1 re-crawl started by the orchestrator, one account at a time (rpc mode, read-only): movies → tv → anime. Resume command (re-run the same; progress is kept): `python tools/gp_inventory.py <movies|tv|anime> --port <9223|9225|9224>`; check with `python tools/gp_inventory.py all --status`. Logs: D:\MediaVault_gp_inventory\<account>.log + crawl_r1_<account>.out.
+- 2026-10-05 Step 11 read-only live `fetch_cleanup` dry run (a scratch wrapper around `main.cmd_fetch_cleanup()`, its listing discarded; counts only): ~/Downloads leftovers 0 files / 0 B (9 files there, none a video, partial or `[short_id]`-tagged; the library's expected-name family holds 2,147 upload names) · .mv_incoming leftovers 0 (0 marked folders, 0 unmarked) · unfinished fetch journals 0 · fetch lock absent · wrote nothing (libraries and ~/Downloads unchanged, no journal folder, no lock file). Re-run any time: `python main.py fetch_cleanup` (dry run).
 
 ## In-progress sub-state
+_(none — Step 11 done 2026-10-05; its sub-task record follows for reference)_
 `Step 11 — dispatched 2026-10-04 to executor-fable (fable) · sub-tasks: [x] 11.a incoming dir + long-path + disk
 pre-flight + _set_download_dir (a29d604) · [x] 11.b harvester modes incoming / fallback / legacy, wired into
 _fetch_items + conftest redirects of ~/Downloads and the long-path root (60cf774) · [x] 11.c end-of-entry cleanup
@@ -128,8 +136,9 @@ closes its tabs and the Chrome it launched (user requirement 2026-10-04, PLAN St
 _close_session at the end of every account session but an interruption — waits until no download of the session
 grows (DOWNLOAD_STALL_S 300), launched → CDP Browser.close when it holds the debug port, terminated after 10 s only if
 its command line names the profile; attached → only this run's tabs closed (between accounts its windows, IMP-C26);
-journal sessions[].launched/closed; an attached Chrome is never terminated (11.e/11.f too) (the commit that ticks
-this) · next: disarm probes on a scratch copy, full + smoke, live fetch_cleanup dry-run, STATUS, final commit`
+journal sessions[].launched/closed; an attached Chrome is never terminated (11.e/11.f too) (8c3368e) · [x] self-review
+(505dada: the start-up cleanup waits for locks only after a termination) · [x] disarm 32/32 · full 2421 · smoke 82 ·
+live fetch_cleanup dry run · STATUS · feat commit`
 `resumed 2026-10-04 by executor-fable after a usage-limit pause (tree clean at c01be08; nothing to keep or discard)`
 `resumed 2026-10-04 by executor-fable after a second usage-limit pause (HEAD 7aa032b): uncommitted 11.g changes KEPT
 (main.py, mainfetch.py, tests/test_fetch_hygiene.py — coherent; hygiene + fetch suites 495 passed, smoke 82);

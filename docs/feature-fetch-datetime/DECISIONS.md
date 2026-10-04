@@ -460,3 +460,8 @@ No other step of this plan uses candidates.
   An object in no account is reported as "not in Google Photos", split by recency: pushed recently (after, or shortly
   before, the inventory crawl — the newly added entries) → "not backed up yet (recent)"; otherwise → "not in Google
   Photos (possible loss)". No phone needed. Step 8 code stays (used only with `--devices` and by later steps).
+- **Fetch closes Chrome and its tabs at the end (2026-10-04)** — user, verbatim: "ALSO, MAKE SURE the fetch also closes
+  the chrome and tabs properly before finishing the task. which makes it easier for us to re open in next fetch for
+  proper task." → Step 11 item i: after downloads finish, close this run's tabs and the Chrome the run launched
+  (graceful, then terminate its recorded pid); a Chrome the run only attached to keeps running with only this run's
+  tabs closed (orchestrator's safe default — it may hold the user's own tabs).

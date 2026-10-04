@@ -868,6 +868,15 @@ inconsistencies. Defects found here become Step 9b fix-ups (recorded in PROGRESS
      journals; dry-run prints name, size and reason and writes nothing; `--apply` deletes exactly the listed files after
      re-checking each one.
   h. `verify_restore` accepts `tempdir` (reuses `_parts_base` exactly like `cmd_restore`).
+  i. (User requirement 2026-10-04, DECISIONS §1e: "make sure the fetch also closes the chrome and tabs properly before
+     finishing the task. which makes it easier for us to re open in next fetch") Normal end of every fetch/fetch_restore
+     run — success, partial or failure — only after no download is active (never cancel a running transfer): close every
+     tab this run opened; if this run LAUNCHED the Chrome, close it gracefully (CDP `Browser.close`, then terminate the
+     recorded pid if still alive after a short wait) so the debug port and the profile are free and the next fetch
+     launches a fresh Chrome (with `--disable-quic`); a Chrome the run only ATTACHED to (already running before it) is
+     left open with only this run's tabs closed. One line says what was closed. Multi-account runs close each
+     account's Chrome at the end of its session. The journal (d) records `closed`; start-up cleanup (e) still handles a
+     run that died before closing.
 - Tests: CDP redirect params per entry; incoming harvest (match → renamed into `dest`; mismatch/duplicate → deleted;
   holder + extras extensions); nothing written to or read from `~/Downloads` in incoming mode; incoming dir empty and
   removed after each entry; crash mid-download → the next start terminates only the recorded Chrome (fake process table,

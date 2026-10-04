@@ -6,6 +6,7 @@ import time
 import re
 import socket
 import hashlib
+import errno
 import urllib.parse
 from datetime import datetime, timezone
 # --- SELENIUM IMPORTS ---
@@ -589,6 +590,13 @@ def _in_family(name, family):
     return False
 
 
+def _short_incoming_root(dest):
+    """<drive>:\\MV_incoming on the destination's own volume, or None when `dest` has no drive.
+    (tests/conftest.py points it under the test's tmp_path.)"""
+    drive = os.path.splitdrive(os.path.abspath(dest))[0]
+    return os.path.join(drive + os.sep, SHORT_INCOMING_ROOT) if drive else None
+
+
 def _incoming_location(dest, names):
     """Where the entry's downloads should land (P-12): <dest>\\.mv_incoming, unless that path plus
     the longest expected file name plus '.crdownload' exceeds INCOMING_PATH_LIMIT characters —
@@ -600,12 +608,11 @@ def _incoming_location(dest, names):
     longest = max((len(n) for n in names), default=0)
     if len(incoming) + 1 + longest + len(_CRDOWNLOAD) <= INCOMING_PATH_LIMIT:
         return incoming
-    absolute = os.path.abspath(dest)
-    drive = os.path.splitdrive(absolute)[0]
-    if not drive:
+    root = _short_incoming_root(dest)
+    if root is None:
         return None
-    digest = hashlib.sha1(os.path.normcase(absolute).encode("utf-8")).hexdigest()[:8]
-    return os.path.join(drive + os.sep, SHORT_INCOMING_ROOT, digest)
+    digest = hashlib.sha1(os.path.normcase(os.path.abspath(dest)).encode("utf-8")).hexdigest()[:8]
+    return os.path.join(root, digest)
 
 
 def _make_incoming(path):
@@ -674,11 +681,198 @@ def _disk_preflight(dest, need_bytes):
         return True
     sizes = f"{size(need)} needed ({size(need_bytes)} to download + {size(DISK_HEADROOM_BYTES)} headroom)"
     if free < need:
-        print(f"   ❌ Not enough space on {volume}: {sizes}, only {size(free)} free — nothing was "
-              f"downloaded for this entry. Free some space, then re-run.")
+        print(f"   ❌ Not enough free space on {volume} for this entry: {sizes}, only {size(free)} free. "
+              f"Nothing was downloaded — free some space, then re-run.")
         return False
-    print(f"   > 💽 Space on {volume}: {sizes}, {size(free)} free.")
+    print(f"   > 💽 Disk space on {volume}: {sizes}, {size(free)} free.")
     return True
+
+
+def _point_downloads(driver, path):
+    """_set_download_dir, once more in a freshly selected Photos tab when the first try fails (the
+    tab the driver was in may have closed). True when Chrome accepted the folder."""
+    if _set_download_dir(driver, path):
+        return True
+    try:
+        use_photos_tab(driver)
+    except Exception:
+        return False
+    return _set_download_dir(driver, path)
+
+
+def _remove_incoming(path):
+    """Remove the incoming folder `path` when nothing but its marker is left in it (the marker goes
+    first) — and, for a long-path folder, its MV_incoming root once that is empty too. True when
+    the folder is gone afterwards. Never raises; touches nothing that _is_incoming_dir does not
+    allow."""
+    if not os.path.isdir(path):
+        return True
+    if not _is_incoming_dir(path):
+        return False
+    try:
+        if os.listdir(path) != [INCOMING_MARKER]:
+            return False
+        os.remove(os.path.join(path, INCOMING_MARKER))
+        os.rmdir(path)
+    except OSError:
+        return False
+    parent = os.path.dirname(os.path.abspath(path))
+    if os.path.basename(parent) == SHORT_INCOMING_ROOT:
+        try:
+            os.rmdir(parent)  # only succeeds when empty
+        except OSError:
+            pass
+    return True
+
+
+def _prepare_downloads(driver, queue, ctx, entry=None, owner_id=None):
+    """[IMP-C25 Step 11 a] Before the entry's first request: decide where its downloads land and
+    point Chrome there (P-12). Sets ctx.target (FetchContext) with one of three modes:
+      incoming  Chrome saves into the entry's incoming dir — <dest>\\.mv_incoming, or the short
+                <drive>:\\MV_incoming\\<hash> when that path is too long for Chrome; the harvester
+                watches only it, and ~/Downloads is neither read nor written
+      fallback  ~/Downloads, as before IMP-C25, with P-12's delete rules — when Chrome refused the
+                redirect (then for the rest of the run, with one warning line) or no incoming folder
+                could be made for this entry
+      legacy    a driver without Chrome's DevTools protocol (None or a test stand-in — never a real
+                Chrome, which always has execute_cdp_cmd): today's ~/Downloads harvesting, unchanged
+    With `entry` given, the disk pre-flight runs first (incoming and fallback modes): False when it
+    refused the entry — nothing may be requested — else True. Entries run one at a time, so no
+    download is running while the folder changes."""
+    dest = queue[0]["dest"]
+    family = _expected_names(queue)
+    target = {"mode": "legacy", "dir": SYSTEM_DOWNLOADS_FOLDER, "dest": dest, "incoming": None,
+              "family": family, "handled": set()}
+    if not hasattr(driver, "execute_cdp_cmd"):
+        ctx.target = target
+        return True
+    if entry is not None and not _disk_preflight(dest, _remaining_bytes(entry, owner_id, queue)):
+        return False
+    target["mode"] = "fallback"
+    if not ctx.redirect_refused:
+        incoming = _incoming_location(dest, family + [item["filename"] for item in queue])
+        if incoming is not None and _make_incoming(incoming):
+            if _point_downloads(driver, incoming):
+                target.update(mode="incoming", dir=incoming, incoming=incoming)
+                driver._mv_download_dir = incoming   # re-applied on every Photos tab (use_photos_tab)
+            else:
+                _remove_incoming(incoming)
+                ctx.redirect_refused = True
+        else:
+            print(f"   > ⚠️ No download folder could be made next to {dest} — this entry downloads to "
+                  f"~/Downloads.")
+            if not _point_downloads(driver, SYSTEM_DOWNLOADS_FOLDER):  # never into an earlier entry's folder
+                ctx.redirect_refused = True
+        if ctx.redirect_refused:
+            print("   ⚠️ Chrome refused the download folder (CDP) — this run downloads to ~/Downloads as before; "
+                  "only files that appear during it, belong to the entry and fail verification are deleted there.")
+    if target["mode"] == "fallback" and ctx.run_downloads is None:
+        ctx.run_downloads = {_family_key(name): stamp for name, stamp in _downloads_snapshot().items()}
+    ctx.target = target
+    return True
+
+
+def _finish_downloads(driver, ctx):
+    """[IMP-C25 Step 11 c] The end of an entry's part in this session (after IMP-C34's retry round):
+    the driver is disarmed and the incoming folder, empty again, is removed. Clears ctx.target."""
+    target, ctx.target = ctx.target, None
+    if getattr(driver, "_mv_download_dir", None):
+        driver._mv_download_dir = None
+    if target and target["mode"] == "incoming":
+        _remove_incoming(target["incoming"])
+
+
+def _watched_names(folder, mode):
+    """The names in the watched folder. ~/Downloads (legacy, fallback) is listed exactly as before
+    (an error propagates); an incoming folder that has gone reads as empty."""
+    if mode != "incoming":
+        return os.listdir(folder)
+    try:
+        return os.listdir(folder)
+    except OSError:
+        return []
+
+
+def _harvestable(name, mode, target):
+    """Whether the harvester looks at the finished file `name`: legacy — a .mkv / .mp4, as before;
+    incoming — any file but the marker (chunks, FLAC holders, extras of any extension); fallback —
+    a .mkv / .mp4 or a name of the entry's expected-name family."""
+    if mode == "incoming":
+        return name != INCOMING_MARKER
+    if name.endswith(".mkv") or name.endswith(".mp4"):
+        return True
+    return mode == "fallback" and _in_family(name, target["family"])
+
+
+def _delete_download(path):
+    """Delete one file; True when it is gone. Never raises (a file Chrome still writes stays)."""
+    try:
+        os.remove(path)
+        return True
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+
+def _drop_unmatched(name, path, duplicate, cached, target, ctx):
+    """[P-12] A finished file that matched no pending object, in the incoming or the fallback mode.
+    Incoming: everything in .mv_incoming is disposable — a copy of an object already fetched is
+    deleted as before ('Duplicate. Deleting.'), any other file is deleted and listed (name + size).
+    Fallback: the same, but ONLY for a file that appeared during this run and belongs to the
+    entry's expected-name family; anything else stays untouched — a run-new one is listed when the
+    run ends. Each file is reported once per entry."""
+    if path in target["handled"]:
+        return
+    target["handled"].add(path)
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        size = 0
+    deletable = target["mode"] == "incoming"
+    run_new = False
+    if target["mode"] == "fallback":
+        run_new = ctx.run_downloads is not None and _family_key(name) not in ctx.run_downloads
+        deletable = run_new and _in_family(name, target["family"])
+    if duplicate:
+        if cached:
+            print(f"\n   > 🔎 Checking: {name}")
+        if deletable:
+            print("     ⚠️ Duplicate. Deleting.")
+            _delete_download(path)
+        else:
+            print("     ⚠️ Duplicate — left in Downloads (not provably this fetch's download).")
+    elif deletable:
+        _delete_download(path)
+        print(f"     🗑️ Not an expected file — deleted: {name} ({mvcommon.human_readable_size(size)})")
+    if not deletable and run_new:
+        ctx.left[name] = size
+
+
+def _move_into_place(path, dest):
+    """[P-12] Rename a verified download from the incoming folder to <dest>\\<expected filename>,
+    replacing an existing file as before (os.remove + move): one rename on the same volume. A
+    cross-volume rename (not expected: the folder sits on the destination's volume) copies
+    instead; any other error propagates, as it did."""
+    try:
+        os.replace(path, dest)
+    except OSError as e:
+        if e.errno != errno.EXDEV:
+            raise
+        if os.path.exists(dest):
+            os.remove(dest)
+        shutil.move(path, dest)
+
+
+def _left_in_downloads_line(ctx):
+    """[P-12] The run's closing list of files that appeared in ~/Downloads during it (the fallback)
+    and are still there, untouched — not provably this fetch's — or None."""
+    left = [(name, size) for name, size in ctx.left.items()
+            if os.path.exists(os.path.join(SYSTEM_DOWNLOADS_FOLDER, name))]
+    if not left:
+        return None
+    files = ", ".join(f"{name} ({mvcommon.human_readable_size(size)})" for name, size in left)
+    return f"   > 📋 Left in Downloads (appeared during this fetch, not provably its own): {files}"
 
 
 # ==========================================
@@ -715,6 +909,18 @@ class FetchContext:
                fetches only its own objects of the entry
     reasons    {account: {"override" | "learned" | "prefix"}} — why the batch's
                objects were routed to each account (the Switching line)
+    [IMP-C25 Step 11 — download hygiene, P-12]
+    target     where the CURRENT entry's downloads land — set by _prepare_downloads
+               before its first request, cleared at its end (_finish_downloads):
+               {"mode": "incoming" | "fallback" | "legacy", "dir": the folder the
+               harvester watches, "dest", "incoming": the entry's incoming dir or
+               None, "family": its expected-name family, ...}; None outside an entry
+    redirect_refused  Chrome refused the CDP download redirect: every later entry of
+               the run uses the ~/Downloads fallback
+    run_downloads  {name (Windows case): (size, mtime_ns)} of ~/Downloads when the run
+               first used the fallback — a name not in it appeared during the run
+    left       {name: size} — files that appeared in ~/Downloads during the run (the
+               fallback) and were neither moved nor deleted: listed when the run ends
     """
 
     def __init__(self, manual=False, run_id=None):
@@ -726,6 +932,11 @@ class FetchContext:
         self.stats = {"learned": 0, "retried": 0, "recovered": 0, "lost_twice": 0}
         self.plans = {}
         self.reasons = {}
+        self.target = None
+        self.redirect_refused = False
+        self.run_downloads = None
+        self.left = {}
+        self.hinted = False  # the incoming-mode "Chrome ignored the folder?" hint was printed
 
     def start_session(self, account):
         """A Chrome session for `account` is up: the run now fetches in it."""
@@ -1094,8 +1305,27 @@ def harvest_downloads(queue, ctx):
        "saw_download": bool,  a .crdownload was seen during the round (IMP-C29)
        "unmatched": int}      files that ARRIVED in this round (new to the session)
                               and matched no pending item — a request fetched a
-                              wrong item (another one, or one already fetched)"""
-    print("   > Watching Downloads (Infinite wait if active)...")
+                              wrong item (another one, or one already fetched)
+
+    [IMP-C25 Step 11 — P-12] The folder it watches is the entry's (ctx.target, set by
+    _prepare_downloads; none = legacy):
+      incoming  only the entry's incoming dir — ~/Downloads is never read. Every
+                finished file of any extension arrived in this session (a multi-
+                account entry's folder is emptied when each session's part ends);
+                a match is renamed into its `dest`, a copy of a fetched item and any
+                other file are deleted (the other file listed with its size) — a
+                deleted wrong item still counts in "unmatched". The Watching line
+                names the folder.
+      fallback  ~/Downloads as below, but a file is deleted ONLY when it appeared
+                during this run, belongs to the entry's expected-name family and is
+                not moved; other run-new files are listed when the run ends.
+      legacy    ~/Downloads exactly as described above."""
+    target = ctx.target or {"mode": "legacy", "dir": SYSTEM_DOWNLOADS_FOLDER}
+    mode, folder = target["mode"], target["dir"]
+    if mode == "incoming":
+        print(f"   > Watching {folder} (Infinite wait if active)...")
+    else:
+        print("   > Watching Downloads (Infinite wait if active)...")
     start_time = time.time()
     base_timeout = 300  # 5 mins initial timeout
 
@@ -1105,7 +1335,7 @@ def harvest_downloads(queue, ctx):
 
     while True:
         # Check Active Downloads
-        active_downloads = [f for f in os.listdir(SYSTEM_DOWNLOADS_FOLDER) if f.endswith(".crdownload")]
+        active_downloads = [f for f in _watched_names(folder, mode) if f.endswith(".crdownload")]
         is_active = len(active_downloads) > 0
         saw_download = saw_download or is_active
         timed_out = time.time() - start_time > base_timeout
@@ -1121,10 +1351,10 @@ def harvest_downloads(queue, ctx):
             return {"timed_out": False, "saw_download": saw_download, "unmatched": unmatched}
 
         found_new = False
-        for f in os.listdir(SYSTEM_DOWNLOADS_FOLDER):
-            if f.endswith(".crdownload") or not (f.endswith(".mkv") or f.endswith(".mp4")): continue
+        for f in _watched_names(folder, mode):
+            if f.endswith(".crdownload") or not _harvestable(f, mode, target): continue
 
-            fpath = os.path.join(SYSTEM_DOWNLOADS_FOLDER, f)
+            fpath = os.path.join(folder, f)
             if fpath in processed_files: continue
 
             # Stability Check
@@ -1136,7 +1366,8 @@ def harvest_downloads(queue, ctx):
 
             fhash, sha1, cached = _hash_download(f, fpath, ctx)
             processed_files.add(fpath)
-            arrived = _arrived_this_session(f, fpath, ctx)
+            # [IMP-C25 P-12] every file in the entry's incoming dir came from this session
+            arrived = True if mode == "incoming" else _arrived_this_session(f, fpath, ctx)
 
             # Match
             matched = next((i for i in queue if i["hash"] == fhash and i["status"] == "pending"), None)
@@ -1144,8 +1375,11 @@ def harvest_downloads(queue, ctx):
                 if cached:
                     print(f"\n   > 🔎 Checking: {f}")
                 dest = os.path.join(matched["dest"], matched["filename"])
-                if os.path.exists(dest): os.remove(dest)
-                shutil.move(fpath, dest)
+                if mode == "incoming":
+                    _move_into_place(fpath, dest)  # [IMP-C25 P-12] one rename on the destination's volume
+                else:
+                    if os.path.exists(dest): os.remove(dest)
+                    shutil.move(fpath, dest)
                 print(f"     ✅ MOVED: {matched['filename']}")
                 matched["status"] = "done"
                 found_new = True
@@ -1154,8 +1388,11 @@ def harvest_downloads(queue, ctx):
             else:
                 if arrived and not cached:
                     unmatched += 1  # [IMP-C34] a request fetched a wrong item
+                duplicate = any(i["hash"] == fhash for i in queue)
+                if mode != "legacy":
+                    _drop_unmatched(f, fpath, duplicate, cached, target, ctx)  # [IMP-C25 P-12]
                 # Duplicate check
-                if any(i["hash"] == fhash for i in queue):
+                elif duplicate:
                     if cached:
                         print(f"\n   > 🔎 Checking: {f}")
                     print("     ⚠️ Duplicate. Deleting.")
@@ -1173,6 +1410,11 @@ def harvest_downloads(queue, ctx):
             lost = sum(1 for i in queue if i["status"] == "pending" and i.get("triggered"))
             if lost:
                 print(_lost_download_note(lost, saw_download))
+                if mode == "incoming" and not saw_download and not ctx.hinted:
+                    ctx.hinted = True  # [IMP-C25 P-12] the redirect is unverified live (PLAN P6): say where to look
+                    print(f"     Chrome was told to save into {folder}. If chrome://downloads shows the file saved "
+                          f"somewhere else, Chrome ignored that folder — `python main.py fetch_cleanup` lists "
+                          f"such leftovers.")
             return {"timed_out": True, "saw_download": saw_download, "unmatched": unmatched}
 
         if not found_new:
@@ -1281,12 +1523,20 @@ def _lost_downloads_line(ctx):
             f"{s['lost_twice']} lost twice — see the failed list.")
 
 
-def _fetch_items(driver, queue, ctx):
-    """Fetch the pending items of one entry in the running session: the exact-item
-    stages, today's two legacy attempts, then IMP-C34's one retry."""
+def _fetch_items(driver, queue, ctx, entry=None, owner_id=None):
+    """Fetch the pending items of one entry in the running session: [IMP-C25 Step 11]
+    first where its downloads land (_prepare_downloads — the disk pre-flight may refuse
+    the entry: then nothing is requested), the exact-item stages, today's two legacy
+    attempts, IMP-C34's one retry, and last the end of the entry's downloads
+    (_finish_downloads). `entry` / `owner_id` size the pre-flight."""
+    if not _prepare_downloads(driver, queue, ctx, entry, owner_id):
+        return
+
     # [IMP-C25] What is in Downloads before this session requests anything: no file
     # that was already there may teach the learned sidecar about this account.
-    if ctx.downloads is None:
+    # ([Step 11] Not in the incoming mode: every file there arrived in this session,
+    # and ~/Downloads is never read.)
+    if ctx.target["mode"] != "incoming" and ctx.downloads is None:
         ctx.downloads = _downloads_snapshot()
 
     # [IMP-C25 P-14] The exact-item stages first (a no-op until Step 12); today's two
@@ -1319,6 +1569,9 @@ def _fetch_items(driver, queue, ctx):
 
     # [IMP-C34] A download lost and not requested since gets its one retry.
     _retry_lost_downloads(queue, ctx)
+
+    # [IMP-C25 Step 11] Only now — after the retry's harvest — the entry's downloads end.
+    _finish_downloads(driver, ctx)
 
 
 def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None, ctx=None):
@@ -1358,7 +1611,7 @@ def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None, ctx=None):
               f"fetched in the {_session_names(plan['accounts'][1:])} session.")
 
     if mine:
-        _fetch_items(driver, mine, ctx)
+        _fetch_items(driver, mine, ctx, entry, entry_id or entry.get("manual_id"))
     elif plan is None:
         print("   ✅ All files already exist.")
         return
@@ -1901,6 +2154,9 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None,
     lost_line = _lost_downloads_line(ctx)  # [IMP-C34] only when a download was lost
     if lost_line:
         print(f"\n{lost_line}")
+    left_line = _left_in_downloads_line(ctx)  # [IMP-C25 P-12] only in the ~/Downloads fallback
+    if left_line:
+        print(left_line)
     print("\n✅ Batch Processing Complete.")
 
 

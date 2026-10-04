@@ -16,6 +16,9 @@ import mvcommon  # authoritative home of LIBRARY_* + load_library/save_library
 # The real Chrome profile folders, as mainfetch declares them (C:\Media\Utils\ChromeProfile*) — read once, before any
 # test can patch the map.
 _REAL_CHROME_PROFILES = dict(mainfetch.CHROME_PROFILES)
+# The real <drive>:\MV_incoming locator (IMP-C25 Step 11) — the autouse fixture below redirects it; a test that checks
+# the real path arithmetic (it creates nothing) asks for the `real_short_incoming_root` fixture.
+_REAL_SHORT_INCOMING_ROOT = mainfetch._short_incoming_root
 
 FAKE_ORIGINAL_BYTES = b"ORIGINAL-MASTER-BYTES"
 FAKE_DUMMY_BYTES    = b"DUMMY"
@@ -58,7 +61,12 @@ def _hermetic_gphotos_state(tmp_path, monkeypatch):
     created here: the dirs appear only when code writes state.
 
     Hard guards: both redirects must resolve under tmp_path and must not be the real locations. Later IMP-C25
-    steps extend THIS fixture (Step 11: mainfetch.FETCH_JOURNAL_DIR; Step 13b: the auto-confirm guard)."""
+    steps extend THIS fixture (Step 11: mainfetch.FETCH_JOURNAL_DIR; Step 13b: the auto-confirm guard).
+
+    IMP-C25 Step 11 (download hygiene) adds, for mainfetch — read module-qualified everywhere, so patching mainfetch
+    alone is complete: SYSTEM_DOWNLOADS_FOLDER -> tmp_path/mv_downloads (NOT created: a test that harvests or cleans a
+    Downloads folder sets its own; nothing can read or delete in the real ~/Downloads), and _short_incoming_root -> a
+    tmp folder (the long-path fallback would otherwise create <drive>:\\MV_incoming on a real drive root)."""
     real_state = os.path.normcase(os.path.join(os.path.expanduser("~"), ".mediavault"))
     real_inventory = os.path.normcase(r"D:\MediaVault_gp_inventory")
     tmp = tmp_path.resolve()
@@ -69,7 +77,23 @@ def _hermetic_gphotos_state(tmp_path, monkeypatch):
         live = os.path.normcase(os.path.abspath(getattr(mvcommon, attr)))
         assert not live.startswith(real_state) and not live.startswith(real_inventory), \
             f"Safety check failed: {attr} still points at the real state: {live}"
+    downloads = tmp_path / "mv_downloads"
+    short_root = tmp_path / "mv_short_root" / mainfetch.SHORT_INCOMING_ROOT
+    real_downloads = os.path.normcase(os.path.join(os.path.expanduser("~"), "Downloads"))
+    for what, path in (("SYSTEM_DOWNLOADS_FOLDER", downloads), ("_short_incoming_root", short_root)):
+        assert tmp in path.resolve().parents, f"Safety check failed: {what} redirect escaped tmp_path: {path}"
+        assert not os.path.normcase(os.path.abspath(path)).startswith(real_downloads), \
+            f"Safety check failed: {what} points at the real Downloads: {path}"
+    monkeypatch.setattr(mainfetch, "SYSTEM_DOWNLOADS_FOLDER", str(downloads))
+    monkeypatch.setattr(mainfetch, "_short_incoming_root", lambda dest: str(short_root))
     yield
+
+
+@pytest.fixture()
+def real_short_incoming_root():
+    """IMP-C25 Step 11 — mainfetch's REAL <drive>:\\MV_incoming locator (pure path arithmetic; it creates nothing),
+    for the one test that pins it. Every test otherwise sees the autouse tmp redirect above."""
+    return _REAL_SHORT_INCOMING_ROOT
 
 
 @pytest.fixture(autouse=True)

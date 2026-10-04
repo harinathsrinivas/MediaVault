@@ -5,6 +5,7 @@ import shutil
 import time
 import re
 import socket
+import hashlib
 import urllib.parse
 from datetime import datetime, timezone
 # --- SELENIUM IMPORTS ---
@@ -256,6 +257,7 @@ def use_photos_tab(driver):
             driver.get(PHOTOS_URL)
             outcome = "new"
     focus_page(driver)
+    _rearm_downloads(driver)  # [IMP-C25 P-12] a fetch entry's downloads go to its incoming dir from this tab too
     return outcome
 
 
@@ -498,6 +500,185 @@ def _fetch_restore_folder(entry, temp_dir, entry_id=None):
     # manual_id (library key), not filename/search_term.
     safe_id = re.sub(r"[^A-Za-z0-9._-]", "_", entry_id or entry.get("filename") or "entry")
     return os.path.join(temp_dir, safe_id, RESTORE_DIR_NAME)
+
+
+# ==========================================
+#   IMP-C25 STEP 11 — DOWNLOAD HYGIENE (P-12)
+# ==========================================
+# docs/feature-fetch-datetime/PLAN.md P-12 + Step 11. Chrome downloads straight into
+# each entry's own destination: <dest>\.mv_incoming\, <dest> = _fetch_restore_folder
+# (<folder_path>\restore, or <tempdir>\<safe id>\restore). Everything in that folder is
+# disposable: a file whose SHA-256 is an expected object's is renamed into <dest>, any
+# other file is deleted, and the folder is removed when the entry ends — nothing ever
+# lands in ~/Downloads. MediaVault deletes a file only when it sits DIRECTLY in a folder
+# that is structurally an incoming folder (named .mv_incoming, or one level under a
+# <drive>:\MV_incoming\ root) AND holds the INCOMING_MARKER file — or, in the ~/Downloads
+# fallback (Chrome refused the redirect), when it appeared during this run, belongs to
+# the entry's expected-name family and is not a file the run kept.
+INCOMING_DIR_NAME = ".mv_incoming"         # <dest>\.mv_incoming\ — one entry's Chrome download folder
+INCOMING_MARKER = ".mediavault_incoming"   # marker file: only a folder holding it is ever emptied
+SHORT_INCOMING_ROOT = "MV_incoming"        # <drive>:\MV_incoming\<8-char hash>\ — the long-path fallback
+INCOMING_PATH_LIMIT = 240                  # incoming path + file name + ".crdownload" longer than this -> short dir
+DISK_HEADROOM_BYTES = 2 * 1024 ** 3        # free space an entry must leave on its destination volume
+_CRDOWNLOAD = ".crdownload"                # Chrome's in-progress suffix ("<name>.crdownload", "Unconfirmed N.crdownload")
+_PART_KINDS = ("chunk", "holder", "extra_chunk")
+
+
+def _set_download_dir(driver, path):
+    """[P-12] Point the attached Chrome's downloads at `path`: CDP Browser.setDownloadBehavior
+    {behavior: allow, downloadPath, eventsEnabled: true}, else the older Page.setDownloadBehavior
+    {behavior: allow, downloadPath}. True when Chrome accepted one of them, False when both raised
+    (Chrome refused the redirect). Never raises.
+
+    That an ATTACHED Chrome 154 honours it is unverified live (PLAN P6; 🚦 R2 §M6–M7). In the
+    Chromium source the setting belongs to the DevTools session of the tab it was sent through and
+    returns to Chrome's default when that session ends (the tab closes; Selenium quits) — so a fetch
+    re-applies it on every Photos tab it works in (_rearm_downloads, from use_photos_tab)."""
+    for command, params in (("Browser.setDownloadBehavior",
+                             {"behavior": "allow", "downloadPath": path, "eventsEnabled": True}),
+                            ("Page.setDownloadBehavior", {"behavior": "allow", "downloadPath": path})):
+        try:
+            driver.execute_cdp_cmd(command, params)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _rearm_downloads(driver):
+    """Re-apply the download folder a fetch entry armed (driver._mv_download_dir) in the tab the
+    driver is in now. use_photos_tab calls it for every tab it selects, so whatever the fetch
+    requests next downloads into the entry's incoming dir. A no-op when nothing is armed (outside
+    an entry, or in the ~/Downloads fallback); never raises."""
+    path = getattr(driver, "_mv_download_dir", None)
+    if path:
+        _set_download_dir(driver, path)
+
+
+def _family_key(name):
+    """A file name as Windows compares it (case-insensitive)."""
+    return os.path.normcase(name)
+
+
+def _expected_names(queue):
+    """The entry's expected-name family (P-12): the exact uploaded name of every queued object —
+    the name Google Photos gives its download (a chunk or FLAC holder keeps its own, tagged name;
+    a whole file is '<stem> [<short_id>]<ext>'). Sorted, without duplicates; an object whose
+    uploaded name is unknown adds nothing."""
+    return sorted({loc["uploaded_name"] for loc in (item.get("locator") or {} for item in queue)
+                   if isinstance(loc.get("uploaded_name"), str) and loc["uploaded_name"]})
+
+
+def _in_family(name, family):
+    """True when the file `name` belongs to the expected-name family `family` (base names): one of
+    them, Chrome's ' (n)' variant of one ('<stem> (2)<ext>' — Chrome numbers before the last
+    extension), or the '.crdownload' partial of either. Case-insensitive, like Windows names.
+    'Unconfirmed NNN.crdownload' (a partial Chrome has not named yet) never belongs: nothing ties
+    it to an entry."""
+    key = _family_key(name)
+    if key.endswith(_CRDOWNLOAD):
+        key = key[:-len(_CRDOWNLOAD)]
+    for base in family:
+        base_key = _family_key(base)
+        if key == base_key:
+            return True
+        stem, ext = os.path.splitext(base_key)
+        if (key.startswith(stem + " (") and key.endswith(")" + ext)
+                and key[len(stem) + 2:len(key) - len(ext) - 1].isdigit()):
+            return True
+    return False
+
+
+def _incoming_location(dest, names):
+    """Where the entry's downloads should land (P-12): <dest>\\.mv_incoming, unless that path plus
+    the longest expected file name plus '.crdownload' exceeds INCOMING_PATH_LIMIT characters —
+    then <drive>:\\MV_incoming\\<first 8 hex of SHA-1(dest)>, on the destination's own volume (so
+    the verified file is still renamed into place, never copied); None when the destination has no
+    drive (the caller then uses the ~/Downloads fallback). `names` = the file names the entry may
+    download. Pure path arithmetic; creates nothing."""
+    incoming = os.path.join(dest, INCOMING_DIR_NAME)
+    longest = max((len(n) for n in names), default=0)
+    if len(incoming) + 1 + longest + len(_CRDOWNLOAD) <= INCOMING_PATH_LIMIT:
+        return incoming
+    absolute = os.path.abspath(dest)
+    drive = os.path.splitdrive(absolute)[0]
+    if not drive:
+        return None
+    digest = hashlib.sha1(os.path.normcase(absolute).encode("utf-8")).hexdigest()[:8]
+    return os.path.join(drive + os.sep, SHORT_INCOMING_ROOT, digest)
+
+
+def _make_incoming(path):
+    """Create the incoming folder `path` and its INCOMING_MARKER file; True when both exist
+    afterwards (an existing folder is reused), False when they cannot be created."""
+    try:
+        os.makedirs(path, exist_ok=True)
+        marker = os.path.join(path, INCOMING_MARKER)
+        if not os.path.isfile(marker):
+            with open(marker, "w", encoding="utf-8") as fh:
+                fh.write("MediaVault fetch download folder (IMP-C25 P-12): every file in it is disposable.\n")
+        return True
+    except OSError:
+        return False
+
+
+def _is_incoming_dir(path):
+    """True only for a folder MediaVault may empty: it is named INCOMING_DIR_NAME, or sits one level
+    under a SHORT_INCOMING_ROOT folder, and it holds the INCOMING_MARKER file. Every delete of the
+    start-up cleanup, the interruption cleanup and fetch_cleanup asks this first."""
+    if not isinstance(path, str) or not path:
+        return False
+    absolute = os.path.abspath(path)
+    named = os.path.basename(absolute) == INCOMING_DIR_NAME
+    short = os.path.basename(os.path.dirname(absolute)) == SHORT_INCOMING_ROOT
+    return (named or short) and os.path.isfile(os.path.join(absolute, INCOMING_MARKER))
+
+
+def _remaining_bytes(entry, owner_id, queue):
+    """Best estimate of the bytes `queue` (one entry's objects still to fetch) will download: each
+    object's recorded size (its trusted block's size_bytes, else its capture's — both describe
+    exactly these bytes); without one, a whole file counts the entry's tech_spec.size_bytes and a
+    chunk an equal share of it (a split's chunks add up to about the whole file); anything else
+    (a FLAC holder) counts 0 — DISK_HEADROOM_BYTES covers it."""
+    objects = _entry_objects(entry, owner_id) if queue else {}
+    whole = (entry.get("tech_spec") or {}).get("size_bytes")
+    whole = whole if mvcommon._is_int(whole) and whole > 0 else 0
+    split = entry.get("split_info") if isinstance(entry.get("split_info"), dict) else {}
+    chunks = len(split.get("chunks") or []) if split.get("is_split") else 0
+    total = 0
+    for item in queue:
+        obj = objects.get(item["hash"]) or {}
+        size = next((facts["size_bytes"] for facts in (obj.get("block"), obj.get("capture"))
+                     if isinstance(facts, dict) and mvcommon._is_int(facts.get("size_bytes"))
+                     and facts["size_bytes"] > 0), None)
+        if size is None:
+            kind = (item.get("locator") or {}).get("kind")
+            size = whole if kind in ("whole", "extra_whole") else (
+                whole // chunks if kind in ("chunk", "extra_chunk") and chunks else 0)
+        total += size
+    return total
+
+
+def _disk_preflight(dest, need_bytes):
+    """[P-12 rule 5] True when the destination volume holds the entry's remaining bytes plus
+    DISK_HEADROOM_BYTES; prints one line either way (a refusal names the volume and the sizes, and
+    nothing is downloaded for the entry). A volume whose free space cannot be read passes with a
+    note — the download itself would then report the problem."""
+    need = need_bytes + DISK_HEADROOM_BYTES
+    volume = os.path.splitdrive(os.path.abspath(dest))[0] or dest
+    size = mvcommon.human_readable_size
+    try:
+        free = shutil.disk_usage(dest).free
+    except OSError as e:
+        print(f"   > ⚠️ Could not read the free space on {volume} ({e}) — continuing.")
+        return True
+    sizes = f"{size(need)} needed ({size(need_bytes)} to download + {size(DISK_HEADROOM_BYTES)} headroom)"
+    if free < need:
+        print(f"   ❌ Not enough space on {volume}: {sizes}, only {size(free)} free — nothing was "
+              f"downloaded for this entry. Free some space, then re-run.")
+        return False
+    print(f"   > 💽 Space on {volume}: {sizes}, {size(free)} free.")
+    return True
 
 
 # ==========================================
@@ -1341,7 +1522,9 @@ def build_extras_entries(title_entry, title_id=None):
     split item's chunk blocks travel inside its split_info), `group_rel`,
     `sub_rel`, `label` ('extra <group_rel>/<sub_rel>', the label
     mvcommon.iter_entry_objects gives the item) and `manual_id` = title_id —
-    an extra's objects are owned by its TITLE id (None when not given)."""
+    an extra's objects are owned by its TITLE id (None when not given).
+    [IMP-C25 Step 11] ... and the item's `tech_spec` (its size, for the
+    per-entry disk pre-flight — P-12 rule 5)."""
     title_folder = title_entry.get("folder_path", "")
     groups = title_entry.get("extras", {}).get("groups", {})
     entries = []
@@ -1361,6 +1544,7 @@ def build_extras_entries(title_entry, title_id=None):
                 "short_id": item.get("short_id"),
                 "split_info": item.get("split_info"),
                 "gphotos": item.get("gphotos"),
+                "tech_spec": item.get("tech_spec"),
                 "manual_id": title_id,
                 "group_rel": group_rel,
                 "sub_rel": sub_rel,

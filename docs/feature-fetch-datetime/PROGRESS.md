@@ -110,10 +110,12 @@ Worktrees C:\Users\harin\PycharmProjects\MediaVault-c25-cand\step-12\A|B|C · br
 - 2026-10-03 R1 re-crawl started by the orchestrator, one account at a time (rpc mode, read-only): movies → tv → anime. Resume command (re-run the same; progress is kept): `python tools/gp_inventory.py <movies|tv|anime> --port <9223|9225|9224>`; check with `python tools/gp_inventory.py all --status`. Logs: D:\MediaVault_gp_inventory\<account>.log + crawl_r1_<account>.out.
 
 ## In-progress sub-state
-`Step 11 — dispatched 2026-10-04 to executor-fable (fable) · sub-tasks: [ ] 11.a incoming dir + long-path + disk
-pre-flight + _set_download_dir ← next · [ ] 11.b incoming-mode harvester · [ ] 11.c end-of-entry cleanup +
-pending_delete · [ ] 11.d fetch journal · [ ] 11.e start-up cleanup · [ ] 11.f interruption handling · [ ] 11.g
-fetch_cleanup [--apply] · [ ] 11.h verify_restore tempdir · then disarm probes, full + smoke`
+`Step 11 — dispatched 2026-10-04 to executor-fable (fable) · sub-tasks: [x] 11.a incoming dir + long-path + disk
+pre-flight + _set_download_dir (helpers + tests, not yet wired; the commit that ticks this) · [ ] 11.b incoming-mode
+harvester ← next · [ ] 11.c end-of-entry cleanup + pending_delete · [ ] 11.d fetch journal · [ ] 11.e start-up
+cleanup · [ ] 11.f interruption handling · [ ] 11.g fetch_cleanup [--apply] · [ ] 11.h verify_restore tempdir · then
+disarm probes, full + smoke`
+`resumed 2026-10-04 by executor-fable after a usage-limit pause (tree clean at c01be08; nothing to keep or discard)`
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes
 alone; re-run it before treating a red full suite as a regression.
 Template — when a step is running (Execution protocol "In-step checkpoints"):

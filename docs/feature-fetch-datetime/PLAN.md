@@ -84,7 +84,7 @@ last chunks) and a set of `archived` items found in no account (their local copy
    (`resolve_photos`, `set_search`), and offers `--manual`. SHA-256 stays the final authority; restore's chunk merge +
    canonical-hash verification stays authoritative and untouched.
 3. The already-archived library is backfilled by **mapping** (inventory ↔ library by normalized exact filename, with
-   dedupKey cross-checks, re-split disambiguation, wrong-account detection, device cross-check before any "missing"
+   dedupKey cross-checks, re-split disambiguation, wrong-account detection, recency rule before any "missing" (Step 9b: no phone needed; device check opt-in)
    verdict) → report → user resolution (CSV) → dry-run → user review → `--apply`.
 4. `check_photos` verifies any scope (item / season / series / prefix / account / pending / whole library) in Google
    Photos **without downloading**, reports exactly-one / ambiguous / not-found per approach and per category, flags
@@ -726,10 +726,12 @@ planner-v2 to amend.
 - Depends on: Steps 2, 3, 6, 7, 8.
 - Consumed by: 🚦 R1, 🚦 R3, Steps 10–13 (photo_ids and home accounts), docs.
 - Files: `main.py` (`cmd_map_photos` + CLI `map_photos`), `tests/test_map_photos.py`.
-- CLI: `map_photos [all|<id>|<prefix>] [--account movies|tv|anime|others] [--devices-only] [--resolutions <csv>] [--repair split-info|names] [--accept-probable] [--apply] [--out <dir>]` — dry-run default.
+- CLI: `map_photos [all|<id>|<prefix>] [--account movies|tv|anime|others] [--devices] [--devices-only] [--resolutions <csv>] [--repair split-info|names] [--accept-probable] [--apply] [--out <dir>]` — dry-run default.
 - Details (per account, all categories; library read-only until `--apply`):
   1. Freshness gate: refuse a verdict (report `stale-inventory`) for any account whose latest complete enumeration is
-     older than the newest capture push for that account or older than 24 h — print the re-crawl command.
+     older than 24 h (or never ran) — print the re-crawl command. **Step 9b (user ruling 2026-10-03, DECISIONS §1e):**
+     a push newer than its routed account's crawl no longer marks the whole account stale; that object alone can only
+     be proven by its own bytes, otherwise it is `not-backed-up-yet`.
   2. Match per object: exact name → normalized name (P-6) → wrong-account (the name exists only in another account's
      inventory → candidate `home_account`) → `[short_id]`-tag probable (OD-14).
   3. Cross-check: capture sha1 → dedupKey must equal the item's (else `conflict`, never applied).
@@ -745,9 +747,12 @@ planner-v2 to amend.
      `checksums/<chunk>.sha256` sidecars when present (dry-run diff; applied only with `--repair split-info --apply`;
      anything it cannot prove stays a user decision); (b) uploaded under an old untagged name (`<name><ext>` without
      `[sid]`) → record the actual `uploaded_name` (`--repair names`); (c) partial chunk sets (some chunks in no account) →
-     device cross-check (Step 8) → report; (d) object in no account → device cross-check: `on_device` →
-     `awaiting-backup`; `freed` → `missing-after-backup` (possible cloud loss); `absent` → `missing-everywhere` — every
-     (c)/(d) row is printed in a LOUD block (the local copy of an `archived` entry is a dummy).
+     report (`partial-set`); (d) object in no account → **Step 9b recency rule, no phone needed**: pushed (capture
+     `pushed.at` of its own bytes) after its routed account's crawl started or within `MAP_RECENT_DAYS = 7` before it →
+     `not-backed-up-yet` (listed, not on the todo/failed list); otherwise or push time unknown → `possible-loss`. Only
+     with `--devices`, an old object gets the phone verdict instead (`awaiting-backup` / `missing-after-backup` /
+     `missing-everywhere`); an unlisted phone only annotates, never blocks — every possible-loss row is printed in a
+     LOUD block (the local copy of an `archived` entry is a dummy).
   6. Unmatched inventory items → categorized report only (superseded split sets, duplicates, cross-account copies,
      non-MediaVault uploads); never touched.
   7. Outputs (under `~/.mediavault/gphotos/map/<ts>/` or `--out`): `summary.txt` (per account × category counts),
@@ -948,7 +953,8 @@ inconsistencies. Defects found here become Step 9b fix-ups (recorded in PROGRESS
   REVIEWED dry-run's records without searching again (the run's recorded scope must equal the given scope, else refuse;
   `latest` = newest completed run for that scope; the apply engine re-checks every pin, so stale runs cannot corrupt a
   node). Flags: account mismatch
-  (found in a non-home account), library/cloud inconsistencies (C27), `confirmed` on success (upload_ms + verified).
+  (found in a non-home account), library/cloud inconsistencies (C27) — an object in no account uses Step 9b's rule
+  (routed-account crawl, `MAP_RECENT_DAYS`, phone opt-in), `confirmed` on success (upload_ms + verified).
   RPC acceleration (OD-9 ruling): objects with a known SHA-1 (capture/proven) or a mapped cloud dedupKey are confirmed
   in `hash_lookup` batches of 50 (seconds per account); `--approaches all` evaluates S2/S3/S3u through `gprpc.search`
   (`EzkLib` returns what the UI search shows), so the OD-7 full-library sweep costs paced RPC calls instead of page
@@ -972,6 +978,9 @@ inconsistencies. Defects found here become Step 9b fix-ups (recorded in PROGRESS
   push-family branches), `webui/server.py` (only if it spawns push-family commands: set `MEDIAVAULT_WEB_JOB=1` in that
   child's environment — additive), `tests/conftest.py` (autouse: auto-confirm disabled in every test except its own),
   `tests/test_auto_confirm.py` (new).
+- Note (Step 9b live data, 2026-10-03): backups reached Google Photos 2.8–49.6 h after the push (median 14 h,
+  p90 38 h), so a 12 h minimum age finds most objects not yet backed up on the first try. Measure and consider
+  raising `AUTO_CONFIRM_MIN_AGE_H` (e.g. 24–48 h) when implementing; re-attempts stay harmless either way.
 - Details: exactly P-19. "Succeeded" = the command function returned normally (no exception — incl. no
   `RollbackHardFail`/`SystemExit`) and did not return `False`; the executor documents each of the six functions' return
   contract in the test file. The hook never runs inside a `cmd_*` function (so it can never sit inside a journal scope or
@@ -1047,7 +1056,7 @@ inconsistencies. Defects found here become Step 9b fix-ups (recorded in PROGRESS
   `parse_fetch_args` shape; spawned fetch argv; web markers; `trigger_download` source digest; `calculate_file_hash`
   SHA-256/return contract; `ENTRY_TYPE_KEYS` literal; mvmeta v1 keys; `gprpc.ALLOWED_RPCIDS` literal (a new rpcid is a
   reviewed change). Mutation/disarm probes for every new guard (pin rule, verification-before-trigger,
-  dry-run-writes-nothing, never-delete-foreign, home-account routing, freshness gate, capture-never-confirms, RPC
+  dry-run-writes-nothing, never-delete-foreign, home-account routing, freshness gate (24 h, routed account, Step 9b recency), no adb without `--devices`, capture-never-confirms, RPC
   allowlist, apply fingerprint re-check, auto-confirm only after success, mvmeta sha1 only when proven, download URL
   never persisted or printed, deletions only inside `.mv_incoming` / run-new expected-family files, Chrome kill only
   for the journaled pid with a matching user-data-dir) — each recorded in PROGRESS as `disarm N/N ✓`.
@@ -1184,8 +1193,8 @@ the RPC allowlist, config keys `fetch_account_overrides` / `auto_confirm_after_p
 - Google UI/DOM/locale drift → page record primary (P-7); every stage falls through; S4 legacy unchanged; kill switch.
 - Wrong-account objects (31 X-Files in MOVIES; Kuroko copies in TV) → P-4 routing + check flags; mixed batches spawn one
   session per account (longer runs).
-- Enumeration timing (items backed up after the crawl) → incremental re-crawl + freshness gate + device cross-check before
-  any "missing" verdict.
+- Enumeration timing (items backed up after the crawl) → incremental re-crawl + freshness gate + Step 9b recency rule
+  (`not-backed-up-yet` vs `possible-loss`; phones opt-in) before any "missing" verdict.
 - Possible cloud loss on `archived` items (local dummy) → LOUD reports, never auto-fixed; user decides (C27).
 - Re-split duplicate chunk sets → set rule + alternates; SHA-256 after download is authoritative.
 - IMP-C24 lost update during a real `--apply` → run when idle; the sidecar makes re-apply idempotent.
@@ -1268,8 +1277,8 @@ first. Do not run prep/push/replace/restore in the main folder while an `--apply
 - **M2 — device cross-check (read-only):** `& $PY main.py map_photos all --devices-only` → lists objects still on a Pixel
   (awaiting backup) vs freed.
 - **M3 — mapping dry-run (🚦 R1):** `& $PY main.py map_photos all` → read `summary.txt`, the LOUD possible-loss block,
-  `inconsistencies.csv`, `resolutions_todo.csv`. Expect roughly tv ≈1,065 + 31 wrong-account, movies ≈688 + 19 normalized,
-  anime ≈157/158.
+  `inconsistencies.csv`, `resolutions_todo.csv`. Ran 2026-10-03 (R1 + 9b re-run `map_r1b_20261003_1714`): mapped 2,020 ·
+  wrong-account 31 (override covers 31) · inconsistent 4 · not-backed-up-yet 23 · possible-loss 15 · others stale 35.
 - **M4 — locate probes (read-only, 🚦 G12):** `& $PY mainfetch.py locate tv-en-2014-siliconvalley-s02e03` (expect S0/S1,
   proof dedupkey), `… s02e02` (filename proof), one X-Files episode from the wrong-account list (expect account movies),
   `… tv-en-2019-chernobyle02` (3 chunks, one shared second), one split movie, one anime episode.

@@ -8230,7 +8230,7 @@ def _verify_title_extras_restore(library, manual_id):
                 print(f"   ❌ {label} FAILURE: Hash mismatch.")
 
 
-def cmd_verify_restore(manual_id):
+def cmd_verify_restore(manual_id, temp_dir=None):
     print(f"--- VERIFYING RESTORE (DRY RUN): {manual_id} ---")
     library = load_library()
     if manual_id not in library: print("❌ ID not found."); return
@@ -8239,8 +8239,13 @@ def cmd_verify_restore(manual_id):
         print(f"ℹ️  {manual_id} is part of the combined file registered as {real_id} — operating on that.")
         manual_id = real_id
 
-    # Auto-detect restore folder
-    restore_folder = os.path.join(entry['folder_path'], RESTORE_DIR_NAME)
+    # Auto-detect restore folder ([IMP-C25 Step 11 h] — or temp_dir/<safe id>/restore when a temp
+    # volume is given: the SAME _parts_base rule cmd_restore and the fetch use)
+    restore_base, restore_err = _parts_base(entry['folder_path'], temp_dir, manual_id)
+    if restore_err:
+        print(f"❌ {restore_err}")
+        return
+    restore_folder = os.path.join(restore_base, RESTORE_DIR_NAME)
 
     if not os.path.exists(restore_folder):
         print(f"❌ Error: Restore folder missing at:\n   {restore_folder}")
@@ -14710,7 +14715,7 @@ if __name__ == "__main__":
         print("  replace_group [id]")
         print("  repair_dummies [optional: id_prefix]")
         print("  verify_library [--fix-dummies]")
-        print("  verify_restore [id]")
+        print("  verify_restore [id] [tempdir <path>]")
         print("  restore [id] [tempdir <path>]")
         print("  restore_group [id] [tempdir <path>]")
         print("  sort")
@@ -15180,7 +15185,16 @@ if __name__ == "__main__":
         cmd_verify_library(fix_dummies=fix)
 
     elif cmd == "verify_restore":
-        cmd_verify_restore(sys.argv[2])
+        # [IMP-C25 Step 11 h] verify_restore [id] [tempdir <path>] — tempdir parsed like restore's
+        args = sys.argv[2:]
+        tdir = None
+        i = 0
+        while i < len(args):
+            if args[i] == "tempdir" and i + 1 < len(args):
+                tdir = args[i + 1]; i += 2
+            else:
+                i += 1
+        cmd_verify_restore(args[0], temp_dir=tdir) if args else print("❌ Usage: verify_restore [id] [tempdir <path>]")
 
     elif cmd == "restore":
         args = sys.argv[2:]

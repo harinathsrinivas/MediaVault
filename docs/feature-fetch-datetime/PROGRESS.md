@@ -122,9 +122,10 @@ fetch is left alone; 7ad720c) · [x] 11.f interruption handling (_end_run: Ctrl+
 via its kept Popen handle (a handed-over Chrome: the debug-port 9222 listener, profile-checked) → this run's leftovers
 deleted → journal clean or pending; a finished run with held files closes Chrome, then deletes; 395b130) · [x] 11.g
 fetch_cleanup [--apply] (mainfetch.fetch_cleanup_plan / _apply / print + main.cmd_fetch_cleanup + CLI + usage; one
-shared name rule _family_bases; the commit that ticks this) · [ ] 11.h verify_restore tempdir ← next · [ ] 11.i fetch
-closes its tabs and the Chrome it launched at the normal end of every run, only once no download is active (user
-requirement 2026-10-04, PLAN Step 11 item i, added by 7aa032b) · then disarm probes, full + smoke`
+shared name rule _family_bases; b3375b6) · [x] 11.h verify_restore [id] [tempdir <path>] via _parts_base + the plan's
+no / empty / leftover .mv_incoming invariance test for verify_restore and cmd_restore (the commit that ticks this) ·
+[ ] 11.i fetch closes its tabs and the Chrome it launched at the normal end of every run, only once no download is
+active (user requirement 2026-10-04, PLAN Step 11 item i, added by 7aa032b) ← next · then disarm probes, full + smoke`
 `resumed 2026-10-04 by executor-fable after a usage-limit pause (tree clean at c01be08; nothing to keep or discard)`
 `resumed 2026-10-04 by executor-fable after a second usage-limit pause (HEAD 7aa032b): uncommitted 11.g changes KEPT
 (main.py, mainfetch.py, tests/test_fetch_hygiene.py — coherent; hygiene + fetch suites 495 passed, smoke 82);

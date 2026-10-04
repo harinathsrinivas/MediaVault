@@ -1550,6 +1550,115 @@ def test_the_fetch_cleanup_command_line():
         parse_argv(["main.py", "fetch_cleanup", "--aply"])           # a typo never runs a cleanup
 
 
+# ===========================================================================
+# 11.h — verify_restore tempdir; restore / verify_restore and a .mv_incoming folder
+# ===========================================================================
+def _seed_restore_case(sandbox, make_video, base, staged_in=None):
+    """A whole-file episode and a 2-chunk movie whose files sit in their restore folders (or in `staged_in`'s
+    tempdir layout, temp_dir/<safe id>/restore). Returns {id: restore folder}."""
+    import main
+    whole_dir, split_dir = base / "Series" / "Show" / "Season 01", base / "Movies" / "Film (2020)"
+    whole_id, split_id = "tv-en-2001-show-s01e01", "mov-en-2020-film"
+    for folder in (whole_dir, split_dir):
+        folder.mkdir(parents=True)
+    restore = {}
+    for mid, folder in ((whole_id, whole_dir), (split_id, split_dir)):
+        restore[mid] = pathlib.Path(main._parts_base(str(folder), str(staged_in) if staged_in else None, mid)[0],
+                                    "restore")
+        restore[mid].mkdir(parents=True)
+    _, whole_hash = make_video(restore[whole_id] / "Show.S01E01.mkv", marker=b"WHOLE\n")
+    make_video(whole_dir / "Show.S01E01.mkv", marker=b"DUMMY-SLOT\n")         # what the restore replaces
+    chunks = []
+    for n in (1, 2):
+        name = f"Film [f1f1f1].chunk.00{n}.mkv"
+        _, h = make_video(restore[split_id] / name, marker=f"CHUNK{n}\n".encode())
+        chunks.append({"filename": name, "hash": h})
+    mvcommon.save_library({
+        whole_id: {"filename": "Show.S01E01.mkv", "folder_path": str(whole_dir), "hash": whole_hash,
+                   "short_id": "abc123", "status": "archived", "uploaded": True},
+        split_id: {"filename": "Film.mkv", "folder_path": str(split_dir), "hash": _sha("film"), "short_id": "f1f1f1",
+                   "status": "archived", "uploaded": True,
+                   "split_info": {"is_split": True, "total_chunks": 2, "chunks": chunks}}})
+    return restore
+
+
+def test_verify_restore_reads_the_tempdir_location_like_restore(sandbox, make_video, tmp_path, capsys):
+    import main
+    temp = tmp_path / "T"
+    temp.mkdir()
+    _seed_restore_case(sandbox, make_video, sandbox["local_root"], staged_in=temp)
+
+    main.cmd_verify_restore("mov-en-2020-film", temp_dir=str(temp))
+    out = capsys.readouterr().out
+    assert "✅ Verified: Film [f1f1f1].chunk.001.mkv" in out and "✅ SUCCESS: All chunks verified." in out
+    main.cmd_verify_restore("tv-en-2001-show-s01e01", temp_dir=str(temp))
+    assert "✅ SUCCESS: Verified against Master Hash." in capsys.readouterr().out
+    main.cmd_verify_restore("mov-en-2020-film")                         # without tempdir: today's folder
+    assert "❌ Error: Restore folder missing at:" in capsys.readouterr().out
+
+
+def test_verify_restore_refuses_a_temp_dir_that_is_not_there(sandbox, make_video, tmp_path, capsys):
+    import main
+    _seed_restore_case(sandbox, make_video, sandbox["local_root"])
+    main.cmd_verify_restore("mov-en-2020-film", temp_dir=str(tmp_path / "nope"))
+    out = capsys.readouterr().out
+    assert "❌ temp dir does not exist or is not a directory:" in out and "Detected" not in out
+
+
+def test_the_verify_restore_command_line_takes_tempdir():
+    from test_prep_push_rep_enrich_cli import parse_argv
+    assert parse_argv(["main.py", "verify_restore", "tv-x"]) == ("cmd_verify_restore",
+                                                                  {"manual_id": "tv-x", "temp_dir": None})
+    assert parse_argv(["main.py", "verify_restore", "tv-x", "tempdir", "D:\\t"]) == (
+        "cmd_verify_restore", {"manual_id": "tv-x", "temp_dir": "D:\\t"})
+
+
+def test_restore_and_verify_restore_do_not_care_about_an_incoming_folder(sandbox, make_video, tmp_path, monkeypatch,
+                                                                         capsys):
+    # PLAN Step 11 tests: identical results with no, an empty, or a leftover .mv_incoming folder in restore/ — both
+    # address their files by name. The one difference, documented: restore's empty-folder cleanup leaves a restore
+    # folder that still holds .mv_incoming (the next fetch or fetch_cleanup removes it).
+    import main
+
+    def concat(chunk_paths, output_path, seed=None, **kwargs):               # mkvmerge stand-in
+        with open(output_path, "wb") as out:
+            for path in chunk_paths:
+                with open(path, "rb") as fh:
+                    out.write(fh.read())
+        return True
+
+    monkeypatch.setattr(main, "merge_video_files", concat)
+    monkeypatch.setattr(main, "_current_merge_tool", lambda: "mkvmerge vTEST")
+    results = {}
+    for variant in ("none", "empty", "leftover"):
+        base = tmp_path / variant
+        restore = _seed_restore_case(sandbox, make_video, base)
+        for folder in restore.values():
+            if variant != "none":
+                assert mainfetch._make_incoming(str(folder / ".mv_incoming"))
+            if variant == "leftover":
+                (folder / ".mv_incoming" / "x.mkv.crdownload").write_bytes(b"partial")
+        capsys.readouterr()
+        outputs = []
+        for mid in restore:
+            main.cmd_verify_restore(mid)
+            outputs.append(capsys.readouterr().out)
+            outputs.append(main.cmd_restore(mid))
+            outputs.append(capsys.readouterr().out)
+        library = mvcommon.load_library()
+        results[variant] = (outputs, {mid: (e["status"], e.get("re_hashed")) for mid, e in library.items()},
+                            {mid: sorted(p.name for p in folder.iterdir()) if folder.exists() else None
+                             for mid, folder in restore.items()})
+
+    assert results["none"][0] == results["empty"][0] == results["leftover"][0]          # every line, every return
+    assert results["none"][1] == results["empty"][1] == results["leftover"][1] == {
+        "tv-en-2001-show-s01e01": ("restored_local", None), "mov-en-2020-film": ("restored_local", True)}
+    assert all(r is True for r in results["none"][0][1::3])
+    assert results["none"][2] == {"tv-en-2001-show-s01e01": None, "mov-en-2020-film": None}   # removed when empty
+    assert results["empty"][2] == results["leftover"][2] == {"tv-en-2001-show-s01e01": [".mv_incoming"],
+                                                            "mov-en-2020-film": [".mv_incoming"]}
+
+
 def test_a_driver_without_devtools_keeps_todays_downloads_flow(world, tmp_path):
     # Only a test stand-in lacks execute_cdp_cmd (a real Chrome driver always has it): today's flow, frozen in
     # tests/test_fetch_harvester.py — no redirect, no folder, no pre-flight.

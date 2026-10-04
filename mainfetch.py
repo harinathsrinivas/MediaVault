@@ -1260,13 +1260,16 @@ def _startup_cleanup(ctx):
         try:
             if _journal_is_live(doc):
                 continue
+            killed = []
             for session in doc.get("sessions") or []:
                 if not isinstance(session, dict) or session.get("launched") is not True:
                     continue  # only a Chrome that run LAUNCHED — never one it attached to (it may hold user tabs)
                 pid = session.get("chrome_pid")
                 if _chrome_still_ours(pid, session.get("user_data_dir")) and PROCESS_TABLE.terminate(pid):
-                    terminated.append(pid)
-            deleted, held = _clean_journal_files(doc)
+                    killed.append(pid)
+            terminated += killed
+            # waiting for files to be let go only makes sense once a Chrome was terminated
+            deleted, held = _clean_journal_files(doc, wait=None if killed else 0)
         except Exception as e:  # a cleanup problem must never stop the fetch
             print(f"   > ⚠️ Could not clean up after the interrupted fetch {doc.get('run_id')}: {e}")
             continue

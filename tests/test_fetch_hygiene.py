@@ -1076,9 +1076,11 @@ def test_files_still_held_keep_the_journal_pending_for_the_next_start(world, mon
     _held(monkeypatch, "x.mkv.crdownload")
     path = _crashed_journal("fetch-20261004T100000Z-7001", state="pending",
                             entries=[{"incoming": str(a), "cleaned": False, "mode": "incoming", "names": []}])
+    started = world.clock.now
 
     mainfetch._startup_cleanup(mainfetch.FetchContext(run_id="fetch-20261004T110000Z-1"))
 
+    assert world.clock.now == started               # nothing was terminated: no waiting for a lock to clear
     journal = json.loads(path.read_text(encoding="utf-8"))
     assert (journal["state"], journal["pending_delete"]) == ("pending", [str(a / "x.mkv.crdownload")])
     assert "1 leftover file(s) of an interrupted fetch are still in use — the next fetch tries again." in \

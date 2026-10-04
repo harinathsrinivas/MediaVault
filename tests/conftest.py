@@ -105,6 +105,9 @@ class _InertProcessTable:
     def query(self, pid):
         return None, None
 
+    def listener(self, port):
+        return None
+
     def terminate(self, pid):
         raise AssertionError(f"a test tried to terminate a real process (pid {pid})")
 

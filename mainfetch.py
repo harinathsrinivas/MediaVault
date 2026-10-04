@@ -1034,6 +1034,21 @@ class _ProcessTable:
             return False
         return run.returncode == 0
 
+    def listener(self, port):
+        """The pid of the process listening on local TCP `port` (a Chrome's debug port: its browser
+        process), or None when there is none or it cannot be told."""
+        if os.name != "nt" or not mvcommon._is_int(port):
+            return None
+        script = (f"Get-NetTCPConnection -LocalPort {int(port)} -State Listen -ErrorAction SilentlyContinue | "
+                  "Select-Object -First 1 -ExpandProperty OwningProcess")
+        try:
+            run = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        text = (run.stdout or "").strip().lstrip("﻿")
+        return int(text) if run.returncode == 0 and text.isdigit() and int(text) > 0 else None
+
 
 PROCESS_TABLE = _ProcessTable()
 _UNLOCK_WAIT_S = 10.0   # how long a cleanup waits for a terminated Chrome to let go of its files
@@ -1158,12 +1173,13 @@ def _may_delete_pending(path, doc):
     return _family_key(name) not in {_family_key(n) for n in snapshot} and _in_family(name, family)
 
 
-def _clean_journal_files(doc):
-    """Delete what `doc`'s run left (see _journal_files), waiting up to _UNLOCK_WAIT_S for files a
-    just-terminated Chrome still holds. Returns (deleted [(path, size)], still held [path])."""
+def _clean_journal_files(doc, wait=None):
+    """Delete what `doc`'s run left (see _journal_files), waiting up to `wait` seconds (default
+    _UNLOCK_WAIT_S) for files a just-terminated Chrome still holds. Returns (deleted [(path,
+    size)], still held [path])."""
     folders, pending, downloads = _journal_files(doc)
     deleted, held = [], []
-    deadline = time.time() + _UNLOCK_WAIT_S
+    deadline = time.time() + (_UNLOCK_WAIT_S if wait is None else wait)
     while True:
         held = []
         for folder in folders:
@@ -1250,23 +1266,88 @@ def _note_session(ctx, driver, account):
     """[11 d] An account's Chrome session is up: remember the Chrome init_driver launched (its Popen
     handle rides on the driver — additive; a stand-in has none) and journal its pid together with
     the profile folder it runs on (the start-up cleanup terminates only that pid, and only while
-    its command line still names that folder)."""
+    its command line still names that folder).
+
+    When that chrome.exe has already exited, it handed the profile to a Chrome that was running
+    before (an earlier fetch leaves its Chrome open): the browser Selenium is attached to is then
+    the process listening on init_driver's debug port 9222 — recorded instead, but only when its
+    command line names this profile; otherwise no pid is recorded."""
     proc = getattr(driver, "_mv_chrome_proc", None)
     pid = getattr(proc, "pid", None)
     user_data_dir = getattr(driver, "_mv_user_data_dir", None) or CHROME_PROFILES.get(account)
+    poll = getattr(proc, "poll", None)
+    if callable(poll) and poll() is not None:
+        try:
+            listener = PROCESS_TABLE.listener(9222)
+            pid = listener if _chrome_still_ours(listener, user_data_dir) else None
+        except Exception:  # bookkeeping only: never a reason to stop the fetch
+            pid = None
+        proc = None
     ctx.chrome = {"account": account, "proc": proc, "pid": pid if mvcommon._is_int(pid) else None,
                   "user_data_dir": user_data_dir}
     if ctx.journal is not None:
         ctx.journal.add_session(account, ctx.chrome["pid"], user_data_dir)
 
 
+def _terminate_session_chrome(ctx):
+    """Terminate the running session's Chrome (ctx.chrome) and every process it started, but only
+    while it is provably ours: the Popen handle init_driver kept (its pid cannot be reused while
+    the handle is open) and it still runs, or — without a handle — the pid still runs a Chrome
+    whose command line names that profile. Returns the pid terminated, or None."""
+    chrome = ctx.chrome or {}
+    pid = chrome.get("pid")
+    if not mvcommon._is_int(pid):
+        return None
+    poll = getattr(chrome.get("proc"), "poll", None)
+    ours = poll() is None if callable(poll) else _chrome_still_ours(pid, chrome.get("user_data_dir"))
+    return pid if ours and PROCESS_TABLE.terminate(pid) else None
+
+
 def _end_run(ctx, interrupted=False):
-    """[IMP-C25 Step 11] The fetch run is over — finished, stopped on a problem line, or
-    interrupted (Ctrl+C or an error): the journal records the end (clean, or pending when
-    something is left to delete — the next run's start-up cleanup does it). Never raises past a
-    write failure (the journal reports that itself)."""
-    if ctx.journal is not None:
-        ctx.journal.finish(ctx.pending_delete, interrupted)
+    """[IMP-C25 Step 11 f — P-12] The fetch run is over — finished, stopped on a problem line, or
+    interrupted (Ctrl+C or an error; the session's driver has already quit).
+      interrupted  its Chrome is terminated (_terminate_session_chrome: 'Chrome terminated', so
+                   its downloads stop — a CDP cancel would need download ids from an event channel,
+                   which the attached Selenium session does not have: PLAN P6), then this run's
+                   leftovers are deleted — the files in every incoming folder it left, its pending
+                   files and, after a ~/Downloads fallback, the files that appeared during the run
+                   and belong to an entry's expected-name family (_clean_journal_files);
+      finished     with files Chrome still held (ctx.pending_delete) or a folder not yet removed:
+                   deleted now when Chrome has let go of them, else Chrome is closed first (P-12:
+                   retried after the run closes Chrome);
+    then the journal records the end: clean, or pending with what is still held — the next run's
+    start-up cleanup finishes it. A problem here never stops the run's own ending (one warning)."""
+    journal = ctx.journal
+    if journal is None:
+        return
+    try:
+        journal.doc["pending_delete"] = list(ctx.pending_delete)
+        leftovers = interrupted or ctx.pending_delete or any(not e.get("cleaned") for e in journal.doc["entries"])
+        if leftovers:
+            terminated = _terminate_session_chrome(ctx) if interrupted else None
+            # waiting for Chrome to let go only makes sense once it was terminated
+            deleted, held = _clean_journal_files(journal.doc, wait=None if terminated else 0)
+            if held and not interrupted:
+                terminated = _terminate_session_chrome(ctx)
+                if terminated:
+                    more, held = _clean_journal_files(journal.doc)
+                    deleted += more
+            if terminated:
+                print(f"   > 🛑 Chrome terminated (pid {terminated}) — "
+                      f"{'its downloads stopped' if interrupted else 'it still held files of this fetch'}.")
+            if deleted:
+                size = sum(s for _, s in deleted)
+                what = "of this interrupted fetch" if interrupted else "Chrome had held"
+                print(f"   > 🧹 Cleaned {len(deleted)} leftover file(s) {what} ({size / 1024 ** 3:.1f} GB)")
+            if held:
+                print(f"   > ⏳ {len(held)} file(s) are still in use — the next fetch deletes them.")
+            ctx.pending_delete = held
+            for entry in journal.doc["entries"]:
+                if entry.get("incoming") and not entry.get("cleaned") and not os.path.isdir(entry["incoming"]):
+                    entry["cleaned"] = True
+    except Exception as e:  # the run must end — its journal stays pending for the next start-up cleanup
+        print(f"   > ⚠️ Cleaning up after this fetch failed ({type(e).__name__}: {e}) — the next fetch tries again.")
+    journal.finish(ctx.pending_delete, interrupted)
 
 
 def _watched_names(folder, mode):

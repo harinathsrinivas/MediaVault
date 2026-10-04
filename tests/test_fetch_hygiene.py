@@ -927,6 +927,7 @@ class _Procs:
         self.alive = dict(alive or {})
         self.queried, self.terminated = [], []
         self.on_terminate = lambda pid: None
+        self.listener = lambda port: None       # nothing listens on a debug port unless a test says so
 
     def query(self, pid):
         self.queried.append(pid)
@@ -1193,6 +1194,174 @@ def test_no_start_up_cleanup_when_the_profile_is_missing(world, monkeypatch, san
     mainfetch.cmd_fetch_route(SEASON)
 
     assert ran == [] and _journals() == []
+
+
+# ===========================================================================
+# 11.f — an interrupted run cleans up after itself; a finished one releases what Chrome held
+# ===========================================================================
+class _Popen:
+    """The Popen handle init_driver keeps: poll() is None while the launched chrome.exe runs."""
+
+    def __init__(self, pid, running=True):
+        self.pid, self.running = pid, running
+
+    def poll(self):
+        return None if self.running else 0
+
+
+def _launched(browser, procs, pid, running=True):
+    browser._mv_chrome_proc = _Popen(pid, running)
+    browser._mv_user_data_dir = TV_PROFILE
+    procs.alive[pid] = CHROME_TV
+
+
+@pytest.mark.parametrize("stop, line", [(KeyboardInterrupt, "🛑 Stopped by user."),
+                                        (RuntimeError("selenium went away"), "❌ Critical Error: selenium went away")])
+def test_an_interrupted_run_terminates_its_chrome_and_cleans_its_incoming_leftovers(
+        world, monkeypatch, capsys, sandbox, stop, line):
+    folder = _seed_season(sandbox)
+    incoming = folder / "restore" / ".mv_incoming"
+    procs = _procs(monkeypatch)
+    _launched(world.browser, procs, 6060)
+    _held_until_killed(monkeypatch, procs, 6060, "S01E01 [aaa111].mkv.crdownload")
+
+    def script(q, i):
+        world.browser.start("S01E01 [aaa111].mkv", PAYLOAD_A, 900)     # still downloading when the run is stopped
+        raise stop
+
+    _script(monkeypatch, script)
+    _route(monkeypatch, lambda profile: world.browser)
+
+    mainfetch.cmd_fetch_route(SEASON)
+
+    out = capsys.readouterr().out
+    assert procs.terminated == [6060] and procs.queried == []           # the kept handle proves the pid is ours
+    assert out.index(line) < out.index("   > 🛑 Chrome terminated (pid 6060) — its downloads stopped.") < out.index(
+        "   > 🧹 Cleaned 1 leftover file(s) of this interrupted fetch (0.0 GB)")
+    assert not incoming.exists()
+    [journal] = _journals()
+    assert (journal["state"], journal["interrupted"], journal["pending_delete"]) == ("clean", True, [])
+    assert journal["entries"][0]["cleaned"] is True
+
+
+def test_what_chrome_still_holds_after_an_interruption_waits_for_the_next_start(world, monkeypatch, capsys, sandbox):
+    folder = _seed_season(sandbox)
+    incoming = folder / "restore" / ".mv_incoming"
+    partial = incoming / "S01E01 [aaa111].mkv.crdownload"
+    procs = _procs(monkeypatch)
+    _launched(world.browser, procs, 6060, running=False)    # handed over to an earlier Chrome: no pid to terminate
+    _held(monkeypatch, partial.name)
+    world.browser._mv_chrome_proc = _Popen(6060, running=False)
+
+    def script(q, i):
+        world.browser.start("S01E01 [aaa111].mkv", PAYLOAD_A, 900)
+        raise KeyboardInterrupt
+
+    _script(monkeypatch, script)
+    _route(monkeypatch, lambda profile: world.browser)
+
+    mainfetch.cmd_fetch_route(SEASON)
+
+    out = capsys.readouterr().out
+    assert procs.terminated == [] and "Chrome terminated" not in out
+    assert "   > ⏳ 1 file(s) are still in use — the next fetch deletes them." in out
+    [journal] = _journals()
+    assert (journal["state"], journal["pending_delete"]) == ("pending", [str(partial)])
+    monkeypatch.setattr(mainfetch, "_delete_download", lambda p: (os.remove(p), True)[1])   # Chrome let go
+
+    mainfetch._startup_cleanup(mainfetch.FetchContext(run_id="fetch-29991231T000000Z-1"))   # the next run (one
+                                                                                             # per process for real)
+    assert not incoming.exists() and _journals()[0]["state"] == "recovered"
+
+
+def test_a_finished_run_closes_chrome_to_delete_what_it_still_held(world, monkeypatch, capsys):
+    entry = _whole_entry(world.tmp)
+    procs = _procs(monkeypatch)
+    _launched(world.browser, procs, 6161)
+    _held_until_killed(monkeypatch, procs, 6161, "Extra [qqq999].mkv.crdownload")
+
+    def script(q, i):
+        if q != SHOW_UP:
+            return False
+        world.browser.start("Extra [qqq999].mkv", PAYLOAD_X, 5000)    # a surplus download, still running at the end
+        return world.browser.start(SHOW_UP, PAYLOAD_A, 10)
+
+    _script(monkeypatch, script)
+    ctx = _session("tv")
+    ctx.journal = mainfetch.FetchJournal(ctx.run_id)
+    mainfetch._note_session(ctx, world.browser, "tv")
+    mainfetch.fetch_single_entry(world.browser, entry, entry_id=EP_ID, ctx=ctx)
+    assert ctx.pending_delete
+
+    mainfetch._end_run(ctx)
+
+    out = capsys.readouterr().out
+    assert procs.terminated == [6161]
+    assert "   > 🛑 Chrome terminated (pid 6161) — it still held files of this fetch." in out
+    assert "   > 🧹 Cleaned 1 leftover file(s) Chrome had held (0.0 GB)" in out
+    assert not (_restore(entry) / ".mv_incoming").exists()
+    journal = json.loads(pathlib.Path(ctx.journal.path).read_text(encoding="utf-8"))
+    assert (journal["state"], journal["interrupted"], journal["pending_delete"]) == ("clean", False, [])
+
+
+def test_a_run_that_left_nothing_never_touches_chrome(world, monkeypatch, sandbox):
+    _seed_season(sandbox)
+    procs = _procs(monkeypatch)
+    _launched(world.browser, procs, 6262)
+    _script(monkeypatch, lambda q, i: world.browser.start(*SEASON_DOWNLOADS[q], 30) if q in SEASON_DOWNLOADS
+            else False)
+    _route(monkeypatch, lambda profile: world.browser)
+
+    mainfetch.cmd_fetch_route(SEASON)
+
+    assert procs.terminated == [] and procs.queried == []
+    assert _journals()[0]["state"] == "clean" and _journals()[0]["sessions"][0]["chrome_pid"] == 6262
+
+
+def test_an_interrupted_fallback_run_deletes_only_its_own_family_partials(world, monkeypatch, capsys):
+    (world.downloads / "Holiday.mkv").write_bytes(b"h")
+    (world.downloads / "Show.S01E01 [abc123] (1).mkv").write_bytes(b"old")        # an older leftover: not this run's
+    world.browser.refuse = {"Browser.setDownloadBehavior", "Page.setDownloadBehavior"}
+    procs = _procs(monkeypatch)
+    _launched(world.browser, procs, 6363)
+
+    def script(q, i):
+        world.browser.start(SHOW_UP, PAYLOAD_A, 900)
+        world.browser.start("Other [zzz999].mkv", PAYLOAD_B, 900)
+        raise KeyboardInterrupt
+
+    _script(monkeypatch, script)
+    ctx = _session("tv")
+    ctx.journal = mainfetch.FetchJournal(ctx.run_id)
+    mainfetch._note_session(ctx, world.browser, "tv")
+    with pytest.raises(KeyboardInterrupt):
+        mainfetch.fetch_single_entry(world.browser, _whole_entry(world.tmp), entry_id=EP_ID, ctx=ctx)
+
+    mainfetch._end_run(ctx, interrupted=True)
+
+    assert sorted(p.name for p in world.downloads.iterdir()) == [
+        "Holiday.mkv", "Other [zzz999].mkv.crdownload", "Show.S01E01 [abc123] (1).mkv"]
+    assert "Cleaned 1 leftover file(s) of this interrupted fetch" in capsys.readouterr().out
+
+
+def test_a_chrome_that_handed_over_is_tracked_by_its_debug_port_listener(world, monkeypatch):
+    procs = _procs(monkeypatch, {8080: CHROME_TV, 9090: CHROME_TV.replace(TV_PROFILE, r"C:\Other\Profile")})
+    world.browser._mv_chrome_proc = _Popen(1111, running=False)       # chrome.exe exited at once: a hand-over
+    world.browser._mv_user_data_dir = TV_PROFILE
+    for listener, recorded in ((8080, 8080), (9090, None), (None, None)):
+        procs.listener = lambda port, _pid=listener: _pid if port == 9222 else None
+        ctx = mainfetch.FetchContext()
+        mainfetch._note_session(ctx, world.browser, "tv")
+        assert (ctx.chrome["pid"], ctx.chrome["proc"]) == (recorded, None)
+
+
+@pytest.mark.parametrize("stdout, code, expected", [("4242\r\n", 0, 4242), ("", 0, None), ("abc\n", 0, None),
+                                                    ("4242\n", 1, None), ("0\n", 0, None)])
+def test_the_windows_debug_port_query_never_guesses(monkeypatch, stdout, code, expected):
+    seen = []
+    monkeypatch.setattr(mainfetch.subprocess, "run", lambda argv, **k: seen.append(argv) or _Run(code, stdout))
+    assert mainfetch._ProcessTable().listener(9222) == expected
+    assert "Get-NetTCPConnection -LocalPort 9222 -State Listen" in seen[0][4]
 
 
 def test_a_driver_without_devtools_keeps_todays_downloads_flow(world, tmp_path):

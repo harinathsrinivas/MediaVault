@@ -118,9 +118,10 @@ _fetch_items + conftest redirects of ~/Downloads and the long-path root (60cf774
 sessions / entries / object states / snapshot; conftest redirect; 1b4de0d) · [x] 11.e start-up cleanup
 (_ProcessTable = PowerShell Win32_Process query + taskkill /T /F, conftest inert stand-in; terminates only a recorded
 pid whose command line names that profile; marked incoming folders / pending / fallback run-new family files; a live
-fetch is left alone; the commit that ticks this) · [ ] 11.f interruption handling (+ the run-end retry of
-pending_delete after Chrome closes) ← next · [ ] 11.g fetch_cleanup [--apply] · [ ] 11.h verify_restore tempdir ·
-then disarm probes, full + smoke`
+fetch is left alone; 7ad720c) · [x] 11.f interruption handling (_end_run: Ctrl+C / error → session Chrome terminated
+via its kept Popen handle (a handed-over Chrome: the debug-port 9222 listener, profile-checked) → this run's leftovers
+deleted → journal clean or pending; a finished run with held files closes Chrome, then deletes; the commit that ticks
+this) · [ ] 11.g fetch_cleanup [--apply] ← next · [ ] 11.h verify_restore tempdir · then disarm probes, full + smoke`
 `resumed 2026-10-04 by executor-fable after a usage-limit pause (tree clean at c01be08; nothing to keep or discard)`
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes
 alone; re-run it before treating a red full suite as a regression.

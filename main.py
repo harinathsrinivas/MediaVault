@@ -11007,9 +11007,10 @@ def classify_device_objects(library, inventory, objects=None):
 #
 # Per object:
 #   1. freshness gate — a verdict needs every inventory it rests on to be FRESH: crawled, with a complete
-#      enumeration at most MAP_INVENTORY_MAX_AGE_H old that is not older than the newest capture push of the
-#      in-scope objects routed to that account; an "in no account" verdict also needs every crawled account fresh
-#      and fully detailed. Otherwise the row is `stale-inventory` (no verdict) and the re-crawl command is printed.
+#      enumeration at most MAP_INVENTORY_MAX_AGE_H old; an "in no account" verdict also needs every crawled account
+#      fresh and fully detailed, and the account the object is routed to crawled. Otherwise the row is
+#      `stale-inventory` (no verdict) and the re-crawl command is printed. A push newer than an enumeration does not
+#      stale the account (Step 9b): only that push's objects wait for the next crawl (see 5).
 #   2. match (PLAN P-6) — the exact uploaded name in the object's DEFAULT account (its id prefix), then the
 #      normalized name; else the name in ANOTHER account (wrong-account); an object whose content key (SHA-1 =
 #      dedupKey: trusted block or capture) is known is found by that key; then the `[short_id]`-tag `probable`.
@@ -11017,16 +11018,28 @@ def classify_device_objects(library, inventory, objects=None):
 #   4. duplicates — same bytes: one item, the rest alternates; a re-split set: the chunks' items grouped by taken
 #      second, the newest COMPLETE set chosen when no newer set exists; anything else `ambiguous`.
 #   5. IMP-C27 detectors — split_info lost (--repair split-info), uploaded under the old untagged name (--repair
-#      names), a partial / non-original upload, and for an object in NO account the read-only device check
-#      (Step 8): awaiting-backup / missing-after-backup / missing-everywhere / device-check-incomplete.
-# Outputs, --resolutions, --apply and --devices-only: see cmd_map_photos. Nothing here prints a P-13 web-progress
-# marker; no photo id, dedupKey or URL is printed (they live in the run directory's files only — P-15).
+#      names), a partial / non-original upload, and an object in NO account. That verdict is library <-> Google
+#      Photos only (Step 9b, DECISIONS §1e — no phone needed): by its capture push time against the crawl start of
+#      the account it is routed to, `not-backed-up-yet` (pushed after the crawl began, or in the MAP_RECENT_DAYS
+#      before it: not a problem yet) or `possible-loss` (pushed earlier, or push time unknown — no capture). A push
+#      newer than the crawl can only be proven by its bytes (dedupKey); a name match is no evidence for it. Only
+#      with --devices does the read-only device check (Step 8) refine an OLD object — awaiting-backup /
+#      missing-after-backup / missing-everywhere — and annotate a recent one; a phone that was not listed only
+#      annotates (it never blocks or downgrades a verdict).
+# Outputs, --resolutions, --apply, --devices and --devices-only: see cmd_map_photos. Nothing here prints a P-13
+# web-progress marker; no photo id, dedupKey or URL is printed (they live in the run directory's files only — P-15).
 
 MAP_INVENTORY_MAX_AGE_H = 24  # PLAN Step 9 (1): an enumeration older than this cannot back a verdict
+# Step 9b: an object in no account that was pushed after its account's crawl began, or within this many days before
+# it, is `not-backed-up-yet`; earlier, or with no push time, it is `possible-loss`. A phone backs up when it can —
+# live 2026-10-03: 66 captured chunks reached Google Photos 2.8–49.6 h after their push completed, while 4 chunks
+# pushed 5.9 days before the crawl had not yet — so the window is a week, not the observed two days.
+MAP_RECENT_DAYS = 7
 MAP_REPAIRS = ("split-info", "names")
-MAP_USAGE = ("map_photos [all|<id>|<prefix>] [--account movies|tv|anime|others] [--devices-only] "
+MAP_USAGE = ("map_photos [all|<id>|<prefix>] [--account movies|tv|anime|others] [--devices] [--devices-only] "
              "[--resolutions <csv>] [--repair split-info|names] [--accept-probable] [--apply] [--out <dir>]")
-_MP_FLAGS = {"--devices-only": "devices_only", "--accept-probable": "accept_probable", "--apply": "apply"}
+_MP_FLAGS = {"--devices": "devices", "--devices-only": "devices_only", "--accept-probable": "accept_probable",
+             "--apply": "apply"}
 _MP_VALUED = ("--account", "--resolutions", "--repair", "--out")
 _MP_RECRAWL = "python tools/gp_inventory.py {account} --port <port>"
 # The P-1 item facts an inventory record carries (the crawler's record format, dom and rpc).
@@ -11041,8 +11054,8 @@ def parse_map_photos_args(tokens):
     """The `map_photos` CLI tokens (after the verb) -> cmd_map_photos keyword arguments (MAP_USAGE). Raises
     ValueError naming the problem: an unknown option, a missing or invalid value, a second scope, or
     --devices-only combined with an option it does not take."""
-    opts = {"scope": "all", "account": None, "devices_only": False, "resolutions": None, "repairs": (),
-            "accept_probable": False, "apply": False, "out": None}
+    opts = {"scope": "all", "account": None, "devices": False, "devices_only": False, "resolutions": None,
+            "repairs": (), "accept_probable": False, "apply": False, "out": None}
     tokens, scope, repairs, i = list(tokens), None, [], 0
     while i < len(tokens):
         token = tokens[i]
@@ -11075,7 +11088,8 @@ def parse_map_photos_args(tokens):
             i += 1
     opts["scope"] = scope or "all"
     opts["repairs"] = tuple(repairs)
-    if opts["devices_only"] and (opts["apply"] or opts["resolutions"] or repairs or opts["accept_probable"]):
+    if opts["devices_only"] and (opts["apply"] or opts["resolutions"] or repairs or opts["accept_probable"]
+                                 or opts["devices"]):
         raise ValueError("--devices-only takes only a scope, --account and --out")
     return opts
 
@@ -11122,11 +11136,12 @@ def _mp_route(obj, overrides, prefix_map, default):
 
 
 def _mp_freshness(states, objects, routes, now):
-    """PLAN Step 9 (1): {account: freshness} — fresh when the account was crawled, has a complete enumeration
-    (inventory_state's latest_complete: its start is the as-of time) at most MAP_INVENTORY_MAX_AGE_H old, and that
-    as-of time is not older than the newest capture push of the in-scope objects ROUTED to the account (such a push
-    may not be backed up yet). Also reported: `gaps` — known ids without a good record (errored, or listed and never
-    detailed) — which blocks every "in no account" verdict, and the re-crawl command."""
+    """PLAN Step 9 (1): {account: freshness} — fresh when the account was crawled and has a complete enumeration
+    (inventory_state's latest_complete: its start is the as-of time) at most MAP_INVENTORY_MAX_AGE_H old. Also
+    reported: the newest capture push of the in-scope objects ROUTED to the account (Step 9b: a push newer than the
+    enumeration no longer stales the account — _mp_recency makes only that push's objects wait), `gaps` — known ids
+    without a good record (errored, or listed and never detailed) — which blocks every "in no account" verdict, and
+    the re-crawl command."""
     newest = {}
     for obj in objects:
         pushed = (obj.get("capture") or {}).get("pushed") or {}
@@ -11147,8 +11162,6 @@ def _mp_freshness(states, objects, routes, now):
             reason = "no complete enumeration yet"
         elif age_h > MAP_INVENTORY_MAX_AGE_H:
             reason = f"the enumeration is {age_h:.1f} h old (limit {MAP_INVENTORY_MAX_AGE_H} h)"
-        elif push is not None and push > as_of:
-            reason = f"a push at {_mp_iso(push)} is newer than the enumeration ({_mp_iso(as_of)})"
         else:
             reason = None
         gone = set(state["possibly_deleted"])
@@ -11236,6 +11249,14 @@ def _mp_expected_local(obj):
     return local.strftime("%Y-%m-%d %H:%M:%S") + f" GMT{sign}{abs(offset) // 60:02d}:{abs(offset) % 60:02d}"
 
 
+def _mp_pushed_at(obj):
+    """Step 9b: when THESE bytes were pushed — the capture's push time ('…Z'; stamped when that push completed) —
+    or None: no capture recorded a push of them (a pre-capture push). The only push-time evidence the library
+    side has: the remote .mvmeta.json lives on the phone alone (write_remote_mvmeta deletes its local temp), and the
+    capture's other times (its prep record, another push of the same entry) date other bytes or other steps."""
+    return _mp_iso(_mp_when(((obj.get("capture") or {}).get("pushed") or {}).get("at")))
+
+
 def _mp_row(obj, route):
     """The mapping.jsonl row of one object, before its verdict (status None)."""
     return {"manual_id": obj["manual_id"], "label": obj["label"], "kind": obj["kind"], "category": obj["category"],
@@ -11245,6 +11266,7 @@ def _mp_row(obj, route):
             "name_match": None, "proof": None, "item": None, "alternates": [], "copies": [], "candidates": [],
             "deleted": [], "override_check": None, "duplicate": None, "set": None, "device": None,
             "partial_set": False, "content_key": _mp_content_key(obj), "expected_taken_local": _mp_expected_local(obj),
+            "pushed_at": _mp_pushed_at(obj), "recent": None, "library_position": None,
             "reason": None, "user_decision": None, "note": None, "repair": None}
 
 
@@ -11544,9 +11566,10 @@ def _mp_settle_by_content(row, key, decisions, fresh):
 
 def _mp_nowhere(row, obj, fresh, index, library):
     """An object found in no account by name or bytes: withheld while any crawled inventory is not fresh or not fully
-    detailed; else, in order, the `[short_id]`-tag probable (never for a content-keyed object: those items hold other
-    bytes), the IMP-C27 (a) split_info lost and (b) old untagged name of a whole file; else not-found (the device
-    check decides), with any possibly-deleted same-named item as evidence."""
+    detailed, or the account it is routed to was never crawled (it could be there); else, in order, the
+    `[short_id]`-tag probable (never for a content-keyed object: those items hold other bytes), the IMP-C27 (a)
+    split_info lost and (b) old untagged name of a whole file; else not-found (_mp_recency gives its verdict), with
+    any possibly-deleted same-named item as evidence."""
     blocked = [a for a in mvcommon.GP_ACCOUNTS if fresh[a]["crawled"] and not fresh[a]["fresh"]]
     gaps = [a for a in mvcommon.GP_ACCOUNTS if fresh[a]["crawled"] and fresh[a]["gaps"]]
     if blocked or gaps:
@@ -11554,6 +11577,9 @@ def _mp_nowhere(row, obj, fresh, index, library):
         why = fresh[a]["reason"] or f"{fresh[a]['gaps']:,} known id(s) without details — re-run the crawl"
         return _mp_stale(row, a, f"not in any account, but that cannot be told while this inventory is not "
                                  f"complete ({why})")
+    if not fresh[row["routing"]]["crawled"]:
+        return _mp_stale(row, row["routing"], "not in any crawled account, and the account it is routed to was "
+                                              "never crawled")
     if not row["uploaded_name"]:
         row.update(status="inconsistent", issue="no-uploaded-name")
         return _mp_note(row, "the library holds no name it was uploaded under (no short_id)")
@@ -11780,9 +11806,58 @@ def _mp_quality(row):
     _mp_note(row, f"Google Photos holds a {issue.replace('-', ' ')} copy — a restore would fail its SHA-256 check")
 
 
+def _mp_not_yet(row, note):
+    """Step 9b: the row becomes `not-backed-up-yet` in the account it is routed to — what the inventory shows cannot
+    be this push; any item the ladder took for it stays as a candidate (context only), nothing is recorded for it."""
+    pool = ([row["item"]] if row["item"] else []) + row["candidates"]
+    row.update(status="not-backed-up-yet", account=row["routing"], issue=None, proof=None, item=None, alternates=[],
+               copies=[], duplicate=None, set=None, repair=None, candidates=[dict(c) for c in pool])
+    _mp_note(row, note)
+
+
+def _mp_evidence_as_of(row, fresh):
+    """The latest crawl start among the fresh inventories a row's answer came from — its item's account, else its
+    candidates' accounts, else its own — or None."""
+    accounts = {row["item"]["account"]} if row["item"] else {c["account"] for c in row["candidates"]}
+    times = [_mp_when(fresh[a]["as_of"]) for a in accounts or {row["account"]} if a in fresh and fresh[a]["fresh"]]
+    return max(times) if times else None
+
+
+def _mp_recency(rows, fresh):
+    """Step 9b (DECISIONS §1e) — what it means that Google Photos does not show an object, library <-> Google only.
+    `recent`: its capture push time (`pushed_at`) is no older than MAP_RECENT_DAYS before the crawl start of the
+    account it is routed to — where its backup lands (None while either time is unknown). Then:
+      * not found -> not-backed-up-yet when recent (a phone backs up when it can; pushes after the crawl began
+        included), else possible-loss — pushed earlier, or push time unknown (no capture: a pre-capture push);
+      * pushed after the crawl that gave any other answer began (a name match, a conflict, a probable ...): that
+        inventory cannot hold this push, so only its own bytes (a dedupKey match) prove it -> not-backed-up-yet;
+      * a recent conflict (another upload holds its name) -> not-backed-up-yet: the new upload may not be listed.
+    A waiting or a lost row names the account it is routed to."""
+    for row in rows:
+        when = _mp_when(row["pushed_at"])
+        info = fresh.get(row["routing"]) or {}
+        as_of = _mp_when(info.get("as_of")) if info.get("fresh") else None
+        if when is not None and as_of is not None:
+            row["recent"] = when >= as_of - timedelta(days=MAP_RECENT_DAYS)
+        status = row["status"]
+        if status == "not-found":
+            row.update(status="not-backed-up-yet" if row["recent"] else "possible-loss", account=row["routing"])
+            continue
+        if status == "stale-inventory" or when is None or row["proof"] == "dedupkey":
+            continue
+        evidence = _mp_evidence_as_of(row, fresh)
+        if evidence is not None and when > evidence:
+            _mp_not_yet(row, f"pushed {_mp_iso(when)}, after the crawl that shows its name began ({_mp_iso(evidence)}) "
+                             f"— what Google Photos shows under its name predates this push")
+        elif status == "conflict" and row["recent"]:
+            _mp_not_yet(row, "another upload holds its name in Google Photos (other bytes) — this push is not in the "
+                             "inventory yet")
+
+
 def _mp_match(objects, routes, index, fresh, library):
-    """The verdict of every object (PLAN Step 9 (1)-(5)) -> rows in object order. Offline: objects in no account stay
-    `not-found` here; _mp_device_check gives them their device verdict."""
+    """The verdict of every object (PLAN Step 9 (1)-(5), Step 9b) -> rows in object order. Offline: an object in no
+    account becomes not-backed-up-yet or possible-loss (_mp_recency); only --devices adds what the phones hold
+    (_mp_device_check)."""
     rows, by_key = [], {}
     for obj in objects:
         by_key[_mp_key(obj)] = _mp_row(obj, routes[_mp_key(obj)])
@@ -11805,15 +11880,18 @@ def _mp_match(objects, routes, index, fresh, library):
                 row.update(status="ambiguous", issue=None, proof=None, candidates=[row["item"]], item=None,
                            alternates=[], repair=None)
                 _mp_note(row, f"{len(claimants)} library objects share this old untagged name")
+    _mp_recency(rows, fresh)
     for row in rows:
         _mp_quality(row)
         row["override_check"] = _mp_override_check(row)
     return rows
 
 
-_MP_DEVICE_STATUS = {"on_device": "awaiting-backup", "freed": "missing-after-backup", "absent": "missing-everywhere",
-                     "unchecked": "device-check-incomplete"}   # Step 8's verdict -> the mapper's (never "missing" for
-                                                               # `unchecked`: a configured phone was not listed)
+# Step 9b: the statuses of an object Google Photos does not show (in report order), and — --devices only — Step 8's
+# verdict for an OLD one (possible-loss); `unchecked` (a configured phone not listed) keeps the verdict: a note only.
+_MP_NOT_IN_GP = ("not-backed-up-yet", "possible-loss", "awaiting-backup", "missing-after-backup",
+                 "missing-everywhere")
+_MP_DEVICE_STATUS = {"on_device": "awaiting-backup", "freed": "missing-after-backup", "absent": "missing-everywhere"}
 
 
 def _mp_family(obj):
@@ -11825,13 +11903,15 @@ def _mp_family(obj):
 
 
 def _mp_device_check(library, objects, rows, cache=None):
-    """PLAN Step 9 (5c/d) with Step 8: the READ-ONLY device check (device_inventory() over device_check_aliases()) for
-    every object found in no account: on a phone -> awaiting-backup; only its .mvmeta.json sidecar -> missing-after-
-    backup (possible cloud loss); on no phone of a complete check -> missing-everywhere; a configured phone not
-    listed -> device-check-incomplete (never "missing"). Such an object of a split whose other members ARE in Google
-    Photos is flagged partial_set (IMP-C27 (c)). -> the check's summary, or None when no object needed it (then no
-    adb command runs). `cache` (a dict) keeps the phones' listing for a second pass of the same run."""
-    todo = [r for r in rows if r["status"] == "not-found"]
+    """--devices only (Step 9b: no verdict needs a phone). The READ-ONLY device check of Step 8 (device_inventory()
+    over device_check_aliases()) for every object found in no account. An OLD one (possible-loss) gets the phones'
+    richer verdict: still on a phone -> awaiting-backup (its backup is overdue); only its .mvmeta.json sidecar left ->
+    missing-after-backup (possible cloud loss); on no phone of a complete check -> missing-everywhere. A recent one
+    (not-backed-up-yet) keeps its verdict — the phones' answer is its annotation. A configured phone that was not
+    listed (`unchecked`) only adds a note: it never blocks or downgrades a verdict. -> the check's summary, or None
+    when no object needed it (then no adb command runs). `cache` (a dict) keeps the phones' listing for a second
+    pass of the same run."""
+    todo = [r for r in rows if r["status"] in ("not-backed-up-yet", "possible-loss")]
     if not todo:
         return None
     objs = {_mp_key(o): o for o in objects}
@@ -11846,29 +11926,35 @@ def _mp_device_check(library, objects, rows, cache=None):
     away = ", ".join(f"{alias} ({(devices.get(alias) or {}).get('serial')}) {status}"
                      for alias, status in result["incomplete_devices"].items())
     for row, verdict in zip(todo, result["objects"]):
-        row["status"] = _MP_DEVICE_STATUS[verdict["state"]]
-        row["device"] = {"state": verdict["state"], "expected_size": verdict["expected_size"],
+        state = verdict["state"]
+        if row["status"] == "possible-loss" and state in _MP_DEVICE_STATUS:
+            row["status"] = _MP_DEVICE_STATUS[state]
+        row["device"] = {"state": state, "expected_size": verdict["expected_size"],
                          "copies": [{k: c.get(k) for k in ("alias", "serial", "path", "size", "size_match")}
                                     for c in verdict["copies"]],
                          "sidecars": [{k: s.get(k) for k in ("alias", "serial", "path", "mtime")}
                                       for s in verdict["sidecars"]],
                          "partials": [{k: p.get(k) for k in ("alias", "serial", "path", "size")}
                                       for p in verdict["partials"]]}
-        if verdict["state"] == "unchecked" and away:
-            _mp_note(row, f"not listed: {away} — connect it and re-run")
+        if state == "unchecked" and away:
+            _mp_note(row, f"device check incomplete — not listed: {away} (the verdict stands)")
+    return {"complete": result["complete"], "incomplete": result["incomplete_devices"], "counts": result["counts"],
+            "devices": devices, "unconfigured": inventory.get("unconfigured") or []}
+
+
+def _mp_partial_sets(objects, rows):
+    """IMP-C27 (c): an object Google Photos does not show, of a split (its chunks + FLAC holders) of which Google
+    Photos DOES show another member, is flagged partial_set."""
     by_key, families = {(r["manual_id"], r["label"]): r for r in rows}, {}
     for obj in objects:
         if _mp_family(obj) is not None:
             families.setdefault(_mp_family(obj), []).append(by_key[_mp_key(obj)])
-    lost = set(_MP_DEVICE_STATUS.values())
     for members in families.values():
-        if any(m["status"] in lost for m in members) and any(
-                m["status"] not in lost and m["status"] != "stale-inventory" for m in members):
+        if any(m["status"] in _MP_NOT_IN_GP for m in members) and any(
+                m["status"] not in _MP_NOT_IN_GP and m["status"] != "stale-inventory" for m in members):
             for m in members:
-                if m["status"] in lost:
+                if m["status"] in _MP_NOT_IN_GP:
                     m["partial_set"] = True
-    return {"complete": result["complete"], "incomplete": result["incomplete_devices"], "counts": result["counts"],
-            "devices": devices, "unconfigured": inventory.get("unconfigured") or []}
 
 
 MAP_UNMATCHED = ("superseded-split", "duplicate", "cross-account-copy", "mediavault-unknown", "non-mediavault",
@@ -11936,17 +12022,19 @@ def _mp_unmatched(states, fresh, rows, objects):
 
 
 _MP_REASONS = {"probable": "probable", "ambiguous": "ambiguous", "conflict": "wrong-item",
-               "inconsistent": "inconsistent", "missing-after-backup": "missing-after-backup",
-               "missing-everywhere": "missing-everywhere",
-               "device-check-incomplete": "not-found"}   # status -> P-18 failed-list reason (unresolved rows only)
+               "inconsistent": "inconsistent", "possible-loss": "not-found",
+               "missing-after-backup": "missing-after-backup",
+               "missing-everywhere": "missing-everywhere"}   # status -> P-18 failed-list reason (unresolved rows only)
+_MP_LOST = ("possible-loss", "missing-after-backup", "missing-everywhere")   # the rows a partial set's reason names
 
 
 def _mp_reasons(rows):
-    """Set every row's P-18 failed-list `reason` — None for a resolved row (mapped, wrong-account), one awaiting its
-    backup, or one without a verdict (stale-inventory); a lost member of a partially uploaded split: partial-set."""
+    """Set every row's P-18 failed-list `reason` — None for a resolved row (mapped, wrong-account), one waiting for its
+    backup (not-backed-up-yet: Step 9b keeps it off resolutions_todo.csv and the failed list; awaiting-backup), or one
+    without a verdict (stale-inventory); a lost member of a partially uploaded split: partial-set."""
     for row in rows:
         reason = _MP_REASONS.get(row["status"])
-        if reason in ("missing-after-backup", "missing-everywhere") and row["partial_set"]:
+        if row["status"] in _MP_LOST and row["partial_set"]:
             reason = "partial-set"
         row["reason"] = reason
 
@@ -12132,15 +12220,17 @@ def _mp_write_jsonl(path, records):
 
 
 MAP_STATES = ("mapped", "mapped-normalized", "wrong-account", "probable", "ambiguous", "conflict", "inconsistent",
-              "awaiting-backup", "missing-after-backup", "missing-everywhere", "device-check-incomplete",
+              "not-backed-up-yet", "possible-loss", "awaiting-backup", "missing-after-backup", "missing-everywhere",
               "stale-inventory")   # every row's final status, in report order
-_MP_LOSS = ("missing-after-backup", "missing-everywhere", "device-check-incomplete", "awaiting-backup")
+_MP_LOSS = ("possible-loss", "missing-after-backup", "missing-everywhere", "awaiting-backup")   # the LOUD block
 _MP_LOSS_TEXT = {
+    "possible-loss": f"in no account, pushed over {MAP_RECENT_DAYS} days before its account's crawl began or with no "
+                     f"push time (no capture) — possible LOSS",
     "missing-after-backup": "in no account and freed from a phone — only its .mvmeta.json sidecar is left "
                             "(possible cloud LOSS)",
     "missing-everywhere": "in no account and on no phone (possible LOSS)",
-    "device-check-incomplete": "in no account; a configured phone was not listed — connect it and re-run",
-    "awaiting-backup": "in no account but still on a phone — awaiting its backup (do NOT free it yet)",
+    "awaiting-backup": f"in no account but still on a phone although pushed over {MAP_RECENT_DAYS} days before the "
+                       f"crawl — its backup is overdue (do NOT free it yet)",
 }
 _MP_INCONSISTENCY = ("inconsistent", "conflict") + _MP_LOSS     # the rows of inconsistencies.csv (IMP-C27)
 
@@ -12149,17 +12239,35 @@ def _mp_counts_line(counter):
     return " · ".join(f"{state} {n:,}" for state, n in counter.items() if n)
 
 
+def _mp_push_text(row):
+    """Step 9b: a row's push-time evidence for the report — the capture's push time, else 'push time unknown' with
+    the entry's place in its library file (newly added entries come last; a hint only, never a verdict)."""
+    when = _mp_when(row["pushed_at"])
+    if when is not None:
+        return f"pushed {when.strftime('%Y-%m-%d %H:%M')} UTC (capture)"
+    return "push time unknown (no capture)" + (f" · entry {row['library_position']}" if row["library_position"] else "")
+
+
 def _mp_device_hint(row):
-    """One line of device evidence for a LOUD-block row."""
-    device = row.get("device") or {}
-    copies, sidecars = device.get("copies") or [], device.get("sidecars") or []
-    if row["status"] == "awaiting-backup" and copies:
-        return "on " + ", ".join(sorted({f"{c['alias']} ({c['serial']})" for c in copies}))
-    if row["status"] == "missing-after-backup" and sidecars:
-        return "sidecar only on " + ", ".join(sorted({f"{s['alias']} ({s['serial']})" for s in sidecars}))
-    if row["status"] == "missing-everywhere":
+    """What the phones hold for a row Google Photos does not show (--devices), or None without a device check."""
+    device = row.get("device")
+    if not device:
+        return None
+    if device["state"] == "on_device":
+        return "on " + ", ".join(sorted({f"{c['alias']} ({c['serial']})" for c in device["copies"]
+                                         if c.get("size_match") is not False}))
+    if device["state"] == "freed":
+        return "sidecar only on " + ", ".join(sorted({f"{s['alias']} ({s['serial']})" for s in device["sidecars"]}))
+    if device["state"] == "absent":
         return "on no phone"
-    return "a configured phone was not listed"
+    return "device check incomplete"
+
+
+def _mp_nowhere_line(row):
+    """One report line for a row Google Photos does not show: verdict, object, push evidence, phones (--devices)."""
+    hint = _mp_device_hint(row)
+    return (f"    {row['status']:<20} {row['manual_id']} · {row['label']}"
+            f"{' [partial set]' if row['partial_set'] else ''} — {_mp_push_text(row)}" + (f" · {hint}" if hint else ""))
 
 
 def _mp_device_lines(devices):
@@ -12229,6 +12337,7 @@ def _mp_apply_lines(ctx):
                      else _mp_engine_line(preview, "would change"))
         flags = ([f"--account {ctx['account']}"] if ctx["account"] else []) + [f"--repair {r}" for r in ctx["repairs"]]
         flags += ["--accept-probable"] if ctx["accept_probable"] else []
+        flags += ["--devices"] if ctx["use_devices"] else []
         resolution = ctx["resolution"]        # previewed above: the apply must import the same decisions
         flags += [f'--resolutions "{resolution["path"]}"'] if resolution and not resolution["fatal"] else []
         lines.append(f"Next: python main.py map_photos {ctx['scope']} {' '.join(flags + ['--apply'])}")
@@ -12297,8 +12406,8 @@ def _mp_report(ctx):
     loud = [r for r in rows if r["status"] in _MP_LOSS]
     if loud:
         partial = [r for r in loud if r["partial_set"]]
-        lines.append(f"⚠️⚠️⚠️  NOT IN GOOGLE PHOTOS (IMP-C27): {len(loud):,} object(s) — the local copy of an archived "
-                     f"entry is a dummy  ⚠️⚠️⚠️")
+        lines.append(f"⚠️⚠️⚠️  NOT IN GOOGLE PHOTOS — POSSIBLE LOSS (IMP-C27): {len(loud):,} object(s) — the local "
+                     f"copy of an archived entry is a dummy  ⚠️⚠️⚠️")
         for state in _MP_LOSS:
             n = sum(1 for r in loud if r["status"] == state)
             if n:
@@ -12307,9 +12416,16 @@ def _mp_report(ctx):
             lines.append(f"  partial chunk sets: {len(partial):,} object(s) in "
                          f"{len({r['manual_id'] for r in partial}):,} entr(y/ies) — the rest of the set IS in Google "
                          f"Photos")
-        for row in loud:
-            lines.append(f"    {row['status']:<24} {row['manual_id']} · {row['label']}"
-                         f"{' [partial set]' if row['partial_set'] else ''} — {_mp_device_hint(row)}")
+        if ctx["devices"] is None:
+            lines.append("  (no phone was checked — add --devices to see which of these are still on a phone or were "
+                         "freed from one)")
+        lines.extend(_mp_nowhere_line(row) for row in loud)
+    recent = [r for r in rows if r["status"] == "not-backed-up-yet"]
+    if recent:
+        lines.append(f"Not backed up yet (recent — not a problem yet): {len(recent):,} object(s) pushed after their "
+                     f"account's crawl began or in the {MAP_RECENT_DAYS} days before it — a later crawl should list "
+                     f"them")
+        lines.extend(_mp_nowhere_line(row) for row in recent)
     told = [r for r in rows if r["user_decision"] == "not_uploaded"]
     if told:
         lines.append(f"⚠️⚠️⚠️  YOU SAY NOT UPLOADED (IMP-C27): {len(told):,} object(s) — an archived entry keeps only "
@@ -12522,13 +12638,16 @@ def _mp_apply(ctx, repairs, accept_probable, recompute):
 
 
 def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=None, repairs=(),
-                   accept_probable=False, apply=False, out=None):
-    """`map_photos` (PLAN Step 9): map the uploaded library objects to the Google Photos inventory — the per-object
-    rules are in the section comment above. A DRY RUN by default.
+                   accept_probable=False, apply=False, out=None, devices=False):
+    """`map_photos` (PLAN Step 9, Step 9b): map the uploaded library objects to the Google Photos inventory — the
+    per-object rules are in the section comment above. A DRY RUN by default; no verdict needs a phone.
 
     scope             all (the whole library) | a library id | an id prefix (a season id selects its episodes; an
                       alias id maps its primary)
     account           only the objects ROUTED to that account (mvconfig override > learned home > id prefix)
+    devices           also run Step 8's read-only device check for the objects in no account: an OLD one
+                      (possible-loss) gets awaiting-backup / missing-after-backup / missing-everywhere, a recent one an
+                      annotation; a phone not listed only annotates. Without it no adb command runs at all
     devices_only      only Step 8's read-only device report (devices.csv): no inventory, nothing recorded
     resolutions       a filled resolutions_todo.csv / failed_objects.csv: url -> a manual-proof learned record + a
                       hint, datetime -> a hint (both verified later by `check_photos hinted`), search -> the
@@ -12543,8 +12662,9 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
 
     Row status (mapping.jsonl): mapped · mapped-normalized · wrong-account (these three are applied) · probable ·
     ambiguous · conflict · inconsistent (issue: split-info-lost | untagged-name | partial-upload |
-    not-original-quality | no-uploaded-name) · awaiting-backup · missing-after-backup · missing-everywhere ·
-    device-check-incomplete · stale-inventory (no verdict). Run directory: summary.txt (the printed report),
+    not-original-quality | no-uploaded-name) · not-backed-up-yet (recent: not on the todo or failed list) ·
+    possible-loss · with devices also awaiting-backup · missing-after-backup · missing-everywhere ·
+    stale-inventory (no verdict). Run directory: summary.txt (the printed report),
     mapping.jsonl, mapping.csv (its sheet for a reader: one row per object, the names side by side, no photo id),
     inconsistencies.csv, resolutions_todo.csv (the failed_objects.csv columns), unmatched_<account>.csv (`all`
     without account only); devices.csv for devices_only. A report file that cannot be written (open in Excel) ends
@@ -12571,7 +12691,7 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
     if devices_only:
         return _mp_devices_only(library, scope, ids, account, run_dir)
     cache = {}
-    ctx = _mp_compute(library, scope, ids, account, resolutions, now, cache)
+    ctx = _mp_compute(library, scope, ids, account, resolutions, now, cache, devices)
     applied = preview = None
     unread = bool(apply and ctx["resolution"] and ctx["resolution"]["fatal"])
     if unread:                        # a mistyped --resolutions path must not turn into a half-intended apply
@@ -12579,7 +12699,8 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
                             "recorded; fix the path and re-run")
     elif apply:
         applied, ctx = _mp_apply(ctx, repairs, accept_probable,
-                                 lambda: _mp_compute(load_library(), scope, ids, account, resolutions, now, cache))
+                                 lambda: _mp_compute(load_library(), scope, ids, account, resolutions, now, cache,
+                                                     devices))
     else:
         preview = _mp_preview(ctx, repairs, accept_probable)
     ctx.update(apply=apply and not unread, repairs=tuple(repairs), accept_probable=accept_probable, applied=applied,
@@ -12612,15 +12733,32 @@ def _mp_objects(library, ids, account):
     return objects, routes
 
 
-def _mp_compute(library, scope, ids, account, resolutions, now, cache):
-    """One complete, offline (but for the read-only device check) mapping pass over a loaded library -> ctx: scope,
-    account, library, objects, rows (verdicts, reasons, user decisions), fresh, devices, unmatched, resolution,
-    todo, notes, run."""
+def _mp_library_positions(library):
+    """Step 9b's hint for an object with no push time: {manual_id: 'k/n in <library file>'} — the entry's place in
+    the library file save_library writes it to (newly added entries come last). Never a verdict."""
+    files = {"movies": mvcommon.LIBRARY_MOVIES, "tv": mvcommon.LIBRARY_SERIES, "anime": mvcommon.LIBRARY_ANIME,
+             "others": mvcommon.LIBRARY_OTHERS}            # save_library's routing; any other prefix -> movies
+    order = {}
+    for mid in library:
+        if isinstance(mid, str):
+            order.setdefault(mvcommon.category_for_id(mid) or "movies", []).append(mid)
+    return {mid: f"{k}/{len(ids)} in {os.path.basename(files[category])}"
+            for category, ids in order.items() for k, mid in enumerate(ids, 1)}
+
+
+def _mp_compute(library, scope, ids, account, resolutions, now, cache, devices=False):
+    """One complete, offline mapping pass over a loaded library -> ctx: scope, account, library, objects, rows
+    (verdicts, reasons, user decisions), fresh, devices (the device check's summary: devices=True only — the one
+    step that may run adb, read-only), use_devices, unmatched, resolution, todo, notes, run."""
     objects, routes = _mp_objects(library, ids, account)
     states = _mp_inventory_states()
     fresh = _mp_freshness(states, objects, routes, now)
     rows = _mp_match(objects, routes, _mp_index(states), fresh, library)
-    devices = _mp_device_check(library, objects, rows, cache)
+    positions = _mp_library_positions(library)
+    for row in rows:
+        row["library_position"] = positions.get(row["manual_id"])
+    summary = _mp_device_check(library, objects, rows, cache) if devices else None
+    _mp_partial_sets(objects, rows)
     unmatched = _mp_unmatched(states, fresh, rows, objects) if scope == "all" and account is None else None
     _mp_reasons(rows)
     decided, hint_problem = _mp_prior_decisions(objects)
@@ -12630,8 +12768,8 @@ def _mp_compute(library, scope, ids, account, resolutions, now, cache):
         row["user_decision"] = (resolution["decisions"].get(key) if resolution else None) or decided.get(key)
     run = "map-" + now.strftime("%Y%m%dT%H%M%SZ")
     return {"scope": scope, "account": account, "library": library, "objects": objects, "rows": rows,
-            "fresh": fresh, "devices": devices, "unmatched": unmatched, "resolution": resolution,
-            "todo": _mp_todo(rows, run), "notes": [hint_problem], "run": run}
+            "fresh": fresh, "devices": summary, "use_devices": devices, "unmatched": unmatched,
+            "resolution": resolution, "todo": _mp_todo(rows, run), "notes": [hint_problem], "run": run}
 
 
 def _mp_devices_only(library, scope, ids, account, run_dir):
@@ -12679,20 +12817,24 @@ def _mp_devices_only(library, scope, ids, account, run_dir):
 # items' photo ids and dedupKeys stay in mapping.jsonl.
 _MP_CSV_COLUMNS = ("account", "category", "manual_id", "object", "uploaded_name", "status", "issue", "name_match",
                    "proof", "gp_filename", "taken_utc", "upload_utc", "duplicate", "alternates", "copies",
-                   "default_account", "override", "override_check", "learned_home", "device", "partial_set",
-                   "user_decision", "note")
+                   "default_account", "override", "override_check", "learned_home", "pushed_utc",
+                   "library_position", "device", "partial_set", "user_decision", "note")
 
 
 def _mp_csv_row(row):
     """One mapping.csv row (_MP_CSV_COLUMNS): gp_filename / taken_utc / upload_utc describe the item the object maps
-    to, `alternates` counts its other items (duplicates), `copies` names the other accounts holding the same bytes."""
+    to, `alternates` counts its other items (duplicates), `copies` names the other accounts holding the same bytes,
+    pushed_utc is the capture's push time (Step 9b's evidence; blank: unknown)."""
     item = row["item"] or {}
+    pushed = _mp_when(row["pushed_at"])
     return (row["account"], row["category"], row["manual_id"], row["label"], row["uploaded_name"], row["status"],
             row["issue"], row["name_match"], row["proof"], item.get("filename"), _mp_utc(item.get("taken_ms")),
             _mp_utc(item.get("upload_ms")), row["duplicate"], len(row["alternates"]) or None,
             ", ".join(c["account"] for c in row["copies"]) or None, row["default_account"], row["override"],
-            row["override_check"], row["learned_home"], (row["device"] or {}).get("state"),
-            "yes" if row["partial_set"] else None, row["user_decision"], row["note"])
+            row["override_check"], row["learned_home"],
+            pushed.strftime("%Y-%m-%d %H:%M:%S UTC") if pushed else None, row["library_position"],
+            (row["device"] or {}).get("state"), "yes" if row["partial_set"] else None, row["user_decision"],
+            row["note"])
 
 
 def _mp_finish(ctx, run_dir):

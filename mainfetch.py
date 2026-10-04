@@ -260,6 +260,7 @@ def use_photos_tab(driver):
             outcome = "existing"
         else:
             driver.switch_to.new_window("tab")
+            _note_opened_tab(driver)  # [IMP-C25 Step 11 i] the fetch closes the tabs it opened when it ends
             driver.get(PHOTOS_URL)
             outcome = "new"
     focus_page(driver)
@@ -598,8 +599,12 @@ class FetchJournal:
                    interrupted, something still to delete) · recovered (a later run cleaned it up)
       interrupted  the run ended on Ctrl+C or an error
       mode         the latest entry's download mode (incoming | fallback | legacy)
-      sessions     [{account, chrome_pid, user_data_dir, started_at}] — the Chrome each account
-                   session launched (chrome_pid None when unknown)
+      sessions     [{account, chrome_pid, user_data_dir, launched, started_at, closed}] — each
+                   account session's Chrome: launched True = this run started it (the only kind a
+                   cleanup may terminate), False = it was already running (attached; chrome_pid is
+                   then the browser on the debug port), None = unknown; closed = how the session
+                   ended it (11 i): chrome · tabs · windows · terminated · open (absent: the run
+                   died before closing — the start-up cleanup takes over)
       downloads_snapshot  {name: [size, mtime_ns]} of ~/Downloads when the run first used the
                    fallback (absent otherwise) — a name not in it appeared during the run
       entries      [{manual_id, label, account, dest, mode, incoming, names, cleaned, objects}] —
@@ -631,10 +636,17 @@ class FetchJournal:
                   f"interrupted, its leftovers are not cleaned up automatically (`python main.py fetch_cleanup` "
                   f"lists them).")
 
-    def add_session(self, account, chrome_pid, user_data_dir):
+    def add_session(self, account, chrome_pid, user_data_dir, launched=None):
         self.doc["sessions"].append({"account": account, "chrome_pid": chrome_pid if mvcommon._is_int(chrome_pid)
-                                     else None, "user_data_dir": user_data_dir, "started_at": _utc_now()})
+                                     else None, "user_data_dir": user_data_dir, "launched": launched,
+                                     "started_at": _utc_now()})
         self.save()
+
+    def end_session(self, closed):
+        """[11 i] How the latest session's Chrome was left: chrome · tabs · windows · terminated · open."""
+        if self.doc["sessions"]:
+            self.doc["sessions"][-1]["closed"] = closed
+            self.save()
 
     def add_entry(self, target, queue, account):
         """Record an entry before its first request; returns its record (update_objects / end_entry)."""
@@ -702,6 +714,15 @@ def _rearm_downloads(driver):
     path = getattr(driver, "_mv_download_dir", None)
     if path:
         _set_download_dir(driver, path)
+
+
+def _note_opened_tab(driver):
+    """[IMP-C25 Step 11 i] Remember the tab use_photos_tab just opened (driver._mv_opened_tabs):
+    a fetch closes the tabs it opened when it ends. Never raises."""
+    try:
+        driver._mv_opened_tabs = list(getattr(driver, "_mv_opened_tabs", None) or []) + [driver.current_window_handle]
+    except Exception:
+        pass
 
 
 def _family_key(name):
@@ -1059,6 +1080,9 @@ class _ProcessTable:
 PROCESS_TABLE = _ProcessTable()
 _UNLOCK_WAIT_S = 10.0   # how long a cleanup waits for a terminated Chrome to let go of its files
 _UNLOCK_POLL_S = 0.5
+_CLOSE_WAIT_S = 10.0    # [11 i] how long a gracefully closed Chrome may take to exit before its pid is terminated
+DOWNLOAD_STALL_S = 300  # [11 i] a partial download that has not grown for this long is not running any more
+                        # (the harvester's base timeout)
 
 
 def _cmdline_args(cmdline):
@@ -1217,8 +1241,9 @@ def _startup_cleanup(ctx):
     """[IMP-C25 Step 11 e — P-12 rule 3] Before a fetch run's first Chrome session (inside the
     fetch lock): finish what an interrupted earlier fetch left. For every unfinished journal
     (not clean / recovered) that is not a fetch still running:
-      * its Chrome is terminated — only a recorded pid that still runs AND whose command line
-        names that session's profile folder (_chrome_still_ours);
+      * the Chrome it LAUNCHED is terminated — only a recorded pid that still runs AND whose
+        command line names that session's profile folder (_chrome_still_ours); a Chrome that
+        run only attached to (launched False) is never touched;
       * the leftovers of every incoming folder it names (marked folders only), its pending files,
         and — for a ~/Downloads fallback run — ONLY files that appeared during that run and belong
         to its expected-name family are deleted; emptied incoming folders are removed;
@@ -1236,7 +1261,9 @@ def _startup_cleanup(ctx):
             if _journal_is_live(doc):
                 continue
             for session in doc.get("sessions") or []:
-                pid = session.get("chrome_pid") if isinstance(session, dict) else None
+                if not isinstance(session, dict) or session.get("launched") is not True:
+                    continue  # only a Chrome that run LAUNCHED — never one it attached to (it may hold user tabs)
+                pid = session.get("chrome_pid")
                 if _chrome_still_ours(pid, session.get("user_data_dir")) and PROCESS_TABLE.terminate(pid):
                     terminated.append(pid)
             deleted, held = _clean_journal_files(doc)
@@ -1475,82 +1502,249 @@ def _note_session(ctx, driver, account):
     its command line still names that folder).
 
     When that chrome.exe has already exited, it handed the profile to a Chrome that was running
-    before (an earlier fetch leaves its Chrome open): the browser Selenium is attached to is then
-    the process listening on init_driver's debug port 9222 — recorded instead, but only when its
-    command line names this profile; otherwise no pid is recorded."""
+    before: the run only ATTACHED to that browser (launched False — it may hold the user's own
+    tabs, so nothing ever closes or terminates it). Its pid — the process listening on
+    init_driver's debug port 9222, when its command line names this profile — is recorded for the
+    journal only. A stand-in without a Popen handle: launched None (unknown — treated as attached)."""
     proc = getattr(driver, "_mv_chrome_proc", None)
     pid = getattr(proc, "pid", None)
     user_data_dir = getattr(driver, "_mv_user_data_dir", None) or CHROME_PROFILES.get(account)
     poll = getattr(proc, "poll", None)
-    if callable(poll) and poll() is not None:
-        try:
-            listener = PROCESS_TABLE.listener(9222)
-            pid = listener if _chrome_still_ours(listener, user_data_dir) else None
-        except Exception:  # bookkeeping only: never a reason to stop the fetch
-            pid = None
-        proc = None
+    launched = None
+    if callable(poll):
+        launched = poll() is None
+        if not launched:
+            try:
+                listener = PROCESS_TABLE.listener(9222)
+                pid = listener if _chrome_still_ours(listener, user_data_dir) else None
+            except Exception:  # bookkeeping only: never a reason to stop the fetch
+                pid = None
+            proc = None
     ctx.chrome = {"account": account, "proc": proc, "pid": pid if mvcommon._is_int(pid) else None,
-                  "user_data_dir": user_data_dir}
+                  "user_data_dir": user_data_dir, "launched": launched}
     if ctx.journal is not None:
-        ctx.journal.add_session(account, ctx.chrome["pid"], user_data_dir)
+        ctx.journal.add_session(account, ctx.chrome["pid"], user_data_dir, launched)
 
 
 def _terminate_session_chrome(ctx):
-    """Terminate the running session's Chrome (ctx.chrome) and every process it started, but only
-    while it is provably ours: the Popen handle init_driver kept (its pid cannot be reused while
-    the handle is open) and it still runs, or — without a handle — the pid still runs a Chrome
-    whose command line names that profile. Returns the pid terminated, or None."""
+    """Terminate the running session's Chrome (ctx.chrome) and every process it started — only a
+    Chrome this run LAUNCHED that still runs (the Popen handle init_driver kept: while it is open
+    the pid cannot be reused) AND whose command line still names that profile (_chrome_still_ours,
+    the start-up cleanup's guard). A Chrome the run attached to is never terminated. Returns the
+    pid terminated, or None."""
     chrome = ctx.chrome or {}
     pid = chrome.get("pid")
-    if not mvcommon._is_int(pid):
+    if chrome.get("launched") is not True or not mvcommon._is_int(pid):
         return None
     poll = getattr(chrome.get("proc"), "poll", None)
-    ours = poll() is None if callable(poll) else _chrome_still_ours(pid, chrome.get("user_data_dir"))
-    return pid if ours and PROCESS_TABLE.terminate(pid) else None
+    if callable(poll) and poll() is not None:
+        return None  # it has exited already
+    if not _chrome_still_ours(pid, chrome.get("user_data_dir")):
+        return None  # never a Chrome that is not ours
+    return pid if PROCESS_TABLE.terminate(pid) else None
+
+
+def _release_leftovers(ctx, wait):
+    """Delete what this run left behind that Chrome no longer holds (_clean_journal_files over the
+    run's own journal, waiting up to `wait` seconds); keeps ctx.pending_delete, the entries'
+    cleaned flags and the journal in step. Returns (deleted [(path, size)], still held)."""
+    journal = ctx.journal
+    journal.doc["pending_delete"] = list(ctx.pending_delete)
+    deleted, held = _clean_journal_files(journal.doc, wait=wait)
+    ctx.pending_delete = held
+    for entry in journal.doc["entries"]:
+        if entry.get("incoming") and not entry.get("cleaned") and not os.path.isdir(entry["incoming"]):
+            entry["cleaned"] = True
+    journal.doc["pending_delete"] = list(held)
+    journal.save()
+    return deleted, held
+
+
+def _session_partials(ctx, account):
+    """{path: size} of the partial downloads ('.crdownload') a session still has: in the incoming
+    folders its entries left behind (a download still running when its entry ended) and — after
+    a ~/Downloads fallback — the partials of its entries' expected-name family that appeared
+    during the run."""
+    entries = [e for e in (ctx.journal.doc["entries"] if ctx.journal is not None else [])
+               if isinstance(e, dict) and e.get("account") == account]
+    partials = {}
+    folders = [e["incoming"] for e in entries if e.get("incoming") and not e.get("cleaned")]
+    for folder in folders:
+        if _is_incoming_dir(folder):
+            for name in _watched_names(folder, "incoming"):
+                if name.endswith(_CRDOWNLOAD):
+                    partials[os.path.join(folder, name)] = _size_of(os.path.join(folder, name))
+    family = [n for e in entries if e.get("mode") == "fallback" for n in e.get("names") or []]
+    if family and ctx.run_downloads is not None:
+        try:
+            names = os.listdir(SYSTEM_DOWNLOADS_FOLDER)
+        except OSError:
+            names = []
+        for name in names:
+            if (name.endswith(_CRDOWNLOAD) and _family_key(name) not in ctx.run_downloads
+                    and _in_family(name, family)):
+                partials[os.path.join(SYSTEM_DOWNLOADS_FOLDER, name)] = _size_of(
+                    os.path.join(SYSTEM_DOWNLOADS_FOLDER, name))
+    return partials
+
+
+def _wait_downloads_idle(ctx, account):
+    """[11 i] Never cancel a running transfer: before a session's Chrome is closed, wait while one
+    of its downloads still runs — a partial (_session_partials) seen growing within the last
+    DOWNLOAD_STALL_S seconds (a partial first seen counts as growing). One line says so."""
+    seen, told = {}, False
+    while True:
+        now = time.time()
+        partials = _session_partials(ctx, account)
+        for path, size in partials.items():
+            if path not in seen or seen[path][0] != size:
+                seen[path] = (size, now)
+        running = [p for p in partials if now - seen[p][1] < DOWNLOAD_STALL_S]
+        if not running:
+            return
+        if not told:
+            print(f"   > ⏳ Waiting for {len(running)} download(s) of this fetch to finish before Chrome is closed...")
+            told = True
+        time.sleep(5)
+
+
+def _close_run_tabs(driver):
+    """[11 i] In a Chrome this run did not launch: close only the tabs the run opened — the ones
+    use_photos_tab opened (driver._mv_opened_tabs) and an about:blank tab (init_driver's launch
+    command opens one in a Chrome that was already running; a blank tab holds nothing of the
+    user's). Every other tab stays. Returns how many were closed; never raises."""
+    opened = set(getattr(driver, "_mv_opened_tabs", None) or [])
+    try:
+        handles = list(driver.window_handles)
+    except Exception:
+        return 0
+    try:
+        infos = {i.get("targetId"): i for i in driver.execute_cdp_cmd("Target.getTargets", {})["targetInfos"]}
+    except Exception:
+        infos = {}
+    closed = 0
+    for handle in handles:
+        info = infos.get(handle) or {}
+        if handle in opened or (info.get("type") == "page" and info.get("url") == "about:blank"):
+            try:
+                driver.switch_to.window(handle)
+                driver.close()
+                closed += 1
+            except Exception:
+                pass
+    return closed
+
+
+def _chrome_exited(chrome, wait):
+    """True once the Chrome this run launched has exited (its Popen handle), waiting up to `wait`
+    seconds."""
+    poll = getattr(chrome.get("proc"), "poll", None)
+    if not callable(poll):
+        return False
+    deadline = time.time() + wait
+    while poll() is None:
+        if time.time() >= deadline:
+            return False
+        time.sleep(_UNLOCK_POLL_S)
+    return True
+
+
+def _close_session(driver, ctx, last):
+    """[IMP-C25 Step 11 i] The end of one account's session — every way out but an interruption
+    (_end_run terminates the Chrome at once then). User requirement 2026-10-04: "make sure the
+    fetch also closes the chrome and tabs properly before finishing the task" (PLAN Step 11 i):
+      1. never cancel a running transfer: wait until no download of the session runs
+         (_wait_downloads_idle);
+      2. a Chrome this run LAUNCHED: closed gracefully — CDP Browser.close, sent only when the
+         browser Selenium drives is that Chrome (the process on the debug port; else only this
+         run's tabs are closed in the browser it drives) — and, still running _CLOSE_WAIT_S later,
+         terminated (_terminate_session_chrome: only when its command line names the profile).
+         The debug port and the profile are free; the next fetch starts a fresh Chrome;
+      3. a Chrome the run only ATTACHED to (already running): after the last account only the
+         tabs this run opened are closed (_close_run_tabs) and it stays open — it may hold the
+         user's own tabs; between two accounts its windows are closed as before (IMP-C26: the
+         next account needs the debug port);
+      4. what Chrome held is deleted now (_release_leftovers).
+    One line says what was closed; the journal records it (sessions[].closed). A driver without
+    Chrome's DevTools protocol (a test stand-in, never a real Chrome) keeps today's ending: its
+    windows are closed between two accounts, nothing else, nothing printed."""
+    if not hasattr(driver, "execute_cdp_cmd"):
+        if not last:
+            _close_browser_windows(driver)
+        return
+    chrome = ctx.chrome or {}
+    account = chrome.get("account")
+    _wait_downloads_idle(ctx, account)
+    pid, terminated = chrome.get("pid"), None
+    if chrome.get("launched") is True:
+        on_port = PROCESS_TABLE.listener(9222) == pid
+        sent = False
+        if on_port:
+            try:
+                driver.execute_cdp_cmd("Browser.close", {})
+                sent = True
+            except Exception:
+                _close_browser_windows(driver)
+        else:
+            _close_run_tabs(driver)  # the browser Selenium drives is not the one we launched
+        exited = _chrome_exited(chrome, _CLOSE_WAIT_S)
+        if not exited:
+            terminated = _terminate_session_chrome(ctx)
+        closed = "chrome" if exited else ("terminated" if terminated else "open")
+        if closed == "open":
+            line = f"⚠️ The Chrome this fetch started ('{account}') did not close — close it before the next fetch."
+        else:
+            how = ("closed" if sent else "closed (its windows)") if exited else f"terminated (pid {terminated})"
+            line = f"🧹 Chrome ('{account}') {how} — the next fetch starts a fresh one."
+    elif not last:
+        _close_browser_windows(driver)
+        closed, line = "windows", (f"🧹 Closed the windows of the Chrome this fetch attached to ('{account}') — "
+                                   f"the next account needs its debug port.")
+    else:
+        count = _close_run_tabs(driver)
+        closed, line = "tabs", (f"🧹 Closed {count} tab(s) this fetch opened — the Chrome it attached to "
+                                f"('{account}', already running before) stays open.")
+    print(f"   > {line}")
+    if ctx.journal is not None:
+        ctx.journal.end_session(closed)
+        if ctx.pending_delete or any(not e.get("cleaned") for e in ctx.journal.doc["entries"]):
+            _release_leftovers(ctx, wait=_UNLOCK_WAIT_S if closed in ("chrome", "terminated") else 0)
 
 
 def _end_run(ctx, interrupted=False):
     """[IMP-C25 Step 11 f — P-12] The fetch run is over — finished, stopped on a problem line, or
     interrupted (Ctrl+C or an error; the session's driver has already quit).
-      interrupted  its Chrome is terminated (_terminate_session_chrome: 'Chrome terminated', so
-                   its downloads stop — a CDP cancel would need download ids from an event channel,
-                   which the attached Selenium session does not have: PLAN P6), then this run's
-                   leftovers are deleted — the files in every incoming folder it left, its pending
-                   files and, after a ~/Downloads fallback, the files that appeared during the run
-                   and belong to an entry's expected-name family (_clean_journal_files);
-      finished     with files Chrome still held (ctx.pending_delete) or a folder not yet removed:
-                   deleted now when Chrome has let go of them, else Chrome is closed first (P-12:
-                   retried after the run closes Chrome);
+      interrupted  the Chrome this run launched is terminated (_terminate_session_chrome: 'Chrome
+                   terminated', so its downloads stop — a CDP cancel would need download ids from an
+                   event channel, which the attached Selenium session does not have: PLAN P6; a
+                   Chrome it only attached to is never terminated), then this run's leftovers are
+                   deleted — the files in every incoming folder it left, its pending files and, after
+                   a ~/Downloads fallback, the files that appeared during the run and belong to an
+                   entry's expected-name family (_clean_journal_files);
+      otherwise    each session has closed its Chrome already (_close_session, 11 i) after its
+                   downloads ended — whatever is still left is deleted now if Chrome has let go of
+                   it; nothing is cancelled or terminated here;
     then the journal records the end: clean, or pending with what is still held — the next run's
     start-up cleanup finishes it. A problem here never stops the run's own ending (one warning)."""
     journal = ctx.journal
     if journal is None:
         return
     try:
-        journal.doc["pending_delete"] = list(ctx.pending_delete)
         leftovers = interrupted or ctx.pending_delete or any(not e.get("cleaned") for e in journal.doc["entries"])
         if leftovers:
             terminated = _terminate_session_chrome(ctx) if interrupted else None
+            if interrupted and ctx.chrome:
+                journal.end_session("terminated" if terminated else "open")
             # waiting for Chrome to let go only makes sense once it was terminated
-            deleted, held = _clean_journal_files(journal.doc, wait=None if terminated else 0)
-            if held and not interrupted:
-                terminated = _terminate_session_chrome(ctx)
-                if terminated:
-                    more, held = _clean_journal_files(journal.doc)
-                    deleted += more
+            deleted, held = _release_leftovers(ctx, wait=None if terminated else 0)
             if terminated:
-                print(f"   > 🛑 Chrome terminated (pid {terminated}) — "
-                      f"{'its downloads stopped' if interrupted else 'it still held files of this fetch'}.")
+                print(f"   > 🛑 Chrome terminated (pid {terminated}) — its downloads stopped.")
             if deleted:
                 size = sum(s for _, s in deleted)
-                what = "of this interrupted fetch" if interrupted else "Chrome had held"
+                what = "of this interrupted fetch" if interrupted else "this fetch left"
                 print(f"   > 🧹 Cleaned {len(deleted)} leftover file(s) {what} ({size / 1024 ** 3:.1f} GB)")
             if held:
                 print(f"   > ⏳ {len(held)} file(s) are still in use — the next fetch deletes them.")
-            ctx.pending_delete = held
-            for entry in journal.doc["entries"]:
-                if entry.get("incoming") and not entry.get("cleaned") and not os.path.isdir(entry["incoming"]):
-                    entry["cleaned"] = True
     except Exception as e:  # the run must end — its journal stays pending for the next start-up cleanup
         print(f"   > ⚠️ Cleaning up after this fetch failed ({type(e).__name__}: {e}) — the next fetch tries again.")
     journal.finish(ctx.pending_delete, interrupted)
@@ -2886,9 +3080,12 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None,
     # empty batch never touches the lock file. [IMP-C26] Held across EVERY
     # account group, so nothing else can take port 9222 between two sessions.
     interrupted = False  # [IMP-C25 Step 11] the run ended on Ctrl+C or an error
+    stopped = False      # [IMP-C25 Step 11 i] the run stopped on a logged-out profile: no later session
     with fetch_session_lock(blocking=True):
         try:
             for n, (profile, group_targets, group_extras) in enumerate(groups):
+                if interrupted:
+                    break  # [IMP-C25 Step 11 i] stopped while the previous session was closing
                 # Init Selenium ONCE per account group (one group = the whole batch)
                 driver = None
                 try:
@@ -2930,15 +3127,13 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None,
                     for ex in group_extras:
                         fetch_single_entry(driver, ex, ctx=ctx)
 
-                    if n + 1 < len(groups):
-                        _close_browser_windows(driver)
-
                 except SessionExpiredError:
                     # [IMP-C6] One logged-out detection aborts the whole batch loudly
                     # (IMP-C26: naming the account group that hit it).
                     print(f"❌ Profile '{profile}' is logged out. Open Chrome with "
                           f"--user-data-dir={CHROME_PROFILES[profile]}, sign in to "
                           f"photos.google.com, then re-run.")
+                    stopped = True
                     return
                 except KeyboardInterrupt:
                     print("\n🛑 Stopped by user.")
@@ -2950,6 +3145,16 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None,
                     break
                 finally:
                     if driver:
+                        if not interrupted:
+                            # [IMP-C25 Step 11 i] once its downloads have ended, the session closes the Chrome
+                            # it launched (IMP-C26: between two accounts the windows of any other one)
+                            try:
+                                _close_session(driver, ctx, last=stopped or n + 1 == len(groups))
+                            except KeyboardInterrupt:  # stopped while waiting for a download: as any Ctrl+C
+                                print("\n🛑 Stopped by user.")
+                                interrupted = True
+                            except Exception as e:
+                                print(f"   > ⚠️ Closing Chrome failed ({type(e).__name__}: {e}).")
                         try:
                             driver.quit()
                         except:

@@ -262,21 +262,37 @@ class _Browser(_CdpDriver):
         super().__init__(refuse)
         self.clock, self.dir, self.profile = clock, str(downloads), profile
         self.saved, self.quits = [], 0
+        self.tabs, self.current = {}, None       # {handle: url} — empty unless a test opens tabs
+        self.switch_to = types.SimpleNamespace(window=self._switch)
+        self.on_close = lambda: None             # what CDP Browser.close does (a test makes the process exit)
+        self.closed_at = None
 
     def execute_cdp_cmd(self, cmd, params):
         super().execute_cdp_cmd(cmd, params)
         if cmd.endswith("setDownloadBehavior"):
             self.dir = params["downloadPath"]
+        if cmd == "Target.getTargets":
+            return {"targetInfos": [{"targetId": h, "type": "page", "url": u} for h, u in self.tabs.items()]}
+        if cmd == "Browser.close":
+            self.closed_at = self.clock.now
+            self.tabs.clear()
+            self.on_close()
         return {}
 
     @property
     def window_handles(self):
-        return []
+        return list(self.tabs)
+
+    def _switch(self, handle):
+        self.current = handle
+
+    def close(self):
+        self.tabs.pop(self.current, None)
 
     def quit(self):
         self.quits += 1
 
-    def start(self, name, payload, seconds):
+    def start(self, name, payload, seconds, grow_every=None):
         folder = pathlib.Path(self.dir)
         stem, ext = os.path.splitext(name)
         final, n = name, 0
@@ -294,6 +310,13 @@ class _Browser(_CdpDriver):
             if payload is not None:
                 (folder / final).write_bytes(payload)
 
+        def grow():                      # a running transfer: its partial keeps growing
+            if partial.exists():
+                with open(partial, "ab") as fh:
+                    fh.write(b".")
+
+        for t in range(grow_every or seconds, seconds, grow_every or seconds):
+            self.clock.after(t, grow)
         self.clock.after(seconds, finish)
         return True
 
@@ -565,7 +588,8 @@ def test_chrome_refusing_the_redirect_falls_back_to_downloads_for_the_rest_of_th
 
     out = capsys.readouterr().out
     assert out.count("Chrome refused the download folder (CDP)") == 1            # one warning for the whole run
-    assert [c for c, _ in world.browser.cdp] == ["Browser.setDownloadBehavior", "Page.setDownloadBehavior"]
+    assert [c for c, _ in world.browser.cdp if c.endswith("setDownloadBehavior")] == [
+        "Browser.setDownloadBehavior", "Page.setDownloadBehavior"]                 # never asked again in the run
     assert out.count("   > Watching Downloads (Infinite wait if active)...") == 2
     assert sorted(p.name for p in (folder / "restore").iterdir()) == ["S01E01.mkv", "S01E02.mkv"]
     assert out.count("✅ ENTRY COMPLETE.") == 2 and list(world.downloads.iterdir()) == []
@@ -986,8 +1010,8 @@ def test_the_next_start_terminates_only_the_recorded_chrome_and_cleans_only_name
                                  7003: CHROME_TV.replace(TV_PROFILE, r"C:\Users\x\ChromeProfile_TV2")})
     _held_until_killed(monkeypatch, procs, 7002, "S01E01 [aaa111].mkv.crdownload")
     path = _crashed_journal("fetch-20261004T100000Z-7001", sessions=[
-        {"account": "tv", "chrome_pid": 7002, "user_data_dir": TV_PROFILE},
-        {"account": "movies", "chrome_pid": 7003, "user_data_dir": TV_PROFILE + "2"}],   # pid 7003 runs another dir
+        {"account": "tv", "chrome_pid": 7002, "user_data_dir": TV_PROFILE, "launched": True},
+        {"account": "movies", "chrome_pid": 7003, "user_data_dir": TV_PROFILE + "2", "launched": True}],  # 7003: other dir
         entries=[{"incoming": str(a), "cleaned": False, "mode": "incoming", "names": []},
                  {"incoming": str(unmarked), "cleaned": False, "mode": "incoming", "names": []}])
     ctx = mainfetch.FetchContext(run_id="fetch-20261004T120000Z-9999")
@@ -1016,7 +1040,8 @@ def test_a_fetch_that_may_still_run_is_left_alone(world, monkeypatch, capsys, ow
     a = _incoming_with(world.tmp / "A", ("x.mkv.crdownload", b"p"))
     procs = _procs(monkeypatch, {7001: owner_cmdline, 7002: CHROME_TV})
     path = _crashed_journal("fetch-20261004T100000Z-7001",
-                            sessions=[{"account": "tv", "chrome_pid": 7002, "user_data_dir": TV_PROFILE}],
+                            sessions=[{"account": "tv", "chrome_pid": 7002, "user_data_dir": TV_PROFILE,
+                                       "launched": True}],
                             entries=[{"incoming": str(a), "cleaned": False, "mode": "incoming", "names": []}])
 
     mainfetch._startup_cleanup(mainfetch.FetchContext())
@@ -1235,7 +1260,7 @@ def test_an_interrupted_run_terminates_its_chrome_and_cleans_its_incoming_leftov
     mainfetch.cmd_fetch_route(SEASON)
 
     out = capsys.readouterr().out
-    assert procs.terminated == [6060] and procs.queried == []           # the kept handle proves the pid is ours
+    assert procs.terminated == [6060] and procs.queried == [6060]       # handle alive AND command line checked
     assert out.index(line) < out.index("   > 🛑 Chrome terminated (pid 6060) — its downloads stopped.") < out.index(
         "   > 🧹 Cleaned 1 leftover file(s) of this interrupted fetch (0.0 GB)")
     assert not incoming.exists()
@@ -1274,48 +1299,217 @@ def test_what_chrome_still_holds_after_an_interruption_waits_for_the_next_start(
     assert not incoming.exists() and _journals()[0]["state"] == "recovered"
 
 
-def test_a_finished_run_closes_chrome_to_delete_what_it_still_held(world, monkeypatch, capsys):
-    entry = _whole_entry(world.tmp)
-    procs = _procs(monkeypatch)
-    _launched(world.browser, procs, 6161)
-    _held_until_killed(monkeypatch, procs, 6161, "Extra [qqq999].mkv.crdownload")
-
-    def script(q, i):
-        if q != SHOW_UP:
-            return False
-        world.browser.start("Extra [qqq999].mkv", PAYLOAD_X, 5000)    # a surplus download, still running at the end
-        return world.browser.start(SHOW_UP, PAYLOAD_A, 10)
-
-    _script(monkeypatch, script)
-    ctx = _session("tv")
-    ctx.journal = mainfetch.FetchJournal(ctx.run_id)
-    mainfetch._note_session(ctx, world.browser, "tv")
-    mainfetch.fetch_single_entry(world.browser, entry, entry_id=EP_ID, ctx=ctx)
-    assert ctx.pending_delete
-
-    mainfetch._end_run(ctx)
-
-    out = capsys.readouterr().out
-    assert procs.terminated == [6161]
-    assert "   > 🛑 Chrome terminated (pid 6161) — it still held files of this fetch." in out
-    assert "   > 🧹 Cleaned 1 leftover file(s) Chrome had held (0.0 GB)" in out
-    assert not (_restore(entry) / ".mv_incoming").exists()
-    journal = json.loads(pathlib.Path(ctx.journal.path).read_text(encoding="utf-8"))
-    assert (journal["state"], journal["interrupted"], journal["pending_delete"]) == ("clean", False, [])
+# ===========================================================================
+# 11.i — the fetch closes its tabs and the Chrome it launched (user requirement 2026-10-04, PLAN Step 11 i)
+# ===========================================================================
+def _launched_on_port(browser, procs, pid, exits_on_close=True):
+    """A Chrome this run launched (its Popen still runs) that holds the debug port; CDP Browser.close makes it exit,
+    unless exits_on_close is False."""
+    _launched(browser, procs, pid)
+    procs.listener = lambda port: pid if port == 9222 else None
+    if exits_on_close:
+        browser.on_close = lambda: setattr(browser._mv_chrome_proc, "running", False)
 
 
-def test_a_run_that_left_nothing_never_touches_chrome(world, monkeypatch, sandbox):
-    _seed_season(sandbox)
-    procs = _procs(monkeypatch)
-    _launched(world.browser, procs, 6262)
+def _season_script(monkeypatch, world):
     _script(monkeypatch, lambda q, i: world.browser.start(*SEASON_DOWNLOADS[q], 30) if q in SEASON_DOWNLOADS
             else False)
+
+
+def test_a_launched_chrome_is_closed_gracefully_when_the_run_ends(world, monkeypatch, capsys, sandbox):
+    _seed_season(sandbox)
+    procs = _procs(monkeypatch)
+    _launched_on_port(world.browser, procs, 7070)
+    _season_script(monkeypatch, world)
     _route(monkeypatch, lambda profile: world.browser)
 
     mainfetch.cmd_fetch_route(SEASON)
 
-    assert procs.terminated == [] and procs.queried == []
-    assert _journals()[0]["state"] == "clean" and _journals()[0]["sessions"][0]["chrome_pid"] == 6262
+    out = capsys.readouterr().out
+    assert [c for c, _ in world.browser.cdp].count("Browser.close") == 1 and procs.terminated == []
+    line = "   > 🧹 Chrome ('tv') closed — the next fetch starts a fresh one."
+    assert out.count(line) == 1
+    assert out.rindex("✅ ENTRY COMPLETE.") < out.index(line) < out.index("✅ Batch Processing Complete.")
+    assert not any(marker in line for marker in WEB_MARKERS)
+    [journal] = _journals()
+    assert journal["state"] == "clean"
+    assert {k: journal["sessions"][0][k] for k in ("chrome_pid", "launched", "closed")} == {
+        "chrome_pid": 7070, "launched": True, "closed": "chrome"}
+
+
+@pytest.mark.parametrize("cmdline, terminated, closed", [
+    (CHROME_TV, [7171], "terminated"),                                            # still running: ours, terminated
+    (CHROME_TV.replace(TV_PROFILE, r"C:\Users\x\Other Profile"), [], "open"),     # another profile: never killed
+    (None, [], "open"),                                                           # command line unknown: never
+])
+def test_a_launched_chrome_that_does_not_exit_is_terminated_only_if_it_is_ours(world, monkeypatch, capsys, sandbox,
+                                                                              cmdline, terminated, closed):
+    _seed_season(sandbox)
+    procs = _procs(monkeypatch)
+    _launched_on_port(world.browser, procs, 7171, exits_on_close=False)
+    procs.alive[7171] = cmdline
+    _season_script(monkeypatch, world)
+    _route(monkeypatch, lambda profile: world.browser)
+
+    mainfetch.cmd_fetch_route(SEASON)
+
+    out = capsys.readouterr().out
+    assert procs.terminated == terminated
+    assert _journals()[0]["sessions"][0]["closed"] == closed
+    if terminated:
+        assert "   > 🧹 Chrome ('tv') terminated (pid 7171) — the next fetch starts a fresh one." in out
+    else:
+        assert "   > ⚠️ The Chrome this fetch started ('tv') did not close — close it before the next fetch." in out
+
+
+def test_a_chrome_the_run_attached_to_stays_open_with_only_its_own_tabs_closed(world, monkeypatch, capsys, sandbox):
+    _seed_season(sandbox)
+    procs = _procs(monkeypatch, {8080: CHROME_TV})
+    _launched(world.browser, procs, 1111, running=False)     # chrome.exe handed over to a Chrome already running
+    procs.listener = lambda port: 8080
+    world.browser.tabs = {"USER": "https://mail.example.invalid/", "BLANK": "about:blank",
+                          "RUN": "https://photos.google.com/"}
+    world.browser._mv_opened_tabs = ["RUN"]                 # what use_photos_tab records when it opens a tab
+    _season_script(monkeypatch, world)
+    _route(monkeypatch, lambda profile: world.browser)
+
+    mainfetch.cmd_fetch_route(SEASON)
+
+    out = capsys.readouterr().out
+    assert list(world.browser.tabs) == ["USER"]             # the user's own tab stays
+    assert "Browser.close" not in [c for c, _ in world.browser.cdp] and procs.terminated == []
+    assert ("   > 🧹 Closed 2 tab(s) this fetch opened — the Chrome it attached to ('tv', already running before) "
+            "stays open.") in out
+    session = _journals()[0]["sessions"][0]
+    assert {k: session[k] for k in ("chrome_pid", "launched", "closed")} == {
+        "chrome_pid": 8080, "launched": False, "closed": "tabs"}
+
+
+def test_an_attached_chrome_is_never_terminated_even_after_ctrl_c_or_by_the_next_start(world, monkeypatch, capsys,
+                                                                                         sandbox):
+    folder = _seed_season(sandbox)
+    procs = _procs(monkeypatch, {8080: CHROME_TV})
+    _launched(world.browser, procs, 1111, running=False)
+    procs.listener = lambda port: 8080
+    _held(monkeypatch, "S01E01 [aaa111].mkv.crdownload")
+
+    def script(q, i):
+        world.browser.start("S01E01 [aaa111].mkv", PAYLOAD_A, 900)
+        raise KeyboardInterrupt
+
+    _script(monkeypatch, script)
+    _route(monkeypatch, lambda profile: world.browser)
+
+    mainfetch.cmd_fetch_route(SEASON)
+    mainfetch._startup_cleanup(mainfetch.FetchContext(run_id="fetch-29991231T000000Z-1"))
+
+    assert procs.terminated == []                            # its downloads finish in the user's Chrome
+    assert (folder / "restore" / ".mv_incoming" / "S01E01 [aaa111].mkv.crdownload").exists()
+    assert _journals()[0]["state"] == "pending" and _journals()[0]["sessions"][0]["closed"] == "open"
+
+
+def test_an_active_download_delays_the_close(world, monkeypatch, capsys, sandbox):
+    folder = _seed_season(sandbox)
+    procs = _procs(monkeypatch)
+    _launched_on_port(world.browser, procs, 7272)
+    _held(monkeypatch, "Extra [qqq999].mkv.crdownload")      # Chrome still writes it when the entry ends
+    done = []
+
+    def script(q, i):
+        if q not in SEASON_DOWNLOADS:
+            return False
+        if q == "S01E02.mkv":
+            world.browser.start("Extra [qqq999].mkv", PAYLOAD_X, 1000, grow_every=60)   # a surplus, still running
+            done.append(world.clock.now + 1000)
+        return world.browser.start(*SEASON_DOWNLOADS[q], 30)
+
+    _script(monkeypatch, script)
+    _route(monkeypatch, lambda profile: world.browser)
+
+    mainfetch.cmd_fetch_route(SEASON)
+
+    out = capsys.readouterr().out
+    assert "   > ⏳ Waiting for 1 download(s) of this fetch to finish before Chrome is closed..." in out
+    assert world.browser.closed_at >= done[0]                # never cancelled: closed once it had finished
+    assert out.index("Waiting for 1 download(s)") < out.index("Chrome ('tv') closed")
+    assert not (folder / "restore" / ".mv_incoming").exists()   # the finished surplus file was deleted after
+    assert _journals()[0]["state"] == "clean" and procs.terminated == []
+
+
+def test_a_stalled_partial_delays_the_close_no_longer_than_the_stall_time(world, monkeypatch, capsys, sandbox):
+    _seed_season(sandbox)
+    procs = _procs(monkeypatch)
+    _launched_on_port(world.browser, procs, 7373)
+    _held(monkeypatch, "Extra [qqq999].mkv.crdownload")
+    seen = []
+
+    def script(q, i):
+        if q not in SEASON_DOWNLOADS:
+            return False
+        if q == "S01E02.mkv":
+            world.browser.start("Extra [qqq999].mkv", PAYLOAD_X, 10 ** 9)            # never grows, never ends
+            seen.append(world.clock.now)
+        return world.browser.start(*SEASON_DOWNLOADS[q], 30)
+
+    _script(monkeypatch, script)
+    _route(monkeypatch, lambda profile: world.browser)
+
+    mainfetch.cmd_fetch_route(SEASON)
+
+    assert seen[0] + mainfetch.DOWNLOAD_STALL_S <= world.browser.closed_at <= seen[0] + mainfetch.DOWNLOAD_STALL_S + 60
+    assert _journals()[0]["state"] == "pending"              # Chrome held it to the end: the next start retries
+
+
+@pytest.mark.parametrize("script", [lambda q, i: (_ for _ in ()).throw(mainfetch.SessionExpiredError("logged out")),
+                                    lambda q, i: False], ids=["logged-out", "nothing-found"])
+def test_a_failure_path_still_closes_the_chrome(world, monkeypatch, capsys, sandbox, script):
+    _seed_season(sandbox)
+    procs = _procs(monkeypatch)
+    _launched_on_port(world.browser, procs, 7474)
+    _script(monkeypatch, script)
+    _route(monkeypatch, lambda profile: world.browser)
+
+    mainfetch.cmd_fetch_route(SEASON)
+
+    out = capsys.readouterr().out
+    assert "is logged out" in out or "❌ ENTRY INCOMPLETE." in out
+    assert [c for c, _ in world.browser.cdp].count("Browser.close") == 1
+    assert _journals()[0]["sessions"][0]["closed"] == "chrome"
+
+
+def test_a_multi_account_run_closes_each_accounts_chrome_at_the_end_of_its_session(world, monkeypatch, capsys,
+                                                                                    sandbox):
+    from test_fetch_routing import CHUNK_BYTES, MOVIE, _seed_split_movie
+    folder, names = _seed_split_movie(sandbox)
+    payloads = dict(zip(names, CHUNK_BYTES))
+    procs = _procs(monkeypatch)
+    events, browsers, pids = [], {}, {"movies": 7501, "tv": 7502}
+
+    def browser(profile):
+        events.append(("init", profile))
+        b = _Browser(world.clock, world.downloads, profile=profile)
+        _launched_on_port(b, procs, pids[profile])
+        b.on_close = lambda b=b, p=profile: (events.append(("close", p)), setattr(b._mv_chrome_proc, "running", False))
+        browsers[profile] = b
+        return b
+
+    _script(monkeypatch, lambda q, i: _active(browsers).start(q, payloads[q], 30) if q in payloads else False)
+    _route(monkeypatch, browser)
+
+    mainfetch.cmd_fetch_route(MOVIE)
+
+    out = capsys.readouterr().out
+    assert events == [("init", "movies"), ("close", "movies"), ("init", "tv"), ("close", "tv")]
+    assert [(s["account"], s["closed"]) for s in _journals()[0]["sessions"]] == [("movies", "chrome"), ("tv", "chrome")]
+    assert out.count("the next fetch starts a fresh one.") == 2 and out.count("✅ ENTRY COMPLETE.") == 1
+    assert sorted(p.name for p in (folder / "restore").iterdir()) == sorted(names)
+
+
+def test_use_photos_tab_remembers_the_tabs_it_opens(fake_photos):
+    d = fake_photos.driver("tv")
+    mainfetch.use_photos_tab(d)                              # no Photos tab yet: it opens one
+    assert d._mv_opened_tabs == [d.current_window_handle]
+    assert mainfetch._close_run_tabs(d) == 1 and d.window_handles == ["FAKE-TAB-1"]   # only that one goes
 
 
 def test_an_interrupted_fallback_run_deletes_only_its_own_family_partials(world, monkeypatch, capsys):

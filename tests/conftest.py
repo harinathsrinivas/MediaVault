@@ -64,9 +64,11 @@ def _hermetic_gphotos_state(tmp_path, monkeypatch):
     steps extend THIS fixture (Step 11: mainfetch.FETCH_JOURNAL_DIR; Step 13b: the auto-confirm guard).
 
     IMP-C25 Step 11 (download hygiene) adds, for mainfetch — read module-qualified everywhere, so patching mainfetch
-    alone is complete: SYSTEM_DOWNLOADS_FOLDER -> tmp_path/mv_downloads (NOT created: a test that harvests or cleans a
-    Downloads folder sets its own; nothing can read or delete in the real ~/Downloads), and _short_incoming_root -> a
-    tmp folder (the long-path fallback would otherwise create <drive>:\\MV_incoming on a real drive root)."""
+    alone is complete: FETCH_JOURNAL_DIR -> tmp_path/mv_state/fetch_journal (the fetch journal; real:
+    ~/.mediavault/fetch_journal), SYSTEM_DOWNLOADS_FOLDER -> tmp_path/mv_downloads (NOT created: a test that harvests
+    or cleans a Downloads folder sets its own; nothing can read or delete in the real ~/Downloads), and
+    _short_incoming_root -> a tmp folder (the long-path fallback would otherwise create <drive>:\\MV_incoming on a
+    real drive root)."""
     real_state = os.path.normcase(os.path.join(os.path.expanduser("~"), ".mediavault"))
     real_inventory = os.path.normcase(r"D:\MediaVault_gp_inventory")
     tmp = tmp_path.resolve()
@@ -77,6 +79,11 @@ def _hermetic_gphotos_state(tmp_path, monkeypatch):
         live = os.path.normcase(os.path.abspath(getattr(mvcommon, attr)))
         assert not live.startswith(real_state) and not live.startswith(real_inventory), \
             f"Safety check failed: {attr} still points at the real state: {live}"
+    journal_dir = tmp_path / "mv_state" / "fetch_journal"
+    assert tmp in journal_dir.resolve().parents, f"Safety check failed: FETCH_JOURNAL_DIR escaped tmp_path: {journal_dir}"
+    monkeypatch.setattr(mainfetch, "FETCH_JOURNAL_DIR", str(journal_dir))
+    assert not os.path.normcase(os.path.abspath(mainfetch.FETCH_JOURNAL_DIR)).startswith(real_state), \
+        f"Safety check failed: FETCH_JOURNAL_DIR still points at the real state: {mainfetch.FETCH_JOURNAL_DIR}"
     downloads = tmp_path / "mv_downloads"
     short_root = tmp_path / "mv_short_root" / mainfetch.SHORT_INCOMING_ROOT
     real_downloads = os.path.normcase(os.path.join(os.path.expanduser("~"), "Downloads"))

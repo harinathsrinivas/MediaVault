@@ -21,6 +21,7 @@ no real C:\\Media.
 """
 import contextlib
 import hashlib
+import json
 import os
 import pathlib
 import shutil
@@ -765,6 +766,149 @@ def test_a_held_file_in_the_downloads_fallback_is_pending_not_reported_deleted(w
     assert path.exists() and ctx.pending_delete == [str(path)]
     assert "still in use, deleted once Chrome has closed: Show.S01E01 [abc123].mkv (4.00 KB)" in \
         capsys.readouterr().out
+
+
+# ===========================================================================
+# 11.d — the fetch journal
+# ===========================================================================
+def _journals():
+    folder = pathlib.Path(mainfetch.FETCH_JOURNAL_DIR)
+    return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(folder.glob("*.json"))] if folder.is_dir() else []
+
+
+def test_the_run_journal_exists_before_chrome_starts_and_names_the_launched_chrome(world, monkeypatch, sandbox):
+    _seed_season(sandbox)
+    _script(monkeypatch, lambda q, i: world.browser.start(*SEASON_DOWNLOADS[q], 30) if q in SEASON_DOWNLOADS
+            else False)
+    world.browser._mv_chrome_proc = types.SimpleNamespace(pid=4242)        # what init_driver keeps (additive)
+    world.browser._mv_user_data_dir = mainfetch.CHROME_PROFILES["tv"]
+    at_launch = []
+
+    def browser(profile):
+        at_launch.append(_journals())
+        return world.browser
+
+    _route(monkeypatch, browser)
+
+    mainfetch.cmd_fetch_route(SEASON)
+
+    [[before]] = at_launch
+    assert (before["state"], before["sessions"], before["pid"]) == ("running", [], os.getpid())
+    [journal] = _journals()
+    assert journal["run_id"].startswith("fetch-") and journal["state"] == "clean" and journal["interrupted"] is False
+    assert [(s["account"], s["chrome_pid"], s["user_data_dir"]) for s in journal["sessions"]] == [
+        ("tv", 4242, mainfetch.CHROME_PROFILES["tv"])]
+
+
+def test_the_journal_records_each_entrys_folder_names_and_object_states(world, monkeypatch, sandbox):
+    folder = _seed_season(sandbox)
+    _script(monkeypatch, lambda q, i: world.browser.start(*SEASON_DOWNLOADS[q], 30) if q in SEASON_DOWNLOADS
+            else False)
+    _route(monkeypatch, lambda profile: world.browser)
+
+    mainfetch.cmd_fetch_route(SEASON)
+
+    [journal] = _journals()
+    incoming = str(folder / "restore" / ".mv_incoming")
+    assert [(e["manual_id"], e["account"], e["mode"], e["incoming"], e["names"], e["cleaned"])
+            for e in journal["entries"]] == [
+        (SEASON + "e01", "tv", "incoming", incoming, ["S01E01 [aaa111].mkv"], True),
+        (SEASON + "e02", "tv", "incoming", incoming, ["S01E02 [bbb222].mkv"], True)]
+    assert journal["entries"][0]["objects"] == [
+        {"label": "whole", "sha256": _sha(PAYLOAD_A), "state": "moved", "method": "legacy"}]
+    assert journal["mode"] == "incoming" and journal["pending_delete"] == []
+    assert "downloads_snapshot" not in journal                          # the incoming mode never read ~/Downloads
+
+
+def test_a_crash_mid_download_leaves_a_journal_that_names_what_to_clean(world, monkeypatch, sandbox):
+    folder = _seed_season(sandbox)
+    world.browser._mv_chrome_proc = types.SimpleNamespace(pid=5151)
+    crash_time = []
+
+    def script(q, i):
+        world.browser.start("S01E01 [aaa111].mkv", PAYLOAD_A, 500)
+        crash_time.append(_journals())                                  # what a killed process leaves on disk
+        raise KeyboardInterrupt
+
+    _script(monkeypatch, script)
+    _route(monkeypatch, lambda profile: world.browser)
+
+    mainfetch.cmd_fetch_route(SEASON)
+
+    [[journal]] = crash_time
+    assert journal["state"] == "running" and journal["sessions"][0]["chrome_pid"] == 5151
+    [entry] = journal["entries"]
+    assert (entry["incoming"], entry["cleaned"]) == (str(folder / "restore" / ".mv_incoming"), False)
+    [after] = _journals()
+    assert after["interrupted"] is True and after["state"] in ("pending", "clean")
+
+
+def test_the_journal_never_holds_a_url(world, monkeypatch):
+    # P-20: a minted download URL is a short-lived bearer credential — memory only. A stage that keeps one on the item
+    # (Step 12's direct download) must not leak it into the journal.
+    url = "https://video-downloads.fake.invalid/orig/FAKEORIG0001abc"
+
+    def seam(driver, queue, ctx):
+        queue[0]["_trigger"] = {"method": "direct", "url": url, "approach": {"tried": "s0_photo_id", "via": url},
+                                "record": {"photo_id": "AF1QipFAKEstep11journal01", "dedup_key": "x", "url": url,
+                                           "filename": url}}
+
+    monkeypatch.setattr(mainfetch, "_run_locator_phase", seam)
+    _script(monkeypatch, lambda q, i: world.browser.start(SHOW_UP, PAYLOAD_A, 10) if q == SHOW_UP else False)
+    ctx = _session("tv")
+    ctx.journal = mainfetch.FetchJournal(ctx.run_id)
+
+    mainfetch.fetch_single_entry(world.browser, _whole_entry(world.tmp), entry_id=EP_ID, ctx=ctx)
+
+    text = pathlib.Path(ctx.journal.path).read_text(encoding="utf-8")
+    assert "://" not in text and "video-downloads" not in text
+    [entry] = json.loads(text)["entries"]
+    assert entry["objects"] == [{"label": "whole", "sha256": _sha(PAYLOAD_A), "state": "moved", "method": "direct",
+                                 "photo_id": "AF1QipFAKEstep11journal01"}]
+
+
+@pytest.mark.parametrize("item, state", [
+    ({"status": "done"}, "moved"),
+    ({"status": "failed", "triggered": True}, "failed"),
+    ({"status": "pending", "triggered": True}, "triggered"),
+    ({"status": "pending", "triggered": False, "_retrigger": print}, "triggered"),   # requested in an earlier round
+    ({"status": "pending", "_trigger": {"record": {"photo_id": "AF1QipFAKEstep11state001"}}}, "located"),
+    ({"status": "pending", "_trigger": {"record": {"photo_id": "https://x/y"}}}, "pending"),   # never a URL
+    ({"status": "pending"}, "pending"),
+])
+def test_object_states(item, state):
+    assert mainfetch._object_state(item) == state
+
+
+def test_a_journal_that_cannot_be_written_warns_once_and_the_fetch_goes_on(world, monkeypatch, capsys):
+    blocker = world.tmp / "not-a-folder"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(mainfetch, "FETCH_JOURNAL_DIR", str(blocker / "fetch_journal"))
+    _script(monkeypatch, lambda q, i: world.browser.start(SHOW_UP, PAYLOAD_A, 10) if q == SHOW_UP else False)
+    ctx = _session("tv")
+    ctx.journal = mainfetch.FetchJournal(ctx.run_id)
+
+    mainfetch.fetch_single_entry(world.browser, _whole_entry(world.tmp), entry_id=EP_ID, ctx=ctx)
+    mainfetch._end_run(ctx)
+
+    out = capsys.readouterr().out
+    assert out.count("The fetch journal could not be written") == 1
+    assert "✅ ENTRY COMPLETE." in out and ctx.journal.broken
+
+
+def test_a_fallback_run_journals_its_downloads_snapshot(world, monkeypatch):
+    (world.downloads / "Holiday.mkv").write_bytes(b"F" * 10)
+    world.browser.refuse = {"Browser.setDownloadBehavior", "Page.setDownloadBehavior"}
+    _script(monkeypatch, lambda q, i: world.browser.start(SHOW_UP, PAYLOAD_A, 10) if q == SHOW_UP else False)
+    ctx = _session("tv")
+    ctx.journal = mainfetch.FetchJournal(ctx.run_id)
+
+    mainfetch.fetch_single_entry(world.browser, _whole_entry(world.tmp), entry_id=EP_ID, ctx=ctx)
+
+    journal = json.loads(pathlib.Path(ctx.journal.path).read_text(encoding="utf-8"))
+    assert list(journal["downloads_snapshot"]) == ["Holiday.mkv"]
+    [entry] = journal["entries"]
+    assert (entry["mode"], entry["incoming"], entry["names"]) == ("fallback", None, [SHOW_UP])
 
 
 def test_a_driver_without_devtools_keeps_todays_downloads_flow(world, tmp_path):

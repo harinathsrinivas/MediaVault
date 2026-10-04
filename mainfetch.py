@@ -7,6 +7,7 @@ import re
 import socket
 import hashlib
 import errno
+import json
 import urllib.parse
 from datetime import datetime, timezone
 # --- SELENIUM IMPORTS ---
@@ -88,7 +89,7 @@ def init_driver(profile_key="movies"):
     ]
 
     try:
-        subprocess.Popen(cmd)
+        chrome = subprocess.Popen(cmd)  # [IMP-C25 Step 11 d] kept: the fetch journal records its pid
         print("     Waiting 3 seconds for Chrome to stabilize...")
         time.sleep(3)
     except Exception as e:
@@ -118,6 +119,10 @@ def init_driver(profile_key="movies"):
             pass
         return None
     print(f"   > 🗂️ {_TAB_NOTE[outcome]}")
+    # [IMP-C25 Step 11 d] Additive: the Chrome this call launched and its profile, for the fetch journal and the
+    # interruption cleanup (a chrome.exe that handed over to an already-running browser has exited by now).
+    driver._mv_chrome_proc = chrome
+    driver._mv_user_data_dir = user_data_dir
     return driver
 
 
@@ -522,7 +527,150 @@ SHORT_INCOMING_ROOT = "MV_incoming"        # <drive>:\MV_incoming\<8-char hash>\
 INCOMING_PATH_LIMIT = 240                  # incoming path + file name + ".crdownload" longer than this -> short dir
 DISK_HEADROOM_BYTES = 2 * 1024 ** 3        # free space an entry must leave on its destination volume
 _CRDOWNLOAD = ".crdownload"                # Chrome's in-progress suffix ("<name>.crdownload", "Unconfirmed N.crdownload")
-_PART_KINDS = ("chunk", "holder", "extra_chunk")
+# The fetch journal (Step 11 d): one JSON file per run, ~/.mediavault/fetch_journal/<run_id>.json (a separate file —
+# NOT the rollback journal .mediavault_txn.json). tests/conftest.py redirects it for every test.
+FETCH_JOURNAL_DIR = os.path.join(mvcommon.MV_STATE_DIR, "fetch_journal")
+_JOURNAL_VERSION = 1
+_JOURNAL_DONE = ("clean", "recovered")     # a journal in these states needs nothing more
+_TRIGGER_METHODS = ("direct", "shift_d", "legacy")
+
+
+def _utc_now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _write_json_atomic(path, doc):
+    """Write `doc` as `path` atomically: a sibling temp file, fsynced, then os.replace — a crash at
+    any moment leaves either the previous complete file or the new one. Raises OSError."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, ensure_ascii=False, indent=1)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+def _object_state(item):
+    """A queue item's journal state: moved (SHA-256-verified and renamed into place — the harvester
+    does both at once) · failed · triggered (a download was requested) · located (an exact-item
+    stage named its photo_id, IMP-C25 Step 12) · pending."""
+    if item.get("status") == "done":
+        return "moved"
+    if item.get("status") == "failed":
+        return "failed"
+    if item.get("triggered") or item.get("_retrigger"):
+        return "triggered"
+    trigger = item.get("_trigger") if isinstance(item.get("_trigger"), dict) else {}
+    record = trigger.get("record") if isinstance(trigger.get("record"), dict) else {}
+    return "located" if gpweb.MEDIA_KEY_RE.match(str(record.get("photo_id") or "")) else "pending"
+
+
+def _journal_object(item):
+    """One object's journal record — whitelisted fields only, so nothing a stage keeps on the item
+    (a minted download URL above all — P-20) can reach the file: label, sha256, state, the trigger
+    method (direct | shift_d from the stage's item['_trigger'], else legacy once requested) and
+    the photo_id the stage named (only a well-formed media key)."""
+    loc = item.get("locator") or {}
+    trigger = item.get("_trigger") if isinstance(item.get("_trigger"), dict) else {}
+    record = trigger.get("record") if isinstance(trigger.get("record"), dict) else {}
+    obj = {"label": loc.get("label") if isinstance(loc.get("label"), str) else None,
+           "sha256": item.get("hash") if mvcommon._is_sha256(item.get("hash")) else None,
+           "state": _object_state(item)}
+    if trigger.get("method") in _TRIGGER_METHODS:
+        obj["method"] = trigger["method"]
+    elif item.get("_retrigger"):
+        obj["method"] = "legacy"
+    photo_id = record.get("photo_id")
+    if isinstance(photo_id, str) and gpweb.MEDIA_KEY_RE.match(photo_id):
+        obj["photo_id"] = photo_id
+    return obj
+
+
+class FetchJournal:
+    """[IMP-C25 Step 11 d — P-12] One fetch run's crash record:
+    FETCH_JOURNAL_DIR\\<run_id>.json, rewritten atomically (_write_json_atomic) whenever it changes,
+    so after a crash or a closed terminal the next run's start-up cleanup knows what to clean:
+
+      v, run_id, started_at, updated_at   (UTC 'YYYY-MM-DDTHH:MM:SSZ')
+      pid          this mainfetch process — a "running" journal whose pid still runs is a live fetch
+      state        running · clean (finished, nothing left behind) · pending (finished or
+                   interrupted, something still to delete) · recovered (a later run cleaned it up)
+      interrupted  the run ended on Ctrl+C or an error
+      mode         the latest entry's download mode (incoming | fallback | legacy)
+      sessions     [{account, chrome_pid, user_data_dir, started_at}] — the Chrome each account
+                   session launched (chrome_pid None when unknown)
+      downloads_snapshot  {name: [size, mtime_ns]} of ~/Downloads when the run first used the
+                   fallback (absent otherwise) — a name not in it appeared during the run
+      entries      [{manual_id, label, account, dest, mode, incoming, names, cleaned, objects}] —
+                   one per entry and session: its incoming folder (None outside the incoming
+                   mode), its expected-name family, whether its folder was emptied and removed,
+                   and per object {label, sha256, state, method, photo_id} (_journal_object)
+      pending_delete  [path] — files Chrome held when they had to go
+      recovered_by the run that cleaned it up
+    Never a URL (P-20). A journal that cannot be written prints one warning; the fetch goes on."""
+
+    def __init__(self, run_id):
+        self.path = os.path.join(FETCH_JOURNAL_DIR, f"{run_id}.json")
+        self.broken = False
+        now = _utc_now()
+        self.doc = {"v": _JOURNAL_VERSION, "run_id": run_id, "started_at": now, "updated_at": now,
+                    "pid": os.getpid(), "state": "running", "interrupted": False, "mode": None,
+                    "sessions": [], "entries": [], "pending_delete": []}
+        self.save()
+
+    def save(self):
+        if self.broken:
+            return
+        self.doc["updated_at"] = _utc_now()
+        try:
+            _write_json_atomic(self.path, self.doc)
+        except (OSError, TypeError, ValueError) as e:
+            self.broken = True
+            print(f"   > ⚠️ The fetch journal could not be written ({type(e).__name__}: {e}) — if this fetch is "
+                  f"interrupted, its leftovers are not cleaned up automatically (`python main.py fetch_cleanup` "
+                  f"lists them).")
+
+    def add_session(self, account, chrome_pid, user_data_dir):
+        self.doc["sessions"].append({"account": account, "chrome_pid": chrome_pid if mvcommon._is_int(chrome_pid)
+                                     else None, "user_data_dir": user_data_dir, "started_at": _utc_now()})
+        self.save()
+
+    def add_entry(self, target, queue, account):
+        """Record an entry before its first request; returns its record (update_objects / end_entry)."""
+        loc = (queue[0].get("locator") or {}) if queue else {}
+        record = {"manual_id": loc.get("manual_id"), "label": loc.get("label"), "account": account,
+                  "dest": target["dest"], "mode": target["mode"], "incoming": target["incoming"],
+                  "names": list(target["family"]), "cleaned": target["mode"] != "incoming",
+                  "objects": [_journal_object(item) for item in queue]}
+        self.doc["entries"].append(record)
+        self.doc["mode"] = target["mode"]
+        self.save()
+        return record
+
+    def update_objects(self, record, queue):
+        objects = [_journal_object(item) for item in queue]
+        if record is not None and objects != record["objects"]:
+            record["objects"] = objects
+            self.save()
+
+    def set_snapshot(self, snapshot):
+        self.doc["downloads_snapshot"] = {name: list(stamp) for name, stamp in snapshot.items()}
+        self.save()
+
+    def end_entry(self, record, cleaned, pending):
+        if record is not None:
+            record["cleaned"] = bool(cleaned)
+        self.doc["pending_delete"] = list(pending)
+        self.save()
+
+    def finish(self, pending, interrupted):
+        """The run is over: clean when every entry's folder was emptied and nothing is pending."""
+        self.doc["pending_delete"] = list(pending)
+        self.doc["interrupted"] = bool(interrupted)
+        unclean = any(not e.get("cleaned") for e in self.doc["entries"])
+        self.doc["state"] = "pending" if (pending or unclean) else "clean"
+        self.save()
 
 
 def _set_download_dir(driver, path):
@@ -813,7 +961,12 @@ def _prepare_downloads(driver, queue, ctx, entry=None, owner_id=None):
             print("   ⚠️ Chrome refused the download folder (CDP) — this run downloads to ~/Downloads as before; "
                   "only files that appear during it, belong to the entry and fail verification are deleted there.")
     if target["mode"] == "fallback" and ctx.run_downloads is None:
-        ctx.run_downloads = {_family_key(name): stamp for name, stamp in _downloads_snapshot().items()}
+        snapshot = _downloads_snapshot()
+        ctx.run_downloads = {_family_key(name): stamp for name, stamp in snapshot.items()}
+        if ctx.journal is not None:
+            ctx.journal.set_snapshot(snapshot)
+    if ctx.journal is not None:  # [11 d] recorded before the entry's first request
+        target["journal"] = ctx.journal.add_entry(target, queue, ctx.account)
     ctx.target = target
     return True
 
@@ -829,17 +982,49 @@ def _finish_downloads(driver, ctx):
     target, ctx.target = ctx.target, None
     if getattr(driver, "_mv_download_dir", None):
         driver._mv_download_dir = None
-    if not target or target["mode"] != "incoming":
+    if not target:
         return
-    deleted, locked = _empty_incoming(target["incoming"])
-    if deleted:
-        print(f"   > 🧹 Deleted {len(deleted)} unfinished or surplus download(s): {_listing(deleted)}")
-    if locked:
-        _add_pending(ctx, locked)
-        print(f"   > ⏳ {len(locked)} file(s) in {target['incoming']} are still in use by Chrome — deleted once "
-              f"Chrome has closed.")
-    else:
-        _remove_incoming(target["incoming"])
+    cleaned = True
+    if target["mode"] == "incoming":
+        deleted, locked = _empty_incoming(target["incoming"])
+        if deleted:
+            print(f"   > 🧹 Deleted {len(deleted)} unfinished or surplus download(s): {_listing(deleted)}")
+        if locked:
+            _add_pending(ctx, locked)
+            print(f"   > ⏳ {len(locked)} file(s) in {target['incoming']} are still in use by Chrome — deleted once "
+                  f"Chrome has closed.")
+        cleaned = not locked and _remove_incoming(target["incoming"])
+    if ctx.journal is not None:
+        ctx.journal.end_entry(target.get("journal"), cleaned, ctx.pending_delete)
+
+
+def _journal_sync(ctx, queue):
+    """[11 d] Bring the current entry's object states up to date in the fetch journal (a no-op without one)."""
+    if ctx.journal is not None and ctx.target is not None:
+        ctx.journal.update_objects(ctx.target.get("journal"), queue)
+
+
+def _note_session(ctx, driver, account):
+    """[11 d] An account's Chrome session is up: remember the Chrome init_driver launched (its Popen
+    handle rides on the driver — additive; a stand-in has none) and journal its pid together with
+    the profile folder it runs on (the start-up cleanup terminates only that pid, and only while
+    its command line still names that folder)."""
+    proc = getattr(driver, "_mv_chrome_proc", None)
+    pid = getattr(proc, "pid", None)
+    user_data_dir = getattr(driver, "_mv_user_data_dir", None) or CHROME_PROFILES.get(account)
+    ctx.chrome = {"account": account, "proc": proc, "pid": pid if mvcommon._is_int(pid) else None,
+                  "user_data_dir": user_data_dir}
+    if ctx.journal is not None:
+        ctx.journal.add_session(account, ctx.chrome["pid"], user_data_dir)
+
+
+def _end_run(ctx, interrupted=False):
+    """[IMP-C25 Step 11] The fetch run is over — finished, stopped on a problem line, or
+    interrupted (Ctrl+C or an error): the journal records the end (clean, or pending when
+    something is left to delete — the next run's start-up cleanup does it). Never raises past a
+    write failure (the journal reports that itself)."""
+    if ctx.journal is not None:
+        ctx.journal.finish(ctx.pending_delete, interrupted)
 
 
 def _watched_names(folder, mode):
@@ -990,6 +1175,10 @@ class FetchContext:
     pending_delete  [path] — files the run had to delete but Chrome still held (a
                download still running when its entry ended): retried once Chrome is
                closed, else by the next run's start-up cleanup
+    journal    the run's FetchJournal (cmd_fetch_route opens it); None for a
+               stand-alone fetch_single_entry
+    chrome     the running session's launched Chrome: {"account", "proc" (the Popen
+               init_driver kept, or None), "pid", "user_data_dir"}; None outside one
     """
 
     def __init__(self, manual=False, run_id=None):
@@ -1006,6 +1195,8 @@ class FetchContext:
         self.run_downloads = None
         self.left = {}
         self.pending_delete = []
+        self.journal = None
+        self.chrome = None
         self.hinted = False  # the incoming-mode "Chrome ignored the folder?" hint was printed
 
     def start_session(self, account):
@@ -1613,6 +1804,7 @@ def _fetch_items(driver, queue, ctx, entry=None, owner_id=None):
     # attempts below run unchanged for whatever is still pending.
     if EXACT_LOCATOR_ENABLED:
         _run_locator_phase(driver, queue, ctx)
+        _journal_sync(ctx, queue)  # [IMP-C25 Step 11 d] each object's state, as it changes
 
     # 2. Execute Queue (Smart Retry Loop)
     # Attempt 0: Precision Search
@@ -1633,12 +1825,15 @@ def _fetch_items(driver, queue, ctx, entry=None, owner_id=None):
             # ([IMP-C34] _fire also keeps how to request it again.)
             _fire(item, lambda query=query, idx=idx: trigger_download(driver, query, idx))
             time.sleep(2)
+        _journal_sync(ctx, queue)
 
         # Harvest
         _note_losses(queue, harvest_downloads(queue, ctx), ctx)
+        _journal_sync(ctx, queue)
 
     # [IMP-C34] A download lost and not requested since gets its one retry.
     _retry_lost_downloads(queue, ctx)
+    _journal_sync(ctx, queue)
 
     # [IMP-C25 Step 11] Only now — after the retry's harvest — the entry's downloads end.
     _finish_downloads(driver, ctx)
@@ -2161,65 +2356,75 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None,
     # lock — it never hard-blocks). Placed AFTER the no-targets guard so an
     # empty batch never touches the lock file. [IMP-C26] Held across EVERY
     # account group, so nothing else can take port 9222 between two sessions.
+    interrupted = False  # [IMP-C25 Step 11] the run ended on Ctrl+C or an error
     with fetch_session_lock(blocking=True):
-        for n, (profile, group_targets, group_extras) in enumerate(groups):
-            # Init Selenium ONCE per account group (one group = the whole batch)
-            driver = None
-            try:
-                if profile != active_profile:
-                    print(f"   > [Account] Switching to profile '{profile}' for "
-                          f"{len(group_targets) + len(group_extras)} item(s) "
-                          f"({ctx.switch_reason(profile)})")
-                # [IMP-C25 OD-10] Never launch Chrome on a missing profile folder: it
-                # would come up as a new, empty, signed-out profile.
-                problem = profile_preflight(profile)
-                if problem:
-                    print(f"❌ {problem[:1].upper()}{problem[1:]}")
+        try:
+            for n, (profile, group_targets, group_extras) in enumerate(groups):
+                # Init Selenium ONCE per account group (one group = the whole batch)
+                driver = None
+                try:
+                    if profile != active_profile:
+                        print(f"   > [Account] Switching to profile '{profile}' for "
+                              f"{len(group_targets) + len(group_extras)} item(s) "
+                              f"({ctx.switch_reason(profile)})")
+                    # [IMP-C25 OD-10] Never launch Chrome on a missing profile folder: it
+                    # would come up as a new, empty, signed-out profile.
+                    problem = profile_preflight(profile)
+                    if problem:
+                        print(f"❌ {problem[:1].upper()}{problem[1:]}")
+                        return
+                    if n and not _debug_port_free():
+                        print(f"❌ Cannot switch to profile '{profile}': Chrome's debug port 9222 "
+                              f"is still in use (the previous account's Chrome did not close). "
+                              f"Close that Chrome window, then re-run — files already fetched "
+                              f"stay in their restore folder and are skipped.")
+                        return
+                    if not n:
+                        # [IMP-C25 Step 11 d] The run's journal exists before its first Chrome starts.
+                        ctx.journal = FetchJournal(ctx.run_id)
+                    # Pass the selected profile
+                    driver = init_driver(profile)
+                    if not driver: return
+                    ctx.start_session(profile)
+                    _note_session(ctx, driver, profile)
+
+                    for entry, entry_id in group_targets:
+                        fetch_single_entry(driver, entry, temp_dir=temp_dir, entry_id=entry_id, ctx=ctx)
+
+                    # [IMP-D19 Step 5] Extras fetch through the SAME proven mechanism:
+                    # each synthetic extra entry stages into its own
+                    # <title folder_path>/<group_rel>/restore/ folder.
+                    if group_extras:
+                        print(f"\n=== 📎 FETCHING {len(group_extras)} EXTRA(S) for {manual_id} ===")
+                    for ex in group_extras:
+                        fetch_single_entry(driver, ex, ctx=ctx)
+
+                    if n + 1 < len(groups):
+                        _close_browser_windows(driver)
+
+                except SessionExpiredError:
+                    # [IMP-C6] One logged-out detection aborts the whole batch loudly
+                    # (IMP-C26: naming the account group that hit it).
+                    print(f"❌ Profile '{profile}' is logged out. Open Chrome with "
+                          f"--user-data-dir={CHROME_PROFILES[profile]}, sign in to "
+                          f"photos.google.com, then re-run.")
                     return
-                if n and not _debug_port_free():
-                    print(f"❌ Cannot switch to profile '{profile}': Chrome's debug port 9222 "
-                          f"is still in use (the previous account's Chrome did not close). "
-                          f"Close that Chrome window, then re-run — files already fetched "
-                          f"stay in their restore folder and are skipped.")
-                    return
-                # Pass the selected profile
-                driver = init_driver(profile)
-                if not driver: return
-                ctx.start_session(profile)
-
-                for entry, entry_id in group_targets:
-                    fetch_single_entry(driver, entry, temp_dir=temp_dir, entry_id=entry_id, ctx=ctx)
-
-                # [IMP-D19 Step 5] Extras fetch through the SAME proven mechanism:
-                # each synthetic extra entry stages into its own
-                # <title folder_path>/<group_rel>/restore/ folder.
-                if group_extras:
-                    print(f"\n=== 📎 FETCHING {len(group_extras)} EXTRA(S) for {manual_id} ===")
-                for ex in group_extras:
-                    fetch_single_entry(driver, ex, ctx=ctx)
-
-                if n + 1 < len(groups):
-                    _close_browser_windows(driver)
-
-            except SessionExpiredError:
-                # [IMP-C6] One logged-out detection aborts the whole batch loudly
-                # (IMP-C26: naming the account group that hit it).
-                print(f"❌ Profile '{profile}' is logged out. Open Chrome with "
-                      f"--user-data-dir={CHROME_PROFILES[profile]}, sign in to "
-                      f"photos.google.com, then re-run.")
-                return
-            except KeyboardInterrupt:
-                print("\n🛑 Stopped by user.")
-                break
-            except Exception as e:
-                print(f"\n❌ Critical Error: {e}")
-                break
-            finally:
-                if driver:
-                    try:
-                        driver.quit()
-                    except:
-                        pass
+                except KeyboardInterrupt:
+                    print("\n🛑 Stopped by user.")
+                    interrupted = True
+                    break
+                except Exception as e:
+                    print(f"\n❌ Critical Error: {e}")
+                    interrupted = True
+                    break
+                finally:
+                    if driver:
+                        try:
+                            driver.quit()
+                        except:
+                            pass
+        finally:
+            _end_run(ctx, interrupted)  # [IMP-C25 Step 11] every way out: finished, stopped or interrupted
 
     lost_line = _lost_downloads_line(ctx)  # [IMP-C34] only when a download was lost
     if lost_line:

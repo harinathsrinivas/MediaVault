@@ -471,3 +471,12 @@ No other step of this plan uses candidates.
   block; then deletes the test copy.
 - **warm_profiles leaves each Chrome on port 9222** (the next profile attaches to the previous one): card answer "Fix
   inside C25 (Recommended)" → added to Step 14 with a test; registered as an IMP.
+- **Agents and candidates must finish — no half results (2026-10-05)** — user, verbatim: "make sure all candidates and
+  agents finish. dont tAKe half ones" and "make sure all candidates or agents are properly resumable in limit crashes.
+  so that we dont go to judge by half results or considering it as done. make sure all candidates are completely done
+  before proceeding." → **Step 12 completion gate** (also appended to each candidate's brief): CANDIDATE_STATUS.md line 1
+  `STATE: COMPLETE`, every sub-task `[x]` with its WIP SHA, one test per PLAN scenario, full + smoke + disarm counts
+  recorded, CRITIQUE.md committed, tree clean, final message `CANDIDATE <X> COMPLETE — <SHA>`. **Before judge-v2 runs,
+  the orchestrator verifies the gate independently for each candidate** (reads the status file, `git status`, and
+  re-runs full + smoke in each worktree). Any gap → resume that same candidate; never judge, merge or relay partial
+  work. The same "done = its final report + green gates" rule applies to every other agent.

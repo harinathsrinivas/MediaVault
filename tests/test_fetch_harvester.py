@@ -879,17 +879,40 @@ def test_a_lost_extra_is_requested_once_more(world, monkeypatch, capsys, sandbox
 TODAY_WRONG_ITEM = "\n🔹 PROCESSING: Show.S01E01.mkv (abc123)\n\n   === ATTEMPT 1 (1 files) ===\n   > Watching Downloads (Infinite wait if active)...\n\n   ❌ Timeout (No active downloads).\n\n   === ATTEMPT 2 (1 files) ===\n   > Watching Downloads (Infinite wait if active)...\n\n   > 🔎 Checking: Other [zzz999].mkv\n\r  🔍 Other [zzz999].mkv  [████████████████████████] 4.00 KB / 4.00 KB \n\n   ❌ Timeout (No active downloads).\n     A download was in progress, but 1 triggered file(s) never arrived. If chrome://downloads lists it as failed (e.g. 'Failed - Network error'), the transfer broke. Google Photos downloads cannot resume: re-run the fetch (files already fetched are skipped).\n\n   ❌ ENTRY INCOMPLETE.\n"
 
 
+LOST_NOTE = ("     A download was in progress, but 1 triggered file(s) never arrived. If chrome://downloads lists it as "
+             "failed (e.g. 'Failed - Network error'), the transfer broke. Google Photos downloads cannot resume: re-run "
+             "the fetch (files already fetched are skipped).")
+
+
+def _wrong_note(*names):
+    return f"     Not a broken transfer: another item arrived instead ({', '.join(names)}) — it is not requested again."
+
+
+def _not_fetched(name, listed=True):
+    tail = "; added to the failed list (wrong-item)" if listed else ""
+    return f"     ❌ Not fetched: {name} — the search picked another item{tail}."
+
+
 def test_a_wrong_item_is_not_a_lost_download(world, monkeypatch, capsys):
     # The request worked — it fetched a different item. Requesting it again would download that item again.
+    # [live check 2026-10-05] Today's transcript with its two deliberate changes: the round says another item arrived
+    # (not the lost-download note, which sent the user to chrome://downloads for a transfer that never broke), and the
+    # object ends on the failed list as wrong-item. Still no retry.
     calls = _script(monkeypatch, lambda q, i: world.chrome.start("Other [zzz999].mkv", PAYLOAD_B, 60)
                     if q == SHOW_TERM else False)
     ctx = _session("tv")
 
     mainfetch.fetch_single_entry(None, _whole_entry(world.tmp), entry_id=EP_ID, ctx=ctx)
 
-    assert capsys.readouterr().out == TODAY_WRONG_ITEM          # exactly today: no retry, no new line
-    assert calls == [("Show.S01E01.mkv", 0), (SHOW_TERM, 0)]
-    assert mvcommon.read_failed() == [] and ctx.stats["retried"] == 0
+    expected = (TODAY_WRONG_ITEM.replace(LOST_NOTE, _wrong_note("Other [zzz999].mkv"))
+                .replace("\n\n   ❌ ENTRY INCOMPLETE.", f"\n{_not_fetched('Show.S01E01.mkv')}\n\n   ❌ ENTRY INCOMPLETE."))
+    assert LOST_NOTE in TODAY_WRONG_ITEM and expected != TODAY_WRONG_ITEM
+    assert capsys.readouterr().out == expected
+    assert calls == [("Show.S01E01.mkv", 0), (SHOW_TERM, 0)] and ctx.stats["retried"] == 0
+    [row] = mvcommon.read_failed()
+    assert (row["account"], row["manual_id"], row["label"], row["sha256"], row["uploaded_name"], row["reason"]) == (
+        "tv", EP_ID, "whole", _sha(PAYLOAD_A), SHOW_TERM, "wrong-item")
+    assert row["tried"] == [{"approach": "legacy", "outcome": "wrong-item", "n": 1}] and row["run"] == ctx.run_id
 
 
 def test_a_duplicate_is_not_a_lost_download(world, monkeypatch, capsys):
@@ -913,8 +936,56 @@ def test_a_duplicate_is_not_a_lost_download(world, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "     ⚠️ Duplicate. Deleting." in out
     assert calls == [(c1, 0), (c2, 0), ("Movie [abc123].mkv", 1)]
-    assert "RETRY" not in out and "lost twice" not in out and mvcommon.read_failed() == []
+    assert "RETRY" not in out and "lost twice" not in out
     assert "❌ ENTRY INCOMPLETE." in out
+    # [live check 2026-10-05] c2's last request fetched another item (c1's): it ends on the failed list as wrong-item.
+    [row] = mvcommon.read_failed()
+    assert (row["label"], row["sha256"], row["reason"]) == ("chunk 2/2", _sha(PAYLOAD_B), "wrong-item")
+    assert out.count(_not_fetched(c2)) == 1
+
+
+def test_a_round_with_a_wrong_item_and_a_broken_transfer_says_both(world, capsys):
+    # [live check 2026-10-05] Two requests in one round: one fetched another item, the other's transfer broke. The
+    # round names what arrived instead and still reports the one file that never came; which request fetched the
+    # wrong item cannot be told, so both requests are marked (no loss is booked — the IMP-C34 rule).
+    queue = [{"filename": n, "hash": _sha(p), "dest": str(world.tmp), "status": "pending", "triggered": True}
+             for n, p in (("a.mkv", PAYLOAD_A), ("b.mkv", PAYLOAD_B))]
+    ctx = _session("tv")
+    ctx.downloads = {}                                       # the session's snapshot: Downloads was empty
+    world.chrome.start("Other [zzz999].mkv", b"X" * 4096, 30)
+    world.chrome.start("ignored", None, 40)
+
+    rnd = mainfetch.harvest_downloads(queue, ctx)
+
+    out = capsys.readouterr().out
+    assert rnd == {"timed_out": True, "saw_download": True, "unmatched": 1}
+    assert out.index(_wrong_note("Other [zzz999].mkv")) < out.index(IN_PROGRESS_NOTE)   # 1 of the 2 never arrived
+    mainfetch._note_losses(queue, rnd, ctx)
+    assert [i.get("_wrong") for i in queue] == [1, 1] and not any(i.get("_losses") for i in queue)
+
+
+def test_a_wrong_item_then_a_broken_transfer_still_gets_its_one_retry(world, monkeypatch, capsys):
+    # ATTEMPT 1 fetched another item (no loss); ATTEMPT 2's transfer broke (a loss): IMP-C34 requests it once more and
+    # it arrives — the object is fetched, so nothing is booked as wrong-item.
+    entry = _whole_entry(world.tmp)
+    sent = []
+
+    def script(q, i):
+        sent.append(q)
+        if q == "Show.S01E01.mkv":
+            return world.chrome.start("Other [zzz999].mkv", PAYLOAD_B, 30)
+        return world.chrome.start(SHOW_TERM, None if len(sent) == 2 else PAYLOAD_A, 60)
+
+    calls = _script(monkeypatch, script)
+    ctx = _session("tv")
+
+    mainfetch.fetch_single_entry(None, entry, entry_id=EP_ID, ctx=ctx)
+
+    out = capsys.readouterr().out
+    assert calls == [("Show.S01E01.mkv", 0), (SHOW_TERM, 0), (SHOW_TERM, 0)]
+    assert out.index(_wrong_note("Other [zzz999].mkv")) < out.index(IN_PROGRESS_NOTE) < out.index(RETRY_1)
+    assert "✅ ENTRY COMPLETE." in out and "Not fetched" not in out and mvcommon.read_failed() == []
+    assert (ctx.stats["retried"], ctx.stats["recovered"]) == (1, 1)
 
 
 def test_after_a_second_loss_no_later_stage_requests_the_object_again(world, monkeypatch, capsys):

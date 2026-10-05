@@ -1793,10 +1793,11 @@ def _delete_download(path):
 def _drop_unmatched(name, path, duplicate, cached, target, ctx):
     """[P-12] A finished file that matched no pending object, in the incoming or the fallback mode.
     Incoming: everything in .mv_incoming is disposable — a copy of an object already fetched is
-    deleted as before ('Duplicate. Deleting.'), any other file is deleted and listed (name + size).
-    Fallback: the same, but ONLY for a file that appeared during this run and belongs to the
-    entry's expected-name family; anything else stays untouched — a run-new one is listed when the
-    run ends. Each file is reported once per entry."""
+    deleted as before ('Duplicate. Deleting.'), any other file is a wrong item: deleted and listed
+    (name + size). Fallback: the same, but ONLY for a file that appeared during this run and belongs
+    to the entry's expected-name family; anything else stays untouched — a run-new one is listed
+    when the run ends. Each file is reported once per entry; a deleted file's name is free again, so
+    a later download under it (the same wrong item fetched once more) is a new file."""
     if path in target["handled"]:
         return
     target["handled"].add(path)
@@ -1810,6 +1811,8 @@ def _drop_unmatched(name, path, duplicate, cached, target, ctx):
         run_new = ctx.run_downloads is not None and _family_key(name) not in ctx.run_downloads
         deletable = run_new and _in_family(name, target["family"])
     gone = _delete_download(path) if deletable else False
+    if gone:
+        target["handled"].discard(path)  # [live check 2026-10-05] ATTEMPT 2 re-downloaded the same wrong item
     if deletable and not gone:
         _add_pending(ctx, [path])  # Chrome still holds it: deleted once Chrome has closed
     if duplicate:
@@ -1821,7 +1824,7 @@ def _drop_unmatched(name, path, duplicate, cached, target, ctx):
             print("     ⚠️ Duplicate — left in Downloads (not provably this fetch's download).")
     elif deletable:
         what = "deleted" if gone else "still in use, deleted once Chrome has closed"
-        print(f"     🗑️ Not an expected file — {what}: {name} ({mvcommon.human_readable_size(size)})")
+        print(f"     🗑️ Wrong item downloaded ({what}): {name} ({mvcommon.human_readable_size(size)})")
     if not deletable and run_new:
         ctx.left[name] = size
 
@@ -2162,7 +2165,11 @@ def _run_locator_phase(driver, queue, ctx):
         (_learn_from_download — only when the record's dedupKey is the bytes');
       * leave an object it settled 'done', one it may not hand to the legacy
         attempts (OD-5) 'failed'; every item still 'pending' afterwards gets
-        today's two attempts unchanged."""
+        today's two attempts unchanged;
+      * a round in which a wrong item arrived marks each object requested in it
+        `_wrong` (_note_losses); one still pending after the legacy attempts is
+        booked wrong-item (_record_wrong_items) — an object a stage gives up on
+        itself is 'failed' with the stage's own failed-list row, never booked twice."""
     return None
 
 
@@ -2179,6 +2186,14 @@ def _lost_download_note(lost, saw_download):
     return (f"     No download appeared for {lost} triggered file(s). If chrome://downloads lists "
             f"it as failed, the transfer broke at once: re-run the fetch. If it is not listed, "
             f"Shift+D started nothing.")
+
+
+def _wrong_item_note(names):
+    """[IMP-C25 live check 2026-10-05] What the harvester says at a timeout when, instead of a requested file,
+    ANOTHER item arrived (`names`; the lines above say what became of each — in the incoming folder a wrong item is
+    deleted): the transfer worked and the search picked something else, so this is no lost download and IMP-C34
+    does not request it again (that would download the same item once more)."""
+    return f"     Not a broken transfer: another item arrived instead ({', '.join(names)}) — it is not requested again."
 
 
 def _downloads_snapshot():
@@ -2277,7 +2292,9 @@ def harvest_downloads(queue, ctx):
     queue item and moved into its `dest` (`✅ MOVED:`); a copy of an item already
     fetched is deleted; anything else is left alone. Returns once no item is
     pending, or once the base timeout has passed with nothing downloading and
-    nothing new — then IMP-C29's note names the requested files that never came.
+    nothing new — then IMP-C29's note names the requested files that never came
+    (when a request fetched ANOTHER item instead, _wrong_item_note says that: the
+    file came, the search picked the wrong item — live check 2026-10-05).
 
     Step 10 adds, silently:
       * IMP-B10 — every file is hashed at most once per run (_hash_download): one
@@ -2319,6 +2336,7 @@ def harvest_downloads(queue, ctx):
     processed_files = set()  # this round's files ([IMP-B10] their hashes outlive it in ctx.hashed)
     saw_download = False  # [IMP-C29] was a .crdownload ever seen during this wait?
     unmatched = 0  # [IMP-C34] arrivals of this round that matched no pending item
+    wrong = []  # [live check 2026-10-05] their names: what the round's requests fetched instead
 
     while True:
         # Check Active Downloads
@@ -2375,6 +2393,7 @@ def harvest_downloads(queue, ctx):
             else:
                 if arrived and not cached:
                     unmatched += 1  # [IMP-C34] a request fetched a wrong item
+                    wrong.append(f)
                 duplicate = any(i["hash"] == fhash for i in queue)
                 if mode != "legacy":
                     _drop_unmatched(f, fpath, duplicate, cached, target, ctx)  # [IMP-C25 P-12]
@@ -2395,9 +2414,13 @@ def harvest_downloads(queue, ctx):
         if timed_out and not found_new:
             print("\n   ❌ Timeout (No active downloads).")
             lost = sum(1 for i in queue if i["status"] == "pending" and i.get("triggered"))
+            if lost and wrong:
+                # [live check 2026-10-05] A request fetched ANOTHER item: it arrived, so it is no lost download.
+                print(_wrong_item_note(wrong))
+                lost = max(0, lost - len(wrong))
             if lost:
                 print(_lost_download_note(lost, saw_download))
-                if mode == "incoming" and not saw_download and not ctx.hinted:
+                if mode == "incoming" and not saw_download and not wrong and not ctx.hinted:
                     ctx.hinted = True  # [IMP-C25 P-12] the redirect is unverified live (PLAN P6): say where to look
                     print(f"     Chrome was told to save into {folder}. If chrome://downloads shows the file saved "
                           f"somewhere else, Chrome ignored that folder — `python main.py fetch_cleanup` lists "
@@ -2433,12 +2456,12 @@ def _fire(item, fire):
     return item["triggered"]
 
 
-def _record_lost_twice(item, ctx):
-    """[IMP-C34] One failed-list row (P-18, reason download-lost) for an object whose
-    download was lost twice: run, account, manual_id, label, uploaded_name and the
-    sha256 pin. True when written. Needs the session account and the owning id — a
-    stand-alone call has neither and writes nothing; a failed write prints one
-    warning line."""
+def _record_failed(item, ctx, reason, tried=None):
+    """One failed-list row (P-18) for an object this run gives up on: run, account,
+    manual_id, label, uploaded_name, the sha256 pin, `reason` and — when given —
+    what was `tried` ([{approach, outcome, n}]). True when written. Needs the
+    session account and the owning id — a stand-alone call has neither and writes
+    nothing; a failed write prints one warning line."""
     loc = item.get("locator") or {}
     if ctx.account not in mvcommon.GP_ACCOUNTS or not loc.get("manual_id"):
         return False
@@ -2446,11 +2469,17 @@ def _record_lost_twice(item, ctx):
     try:
         mvcommon.append_failed({"run": ctx.run_id, "account": ctx.account, "manual_id": loc["manual_id"],
                                 "label": loc.get("label"), "sha256": sha256,
-                                "uploaded_name": loc.get("uploaded_name"), "reason": "download-lost"})
+                                "uploaded_name": loc.get("uploaded_name"), "tried": tried, "reason": reason})
     except (OSError, ValueError) as e:
         print(f"     ⚠️ Not recorded in the failed list ({type(e).__name__}: {e}).")
         return False
     return True
+
+
+def _record_lost_twice(item, ctx):
+    """[IMP-C34] The failed-list row (P-18, reason download-lost) of an object whose
+    download was lost twice (_record_failed)."""
+    return _record_failed(item, ctx, "download-lost")
 
 
 def _note_losses(queue, rnd, ctx):
@@ -2460,9 +2489,16 @@ def _note_losses(queue, rnd, ctx):
     downloading and nothing that arrived went unmatched. A file that arrived and
     matched no pending object means a request fetched a WRONG item, which no
     re-request fixes (and which request it was cannot be told), so such a round
-    counts no loss. A second loss ends the object for this run: status 'failed',
-    one line, one failed-list row."""
-    if not rnd.get("timed_out") or rnd.get("unmatched"):
+    counts no loss: each object requested in it is marked `_wrong` instead (the
+    rounds in which that happened; _record_wrong_items books an object that ends
+    unfetched — live check 2026-10-05). A second loss ends the object for this
+    run: status 'failed', one line, one failed-list row."""
+    if rnd.get("unmatched"):
+        for item in queue:
+            if item["status"] == "pending" and item.get("triggered"):
+                item["_wrong"] = item.get("_wrong", 0) + 1
+        return
+    if not rnd.get("timed_out"):
         return
     for item in queue:
         if item["status"] != "pending" or not item.get("triggered"):
@@ -2500,6 +2536,22 @@ def _retry_lost_downloads(queue, ctx):
     ctx.stats["recovered"] += sum(1 for i in retry if i["status"] == "done")
 
 
+def _record_wrong_items(queue, ctx):
+    """[IMP-C25 live check 2026-10-05] After every attempt (and IMP-C34's retry): an
+    object still pending whose request fetched ANOTHER item (`_wrong`, booked by
+    _note_losses) ends 'failed' — one line and one failed-list row (P-18, reason
+    wrong-item; tried = the legacy attempts' outcome, n = the rounds that fetched a
+    wrong item). Running the same search again would pick the same item; the object
+    needs its exact item (the failed list)."""
+    for item in queue:
+        if item["status"] != "pending" or not item.get("_wrong"):
+            continue
+        item["status"] = "failed"
+        tried = [{"approach": "legacy", "outcome": "wrong-item", "n": item["_wrong"]}]
+        listed = "; added to the failed list (wrong-item)" if _record_failed(item, ctx, "wrong-item", tried) else ""
+        print(f"     ❌ Not fetched: {item['filename']} — the search picked another item{listed}.")
+
+
 def _lost_downloads_line(ctx):
     """[IMP-C34] The run's one closing line about lost downloads, or None when
     nothing was requested again and nothing was lost twice."""
@@ -2514,8 +2566,9 @@ def _fetch_items(driver, queue, ctx, entry=None, owner_id=None):
     """Fetch the pending items of one entry in the running session: [IMP-C25 Step 11]
     first where its downloads land (_prepare_downloads — the disk pre-flight may refuse
     the entry: then nothing is requested), the exact-item stages, today's two legacy
-    attempts, IMP-C34's one retry, and last the end of the entry's downloads
-    (_finish_downloads). `entry` / `owner_id` size the pre-flight."""
+    attempts, IMP-C34's one retry, the wrong-item booking (_record_wrong_items) and
+    last the end of the entry's downloads (_finish_downloads). `entry` / `owner_id`
+    size the pre-flight."""
     if not _prepare_downloads(driver, queue, ctx, entry, owner_id):
         return
 
@@ -2559,6 +2612,8 @@ def _fetch_items(driver, queue, ctx, entry=None, owner_id=None):
 
     # [IMP-C34] A download lost and not requested since gets its one retry.
     _retry_lost_downloads(queue, ctx)
+    # [live check 2026-10-05] An object whose requests fetched only other items ends on the failed list.
+    _record_wrong_items(queue, ctx)
     _journal_sync(ctx, queue)
 
     # [IMP-C25 Step 11] Only now — after the retry's harvest — the entry's downloads end.

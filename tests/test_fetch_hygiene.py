@@ -426,11 +426,54 @@ def test_a_wrong_item_is_deleted_listed_and_still_counts_as_unmatched(world, mon
     mainfetch.fetch_single_entry(world.browser, entry, entry_id=EP_ID, ctx=ctx)
 
     out = capsys.readouterr().out
-    assert "     🗑️ Not an expected file — deleted: Other [zzz999].mkv (4.00 KB)" in out
+    assert "     🗑️ Wrong item downloaded (deleted): Other [zzz999].mkv (4.00 KB)" in out   # [live check 2026-10-05]
     assert calls == [("Show.S01E01.mkv", 0), (SHOW_UP, 0)] and "RETRY" not in out   # not booked as a lost download
-    assert ctx.stats["retried"] == 0 and mvcommon.read_failed() == []
+    assert ctx.stats["retried"] == 0 and "never arrived" not in out
+    [row] = mvcommon.read_failed()                      # [live check 2026-10-05] the object needs its exact item
+    assert (row["manual_id"], row["reason"]) == (EP_ID, "wrong-item")
     assert "❌ ENTRY INCOMPLETE." in out
     assert not (_restore(entry) / ".mv_incoming").exists() and list(world.downloads.iterdir()) == []
+
+
+def test_the_live_case_the_same_wrong_item_twice_is_deleted_each_time_and_booked_once(world, monkeypatch, capsys):
+    # [live check 2026-10-05, Silicon Valley S02E02 in the TV account] Both attempts' clicks downloaded the SAME wrong
+    # item (The Expanse S01E02, 5.39 GB) under the same name. Before this fix the second copy was neither deleted nor
+    # reported in its round (its name was 'handled' already) — it sat in .mv_incoming until the entry ended — and each
+    # round printed the lost-download note for a transfer that never broke.
+    entry = _whole_entry(world.tmp)
+    wrong = "The.Expanse.S01E02 [bd42e9].mkv"
+    calls = _script(monkeypatch, lambda q, i: world.browser.start(wrong, PAYLOAD_X, 60))
+    ctx = _session("tv")
+
+    mainfetch.fetch_single_entry(world.browser, entry, entry_id=EP_ID, ctx=ctx)
+
+    out = capsys.readouterr().out
+    assert calls == [("Show.S01E01.mkv", 0), (SHOW_UP, 0)]                         # both attempts, no retry
+    assert out.count(f"     🗑️ Wrong item downloaded (deleted): {wrong} (4.00 KB)") == 2   # each copy, in its round
+    assert out.count(f"     Not a broken transfer: another item arrived instead ({wrong}) — it is not "
+                     f"requested again.") == 2
+    assert "never arrived" not in out and "RETRY" not in out and "unfinished or surplus" not in out
+    assert out.count("     ❌ Not fetched: Show.S01E01.mkv — the search picked another item; added to the failed "
+                     "list (wrong-item).") == 1
+    [row] = mvcommon.read_failed()
+    assert (row["reason"], row["tried"]) == ("wrong-item", [{"approach": "legacy", "outcome": "wrong-item", "n": 2}])
+    assert "❌ ENTRY INCOMPLETE." in out and not (_restore(entry) / ".mv_incoming").exists()
+    assert world.browser.saved == [(str(_restore(entry) / ".mv_incoming"), wrong)] * 2   # the same name both times
+
+
+def test_a_deleted_wrong_items_name_is_free_for_the_next_download_a_held_one_stays_reported_once(world, capsys):
+    folder = world.tmp / ".mv_incoming"
+    folder.mkdir()
+    path = folder / "Other [zzz999].mkv"
+    target = {"mode": "incoming", "dir": str(folder), "handled": set()}
+    ctx = mainfetch.FetchContext()
+
+    for _ in range(2):                                   # the same name downloaded twice, deleted in between
+        path.write_bytes(PAYLOAD_X)
+        mainfetch._drop_unmatched(path.name, str(path), False, False, target, ctx)
+        assert not path.exists()
+    assert capsys.readouterr().out.count("🗑️ Wrong item downloaded (deleted): Other [zzz999].mkv") == 2
+    assert target["handled"] == set()
 
 
 def test_harvest_reports_a_deleted_mismatch_in_unmatched(world, monkeypatch, capsys):
@@ -621,7 +664,7 @@ def test_the_fallback_deletes_only_run_new_files_of_the_entrys_family(world, mon
     mainfetch.fetch_single_entry(world.browser, entry, entry_id=EP_ID, ctx=ctx)
 
     out = capsys.readouterr().out
-    assert "     🗑️ Not an expected file — deleted: Show.S01E01 [abc123].mkv (4.00 KB)" in out
+    assert "     🗑️ Wrong item downloaded (deleted): Show.S01E01 [abc123].mkv (4.00 KB)" in out
     assert "✅ MOVED: Show.S01E01.mkv" in out and "✅ ENTRY COMPLETE." in out
     assert sorted(p.name for p in world.downloads.iterdir()) == [
         "Holiday.mkv", "Random [zzz999].mkv", "Show.S01E01 [abc123] (1).mkv", "notes.txt"]
@@ -793,8 +836,8 @@ def test_a_held_file_in_the_downloads_fallback_is_pending_not_reported_deleted(w
     mainfetch._drop_unmatched(SHOW_UP, str(path), False, False, target, ctx)
 
     assert path.exists() and ctx.pending_delete == [str(path)]
-    assert "still in use, deleted once Chrome has closed: Show.S01E01 [abc123].mkv (4.00 KB)" in \
-        capsys.readouterr().out
+    assert "Wrong item downloaded (still in use, deleted once Chrome has closed): Show.S01E01 [abc123].mkv (4.00 KB)" \
+        in capsys.readouterr().out
 
 
 # ===========================================================================

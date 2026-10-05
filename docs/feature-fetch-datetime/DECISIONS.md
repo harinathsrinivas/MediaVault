@@ -465,3 +465,9 @@ No other step of this plan uses candidates.
   proper task." → Step 11 item i: after downloads finish, close this run's tabs and the Chrome the run launched
   (graceful, then terminate its recorded pid); a Chrome the run only attached to keeps running with only this run's
   tabs closed (orchestrator's safe default — it may hold the user's own tabs).
+- **Early live check of Step 11's download redirect (2026-10-05)**: card answer "Yes, run it now (Recommended)" → the
+  orchestrator fetches `tv-en-2014-siliconvalley-s02e02` (5.6 GB, one file) into `D:\MV_fetch`, checks .mv_incoming →
+  restore + hash, Chrome closed at the end, and that the post-fetch identity merge touches only that entry's `gphotos`
+  block; then deletes the test copy.
+- **warm_profiles leaves each Chrome on port 9222** (the next profile attaches to the previous one): card answer "Fix
+  inside C25 (Recommended)" → added to Step 14 with a test; registered as an IMP.

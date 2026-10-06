@@ -480,3 +480,9 @@ No other step of this plan uses candidates.
   the orchestrator verifies the gate independently for each candidate** (reads the status file, `git status`, and
   re-runs full + smoke in each worktree). Any gap → resume that same candidate; never judge, merge or relay partial
   work. The same "done = its final report + green gates" rule applies to every other agent.
+- **Live wrong-pick diagnosis closed (2026-10-07, `74d662d` + `8dacbad`, journal `d714613`)**: cause = Google Photos'
+  new "Most relevant to your search" strip above the real results; not a Step 10 regression. Follow-ups recorded for
+  Step 14/15 (no ruling needed — robustness of existing fetch paths): `driver.get` inherits Selenium's 300 s page-load
+  default (a probe hung ~5 min) → bounded page-load timeout; a failed attach in `init_driver` (e.g. chromedriver-manager
+  online check) can leave the just-launched Chrome running → close it on that path too (extends Step 11 item i).
+  Step 12 candidates must merge these two fixes before their completion gate.

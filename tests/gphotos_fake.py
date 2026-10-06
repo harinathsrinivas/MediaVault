@@ -950,6 +950,7 @@ class FakeDriver:
             else:
                 timeline += 1
         return {"results": results, "timeline": timeline,
+                "relevant": 0,  # the fake has no "Most relevant to your search" strip (tests/test_fetch_search_wait.py)
                 "empty": re.search(r"\bno results\b", self._body_text(), re.IGNORECASE) is not None}
 
     def _is_timeline_link(self, el):

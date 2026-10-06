@@ -10,6 +10,10 @@ a slow search could click a timeline item and download the wrong file. Under tes
   - mainfetch._drop_timeline: a thumbnail that is (or sits inside) a home-timeline link is never clicked.
   - trigger_download uses both — its digest is re-pinned on purpose (PLAN Step 10 h); the IMP-C2 retry, the IMP-C6
     propagation and the IMP-C29 tab rules are pinned by their own, unchanged tests.
+  - [live check 2026-10-05] Google Photos' "Most relevant to your search" strip of loose matches ABOVE the results
+    (the legacy click took its first tile: The Expanse for a Silicon Valley filename): its tiles are never clicked,
+    and a search showing only the strip is a miss after SEARCH_SUGGESTIONS_ONLY_LOOKS looks. The shared fake has no
+    strip; _Page models it (gpweb pins the DOM marker the page scripts use).
 
 Hermetic and Selenium-free: _Page models the Photos tab during a search (each look at the page advances it; the
 page SHOWS what the last look saw), ActionChains / WebDriverWait are stand-ins and every sleep is recorded, never
@@ -31,8 +35,14 @@ def results(n):
     return {"results": n, "timeline": 0, "empty": False}
 
 
+def strip(relevant, n=0):
+    """A search page showing the "Most relevant to your search" strip (`relevant` tiles) above `n` results."""
+    return {"results": n, "timeline": 0, "relevant": relevant, "empty": False}
+
+
 class _El:
-    """A displayed thumbnail element; `timeline` = it is (or sits inside) a home-timeline link."""
+    """A displayed thumbnail element; `timeline` = it is (or sits inside) a link that is not a result to click — a
+    home-timeline link or a "Most relevant" strip suggestion (what gpweb.TIMELINE_LINKS_JS answers for it)."""
 
     def __init__(self, name, timeline):
         self.name, self.timeline = name, timeline
@@ -49,7 +59,8 @@ class _Page:
     """The Photos tab during a keystroke search. `states` = what each look at the page (gpweb.SEARCH_STATE_JS) sees,
     one per look, the last repeating; the page SHOWS what the latest look saw (before any look: the first state).
     Shown timeline: ./photo/<id> links (the CSS selector) and their background-image divs; shown results:
-    background-image divs inside ./search/<token>/photo/<id> links (the XPath selector only)."""
+    background-image divs inside ./search/<token>/photo/<id> links (the XPath selector only), after the "Most
+    relevant" strip's divs (search links too, above the results in DOM order)."""
     HOME = "https://photos.google.com/"
     SEARCH = "https://photos.google.com/search/ClJUOKEN"
 
@@ -89,6 +100,7 @@ class _Page:
         timeline = shown.get("timeline", 0)
         if "background-image" in str(selector):
             return ([_El(f"timeline-div-{n}", True) for n in range(timeline)]
+                    + [_El(f"relevant-{n}", True) for n in range(shown.get("relevant", 0))]
                     + [_El(f"result-{n}", False) for n in range(shown.get("results", 0))])
         return [_El(f"timeline-link-{n}", True) for n in range(timeline)]
 
@@ -208,6 +220,40 @@ def test_it_never_reads_while_the_timeline_is_shown(sleeps):
     assert sleeps.count(mainfetch.SEARCH_POLL_S) == 3 and page.looks == 4
 
 
+def test_the_most_relevant_strip_above_the_results_is_never_clicked():
+    # The live case (tagged name): strip [The Expanse, Mr. Robot, SV] above the date group [SV]. Index 0 used to be the
+    # strip's first tile; now it is the first RESULT.
+    page = _Page([TIMELINE, strip(3, 1)])
+
+    assert mainfetch.trigger_download(page, QUERY) is True
+
+    assert page.clicked == ["result-0"]
+
+
+def test_a_search_showing_only_most_relevant_suggestions_is_a_miss(sleeps, capsys):
+    # The live case (untagged name): no result at all, only the strip with The Expanse. Nothing is clicked, and the wait
+    # ends after SEARCH_SUGGESTIONS_ONLY_LOOKS looks at the strip — not the full SEARCH_RESULTS_WAIT_S.
+    page = _Page([TIMELINE, strip(1)])
+
+    assert mainfetch.trigger_download(page, QUERY) is False
+
+    out = capsys.readouterr().out
+    assert out.count("     ⚠️ Not found (Found 0).") == 2 and "❌" not in out     # both passes (the IMP-C2 retry)
+    assert page.clicked == []
+    looks = mainfetch.SEARCH_SUGGESTIONS_ONLY_LOOKS
+    assert sleeps.count(mainfetch.SEARCH_POLL_S) == looks + (looks - 1)    # 1 timeline look + 4 strip looks; then 4
+    assert looks * mainfetch.SEARCH_POLL_S <= 3.0                          # no slower than the old fixed 3 s read
+
+
+def test_results_that_render_after_the_strip_are_waited_for(sleeps):
+    # A strip shown alone for fewer than SEARCH_SUGGESTIONS_ONLY_LOOKS looks is not yet a miss: results may follow.
+    page = _Page([TIMELINE, strip(3), strip(3), strip(3, 1)])
+
+    assert mainfetch.trigger_download(page, QUERY) is True
+
+    assert page.clicked == ["result-0"] and sleeps.count(mainfetch.SEARCH_POLL_S) == 4
+
+
 def test_a_busy_page_is_simply_looked_at_again():
     page = _Page([results(3)], busy_looks=2)
 
@@ -252,7 +298,9 @@ def test_the_page_scripts_click_nothing_and_the_wait_is_bounded():
 
 
 # ---------------------------------------------------------------------------
-# digest pins — re-pinned on purpose by IMP-C25 Step 10 h (IMP-C35); a change to the legacy S4 path is a decision
+# digest pins — re-pinned on purpose by IMP-C25 Step 10 h (IMP-C35); a change to the legacy S4 path is a decision.
+# The search-wait pin was re-pinned on purpose once more for the "Most relevant to your search" strip (live check
+# 2026-10-05); trigger_download itself is unchanged.
 # ---------------------------------------------------------------------------
 def _digest(*parts):
     text = "\n".join(p if isinstance(p, str) else inspect.getsource(p) for p in parts).replace("\r\n", "\n")
@@ -260,7 +308,7 @@ def _digest(*parts):
 
 
 TRIGGER_DOWNLOAD_DIGEST = "49578db2312de37da50de0554c4051f9b7bdb30a21e5340f5bff01e1b95e62af"
-SEARCH_WAIT_DIGEST = "9b2abbc2470e6638f694e071a4b863b934fca78f30fe31a7b0048e96de7131ef"
+SEARCH_WAIT_DIGEST = "3894100f93b2fb574f2eb91ea85fe75a5f1b5d6d7e4884130fd36dfd60f91936"
 
 
 def test_trigger_download_source_is_pinned():

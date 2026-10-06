@@ -860,7 +860,8 @@ def title_short_id_query(filename, short_id, category):
 # tiles as [{href, label}] (a[href*="photo/"], checkVisibility, width > 40 — RESEARCH F14); SCROLL_JS
 # scrolls the largest scrollable pane (the virtualised grid) and returns [scrollTop, scrollHeight].
 # SEARCH_STATE_JS / TIMELINE_LINKS_JS are the fetch's search wait and timeline guard (IMP-C35 — see
-# mainfetch._await_search_results / _drop_timeline; every UI search path uses them, IMP-C25 Step 12).
+# mainfetch._await_search_results / _drop_timeline; every UI search path uses them, IMP-C25 Step 12) — and
+# since the live check of 2026-10-05 also its guard against the "Most relevant to your search" strip.
 
 TILES_JS = """
 const out=[];
@@ -874,25 +875,32 @@ els.sort((a,b)=>b.scrollHeight-a.scrollHeight);
 const el=els[0]; if(!el){window.scrollBy(0,900);return [window.scrollY, document.body.scrollHeight];}
 el.scrollTop+=Math.max(400, Math.floor(el.clientHeight*0.8)); return [el.scrollTop, el.scrollHeight];"""
 
-# One look at a search page -> {results, timeline, empty}. A visible link to an item (TILES_JS's rule) is
+# One look at a search page -> {results, timeline, relevant, empty}. A visible link to an item (TILES_JS's rule) is
 # either a search RESULT — its href runs through the search: ./search/<token>/photo/<id> — or a home-TIMELINE
-# thumbnail (./photo/<id>), which Google Photos keeps showing for 1-2 s after Enter. `empty`: the page says
-# "No results" — display text, so a hint that only ends a wait early (P-7).
+# thumbnail (./photo/<id>), which Google Photos keeps showing for 1-2 s after Enter. `relevant`: search links in the
+# "Most relevant to your search" strip Google Photos shows ABOVE the date-grouped results — loose matches, counted
+# apart from the results. Live 2026-10-05 (TV account, read-only probe): the strip's container carries
+# data-disable-shift-select (the date groups carry data-segment-expandable); for a Silicon Valley filename it ranked
+# The Expanse first, and a search with no result at all showed only the strip. `empty`: the page says "No results" —
+# display text, so a hint that only ends a wait early (P-7).
 SEARCH_STATE_JS = r"""
-let results = 0, timeline = 0;
+let results = 0, timeline = 0, relevant = 0;
 for (const a of document.querySelectorAll('a[href*="photo/"]')) {
   const r = a.getBoundingClientRect();
   if (!(a.checkVisibility() && r.width > 40)) continue;
-  if (/(^|\/)search\//.test(a.getAttribute('href') || '')) results++; else timeline++;
+  if (!/(^|\/)search\//.test(a.getAttribute('href') || '')) timeline++;
+  else if (a.closest('[data-disable-shift-select]')) relevant++;
+  else results++;
 }
 const text = document.body ? document.body.innerText : '';
-return {results: results, timeline: timeline, empty: /\bno results\b/i.test(text)};"""
+return {results: results, timeline: timeline, relevant: relevant, empty: /\bno results\b/i.test(text)};"""
 
 # arguments[0] = elements -> one boolean each: is it — or does it sit inside — a link to an item that is NOT a
-# search result (a home-timeline thumbnail)?
+# search result to click: a home-timeline thumbnail, or a suggestion in the "Most relevant to your search" strip?
+# Without that strip marker (a changed page) a strip tile reads as a result again — today's click, never fewer.
 TIMELINE_LINKS_JS = r"""
 return arguments[0].map(e => {
   const a = e.closest('a');
   const h = a ? (a.getAttribute('href') || '') : '';
-  return /photo\//.test(h) && !/(^|\/)search\//.test(h);
+  return /photo\//.test(h) && (!/(^|\/)search\//.test(h) || !!e.closest('[data-disable-shift-select]'));
 });"""

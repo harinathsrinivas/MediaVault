@@ -591,6 +591,12 @@ def test_dom_snippets_tell_search_results_from_the_timeline():
     assert "r.width > 40" in gpweb.SEARCH_STATE_JS and r"/(^|\/)search\//" in gpweb.SEARCH_STATE_JS
     assert r"/\bno results\b/i" in gpweb.SEARCH_STATE_JS
     assert "e.closest('a')" in gpweb.TIMELINE_LINKS_JS and r"/(^|\/)search\//" in gpweb.TIMELINE_LINKS_JS
+    # [live check 2026-10-05] the "Most relevant to your search" strip above the results: its container carries
+    # data-disable-shift-select; its search links are counted as `relevant` (never as results) and never clicked.
+    strip = "closest('[data-disable-shift-select]')"
+    assert "a." + strip in gpweb.SEARCH_STATE_JS and "relevant++" in gpweb.SEARCH_STATE_JS
+    assert "relevant: relevant" in gpweb.SEARCH_STATE_JS
+    assert "!!e." + strip in gpweb.TIMELINE_LINKS_JS
     for script in (gpweb.SEARCH_STATE_JS, gpweb.TIMELINE_LINKS_JS):
         assert "click" not in script
 
@@ -742,11 +748,11 @@ def test_fake_answers_the_search_wait_scripts_like_the_real_page(fake_photos):
     fake_photos.add_item("tv", "Sample.Show.S01E01 [a1b2c3].mkv")
     fake_photos.add_item("tv", "Sample.Show.S01E02 [b2c3d4].mkv")
     d = _signed_in(fake_photos)
-    assert d.execute_script(gpweb.SEARCH_STATE_JS) == {"results": 0, "timeline": 2, "empty": False}
+    assert d.execute_script(gpweb.SEARCH_STATE_JS) == {"results": 0, "timeline": 2, "relevant": 0, "empty": False}
     home = d.find_elements(By.XPATH, BG_DIVS) + d.find_elements(By.CSS_SELECTOR, "a[href*='./photo/']")
     assert d.execute_script(gpweb.TIMELINE_LINKS_JS, home) == [True] * 4
     _press(d, "/", "Sample.Show", Keys.ENTER)
-    assert d.execute_script(gpweb.SEARCH_STATE_JS) == {"results": 2, "timeline": 0, "empty": False}
+    assert d.execute_script(gpweb.SEARCH_STATE_JS) == {"results": 2, "timeline": 0, "relevant": 0, "empty": False}
     divs = d.find_elements(By.XPATH, BG_DIVS)
     hidden_timeline = d.find_elements(By.CSS_SELECTOR, "a[href*='./photo/']")
     assert d.execute_script(gpweb.TIMELINE_LINKS_JS, divs + hidden_timeline) == [False, False, True, True]
@@ -754,7 +760,7 @@ def test_fake_answers_the_search_wait_scripts_like_the_real_page(fake_photos):
         d.get(PHOTOS)
         d.execute_script(gpweb.TIMELINE_LINKS_JS, divs)
     _press(d, "/", "nothing like this", Keys.ENTER)
-    assert d.execute_script(gpweb.SEARCH_STATE_JS) == {"results": 0, "timeline": 0, "empty": True}
+    assert d.execute_script(gpweb.SEARCH_STATE_JS) == {"results": 0, "timeline": 0, "relevant": 0, "empty": True}
 
 
 def test_fake_logged_out_modes(fake_photos):

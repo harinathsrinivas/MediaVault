@@ -300,8 +300,15 @@ def _search_page_problem(driver):
 # is ever clicked on a search page.
 SEARCH_RESULTS_WAIT_S = 10.0  # the longest a search may take to show its results
 SEARCH_POLL_S = 0.5           # how often the page is looked at while waiting
+# [live check 2026-10-05] Google Photos now shows a "Most relevant to your search"
+# strip of loose matches ABOVE the date-grouped results; the legacy index-0 click
+# took its first tile (The Expanse for a Silicon Valley filename). Its tiles are
+# never clicked, and a search that shows ONLY the strip has no result: these many
+# consecutive looks at it end the wait (live, the results render with the strip).
+SEARCH_SUGGESTIONS_ONLY_LOOKS = 4
 # The page scripts are the shared ones: gpweb.SEARCH_STATE_JS (results vs timeline
-# links, "No results") and gpweb.TIMELINE_LINKS_JS (is an element a timeline link?).
+# links vs strip suggestions, "No results") and gpweb.TIMELINE_LINKS_JS (is an
+# element a timeline link or a strip suggestion — not a result to click?).
 
 
 def _await_search_results(driver):
@@ -311,7 +318,10 @@ def _await_search_results(driver):
     Ready (returns None) once the page is a photos.google.com /search/ page that
     shows result thumbnails and no timeline thumbnail, with the same number of
     results on two looks in a row (the grid has settled), or once Google Photos
-    says it found nothing and the timeline is gone. After SEARCH_RESULTS_WAIT_S it
+    says it found nothing and the timeline is gone, or once it has shown only its
+    "Most relevant to your search" suggestions for SEARCH_SUGGESTIONS_ONLY_LOOKS
+    looks in a row (no result: the read finds nothing it may click — live check
+    2026-10-05). After SEARCH_RESULTS_WAIT_S it
     reads whatever results are shown — but returns the problem line instead when
     the page never reached /search/ (_search_page_problem's diagnosis) or shows
     nothing but the home timeline: nothing may be clicked then. A driver that runs
@@ -319,6 +329,7 @@ def _await_search_results(driver):
     the URL check passes, exactly as before this wait existed. Shared by every
     search path (trigger_download; IMP-C25 Step 12's UI stages)."""
     problem = state = None
+    suggestions_only = 0  # consecutive looks showing only the "Most relevant" strip
     for poll in range(int(SEARCH_RESULTS_WAIT_S / SEARCH_POLL_S) + 1):
         if poll:
             time.sleep(SEARCH_POLL_S)
@@ -332,6 +343,8 @@ def _await_search_results(driver):
         if not isinstance(looked, dict):
             return None  # a stand-in without page scripts: read the page as before
         previous, state = state, looked
+        only = not state.get("timeline") and not state.get("results") and bool(state.get("relevant"))
+        suggestions_only = suggestions_only + 1 if only else 0
         if state.get("timeline"):
             continue  # the home timeline is still shown
         if state.get("results"):
@@ -339,6 +352,8 @@ def _await_search_results(driver):
                 return None  # results shown, and settled
         elif state.get("empty"):
             return None  # "No results": a genuine miss — the read finds nothing
+        elif suggestions_only >= SEARCH_SUGGESTIONS_ONLY_LOOKS:
+            return None  # only loose "Most relevant" matches: a miss — the read finds nothing to click
     if problem:
         return problem
     if state and state.get("timeline") and not state.get("results"):
@@ -349,10 +364,12 @@ def _await_search_results(driver):
 
 def _drop_timeline(driver, elements):
     """[IMP-C35] `elements` without every one that is — or sits inside — a link to
-    an item that is not a search result (a home-timeline thumbnail): on a search
-    page such an element is never clicked. One page-context call; a driver that
-    runs no page script (a test stand-in) keeps them all. A failing call raises —
-    a Selenium fault, which the IMP-C2 retry handles."""
+    an item that is not a search result to click: a home-timeline thumbnail, or a
+    loose match in Google Photos' "Most relevant to your search" strip above the
+    results (live check 2026-10-05); on a search page such an element is never
+    clicked. One page-context call; a driver that runs no page script (a test
+    stand-in) keeps them all. A failing call raises — a Selenium fault, which the
+    IMP-C2 retry handles."""
     if not elements:
         return elements
     timeline = driver.execute_script(gpweb.TIMELINE_LINKS_JS, elements)

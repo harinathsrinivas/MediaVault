@@ -1555,6 +1555,41 @@ def test_a_multi_account_run_closes_each_accounts_chrome_at_the_end_of_its_sessi
     assert sorted(p.name for p in (folder / "restore").iterdir()) == sorted(names)
 
 
+def test_each_accounts_profile_is_marked_cleanly_exited_once_its_chrome_closed(world, monkeypatch, sandbox):
+    # [2026-10-08] Chrome 154 leaves exit_type "Crashed" even after a graceful Browser.close (seen live), so every
+    # session's profile is marked once its Chrome has exited — at the account switch too, before the next account's
+    # Chrome starts (tests/test_chrome_restore_bubble.py covers the helper and every other launch and close).
+    from test_fetch_routing import CHUNK_BYTES, MOVIE, _seed_split_movie
+    _, names = _seed_split_movie(sandbox)
+    payloads = dict(zip(names, CHUNK_BYTES))
+    procs = _procs(monkeypatch)
+    events, browsers, pids = [], {}, {"movies": 7601, "tv": 7602}
+
+    def browser(profile):
+        events.append(("init", profile))
+        b = _Browser(world.clock, world.downloads, profile=profile)
+        _launched_on_port(b, procs, pids[profile])
+        b._mv_user_data_dir = mainfetch.CHROME_PROFILES[profile]
+        b.on_close = lambda b=b, p=profile: (events.append(("close", p)), setattr(b._mv_chrome_proc, "running", False))
+        browsers[profile] = b
+        return b
+
+    def mark(user_data_dir, profile="Default", wait=0):
+        exited = [p for p, b in browsers.items() if b._mv_user_data_dir == user_data_dir and b._mv_chrome_proc.running is False]
+        events.append(("mark", exited, wait))
+
+    monkeypatch.setattr(mainfetch, "mark_profile_clean_exit", mark)
+    _script(monkeypatch, lambda q, i: _active(browsers).start(q, payloads[q], 30) if q in payloads else False)
+    _route(monkeypatch, browser)
+
+    mainfetch.cmd_fetch_route(MOVIE)
+
+    gone = mainfetch.CHROME_GONE_WAIT_S
+    assert events == [("init", "movies"), ("close", "movies"), ("mark", ["movies"], gone),
+                      ("init", "tv"), ("close", "tv"), ("mark", ["tv"], gone)]
+    assert procs.terminated == []
+
+
 def test_use_photos_tab_remembers_the_tabs_it_opens(fake_photos):
     d = fake_photos.driver("tv")
     mainfetch.use_photos_tab(d)                              # no Photos tab yet: it opens one

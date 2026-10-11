@@ -19,6 +19,10 @@ _REAL_CHROME_PROFILES = dict(mainfetch.CHROME_PROFILES)
 # The real <drive>:\MV_incoming locator (IMP-C25 Step 11) — the autouse fixture below redirects it; a test that checks
 # the real path arithmetic (it creates nothing) asks for the `real_short_incoming_root` fixture.
 _REAL_SHORT_INCOMING_ROOT = mainfetch._short_incoming_root
+# The real mark_profile_clean_exit (IMP-C25, 2026-10-08): it reads and rewrites a Chrome profile's Preferences. The
+# autouse fixture _hermetic_chrome_profiles replaces it for every test; its own tests ask for the
+# `real_mark_profile_clean_exit` fixture (tmp_path profiles only).
+_REAL_MARK_PROFILE_CLEAN_EXIT = mainfetch.mark_profile_clean_exit
 
 FAKE_ORIGINAL_BYTES = b"ORIGINAL-MASTER-BYTES"
 FAKE_DUMMY_BYTES    = b"DUMMY"
@@ -108,6 +112,9 @@ class _InertProcessTable:
     def listener(self, port):
         return None
 
+    def chrome_command_lines(self):
+        return None
+
     def terminate(self, pid):
         raise AssertionError(f"a test tried to terminate a real process (pid {pid})")
 
@@ -119,6 +126,21 @@ def real_short_incoming_root():
     return _REAL_SHORT_INCOMING_ROOT
 
 
+@pytest.fixture()
+def real_mark_profile_clean_exit(tmp_path):
+    """IMP-C25 (2026-10-08) — mainfetch's REAL mark_profile_clean_exit, for its own tests. Every other test sees the
+    inert stand-in of _hermetic_chrome_profiles. Hard guard: it only ever runs on a profile folder under this test's
+    tmp_path — never on a real Chrome profile (C:\\Media\\Utils\\ChromeProfile*)."""
+    root = os.path.normcase(str(tmp_path.resolve())) + os.sep
+
+    def mark(user_data_dir, *args, **kwargs):
+        assert os.path.normcase(os.path.abspath(str(user_data_dir))).startswith(root), \
+            f"Safety check failed: mark_profile_clean_exit outside tmp_path: {user_data_dir}"
+        return _REAL_MARK_PROFILE_CLEAN_EXIT(user_data_dir, *args, **kwargs)
+
+    return mark
+
+
 @pytest.fixture(autouse=True)
 def _hermetic_chrome_profiles(monkeypatch):
     """IMP-C25 (PLAN Step 10a) — AUTOUSE, every test: the fetch never depends on this machine's real profile folders.
@@ -128,7 +150,12 @@ def _hermetic_chrome_profiles(monkeypatch):
     test, so for an account whose CHROME_PROFILES path is still the real one the pre-flight answers "present" (tests
     never launch Chrome — init_driver is always stubbed). A test that points CHROME_PROFILES at its own folder (under
     tmp_path) gets the real check, as the crawler's and the fetch's pre-flight tests do; an unknown account is always
-    checked for real. Patches the module attribute every caller reads (mainfetch.profile_preflight)."""
+    checked for real. Patches the module attribute every caller reads (mainfetch.profile_preflight).
+
+    IMP-C25 (2026-10-08) — and no test reads or rewrites a real profile's Preferences: mainfetch.mark_profile_clean_exit
+    (called before every Chrome launch and after every close, with whatever profile folder the code under test holds —
+    often the real C:\\Media\\Utils\\ChromeProfile* path) is an inert stand-in for every test. A test of a call site
+    installs its own recorder; the helper's own tests use `real_mark_profile_clean_exit` on tmp_path profiles."""
     real_check = mainfetch.profile_preflight
 
     def preflight(account):
@@ -137,6 +164,7 @@ def _hermetic_chrome_profiles(monkeypatch):
         return real_check(account)
 
     monkeypatch.setattr(mainfetch, "profile_preflight", preflight)
+    monkeypatch.setattr(mainfetch, "mark_profile_clean_exit", lambda *args, **kwargs: None)
 
 
 @pytest.fixture()

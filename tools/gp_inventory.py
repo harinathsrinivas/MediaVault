@@ -798,10 +798,14 @@ def landing_check(driver, account):
 
 def launch_chrome(profile_dir, port):
     """Launch one account's Chrome profile on its own debug port (never 9222) -> the process (at once: the caller
-    waits CHROME_START_WAIT_S, so even a Ctrl+C during that wait closes this Chrome)."""
+    waits CHROME_START_WAIT_S, so even a Ctrl+C during that wait closes this Chrome). [2026-10-08] No "Restore
+    pages?" bubble: a profile whose last Chrome did not record a clean exit is marked cleanly exited first
+    (mainfetch.mark_profile_clean_exit), and --hide-crash-restore-bubble (Chrome 154 ignores the older switch)."""
+    mainfetch.mark_profile_clean_exit(profile_dir)
     return subprocess.Popen([CHROME_EXE, f"--user-data-dir={profile_dir}", "--profile-directory=Default",
                              f"--remote-debugging-port={port}", "--no-first-run", "--no-default-browser-check",
-                             "--disable-session-crashed-bubble", "--disable-backgrounding-occluded-windows",
+                             "--disable-session-crashed-bubble", "--hide-crash-restore-bubble",
+                             "--disable-backgrounding-occluded-windows",
                              "--disable-renderer-backgrounding", "--disable-background-timer-throttling",
                              "--window-size=1600,1000", "about:blank"])
 
@@ -852,6 +856,8 @@ def _session(a, account, out_dir, log, heartbeat):
                 pass
         if proc:
             proc.terminate()  # close only the Chrome this run launched
+            # [2026-10-08] once it is gone, no Chrome opened on its profile asks "Restore pages?"
+            mainfetch.mark_profile_clean_exit(mainfetch.CHROME_PROFILES[account], wait=mainfetch.CHROME_GONE_WAIT_S)
 
 
 def _parser():

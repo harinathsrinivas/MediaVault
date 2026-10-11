@@ -80,6 +80,7 @@ def init_driver(profile_key="movies"):
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-session-crashed-bubble",
+        "--hide-crash-restore-bubble",  # [IMP-C25 2026-10-08] Chrome 154 ignores the switch above
         # [IMP-C29] Downloads must ride TCP. Google serves them over HTTP/3 (QUIC)
         # when Chrome allows it, and a QUIC download fails for good after a stall
         # of about 8 s ("Failed - Network error"; a Photos download cannot resume).
@@ -88,6 +89,8 @@ def init_driver(profile_key="movies"):
         "about:blank"
     ]
 
+    # [IMP-C25 2026-10-08] A profile whose last Chrome did not record a clean exit would open with "Restore pages?".
+    mark_profile_clean_exit(user_data_dir)
     try:
         chrome = subprocess.Popen(cmd)  # [IMP-C25 Step 11 d] kept: the fetch journal records its pid
         print("     Waiting 3 seconds for Chrome to stabilize...")
@@ -1093,11 +1096,32 @@ class _ProcessTable:
         text = (run.stdout or "").strip().lstrip("﻿")
         return int(text) if run.returncode == 0 and text.isdigit() and int(text) > 0 else None
 
+    def chrome_command_lines(self):
+        """[IMP-C25 2026-10-08] The command line of every running chrome.exe (None for one that cannot be
+        read) — or None when the process table cannot be read at all: never a guess."""
+        if os.name != "nt":
+            return None
+        script = ("[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+                  "$ps = @(Get-CimInstance Win32_Process -Filter 'Name=''chrome.exe''' -ErrorAction Stop); 'OK'; "
+                  r"foreach ($p in $ps) { if ($p.CommandLine) { 'CMD ' + ($p.CommandLine -replace '[\r\n]+', ' ') } "
+                  "else { 'CMD?' } }")
+        try:
+            run = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        lines = (run.stdout or "").lstrip("﻿").splitlines()
+        if run.returncode != 0 or not lines or lines[0].strip() != "OK":
+            return None
+        return [line[4:].strip() or None for line in lines[1:] if line.startswith("CMD")]
+
 
 PROCESS_TABLE = _ProcessTable()
 _UNLOCK_WAIT_S = 10.0   # how long a cleanup waits for a terminated Chrome to let go of its files
 _UNLOCK_POLL_S = 0.5
 _CLOSE_WAIT_S = 10.0    # [11 i] how long a gracefully closed Chrome may take to exit before its pid is terminated
+CHROME_GONE_WAIT_S = 10.0  # [2026-10-08] how long a closed or terminated Chrome may take to be gone from the process
+                           # table before its profile is marked cleanly exited (mark_profile_clean_exit)
 DOWNLOAD_STALL_S = 300  # [11 i] a partial download that has not grown for this long is not running any more
                         # (the harvester's base timeout)
 
@@ -1137,6 +1161,130 @@ def _chrome_still_ours(pid, user_data_dir):
     alive, cmdline = PROCESS_TABLE.query(pid)
     return (alive is True and cmdline is not None
             and _cmdline_user_data_dir(cmdline) == os.path.normcase(os.path.abspath(user_data_dir)))
+
+
+def _chrome_runs_on(user_data_dir):
+    """[IMP-C25 2026-10-08] Whether a Chrome browser runs on the profile folder `user_data_dir`: True when the
+    command line of a chrome.exe BROWSER process names exactly that folder (the browser is the only process that
+    writes the profile's Preferences; its renderer, GPU and crashpad helpers carry --type= and may outlive it for
+    a moment), False when none does, None when that cannot be told (the process table, or one chrome.exe's command
+    line, cannot be read) — never a guess."""
+    cmdlines = PROCESS_TABLE.chrome_command_lines()
+    if cmdlines is None:
+        return None
+    target = os.path.normcase(os.path.abspath(user_data_dir))
+    unreadable = False
+    for cmdline in cmdlines:
+        if cmdline is None:
+            unreadable = True
+        elif (_cmdline_user_data_dir(cmdline) == target
+              and not any(arg.lower().startswith("--type=") for arg in _cmdline_args(cmdline))):
+            return True
+    return None if unreadable else False
+
+
+def _read_preferences(path):
+    """A Chrome profile's Preferences file -> (doc, None), or (None, why not) when it is missing, unreadable or
+    not a JSON object (nor its 'profile')."""
+    try:
+        with open(path, "rb") as fh:
+            raw = fh.read()
+    except FileNotFoundError:
+        return None, f"{path} does not exist"
+    except OSError as e:
+        return None, f"{path} could not be read ({e})"
+    try:
+        doc = json.loads(raw)
+    except ValueError:  # not JSON, or not text at all (UnicodeDecodeError is a ValueError)
+        return None, f"{path} is not valid JSON"
+    if not isinstance(doc, dict) or not isinstance(doc.get("profile", {}), dict):
+        return None, f"{path} is not a JSON object"
+    return doc, None
+
+
+def _unclean_exit_recorded(doc):
+    """Whether Chrome would read this Preferences document as an exit that was not clean — what makes it ask
+    "Restore pages?": profile.exit_type "Crashed" (Chrome 154 leaves it even after a graceful CDP Browser.close —
+    seen live 2026-10-08, without any exited_cleanly key) or the older profile.exited_cleanly false."""
+    profile = doc.get("profile", {})
+    return profile.get("exit_type") == "Crashed" or profile.get("exited_cleanly") is False
+
+
+def _write_preferences(path, doc):
+    """Write `doc` as a Chrome Preferences file — compact UTF-8 JSON, as Chrome writes it — atomically: a sibling
+    temp file, fsynced, then os.replace; a failure leaves the previous file as it was and no temp file. Returns
+    None, or why it was not written. (Python's JSON round trip keeps every value: key order, integers of any size,
+    floats, strings; a value JSON cannot carry — NaN, an unpaired surrogate — is refused, never written.)"""
+    try:
+        data = json.dumps(doc, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    except ValueError as e:  # UnicodeEncodeError is a ValueError
+        return f"{path} holds a value that cannot be written back ({e})"
+    tmp = path + ".mediavault-tmp"
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except OSError as e:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return f"{path} could not be written ({e})"
+    return None
+
+
+def _mark_clean_exit(user_data_dir, profile, wait):
+    """mark_profile_clean_exit's steps -> (status, why it was left as it was — or None)."""
+    path = os.path.join(user_data_dir, profile, "Preferences")
+    doc, why = _read_preferences(path)
+    if why or not _unclean_exit_recorded(doc):
+        return ("skipped", why) if why else ("clean", None)
+    deadline = time.time() + wait
+    running = _chrome_runs_on(user_data_dir)
+    while running is True and time.time() < deadline:
+        time.sleep(_UNLOCK_POLL_S)
+        running = _chrome_runs_on(user_data_dir)
+    if running is True:
+        return "running", None
+    if running is None:
+        return "skipped", f"it cannot be told whether a Chrome still runs on {user_data_dir}"
+    doc, why = _read_preferences(path)  # read afresh: no Chrome runs on the profile now, so this is its last word
+    if why or not _unclean_exit_recorded(doc):
+        return ("skipped", why) if why else ("clean", None)
+    doc["profile"].update(exit_type="Normal", exited_cleanly=True)
+    why = _write_preferences(path, doc)
+    return ("skipped", why) if why else ("marked", None)
+
+
+def mark_profile_clean_exit(user_data_dir, profile=CHROME_PROFILE_NAME, wait=0):
+    """[IMP-C25 — user request 2026-10-08: "make sure to close the restore small box which opens in chrome. in
+    right top."] Chrome opens with the bubble "Restore pages? Chrome didn't shut down correctly." when the
+    profile's Preferences record an exit that was not clean (_unclean_exit_recorded): after a terminate, a Ctrl+C
+    or a crash — and, on Chrome 154, even after a graceful CDP Browser.close (seen live 2026-10-08). Chrome 154
+    ignores --disable-session-crashed-bubble. This sets profile.exit_type "Normal" and profile.exited_cleanly true
+    in <user_data_dir>/<profile>/Preferences:
+      * only when an unclean exit is recorded — a clean profile is read once and nothing else happens;
+      * only while no Chrome runs on that user-data-dir (_chrome_runs_on): one still running is waited for up to
+        `wait` seconds (a Chrome that was just closed or terminated) and then left alone, as is a profile whose
+        Chrome cannot be told to be gone — a running Chrome writes Preferences itself;
+      * atomically (_write_preferences), every other key kept as it was;
+      * a missing, unreadable or non-object Preferences file is left as it is, with one line.
+    No other file of the profile is touched, and it never raises (a launch or a cleanup never stops on it).
+    Called before every launch of an automation Chrome (init_driver — the fetch and the profile warm-up; the
+    crawler's launch_chrome) and, with `wait`, once a Chrome that a run closed or terminated is gone
+    (_close_session, _end_run, _startup_cleanup; the crawler's _session).
+    Returns "clean" (nothing to do) · "marked" · "running" · "skipped" (one line said why)."""
+    try:
+        status, why = _mark_clean_exit(user_data_dir, profile, wait)
+    except Exception as e:  # never a reason to stop a launch or a cleanup
+        status, why = "skipped", f"{type(e).__name__}: {e}"
+    if why:
+        print(f"   > ⚠️ Chrome profile not marked as closed cleanly — {why}.")
+    elif status == "marked":
+        print(f'   > 🧹 Chrome profile marked as closed cleanly (no "Restore pages?"): {user_data_dir}')
+    return status
 
 
 def read_fetch_journals():
@@ -1260,14 +1408,15 @@ def _startup_cleanup(ctx):
     (not clean / recovered) that is not a fetch still running:
       * the Chrome it LAUNCHED is terminated — only a recorded pid that still runs AND whose
         command line names that session's profile folder (_chrome_still_ours); a Chrome that
-        run only attached to (launched False) is never touched;
+        run only attached to (launched False) is never touched; [2026-10-08] the profile of a
+        terminated Chrome is then marked cleanly exited (mark_profile_clean_exit);
       * the leftovers of every incoming folder it names (marked folders only), its pending files,
         and — for a ~/Downloads fallback run — ONLY files that appeared during that run and belong
         to its expected-name family are deleted; emptied incoming folders are removed;
       * it is marked recovered (or stays pending, listing what Chrome still holds, for the next run).
     One summary line when something was deleted. An unreadable journal is reported and left alone.
     Never raises (a cleanup must not stop the fetch)."""
-    total, size, terminated = 0, 0, []
+    total, size, terminated, profiles = 0, 0, [], []
     for path, doc in read_fetch_journals():
         if doc is None:
             print(f"   > ⚠️ An unreadable fetch journal was left alone: {os.path.basename(path)}")
@@ -1284,6 +1433,7 @@ def _startup_cleanup(ctx):
                 pid = session.get("chrome_pid")
                 if _chrome_still_ours(pid, session.get("user_data_dir")) and PROCESS_TABLE.terminate(pid):
                     killed.append(pid)
+                    profiles.append(session["user_data_dir"])
             terminated += killed
             # waiting for files to be let go only makes sense once a Chrome was terminated
             deleted, held = _clean_journal_files(doc, wait=None if killed else 0)
@@ -1305,6 +1455,8 @@ def _startup_cleanup(ctx):
                   f"tries again.")
     for pid in terminated:
         print(f"   > 🛑 Closed the Chrome an interrupted fetch left running (pid {pid}).")
+    for user_data_dir in profiles:  # [2026-10-08] once it is gone, no Chrome opened on it asks "Restore pages?"
+        mark_profile_clean_exit(user_data_dir, wait=CHROME_GONE_WAIT_S)
     if total:
         print(f"   > 🧹 Cleaned {total} leftover file(s) from an interrupted fetch ({size / 1024 ** 3:.1f} GB)")
 
@@ -1684,7 +1836,9 @@ def _close_session(driver, ctx, last):
          tabs this run opened are closed (_close_run_tabs) and it stays open — it may hold the
          user's own tabs; between two accounts its windows are closed as before (IMP-C26: the
          next account needs the debug port);
-      4. what Chrome held is deleted now (_release_leftovers).
+      4. what Chrome held is deleted now (_release_leftovers);
+      5. [2026-10-08] once a Chrome this session closed (2, or its windows in 3) is gone, its profile is
+         marked cleanly exited (mark_profile_clean_exit) — also after a graceful close.
     One line says what was closed; the journal records it (sessions[].closed). A driver without
     Chrome's DevTools protocol (a test stand-in, never a real Chrome) keeps today's ending: its
     windows are closed between two accounts, nothing else, nothing printed."""
@@ -1725,6 +1879,11 @@ def _close_session(driver, ctx, last):
         closed, line = "tabs", (f"🧹 Closed {count} tab(s) this fetch opened — the Chrome it attached to "
                                 f"('{account}', already running before) stays open.")
     print(f"   > {line}")
+    if closed in ("chrome", "terminated", "windows"):
+        # [2026-10-08] Chrome 154 leaves its profile "Crashed" even after a graceful Browser.close (seen live): once
+        # the Chrome this session closed is gone, its profile is marked cleanly exited, so neither the next fetch
+        # nor a Chrome the user opens on it asks "Restore pages?". A Chrome left open is never marked.
+        mark_profile_clean_exit(chrome.get("user_data_dir"), wait=CHROME_GONE_WAIT_S)
     if ctx.journal is not None:
         ctx.journal.end_session(closed)
         if ctx.pending_delete or any(not e.get("cleaned") for e in ctx.journal.doc["entries"]):
@@ -1737,7 +1896,8 @@ def _end_run(ctx, interrupted=False):
       interrupted  the Chrome this run launched is terminated (_terminate_session_chrome: 'Chrome
                    terminated', so its downloads stop — a CDP cancel would need download ids from an
                    event channel, which the attached Selenium session does not have: PLAN P6; a
-                   Chrome it only attached to is never terminated), then this run's leftovers are
+                   Chrome it only attached to is never terminated; [2026-10-08] its profile is then
+                   marked cleanly exited — mark_profile_clean_exit), then this run's leftovers are
                    deleted — the files in every incoming folder it left, its pending files and, after
                    a ~/Downloads fallback, the files that appeared during the run and belong to an
                    entry's expected-name family (_clean_journal_files);
@@ -1759,6 +1919,8 @@ def _end_run(ctx, interrupted=False):
             deleted, held = _release_leftovers(ctx, wait=None if terminated else 0)
             if terminated:
                 print(f"   > 🛑 Chrome terminated (pid {terminated}) — its downloads stopped.")
+                # [2026-10-08] once it is gone, no Chrome opened on its profile asks "Restore pages?"
+                mark_profile_clean_exit(ctx.chrome.get("user_data_dir"), wait=CHROME_GONE_WAIT_S)
             if deleted:
                 size = sum(s for _, s in deleted)
                 what = "of this interrupted fetch" if interrupted else "this fetch left"

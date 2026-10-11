@@ -459,6 +459,7 @@ def test_the_chrome_launch_command_is_pinned(attach, profile):
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-session-crashed-bubble",
+        "--hide-crash-restore-bubble",        # 2026-10-08: no "Restore pages?" bubble (test_chrome_restore_bubble.py)
         "--disable-quic",
         "about:blank",
     ]

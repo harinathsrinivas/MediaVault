@@ -3278,6 +3278,17 @@ def _shows_item(driver, photo_id, key):
         time.sleep(ITEM_POLL_S)
 
 
+def _on_item_page(driver, photo_id):
+    """The open page is already photo_id's own item page — its address names the item and its record is in the page
+    now (one instant look; _shows_item still checks both before any keystroke). A page the item's locate (or the
+    drift check) opened is then reused for Shift+D instead of loaded again."""
+    try:
+        return (gpweb.photo_id_from_url(driver.current_url) == photo_id
+                and bool(gpweb.page_record(driver.page_source, photo_id)))
+    except Exception:
+        return False
+
+
 def _shift_d_here(driver, ctx, others=()):
     """Shift+D on the item page now shown (once its viewer is up); True once a download shows in the watched folder
     (never one of `others`, the window's other downloads)."""
@@ -3325,7 +3336,8 @@ def _click_queries(item):
 def _shift_d_trigger(driver, item, ctx, others=()):
     """(i) the located item's page, focused, then Shift+D — the web app's own original download. When the keystroke
     starts nothing on a directly loaded page (unverified live: PLAN Step 12 / R2), the click path opens the item from
-    search results and presses it there. The page must show the located item (_shows_item) before any keystroke.
+    search results and presses it there. The page must show the located item (_shows_item) before any keystroke; one
+    already open on it (_on_item_page — e.g. the page its locate read) is used as it is, not loaded again.
     True once a download shows in the watched folder (never one of `others`, the window's other downloads)."""
     name = item["filename"]
     pid = item["_located"]["photo_id"]
@@ -3333,8 +3345,9 @@ def _shift_d_trigger(driver, item, ctx, others=()):
     try:
         if hasattr(driver, "execute_cdp_cmd"):
             use_photos_tab(driver)  # focused (keystrokes reach only a front tab), downloads re-armed here (P-12)
-        driver.get(f"{PHOTOS_URL}/photo/{pid}")
-        check_session_alive(driver)
+        if not _on_item_page(driver, pid):
+            driver.get(f"{PHOTOS_URL}/photo/{pid}")
+            check_session_alive(driver)
         if _shows_item(driver, pid, key) and _shift_d_here(driver, ctx, others):
             print(f"     ⬇️ {name}: Shift+D on its item page")
             return True

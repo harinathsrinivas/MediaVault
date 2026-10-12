@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 7 Shift+D page reuse
+STATE: IN PROGRESS — next: 8 allowlist check after every test
 
 # IMP-C25 Step 12 follow-up — the judge's 10 cherry-picks into the merged locator (candidate C) — resumable status
 
@@ -72,9 +72,18 @@ tests pass, with its SHA. Pathspec commits only; never -A, amend, rebase or stas
       test_a_located_item_fetching_nothing_verified_gets_another_verified_copy_before_todays_search (re-split,
       names-only, library = the OLDER set: 4 deleted downloads, then both copies fetched + learned, S4 never runs;
       the only test failing with `_another_copy` disarmed in-process) ·
-      test_a_copy_that_brings_other_bytes_too_keeps_the_first_finds_evidence — WIP commit "6 another verified copy"
-      (SHA in the next commit) · tests/test_locator.py 87 passed
-- [ ] 7 Shift+D reuses the open item page when its address already names the item (C's own-address check kept)
+      test_a_copy_that_brings_other_bytes_too_keeps_the_first_finds_evidence — 64b0f00 · tests/test_locator.py 87
+      passed
+- [x] 7 Shift+D reuses the open item page — `_on_item_page(driver, pid)`: the tab's address names the item
+      (`gpweb.photo_id_from_url`, so a click-opened `/search/…/photo/<id>` page counts too) AND its record is in the
+      page now (A's instant look) → `_shift_d_trigger` skips the reload; C's `_shows_item` (own address + record, with
+      its wait) still runs before every keystroke. Tests: test_shift_d_reuses_the_item_page_its_locate_opened ·
+      test_shift_d_never_reuses_a_neighbours_page_that_embeds_the_item · test_with_rpc_down_a_season_costs_one_item_
+      page_per_episode (3 episodes → 3 item pages, was 6). The shared fake answers no CDP Target.* command (so
+      use_photos_tab always opened a fresh tab there and no page could be reused); these tests answer
+      Target.getTargetInfo as Chrome does (test-local `_tab_info_like_chrome`). In-process disarms: no reuse → the two
+      reuse tests fail; reuse ignoring the address → the neighbour test fails — WIP commit "7 Shift+D page reuse" (SHA
+      in the next commit) · tests/test_locator.py 90 passed
 - [ ] 8 RPC allowlist check after every locator test (tests only)
 - [ ] 9 no 20-candidate cap when the RPC records already carry dedupKeys
 - [ ] 10 `locate` early stop passes `last=True` to `_close_session`

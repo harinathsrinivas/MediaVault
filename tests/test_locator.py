@@ -1846,3 +1846,72 @@ def test_a_copy_that_brings_other_bytes_too_keeps_the_first_finds_evidence(capsy
     [row] = mvcommon.read_failed()
     assert (row["reason"], row["candidates"]) == ("inconsistent", [first_pid, copy_pid, seen])
     assert row["tried"] == [{"approach": "exact_name", "outcome": "ambiguous", "n": 3}]
+
+
+def _tab_info_like_chrome(monkeypatch):
+    """CDP Target.getTargetInfo answered as Chrome answers it — the tab the driver is in is a normal page at its
+    address — so use_photos_tab KEEPS a Photos tab it is already in (the shared fake answers no Target.* command:
+    there use_photos_tab always opens a fresh Photos tab, and no item page could ever be reused)."""
+    real = gphotos_fake.FakeDriver.execute_cdp_cmd
+
+    def cdp(driver, cmd, params):
+        if cmd == "Target.getTargetInfo":
+            return {"targetInfo": {"targetId": driver.current_window_handle, "type": "page", "url": driver.current_url}}
+        return real(driver, cmd, params)
+
+    monkeypatch.setattr(gphotos_fake.FakeDriver, "execute_cdp_cmd", cdp)
+
+
+def _gets(monkeypatch):
+    """Every address the fake drivers load from now on."""
+    loaded, real = [], gphotos_fake.FakeDriver.get
+    monkeypatch.setattr(gphotos_fake.FakeDriver, "get", lambda driver, url: loaded.append(url) or real(driver, url))
+    return loaded
+
+
+def test_shift_d_reuses_the_item_page_its_locate_opened(fake_photos, tmp_path, monkeypatch):
+    # Pick 7 (from A): on the web-page path the item's own page is open after its locate — Shift+D is pressed there,
+    # not on a second load of it. The page still has to show the item at its own address first (C's _shows_item).
+    fake_photos.wiz_token_missing["tv"] = True
+    ctx, d, item, fake, incoming = _armed(fake_photos, tmp_path)
+    assert item["_located"]["via"] == "ui" and gpweb.photo_id_from_url(d.current_url) == fake.photo_id
+    _tab_info_like_chrome(monkeypatch)
+    loaded = _gets(monkeypatch)
+
+    assert mainfetch._shift_d_trigger(d, item, ctx) is True
+
+    assert loaded == [] and _files(incoming) == [fake.filename]
+    assert [a["photo_id"] for a in d.actions if a["kind"] == "shift_d"] == [fake.photo_id]
+
+
+def test_shift_d_never_reuses_a_neighbours_page_that_embeds_the_item(fake_photos, tmp_path, monkeypatch):
+    # Pick 7 keeps C's own-address rule: a neighbour's page embeds the located item's record as well — it is NOT
+    # reused; the item's own page is loaded and Shift+D downloads the item, never the neighbour.
+    ctx, d, item, fake, incoming = _armed(fake_photos, tmp_path)
+    neighbour = fake_photos.add_item("tv", "Other.Show.S09E09 [o9o9o9].mkv", taken=TAKEN)
+    d.get(f"{gphotos_fake.PHOTOS_URL}/photo/{neighbour.photo_id}")
+    assert gpweb.page_record(d.page_source, fake.photo_id)                  # the item's record IS in this page
+    _tab_info_like_chrome(monkeypatch)
+    loaded = _gets(monkeypatch)
+
+    assert mainfetch._shift_d_trigger(d, item, ctx) is True
+
+    assert loaded == [f"{mainfetch.PHOTOS_URL}/photo/{fake.photo_id}"]
+    assert [a["photo_id"] for a in d.actions if a["kind"] == "shift_d"] == [fake.photo_id]
+    assert _files(incoming) == [fake.filename]
+
+
+def test_with_rpc_down_a_season_costs_one_item_page_per_episode(flow, sandbox, monkeypatch):
+    # Pick 7 in a fetch (the judge's count: 20 → 10 item pages for 10 episodes when RPC is down): each episode's own
+    # page, read by its locate, takes its Shift+D — it is never loaded a second time.
+    flow.world.wiz_token_missing["tv"] = True
+    folder, items = _season(sandbox, flow.world, (1, 2, 3))
+    _tab_info_like_chrome(monkeypatch)
+    loaded = _gets(monkeypatch)
+
+    mainfetch.cmd_fetch_route(SEASON)
+
+    assert sorted(p.name for p in (folder / "restore").iterdir()) == [f"Demo.S01E0{n}.mkv" for n in (1, 2, 3)]
+    assert sorted(u for u in loaded if "/photo/" in u) == sorted(
+        f"{mainfetch.PHOTOS_URL}/photo/{i.photo_id}" for i in items.values())   # one page per episode, not two
+    assert [r["via"] for r in flow.world.downloads] == ["shift_d"] * 3 and flow.legacy == []

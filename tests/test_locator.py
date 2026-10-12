@@ -1685,3 +1685,73 @@ def test_a_located_item_whose_downloads_hold_other_bytes_ends_inconsistent_with_
             "library's (inconsistent); added to the failed list.") in out
     assert "the search picked another item" not in out and "❌ ENTRY INCOMPLETE." in out
     assert not (folder / "restore" / mainfetch.INCOMING_DIR_NAME).exists()      # every wrong copy deleted
+
+
+def test_a_download_of_another_object_of_the_window_never_confirms_this_ones_start(tmp_path):
+    # Pick 4 (from B): the window's other downloads are not this request's — not their partials, not their finished
+    # files, not Chrome's ' (n)' variants. An 'Unconfirmed N.crdownload' names no object: it still counts.
+    folder = tmp_path / "incoming"
+    folder.mkdir()
+    ctx = mainfetch.FetchContext()
+    ctx.target = {"dir": str(folder)}
+    before = mainfetch._watched_now(ctx)
+    (folder / "Other [o1o1o1].chunk.001.mkv.crdownload").write_bytes(b"x")    # named while this request waits
+    (folder / "Other [o1o1o1].chunk.002 (1).mkv").write_bytes(b"x")           # a ' (n)' copy of another one
+    others = ["Other [o1o1o1].chunk.001.mkv", "Other [o1o1o1].chunk.002.mkv"]
+    assert mainfetch._download_started(ctx, before, others) is False
+    assert mainfetch._download_started(ctx, before) is True                     # without them: taken for its own
+    (folder / "Unconfirmed 12.crdownload").write_bytes(b"x")
+    assert mainfetch._download_started(ctx, before, others) is True
+
+
+def test_a_window_never_takes_another_objects_download_for_its_own_start(flow, sandbox, capsys, monkeypatch, clock):
+    # Pick 4 in a fetch: chunk 1's download is still unnamed ('Unconfirmed N.crdownload') when chunk 2's link is
+    # opened, and Chrome names it while chunk 2's start is being confirmed. Before, that new '<chunk 1>.crdownload'
+    # confirmed chunk 2's direct download: chunk 2 was booked 'direct' and its round waited the 300 s harvest timeout
+    # for a file never requested. Now chunk 2's link started nothing — Shift+D fetches it at once.
+    flow.world.download_mode = "manual"
+    folder = sandbox["local_root"] / "Movies" / "Pair (2018)"
+    folder.mkdir(parents=True)
+    stem, sid, taken = "Pair.2018", "p2p2p2", "2025-06-06T06:06:06Z"
+    datas = [_bytes("pair1"), _bytes("pair2")]
+    names = [f"{stem} [{sid}].chunk.00{n}.mkv" for n in (1, 2)]
+    items = [flow.world.add_item("movies", name, data=d, taken=taken) for name, d in zip(names, datas)]
+    _capture(folder, sid, [_obj(d, name, role="chunk", index=n, date_utc=taken)
+                           for n, (name, d) in enumerate(zip(names, datas), 1)])
+    mvcommon.save_library({"mov-en-2018-pair": _split(folder, f"{stem}.mkv", sid, datas)})
+    real_direct, real_harvest = gphotos_fake.FakeDriver._direct_download, mainfetch.harvest_downloads
+
+    def direct(driver, url):
+        if flow.world.minted[url.rsplit("/", 1)[-1]]["keys"] == [items[1].photo_id]:
+            return None                                      # chunk 2's link: no download starts, the tab stays
+        real_direct(driver, url)
+        rec = flow.world.downloads[-1]                       # chunk 1's partial, not named yet …
+        named, rec["partial"] = rec["partial"], os.path.join(os.path.dirname(rec["partial"]), "Unconfirmed 4711.crdownload")
+        os.replace(named, rec["partial"])
+
+        def name_it():                                       # … until Chrome names it, 5 s later
+            os.replace(rec["partial"], named)
+            rec["partial"] = named
+        clock.after(5, name_it)
+
+    def harvest(queue, ctx):
+        flow.world.finish_downloads()
+        return real_harvest(queue, ctx)
+
+    monkeypatch.setattr(gphotos_fake.FakeDriver, "_direct_download", direct)
+    monkeypatch.setattr(mainfetch, "harvest_downloads", harvest)
+    started = clock.now
+
+    mainfetch.cmd_fetch_route("mov-en-2018-pair")
+
+    out = capsys.readouterr().out
+    assert f"⬇️ {names[0]}: direct download" in out and f"⬇️ {names[1]}: direct download" not in out
+    assert f"↪️ {names[1]}: the direct download did not start" in out
+    assert f"⬇️ {names[1]}: Shift+D on its item page" in out
+    assert [(r["photo_id"], r["via"]) for r in flow.world.downloads] == [(items[0].photo_id, "direct"),
+                                                                         (items[1].photo_id, "shift_d")]
+    assert "Timeout (No active downloads)" not in out and "never arrived" not in out
+    assert clock.now - started < mainfetch.TRIGGER_CONFIRM_S * 3                 # no 300 s harvest timeout
+    assert [o["method"] for o in _journal_objects()] == ["direct", "shift_d"]
+    for name, data in zip(names, datas):
+        assert (folder / "restore" / name).read_bytes() == data

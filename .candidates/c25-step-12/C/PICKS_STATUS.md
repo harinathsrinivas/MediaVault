@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 4 start confirmation
+STATE: IN PROGRESS — next: 5 HTML link page
 
 # IMP-C25 Step 12 follow-up — the judge's 10 cherry-picks into the merged locator (candidate C) — resumable status
 
@@ -39,9 +39,19 @@ tests pass, with its SHA. Pathspec commits only; never -A, amend, rebase or stas
       `_record_unfetched` books located + `_other_bytes` as `inconsistent` (its item first among the candidates; a
       wrong pick of today's attempts still folded in as legacy wrong-item(n)). Test:
       test_a_located_item_whose_downloads_hold_other_bytes_ends_inconsistent_with_one_row[names-only / content-key]
-      (B's scenario + the storage-saver form: the content key matches, the served bytes do not) — WIP commit
-      "3 inconsistent reason" (SHA in the next commit) · tests/test_locator.py 81 passed · fetch suites 328 passed
-- [ ] 4 start confirmation ignores the other downloads of the same window
+      (B's scenario + the storage-saver form: the content key matches, the served bytes do not) — 6d9c258 ·
+      tests/test_locator.py 81 passed · fetch suites 328 passed
+- [x] 4 start confirmation ignores the other downloads of the same window — `_download_started(ctx, before,
+      others=())` skips any new file whose family base (`_family_bases`: '.crdownload' and Chrome's ' (n)' stripped)
+      is one of `others`; `_download_names(item)` = the uploaded name + the found item's file name; `_fetch_window`
+      passes each request the names of the window's OTHER objects (its own names excluded) through `_fire`, so
+      IMP-C34's re-request keeps them; `_direct_trigger` / `_shift_d_trigger` / `_shift_d_here` take `others`.
+      'Unconfirmed N.crdownload' names no object and still counts (as in B). Tests:
+      test_a_download_of_another_object_of_the_window_never_confirms_this_ones_start (unit) ·
+      test_a_window_never_takes_another_objects_download_for_its_own_start (a 2-chunk window: chunk 1's partial is
+      named by Chrome while chunk 2's start is confirmed — before: chunk 2 booked 'direct' + a 300 s harvest timeout).
+      Both checked to FAIL with the fix disarmed in-process (scratch plugin) — WIP commit "4 start confirmation" (SHA
+      in the next commit) · tests/test_locator.py 83 passed
 - [ ] 5 a link page answering with HTML is left at once (no 20 s wait on a bearer-credential address)
 - [ ] 6 another verified copy (re-locate with `exclude`) before today's blind S4 attempts
 - [ ] 7 Shift+D reuses the open item page when its address already names the item (C's own-address check kept)

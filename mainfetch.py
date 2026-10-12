@@ -3137,14 +3137,28 @@ def _watched_now(ctx):
         return set()
 
 
-def _download_started(ctx, before):
+def _download_names(item):
+    """The names a located object's download may carry: its exact uploaded name and its found item's file name (an
+    item uploaded under another name keeps that one)."""
+    record = (item.get("_trigger") or {}).get("record") or {}
+    names = ((item.get("locator") or {}).get("uploaded_name"), record.get("filename"))
+    return [name for name in dict.fromkeys(names) if isinstance(name, str) and name]
+
+
+def _download_started(ctx, before, others=()):
     """[P-12 / P-20] True once a download requested after `before` (the watched folder's names then) shows: a new
     partial ('<name>.crdownload', Chrome's 'Unconfirmed N.crdownload') or a new finished file whose partial was not
     there before (a small file finishes between two looks) — within TRIGGER_CONFIRM_S. An earlier download that
-    finishes meanwhile does not count: its partial was already there."""
+    finishes meanwhile does not count: its partial was already there. Nor does a file of `others` — the names the
+    OTHER downloads of the same window may carry (_download_names), their ' (n)' variants and partials included:
+    Chrome may name or finish one of them while this request is confirmed (an 'Unconfirmed N.crdownload' names no
+    object, so it counts)."""
+    others = {_family_key(name) for name in others if isinstance(name, str) and name}
     deadline = time.time() + TRIGGER_CONFIRM_S
     while True:
         for name in _watched_now(ctx) - before:
+            if others and any(base in others for base in _family_bases(name)):
+                continue  # another object's download of this window
             if name.endswith(_CRDOWNLOAD) or name + _CRDOWNLOAD not in before:
                 return True
         if time.time() >= deadline:
@@ -3186,13 +3200,14 @@ def _back_on_photos(driver):
         check_session_alive(driver)
 
 
-def _direct_trigger(driver, item, ctx):
+def _direct_trigger(driver, item, ctx, others=()):
     """(ii) P-20's direct download: a FRESH original-quality link for the located item — gprpc.download_url (item
     info's [7], else pLFTfd with that ONE key) — minted now and opened in the automation Chrome, whose downloads go
     to the entry's folder (_rearm_downloads right before). The link lives in this call only: never stored, printed,
     logged or journaled (gprpc's redacted DownloadUrl; reveal() only for driver.get). True once the download shows
-    in the watched folder (_download_started); False when RPC is off, no link was minted or nothing started (an
-    HTML answer, a refused link) — the caller then tries (i), Shift+D."""
+    in the watched folder (_download_started — never one of `others`, the window's other downloads); False when RPC
+    is off, no link was minted or nothing started (an HTML answer, a refused link) — the caller then tries (i),
+    Shift+D."""
     if not _rpc_ok(driver, ctx):
         return False
     name = item["filename"]
@@ -3212,7 +3227,7 @@ def _direct_trigger(driver, item, ctx):
         except Exception:  # a navigation that becomes a download may end in an error or a timeout: the folder decides
             pass
         link = None
-        started = _download_started(ctx, before)
+        started = _download_started(ctx, before, others)
         _back_on_photos(driver)
     except SessionExpiredError:
         raise
@@ -3245,12 +3260,13 @@ def _shows_item(driver, photo_id, key):
         time.sleep(ITEM_POLL_S)
 
 
-def _shift_d_here(driver, ctx):
-    """Shift+D on the item page now shown (once its viewer is up); True once a download shows in the watched folder."""
+def _shift_d_here(driver, ctx, others=()):
+    """Shift+D on the item page now shown (once its viewer is up); True once a download shows in the watched folder
+    (never one of `others`, the window's other downloads)."""
     time.sleep(VIEWER_SETTLE_S)
     before = _watched_now(ctx)
     webdriver.ActionChains(driver).key_down(Keys.SHIFT).send_keys("d").key_up(Keys.SHIFT).perform()
-    return _download_started(ctx, before)
+    return _download_started(ctx, before, others)
 
 
 def _open_from_results(driver, photo_id, query):
@@ -3288,11 +3304,11 @@ def _click_queries(item):
     return [q for q in dict.fromkeys(queries) if isinstance(q, str) and q.strip()]
 
 
-def _shift_d_trigger(driver, item, ctx):
+def _shift_d_trigger(driver, item, ctx, others=()):
     """(i) the located item's page, focused, then Shift+D — the web app's own original download. When the keystroke
     starts nothing on a directly loaded page (unverified live: PLAN Step 12 / R2), the click path opens the item from
     search results and presses it there. The page must show the located item (_shows_item) before any keystroke.
-    True once a download shows in the watched folder."""
+    True once a download shows in the watched folder (never one of `others`, the window's other downloads)."""
     name = item["filename"]
     pid = item["_located"]["photo_id"]
     key = _content_key(item.get("locator") or {})
@@ -3301,11 +3317,12 @@ def _shift_d_trigger(driver, item, ctx):
             use_photos_tab(driver)  # focused (keystrokes reach only a front tab), downloads re-armed here (P-12)
         driver.get(f"{PHOTOS_URL}/photo/{pid}")
         check_session_alive(driver)
-        if _shows_item(driver, pid, key) and _shift_d_here(driver, ctx):
+        if _shows_item(driver, pid, key) and _shift_d_here(driver, ctx, others):
             print(f"     ⬇️ {name}: Shift+D on its item page")
             return True
         for query in _click_queries(item):
-            if _open_from_results(driver, pid, query) and _shows_item(driver, pid, key) and _shift_d_here(driver, ctx):
+            if (_open_from_results(driver, pid, query) and _shows_item(driver, pid, key)
+                    and _shift_d_here(driver, ctx, others)):
                 print(f"     ⬇️ {name}: Shift+D after opening it from its search results")
                 return True
     except SessionExpiredError:
@@ -3474,7 +3491,8 @@ def _locate_item(driver, item, ctx):
 def _fetch_window(driver, window, queue, ctx):
     """Step 2 of _run_locator_phase for ≤ DIRECT_DOWNLOAD_CONCURRENCY located objects: (ii) direct, harvest; (i)
     Shift+D for what is still pending, harvest. Each round harvests only its own requests (+ the entry's fetched
-    objects, so a duplicate is told apart) — an object not requested yet never holds a round up."""
+    objects, so a duplicate is told apart) — an object not requested yet never holds a round up. A request's start
+    is never confirmed by a download of the window's OTHER objects (_download_started's `others`)."""
     run = _locator_run(ctx)
     for method, trigger in (("direct", _direct_trigger), ("shift_d", _shift_d_trigger)):
         todo = [i for i in window if i["status"] == "pending"]
@@ -3482,7 +3500,10 @@ def _fetch_window(driver, window, queue, ctx):
             continue
         for item in todo:
             item["_trigger"]["method"] = method
-            if _fire(item, lambda item=item, trigger=trigger: trigger(driver, item, ctx)):
+            own = {_family_key(name) for name in _download_names(item)}
+            others = [name for other in window if other is not item for name in _download_names(other)
+                      if _family_key(name) not in own]
+            if _fire(item, lambda item=item, trigger=trigger, others=others: trigger(driver, item, ctx, others)):
                 _session_stats(ctx)[method] += 1
         _journal_sync(ctx, queue)
         requested = {id(i) for i in todo if i["triggered"]}

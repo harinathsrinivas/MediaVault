@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 2 failed-list rows
+STATE: IN PROGRESS — next: 3 inconsistent reason
 
 # IMP-C25 Step 12 follow-up — the judge's 10 cherry-picks into the merged locator (candidate C) — resumable status
 
@@ -21,10 +21,18 @@ tests pass, with its SHA. Pathspec commits only; never -A, amend, rebase or stas
 - [x] 1 contract shape — `per_approach[<approach>]` exactly `{outcome, n}`; `via` in a parallel map
       `per_approach_via` ({approach: rpc|ui}, same keys and order); pinned by `test_the_result_carries_the_whole_contract`
       [fast-path / approaches-all / web-pages] (contract keys; every entry exactly {outcome, n}; the entries passed
-      UNCHANGED as failed-list `tried` rows are accepted by `mvcommon.append_failed` — the judge's probe) — WIP commit
-      "1 contract shape" (SHA backfilled below) · tests/test_locator.py 77 passed
-- [ ] 2 failed-list rows — one row per unlocated object with the stages' evidence, booked BEFORE
-      `_record_wrong_items`, today's wrong pick folded into that row
+      UNCHANGED as failed-list `tried` rows are accepted by `mvcommon.append_failed` — the judge's probe) — e5135c1 ·
+      tests/test_locator.py 77 passed
+- [x] 2 failed-list rows — `_record_unlocated` → `_record_unfetched` (renamed: it now also books a LOCATED object
+      that today's search then mis-picked), called BEFORE `_record_wrong_items` in `_fetch_items`: one row per object
+      the stages examined that nothing fetched — tried = the stages' verdicts with today's wrong pick folded in as
+      `legacy wrong-item(n)` (replacing the OD-5 preview's `legacy` verdict, A's rule), candidates = what the stages saw
+      (a found item first), expected_taken_local; `_record_wrong_items` keeps only objects the stages never saw.
+      Tests: test_one_failed_row_keeps_the_stages_evidence_when_todays_search_then_picks_another_item (the judge's
+      probe through cmd_fetch_route, today's REAL trigger_download clicking in the fake world) ·
+      test_the_stages_book_every_object_they_examined_once_and_leave_the_rest_to_the_wrong_item_booking (the rules,
+      six objects) — WIP commit "2 failed-list rows" (SHA in the next commit) · tests/test_locator.py 79 passed ·
+      fetch suites (harvester, hygiene, routing, trigger retry) 234 passed
 - [ ] 3 `inconsistent` reason — a located object whose verified item's downloads keep arriving with other bytes
 - [ ] 4 start confirmation ignores the other downloads of the same window
 - [ ] 5 a link page answering with HTML is left at once (no 20 s wait on a bearer-credential address)

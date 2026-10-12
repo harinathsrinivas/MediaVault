@@ -35,6 +35,7 @@ TAKEN_MS = 1644061786000
 EP = "tv-en-2015-exampleshow-s02e03"
 SHOW = "Example.Show.S02E03.Pilot.2015.1080p.BluRay.mkv"
 SID = "a1b2c3"
+TRIGGER_DOWNLOAD = mainfetch.trigger_download   # today's legacy trigger (S4) — captured before any fixture stubs it
 
 
 @pytest.fixture(autouse=True)
@@ -1571,3 +1572,84 @@ def test_the_result_carries_the_whole_contract(fake_photos, tmp_path, run):
     tried = [dict(approach=approach, **verdict) for approach, verdict in res["per_approach"].items()]
     mvcommon.append_failed({"account": "tv", "manual_id": EP, "reason": "ambiguous", "tried": tried})
     assert mvcommon.read_failed()[0]["tried"] == tried                 # Step 13 passes them through as they are
+
+
+def _todays_attempts_click(flow, monkeypatch):
+    """Today's two attempts (S4) really search and click in the fake world — recorded in flow.legacy as before."""
+    monkeypatch.setattr(mainfetch, "trigger_download", lambda driver, query, index=0: flow.legacy.append(
+        (query, index)) or TRIGGER_DOWNLOAD(driver, query, index))
+
+
+def test_one_failed_row_keeps_the_stages_evidence_when_todays_search_then_picks_another_item(flow, sandbox, capsys,
+                                                                                             monkeypatch):
+    # Pick 2 (from A / B; the judge's probe — defect 6): a legacy object no stage pins, and today's attempt then clicks
+    # ANOTHER item. Its ONE row keeps what every stage saw — booked BEFORE _record_wrong_items, the wrong pick folded in
+    # as legacy wrong-item(1) — so resolve_photos (PLAN Step 14) still shows the candidates. Before: a bare
+    # [legacy wrong-item] row without candidates.
+    _todays_attempts_click(flow, monkeypatch)
+    folder, name, sid = _episode_folder(sandbox), "Demo.S04E08.mkv", "l8l8l8"
+    other = flow.world.add_item("tv", "Demo.S04E08.Extended [l8x8x8].mkv", data=_bytes("another file"), taken=TAKEN)
+    flow.world.script_search("tv", _up(name, sid), [other.photo_id])             # S2 — and today's attempt 2 — see it
+    mvcommon.save_library({"tv-en-2015-demo-s04e08": _whole(folder, name, _bytes("legacy real"), sid)})
+
+    mainfetch.cmd_fetch_route("tv-en-2015-demo-s04e08")
+
+    out = capsys.readouterr().out
+    assert flow.legacy == [(name, 0), (_up(name, sid), 0)]                       # today's two attempts (S4) ran
+    assert [(d["photo_id"], d["via"]) for d in flow.world.downloads] == [(other.photo_id, "shift_d")]  # the blind click
+    assert "Wrong item downloaded (deleted)" in out and "❌ ENTRY INCOMPLETE." in out
+    [row] = mvcommon.read_failed()                                               # ONE row: never booked twice
+    assert (row["reason"], row["candidates"], row["sha256"]) == ("wrong-item", [other.photo_id],
+                                                                 _sha256(_bytes("legacy real")))
+    assert row["tried"] == [{"approach": "exact_name", "outcome": "wrong-item", "n": 1},
+                            {"approach": "title_sid", "outcome": "not-found", "n": 0},
+                            {"approach": "legacy", "outcome": "wrong-item", "n": 1}]
+    assert ("Not fetched: Demo.S04E08.mkv — no stage found its exact item, and today's search picked another item "
+            "(wrong-item); added to the failed list.") in out
+    assert "the search picked another item; added to the failed list (wrong-item)" not in out   # nothing left for it
+
+
+def test_the_stages_book_every_object_they_examined_once_and_leave_the_rest_to_the_wrong_item_booking(capsys):
+    # Pick 2's booking rules, one object each: a located object with a wrong pick of today's search (its found item
+    # first among the candidates) · a located object that simply did not arrive (no row: a re-run fetches it) · one no
+    # stage pinned (the stages' verdict) · one whose OD-5 preview verdict gives way to the wrong pick · one already
+    # 'failed' (it has its row) · one the stages never saw (left to _record_wrong_items).
+    ctx = _ctx()
+    pid, seen = "AF1QipFAKETVL0000001found", "AF1QipFAKETVL0000002other"
+
+    def obj(name, res, **marks):
+        loc = {"manual_id": "tv-en-2015-demo-s04e09", "label": name, "uploaded_name": name, "taken_ms": TAKEN_MS,
+               "device_tz_offset_min": 480}
+        item = {"filename": name, "hash": _sha256(name.encode()), "status": "pending", "locator": loc, **marks}
+        if res is not None:
+            item["_located"] = res
+        return item
+
+    found = {"found": True, "photo_id": pid, "candidates": [seen, pid],
+             "per_approach": {"exact_name": {"outcome": "exactly-one", "n": 2}}}
+    missed = {"found": False, "photo_id": None, "candidates": [seen],
+              "per_approach": {"hash": {"outcome": "not-found", "n": 0}, "exact_name": {"outcome": "ambiguous", "n": 1}}}
+    previewed = {"found": False, "photo_id": None, "candidates": [seen],
+                 "per_approach": {"exact_name": {"outcome": "wrong-item", "n": 1},
+                                  "legacy": {"outcome": "ambiguous", "n": 3}}}
+    queue = [obj("a.mkv", found, _wrong=1), obj("b.mkv", found), obj("c.mkv", missed), obj("d.mkv", previewed, _wrong=2),
+             obj("e.mkv", missed, _wrong=1, status="failed"), obj("f.mkv", None, _wrong=1)]
+
+    mainfetch._record_unfetched(queue, ctx)
+    mainfetch._record_wrong_items(queue, ctx)
+
+    assert [i["status"] for i in queue] == ["failed", "pending", "failed", "failed", "failed", "failed"]
+    rows = {r["label"]: r for r in mvcommon.read_failed()}
+    assert sorted(rows) == ["a.mkv", "c.mkv", "d.mkv", "f.mkv"]                  # b: no row · e: had its own
+    assert (rows["a.mkv"]["reason"], rows["a.mkv"]["candidates"]) == ("wrong-item", [pid, seen])
+    assert rows["a.mkv"]["tried"] == [{"approach": "exact_name", "outcome": "exactly-one", "n": 2},
+                                      {"approach": "legacy", "outcome": "wrong-item", "n": 1}]
+    assert rows["a.mkv"]["expected_taken_local"] == "2022-02-05 19:49:46 GMT+08:00"
+    assert (rows["c.mkv"]["reason"], rows["c.mkv"]["tried"]) == ("ambiguous", [
+        {"approach": "hash", "outcome": "not-found", "n": 0}, {"approach": "exact_name", "outcome": "ambiguous", "n": 1}])
+    assert rows["d.mkv"]["tried"] == [{"approach": "exact_name", "outcome": "wrong-item", "n": 1},
+                                      {"approach": "legacy", "outcome": "wrong-item", "n": 2}]   # the preview gave way
+    assert (rows["f.mkv"]["reason"], rows["f.mkv"]["tried"]) == ("wrong-item", [
+        {"approach": "legacy", "outcome": "wrong-item", "n": 1}])                # _record_wrong_items, as before
+    out = capsys.readouterr().out
+    assert out.count("the search picked another item; added to the failed list (wrong-item)") == 1   # f only

@@ -3340,7 +3340,8 @@ def _run_locator_phase(driver, queue, ctx):
       * a round in which a wrong item arrived marks each object requested in it
         `_wrong` (_note_losses); one still pending after the legacy attempts is
         booked wrong-item (_record_wrong_items) — an object a stage gives up on
-        itself is 'failed' with the stage's own failed-list row, never booked twice.
+        itself is 'failed' with the stage's own failed-list row, never booked twice
+        (Step 12: the stages' own booking, _record_unfetched, runs first).
 
     [IMP-C25 Step 12 — candidate C] What it does (nothing for a driver that cannot
     navigate or run page scripts — a stand-in: today's flow, byte for byte):
@@ -3358,8 +3359,9 @@ def _run_locator_phase(driver, queue, ctx):
          VERIFIED item's link that delivered other bytes is no wrong pick (P14: a
          transcode may be served): its `_wrong` mark is cleared, Shift+D follows.
     Whatever is still pending gets today's attempts (S4) unchanged; one the stages
-    could not locate and those attempts did not fetch goes to the failed list
-    after them (_record_unlocated, from _fetch_items)."""
+    examined that those attempts did not fetch either goes to the failed list after
+    them — one row with the stages' evidence and any wrong pick of those attempts
+    (_record_unfetched, from _fetch_items, before _record_wrong_items)."""
     if not _can_locate(driver):
         return None
     pending = [i for i in queue if i["status"] == "pending"]
@@ -3897,25 +3899,45 @@ def _record_wrong_items(queue, ctx):
         print(f"     ❌ Not fetched: {item['filename']} — the search picked another item{listed}.")
 
 
-def _record_unlocated(queue, ctx):
-    """[IMP-C25 Step 12 — P-18] After today's attempts and _record_wrong_items: an object the exact-item stages
-    examined and could NOT pin, which today's attempts did not fetch either, ends 'failed' with one failed-list row —
-    reason ambiguous (a stage saw candidates it could not tell apart) · wrong-item (candidates proven other items) ·
-    not-found; tried = every stage's outcome, candidates = what they saw, expected_taken_local. A LOCATED object that
-    ends unfetched is no failed-list object (its item is known — a re-run fetches it); an object already 'failed'
-    (lost twice, a wrong pick, OD-5's skip) has its row: never booked twice. Without the exact-item stages (the kill
-    switch, a stand-in driver) no object carries `_located`: nothing happens."""
+def _record_unfetched(queue, ctx):
+    """[IMP-C25 Step 12 — P-18] After today's attempts and IMP-C34's retry, BEFORE _record_wrong_items: an object the
+    exact-item stages examined (item['_located']) that nothing fetched ends 'failed' with ONE failed-list row carrying
+    their evidence — tried = every stage's verdict, candidates = the items they saw (its found item first),
+    expected_taken_local — and the reason:
+      wrong-item    today's attempts fetched another item for it (`_wrong`, booked by _note_losses): that pick is
+                    folded into the row as legacy wrong-item(n) — replacing the OD-5 preview's verdict: what the
+                    attempts fetched is the stronger fact;
+      otherwise     no stage pinned it: ambiguous (a stage saw candidates it could not tell apart) · wrong-item (every
+                    candidate proven another item) · not-found.
+    A LOCATED object that ends unfetched without a wrong pick gets no row (its item is known — a re-run fetches it);
+    an object already 'failed' (lost twice, OD-5's skip) has its row. _record_wrong_items, which runs next, is left
+    only the objects the stages never saw (the kill switch, a stand-in driver, a locate that raised): never booked
+    twice. Without the exact-item stages no object carries `_located`: nothing happens."""
     for item in queue:
         res = item.get("_located")
-        if not res or res["found"] or item["status"] != "pending":
+        if not res or item["status"] != "pending":
             continue
-        outcomes = [v["outcome"] for v in res["per_approach"].values()]
-        reason = "ambiguous" if "ambiguous" in outcomes else "wrong-item" if "wrong-item" in outcomes else "not-found"
+        wrong = item.get("_wrong")
+        if res["found"] and not wrong:
+            continue  # its item is known: a re-run fetches it
+        tried = _tried(res)
+        if wrong:
+            legacy = _LEGACY_STAGE[0]
+            tried = [t for t in tried if t["approach"] != legacy] + [
+                {"approach": legacy, "outcome": "wrong-item", "n": wrong}]
+            reason = "wrong-item"
+        else:
+            outcomes = [v["outcome"] for v in res["per_approach"].values()]
+            reason = "ambiguous" if "ambiguous" in outcomes else "wrong-item" if "wrong-item" in outcomes else "not-found"
         item["status"] = "failed"
+        candidates = list(dict.fromkeys(([res["photo_id"]] if res["found"] else []) + res["candidates"]))
         listed = "; added to the failed list" if _record_failed(
-            item, ctx, reason, _tried(res), res["candidates"][:LOCATE_MAX_CANDIDATES],
+            item, ctx, reason, tried, candidates[:LOCATE_MAX_CANDIDATES],
             _expected_local(item.get("locator") or {})) else ""
-        print(f"     ❌ Not fetched: {item['filename']} — no stage found its exact item ({reason}){listed}.")
+        why = ("its item was found but not fetched, and today's search then picked another item" if res["found"]
+               else "no stage found its exact item, and today's search picked another item" if wrong
+               else "no stage found its exact item")
+        print(f"     ❌ Not fetched: {item['filename']} — {why} ({reason}){listed}.")
 
 
 def _lost_downloads_line(ctx):
@@ -3978,10 +4000,11 @@ def _fetch_items(driver, queue, ctx, entry=None, owner_id=None):
 
     # [IMP-C34] A download lost and not requested since gets its one retry.
     _retry_lost_downloads(queue, ctx)
+    # [IMP-C25 Step 12] An object the exact-item stages examined and nothing fetched ends on the failed list with ONE
+    # row carrying their evidence (+ today's wrong pick) — before _record_wrong_items (P-18; a no-op without the stages).
+    _record_unfetched(queue, ctx)
     # [live check 2026-10-05] An object whose requests fetched only other items ends on the failed list.
     _record_wrong_items(queue, ctx)
-    # [IMP-C25 Step 12] ... and so does one no exact-item stage could locate (P-18; a no-op without the stages).
-    _record_unlocated(queue, ctx)
     _journal_sync(ctx, queue)
 
     # [IMP-C25 Step 11] Only now — after the retry's harvest — the entry's downloads end.

@@ -1653,3 +1653,35 @@ def test_the_stages_book_every_object_they_examined_once_and_leave_the_rest_to_t
         {"approach": "legacy", "outcome": "wrong-item", "n": 1}])                # _record_wrong_items, as before
     out = capsys.readouterr().out
     assert out.count("the search picked another item; added to the failed list (wrong-item)") == 1   # f only
+
+
+@pytest.mark.parametrize("keyed", [False, True], ids=["names-only", "content-key"])
+def test_a_located_item_whose_downloads_hold_other_bytes_ends_inconsistent_with_one_row(flow, sandbox, capsys,
+                                                                                         monkeypatch, keyed):
+    # Pick 3 (from B): the item that IS the object — its exact name proves it, or its content key (Google keeps the
+    # dedupKey of the ORIGINAL upload, a storage-saver item serves re-encoded bytes) — serves other bytes than the
+    # library holds, by its direct link AND by Shift+D, the web app's own original download: an IMP-C27 case, not
+    # "the search picked another item". ONE row, reason inconsistent, its item first among the candidates.
+    _todays_attempts_click(flow, monkeypatch)
+    folder, name, sid = _episode_folder(sandbox), "Demo.S04E11.mkv", "l1l1l1"
+    cloud = flow.world.add_item("tv", _up(name, sid), data=_bytes("cloud bytes"), taken=TAKEN)
+    library = _bytes("library bytes")
+    block = mvcommon.new_gphotos_block(_sha256(library), sha1=cloud.sha1_hex) if keyed else None
+    mvcommon.save_library({"tv-en-2015-demo-s04e11": _whole(folder, name, library, sid, block=block)})
+
+    mainfetch.cmd_fetch_route("tv-en-2015-demo-s04e11")
+
+    out = capsys.readouterr().out
+    stage = "S0b hash · proof dedupkey" if keyed else "S2 exact_name · proof filename"
+    assert f"🎯 {name}: {stage} · via rpc" in out
+    assert [(d["photo_id"], d["via"]) for d in flow.world.downloads] == [
+        (cloud.photo_id, "direct"), (cloud.photo_id, "shift_d"), (cloud.photo_id, "shift_d")]   # its link, Shift+D, S4
+    assert out.count("Wrong item downloaded (deleted)") == 3 and "RETRY" not in out
+    [row] = mvcommon.read_failed()                                               # ONE row: never booked twice
+    assert (row["reason"], row["candidates"][0]) == ("inconsistent", cloud.photo_id)
+    assert row["tried"][0] == {"approach": "hash" if keyed else "exact_name", "outcome": "exactly-one", "n": 1}
+    assert row["tried"][-1] == {"approach": "legacy", "outcome": "wrong-item", "n": 1}   # today's attempt, folded in
+    assert ("Not fetched: Demo.S04E11.mkv — its item was found, but what it serves held other bytes than the "
+            "library's (inconsistent); added to the failed list.") in out
+    assert "the search picked another item" not in out and "❌ ENTRY INCOMPLETE." in out
+    assert not (folder / "restore" / mainfetch.INCOMING_DIR_NAME).exists()      # every wrong copy deleted

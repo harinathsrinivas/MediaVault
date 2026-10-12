@@ -3358,6 +3358,9 @@ def _run_locator_phase(driver, queue, ctx):
          broke, or served other bytes (SHA-256 decides) — and one more round. A
          VERIFIED item's link that delivered other bytes is no wrong pick (P14: a
          transcode may be served): its `_wrong` mark is cleared, Shift+D follows.
+         When Shift+D — the web app's own original — delivers other bytes as well,
+         that mark is kept apart (`_other_bytes`): unless today's attempts still
+         fetch the object, it ends `inconsistent` (P-18, IMP-C27).
     Whatever is still pending gets today's attempts (S4) unchanged; one the stages
     examined that those attempts did not fetch either goes to the failed list after
     them — one row with the stages' evidence and any wrong pick of those attempts
@@ -3382,6 +3385,10 @@ def _run_locator_phase(driver, queue, ctx):
         _fetch_window(driver, located[start:start + DIRECT_DOWNLOAD_CONCURRENCY], queue, ctx)
     for item in located:
         if item["status"] == "pending":
+            if item.get("_wrong"):
+                # its VERIFIED item's own download (Shift+D; the direct round's mark was cleared) held other bytes —
+                # kept apart from what today's attempts may fetch next: P-18 `inconsistent` (_record_unfetched)
+                item["_other_bytes"] = item.pop("_wrong")
             item["_trigger"]["method"] = None  # today's attempts take over (the journal then says legacy)
     return None
 
@@ -3904,27 +3911,34 @@ def _record_unfetched(queue, ctx):
     exact-item stages examined (item['_located']) that nothing fetched ends 'failed' with ONE failed-list row carrying
     their evidence — tried = every stage's verdict, candidates = the items they saw (its found item first),
     expected_taken_local — and the reason:
-      wrong-item    today's attempts fetched another item for it (`_wrong`, booked by _note_losses): that pick is
-                    folded into the row as legacy wrong-item(n) — replacing the OD-5 preview's verdict: what the
-                    attempts fetched is the stronger fact;
+      inconsistent  it was LOCATED, but its verified item's own download held other bytes than the library's
+                    (`_other_bytes`, kept apart by _run_locator_phase): the item IS the object — its content key or
+                    its exact name proves it — yet what Google Photos serves is not its bytes (a storage-saver or
+                    partial upload: IMP-C27), not "the search picked another item";
+      wrong-item    today's attempts fetched another item for it (`_wrong`, booked by _note_losses);
       otherwise     no stage pinned it: ambiguous (a stage saw candidates it could not tell apart) · wrong-item (every
                     candidate proven another item) · not-found.
-    A LOCATED object that ends unfetched without a wrong pick gets no row (its item is known — a re-run fetches it);
-    an object already 'failed' (lost twice, OD-5's skip) has its row. _record_wrong_items, which runs next, is left
-    only the objects the stages never saw (the kill switch, a stand-in driver, a locate that raised): never booked
-    twice. Without the exact-item stages no object carries `_located`: nothing happens."""
+    What today's attempts fetched instead is folded into the row as legacy wrong-item(n), replacing the OD-5
+    preview's verdict (what the attempts fetched is the stronger fact). A LOCATED object that simply ends unfetched
+    gets no row (its item is known — a re-run fetches it); an object already 'failed' (lost twice, OD-5's skip) has
+    its row. _record_wrong_items, which runs next, is left only the objects the stages never saw (the kill switch, a
+    stand-in driver, a locate that raised): never booked twice. Without the exact-item stages no object carries
+    `_located`: nothing happens."""
     for item in queue:
         res = item.get("_located")
         if not res or item["status"] != "pending":
             continue
-        wrong = item.get("_wrong")
-        if res["found"] and not wrong:
+        wrong, other = item.get("_wrong"), res["found"] and item.get("_other_bytes")
+        if res["found"] and not (wrong or other):
             continue  # its item is known: a re-run fetches it
         tried = _tried(res)
         if wrong:
             legacy = _LEGACY_STAGE[0]
             tried = [t for t in tried if t["approach"] != legacy] + [
                 {"approach": legacy, "outcome": "wrong-item", "n": wrong}]
+        if other:
+            reason = "inconsistent"
+        elif wrong:
             reason = "wrong-item"
         else:
             outcomes = [v["outcome"] for v in res["per_approach"].values()]
@@ -3934,7 +3948,8 @@ def _record_unfetched(queue, ctx):
         listed = "; added to the failed list" if _record_failed(
             item, ctx, reason, tried, candidates[:LOCATE_MAX_CANDIDATES],
             _expected_local(item.get("locator") or {})) else ""
-        why = ("its item was found but not fetched, and today's search then picked another item" if res["found"]
+        why = ("its item was found, but what it serves held other bytes than the library's" if other
+               else "its item was found but not fetched, and today's search then picked another item" if res["found"]
                else "no stage found its exact item, and today's search picked another item" if wrong
                else "no stage found its exact item")
         print(f"     ❌ Not fetched: {item['filename']} — {why} ({reason}){listed}.")

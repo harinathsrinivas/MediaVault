@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 3 inconsistent reason
+STATE: IN PROGRESS — next: 4 start confirmation
 
 # IMP-C25 Step 12 follow-up — the judge's 10 cherry-picks into the merged locator (candidate C) — resumable status
 
@@ -31,9 +31,16 @@ tests pass, with its SHA. Pathspec commits only; never -A, amend, rebase or stas
       Tests: test_one_failed_row_keeps_the_stages_evidence_when_todays_search_then_picks_another_item (the judge's
       probe through cmd_fetch_route, today's REAL trigger_download clicking in the fake world) ·
       test_the_stages_book_every_object_they_examined_once_and_leave_the_rest_to_the_wrong_item_booking (the rules,
-      six objects) — WIP commit "2 failed-list rows" (SHA in the next commit) · tests/test_locator.py 79 passed ·
-      fetch suites (harvester, hygiene, routing, trigger retry) 234 passed
-- [ ] 3 `inconsistent` reason — a located object whose verified item's downloads keep arriving with other bytes
+      six objects) — 8a5e88e · tests/test_locator.py 79 passed · fetch suites (harvester, hygiene, routing, trigger
+      retry) 234 passed
+- [x] 3 `inconsistent` reason — at the end of `_run_locator_phase` a located object still pending whose `_wrong` mark
+      survived the locator's rounds (the direct round's mark is cleared — a link may serve a transcode, P14 — so it is
+      the Shift+D round's: the web app's own original held other bytes) gets it moved to `_other_bytes`;
+      `_record_unfetched` books located + `_other_bytes` as `inconsistent` (its item first among the candidates; a
+      wrong pick of today's attempts still folded in as legacy wrong-item(n)). Test:
+      test_a_located_item_whose_downloads_hold_other_bytes_ends_inconsistent_with_one_row[names-only / content-key]
+      (B's scenario + the storage-saver form: the content key matches, the served bytes do not) — WIP commit
+      "3 inconsistent reason" (SHA in the next commit) · tests/test_locator.py 81 passed · fetch suites 328 passed
 - [ ] 4 start confirmation ignores the other downloads of the same window
 - [ ] 5 a link page answering with HTML is left at once (no 20 s wait on a bearer-credential address)
 - [ ] 6 another verified copy (re-locate with `exclude`) before today's blind S4 attempts
@@ -57,6 +64,25 @@ tests pass, with its SHA. Pathspec commits only; never -A, amend, rebase or stas
   asserted through `per_approach_via` (the evidence each test pinned — which path a stage took — is kept).
 
 ## Decisions / assumptions
+- Commit trailer: `Co-Authored-By: Claude Fable 5.1` — the session's own model id is claude-fable-5-1 (the dispatch
+  asks for the model I actually am); the harness's attribution notice switched to "Opus 5.5" mid-session, the same
+  quirk candidate C and the judge recorded.
+- Item 1: the parallel map is named `per_approach_via` ({approach: "rpc" | "ui"}, same keys, same order).
+- Item 2: `_record_unlocated` renamed `_record_unfetched` — it now also books a LOCATED object (a wrong pick of
+  today's search, item 3's inconsistent case), so the old name would mislead Steps 13/14; no test referenced it.
+  Today's wrong pick REPLACES the OD-5 preview's `legacy` verdict in `tried` (A's rule — one `legacy` entry, the
+  attempts' actual outcome) instead of B's "add only when absent"; n = the rounds that fetched another item (as
+  `_record_wrong_items` counts it).
+- Item 2: a LOCATED object that simply ends unfetched (its download did not start or arrive, no wrong bytes) still
+  gets NO row — C's rule ("its item is known, a re-run fetches it"); B's `download-lost` row for it is not one of the
+  ten picks. IMP-C34's lost-twice row is unchanged.
+- Item 3: `_other_bytes` = the `_wrong` mark left by the locator's own Shift+D round. The harvester books `_wrong`
+  per ROUND (it cannot tell which request fetched the other bytes — shared Step 10 code, not changed here): in a
+  window of 2–3 chunks, a chunk whose own download was merely lost in a round where another chunk's download held
+  other bytes is marked too. Likewise an IMP-C34 retry of a lost Shift+D download (after S4) that brings other
+  bytes is booked as today's wrong pick, not `_other_bytes`. Both are rare; the row still carries the evidence.
+- Item 3: S4 still runs for an object whose verified item served other bytes (P-20's chain → the search waterfall
+  → failed list; OD-5 skips S4 only when every candidate is proven ANOTHER item) — B does the same.
 
 ## Gates
 

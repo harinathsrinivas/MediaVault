@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 10 locate early stop
+STATE: IN PROGRESS — next: gates (disarm probes on a scratch copy · full suite · smoke · final commit)
 
 # IMP-C25 Step 12 follow-up — the judge's 10 cherry-picks into the merged locator (candidate C) — resumable status
 
@@ -96,8 +96,14 @@ tests pass, with its SHA. Pathspec commits only; never -A, amend, rebase or stas
       Test: test_no_candidate_cap_when_the_rpc_records_carry_their_dedupkeys[content-key / names-only] (24 episodes in
       one second, the target listed 22nd: S1 pins it with a key — 1 RPC; without a key S1 stays ambiguous(20) and S2
       pins it). In-process disarms: cap always → the content-key param fails; cap never → the names-only param fails
-      — WIP commit "9 candidate cap" (SHA in the next commit) · tests/test_locator.py 93 passed
-- [ ] 10 `locate` early stop passes `last=True` to `_close_session`
+      — 9bc80c7 · tests/test_locator.py 93 passed
+- [x] 10 `locate` early stop passes `last=True` to `_close_session` — `_locate_sessions` closes a session that did not
+      complete (sign-out, Ctrl+C, any exception) with `last=True` (`last=not completed or n + 1 == len(groups)` —
+      A / B used `stopped or …`; `not completed` also covers an unexpected error): a Chrome it only attached to then
+      keeps its windows (only this run's tabs close) instead of having every window closed for a next account that
+      never comes. Test: test_locate_stopping_early_closes_its_chrome_as_the_last_session[signed-out / ctrl-c] (two
+      account groups; the tv session stops; `_close_session` spied: [("tv", True)]; the movies session never starts)
+      — WIP commit "10 locate early stop" (SHA in the next commit) · tests/test_locator.py 95 passed
 - [ ] gates — disarm probes (scratch copy, incl. the new rules) · full suite · smoke · notes · final commit
 
 ## Edits to existing tests (each required by an item — why)

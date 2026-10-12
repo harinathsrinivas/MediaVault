@@ -4902,7 +4902,9 @@ def cmd_locate(manual_id, ep_range=None, fetch_extras=False, probe_direct=False)
 
 def _locate_sessions(groups, active, ctx, probe_direct, tally):
     """cmd_locate's account sessions — cmd_fetch_route's order, pre-flight and port guard; one Chrome per account,
-    closed at its end. True when every session ran to its end; False after a stop (its line says why)."""
+    closed at its end — a session that stops early as the LAST one (no later session needs the debug port, so a
+    Chrome it only attached to keeps its windows). True when every session ran to its end; False after a stop (its
+    line says why)."""
     for n, (profile, group_targets, group_extras) in enumerate(groups):
         if profile != active:
             print(f"   > [Account] Switching to profile '{profile}' for {len(group_targets) + len(group_extras)} "
@@ -4919,9 +4921,11 @@ def _locate_sessions(groups, active, ctx, probe_direct, tally):
             return False
         ctx.start_session(profile)
         _note_session(ctx, driver, profile)
+        completed = False
         try:
             for entry, entry_id in list(group_targets) + [(ex, None) for ex in group_extras]:
                 _locate_entry(driver, entry, entry_id, ctx, probe_direct, tally)
+            completed = True
         except SessionExpiredError:
             print(f"❌ Profile '{profile}' is logged out. Open Chrome with --user-data-dir={CHROME_PROFILES[profile]}, "
                   f"sign in to photos.google.com, then re-run.")
@@ -4932,7 +4936,7 @@ def _locate_sessions(groups, active, ctx, probe_direct, tally):
         finally:
             print(f"   > {gprpc.summary_line(driver)}")
             try:
-                _close_session(driver, ctx, last=n + 1 == len(groups))
+                _close_session(driver, ctx, last=not completed or n + 1 == len(groups))
             except Exception as e:
                 print(f"   > ⚠️ Closing Chrome failed ({type(e).__name__}: {e}).")
             try:

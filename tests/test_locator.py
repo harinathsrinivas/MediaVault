@@ -1964,3 +1964,36 @@ def test_no_candidate_cap_when_the_rpc_records_carry_their_dedupkeys(fake_photos
     else:
         assert (res["stage"], res["proof"]) == ("s2_exact_name", "filename")
         assert res["per_approach"]["taken_second"] == {"outcome": "ambiguous", "n": mainfetch.LOCATE_MAX_CANDIDATES}
+
+
+@pytest.mark.parametrize("stop", ["signed-out", "ctrl-c"])
+def test_locate_stopping_early_closes_its_chrome_as_the_last_session(flow, sandbox, capsys, monkeypatch, stop):
+    # Pick 10 (C's own nit; A / B pass last=stopped or …): a season whose episodes live in two accounts runs two locate
+    # sessions (tv, then movies). The tv session stops early — no later session will run, so its Chrome is closed as
+    # the LAST one: a Chrome it only attached to keeps the user's windows (only its own tabs close) instead of having
+    # every window closed for a next account's debug port.
+    folder, items = _season(sandbox, flow.world, (1,))
+    data = _bytes("ep2-in-movies")
+    moved = flow.world.add_item("movies", _up("Demo.S01E02.mkv", "de2de2"), data=data, taken=TAKEN)
+    lib = mvcommon.load_library()
+    lib[SEASON]["children"].append(f"{SEASON}e02")
+    lib[f"{SEASON}e02"] = dict(_whole(folder, "Demo.S01E02.mkv", data, "de2de2", block=_learned(moved, account="movies")),
+                               parent_id=SEASON)
+    mvcommon.save_library(lib)
+    if stop == "signed-out":
+        flow.world.session["tv"] = "expired"
+    else:
+        def interrupted(*args, **kwargs):
+            raise KeyboardInterrupt
+        monkeypatch.setattr(mainfetch, "locate_object", interrupted)
+    closes, real_close = [], mainfetch._close_session
+    monkeypatch.setattr(mainfetch, "_close_session",
+                        lambda driver, ctx, last: closes.append((ctx.account, last)) or real_close(driver, ctx, last))
+
+    mainfetch.cmd_locate(SEASON)
+
+    out = capsys.readouterr().out
+    assert list(flow.drivers) == ["tv"] and closes == [("tv", True)]          # the movies session never starts
+    assert "stays open" in out and "the next account needs its debug port" not in out
+    assert ("❌ Profile 'tv' is logged out." if stop == "signed-out" else "🛑 Stopped by user.") in out
+    assert "Located" not in out

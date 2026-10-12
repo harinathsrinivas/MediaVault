@@ -26,7 +26,7 @@ from tools import warm_profiles
 
 CHROME_EXE = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 BUBBLE_FLAGS = ("--disable-session-crashed-bubble", "--hide-crash-restore-bubble")
-WARN = "   > ⚠️ Chrome profile not marked as closed cleanly — "
+WARN = "   > WARNING: Chrome profile not marked as closed cleanly — "
 GONE = mainfetch.CHROME_GONE_WAIT_S
 
 
@@ -163,8 +163,9 @@ def test_an_unclean_exit_is_marked_clean_and_nothing_else_changes(tmp_path, tabl
     assert {k: v for k, v in after["profile"].items() if k not in ("exit_type", "exited_cleanly")} == \
         {k: v for k, v in prefs["profile"].items() if k not in ("exit_type", "exited_cleanly")}
     assert t.asked == 1
-    assert capsys.readouterr().out == \
-        f'   > 🧹 Chrome profile marked as closed cleanly (no "Restore pages?"): {user_data_dir}\n'
+    out = capsys.readouterr().out
+    assert out == f'   > Chrome profile marked as closed cleanly (no "Restore pages?"): {user_data_dir}\n'
+    out.encode("cp1252")        # the crawler's output is often a cp1252 pipe: an emoji here would stop it
 
 
 def test_chromes_own_number_and_escape_forms_keep_their_values(tmp_path, table, real_mark_profile_clean_exit):
@@ -304,6 +305,7 @@ def test_missing_or_corrupt_preferences_are_left_as_they_are_with_one_line(tmp_p
     assert t.asked == 0
     out = capsys.readouterr().out
     assert out.startswith(f"{WARN}{path} {why}") and out.count("\n") == 1
+    out.encode("cp1252")        # the crawler's output is often a cp1252 pipe: an emoji here would stop it
 
 
 def test_a_profile_folder_that_does_not_exist_is_not_created(tmp_path, table, capsys, real_mark_profile_clean_exit):

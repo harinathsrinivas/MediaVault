@@ -1280,10 +1280,12 @@ def mark_profile_clean_exit(user_data_dir, profile=CHROME_PROFILE_NAME, wait=0):
         status, why = _mark_clean_exit(user_data_dir, profile, wait)
     except Exception as e:  # never a reason to stop a launch or a cleanup
         status, why = "skipped", f"{type(e).__name__}: {e}"
+    # Plain cp1252 text, no emoji: the crawler shares this helper, and its output is often redirected — on Windows a
+    # pipe or a file is cp1252, where an emoji raises UnicodeEncodeError.
     if why:
-        print(f"   > ⚠️ Chrome profile not marked as closed cleanly — {why}.")
+        print(f"   > WARNING: Chrome profile not marked as closed cleanly — {why}.")
     elif status == "marked":
-        print(f'   > 🧹 Chrome profile marked as closed cleanly (no "Restore pages?"): {user_data_dir}')
+        print(f'   > Chrome profile marked as closed cleanly (no "Restore pages?"): {user_data_dir}')
     return status
 
 

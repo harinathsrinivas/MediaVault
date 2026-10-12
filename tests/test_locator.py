@@ -1937,3 +1937,30 @@ def test_the_allowlist_check_runs_after_every_test_that_drives_the_fake_world(fa
     with pytest.raises(AssertionError):
         _assert_read_only_rpc(fake_photos)
     fake_photos.rpc_log.pop()                                     # this test's own after-check must pass
+
+
+@pytest.mark.parametrize("keyed", [True, False], ids=["content-key", "names-only"])
+def test_no_candidate_cap_when_the_rpc_records_carry_their_dedupkeys(fake_photos, tmp_path, keyed):
+    # Pick 9 (from B's _judge; the judge's batch of 24): a whole season released in ONE second. An RPC listing's records
+    # carry their dedupKeys, so a content-keyed object is judged on all of them at no cost — the episode listed 22nd
+    # is pinned by S1 itself (before: cut at 20 → ambiguous → later stages). Names cost a lookup per candidate set:
+    # without a content key the cap stays (more: ambiguous, never guessed) and the exact name pins it at S2.
+    datas = [_bytes(f"saga{n}") for n in range(24)]
+    items = [fake_photos.add_item("tv", f"Big.Saga.E{n + 1:02d} [bs{n:04d}].mkv", data=d, taken=TAKEN)
+             for n, d in enumerate(datas)]
+    block = mvcommon.new_gphotos_block(_sha256(datas[21]), sha1=_sha1(datas[21]) if keyed else None, date_utc=TAKEN,
+                                       accounts={"tv": {"approach": {"best": "taken_second", "ok": ["taken_second"]}}})
+    ctx = _ctx()
+    [loc] = _locators(_whole(_folder(tmp_path), "Big.Saga.E22.mkv", datas[21], "bs0021", block=block),
+                      "tv-en-2010-bigsaga-s01e22", ctx, tmp_path)
+
+    res = mainfetch.locate_object(fake_photos.driver("tv"), loc, ctx)
+
+    assert res["found"] and res["photo_id"] == items[21].photo_id
+    if keyed:
+        assert (res["stage"], res["proof"]) == ("s1_taken_second", "dedupkey")
+        assert res["per_approach"] == {"taken_second": {"outcome": "exactly-one", "n": 24}}
+        assert fake_photos.rpc_ids_sent() == ["lcxiM"] and res["candidates_seen"] == 24
+    else:
+        assert (res["stage"], res["proof"]) == ("s2_exact_name", "filename")
+        assert res["per_approach"]["taken_second"] == {"outcome": "ambiguous", "n": mainfetch.LOCATE_MAX_CANDIDATES}

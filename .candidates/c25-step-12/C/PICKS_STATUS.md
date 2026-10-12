@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 9 candidate cap
+STATE: IN PROGRESS — next: 10 locate early stop
 
 # IMP-C25 Step 12 follow-up — the judge's 10 cherry-picks into the merged locator (candidate C) — resumable status
 
@@ -88,9 +88,15 @@ tests pass, with its SHA. Pathspec commits only; never -A, amend, rebase or stas
       tests/test_locator.py: for every test whose fixture closure holds `fake_photos` (`flow` tests too) the
       emulator log is checked with `_assert_read_only_rpc` after the test (the world resolved at set-up, so it is torn
       down after the check). Test: test_the_allowlist_check_runs_after_every_test_that_drives_the_fake_world (wired;
-      catches a mutating rpcid). All 90 other tests pass the after-check — WIP commit "8 allowlist check" (SHA in the
-      next commit) · tests/test_locator.py 91 passed
-- [ ] 9 no 20-candidate cap when the RPC records already carry dedupKeys
+      catches a mutating rpcid). All 90 other tests pass the after-check — afcfcdf · tests/test_locator.py 91 passed
+- [x] 9 no 20-candidate cap when the RPC records already carry dedupKeys — `_collect(..., cap=LOCATE_MAX_CANDIDATES)`;
+      `_stage_listing`'s RPC path passes `cap=None` for a content-keyed object (its listing's records carry their
+      dedupKeys: every one is judged at no cost; the listing stays bounded by the pages read — S1 ≤ 3 × 100, a search
+      ≤ 2 EzkLib pages). Names-only objects (a name lookup per candidate set) and the web-page path keep the cap.
+      Test: test_no_candidate_cap_when_the_rpc_records_carry_their_dedupkeys[content-key / names-only] (24 episodes in
+      one second, the target listed 22nd: S1 pins it with a key — 1 RPC; without a key S1 stays ambiguous(20) and S2
+      pins it). In-process disarms: cap always → the content-key param fails; cap never → the names-only param fails
+      — WIP commit "9 candidate cap" (SHA in the next commit) · tests/test_locator.py 93 passed
 - [ ] 10 `locate` early stop passes `last=True` to `_close_session`
 - [ ] gates — disarm probes (scratch copy, incl. the new rules) · full suite · smoke · notes · final commit
 

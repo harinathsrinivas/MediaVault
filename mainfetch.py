@@ -2359,7 +2359,9 @@ def build_fetch_queue(entry, restore_folder, ctx=None, entry_id=None):
 TRIGGER_CONFIRM_S = 20.0         # a requested download must show in the watched folder within this long
 TRIGGER_POLL_S = 0.5             # ... looked at this often
 DIRECT_DOWNLOAD_CONCURRENCY = 3  # P-20: at most this many direct downloads run at once
-LOCATE_MAX_CANDIDATES = 20       # candidates one stage verifies — more: ambiguous, never guessed
+LOCATE_MAX_CANDIDATES = 20       # candidates one stage verifies — more: ambiguous, never guessed (not for a
+                                 # content-keyed object's RPC listing: its records carry their dedupKeys, all judged
+                                 # at no cost; the pages read bound it)
 LOCATE_MAX_SCROLLS = 12          # result-grid scrolls per web-page search
 LOCATE_SEARCH_PAGES = 2          # EzkLib pages per RPC search
 SHORT_ID_QUERY_MIN = 6           # S3's last query is the bare short id only from this length on (shorter: too loose)
@@ -2786,9 +2788,10 @@ def _ui_item(driver, photo_id, ctx, account, st, key, fresh=False):
     return _remember(ctx, account, facts, "ui") if facts else None
 
 
-def _collect(driver, sources, path, loc, ctx, account, st):
+def _collect(driver, sources, path, loc, ctx, account, st, cap=LOCATE_MAX_CANDIDATES):
     """The candidates of a stage's listings (`sources`: [("second", taken_ms)] or [("text", query), …]) -> (ids in
-    listing order, complete, {photo_id: the text query that listed it})."""
+    listing order, complete, {photo_id: the text query that listed it}). More than `cap` (None: no cap): the first
+    `cap`, incomplete."""
     ids, complete, origin = [], True, {}
     for kind, value in sources:
         if kind == "second":
@@ -2800,8 +2803,8 @@ def _collect(driver, sources, path, loc, ctx, account, st):
             if pid not in origin and pid not in st["exclude"]:
                 origin[pid] = value if kind == "text" else None
                 ids.append(pid)
-    if len(ids) > LOCATE_MAX_CANDIDATES:
-        ids, complete = ids[:LOCATE_MAX_CANDIDATES], False
+    if cap is not None and len(ids) > cap:
+        ids, complete = ids[:cap], False
     for pid in ids:
         _seen(st, pid)
     return ids, complete, origin
@@ -2839,7 +2842,10 @@ def _stage_listing(driver, loc, ctx, account, st, key, sources):
     via = None
     if _rpc_ok(driver, ctx):
         try:
-            ids, complete, origin = _collect(driver, sources, "rpc", loc, ctx, account, st)
+            # the records of an RPC listing carry their dedupKeys: a content-keyed object is judged on every one of
+            # them at no cost (G12 pick 9 — a batch released in one second outnumbers the cap); names cost a lookup
+            cap = None if key else LOCATE_MAX_CANDIDATES
+            ids, complete, origin = _collect(driver, sources, "rpc", loc, ctx, account, st, cap)
             records = _rpc_verifiable(driver, ids, ctx, account, key)
             via = "rpc"
         except gprpc.RpcUnavailable as e:

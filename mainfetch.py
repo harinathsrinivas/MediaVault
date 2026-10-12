@@ -3002,11 +3002,12 @@ def _stage_order(loc):
     return sorted(_LOCATE_STAGES, key=lambda s: s[0] != best)  # stable: the P-8 order otherwise
 
 
-def _locate_result(found, per, stale, s4_skip):
+def _locate_result(found, per, per_via, stale, s4_skip):
     """locate_object's dict before its counters (see its docstring)."""
     res = {"found": False, "photo_id": None, "record": None, "proof": None, "name_normalized": False, "stage": None,
            "approach": None, "via": None, "outcome": None, "n": 0, "rule": None, "alternates": [], "query": None,
-           "per_approach": per, "stale": list(dict.fromkeys(stale)), "s4_skip": bool(s4_skip)}
+           "per_approach": per, "per_approach_via": per_via, "stale": list(dict.fromkeys(stale)),
+           "s4_skip": bool(s4_skip)}
     if found is not None:
         approach, stage, out = found
         pick = out["pick"]
@@ -3021,12 +3022,13 @@ def _waterfall(driver, loc, ctx, account, st, approaches):
     """Run the stages in order until one pins the object (approaches "all": every stage), then — for a
     content-keyed object nothing pinned — the legacy preview (OD-5)."""
     key = _content_key(loc)
-    per, stale, found, preview = {}, [], None, None
+    per, per_via, stale, found, preview = {}, {}, [], None, None
     for approach, stage, _label in _stage_order(loc):
         out = _STAGE_RUNS[approach](driver, loc, ctx, account, st, key)
         if out is None:
             continue  # the object gives this stage nothing to work with
-        per[approach] = {"outcome": out["outcome"], "n": out["n"], "via": out["via"]}
+        per[approach] = {"outcome": out["outcome"], "n": out["n"]}  # exactly the contract's shape (Step 13 reuses it)
+        per_via[approach] = out["via"]
         stale += out.get("stale") or []
         if out["pick"] is not None and found is None:
             found = (approach, stage, out)
@@ -3035,10 +3037,12 @@ def _waterfall(driver, loc, ctx, account, st, approaches):
     if key and (found is None or approaches == "all"):
         preview = _stage_legacy_preview(driver, loc, ctx, account, st, key)
         if preview is not None:
-            per[_LEGACY_STAGE[0]] = {"outcome": preview["outcome"], "n": preview["n"], "via": preview["via"]}
+            per[_LEGACY_STAGE[0]] = {"outcome": preview["outcome"], "n": preview["n"]}
+            per_via[_LEGACY_STAGE[0]] = preview["via"]
             if found is None and preview["pick"] is not None:
                 found = (_LEGACY_STAGE[0], _LEGACY_STAGE[1], preview)
-    return _locate_result(found, per, stale, found is None and preview is not None and preview.get("skip"))
+    return _locate_result(found, per, per_via, stale,
+                          found is None and preview is not None and preview.get("skip"))
 
 
 def _arbitrate(driver, res, loc, ctx, account, st, approaches):
@@ -3094,8 +3098,11 @@ def locate_object(driver, locator, ctx, approaches="best"):
       via              rpc | ui — the path that pinned it
       candidates_seen  how many distinct items were examined (candidates: their photo_ids)
       pages_opened, searches, rpc_calls, elapsed (s)   what it cost
-      per_approach     {approach: {outcome: exactly-one | ambiguous | not-found | wrong-item | error, n, via}} for
-                       every stage that ran ("legacy": the OD-5 preview of today's queries)
+      per_approach     {approach: {outcome: exactly-one | ambiguous | not-found | wrong-item | error, n}} — EXACTLY
+                       those two keys — for every stage that ran ("legacy": the OD-5 preview of today's queries);
+                       each entry is a failed-list `tried` row as it stands ({approach} + it, P-18)
+      per_approach_via {approach: rpc | ui} — the path each of those verdicts came by (a parallel map, so
+                       per_approach keeps the contract's shape)
     plus outcome / n (the pinning stage's), rule ("newest-set" when a name matched several uploads with
     different bytes), alternates (other items holding the same bytes or name), query (the text query that listed
     the item — the Shift+D click path searches it), stale (learned photo_ids RPC AND the item page call gone),
@@ -3107,7 +3114,7 @@ def locate_object(driver, locator, ctx, approaches="best"):
     st = {"pages": 0, "searches": 0, "seen": []}
     calls = 0
     if not _can_locate(driver):
-        res = _locate_result(None, {}, [], False)
+        res = _locate_result(None, {}, {}, [], False)
     else:
         before = gprpc.stats(driver)["calls"]
         res = _waterfall(driver, loc, ctx, account, st, approaches)

@@ -188,7 +188,8 @@ def test_s0a_a_learned_photo_id_is_pinned_by_item_info_with_zero_searches(fake_p
 
     assert res["found"] and res["photo_id"] == item.photo_id
     assert (res["stage"], res["approach"], res["proof"], res["via"]) == ("s0_photo_id", "photo_id", "dedupkey", "rpc")
-    assert res["per_approach"] == {"photo_id": {"outcome": "exactly-one", "n": 1, "via": "rpc"}}
+    assert res["per_approach"] == {"photo_id": {"outcome": "exactly-one", "n": 1}}
+    assert res["per_approach_via"] == {"photo_id": "rpc"}
     assert res["record"] == {"photo_id": item.photo_id, "dedup_key": item.dedup_key, "taken_ms": item.taken_ms,
                              "tz_offset_ms": item.tz_offset_ms, "upload_ms": item.upload_ms, "width": item.width,
                              "height": item.height, "filename": item.filename}
@@ -232,7 +233,8 @@ def test_s0b_the_hash_lookup_pins_a_content_keyed_object_directly(fake_photos, t
 
     assert res["found"] and res["photo_id"] == item.photo_id
     assert (res["stage"], res["proof"], res["via"]) == ("s0_hash", "dedupkey", "rpc")
-    assert res["per_approach"] == {"hash": {"outcome": "exactly-one", "n": 1, "via": "rpc"}}
+    assert res["per_approach"] == {"hash": {"outcome": "exactly-one", "n": 1}}
+    assert res["per_approach_via"] == {"hash": "rpc"}
     assert fake_photos.rpc_ids_sent() == ["swbisb"] and res["searches"] == 0
     _assert_read_only_rpc(fake_photos)
 
@@ -276,7 +278,8 @@ def test_s1_on_the_web_pages_when_rpc_is_unavailable(fake_photos, tmp_path, caps
 
     assert res["found"] and res["photo_id"] == items[6].photo_id
     assert (res["stage"], res["via"], res["proof"]) == ("s1_taken_second", "ui", "dedupkey")
-    assert res["per_approach"]["taken_second"] == {"outcome": "exactly-one", "n": 10, "via": "ui"}
+    assert res["per_approach"]["taken_second"] == {"outcome": "exactly-one", "n": 10}
+    assert res["per_approach_via"]["taken_second"] == "ui"
     assert res["searches"] == 1 and res["pages_opened"] == 7           # the day search; items opened up to the match
     out = capsys.readouterr().out
     assert out.count("A Google Photos internal call failed (RpcUnavailable)") == 1
@@ -307,7 +310,8 @@ def test_s1_on_the_web_pages_reads_the_whole_release_day_before_filtering_to_the
 
     assert res["found"] and res["photo_id"] == target.photo_id
     assert (res["stage"], res["via"], res["proof"]) == ("s1_taken_second", "ui", "dedupkey")
-    assert res["per_approach"]["taken_second"] == {"outcome": "exactly-one", "n": 8, "via": "ui"}   # its batch only
+    assert res["per_approach"]["taken_second"] == {"outcome": "exactly-one", "n": 8}   # its batch only
+    assert res["per_approach_via"]["taken_second"] == "ui"
     assert res["searches"] == 1 and res["pages_opened"] == 5           # one day search; S01E01…E05 opened
 
 
@@ -331,7 +335,8 @@ def test_s2_a_legacy_object_is_pinned_by_its_exact_name_never_by_tile_position(f
 
     assert res["found"] and res["photo_id"] == right.photo_id
     assert (res["stage"], res["proof"], res["name_normalized"], res["via"]) == ("s2_exact_name", "filename", False, "rpc")
-    assert res["per_approach"] == {"exact_name": {"outcome": "exactly-one", "n": 3, "via": "rpc"}}
+    assert res["per_approach"] == {"exact_name": {"outcome": "exactly-one", "n": 3}}
+    assert res["per_approach_via"] == {"exact_name": "rpc"}
     assert res["candidates_seen"] == 3 and res["query"] == _up(LIVE_NAME, "0003a8")
     assert fake_photos.rpc_ids_sent() == ["EzkLib", "EWgK9e"]           # one search + one batch of names
 
@@ -368,7 +373,8 @@ def test_s0a_a_stale_photo_id_is_reported_and_the_next_stage_finds_the_reupload(
 
     assert res["found"] and res["photo_id"] == alive.photo_id and res["stage"] == "s0_hash"
     assert res["stale"] == [dead.photo_id]                             # RPC said gone AND its page shows nothing
-    assert res["per_approach"]["photo_id"] == {"outcome": "not-found", "n": 0, "via": "ui"}
+    assert res["per_approach"]["photo_id"] == {"outcome": "not-found", "n": 0}
+    assert res["per_approach_via"]["photo_id"] == "ui"
     assert ("tv", dead.photo_id) in mainfetch._locator_run(ctx).gone
 
 
@@ -438,8 +444,9 @@ def test_a_no_date_utc_object_skips_s1_and_is_pinned_at_s2(fake_photos, tmp_path
 
     assert res["found"] and res["photo_id"] == item.photo_id
     assert (res["stage"], res["proof"], res["via"]) == ("s2_exact_name", "dedupkey", "rpc")
-    assert res["per_approach"] == {"hash": {"outcome": "error", "n": 0, "via": "rpc"},
-                                   "exact_name": {"outcome": "exactly-one", "n": 1, "via": "rpc"}}   # no S1 at all
+    assert res["per_approach"] == {"hash": {"outcome": "error", "n": 0},
+                                   "exact_name": {"outcome": "exactly-one", "n": 1}}   # no S1 at all
+    assert res["per_approach_via"] == {"hash": "rpc", "exact_name": "rpc"}
 
 
 ANIME_NAME = "Death.Saga.01.Rebirth.1080p.mkv"   # synthetic stand-in for the live case
@@ -467,7 +474,8 @@ def test_s3_ends_with_the_bare_short_id_when_name_and_title_find_nothing(fake_ph
     assert (res["stage"], res["proof"], res["query"], res["via"]) == ("s3_title_sid", "filename", sid,
                                                                       "rpc" if rpc else "ui")
     assert res["per_approach"]["exact_name"]["outcome"] == "not-found"
-    assert res["per_approach"]["title_sid"] == {"outcome": "exactly-one", "n": 2, "via": "rpc" if rpc else "ui"}
+    assert res["per_approach"]["title_sid"] == {"outcome": "exactly-one", "n": 2}
+    assert res["per_approach_via"]["title_sid"] == ("rpc" if rpc else "ui")
 
 
 def test_a_short_id_under_six_characters_is_never_searched_alone(fake_photos, tmp_path):
@@ -506,16 +514,17 @@ def test_s3u_the_users_search_term_is_tried_and_still_verified(fake_photos, tmp_
 
     res = mainfetch.locate_object(fake_photos.driver("tv"), loc, ctx)
 
-    expected = {"exact_name": {"outcome": "not-found", "n": 0, "via": "rpc"},
-                "title_sid": {"outcome": "not-found", "n": 0, "via": "rpc"}}
+    expected = {"exact_name": {"outcome": "not-found", "n": 0},
+                "title_sid": {"outcome": "not-found", "n": 0}}
     if listed_right:
         assert res["found"] and res["photo_id"] == right.photo_id
         assert (res["stage"], res["approach"], res["proof"]) == ("s3u_user_query", "user_query", "filename")
-        expected["user_query"] = {"outcome": "exactly-one", "n": 2, "via": "rpc"}
+        expected["user_query"] = {"outcome": "exactly-one", "n": 2}
     else:            # the user's term lists only another item: verified away, never taken
         assert not res["found"] and not res["s4_skip"]          # no content key: today's attempts stay (OD-5)
-        expected["user_query"] = {"outcome": "wrong-item", "n": 1, "via": "rpc"}
+        expected["user_query"] = {"outcome": "wrong-item", "n": 1}
     assert res["per_approach"] == expected
+    assert res["per_approach_via"] == {"exact_name": "rpc", "title_sid": "rpc", "user_query": "rpc"}
 
 
 def test_nothing_verifiable_previews_todays_queries_and_marks_the_skip(fake_photos, tmp_path):
@@ -534,11 +543,12 @@ def test_nothing_verifiable_previews_todays_queries_and_marks_the_skip(fake_phot
 
     assert not res["found"] and res["s4_skip"] is True
     assert res["per_approach"] == {
-        "hash": {"outcome": "not-found", "n": 0, "via": "rpc"},
-        "taken_second": {"outcome": "wrong-item", "n": 2, "via": "rpc"},
-        "exact_name": {"outcome": "wrong-item", "n": 1, "via": "rpc"},
-        "title_sid": {"outcome": "wrong-item", "n": 1, "via": "rpc"},       # its bare short id lists the old upload
-        "legacy": {"outcome": "wrong-item", "n": 2, "via": "rpc"}}
+        "hash": {"outcome": "not-found", "n": 0},
+        "taken_second": {"outcome": "wrong-item", "n": 2},
+        "exact_name": {"outcome": "wrong-item", "n": 1},
+        "title_sid": {"outcome": "wrong-item", "n": 1},       # its bare short id lists the old upload
+        "legacy": {"outcome": "wrong-item", "n": 2}}
+    assert res["per_approach_via"] == dict.fromkeys(res["per_approach"], "rpc")
     assert res["candidates_seen"] == 2 and fake_photos.downloads == []
     assert not [a for a in d.actions if a["kind"] in ("shift_d", "open")]
 
@@ -558,7 +568,8 @@ def test_rpc_unavailable_every_stage_runs_on_the_web_pages(fake_photos, tmp_path
 
     assert (first["photo_id"], first["stage"], first["via"]) == (learned.photo_id, "s0_photo_id", "ui")
     assert (second["photo_id"], second["stage"], second["via"]) == (legacy.photo_id, "s2_exact_name", "ui")
-    assert second["per_approach"]["exact_name"] == {"outcome": "exactly-one", "n": 1, "via": "ui"}
+    assert second["per_approach"]["exact_name"] == {"outcome": "exactly-one", "n": 1}
+    assert second["per_approach_via"]["exact_name"] == "ui"
     assert capsys.readouterr().out.count("A Google Photos internal call failed") == 1     # one note per run
     assert fake_photos.rpc_log == [] and mainfetch._locator_run(ctx).stats["tv"]["fallbacks"] >= 2
 
@@ -694,12 +705,13 @@ def test_approaches_all_evaluates_every_stage_for_check_photos(fake_photos, tmp_
 
     assert (res["photo_id"], res["stage"]) == (item.photo_id, "s0_photo_id")
     assert res["per_approach"] == {
-        "photo_id": {"outcome": "exactly-one", "n": 1, "via": "rpc"},
-        "hash": {"outcome": "exactly-one", "n": 1, "via": "rpc"},
-        "taken_second": {"outcome": "exactly-one", "n": 1, "via": "rpc"},
-        "exact_name": {"outcome": "exactly-one", "n": 1, "via": "rpc"},
-        "title_sid": {"outcome": "exactly-one", "n": 1, "via": "rpc"},      # the title: nothing; the bare short id: it
-        "legacy": {"outcome": "exactly-one", "n": 1, "via": "rpc"}}
+        "photo_id": {"outcome": "exactly-one", "n": 1},
+        "hash": {"outcome": "exactly-one", "n": 1},
+        "taken_second": {"outcome": "exactly-one", "n": 1},
+        "exact_name": {"outcome": "exactly-one", "n": 1},
+        "title_sid": {"outcome": "exactly-one", "n": 1},      # the title: nothing; the bare short id: it
+        "legacy": {"outcome": "exactly-one", "n": 1}}
+    assert res["per_approach_via"] == dict.fromkeys(res["per_approach"], "rpc")
     _assert_read_only_rpc(fake_photos)
 
 
@@ -884,7 +896,8 @@ def test_a_most_relevant_strip_tile_is_never_a_candidate_on_the_web_pages(fake_p
     res = mainfetch.locate_object(d, loc, ctx)
 
     assert res["found"] and res["photo_id"] == right.photo_id and res["via"] == "ui"
-    assert res["per_approach"]["exact_name"] == {"outcome": "exactly-one", "n": 1, "via": "ui"}   # the date group's
+    assert res["per_approach"]["exact_name"] == {"outcome": "exactly-one", "n": 1}   # the date group's
+    assert res["per_approach_via"]["exact_name"] == "ui"
     assert not set(res["candidates"]) & {s.photo_id for s in strip}                     # strip tiles never listed
 
 
@@ -900,7 +913,8 @@ def test_a_search_showing_only_the_strip_is_a_miss(fake_photos, tmp_path):
 
     res = mainfetch.locate_object(d, loc, ctx)
 
-    assert not res["found"] and res["per_approach"]["exact_name"] == {"outcome": "not-found", "n": 0, "via": "ui"}
+    assert not res["found"] and res["per_approach"]["exact_name"] == {"outcome": "not-found", "n": 0}
+    assert res["per_approach_via"]["exact_name"] == "ui"
     assert res["candidates_seen"] == 0 and res["pages_opened"] == 0
 
 
@@ -1523,3 +1537,37 @@ def test_no_link_token_or_account_secret_reaches_any_output_journal_or_sidecar(f
     assert [r["reason"] for r in mvcommon.read_failed()] == ["s4-skipped"]
     assert [r["photo_id"] for r in mvcommon.read_learned("tv") if r.get("stale")] == [dead.photo_id]
     _assert_read_only_rpc(flow.world)                 # and never a mutating rpcid (P13)
+
+
+# ===========================================================================
+# 12C.e — 🚦 G12 follow-up: the judge's ten cherry-picks (.candidates/c25-step-12/DECISION.md; DECISIONS §1f)
+# ===========================================================================
+CONTRACT_KEYS = {"found", "photo_id", "record", "proof", "stage", "approach", "via", "candidates_seen",
+                 "pages_opened", "searches", "rpc_calls", "elapsed", "per_approach"}
+
+
+@pytest.mark.parametrize("run", ["fast-path", "approaches-all", "web-pages"])
+def test_the_result_carries_the_whole_contract(fake_photos, tmp_path, run):
+    # Pick 1 (from B): per_approach[<approach>] is EXACTLY {outcome, n} — PLAN Step 12's contract, which Step 13 reuses
+    # unchanged; the path each verdict came by lives in the parallel per_approach_via. The judge's probe: one extra key
+    # made mvcommon.append_failed refuse the entries as failed-list `tried` rows ("tried entries are {approach,
+    # outcome, n}"), so a Step 13 that passed them through would have lost its rows.
+    data = _bytes("contract")
+    item = fake_photos.add_item("tv", _up(SHOW, SID), data=data, taken=TAKEN)
+    fake_photos.wiz_token_missing["tv"] = run == "web-pages"
+    ctx = _ctx()
+    block = _learned(item, date_utc=TAKEN)
+    [loc] = _locators(_whole(_folder(tmp_path), SHOW, data, SID, block=block), EP, ctx, tmp_path)
+
+    res = mainfetch.locate_object(fake_photos.driver("tv"), loc, ctx,
+                                  approaches="all" if run == "approaches-all" else "best")
+
+    assert CONTRACT_KEYS <= set(res)
+    assert res["found"] and res["photo_id"] == item.photo_id and isinstance(res["elapsed"], float)
+    assert len(res["per_approach"]) == (6 if run == "approaches-all" else 1)
+    assert all(set(verdict) == {"outcome", "n"} for verdict in res["per_approach"].values())
+    assert list(res["per_approach_via"]) == list(res["per_approach"])
+    assert set(res["per_approach_via"].values()) == {"ui" if run == "web-pages" else "rpc"}
+    tried = [dict(approach=approach, **verdict) for approach, verdict in res["per_approach"].items()]
+    mvcommon.append_failed({"account": "tv", "manual_id": EP, "reason": "ambiguous", "tried": tried})
+    assert mvcommon.read_failed()[0]["tried"] == tried                 # Step 13 passes them through as they are

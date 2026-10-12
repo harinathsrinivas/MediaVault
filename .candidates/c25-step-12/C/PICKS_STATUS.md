@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 5 HTML link page
+STATE: IN PROGRESS — next: 6 another verified copy
 
 # IMP-C25 Step 12 follow-up — the judge's 10 cherry-picks into the merged locator (candidate C) — resumable status
 
@@ -50,9 +50,16 @@ tests pass, with its SHA. Pathspec commits only; never -A, amend, rebase or stas
       test_a_download_of_another_object_of_the_window_never_confirms_this_ones_start (unit) ·
       test_a_window_never_takes_another_objects_download_for_its_own_start (a 2-chunk window: chunk 1's partial is
       named by Chrome while chunk 2's start is confirmed — before: chunk 2 booked 'direct' + a 300 s harvest timeout).
-      Both checked to FAIL with the fix disarmed in-process (scratch plugin) — WIP commit "4 start confirmation" (SHA
-      in the next commit) · tests/test_locator.py 83 passed
-- [ ] 5 a link page answering with HTML is left at once (no 20 s wait on a bearer-credential address)
+      Both checked to FAIL with the fix disarmed in-process (scratch plugin) — 60f7ff4 · tests/test_locator.py 83
+      passed
+- [x] 5 a link page answering with HTML is left at once — `_direct_trigger`: after the bounded get, a tab that left
+      Google Photos (`_off_photos`; an unreadable address counts as Photos) means the link answered with a page of its
+      own → `_back_on_photos` AT ONCE, then ONE look at the folder (`_download_started(..., seconds=0)` — the folder
+      still decides, nothing is waited for); a download (the tab stays on Photos) keeps the 20 s confirmation. New
+      line: "the direct download did not start — its link answered with a web page — Shift+D next." Test:
+      test_a_link_answering_with_a_page_is_left_at_once_and_never_waited_on (no clock wait while the tab shows the
+      link's host; disarmed in-process: 40 waits = 20 s on it) — WIP commit "5 HTML link page" (SHA in the next
+      commit) · tests/test_locator.py 84 passed
 - [ ] 6 another verified copy (re-locate with `exclude`) before today's blind S4 attempts
 - [ ] 7 Shift+D reuses the open item page when its address already names the item (C's own-address check kept)
 - [ ] 8 RPC allowlist check after every locator test (tests only)
@@ -72,6 +79,10 @@ tests pass, with its SHA. Pathspec commits only; never -A, amend, rebase or stas
   test_a_most_relevant_strip_tile_is_never_a_candidate_on_the_web_pages, test_a_search_showing_only_the_strip_is_a_miss.
   Each assertion was split, nothing weakened: `per_approach` now compared WITHOUT `via`, and the same `via` values
   asserted through `per_approach_via` (the evidence each test pinned — which path a stage took — is kept).
+- Item 5: test_a_link_answering_with_html_starts_nothing_and_the_tab_goes_back_to_photos asserted the line "the
+  direct download did not start within 20 s — Shift+D next." — the 20 s wait on an HTML answer is exactly what the
+  item removes; it now asserts the new line ("… — its link answered with a web page — Shift+D next."). Its other
+  assertions (nothing downloaded, the tab back on Google Photos) are unchanged.
 
 ## Decisions / assumptions
 - Commit trailer: `Co-Authored-By: Claude Fable 5.1` — the session's own model id is claude-fable-5-1 (the dispatch

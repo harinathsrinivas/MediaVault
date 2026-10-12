@@ -779,7 +779,8 @@ def test_a_link_answering_with_html_starts_nothing_and_the_tab_goes_back_to_phot
 
     assert _files(incoming) == [] and fake_photos.downloads == []
     assert mainfetch._is_photos_host(gpweb_host(d.current_url))            # never left on the link's page (P-20)
-    assert "the direct download did not start within 20 s — Shift+D next." in capsys.readouterr().out
+    assert ("the direct download did not start — its link answered with a web page — Shift+D next."
+            in capsys.readouterr().out)
 
 
 def test_a_refused_mint_is_no_direct_download(fake_photos, tmp_path, capsys):
@@ -1755,3 +1756,20 @@ def test_a_window_never_takes_another_objects_download_for_its_own_start(flow, s
     assert [o["method"] for o in _journal_objects()] == ["direct", "shift_d"]
     for name, data in zip(names, datas):
         assert (folder / "restore" / name).read_bytes() == data
+
+
+def test_a_link_answering_with_a_page_is_left_at_once_and_never_waited_on(fake_photos, tmp_path, capsys, monkeypatch,
+                                                                          clock):
+    # Pick 5 (from B; A left after 3 s): a minted link that answers with a page of its own (a sign-in or error page)
+    # puts its address — a bearer credential while valid (P-20) — in the tab. Before, the tab sat on it through the
+    # whole 20 s start confirmation; now it is back on Google Photos at once: not one wait passes on that page.
+    ctx, d, item, _fake, incoming = _armed(fake_photos, tmp_path, direct_mode="html")
+    waits, real_sleep = [], clock.sleep
+    monkeypatch.setattr(clock, "sleep", lambda seconds=0: waits.append((seconds, gpweb_host(d.current_url)))
+                        or real_sleep(seconds))
+
+    assert mainfetch._direct_trigger(d, item, ctx) is False
+
+    assert [host for _seconds, host in waits if host == gphotos_fake.DOWNLOAD_HOST] == []
+    assert mainfetch._is_photos_host(gpweb_host(d.current_url)) and _files(incoming) == []
+    assert "its link answered with a web page" in capsys.readouterr().out

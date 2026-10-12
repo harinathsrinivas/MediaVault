@@ -3145,16 +3145,16 @@ def _download_names(item):
     return [name for name in dict.fromkeys(names) if isinstance(name, str) and name]
 
 
-def _download_started(ctx, before, others=()):
+def _download_started(ctx, before, others=(), seconds=TRIGGER_CONFIRM_S):
     """[P-12 / P-20] True once a download requested after `before` (the watched folder's names then) shows: a new
     partial ('<name>.crdownload', Chrome's 'Unconfirmed N.crdownload') or a new finished file whose partial was not
-    there before (a small file finishes between two looks) — within TRIGGER_CONFIRM_S. An earlier download that
+    there before (a small file finishes between two looks) — within `seconds` (0: one look). An earlier download that
     finishes meanwhile does not count: its partial was already there. Nor does a file of `others` — the names the
     OTHER downloads of the same window may carry (_download_names), their ' (n)' variants and partials included:
     Chrome may name or finish one of them while this request is confirmed (an 'Unconfirmed N.crdownload' names no
     object, so it counts)."""
     others = {_family_key(name) for name in others if isinstance(name, str) and name}
-    deadline = time.time() + TRIGGER_CONFIRM_S
+    deadline = time.time() + seconds
     while True:
         for name in _watched_now(ctx) - before:
             if others and any(base in others for base in _family_bases(name)):
@@ -3188,6 +3188,15 @@ def _bounded_get(driver, url, seconds):
             pass
 
 
+def _off_photos(driver):
+    """True when the tab shows a page that is not Google Photos — a minted link that answered with a page of its own.
+    An unreadable address counts as Google Photos (a browser glitch is no page answer). Only the host is read."""
+    try:
+        return not _is_photos_host(urllib.parse.urlparse(driver.current_url).hostname)
+    except Exception:
+        return False
+
+
 def _back_on_photos(driver):
     """After a direct download: a link answered with a page (HTML) leaves the tab on it — put the tab back on
     Google Photos (check_session_alive after it). Only the host is read; the link's address is never kept (P-20)."""
@@ -3207,7 +3216,9 @@ def _direct_trigger(driver, item, ctx, others=()):
     logged or journaled (gprpc's redacted DownloadUrl; reveal() only for driver.get). True once the download shows
     in the watched folder (_download_started — never one of `others`, the window's other downloads); False when RPC
     is off, no link was minted or nothing started (an HTML answer, a refused link) — the caller then tries (i),
-    Shift+D."""
+    Shift+D. A link that answers with a page of its own (a sign-in or error page — or media Chrome would play) puts
+    its address in the tab: the tab goes back to Google Photos AT ONCE and the folder gets one look, never a wait on
+    that page (the address is a bearer credential while valid — P-20)."""
     if not _rpc_ok(driver, ctx):
         return False
     name = item["filename"]
@@ -3227,7 +3238,10 @@ def _direct_trigger(driver, item, ctx, others=()):
         except Exception:  # a navigation that becomes a download may end in an error or a timeout: the folder decides
             pass
         link = None
-        started = _download_started(ctx, before, others)
+        page = _off_photos(driver)  # the link answered with a page of its own: no download comes from it
+        if page:
+            _back_on_photos(driver)  # at once: that page's address is the link itself (P-20)
+        started = _download_started(ctx, before, others, 0 if page else TRIGGER_CONFIRM_S)
         _back_on_photos(driver)
     except SessionExpiredError:
         raise
@@ -3236,6 +3250,8 @@ def _direct_trigger(driver, item, ctx, others=()):
         return False
     if started:
         print(f"     ⬇️ {name}: direct download")
+    elif page:
+        print(f"     ↪️ {name}: the direct download did not start — its link answered with a web page — Shift+D next.")
     else:
         print(f"     ↪️ {name}: the direct download did not start within {TRIGGER_CONFIRM_S:g} s — Shift+D next.")
     return started

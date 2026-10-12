@@ -1640,12 +1640,14 @@ def test_the_stages_book_every_object_they_examined_once_and_leave_the_rest_to_t
     found = {"found": True, "photo_id": pid, "candidates": [seen, pid],
              "per_approach": {"exact_name": {"outcome": "exactly-one", "n": 2}}}
     missed = {"found": False, "photo_id": None, "candidates": [seen],
-              "per_approach": {"hash": {"outcome": "not-found", "n": 0}, "exact_name": {"outcome": "ambiguous", "n": 1}}}
+              "per_approach": {"hash": {"outcome": "not-found", "n": 0},
+                               "exact_name": {"outcome": "ambiguous", "n": 1}}}
     previewed = {"found": False, "photo_id": None, "candidates": [seen],
                  "per_approach": {"exact_name": {"outcome": "wrong-item", "n": 1},
                                   "legacy": {"outcome": "ambiguous", "n": 3}}}
-    queue = [obj("a.mkv", found, _wrong=1), obj("b.mkv", found), obj("c.mkv", missed), obj("d.mkv", previewed, _wrong=2),
-             obj("e.mkv", missed, _wrong=1, status="failed"), obj("f.mkv", None, _wrong=1)]
+    queue = [obj("a.mkv", found, _wrong=1), obj("b.mkv", found), obj("c.mkv", missed),
+             obj("d.mkv", previewed, _wrong=2), obj("e.mkv", missed, _wrong=1, status="failed"),
+             obj("f.mkv", None, _wrong=1)]
 
     mainfetch._record_unfetched(queue, ctx)
     mainfetch._record_wrong_items(queue, ctx)
@@ -1658,7 +1660,8 @@ def test_the_stages_book_every_object_they_examined_once_and_leave_the_rest_to_t
                                       {"approach": "legacy", "outcome": "wrong-item", "n": 1}]
     assert rows["a.mkv"]["expected_taken_local"] == "2022-02-05 19:49:46 GMT+08:00"
     assert (rows["c.mkv"]["reason"], rows["c.mkv"]["tried"]) == ("ambiguous", [
-        {"approach": "hash", "outcome": "not-found", "n": 0}, {"approach": "exact_name", "outcome": "ambiguous", "n": 1}])
+        {"approach": "hash", "outcome": "not-found", "n": 0},
+        {"approach": "exact_name", "outcome": "ambiguous", "n": 1}])
     assert rows["d.mkv"]["tried"] == [{"approach": "exact_name", "outcome": "wrong-item", "n": 1},
                                       {"approach": "legacy", "outcome": "wrong-item", "n": 2}]   # the preview gave way
     assert (rows["f.mkv"]["reason"], rows["f.mkv"]["tried"]) == ("wrong-item", [
@@ -1738,7 +1741,8 @@ def test_a_window_never_takes_another_objects_download_for_its_own_start(flow, s
             return None                                      # chunk 2's link: no download starts, the tab stays
         real_direct(driver, url)
         rec = flow.world.downloads[-1]                       # chunk 1's partial, not named yet …
-        named, rec["partial"] = rec["partial"], os.path.join(os.path.dirname(rec["partial"]), "Unconfirmed 4711.crdownload")
+        named = rec["partial"]
+        rec["partial"] = os.path.join(os.path.dirname(named), "Unconfirmed 4711.crdownload")
         os.replace(named, rec["partial"])
 
         def name_it():                                       # … until Chrome names it, 5 s later
@@ -1837,6 +1841,30 @@ def test_a_located_item_fetching_nothing_verified_gets_another_verified_copy_bef
     assert sorted((r["photo_id"], r["approach"]["tried"]) for r in learned) == sorted(
         (o.photo_id, "s2_exact_name") for o in old)                               # the copies, proven by SHA-256
     assert [o["photo_id"] for o in _journal_objects()] == [o.photo_id for o in old]
+
+
+def test_the_copy_search_never_asks_again_about_a_photo_id_found_gone(flow, sandbox, capsys, monkeypatch):
+    # Pick 6, scoped: the stored photo_id is gone (recorded stale once), the re-upload is located by S0b but none of
+    # its requests starts a download — the copy search runs without it AND without the gone one: no second item-info
+    # call about it, no second stale record.
+    folder, name, sid = _episode_folder(sandbox), "Demo.S04E12.mkv", "l2l2l2"
+    data = _bytes("reuploaded-twelve")
+    dead = flow.world.add_item("tv", _up(name, sid), data=data, taken=TAKEN, deleted=True)
+    alive = flow.world.add_item("tv", _up(name, sid), data=data, taken=TAKEN)
+    for knob, value in (("vrseub_original_url", False), ("mint_refused", True), ("shift_d_requires_click", True)):
+        setattr(flow.world, knob, value)                       # no link; Shift+D ignored on a directly loaded page …
+    for query in (alive.filename, "2022-02-05"):
+        flow.world.script_search("tv", query, [])               # … and no search lists it: nothing starts
+    mvcommon.save_library({"tv-en-2015-demo-s04e12": _whole(folder, name, data, sid, block=_learned(dead))})
+    asked, real_info = [], gprpc.item_info
+    monkeypatch.setattr(gprpc, "item_info", lambda driver, pid: asked.append(pid) or real_info(driver, pid))
+
+    mainfetch.cmd_fetch_route("tv-en-2015-demo-s04e12")
+
+    out = capsys.readouterr().out
+    assert "no other verified copy of it — today's search follows." in out and flow.world.downloads == []
+    assert asked.count(dead.photo_id) == 1                       # the first locate's look only
+    assert [r["photo_id"] for r in mvcommon.read_learned("tv") if r.get("stale")] == [dead.photo_id]
 
 
 def test_a_copy_that_brings_other_bytes_too_keeps_the_first_finds_evidence(capsys):
@@ -1977,8 +2005,8 @@ def test_locate_stopping_early_closes_its_chrome_as_the_last_session(flow, sandb
     moved = flow.world.add_item("movies", _up("Demo.S01E02.mkv", "de2de2"), data=data, taken=TAKEN)
     lib = mvcommon.load_library()
     lib[SEASON]["children"].append(f"{SEASON}e02")
-    lib[f"{SEASON}e02"] = dict(_whole(folder, "Demo.S01E02.mkv", data, "de2de2", block=_learned(moved, account="movies")),
-                               parent_id=SEASON)
+    block = _learned(moved, account="movies")                    # its verified copy lives in the movies account
+    lib[f"{SEASON}e02"] = dict(_whole(folder, "Demo.S01E02.mkv", data, "de2de2", block=block), parent_id=SEASON)
     mvcommon.save_library(lib)
     if stop == "signed-out":
         flow.world.session["tv"] = "expired"

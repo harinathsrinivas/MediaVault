@@ -3512,8 +3512,8 @@ def _another_copy(driver, item, ctx):
     cheap). True when one was found: it becomes the item requested (item['_located'] and ['_trigger']); the first find
     stays in item['_first_located'] — the failed list's evidence (_record_unfetched)."""
     name, first = item["filename"], item["_located"]
-    try:
-        res = locate_object(driver, item.get("locator") or {}, ctx, exclude=[first["photo_id"]])
+    try:  # nor the photo_ids its first locate found gone: asked again, they would only be recorded stale twice
+        res = locate_object(driver, item.get("locator") or {}, ctx, exclude=[first["photo_id"], *first["stale"]])
     except (SessionExpiredError, gprpc.RpcRefused):
         raise
     except Exception as e:  # one object's trouble never stops the entry: today's attempts follow
@@ -4049,7 +4049,7 @@ def _record_unfetched(queue, ctx):
             reason = "wrong-item"
         else:
             outcomes = [v["outcome"] for v in res["per_approach"].values()]
-            reason = "ambiguous" if "ambiguous" in outcomes else "wrong-item" if "wrong-item" in outcomes else "not-found"
+            reason = next((o for o in ("ambiguous", "wrong-item") if o in outcomes), "not-found")
         item["status"] = "failed"
         requested = [r["photo_id"] for r in (first, res) if r["found"]]
         candidates = list(dict.fromkeys(requested + first["candidates"] + res["candidates"]))
@@ -4124,7 +4124,7 @@ def _fetch_items(driver, queue, ctx, entry=None, owner_id=None):
     # [IMP-C34] A download lost and not requested since gets its one retry.
     _retry_lost_downloads(queue, ctx)
     # [IMP-C25 Step 12] An object the exact-item stages examined and nothing fetched ends on the failed list with ONE
-    # row carrying their evidence (+ today's wrong pick) — before _record_wrong_items (P-18; a no-op without the stages).
+    # row carrying their evidence (+ today's wrong pick) — before _record_wrong_items (P-18; without the stages: no-op).
     _record_unfetched(queue, ctx)
     # [live check 2026-10-05] An object whose requests fetched only other items ends on the failed list.
     _record_wrong_items(queue, ctx)

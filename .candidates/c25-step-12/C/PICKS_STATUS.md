@@ -103,7 +103,14 @@ tests pass, with its SHA. Pathspec commits only; never -A, amend, rebase or stas
       keeps its windows (only this run's tabs close) instead of having every window closed for a next account that
       never comes. Test: test_locate_stopping_early_closes_its_chrome_as_the_last_session[signed-out / ctrl-c] (two
       account groups; the tv session stops; `_close_session` spied: [("tv", True)]; the movies session never starts)
-      — WIP commit "10 locate early stop" (SHA in the next commit) · tests/test_locator.py 95 passed
+      — 73c679c · tests/test_locator.py 95 passed
+- [x] 6b (self-review of the whole diff) the copy search also excludes the photo_ids its first locate found GONE
+      (`first["stale"]`): asked again, a dead stored photo_id cost one more item-info call and a second identical
+      stale record in the learned sidecar. Test: test_the_copy_search_never_asks_again_about_a_photo_id_found_gone
+      (disarmed in-process: item_info asked twice, two stale records). Same commit: the new lines wrapped to ≤ 120
+      characters (no behavior change; `_record_unfetched`'s reason chain written as next(...)) — WIP commit
+      "6 another verified copy — gone photo_ids not asked again" (SHA in the next commit) · tests/test_locator.py 96
+      passed
 - [ ] gates — disarm probes (scratch copy, incl. the new rules) · full suite · smoke · notes · final commit
 
 ## Edits to existing tests (each required by an item — why)

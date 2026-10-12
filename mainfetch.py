@@ -2797,7 +2797,7 @@ def _collect(driver, sources, path, loc, ctx, account, st):
             got, done = _text_ids(driver, value, path, ctx, account, st)
         complete = complete and done
         for pid in got:
-            if pid not in origin:
+            if pid not in origin and pid not in st["exclude"]:
                 origin[pid] = value if kind == "text" else None
                 ids.append(pid)
     if len(ids) > LOCATE_MAX_CANDIDATES:
@@ -2867,7 +2867,7 @@ def _stage_photo_id(driver, loc, ctx, account, st, key):
     page. An item RPC calls gone is looked at on its page too (arbitration): only when both agree is the photo_id
     stale (returned in `stale` — the fetch records it, a read-only caller only reports it)."""
     ids = [p for p in dict.fromkeys([loc.get("photo_id")] + list(loc.get("alternates") or []))
-           if isinstance(p, str) and gpweb.MEDIA_KEY_RE.match(p)][:LOCATE_MAX_CANDIDATES]
+           if isinstance(p, str) and gpweb.MEDIA_KEY_RE.match(p) and p not in st["exclude"]][:LOCATE_MAX_CANDIDATES]
     if not ids or not (key or loc.get("uploaded_name")):
         return None
     records, stale, pages = [], [], st["pages"]
@@ -2920,7 +2920,7 @@ def _stage_hash(driver, loc, ctx, account, st, key):
     if not _rpc_ok(driver, ctx):
         return _stage_error("rpc")
     try:
-        ids = _hash_ids(driver, sha1, ctx, account)
+        ids = [p for p in _hash_ids(driver, sha1, ctx, account) if p not in st["exclude"]]
     except gprpc.RpcUnavailable as e:
         _note_fallback(ctx, e)
         return _stage_error("rpc")
@@ -3078,7 +3078,7 @@ def _arbitrate(driver, res, loc, ctx, account, st, approaches):
     return _waterfall(driver, loc, ctx, account, st, approaches)
 
 
-def locate_object(driver, locator, ctx, approaches="best"):
+def locate_object(driver, locator, ctx, approaches="best", exclude=()):
     """[IMP-C25 Step 12 — candidate C, hybrid arbitration] Find ONE uploaded object's Google Photos item in the
     session's account — READ-ONLY: it navigates the session's Photos tab, types searches and asks read-only RPCs
     (gprpc's allowlist); it never downloads, clicks a tile, presses Shift+D or writes anything — what it learns is
@@ -3086,7 +3086,9 @@ def locate_object(driver, locator, ctx, approaches="best"):
 
     locator = a build_fetch_queue item's `locator`; ctx = the run's FetchContext (ctx.account = the session's
     account; its locator state caches records across objects). approaches "best" stops at the first stage that
-    pins the object; "all" evaluates every stage (check_photos --approaches all, PLAN Step 13).
+    pins the object; "all" evaluates every stage (check_photos --approaches all, PLAN Step 13). exclude = photo
+    ids no stage may pick or count as a candidate — the items already requested for the object (P-20's fallback
+    chain: the waterfall once more finds another verified copy, or nothing).
 
     Returns (PLAN Step 12's contract — Step 13 reuses it and per_approach unchanged):
       found            the object is pinned to one item (P-5 proof)
@@ -3111,7 +3113,7 @@ def locate_object(driver, locator, ctx, approaches="best"):
     started = time.time()
     loc = locator if isinstance(locator, dict) else {}
     account = getattr(ctx, "account", None) or loc.get("account")
-    st = {"pages": 0, "searches": 0, "seen": []}
+    st = {"pages": 0, "searches": 0, "seen": [], "exclude": frozenset(exclude or ())}
     calls = 0
     if not _can_locate(driver):
         res = _locate_result(None, {}, {}, [], False)
@@ -3394,6 +3396,9 @@ def _run_locator_phase(driver, queue, ctx):
          When Shift+D — the web app's own original — delivers other bytes as well,
          that mark is kept apart (`_other_bytes`): unless today's attempts still
          fetch the object, it ends `inconsistent` (P-18, IMP-C27).
+      3. a located object none of whose requests fetched it is located ONCE more
+         without that item (P-20's chain: Shift+D → the search waterfall) —
+         another VERIFIED copy, requested the same way (_another_copy).
     Whatever is still pending gets today's attempts (S4) unchanged; one the stages
     examined that those attempts did not fetch either goes to the failed list after
     them — one row with the stages' evidence and any wrong pick of those attempts
@@ -3416,12 +3421,16 @@ def _run_locator_phase(driver, queue, ctx):
     _journal_sync(ctx, queue)
     for start in range(0, len(located), DIRECT_DOWNLOAD_CONCURRENCY):
         _fetch_window(driver, located[start:start + DIRECT_DOWNLOAD_CONCURRENCY], queue, ctx)
+    _keep_other_bytes(located)
+    # P-20's chain — Shift+D → the search waterfall (P-8): another verified copy before today's blind attempts
+    again = [item for item in located if item["status"] == "pending" and _another_copy(driver, item, ctx)]
+    if again:
+        _journal_sync(ctx, queue)
+    for start in range(0, len(again), DIRECT_DOWNLOAD_CONCURRENCY):
+        _fetch_window(driver, again[start:start + DIRECT_DOWNLOAD_CONCURRENCY], queue, ctx)
+    _keep_other_bytes(again)
     for item in located:
         if item["status"] == "pending":
-            if item.get("_wrong"):
-                # its VERIFIED item's own download (Shift+D; the direct round's mark was cleared) held other bytes —
-                # kept apart from what today's attempts may fetch next: P-18 `inconsistent` (_record_unfetched)
-                item["_other_bytes"] = item.pop("_wrong")
             item["_trigger"]["method"] = None  # today's attempts take over (the journal then says legacy)
     return None
 
@@ -3469,6 +3478,48 @@ def _record_stale(item, res, ctx):
             print(f"     ⚠️ Not recorded in the learned sidecar ({type(e).__name__}: {e}).")
 
 
+def _trigger_of(res):
+    """item['_trigger'] for a located object (_run_locator_phase's contract): the found item's record and the stage's
+    verdict — what learn-on-fetch reads after a SHA-256 match; the method is set when a request goes out."""
+    return {"method": None, "record": dict(res["record"]),
+            "approach": {"tried": res["stage"], "outcome": res["outcome"], "n": res["n"], "via": res["via"]}}
+
+
+def _another_copy(driver, item, ctx):
+    """P-20's fallback chain after the located item's own requests fetched nothing verified: the search waterfall (P-8)
+    once more, WITHOUT that item — another VERIFIED copy of the object (the same bytes uploaded twice; or, for an object
+    without a content key, another upload under its exact name — a re-split set's older one: SHA-256 decides) before
+    today's blind attempts (S4). One try per object, read-only like any locate (the run's record cache makes it
+    cheap). True when one was found: it becomes the item requested (item['_located'] and ['_trigger']); the first find
+    stays in item['_first_located'] — the failed list's evidence (_record_unfetched)."""
+    name, first = item["filename"], item["_located"]
+    try:
+        res = locate_object(driver, item.get("locator") or {}, ctx, exclude=[first["photo_id"]])
+    except (SessionExpiredError, gprpc.RpcRefused):
+        raise
+    except Exception as e:  # one object's trouble never stops the entry: today's attempts follow
+        print(f"   > ⚠️ {name}: looking for another copy failed ({type(e).__name__}) — today's search follows.")
+        return False
+    _record_stale(item, res, ctx)
+    if not res["found"]:
+        print(f"   > 🔍 {name}: no other verified copy of it — today's search follows.")
+        return False
+    item["_first_located"], item["_located"], item["_trigger"] = first, res, _trigger_of(res)
+    how = " (normalized name)" if res["name_normalized"] else ""
+    print(f"   > 🎯 {name}: its item was not fetched — another verified copy: {_STAGE_LABEL[res['stage']]} "
+          f"{res['approach']} · proof {res['proof']}{how} · via {res['via']}")
+    return True
+
+
+def _keep_other_bytes(items):
+    """A located object still pending whose `_wrong` mark survived the locator's rounds — its VERIFIED item's own
+    download (Shift+D; the direct round's mark is cleared) held other bytes — has it kept apart (`_other_bytes`) from
+    whatever is requested next: P-18 `inconsistent` (_record_unfetched)."""
+    for item in items:
+        if item["status"] == "pending" and item.get("_wrong"):
+            item["_other_bytes"] = item.get("_other_bytes", 0) + item.pop("_wrong")
+
+
 def _locate_item(driver, item, ctx):
     """Step 1 of _run_locator_phase for one object; True when it was located (its _trigger is set)."""
     name, loc, stats = item["filename"], item.get("locator") or {}, _session_stats(ctx)
@@ -3484,9 +3535,7 @@ def _locate_item(driver, item, ctx):
     _record_stale(item, res, ctx)
     if res["found"]:
         stats["located"] += 1
-        item["_trigger"] = {"method": None, "record": dict(res["record"]),
-                            "approach": {"tried": res["stage"], "outcome": res["outcome"], "n": res["n"],
-                                         "via": res["via"]}}
+        item["_trigger"] = _trigger_of(res)
         how = " (normalized name)" if res["name_normalized"] else ""
         if res["rule"] == "newest-set":
             how += f" · the newest of {len(res['alternates']) + 1} same-name uploads"
@@ -3946,8 +3995,9 @@ def _record_wrong_items(queue, ctx):
 def _record_unfetched(queue, ctx):
     """[IMP-C25 Step 12 — P-18] After today's attempts and IMP-C34's retry, BEFORE _record_wrong_items: an object the
     exact-item stages examined (item['_located']) that nothing fetched ends 'failed' with ONE failed-list row carrying
-    their evidence — tried = every stage's verdict, candidates = the items they saw (its found item first),
-    expected_taken_local — and the reason:
+    their evidence — tried = every stage's verdict (of its first locate when another copy was tried:
+    item['_first_located']), candidates = the items they saw (the items requested first), expected_taken_local — and
+    the reason:
       inconsistent  it was LOCATED, but its verified item's own download held other bytes than the library's
                     (`_other_bytes`, kept apart by _run_locator_phase): the item IS the object — its content key or
                     its exact name proves it — yet what Google Photos serves is not its bytes (a storage-saver or
@@ -3965,10 +4015,11 @@ def _record_unfetched(queue, ctx):
         res = item.get("_located")
         if not res or item["status"] != "pending":
             continue
+        first = item.get("_first_located") or res
         wrong, other = item.get("_wrong"), res["found"] and item.get("_other_bytes")
         if res["found"] and not (wrong or other):
             continue  # its item is known: a re-run fetches it
-        tried = _tried(res)
+        tried = _tried(first)
         if wrong:
             legacy = _LEGACY_STAGE[0]
             tried = [t for t in tried if t["approach"] != legacy] + [
@@ -3981,7 +4032,8 @@ def _record_unfetched(queue, ctx):
             outcomes = [v["outcome"] for v in res["per_approach"].values()]
             reason = "ambiguous" if "ambiguous" in outcomes else "wrong-item" if "wrong-item" in outcomes else "not-found"
         item["status"] = "failed"
-        candidates = list(dict.fromkeys(([res["photo_id"]] if res["found"] else []) + res["candidates"]))
+        requested = [r["photo_id"] for r in (first, res) if r["found"]]
+        candidates = list(dict.fromkeys(requested + first["candidates"] + res["candidates"]))
         listed = "; added to the failed list" if _record_failed(
             item, ctx, reason, tried, candidates[:LOCATE_MAX_CANDIDATES],
             _expected_local(item.get("locator") or {})) else ""

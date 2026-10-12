@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 6 another verified copy
+STATE: IN PROGRESS — next: 7 Shift+D page reuse
 
 # IMP-C25 Step 12 follow-up — the judge's 10 cherry-picks into the merged locator (candidate C) — resumable status
 
@@ -58,9 +58,22 @@ tests pass, with its SHA. Pathspec commits only; never -A, amend, rebase or stas
       still decides, nothing is waited for); a download (the tab stays on Photos) keeps the 20 s confirmation. New
       line: "the direct download did not start — its link answered with a web page — Shift+D next." Test:
       test_a_link_answering_with_a_page_is_left_at_once_and_never_waited_on (no clock wait while the tab shows the
-      link's host; disarmed in-process: 40 waits = 20 s on it) — WIP commit "5 HTML link page" (SHA in the next
-      commit) · tests/test_locator.py 84 passed
-- [ ] 6 another verified copy (re-locate with `exclude`) before today's blind S4 attempts
+      link's host; disarmed in-process: 40 waits = 20 s on it) — 29719cb · tests/test_locator.py 84 passed
+- [x] 6 another verified copy before today's blind S4 attempts — B's form (P-20's chain: Shift+D → the search
+      waterfall): `locate_object(..., exclude=())` (the per-locate state `st["exclude"]`, applied where candidate ids
+      enter verification: S0a's ids, S0b's hash listing, `_collect` for S1/S2/S3/S3u/the OD-5 preview — never picked,
+      never a candidate); `_another_copy` re-locates a located object still pending after its window, ONCE, without
+      the item requested; a find becomes the item requested (`_located`, `_trigger` via the new `_trigger_of`, also
+      used by `_locate_item`), the first find kept in `_first_located` (the row's evidence: its verdicts, both items
+      first among the candidates); the copies go through `_fetch_window` like any located object. `_keep_other_bytes`
+      (item 3's move, now a helper) runs before the copy search and after its rounds, so the copy's direct round
+      never clears the first item's other-bytes mark. The re-locate's OD-5 `s4_skip` is ignored (S4 may still click
+      the excluded verified item). Tests: test_an_excluded_photo_id_is_never_picked_nor_a_candidate ·
+      test_a_located_item_fetching_nothing_verified_gets_another_verified_copy_before_todays_search (re-split,
+      names-only, library = the OLDER set: 4 deleted downloads, then both copies fetched + learned, S4 never runs;
+      the only test failing with `_another_copy` disarmed in-process) ·
+      test_a_copy_that_brings_other_bytes_too_keeps_the_first_finds_evidence — WIP commit "6 another verified copy"
+      (SHA in the next commit) · tests/test_locator.py 87 passed
 - [ ] 7 Shift+D reuses the open item page when its address already names the item (C's own-address check kept)
 - [ ] 8 RPC allowlist check after every locator test (tests only)
 - [ ] 9 no 20-candidate cap when the RPC records already carry dedupKeys
@@ -104,6 +117,12 @@ tests pass, with its SHA. Pathspec commits only; never -A, amend, rebase or stas
   bytes is booked as today's wrong pick, not `_other_bytes`. Both are rare; the row still carries the evidence.
 - Item 3: S4 still runs for an object whose verified item served other bytes (P-20's chain → the search waterfall
   → failed list; OD-5 skips S4 only when every candidate is proven ANOTHER item) — B does the same.
+- Item 6: B's re-locate with `exclude` chosen over A's "verified alternates": P-20 names the search waterfall as the
+  step after Shift+D, and C's `alternates` hold only what the PINNING stage saw (S0a stops at the first match, so a
+  fast-path find has none); the waterfall subsumes them (the same stage lists them again, the requested item
+  excluded) and also reaches later stages (e.g. S0b's hash lookup for a stored photo_id). Cost: only for an object
+  whose requests all failed; the run's record cache serves every listing already read. ONE copy per object ("try
+  one"), for any reason the first item failed (nothing started, lost once, other bytes).
 
 ## Gates
 

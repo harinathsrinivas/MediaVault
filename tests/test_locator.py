@@ -1773,3 +1773,76 @@ def test_a_link_answering_with_a_page_is_left_at_once_and_never_waited_on(fake_p
     assert [host for _seconds, host in waits if host == gphotos_fake.DOWNLOAD_HOST] == []
     assert mainfetch._is_photos_host(gpweb_host(d.current_url)) and _files(incoming) == []
     assert "its link answered with a web page" in capsys.readouterr().out
+
+
+def test_an_excluded_photo_id_is_never_picked_nor_a_candidate(fake_photos, tmp_path):
+    # Pick 6's locate half (from B): the waterfall once more WITHOUT the item already requested finds another verified
+    # copy — here the same bytes uploaded twice: S0a skips the stored (excluded) photo_id, S0b's hash lookup pins
+    # the other copy. With both excluded nothing is found, and neither is even listed as a candidate.
+    data = _bytes("twice")
+    first = fake_photos.add_item("tv", _up(SHOW, SID), data=data, taken=TAKEN)
+    second = fake_photos.add_item("tv", _up(SHOW, SID), data=data, taken=TAKEN)
+    ctx, d = _ctx(), fake_photos.driver("tv")
+    [loc] = _locators(_whole(_folder(tmp_path), SHOW, data, SID, block=_learned(first)), EP, ctx, tmp_path)
+
+    res = mainfetch.locate_object(d, loc, ctx, exclude={first.photo_id})
+    none = mainfetch.locate_object(d, loc, ctx, exclude={first.photo_id, second.photo_id})
+
+    assert (res["found"], res["photo_id"], res["stage"], res["proof"]) == (True, second.photo_id, "s0_hash", "dedupkey")
+    assert first.photo_id not in res["candidates"] and "photo_id" not in res["per_approach"]
+    assert not none["found"] and not {first.photo_id, second.photo_id} & set(none["candidates"])
+
+
+def test_a_located_item_fetching_nothing_verified_gets_another_verified_copy_before_todays_search(flow, sandbox,
+                                                                                                  capsys):
+    # Pick 6 (B's trigger_verified / A's verified alternates): after Shift+D, P-20's chain goes on with the search
+    # waterfall, not with today's blind attempts. A names-only chunk set uploaded twice under the same names (a
+    # re-split): the NEWEST set is picked (Step 9's rule), but the library holds the OLDER split — both of its requests
+    # bring other bytes (deleted). The waterfall once more, without that item, finds the other upload: fetched,
+    # SHA-256-verified, learned — and today's search never runs.
+    folder = sandbox["local_root"] / "Movies" / "Some Film (2019)"
+    folder.mkdir(parents=True)
+    name, sid = "Some.Film.2019.mkv", "c3c3c3"
+    chunks = [f"Some.Film.2019 [{sid}].chunk.00{n}.mkv" for n in (1, 2)]
+    old = [flow.world.add_item("movies", c, data=_bytes(f"old{n}"), taken="2025-01-10T08:00:00Z")
+           for n, c in enumerate(chunks)]
+    new = [flow.world.add_item("movies", c, data=_bytes(f"new{n}"), taken="2026-02-20T09:30:00Z")
+           for n, c in enumerate(chunks)]
+    mvcommon.save_library({"mov-en-2019-somefilm": _split(folder, name, sid, [_bytes("old0"), _bytes("old1")])})
+
+    mainfetch.cmd_fetch_route("mov-en-2019-somefilm")
+
+    out = capsys.readouterr().out
+    assert out.count("the newest of 2 same-name uploads") == 2
+    assert [(r["photo_id"], r["via"]) for r in flow.world.downloads] == [
+        (new[0].photo_id, "direct"), (new[1].photo_id, "direct"), (new[0].photo_id, "shift_d"),
+        (new[1].photo_id, "shift_d"), (old[0].photo_id, "direct"), (old[1].photo_id, "direct")]
+    assert out.count("its item was not fetched — another verified copy: S2 exact_name · proof filename · via rpc") == 2
+    for n, chunk in enumerate(chunks):
+        assert (folder / "restore" / chunk).read_bytes() == _bytes(f"old{n}")
+    assert "ATTEMPT 1" not in out and flow.legacy == [] and "✅ ENTRY COMPLETE." in out
+    assert mvcommon.read_failed() == []
+    learned = mvcommon.read_learned("movies")
+    assert sorted((r["photo_id"], r["approach"]["tried"]) for r in learned) == sorted(
+        (o.photo_id, "s2_exact_name") for o in old)                               # the copies, proven by SHA-256
+    assert [o["photo_id"] for o in _journal_objects()] == [o.photo_id for o in old]
+
+
+def test_a_copy_that_brings_other_bytes_too_keeps_the_first_finds_evidence(capsys):
+    # Pick 6 + 3 + 2: when the other copy fails as well, the row is still the stages' FIRST verdicts, with every item
+    # requested listed first.
+    ctx = _ctx()
+    first_pid, copy_pid, seen = "AF1QipFAKETVL0000003first", "AF1QipFAKETVL0000004copy0", "AF1QipFAKETVL0000005seen0"
+    first = {"found": True, "photo_id": first_pid, "candidates": [seen, first_pid, copy_pid],
+             "per_approach": {"exact_name": {"outcome": "ambiguous", "n": 3}}}
+    copy = {"found": True, "photo_id": copy_pid, "candidates": [seen, copy_pid],
+            "per_approach": {"exact_name": {"outcome": "exactly-one", "n": 2}}}
+    loc = {"manual_id": "tv-en-2015-demo-s04e10", "label": "chunk 1/2", "uploaded_name": "x.chunk.001.mkv"}
+    item = {"filename": "x.chunk.001.mkv", "hash": _sha256(b"x"), "status": "pending", "locator": loc,
+            "_first_located": first, "_located": copy, "_other_bytes": 2}
+
+    mainfetch._record_unfetched([item], ctx)
+
+    [row] = mvcommon.read_failed()
+    assert (row["reason"], row["candidates"]) == ("inconsistent", [first_pid, copy_pid, seen])
+    assert row["tried"] == [{"approach": "exact_name", "outcome": "ambiguous", "n": 3}]

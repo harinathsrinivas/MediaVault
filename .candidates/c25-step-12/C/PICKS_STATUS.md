@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: gates (disarm probes on a scratch copy · full suite · smoke · final commit)
+STATE: COMPLETE
 
 # IMP-C25 Step 12 follow-up — the judge's 10 cherry-picks into the merged locator (candidate C) — resumable status
 
@@ -108,10 +108,10 @@ tests pass, with its SHA. Pathspec commits only; never -A, amend, rebase or stas
       (`first["stale"]`): asked again, a dead stored photo_id cost one more item-info call and a second identical
       stale record in the learned sidecar. Test: test_the_copy_search_never_asks_again_about_a_photo_id_found_gone
       (disarmed in-process: item_info asked twice, two stale records). Same commit: the new lines wrapped to ≤ 120
-      characters (no behavior change; `_record_unfetched`'s reason chain written as next(...)) — WIP commit
-      "6 another verified copy — gone photo_ids not asked again" (SHA in the next commit) · tests/test_locator.py 96
-      passed
-- [ ] gates — disarm probes (scratch copy, incl. the new rules) · full suite · smoke · notes · final commit
+      characters (no behavior change; `_record_unfetched`'s reason chain written as next(...)) — ab4d83a ·
+      tests/test_locator.py 96 passed
+- [x] gates — disarm 47/47 caught (isolated `git archive` copy of ab4d83a, incl. 19 probes for the new rules) · full
+      suite 2580 passed · smoke 82 passed · notes · the final commit (`feat(imp-c25): Step 12 follow-up — …`)
 
 ## Edits to existing tests (each required by an item — why)
 - Item 1: 14 existing tests asserted `per_approach` entries WITH `via` (the shape the item removes):
@@ -155,9 +155,67 @@ tests pass, with its SHA. Pathspec commits only; never -A, amend, rebase or stas
   fast-path find has none); the waterfall subsumes them (the same stage lists them again, the requested item
   excluded) and also reaches later stages (e.g. S0b's hash lookup for a stored photo_id). Cost: only for an object
   whose requests all failed; the run's record cache serves every listing already read. ONE copy per object ("try
-  one"), for any reason the first item failed (nothing started, lost once, other bytes).
+  one"), for any reason the first item failed (nothing started, lost once, other bytes). A copy request counts as
+  the object's one IMP-C34 re-request when the first download was lost (`_fire` books it): a second loss ends it.
+- Item 4: `others` = the download names of EVERY other object of the window (requested or not, fetched or not), not
+  only B's "already started" ones: a late start of a request that was not confirmed, or a ' (n)' copy of a fetched
+  object, is never another request's start either. An 'Unconfirmed N.crdownload' names no object and still counts.
+- Item 5: B's "at once" rather than A's 3 s — plus ONE zero-wait look at the folder after leaving the page (C's rule
+  "the folder decides" kept; nothing is waited for). "Left Google Photos" is read from the tab's host: the mint (an
+  RPC from the Photos tab) guarantees the tab was on Photos before the link was opened.
+- Item 7: reuse needs BOTH the address naming the item and its record in the page now (A's instant look); C's
+  `_shows_item` is unchanged and still decides before the keystroke. Reuse happens where the item's own page is the
+  one open: a one-object entry on the web-page path, the drift check's object, the last-located object of a window.
+- Item 9: the cap is lifted for every content-keyed RPC listing, not only "when every record carries a dedupKey": an
+  RPC listing record without one is judged "unknown" at no cost either, so the cost argument holds for all.
+- Item 10: `not completed` (any early exit, incl. an unexpected error) instead of A / B's `stopped`.
+- No live Google Photos run: every pick is proven hermetically (fake world + emulator); the triggers stay unverified
+  live for all candidates (R2 §M6–M7), as before.
 
 ## Gates
+- Baseline at 26c8f89 (before any pick): full suite **2558 passed**, 1 pre-existing StarletteDeprecationWarning, 416 s,
+  exit 0 · tests/test_locator.py 74 passed.
+- FINAL code ab4d83a (the final commit changes only this file): tests/test_locator.py **96 passed** (74 + 22 new) ·
+  full suite **2580 passed** (= 2558 + 22), the same single pre-existing warning, 420 s, exit 0 (2026-10-13, idle
+  machine, sequential) · smoke `pytest tests/smoke -q` **82 passed** (14 s, exit 0).
+- Disarm probes — **47/47 caught** (2026-10-12 23:55; scratchpad `picks/picks_disarm.py`, results
+  `picks/picks_disarm_results.txt`): an ISOLATED copy (`git archive ab4d83a` extracted under the session scratchpad;
+  the worktree never mutated; copy removed after), each probe run against the WHOLE tests/test_locator.py; baseline
+  copy 96 passed, restored copy 96 passed. Candidate C's 28 kept (P20 `_record_unfetched`, P21 the `_fire` lambda
+  with `others`, P23 both `_back_on_photos` calls, P24 `_locate_item`'s `_record_stale` — retargeted to the changed
+  code) + 19 for the picks: P29 per_approach carries `via` · P30 the stages' booking after `_record_wrong_items` · P31
+  the wrong pick not folded in · P32 no `inconsistent` · P33 the other-bytes mark not kept apart · P34 `others`
+  ignored · P35 a page answer not seen · P36 no copy search · P37 `exclude` ignored by `_collect` · P38 `exclude`
+  ignored by S0b · P39 gone photo_ids asked again · P40 a failed copy's row loses the first find's evidence · P41
+  the item page always reloaded · P42 reuse whatever the address · P43 the allowlist after-check unwired · P44
+  ("fires") an ADDED test leaving a mutating rpcid → the after-check errors it · P45 the cap kept for keyed listings
+  · P46 no cap for names-only · P47 an early-stopped locate session closed as if another followed. Every probe's
+  expected catcher was among its failures except P11's listing: P11 (a verified item's other-bytes mark kept) is
+  caught by test_a_verified_items_other_bytes_are_never_booked_as_a_wrong_pick — C's own catcher (its run showed
+  "1 failed, 1 passed" for the same pair); my script had named the twin test; confirmed by a one-off rerun
+  (`picks/p11_catcher.py`, copy removed).
+- In-process disarm checks while each item was built (scratch pytest plugins `picks/plug_item{4,5,6,6b,7,9}_off.py`,
+  the worktree untouched): each new test failed with its guard disarmed (recorded per item above).
+- Change-gates: `git diff 26c8f89 HEAD` = mainfetch.py + tests/test_locator.py + this file only; 0 rollback /
+  `ENTRY_TYPE_KEYS` symbols in it (RollbackJournal, recover_journal, RollbackHardFail, mark_point_of_no_return,
+  .mediavault_txn); main.py, mvcommon.py, gprpc.py, gpweb.py, tests/conftest.py, tests/gphotos_fake.py and every
+  other test file untouched. Byte-identical (AST source segments, base vs HEAD): trigger_download,
+  _await_search_results, _drop_timeline, _search_page_problem, use_photos_tab, check_session_alive,
+  harvest_downloads, _note_losses, _record_wrong_items, _fire, _retry_lost_downloads, _close_session,
+  cmd_fetch_route, build_fetch_queue, _record_failed; the TRIGGER_DOWNLOAD / SEARCH_WAIT digest pins pass. Kill switch
+  (`EXACT_LOCATOR_ENABLED=False`): no object carries `_located`, so `_record_unfetched` is a silent no-op and today's
+  sequence is unchanged — test_the_kill_switch_restores_todays_sequence_exactly + the harvester's frozen oracles
+  green.
+- Downstream (dispatch): Step 13 reuses `locate_object` / `per_approach` unchanged — now exactly {outcome, n}, each
+  entry a valid failed-list `tried` row (pinned); `exclude=` and `per_approach_via` are optional additions. Step 14's
+  resolve_photos reads failed rows: wrong picks and `inconsistent` rows now carry the stages' candidates (found item
+  first) and verdicts. No live run (not required; the triggers stay R2 §M6–M7).
 
 ## Log
-- 2026-10-12 started (executor-fable, max effort). Baseline tests/test_locator.py 74 passed at 26c8f89.
+- 2026-10-12 started (executor-fable, max effort). Baseline tests/test_locator.py 74 passed at 26c8f89; baseline full
+  suite 2558 passed (it ran while the first item's edits were made — collected before them; green).
+- 2026-10-12 items 1–10 (+ 6b from the whole-diff self-review) committed e5135c1 … ab4d83a; disarm 47/47.
+- 2026-10-13 a usage-limit pause hit while waiting on the disarm run (it had finished: results file intact); resumed
+  on the coordinator's word; full suite 2580 + smoke 82 on ab4d83a; STATE: COMPLETE in the final commit.
+- Commit trailers: `Claude Fable 5.1` throughout (the session's model id claude-fable-5-1); the harness's attribution
+  notice alternated Fable 5.1 / Opus 5.5 during the run — the quirk candidate C and the judge recorded.

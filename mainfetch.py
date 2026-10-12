@@ -9,7 +9,7 @@ import hashlib
 import errno
 import json
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 # --- SELENIUM IMPORTS ---
 try:
     from selenium import webdriver
@@ -32,6 +32,7 @@ except ImportError:
 # entries behavior is intentionally removed.
 import mvcommon  # [IMP-C26] runtime config is read module-qualified (mvcommon's RUNTIME CONFIG binding-hazard note)
 import gpweb  # [IMP-C25] the shared Google Photos name / hash helpers (stdlib only)
+import gprpc  # [IMP-C25 Step 12] the ONE read-only Google Photos RPC client (it imports mainfetch lazily)
 from mvcommon import RESTORE_DIR_NAME, load_library, calculate_file_hash, fetch_session_lock, episode_num_from_id
 
 # --- AUTOMATION CONFIG ---
@@ -2089,6 +2090,10 @@ class FetchContext:
                stand-alone fetch_single_entry
     chrome     the running session's launched Chrome: {"account", "proc" (the Popen
                init_driver kept, or None), "pid", "user_data_dir"}; None outside one
+    [IMP-C25 Step 12 — the exact-item locator]
+    locator    the locator's per-run state (_LocatorRun: the record cache both the
+               RPC and the web-page paths feed, the listings, the drift verdict);
+               created on first use (_locator_run)
     """
 
     def __init__(self, manual=False, run_id=None):
@@ -2108,6 +2113,7 @@ class FetchContext:
         self.journal = None
         self.chrome = None
         self.hinted = False  # the incoming-mode "Chrome ignored the folder?" hint was printed
+        self.locator = None  # [IMP-C25 Step 12] _LocatorRun, created on first use
 
     def start_session(self, account):
         """A Chrome session for `account` is up: the run now fetches in it."""
@@ -2327,6 +2333,983 @@ def build_fetch_queue(entry, restore_folder, ctx=None, entry_id=None):
     return queue
 
 
+# ==========================================
+#   IMP-C25 STEP 12 — THE EXACT-ITEM LOCATOR (candidate C: hybrid arbitration)
+# ==========================================
+# docs/feature-fetch-datetime/PLAN.md Step 12, P-5, P-7, P-8, P-9, P-20. locate_object() pins ONE uploaded
+# object to its Google Photos item — read-only — by the evidence-ordered waterfall (P-8):
+#   S0a photo_id (the learned one, then its alternates) · S0b content-hash lookup (swbisb, the object's SHA-1) ·
+#   S1 taken second · S2 exact uploaded name · S3 title + short_id · S3u the user's search_override
+# with the object's verified approach.best first. For a content-keyed object nothing pinned, the queries today's
+# two attempts would type are previewed as well (OD-5: those attempts are skipped when every candidate they could
+# click is proven another item). Candidate C — hybrid arbitration:
+#   * every stage asks Google Photos' read-only internal calls first (gprpc, P-9) and, when one fails
+#     (RpcUnavailable / RpcShapeError / RpcServerError), runs the SAME stage on the web pages — the search box,
+#     the item page's embedded record (gpweb.page_record), its info panel: a per-stage fallback, so one failing
+#     call never costs the run its RPC path;
+#   * both paths feed ONE per-run record cache (ctx.locator): a season or a chunk set lists and opens each item at
+#     most once (one taken-second lookup serves every chunk sharing the second; one swbisb batch an entry);
+#   * the first object of a run that RPC locates is cross-checked against its item page's record — the drift
+#     detector: a disagreement turns RPC off for the rest of the run (one warning line) and the object is located
+#     again from the web pages, the primary source (P-7).
+# A candidate counts only when its record PROVES it (P-5): its dedupKey is the object's content key (proof
+# dedupkey) or — for an object without one — its file name is the exact uploaded name (proof filename; P-6
+# normalized). Never a tile position. SHA-256 after the download stays the final authority (the harvester).
+
+TRIGGER_CONFIRM_S = 20.0         # a requested download must show in the watched folder within this long
+TRIGGER_POLL_S = 0.5             # ... looked at this often
+DIRECT_DOWNLOAD_CONCURRENCY = 3  # P-20: at most this many direct downloads run at once
+LOCATE_MAX_CANDIDATES = 20       # candidates one stage verifies — more: ambiguous, never guessed
+LOCATE_MAX_SCROLLS = 12          # result-grid scrolls per web-page search
+LOCATE_SEARCH_PAGES = 2          # EzkLib pages per RPC search
+SHORT_ID_QUERY_MIN = 6           # S3's last query is the bare short id only from this length on (shorter: too loose)
+TIMELINE_PAGE_SIZE = 100         # S1: lcxiM items per page
+TIMELINE_MAX_PAGES = 3           # S1: pages read while they stay inside the taken second
+ITEM_WAIT_S = 12.0               # an item page: wait this long for its record (+ info panel) — the crawler's wait
+ITEM_POLL_S = 0.4
+VIEWER_SETTLE_S = 1.5            # an opened item takes Shift+D once its viewer is up (trigger_download waits 2 s)
+DIRECT_PAGE_LOAD_S = 15.0        # the page-load bound for opening a minted link — a navigation that becomes a download
+                                 # may never "load" (a live probe hung ~5 min on Selenium's 300 s default)
+SELENIUM_PAGE_LOAD_S = 300.0     # Selenium's / W3C's default page-load timeout, restored when it cannot be read
+DRIFT_CHECK_TRIES = 3            # inconclusive page cross-checks per run before RPC is used unchecked
+
+# (approach — the P-1 vocabulary, stage — a learned record's approach.tried (mvcommon.GP_STAGES), label)
+_LOCATE_STAGES = (("photo_id", "s0_photo_id", "S0a"), ("hash", "s0_hash", "S0b"),
+                  ("taken_second", "s1_taken_second", "S1"), ("exact_name", "s2_exact_name", "S2"),
+                  ("title_sid", "s3_title_sid", "S3"), ("user_query", "s3u_user_query", "S3u"))
+_LEGACY_STAGE = ("legacy", "s4_legacy", "S4")
+_STAGE_LABEL = {stage: label for _approach, stage, label in _LOCATE_STAGES + (_LEGACY_STAGE,)}
+_RECORD_FIELDS = ("photo_id", "dedup_key", "taken_ms", "tz_offset_ms", "upload_ms", "width", "height", "filename")
+_DRIFT_FIELDS = ("dedup_key", "taken_ms", "tz_offset_ms", "upload_ms")
+_SHA1_HEX_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+class _LocatorRun:
+    """The exact-item stages' state for ONE run (ctx.locator — _locator_run creates it on first use):
+
+      records   {(account, photo_id): record} — the ONE record cache both paths feed: the item's facts
+                (_RECORD_FIELDS + size_bytes), `src` = the paths that read it ({"rpc", "ui"}) and `by` = each
+                path's own view (what the drift detector compares). The item page wins over an RPC answer
+                (P-7) — except the file name: an exact RPC name beats the info panel's whitespace-collapsed one
+      listings  {(account, path, key): {"ids", "complete"[, "labels"]}} — what one search, day, taken second
+                or hash lookup listed (path rpc | ui | hash | second-rpc | second-ui)
+      gone      {(account, photo_id)} — RPC AND the item page both said there is no such item (stale)
+      wanted    {account: {sha1}} — the content keys of the entry being located: the first S0b of the entry
+                sends them all in one swbisb batch
+      rpc_off   None, or why RPC is off for the rest of the run ("drift")
+      drift     None (not checked yet) · "ok" · "drift" · "unchecked" (DRIFT_CHECK_TRIES inconclusive looks)
+      direct_off  None, or why the direct download (P-20) is off for the rest of the run: "other-bytes" — a link
+                served other bytes than a content-verified item (P14: a transcode), so Shift+D fetches the rest
+      told      the one-time notes already printed
+      stats     {account: counters} — each account session's summary line (_locator_session_line)"""
+
+    def __init__(self):
+        self.records, self.listings, self.gone, self.wanted = {}, {}, set(), {}
+        self.rpc_off = self.drift = self.direct_off = None
+        self.drift_tries = 0
+        self.told = set()
+        self.stats = {}
+
+
+def _locator_run(ctx):
+    if getattr(ctx, "locator", None) is None:
+        ctx.locator = _LocatorRun()
+    return ctx.locator
+
+
+def _session_stats(ctx):
+    """The exact-item counters of the session's account (one Chrome session per account and run)."""
+    return _locator_run(ctx).stats.setdefault(
+        getattr(ctx, "account", None), {"objects": 0, "located": 0, "direct": 0, "shift_d": 0, "fallbacks": 0})
+
+
+def _can_locate(driver):
+    """True for a driver the exact-item stages can use: it navigates and runs page scripts (get, execute_script,
+    execute_async_script) — every real Chrome driver. A stand-in without them (None, the recorders of the Step
+    10/11 tests) keeps today's two attempts only, exactly as before Step 12."""
+    return all(callable(getattr(driver, name, None)) for name in ("get", "execute_script", "execute_async_script"))
+
+
+def _rpc_ok(driver, ctx):
+    """RPC may be asked: the drift detector has not turned it off and gprpc's circuit breaker is closed."""
+    return _locator_run(ctx).rpc_off is None and not gprpc.stats(driver)["breaker_open"]
+
+
+def _note_fallback(ctx, error):
+    """Count one failed RPC stage (candidate C falls back to the web pages); say so once per run — the
+    exception's type only (gprpc messages carry no token or URL, but nothing needs more)."""
+    run = _locator_run(ctx)
+    _session_stats(ctx)["fallbacks"] += 1
+    if "fallback" not in run.told:
+        run.told.add("fallback")
+        print(f"   > ⚠️ A Google Photos internal call failed ({type(error).__name__}) — that stage uses the web "
+              f"pages instead.")
+
+
+def _content_key(loc):
+    """The object's dedupKey — its content key, P-5's strongest proof — from the locator, or None."""
+    key = gpweb.normalize_dedup_key(loc.get("dedup_key"))
+    if key is None and isinstance(loc.get("sha1"), str) and _SHA1_HEX_RE.match(loc["sha1"]):
+        key = gpweb.normalize_dedup_key(gpweb.dedup_key(loc["sha1"].lower()))
+    return key
+
+
+def _sha1_of(loc, key):
+    """The object's SHA-1 hex (the swbisb lookup key): the locator's, else the one its dedupKey encodes."""
+    sha1 = loc.get("sha1")
+    if isinstance(sha1, str) and _SHA1_HEX_RE.match(sha1):
+        return sha1.lower()
+    return gpweb.dedup_key_to_sha1_hex(key) if key else None
+
+
+def _seen(st, photo_id):
+    if photo_id not in st["seen"]:
+        st["seen"].append(photo_id)
+
+
+def _remember(ctx, account, facts, src):
+    """Fold one item's facts into the run's record cache (src rpc | ui); returns the cached record, or None for
+    facts without a media key."""
+    pid = facts.get("photo_id") if isinstance(facts, dict) else None
+    if not (isinstance(pid, str) and gpweb.MEDIA_KEY_RE.match(pid)):
+        return None
+    held = _locator_run(ctx).records.setdefault((account, pid), {"photo_id": pid, "src": set(), "by": {}})
+    view = held["by"].setdefault(src, {})
+    for k in _RECORD_FIELDS[1:] + ("size_bytes",):
+        value = gpweb.normalize_dedup_key(facts.get(k)) if k == "dedup_key" else facts.get(k)
+        if value is None or (k == "filename" and not (isinstance(value, str) and value.strip())):
+            continue
+        view[k] = value
+        if k == "filename":
+            if held.get(k) is None or (src == "rpc" and held.get("_name_src") != "rpc"):
+                held[k], held["_name_src"] = value, src
+        elif src == "ui" or held.get(k) is None:
+            held[k] = value
+    held["src"].add(src)
+    return held
+
+
+def _verdict(rec, loc, key):
+    """P-5 for one candidate record -> ("match", proof, name_normalized) when it IS the object — its dedupKey is
+    the object's content key, or (no content key) its file name is the exact uploaded name (P-6 normalized
+    counts); ("wrong", None, False) when the record proves another item; ("unknown", None, False) otherwise."""
+    if key:
+        held = gpweb.normalize_dedup_key(rec.get("dedup_key"))
+        if held is None:
+            return "unknown", None, False
+        return ("match", "dedupkey", False) if held == key else ("wrong", None, False)
+    name, got = loc.get("uploaded_name"), rec.get("filename")
+    if not (name and got):
+        return "unknown", None, False
+    how = gpweb.names_match(got, name)
+    return ("match", "filename", how == "normalized") if how else ("wrong", None, False)
+
+
+def _judge(records, loc, key, listed=None, complete=True):
+    """One stage's verdict over the records of its candidates (P-5) -> {outcome, n, pick, proof, normalized,
+    alternates, rule}:
+      exactly-one  one verified item — or several holding the SAME bytes (one dedupKey: one object): the
+                   object's stored photo_id, else the oldest upload, is picked, the others are alternates
+      ambiguous    candidates none of which is proven, or a listing longer than LOCATE_MAX_CANDIDATES — or, for
+                   an object WITHOUT a content key, several name matches holding different bytes (a re-split
+                   set uploaded twice under the same names): the NEWEST set (taken second, then upload time) is
+                   picked (Step 9's rule) — rule "newest-set"; its SHA-256 still decides
+      wrong-item   every candidate examined and proven to be another item
+      not-found    no candidate
+    listed = how many candidates the listing named (default: the records); complete = every one was read."""
+    n = len(records) if listed is None else listed
+    out = {"outcome": "not-found", "n": n, "pick": None, "proof": None, "normalized": False, "alternates": [],
+           "rule": None}
+    if not n:
+        return out
+    verdicts = [(rec, _verdict(rec, loc, key)) for rec in records]
+    matches = [(rec, v) for rec, v in verdicts if v[0] == "match"]
+    if matches:
+        recs = [rec for rec, _v in matches]
+        keys = {gpweb.normalize_dedup_key(rec.get("dedup_key")) for rec in recs}
+        if len(recs) == 1 or (None not in keys and len(keys) == 1):
+            stored = loc.get("photo_id")
+            pick = min(recs, key=lambda r: (r["photo_id"] != stored, r.get("upload_ms") or 0, r["photo_id"]))
+            out["outcome"] = "exactly-one"
+        else:
+            pick = max(recs, key=lambda r: (r.get("taken_ms") or 0, r.get("upload_ms") or 0, r["photo_id"]))
+            out.update(outcome="ambiguous", rule="newest-set")
+        verdict = next(v for rec, v in matches if rec is pick)
+        out.update(pick=pick, proof=verdict[1], normalized=verdict[2],
+                   alternates=[r["photo_id"] for r in recs if r is not pick])
+    elif complete and len(records) == n and all(v[0] == "wrong" for _rec, v in verdicts):
+        out["outcome"] = "wrong-item"
+    else:
+        out["outcome"] = "ambiguous"
+    return out
+
+
+def _stage_error(via):
+    """A stage that could not run (neither path answered)."""
+    return {"outcome": "error", "n": 0, "pick": None, "proof": None, "normalized": False, "alternates": [],
+            "rule": None, "via": via, "complete": False}
+
+
+# ------------------------------------------------------------------ the web-page path (approach A's DOM path)
+class _SearchProblem(Exception):
+    """A web-page search never showed its results (IMP-C29 / IMP-C35's diagnosis): the stage cannot run."""
+
+
+def _body_text(driver):
+    try:
+        return driver.find_element(By.TAG_NAME, "body").text or ""
+    except Exception:
+        return ""
+
+
+def _open_info_panel(driver):
+    """Open the item page's info panel: its Info button, else the 'i' shortcut (tools/gp_inventory.py's
+    sequence — a browser action, kept here because mainfetch must not import the crawler)."""
+    for sel in ("[aria-label='Open info']", "[aria-label='Info']", "[aria-label='Show info']"):
+        try:
+            buttons = [e for e in driver.find_elements(By.CSS_SELECTOR, sel) if e.is_displayed()]
+        except Exception:
+            buttons = []
+        if buttons:
+            driver.execute_script("arguments[0].click();", buttons[0])
+            return
+    webdriver.ActionChains(driver).send_keys("i").perform()
+
+
+def _page_facts(driver, photo_id, want_name, st):
+    """The item page of `photo_id` — one page load, check_session_alive after it — read the crawler's way: its
+    embedded record (gpweb.page_record, P-7's primary source) and, with want_name, the info panel's file name
+    (gpweb.info_panel; the panel is opened once when closed, never toggled shut). None when the page shows no
+    record of the item within ITEM_WAIT_S (a missing item, or a page that did not render)."""
+    driver.get(f"{PHOTOS_URL}/photo/{photo_id}")
+    check_session_alive(driver)
+    st["pages"] += 1
+    if want_name and hasattr(driver, "execute_cdp_cmd"):
+        try:
+            focus_page(driver)  # the panel renders only in a focused tab (RESEARCH F14)
+        except Exception:
+            pass
+    record, name, opened = {}, None, False
+    deadline = time.time() + ITEM_WAIT_S
+    while True:
+        if not record:
+            record = gpweb.page_record(driver.page_source, photo_id)
+        if record and want_name and not name:
+            body = _body_text(driver)
+            name = (gpweb.info_panel(body) or {}).get("filename")
+            if not name and not opened and "Details" not in body:
+                _open_info_panel(driver)  # display text as a hint only (P-7): it decides when to open, nothing else
+                opened = True
+                continue
+        if (record and (name or not want_name)) or time.time() >= deadline:
+            break
+        time.sleep(ITEM_POLL_S)
+    if not record:
+        return None
+    facts = dict(record)
+    if name:
+        facts["filename"] = name
+    return facts
+
+
+def _visible_result_links(driver):
+    """The visible links to items on a search page — TILES_JS's rule (a[href*='photo/'], shown, wider than
+    40 px) — without the home timeline's (_drop_timeline, IMP-C35)."""
+    links = []
+    for el in driver.find_elements(By.CSS_SELECTOR, "a[href*='photo/']"):
+        try:
+            if el.is_displayed() and el.size["width"] > 40:
+                links.append(el)
+        except Exception:  # a tile the grid recycled while it was read
+            continue
+    return _drop_timeline(driver, links)
+
+
+def _ui_search(driver, query):
+    """Type `query` into the Photos search box — trigger_download's keystrokes in a focused Photos tab — and wait
+    for its results (IMP-C35). Raises _SearchProblem when they never show (IMP-C29's diagnosis)."""
+    if hasattr(driver, "execute_cdp_cmd"):
+        use_photos_tab(driver)  # focused, or no result grid renders (RESEARCH F14); re-arms downloads (P-12)
+    driver.get(PHOTOS_URL)
+    check_session_alive(driver)
+    time.sleep(1.5)
+    actions = webdriver.ActionChains(driver)
+    actions.send_keys("/")
+    actions.pause(0.3)
+    actions.send_keys(query)
+    actions.send_keys(Keys.ENTER)
+    actions.perform()
+    problem = _await_search_results(driver)
+    if problem:
+        raise _SearchProblem(problem)
+
+
+def _ui_tiles(driver, query, cap=LOCATE_MAX_CANDIDATES):
+    """The result tiles of one web-page search -> ([(photo_id, aria-label)], complete): grid order, ONE entry
+    per item (live 2026-10-05: an item shows twice — the "most relevant" strip and its date section — and
+    unrelated items come first), the grid scrolled up to LOCATE_MAX_SCROLLS times; complete = its end was reached.
+    cap: stop once more than this many items are listed (a text search: every one would have to be verified);
+    None reads the whole grid — a DAY listing, whose tiles are filtered to the taken second before any is a
+    candidate (a release day holds several batches: RESEARCH F13, 38 items in four seconds). Nothing is clicked.
+    Raises _SearchProblem."""
+    _ui_search(driver, query)
+    tiles, seen, last = [], set(), None
+    for _ in range(LOCATE_MAX_SCROLLS + 1):
+        for el in _visible_result_links(driver):
+            pid = gpweb.photo_id_from_url(el.get_attribute("href"))
+            if pid and pid not in seen:
+                seen.add(pid)
+                tiles.append((pid, el.get_attribute("aria-label")))
+        if cap is not None and len(tiles) > cap:
+            return tiles, False
+        position = driver.execute_script(gpweb.SCROLL_JS)
+        if position == last:
+            return tiles, True
+        last = position
+        time.sleep(1.0)
+    return tiles, False
+
+
+# ------------------------------------------------------------------ listings and records (both paths, one cache)
+def _text_ids(driver, query, path, ctx, account, st, cap=LOCATE_MAX_CANDIDATES):
+    """The candidates one text search lists — RPC (EzkLib: what the search box shows) or the web page — cached per
+    run and account: a query is searched once. cap: _ui_tiles' (None for a day listing)."""
+    run = _locator_run(ctx)
+    hit = run.listings.get((account, path, query))
+    if hit is None:
+        if path == "rpc":
+            found = gprpc.search(driver, query, max_pages=LOCATE_SEARCH_PAGES)
+            for rec in found["items"]:
+                _remember(ctx, account, rec, "rpc")
+            hit = {"ids": [r["photo_id"] for r in found["items"]], "complete": not found["truncated"]}
+        else:
+            tiles, complete = _ui_tiles(driver, query, cap)
+            hit = {"ids": [pid for pid, _label in tiles], "labels": dict(tiles), "complete": complete}
+        st["searches"] += 1
+        run.listings[(account, path, query)] = hit
+    return hit["ids"], hit["complete"]
+
+
+def _rpc_second(driver, second, ctx, account):
+    """S1 by RPC: the timeline (lcxiM) from the end of the taken second backwards — every item taken in that
+    second, paged while the pages stay inside it."""
+    ids, page_id = [], None
+    for _ in range(TIMELINE_MAX_PAGES):
+        page = gprpc.timeline_at(driver, second * 1000 + 999, TIMELINE_PAGE_SIZE, page_id)
+        for rec in page["items"]:
+            taken = rec.get("taken_ms")
+            if not isinstance(taken, int) or taken // 1000 > second:
+                continue
+            if taken // 1000 < second:
+                return ids, True
+            _remember(ctx, account, rec, "rpc")
+            ids.append(rec["photo_id"])
+        page_id = page["next_page_id"]
+        if page_id is None:
+            return ids, True
+    return ids, False
+
+
+def _ui_second(driver, taken_ms, loc, ctx, account, st):
+    """S1 on the web pages: the day search for the item's LOCAL day (RESEARCH F22 — the learned offset, else the
+    pushing phone's, else UTC, then ±1 day), its tiles filtered to the taken second by their aria-label
+    (gpweb.tile_label / same_second — a label that does not parse stays a candidate: P-7)."""
+    learned = loc.get("tz_offset_ms") if isinstance(loc.get("tz_offset_ms"), int) else None
+    for day in gpweb.local_days(taken_ms, learned, loc.get("device_tz_offset_min"), window=1):
+        query = gpweb.day_query(day)
+        ids, complete = _text_ids(driver, query, "ui", ctx, account, st, cap=None)  # the whole day, then the filter
+        labels = _locator_run(ctx).listings[(account, "ui", query)].get("labels") or {}
+        hits = [pid for pid in ids
+                if (when := gpweb.tile_label(labels.get(pid), default_year=day.year)) is None
+                or gpweb.same_second(when, taken_ms, learned)]
+        if hits:
+            return hits, complete
+    return [], True
+
+
+def _second_ids(driver, taken_ms, path, loc, ctx, account, st):
+    """The candidates taken in the object's second (S1), cached per run: one lookup serves every chunk of a split
+    and every object of a release batch sharing the second (RESEARCH F4, F13)."""
+    run = _locator_run(ctx)
+    second = taken_ms // 1000
+    if path == "rpc":
+        cache = (account, "second-rpc", second)
+    else:
+        offsets = (loc.get("tz_offset_ms"), loc.get("device_tz_offset_min"))
+        cache = (account, "second-ui", (second,) + offsets)
+    hit = run.listings.get(cache)
+    if hit is None:
+        if path == "rpc":
+            ids, complete = _rpc_second(driver, second, ctx, account)
+        else:
+            ids, complete = _ui_second(driver, taken_ms, loc, ctx, account, st)
+        hit = run.listings[cache] = {"ids": ids, "complete": complete}
+    return hit["ids"], hit["complete"]
+
+
+def _rpc_names(driver, photo_ids, ctx, account):
+    """Fill cached records' file names from batch_info (EWgK9e — one call per ≤50 ids; proven live by the
+    crawler)."""
+    for pid, row in gprpc.batch_info(driver, photo_ids).items():
+        if row and row.get("filename"):
+            _remember(ctx, account, {"photo_id": pid, "filename": row["filename"],
+                                     "size_bytes": row.get("size_bytes")}, "rpc")
+
+
+def _rpc_item(driver, photo_id, ctx, account, key):
+    """One item's record by RPC — the cache when it holds what verification needs, else item_info (VrseUb +
+    fDcn4b), a missing file name completed by batch_info -> (record, gone): gone = RPC answered that this account
+    has no such item. Raises gprpc.RpcUnavailable."""
+    held = _locator_run(ctx).records.get((account, photo_id))
+    if held and held.get("dedup_key") and (key or held.get("filename")):
+        return held, False
+    info = gprpc.item_info(driver, photo_id)
+    if info is None:
+        return None, True
+    held = _remember(ctx, account, info, "rpc")
+    if held is not None and not key and not held.get("filename"):
+        _rpc_names(driver, [photo_id], ctx, account)
+    return held, False
+
+
+def _ui_item(driver, photo_id, ctx, account, st, key, fresh=False):
+    """One item's record on the web pages — the cache when it already holds what verification needs (whichever
+    path fed it), else its item page (_page_facts). fresh: always look at the page (a second opinion). None when
+    the item is gone or its page shows no record."""
+    run = _locator_run(ctx)
+    if (account, photo_id) in run.gone:
+        return None
+    held = run.records.get((account, photo_id))
+    if not fresh and held and held.get("dedup_key") and (key or held.get("filename")):
+        return held
+    facts = _page_facts(driver, photo_id, not key, st)
+    return _remember(ctx, account, facts, "ui") if facts else None
+
+
+def _collect(driver, sources, path, loc, ctx, account, st):
+    """The candidates of a stage's listings (`sources`: [("second", taken_ms)] or [("text", query), …]) -> (ids in
+    listing order, complete, {photo_id: the text query that listed it})."""
+    ids, complete, origin = [], True, {}
+    for kind, value in sources:
+        if kind == "second":
+            got, done = _second_ids(driver, value, path, loc, ctx, account, st)
+        else:
+            got, done = _text_ids(driver, value, path, ctx, account, st)
+        complete = complete and done
+        for pid in got:
+            if pid not in origin:
+                origin[pid] = value if kind == "text" else None
+                ids.append(pid)
+    if len(ids) > LOCATE_MAX_CANDIDATES:
+        ids, complete = ids[:LOCATE_MAX_CANDIDATES], False
+    for pid in ids:
+        _seen(st, pid)
+    return ids, complete, origin
+
+
+def _rpc_verifiable(driver, ids, ctx, account, key):
+    """The listed candidates' records for verification by RPC: an object without a content key needs their file
+    names (one batch_info call for those the cache lacks)."""
+    records = _locator_run(ctx).records
+    if not key:
+        missing = [p for p in ids if (account, p) in records and not records[(account, p)].get("filename")]
+        if missing:
+            _rpc_names(driver, missing, ctx, account)
+    return [records[(account, p)] for p in ids if (account, p) in records]
+
+
+def _ui_verifiable(driver, ids, loc, ctx, account, st, key):
+    """The listed candidates' records for verification on the web pages: each item page opened unless the cache
+    already holds what is needed; a content proof ends the opening (the rest need not be read)."""
+    found = []
+    for pid in ids:
+        rec = _ui_item(driver, pid, ctx, account, st, key)
+        if rec is None:
+            continue
+        found.append(rec)
+        if key and _verdict(rec, loc, key)[0] == "match":
+            break
+    return found
+
+
+def _stage_listing(driver, loc, ctx, account, st, key, sources):
+    """A listing stage — S1, S2, S3, S3u or the S4 preview: RPC lists and verifies first; when an RPC call fails
+    the SAME stage runs on the web pages (candidate C's per-stage fallback), reusing whatever the record cache
+    already holds. -> _judge's dict + via, complete and query (the text query that listed the pick)."""
+    via = None
+    if _rpc_ok(driver, ctx):
+        try:
+            ids, complete, origin = _collect(driver, sources, "rpc", loc, ctx, account, st)
+            records = _rpc_verifiable(driver, ids, ctx, account, key)
+            via = "rpc"
+        except gprpc.RpcUnavailable as e:
+            _note_fallback(ctx, e)
+    if via is None:
+        try:
+            ids, complete, origin = _collect(driver, sources, "ui", loc, ctx, account, st)
+            records = _ui_verifiable(driver, ids, loc, ctx, account, st, key)
+            via = "ui"
+        except SessionExpiredError:
+            raise
+        except Exception as e:  # the page path failed too (no results page, a browser fault): no verdict
+            if "ui_error" not in _locator_run(ctx).told:
+                _locator_run(ctx).told.add("ui_error")
+                print(f"   > ⚠️ A Google Photos page could not be read ({type(e).__name__}) — that stage is skipped.")
+            return _stage_error("ui")
+    out = _judge(records, loc, key, listed=len(ids), complete=complete)
+    out.update(via=via, complete=complete, query=origin.get(out["pick"]["photo_id"]) if out["pick"] else None)
+    return out
+
+
+# ------------------------------------------------------------------ the stages
+def _stage_photo_id(driver, loc, ctx, account, st, key):
+    """S0a — the learned photo_id of this account, then its alternates: each read by RPC item info, else its item
+    page. An item RPC calls gone is looked at on its page too (arbitration): only when both agree is the photo_id
+    stale (returned in `stale` — the fetch records it, a read-only caller only reports it)."""
+    ids = [p for p in dict.fromkeys([loc.get("photo_id")] + list(loc.get("alternates") or []))
+           if isinstance(p, str) and gpweb.MEDIA_KEY_RE.match(p)][:LOCATE_MAX_CANDIDATES]
+    if not ids or not (key or loc.get("uploaded_name")):
+        return None
+    records, stale, pages = [], [], st["pages"]
+    for pid in ids:
+        _seen(st, pid)
+        rec, gone = None, False
+        if _rpc_ok(driver, ctx):
+            try:
+                rec, gone = _rpc_item(driver, pid, ctx, account, key)
+            except gprpc.RpcUnavailable as e:
+                _note_fallback(ctx, e)
+        if rec is None:
+            rec = _ui_item(driver, pid, ctx, account, st, key, fresh=gone)
+            if rec is None and gone:
+                stale.append(pid)
+                _locator_run(ctx).gone.add((account, pid))
+        if rec is not None:
+            records.append(rec)
+            if _verdict(rec, loc, key)[0] == "match":
+                break
+    out = _judge(records, loc, key)
+    out.update(via="ui" if st["pages"] > pages else "rpc", complete=True, stale=stale)
+    return out
+
+
+def _hash_ids(driver, sha1, ctx, account):
+    """S0b's listing: the items holding exactly these bytes (swbisb). The first lookup of an entry asks for every
+    content key the entry registered (`wanted`) in one batch (≤ gprpc.MAX_BATCH_KEYS); the answers are cached."""
+    run = _locator_run(ctx)
+    hit = run.listings.get((account, "hash", sha1))
+    if hit is None:
+        batch = [sha1] + sorted(h for h in run.wanted.get(account, ())
+                                if h != sha1 and (account, "hash", h) not in run.listings)
+        batch = batch[:gprpc.MAX_BATCH_KEYS]
+        found = gprpc.hash_lookup(driver, batch)
+        for digest in batch:
+            recs = [r for r in (_remember(ctx, account, rec, "rpc") for rec in found.get(digest, [])) if r]
+            run.listings[(account, "hash", digest)] = {"ids": [r["photo_id"] for r in recs], "complete": True}
+        hit = run.listings[(account, "hash", sha1)]
+    return hit["ids"]
+
+
+def _stage_hash(driver, loc, ctx, account, st, key):
+    """S0b — Google Photos' content-hash lookup (swbisb) with the object's SHA-1: the items holding exactly these
+    bytes (their own dedupKey is the hash: content proof by construction). RPC only — the web pages have no
+    equivalent, so without RPC the stage is an `error` and the waterfall goes on."""
+    sha1 = _sha1_of(loc, key)
+    if not sha1:
+        return None
+    if not _rpc_ok(driver, ctx):
+        return _stage_error("rpc")
+    try:
+        ids = _hash_ids(driver, sha1, ctx, account)
+    except gprpc.RpcUnavailable as e:
+        _note_fallback(ctx, e)
+        return _stage_error("rpc")
+    for pid in ids:
+        _seen(st, pid)
+    records = _locator_run(ctx).records
+    out = _judge([records[(account, p)] for p in ids if (account, p) in records], loc, key, listed=len(ids))
+    out.update(via="rpc", complete=True)
+    return out
+
+
+def _stage_second(driver, loc, ctx, account, st, key):
+    """S1 — the items taken in the object's second (its learned taken_ms, else its DateUTC), each verified."""
+    taken = loc.get("taken_ms")
+    if not (isinstance(taken, int) and not isinstance(taken, bool)) or not (key or loc.get("uploaded_name")):
+        return None
+    return _stage_listing(driver, loc, ctx, account, st, key, [("second", taken)])
+
+
+def _merge_stage(first, later):
+    """One verdict for a stage that ran a second listing because its first pinned nothing: the later pick when there
+    is one; else ambiguous beats wrong-item beats not-found, an `error` only when both were errors."""
+    n = first["n"] + later["n"]
+    if later["pick"] is not None:
+        return dict(later, n=n)
+    outcomes = {first["outcome"], later["outcome"]} - {"error"} or {"error"}
+    outcome = next(o for o in ("ambiguous", "wrong-item", "not-found", "error") if o in outcomes)
+    via = "ui" if "ui" in (first["via"], later["via"]) else "rpc"
+    return dict(later, outcome=outcome, n=n, via=via, complete=first.get("complete") and later.get("complete"))
+
+
+def _text_stage(kind):
+    """S2 / S3 / S3u — the locator's query list `kind` searched, every candidate verified. S3 ends with the object's
+    BARE short id (SHORT_ID_QUERY_MIN characters or more) when its title query pinned nothing — live 2026-10-07 (an
+    anime episode): Google Photos answered "No results" for the exact uploaded name, the title and the plain name,
+    yet listed exactly the item for its bare short id. A short id alone can also list many items (RESEARCH F16:
+    1 / 3 / 133): every one is still verified on its record, and more than LOCATE_MAX_CANDIDATES is ambiguous."""
+    def stage(driver, loc, ctx, account, st, key):
+        if not (key or loc.get("uploaded_name")):
+            return None
+        queries = list(dict.fromkeys(q for q in ((loc.get("queries") or {}).get(kind) or [])
+                                     if isinstance(q, str) and q.strip()))
+        sid = loc.get("short_id").strip() if kind == "s3" and isinstance(loc.get("short_id"), str) else ""
+        bare = [sid] if len(sid) >= SHORT_ID_QUERY_MIN and sid not in queries else []
+        if not queries and not bare:
+            return None
+        out = _stage_listing(driver, loc, ctx, account, st, key, [("text", q) for q in queries]) if queries else None
+        if bare and (out is None or out["pick"] is None):
+            later = _stage_listing(driver, loc, ctx, account, st, key, [("text", bare[0])])
+            out = later if out is None else _merge_stage(out, later)
+        return out
+    return stage
+
+
+def _stage_legacy_preview(driver, loc, ctx, account, st, key):
+    """OD-5, for a content-keyed object no stage pinned: the queries today's two attempts would type, listed and
+    verified like any stage. A verified candidate is located (approach legacy, then fetched like any located
+    item); when every candidate of every one of them is proven another item — or there is none — those attempts
+    could only fetch wrong items: `skip` (the fetch marks the object failed, reason s4-skipped)."""
+    queries = []
+    for pair in (loc.get("queries") or {}).get("s4") or []:
+        query = pair[0] if isinstance(pair, (list, tuple)) and pair else None
+        if isinstance(query, str) and query.strip() and query not in queries:
+            queries.append(query)
+    if not queries:
+        return None
+    out = _stage_listing(driver, loc, ctx, account, st, key, [("text", q) for q in queries])
+    out["skip"] = out["outcome"] in ("wrong-item", "not-found") and out.get("complete") is True
+    return out
+
+
+_STAGE_RUNS = {"photo_id": _stage_photo_id, "hash": _stage_hash, "taken_second": _stage_second,
+               "exact_name": _text_stage("s2"), "title_sid": _text_stage("s3"), "user_query": _text_stage("s3u")}
+
+
+def _stage_order(loc):
+    """The waterfall (P-8) with the object's verified approach.best first."""
+    best = loc.get("approach_best")
+    return sorted(_LOCATE_STAGES, key=lambda s: s[0] != best)  # stable: the P-8 order otherwise
+
+
+def _locate_result(found, per, stale, s4_skip):
+    """locate_object's dict before its counters (see its docstring)."""
+    res = {"found": False, "photo_id": None, "record": None, "proof": None, "name_normalized": False, "stage": None,
+           "approach": None, "via": None, "outcome": None, "n": 0, "rule": None, "alternates": [], "query": None,
+           "per_approach": per, "stale": list(dict.fromkeys(stale)), "s4_skip": bool(s4_skip)}
+    if found is not None:
+        approach, stage, out = found
+        pick = out["pick"]
+        res.update(found=True, photo_id=pick["photo_id"], record={k: pick.get(k) for k in _RECORD_FIELDS},
+                   proof=out["proof"], name_normalized=out["normalized"], stage=stage, approach=approach,
+                   via=out["via"], outcome=out["outcome"], n=out["n"], rule=out["rule"],
+                   alternates=list(out["alternates"]), query=out.get("query"), s4_skip=False)
+    return res
+
+
+def _waterfall(driver, loc, ctx, account, st, approaches):
+    """Run the stages in order until one pins the object (approaches "all": every stage), then — for a
+    content-keyed object nothing pinned — the legacy preview (OD-5)."""
+    key = _content_key(loc)
+    per, stale, found, preview = {}, [], None, None
+    for approach, stage, _label in _stage_order(loc):
+        out = _STAGE_RUNS[approach](driver, loc, ctx, account, st, key)
+        if out is None:
+            continue  # the object gives this stage nothing to work with
+        per[approach] = {"outcome": out["outcome"], "n": out["n"], "via": out["via"]}
+        stale += out.get("stale") or []
+        if out["pick"] is not None and found is None:
+            found = (approach, stage, out)
+            if approaches != "all":
+                break
+    if key and (found is None or approaches == "all"):
+        preview = _stage_legacy_preview(driver, loc, ctx, account, st, key)
+        if preview is not None:
+            per[_LEGACY_STAGE[0]] = {"outcome": preview["outcome"], "n": preview["n"], "via": preview["via"]}
+            if found is None and preview["pick"] is not None:
+                found = (_LEGACY_STAGE[0], _LEGACY_STAGE[1], preview)
+    return _locate_result(found, per, stale, found is None and preview is not None and preview.get("skip"))
+
+
+def _arbitrate(driver, res, loc, ctx, account, st, approaches):
+    """The drift detector (candidate C): ONCE per run, the first object RPC located is cross-checked against its
+    item page's record (P-7: the primary source) — dedupKey, taken / upload time, timezone offset. They agree: RPC
+    stays trusted for the run. They differ: one warning line, RPC off for the rest of the run, every RPC-fed cache
+    entry dropped, and this object is located again from the web pages. A page that shows no record leaves the
+    verdict open for the next object (DRIFT_CHECK_TRIES at most)."""
+    run = _locator_run(ctx)
+    held = run.records.get((account, res["photo_id"])) or {}
+    rpc_view = (held.get("by") or {}).get("rpc")
+    if run.drift is not None or run.rpc_off or not rpc_view:
+        return res
+    page_view = (held.get("by") or {}).get("ui")
+    if page_view is None:
+        facts = _page_facts(driver, res["photo_id"], False, st)
+        if facts is None:
+            run.drift_tries += 1
+            if run.drift_tries >= DRIFT_CHECK_TRIES:
+                run.drift = "unchecked"
+            return res
+        page_view = _remember(ctx, account, facts, "ui")["by"]["ui"]
+    differ = [k for k in _DRIFT_FIELDS
+              if rpc_view.get(k) is not None and page_view.get(k) is not None and rpc_view[k] != page_view[k]]
+    if not differ:
+        run.drift = "ok"
+        return res
+    run.drift = run.rpc_off = "drift"
+    run.records.clear()
+    run.listings.clear()
+    print(f"   > ⚠️ Google Photos' internal answers disagree with the item page ({', '.join(differ)}) — RPC is off "
+          f"for the rest of this run; the web pages decide.")
+    return _waterfall(driver, loc, ctx, account, st, approaches)
+
+
+def locate_object(driver, locator, ctx, approaches="best"):
+    """[IMP-C25 Step 12 — candidate C, hybrid arbitration] Find ONE uploaded object's Google Photos item in the
+    session's account — READ-ONLY: it navigates the session's Photos tab, types searches and asks read-only RPCs
+    (gprpc's allowlist); it never downloads, clicks a tile, presses Shift+D or writes anything — what it learns is
+    the caller's to record (the fetch: _run_locator_phase; `mainfetch.py locate` prints it).
+
+    locator = a build_fetch_queue item's `locator`; ctx = the run's FetchContext (ctx.account = the session's
+    account; its locator state caches records across objects). approaches "best" stops at the first stage that
+    pins the object; "all" evaluates every stage (check_photos --approaches all, PLAN Step 13).
+
+    Returns (PLAN Step 12's contract — Step 13 reuses it and per_approach unchanged):
+      found            the object is pinned to one item (P-5 proof)
+      photo_id         that item, or None
+      record           its facts {photo_id, dedup_key, taken_ms, tz_offset_ms, upload_ms, width, height,
+                       filename} (the fetch's item['_trigger']['record']), or None
+      proof            dedupkey | filename (P-5) · name_normalized: the name matched only after P-6 normalizing
+      stage, approach  the stage that pinned it (mvcommon.GP_STAGES key, e.g. s0_photo_id) and its P-1 approach
+      via              rpc | ui — the path that pinned it
+      candidates_seen  how many distinct items were examined (candidates: their photo_ids)
+      pages_opened, searches, rpc_calls, elapsed (s)   what it cost
+      per_approach     {approach: {outcome: exactly-one | ambiguous | not-found | wrong-item | error, n, via}} for
+                       every stage that ran ("legacy": the OD-5 preview of today's queries)
+    plus outcome / n (the pinning stage's), rule ("newest-set" when a name matched several uploads with
+    different bytes), alternates (other items holding the same bytes or name), query (the text query that listed
+    the item — the Shift+D click path searches it), stale (learned photo_ids RPC AND the item page call gone),
+    s4_skip (OD-5: every candidate today's attempts could click is proven another item).
+    Raises SessionExpiredError (signed out) — a stage error is an outcome, not an exception."""
+    started = time.time()
+    loc = locator if isinstance(locator, dict) else {}
+    account = getattr(ctx, "account", None) or loc.get("account")
+    st = {"pages": 0, "searches": 0, "seen": []}
+    calls = 0
+    if not _can_locate(driver):
+        res = _locate_result(None, {}, [], False)
+    else:
+        before = gprpc.stats(driver)["calls"]
+        res = _waterfall(driver, loc, ctx, account, st, approaches)
+        if res["found"]:
+            res = _arbitrate(driver, res, loc, ctx, account, st, approaches)
+        calls = gprpc.stats(driver)["calls"] - before
+    res.update(candidates_seen=len(st["seen"]), candidates=list(st["seen"]), pages_opened=st["pages"],
+               searches=st["searches"], rpc_calls=calls, elapsed=round(time.time() - started, 3))
+    return res
+
+
+# ------------------------------------------------------------------ the triggers (P-20: (ii) direct, then (i) Shift+D)
+def _watched_now(ctx):
+    """The names in the folder the entry's downloads land in (ctx.target['dir'] — its incoming folder, or
+    ~/Downloads in the fallback / legacy modes), without the incoming marker; unreadable: empty."""
+    folder = (ctx.target or {}).get("dir") or SYSTEM_DOWNLOADS_FOLDER
+    try:
+        return set(os.listdir(folder)) - {INCOMING_MARKER}
+    except OSError:
+        return set()
+
+
+def _download_started(ctx, before):
+    """[P-12 / P-20] True once a download requested after `before` (the watched folder's names then) shows: a new
+    partial ('<name>.crdownload', Chrome's 'Unconfirmed N.crdownload') or a new finished file whose partial was not
+    there before (a small file finishes between two looks) — within TRIGGER_CONFIRM_S. An earlier download that
+    finishes meanwhile does not count: its partial was already there."""
+    deadline = time.time() + TRIGGER_CONFIRM_S
+    while True:
+        for name in _watched_now(ctx) - before:
+            if name.endswith(_CRDOWNLOAD) or name + _CRDOWNLOAD not in before:
+                return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(TRIGGER_POLL_S)
+
+
+def _bounded_get(driver, url, seconds):
+    """driver.get(url) with the page-load timeout lowered to `seconds` for this one navigation, then restored (its
+    previous value, else Selenium's default). A driver without set_page_load_timeout (a test stand-in) just gets.
+    A timeout raises as Selenium raises it — the caller decides by the download folder, not by the page."""
+    setter = getattr(driver, "set_page_load_timeout", None)
+    if not callable(setter):
+        driver.get(url)
+        return
+    try:
+        previous = driver.timeouts.page_load
+    except Exception:
+        previous = None
+    setter(seconds)
+    try:
+        driver.get(url)
+    finally:
+        try:
+            setter(previous if isinstance(previous, (int, float)) and previous > 0 else SELENIUM_PAGE_LOAD_S)
+        except Exception:
+            pass
+
+
+def _back_on_photos(driver):
+    """After a direct download: a link answered with a page (HTML) leaves the tab on it — put the tab back on
+    Google Photos (check_session_alive after it). Only the host is read; the link's address is never kept (P-20)."""
+    try:
+        host = urllib.parse.urlparse(driver.current_url).hostname
+    except Exception:
+        host = None
+    if not _is_photos_host(host):
+        driver.get(PHOTOS_URL)
+        check_session_alive(driver)
+
+
+def _direct_trigger(driver, item, ctx):
+    """(ii) P-20's direct download: a FRESH original-quality link for the located item — gprpc.download_url (item
+    info's [7], else pLFTfd with that ONE key) — minted now and opened in the automation Chrome, whose downloads go
+    to the entry's folder (_rearm_downloads right before). The link lives in this call only: never stored, printed,
+    logged or journaled (gprpc's redacted DownloadUrl; reveal() only for driver.get). True once the download shows
+    in the watched folder (_download_started); False when RPC is off, no link was minted or nothing started (an
+    HTML answer, a refused link) — the caller then tries (i), Shift+D."""
+    if not _rpc_ok(driver, ctx):
+        return False
+    name = item["filename"]
+    try:
+        link = gprpc.download_url(driver, item["_located"]["photo_id"])
+    except gprpc.RpcUnavailable as e:
+        _note_fallback(ctx, e)
+        link = None
+    if link is None:
+        print(f"     ↪️ {name}: no download link was minted — Shift+D next.")
+        return False
+    try:
+        _rearm_downloads(driver)  # P-12: this tab saves into the entry's folder
+        before = _watched_now(ctx)
+        try:
+            _bounded_get(driver, link.reveal(), DIRECT_PAGE_LOAD_S)
+        except Exception:  # a navigation that becomes a download may end in an error or a timeout: the folder decides
+            pass
+        link = None
+        started = _download_started(ctx, before)
+        _back_on_photos(driver)
+    except SessionExpiredError:
+        raise
+    except Exception as e:  # the type only — a browser message could carry the page's address
+        print(f"     ⚠️ {name}: the direct download failed ({type(e).__name__}) — Shift+D next.")
+        return False
+    if started:
+        print(f"     ⬇️ {name}: direct download")
+    else:
+        print(f"     ↪️ {name}: the direct download did not start within {TRIGGER_CONFIRM_S:g} s — Shift+D next.")
+    return started
+
+
+def _shows_item(driver, photo_id, key):
+    """The open page IS the located item — checked right before every keystroke, so Shift+D never downloads anything
+    else: the page's own address names photo_id (an item page also embeds its NEIGHBOURS' records, so a record in the
+    source alone proves nothing about which item is open), and its embedded record of photo_id is there — with a
+    content key, holding those bytes."""
+    deadline = time.time() + ITEM_WAIT_S
+    while True:
+        try:
+            shown = gpweb.photo_id_from_url(driver.current_url)
+        except Exception:
+            shown = None
+        rec = gpweb.page_record(driver.page_source, photo_id) if shown == photo_id else {}
+        if rec:
+            return not key or gpweb.dedup_keys_equal(rec.get("dedup_key"), key)
+        if time.time() >= deadline:
+            return False
+        time.sleep(ITEM_POLL_S)
+
+
+def _shift_d_here(driver, ctx):
+    """Shift+D on the item page now shown (once its viewer is up); True once a download shows in the watched folder."""
+    time.sleep(VIEWER_SETTLE_S)
+    before = _watched_now(ctx)
+    webdriver.ActionChains(driver).key_down(Keys.SHIFT).send_keys("d").key_up(Keys.SHIFT).perform()
+    return _download_started(ctx, before)
+
+
+def _open_from_results(driver, photo_id, query):
+    """The click path: search `query` and open the item from its results by clicking the tile whose link names
+    photo_id — never a position, never a timeline thumbnail (IMP-C35). True when it was opened."""
+    try:
+        _ui_search(driver, query)
+    except _SearchProblem:
+        return False
+    last = None
+    for _ in range(LOCATE_MAX_SCROLLS + 1):
+        for el in _visible_result_links(driver):
+            if gpweb.photo_id_from_url(el.get_attribute("href")) == photo_id:
+                driver.execute_script("arguments[0].click();", el)
+                check_session_alive(driver)
+                return True
+        position = driver.execute_script(gpweb.SCROLL_JS)
+        if position == last:
+            return False
+        last = position
+        time.sleep(1.0)
+    return False
+
+
+def _click_queries(item):
+    """The searches that list the located item, best first: the one that found it, its exact uploaded name, its local
+    day (the taken second's day search)."""
+    res, loc = item["_located"], item.get("locator") or {}
+    queries = [res.get("query"), loc.get("uploaded_name")]
+    record = res.get("record") or {}
+    if isinstance(record.get("taken_ms"), int):
+        offset = record.get("tz_offset_ms") if isinstance(record.get("tz_offset_ms"), int) else None
+        days = gpweb.local_days(record["taken_ms"], offset, loc.get("device_tz_offset_min"), window=0)
+        queries.append(gpweb.day_query(days[0]) if days else None)
+    return [q for q in dict.fromkeys(queries) if isinstance(q, str) and q.strip()]
+
+
+def _shift_d_trigger(driver, item, ctx):
+    """(i) the located item's page, focused, then Shift+D — the web app's own original download. When the keystroke
+    starts nothing on a directly loaded page (unverified live: PLAN Step 12 / R2), the click path opens the item from
+    search results and presses it there. The page must show the located item (_shows_item) before any keystroke.
+    True once a download shows in the watched folder."""
+    name = item["filename"]
+    pid = item["_located"]["photo_id"]
+    key = _content_key(item.get("locator") or {})
+    try:
+        if hasattr(driver, "execute_cdp_cmd"):
+            use_photos_tab(driver)  # focused (keystrokes reach only a front tab), downloads re-armed here (P-12)
+        driver.get(f"{PHOTOS_URL}/photo/{pid}")
+        check_session_alive(driver)
+        if _shows_item(driver, pid, key) and _shift_d_here(driver, ctx):
+            print(f"     ⬇️ {name}: Shift+D on its item page")
+            return True
+        for query in _click_queries(item):
+            if _open_from_results(driver, pid, query) and _shows_item(driver, pid, key) and _shift_d_here(driver, ctx):
+                print(f"     ⬇️ {name}: Shift+D after opening it from its search results")
+                return True
+    except SessionExpiredError:
+        raise
+    except Exception as e:  # one object's page trouble never stops the entry: today's attempts follow
+        print(f"     ⚠️ {name}: Shift+D failed ({type(e).__name__}).")
+        return False
+    print(f"     ↪️ {name}: Shift+D started no download.")
+    return False
+
+
 def _run_locator_phase(driver, queue, ctx):
     """[IMP-C25 Step 10 d — the seam IMP-C25 Step 12 fills] The exact-item stages,
     run before today's two legacy attempts when EXACT_LOCATOR_ENABLED (P-14).
@@ -2350,8 +3333,178 @@ def _run_locator_phase(driver, queue, ctx):
       * a round in which a wrong item arrived marks each object requested in it
         `_wrong` (_note_losses); one still pending after the legacy attempts is
         booked wrong-item (_record_wrong_items) — an object a stage gives up on
-        itself is 'failed' with the stage's own failed-list row, never booked twice."""
+        itself is 'failed' with the stage's own failed-list row, never booked twice.
+
+    [IMP-C25 Step 12 — candidate C] What it does (nothing for a driver that cannot
+    navigate or run page scripts — a stand-in: today's flow, byte for byte):
+      1. locate every pending object (locate_object; the entry's content keys go
+         in ONE swbisb batch; the run's record cache serves what earlier objects
+         read). A located object gets item['_trigger'] (the journal says
+         `located`); a learned photo_id RPC and its own page both call gone is
+         recorded stale in the learned sidecar; a content-keyed object whose every
+         candidate — those today's attempts would click included — is proven
+         another item ends 'failed' with an s4-skipped row (OD-5).
+      2. fetch the located objects, DIRECT_DOWNLOAD_CONCURRENCY at a time (P-20):
+         (ii) the direct download for each, one harvest round; then (i) Shift+D
+         (+ the click path) for each still pending — a link that started nothing,
+         broke, or served other bytes (SHA-256 decides) — and one more round. A
+         VERIFIED item's link that delivered other bytes is no wrong pick (P14: a
+         transcode may be served): its `_wrong` mark is cleared, Shift+D follows.
+    Whatever is still pending gets today's attempts (S4) unchanged; one the stages
+    could not locate and those attempts did not fetch goes to the failed list
+    after them (_record_unlocated, from _fetch_items)."""
+    if not _can_locate(driver):
+        return None
+    pending = [i for i in queue if i["status"] == "pending"]
+    if not pending:
+        return None
+    run = _locator_run(ctx)
+    account = ctx.account or (pending[0].get("locator") or {}).get("account")
+    wanted = run.wanted.setdefault(account, set())
+    for item in pending:
+        loc = item.get("locator") or {}
+        sha1 = _sha1_of(loc, _content_key(loc))
+        if sha1:
+            wanted.add(sha1)  # one swbisb batch for the entry (≤ gprpc.MAX_BATCH_KEYS)
+    print(f"\n   === EXACT ITEM ({len(pending)} files) ===")
+    located = [item for item in pending if _locate_item(driver, item, ctx)]
+    _journal_sync(ctx, queue)
+    for start in range(0, len(located), DIRECT_DOWNLOAD_CONCURRENCY):
+        _fetch_window(driver, located[start:start + DIRECT_DOWNLOAD_CONCURRENCY], queue, ctx)
+    for item in located:
+        if item["status"] == "pending":
+            item["_trigger"]["method"] = None  # today's attempts take over (the journal then says legacy)
     return None
+
+
+def _tried(res):
+    """locate_object's per_approach as the failed list's `tried` ([{approach, outcome, n}], waterfall order)."""
+    return [{"approach": a, "outcome": v["outcome"], "n": v["n"]} for a, v in res["per_approach"].items()]
+
+
+def _tried_text(res):
+    return " · ".join(f"{a} {v['outcome']}({v['n']})" for a, v in res["per_approach"].items()) or "nothing to search by"
+
+
+def _expected_local(loc):
+    """The time Google Photos shows for the object — its taken second in its own timezone, 'YYYY-MM-DD HH:MM:SS
+    GMT+08:00' (the learned offset, else the pushing phone's; UTC when neither is known): map_photos' format of the
+    failed list's expected_taken_local. None without a taken time."""
+    taken = loc.get("taken_ms")
+    if not (isinstance(taken, int) and not isinstance(taken, bool)):
+        return None
+    tz = loc.get("tz_offset_ms")
+    offset = tz // 60000 if isinstance(tz, int) else loc.get("device_tz_offset_min")
+    when = datetime.fromtimestamp(taken // 1000, timezone.utc)
+    if not (isinstance(offset, int) and not isinstance(offset, bool)):
+        return when.strftime("%Y-%m-%d %H:%M:%S UTC")
+    sign = "-" if offset < 0 else "+"
+    return ((when + timedelta(minutes=offset)).strftime("%Y-%m-%d %H:%M:%S")
+            + f" GMT{sign}{abs(offset) // 60:02d}:{abs(offset) % 60:02d}")
+
+
+def _record_stale(item, res, ctx):
+    """A learned photo_id that RPC AND its own item page call gone (locate_object's `stale`) is recorded stale in the
+    session account's learned sidecar (P-10: it supersedes every older record naming it; the reducer reads it as
+    s0_photo_id not-found). Only the fetch records it — the read-only callers just report it."""
+    loc = item.get("locator") or {}
+    if ctx.account not in mvcommon.GP_ACCOUNTS or not loc.get("manual_id") or not mvcommon._is_sha256(item.get("hash")):
+        return
+    for photo_id in res.get("stale") or ():
+        try:
+            mvcommon.append_learned(ctx.account, {
+                "manual_id": loc["manual_id"], "label": loc.get("label"), "sha256": item["hash"], "photo_id": photo_id,
+                "source": "fetch", "stale": True,
+                "approach": {"tried": "s0_photo_id", "outcome": "not-found", "n": 0, "via": "rpc"}})
+        except (OSError, ValueError) as e:
+            print(f"     ⚠️ Not recorded in the learned sidecar ({type(e).__name__}: {e}).")
+
+
+def _locate_item(driver, item, ctx):
+    """Step 1 of _run_locator_phase for one object; True when it was located (its _trigger is set)."""
+    name, loc, stats = item["filename"], item.get("locator") or {}, _session_stats(ctx)
+    try:
+        res = locate_object(driver, loc, ctx)
+    except (SessionExpiredError, gprpc.RpcRefused):
+        raise  # signed out: the batch stops with its remediation · a refused rpcid: a bug, never swallowed
+    except Exception as e:  # one object's trouble never stops the entry: today's attempts follow
+        print(f"   > ⚠️ {name}: the exact-item search failed ({type(e).__name__}) — today's search follows.")
+        return False
+    item["_located"] = res
+    stats["objects"] += 1
+    _record_stale(item, res, ctx)
+    if res["found"]:
+        stats["located"] += 1
+        item["_trigger"] = {"method": None, "record": dict(res["record"]),
+                            "approach": {"tried": res["stage"], "outcome": res["outcome"], "n": res["n"],
+                                         "via": res["via"]}}
+        how = " (normalized name)" if res["name_normalized"] else ""
+        if res["rule"] == "newest-set":
+            how += f" · the newest of {len(res['alternates']) + 1} same-name uploads"
+        print(f"   > 🎯 {name}: {_STAGE_LABEL[res['stage']]} {res['approach']} · proof {res['proof']}{how} · "
+              f"via {res['via']}")
+        return True
+    if res["s4_skip"]:
+        item["status"] = "failed"
+        listed = "; added to the failed list" if _record_failed(
+            item, ctx, "s4-skipped", _tried(res), res["candidates"][:LOCATE_MAX_CANDIDATES], _expected_local(loc)) else ""
+        print(f"   > ⏭️ {name}: every candidate is another item ({_tried_text(res)}) — today's search is skipped "
+              f"(OD-5){listed}.")
+    else:
+        print(f"   > 🔍 {name}: not located ({_tried_text(res)}) — today's search follows.")
+    return False
+
+
+def _fetch_window(driver, window, queue, ctx):
+    """Step 2 of _run_locator_phase for ≤ DIRECT_DOWNLOAD_CONCURRENCY located objects: (ii) direct, harvest; (i)
+    Shift+D for what is still pending, harvest. Each round harvests only its own requests (+ the entry's fetched
+    objects, so a duplicate is told apart) — an object not requested yet never holds a round up."""
+    run = _locator_run(ctx)
+    for method, trigger in (("direct", _direct_trigger), ("shift_d", _shift_d_trigger)):
+        todo = [i for i in window if i["status"] == "pending"]
+        if not todo or (method == "direct" and (run.direct_off or not _rpc_ok(driver, ctx))):
+            continue
+        for item in todo:
+            item["_trigger"]["method"] = method
+            if _fire(item, lambda item=item, trigger=trigger: trigger(driver, item, ctx)):
+                _session_stats(ctx)[method] += 1
+        _journal_sync(ctx, queue)
+        requested = {id(i) for i in todo if i["triggered"]}
+        if not requested:
+            continue
+        rnd = [i for i in queue if i["status"] == "done" or id(i) in requested]
+        _note_losses(rnd, harvest_downloads(rnd, ctx), ctx)
+        if method == "direct":
+            _after_direct_round(todo, run)
+        _journal_sync(ctx, queue)
+
+
+def _after_direct_round(todo, run):
+    """A direct round whose download was not this object's bytes (the harvester deleted it; _note_losses marked
+    `_wrong`): the item is VERIFIED, so the link served other bytes (P14: a transcode, or a partial) — no wrong pick.
+    The mark is cleared and Shift+D follows; when the item's proof is its dedupKey the link is what failed, so direct
+    downloads stay off for the rest of the run (one line — the harvester's timeout is paid once, not per object)."""
+    for item in todo:
+        if item["status"] != "pending" or not item.pop("_wrong", None):
+            continue
+        print(f"   > ↪️ {item['filename']}: its direct link served other bytes than the verified item — "
+              f"Shift+D on its item page next.")
+        if item["_located"]["proof"] == "dedupkey" and not run.direct_off:
+            run.direct_off = "other-bytes"
+            print("   > ⚠️ The direct download link served other bytes than a content-verified item (a transcode?) "
+                  "— direct downloads are off for the rest of this run; Shift+D fetches the originals.")
+
+
+def _locator_session_line(driver, ctx):
+    """The line an account session that ran the exact-item stages ends with — its counts and gprpc's `RPC calls: N
+    (errors E)` (P-9: one per browser session) — or None when the stages did not run in it (the kill switch, a
+    stand-in driver: today's output, unchanged). Never a P-13 web marker."""
+    run = getattr(ctx, "locator", None)
+    stats = run.stats.get(ctx.account) if run is not None else None
+    if not stats or not stats["objects"] or not _can_locate(driver):
+        return None
+    return (f"   > 🔎 Exact item ('{ctx.account}'): {stats['located']} of {stats['objects']} object(s) located · "
+            f"{stats['direct']} direct download(s) · {stats['shift_d']} Shift+D · {gprpc.summary_line(driver)}")
 
 
 def _lost_download_note(lost, saw_download):
@@ -2637,12 +3790,14 @@ def _fire(item, fire):
     return item["triggered"]
 
 
-def _record_failed(item, ctx, reason, tried=None):
+def _record_failed(item, ctx, reason, tried=None, candidates=None, expected_taken_local=None):
     """One failed-list row (P-18) for an object this run gives up on: run, account,
     manual_id, label, uploaded_name, the sha256 pin, `reason` and — when given —
-    what was `tried` ([{approach, outcome, n}]). True when written. Needs the
-    session account and the owning id — a stand-alone call has neither and writes
-    nothing; a failed write prints one warning line."""
+    what was `tried` ([{approach, outcome, n}]), the `candidates` seen (photo ids —
+    resolve_photos shows them) and the `expected_taken_local` time (the exact-item
+    stages, IMP-C25 Step 12). True when written. Needs the session account and the
+    owning id — a stand-alone call has neither and writes nothing; a failed write
+    prints one warning line."""
     loc = item.get("locator") or {}
     if ctx.account not in mvcommon.GP_ACCOUNTS or not loc.get("manual_id"):
         return False
@@ -2650,7 +3805,9 @@ def _record_failed(item, ctx, reason, tried=None):
     try:
         mvcommon.append_failed({"run": ctx.run_id, "account": ctx.account, "manual_id": loc["manual_id"],
                                 "label": loc.get("label"), "sha256": sha256,
-                                "uploaded_name": loc.get("uploaded_name"), "tried": tried, "reason": reason})
+                                "uploaded_name": loc.get("uploaded_name"),
+                                "expected_taken_local": expected_taken_local, "tried": tried,
+                                "candidates": candidates or None, "reason": reason})
     except (OSError, ValueError) as e:
         print(f"     ⚠️ Not recorded in the failed list ({type(e).__name__}: {e}).")
         return False
@@ -2733,6 +3890,27 @@ def _record_wrong_items(queue, ctx):
         print(f"     ❌ Not fetched: {item['filename']} — the search picked another item{listed}.")
 
 
+def _record_unlocated(queue, ctx):
+    """[IMP-C25 Step 12 — P-18] After today's attempts and _record_wrong_items: an object the exact-item stages
+    examined and could NOT pin, which today's attempts did not fetch either, ends 'failed' with one failed-list row —
+    reason ambiguous (a stage saw candidates it could not tell apart) · wrong-item (candidates proven other items) ·
+    not-found; tried = every stage's outcome, candidates = what they saw, expected_taken_local. A LOCATED object that
+    ends unfetched is no failed-list object (its item is known — a re-run fetches it); an object already 'failed'
+    (lost twice, a wrong pick, OD-5's skip) has its row: never booked twice. Without the exact-item stages (the kill
+    switch, a stand-in driver) no object carries `_located`: nothing happens."""
+    for item in queue:
+        res = item.get("_located")
+        if not res or res["found"] or item["status"] != "pending":
+            continue
+        outcomes = [v["outcome"] for v in res["per_approach"].values()]
+        reason = "ambiguous" if "ambiguous" in outcomes else "wrong-item" if "wrong-item" in outcomes else "not-found"
+        item["status"] = "failed"
+        listed = "; added to the failed list" if _record_failed(
+            item, ctx, reason, _tried(res), res["candidates"][:LOCATE_MAX_CANDIDATES],
+            _expected_local(item.get("locator") or {})) else ""
+        print(f"     ❌ Not fetched: {item['filename']} — no stage found its exact item ({reason}){listed}.")
+
+
 def _lost_downloads_line(ctx):
     """[IMP-C34] The run's one closing line about lost downloads, or None when
     nothing was requested again and nothing was lost twice."""
@@ -2795,6 +3973,8 @@ def _fetch_items(driver, queue, ctx, entry=None, owner_id=None):
     _retry_lost_downloads(queue, ctx)
     # [live check 2026-10-05] An object whose requests fetched only other items ends on the failed list.
     _record_wrong_items(queue, ctx)
+    # [IMP-C25 Step 12] ... and so does one no exact-item stage could locate (P-18; a no-op without the stages).
+    _record_unlocated(queue, ctx)
     _journal_sync(ctx, queue)
 
     # [IMP-C25 Step 11] Only now — after the retry's harvest — the entry's downloads end.
@@ -3384,6 +4564,9 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None,
                     break
                 finally:
                     if driver:
+                        line = _locator_session_line(driver, ctx)  # [IMP-C25 Step 12] None without the stages
+                        if line:
+                            print(line)
                         if not interrupted:
                             # [IMP-C25 Step 11 i] once its downloads have ended, the session closes the Chrome
                             # it launched (IMP-C26: between two accounts the windows of any other one)
@@ -3454,9 +4637,206 @@ def parse_fetch_options(argv):
     return {"manual": "--manual" in list(argv)[3:]}
 
 
+# ==========================================
+#   IMP-C25 STEP 12 — `python mainfetch.py locate` (read-only diagnostic)
+# ==========================================
+def parse_locate_args(argv):
+    """`mainfetch.py locate <id> [episodes <range>] [--fetchExtras] [--probe-direct]` -> {manual_id, ep_range,
+    fetch_extras, probe_direct} (the flags in any order after the id, the extras aliases as for fetch). Prints the
+    usage and exits 1 on a bad invocation, like parse_fetch_args. Pure."""
+    if len(argv) < 3 or argv[1] != "locate":
+        print("Usage: locate [id] [episodes <range>] [--fetchExtras] [--probe-direct]")
+        sys.exit(1)
+    rest, ep_range, i = list(argv[3:]), None, 0
+    while i < len(rest):
+        if rest[i] == "episodes" and i + 1 < len(rest):
+            ep_range = rest[i + 1]
+            i += 2
+            continue
+        i += 1
+    return {"manual_id": argv[2], "ep_range": ep_range,
+            "fetch_extras": any(t in ("--fetchExtras", "--fetch-extras", "--extras", "--extra") for t in rest),
+            "probe_direct": "--probe-direct" in rest}
+
+
+def _locate_lines(item, res):
+    """The terminal lines of one located (or not) object — ids and the item's ADDRESS are shown here only (P-15:
+    never written to any file); never a download link."""
+    label = (item.get("locator") or {}).get("label") or item["filename"]
+    cost = (f"{res['elapsed']:.1f} s · pages {res['pages_opened']} · searches {res['searches']} · "
+            f"RPC {res['rpc_calls']}")
+    lines = []
+    if res["found"]:
+        how = " (normalized name)" if res["name_normalized"] else ""
+        lines.append(f"   {label} · FOUND · {_STAGE_LABEL[res['stage']]} {res['approach']} · proof {res['proof']}{how}"
+                     f" · via {res['via']} · {cost}")
+        lines.append(f"     photo_id {res['photo_id']} · {PHOTOS_URL}/photo/{res['photo_id']}")
+        if res["rule"] == "newest-set":
+            lines.append(f"     the newest of {len(res['alternates']) + 1} uploads under this name (re-split set) — "
+                         f"a fetch's SHA-256 decides")
+        elif res["alternates"]:
+            lines.append(f"     the same bytes also in: {', '.join(res['alternates'])}")
+    else:
+        lines.append(f"   {label} · NOT FOUND · {cost}")
+    tail = " — a fetch would skip today's search (OD-5)" if res["s4_skip"] else ""
+    lines.append(f"     tried: {_tried_text(res)}{tail}")
+    if res["stale"]:
+        lines.append(f"     stale (RPC and its page: gone): {', '.join(res['stale'])}")
+    return lines
+
+
+def _locate_entry(driver, entry, entry_id, ctx, probe_direct, tally):
+    """Locate the objects one entry uploads in this session's account (a multi-account entry: only this account's —
+    ctx.plans) and print them. Builds the queue against a folder that never exists, so every object is listed (PLAN
+    Step 10's rule for locators without fetching); creates nothing."""
+    import tempfile
+    import uuid
+    nowhere = os.path.join(tempfile.gettempdir(), f"mediavault-locate-{uuid.uuid4().hex}")  # never created
+    plan = ctx.plan_for(entry, entry_id)
+    queue = build_fetch_queue(entry, nowhere, ctx, entry_id=entry_id)
+    mine = queue if plan is None else [i for i in queue
+                                       if plan["by_sha"].get(i["hash"], plan["default"]) == ctx.account]
+    print(f"\n🔸 {entry.get('filename')} ({entry.get('short_id', 'N/A')}) — {len(mine)} object(s) in '{ctx.account}'")
+    wanted = _locator_run(ctx).wanted.setdefault(ctx.account, set())
+    for item in mine:
+        loc = item.get("locator") or {}
+        sha1 = _sha1_of(loc, _content_key(loc))
+        if sha1:
+            wanted.add(sha1)
+    for item in mine:
+        res = locate_object(driver, item.get("locator") or {}, ctx)
+        tally["objects"] += 1
+        tally["found"] += bool(res["found"])
+        for line in _locate_lines(item, res):
+            print(line)
+        if probe_direct and res["found"]:
+            print(f"     direct link without the browser's cookies: {_probe_direct(driver, res['photo_id'])}")
+
+
+def cmd_locate(manual_id, ep_range=None, fetch_extras=False, probe_direct=False):
+    """[IMP-C25 Step 12] `python mainfetch.py locate <id> [episodes <r>] [--fetchExtras] [--probe-direct]` — a
+    READ-ONLY diagnostic: where each uploaded object of the target lives in Google Photos, found by the fetch's own
+    exact-item stages (locate_object, candidate C) in the account it is routed to (P-4) — per object the stage, proof,
+    approach, path (rpc | ui), cost and its photo_id (this terminal only; nothing is written anywhere).
+
+    It downloads nothing, presses no Shift+D, clicks no tile, writes no learned record, failed-list row, journal or
+    library; it takes the fetch lock WITHOUT waiting (a running fetch owns Chrome's debug port and profile: locate
+    refuses then) and closes the Chrome it opened (_close_session). --probe-direct also mints each found item's
+    direct link (P-20) and asks, without the browser's cookies, whether it answers with media — a HEAD request
+    only, its answer yes/no + content type; the link is never shown."""
+    print(f"--- LOCATE: {manual_id} (read-only: nothing is downloaded or written) ---")
+    active = profile_for_id(manual_id)
+    print(f"   > [Account] Profile for {manual_id}: '{active}' ({CHROME_PROFILES.get(active, '?')})")
+    targets = resolve_targets(manual_id, ep_range)
+    target_ids = resolve_target_ids(manual_id, ep_range)
+    extras = resolve_title_extras(manual_id) if fetch_extras else []
+    if not targets and not extras:
+        print("❌ No valid targets found.")
+        return
+    ctx = FetchContext(run_id=f"locate-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{os.getpid()}")
+    groups = _account_groups(manual_id, active, targets, target_ids, extras, ctx)
+    tally = {"objects": 0, "found": 0}
+    try:
+        with fetch_session_lock(blocking=False):
+            completed = _locate_sessions(groups, active, ctx, probe_direct, tally)
+    except mvcommon.LockHeldError:
+        print("❌ A fetch is running (the fetch session lock is held) — locate needs the same Chrome profile and "
+              "port; run it again when that fetch has finished.")
+        return
+    if completed:
+        print(f"\n✅ Located {tally['found']} of {tally['objects']} object(s). Nothing was downloaded or written.")
+
+
+def _locate_sessions(groups, active, ctx, probe_direct, tally):
+    """cmd_locate's account sessions — cmd_fetch_route's order, pre-flight and port guard; one Chrome per account,
+    closed at its end. True when every session ran to its end; False after a stop (its line says why)."""
+    for n, (profile, group_targets, group_extras) in enumerate(groups):
+        if profile != active:
+            print(f"   > [Account] Switching to profile '{profile}' for {len(group_targets) + len(group_extras)} "
+                  f"item(s)")
+        problem = profile_preflight(profile)
+        if problem:
+            print(f"❌ {problem[:1].upper()}{problem[1:]}")
+            return False
+        if n and not _debug_port_free():
+            print(f"❌ Cannot switch to profile '{profile}': Chrome's debug port 9222 is still in use.")
+            return False
+        driver = init_driver(profile)
+        if not driver:
+            return False
+        ctx.start_session(profile)
+        _note_session(ctx, driver, profile)
+        try:
+            for entry, entry_id in list(group_targets) + [(ex, None) for ex in group_extras]:
+                _locate_entry(driver, entry, entry_id, ctx, probe_direct, tally)
+        except SessionExpiredError:
+            print(f"❌ Profile '{profile}' is logged out. Open Chrome with --user-data-dir={CHROME_PROFILES[profile]}, "
+                  f"sign in to photos.google.com, then re-run.")
+            return False
+        except KeyboardInterrupt:
+            print("\n🛑 Stopped by user.")
+            return False
+        finally:
+            print(f"   > {gprpc.summary_line(driver)}")
+            try:
+                _close_session(driver, ctx, last=n + 1 == len(groups))
+            except Exception as e:
+                print(f"   > ⚠️ Closing Chrome failed ({type(e).__name__}: {e}).")
+            try:
+                driver.quit()
+            except Exception:
+                pass
+    return True
+
+
+PROBE_HEAD_TIMEOUT_S = 15.0   # --probe-direct: the cookie-less HEAD request's timeout
+_MEDIA_TYPES = ("video/", "image/", "application/octet-stream")
+
+
+def _head_without_cookies(url):
+    """One HEAD request for `url` from Python — no cookie jar, no browser session, nothing downloaded — -> (HTTP
+    status or None, content type or None, the failure's type name or None). Never raises; never puts the URL in what
+    it returns (an exception is reduced to its type name)."""
+    import urllib.error
+    import urllib.request
+    request = urllib.request.Request(url, method="HEAD", headers={"User-Agent": "MediaVault-locate"})
+    try:
+        with urllib.request.urlopen(request, timeout=PROBE_HEAD_TIMEOUT_S) as answer:
+            ctype = (answer.headers.get("Content-Type") or "").split(";")[0].strip() or None
+            return answer.status, ctype, None
+    except urllib.error.HTTPError as e:
+        return e.code, None, None
+    except Exception as e:
+        return None, None, type(e).__name__
+
+
+def _probe_direct(driver, photo_id):
+    """--probe-direct (PLAN Step 12, §M6; evidence for the resumable-transfer follow-up, Suggested next task #10):
+    mint the item's direct link (P-20) and ask WITHOUT the browser's cookies whether it answers with media. HEAD
+    only — nothing is downloaded; the link is never shown, logged or kept. -> 'yes (<content type>)' or 'no (<why>)'."""
+    try:
+        link = gprpc.download_url(driver, photo_id)
+    except gprpc.RpcUnavailable as e:
+        return f"no (no link: {type(e).__name__})"
+    if link is None:
+        return "no (no link was minted)"
+    status, ctype, failure = _head_without_cookies(link.reveal())
+    link = None
+    if failure:
+        return f"no ({failure})"
+    if isinstance(status, int) and 200 <= status < 300 and ctype and ctype.lower().startswith(_MEDIA_TYPES):
+        return f"yes ({ctype})"
+    return f"no (HTTP {status}{', ' + ctype if ctype else ''})"
+
+
 def cli(argv):
     """`python mainfetch.py fetch <id> [episodes <range>] [tempdir <path>]
-    [--fetchExtras] [--manual]` — parse argv, then run the fetch."""
+    [--fetchExtras] [--manual]` — parse argv, then run the fetch.
+    [IMP-C25 Step 12] `python mainfetch.py locate <id> …` runs the read-only
+    cmd_locate instead (parse_locate_args); every fetch argv is handled as before."""
+    if len(argv) > 1 and argv[1] == "locate":
+        cmd_locate(**parse_locate_args(argv))
+        return
     mid, epr, fetch_extras, temp_dir = parse_fetch_args(argv)
     options = parse_fetch_options(argv)
     cmd_fetch_route(mid, epr, fetch_extras, temp_dir=temp_dir, manual=options["manual"])

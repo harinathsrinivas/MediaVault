@@ -500,3 +500,14 @@ No other step of this plan uses candidates.
   Step 14 fix above), so its profiles are marked at their next launch. Live read-only check 2026-10-11: movies, tv and
   anime read `exit_type "Crashed"` (no `exited_cleanly`); others has no profile folder yet — each is fixed at its next
   launch.
+
+## §1f — 🚦 G12 (Step 12 locator) — user rulings 2026-10-12 (decision cards)
+- **Winner**: card answer "C — hybrid (Recommended)" (judge-v2 DECISION.md `.candidates/c25-step-12/DECISION.md`,
+  02ac913: C was the only candidate with zero wrong downloads in the judge's RPC-down / page-format-change / bad-RPC-facts
+  simulations; 15/15 live §M4 objects in 2–11 s). A (d8dd71f) and B (868cd27) rejected; all three were complete and
+  gate-verified (orchestrator re-runs: A 2493/82 · B 2512/82 · C 2502/82).
+- **Cherry-picks**: card answer "Apply all 10 (Recommended)" → the judge's list (DECISION.md "Cherry-picks worth taking
+  into C", items 1–10: per_approach contract `{outcome, n}`, one failed-list row with stage evidence, `inconsistent`
+  reason, start confirmation ignoring other downloads, leave an HTML link page at once, try another verified copy before
+  S4, reuse the open item page for Shift+D, allowlist check after every locator test, no 20-candidate cap with
+  dedupKeys, `locate` early-stop `last=True`) applied as one follow-up after the merge, before Step 13.

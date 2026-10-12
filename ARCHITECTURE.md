@@ -2166,13 +2166,22 @@ in headful mode), `init_driver`:
    "--profile-directory=Default", "--remote-debugging-port=9222",
    "--disable-gpu", "--window-size=1920,1080", "--no-first-run",
    "--no-default-browser-check", "--disable-session-crashed-bubble",
-   "--disable-quic", "about:blank"])`
+   "--hide-crash-restore-bubble", "--disable-quic", "about:blank"])`
    - `--disable-quic` (IMP-C29) keeps downloads on TCP. Google serves a
      Photos download over HTTP/3 (QUIC) when Chrome allows it, and a QUIC
      download fails for good after a stall of about 8 s; over TCP it
      survives a 60 s stall. The switch only applies when this call
      starts the browser: a Chrome that is already running keeps the
      options it was started with.
+   - No "Restore pages?" bubble (IMP-C25, 2026-10-08): Chrome 154 ignores
+     `--disable-session-crashed-bubble` and leaves `profile.exit_type
+     "Crashed"` in the profile's `Default\Preferences` even after a
+     graceful close. So `--hide-crash-restore-bubble` is passed too, and
+     `mark_profile_clean_exit(<profile>)` runs just before the launch and
+     again once a Chrome a run closed or terminated is gone: it sets
+     `exit_type "Normal"` + `exited_cleanly true` (only while no Chrome
+     runs on that profile; atomic; every other key kept; never raises).
+     The crawler (`tools/gp_inventory.py launch_chrome`) does the same.
 2. `time.sleep(3)` — give Chrome time to bind port 9222.
 3. Build a Selenium `Options` with
    `add_experimental_option("debuggerAddress", "127.0.0.1:9222")`.

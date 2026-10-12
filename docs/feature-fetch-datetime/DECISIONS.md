@@ -486,3 +486,17 @@ No other step of this plan uses candidates.
   default (a probe hung ~5 min) → bounded page-load timeout; a failed attach in `init_driver` (e.g. chromedriver-manager
   online check) can leave the just-launched Chrome running → close it on that path too (extends Step 11 item i).
   Step 12 candidates must merge these two fixes before their completion gate.
+- **No "Restore pages?" bubble in the automation Chrome (2026-10-08)** — user, verbatim: "also, make sure to close the
+  restore small box which opens in chrome. in right top." → Chrome 154 ignores `--disable-session-crashed-bubble`, and
+  (seen live by the orchestrator, 2026-10-08) leaves `profile.exit_type "Crashed"` (no `exited_cleanly` key) in
+  `Default\Preferences` even after a graceful CDP `Browser.close`. Fix (`0d47140`, tests `49367a1`, `d444f12`, this
+  commit): every launch also passes `--hide-crash-restore-bubble`; `mainfetch.mark_profile_clean_exit` sets
+  `exit_type "Normal"` + `exited_cleanly true` only when an unclean exit is recorded and no Chrome browser runs on that
+  user-data-dir (process table; cannot tell → left alone), atomically (temp file + `os.replace`), every other key kept,
+  never raising; its one line is plain cp1252 text (the crawler's output is often a cp1252 pipe). It runs
+  before EVERY launch (`init_driver` = fetch + warm-up; the crawler's `launch_chrome`) and after EVERY close once that
+  Chrome is gone (graceful, terminated, an attached Chrome's windows at an account switch; `_end_run` interrupted;
+  `_startup_cleanup`; the crawler's `_session`). `warm_profiles` never closes its Chrome (attach-mode `quit()` — the
+  Step 14 fix above), so its profiles are marked at their next launch. Live read-only check 2026-10-11: movies, tv and
+  anime read `exit_type "Crashed"` (no `exited_cleanly`); others has no profile folder yet — each is fixed at its next
+  launch.

@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 8 allowlist check after every test
+STATE: IN PROGRESS — next: 9 candidate cap
 
 # IMP-C25 Step 12 follow-up — the judge's 10 cherry-picks into the merged locator (candidate C) — resumable status
 
@@ -82,9 +82,14 @@ tests pass, with its SHA. Pathspec commits only; never -A, amend, rebase or stas
       page_per_episode (3 episodes → 3 item pages, was 6). The shared fake answers no CDP Target.* command (so
       use_photos_tab always opened a fresh tab there and no page could be reused); these tests answer
       Target.getTargetInfo as Chrome does (test-local `_tab_info_like_chrome`). In-process disarms: no reuse → the two
-      reuse tests fail; reuse ignoring the address → the neighbour test fails — WIP commit "7 Shift+D page reuse" (SHA
-      in the next commit) · tests/test_locator.py 90 passed
-- [ ] 8 RPC allowlist check after every locator test (tests only)
+      reuse tests fail; reuse ignoring the address → the neighbour test fails — 5c2954b · tests/test_locator.py 90
+      passed
+- [x] 8 RPC allowlist check after every locator test (tests only) — B's autouse `_only_read_only_rpcids_ever` in
+      tests/test_locator.py: for every test whose fixture closure holds `fake_photos` (`flow` tests too) the
+      emulator log is checked with `_assert_read_only_rpc` after the test (the world resolved at set-up, so it is torn
+      down after the check). Test: test_the_allowlist_check_runs_after_every_test_that_drives_the_fake_world (wired;
+      catches a mutating rpcid). All 90 other tests pass the after-check — WIP commit "8 allowlist check" (SHA in the
+      next commit) · tests/test_locator.py 91 passed
 - [ ] 9 no 20-candidate cap when the RPC records already carry dedupKeys
 - [ ] 10 `locate` early stop passes `last=True` to `_close_session`
 - [ ] gates — disarm probes (scratch copy, incl. the new rules) · full suite · smoke · notes · final commit

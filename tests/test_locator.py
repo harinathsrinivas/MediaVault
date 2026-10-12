@@ -49,6 +49,17 @@ def clock(monkeypatch):
     return c
 
 
+@pytest.fixture(autouse=True)
+def _only_read_only_rpcids_ever(request):
+    """PLAN Step 12 scenario "no mutating rpcid ever sent" (P-9 / P13) — G12 pick 8, from candidate B's test file —
+    enforced after EVERY test of this module that drives the fake world: its emulator log may hold allowlisted
+    read-only rpcids only. (The world is resolved at set-up, so it is torn down after this check.)"""
+    world = request.getfixturevalue("fake_photos") if "fake_photos" in request.fixturenames else None
+    yield
+    if world is not None:
+        _assert_read_only_rpc(world)
+
+
 # ================================================================================ harness
 def _sha256(data):
     return hashlib.sha256(data).hexdigest()
@@ -1915,3 +1926,14 @@ def test_with_rpc_down_a_season_costs_one_item_page_per_episode(flow, sandbox, m
     assert sorted(u for u in loaded if "/photo/" in u) == sorted(
         f"{mainfetch.PHOTOS_URL}/photo/{i.photo_id}" for i in items.values())   # one page per episode, not two
     assert [r["via"] for r in flow.world.downloads] == ["shift_d"] * 3 and flow.legacy == []
+
+
+def test_the_allowlist_check_runs_after_every_test_that_drives_the_fake_world(fake_photos, request):
+    # Pick 8 (from B): _only_read_only_rpcids_ever is wired for every test of this module that uses the fake world (a
+    # `flow` test too: it needs fake_photos), and it fails a test whose emulator log shows anything but the read-only
+    # allowlist (PLAN P-9 / P13).
+    assert "_only_read_only_rpcids_ever" in request.fixturenames
+    fake_photos.rpc_log.append({"rpcid": "XwAOJf"})              # a mutating rpcid (PLAN P13), as if it had been sent
+    with pytest.raises(AssertionError):
+        _assert_read_only_rpc(fake_photos)
+    fake_photos.rpc_log.pop()                                     # this test's own after-check must pass

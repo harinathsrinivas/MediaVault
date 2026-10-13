@@ -511,3 +511,9 @@ No other step of this plan uses candidates.
   reason, start confirmation ignoring other downloads, leave an HTML link page at once, try another verified copy before
   S4, reuse the open item page for Shift+D, allowlist check after every locator test, no 20-candidate cap with
   dedupKeys, `locate` early-stop `last=True`) applied as one follow-up after the merge, before Step 13.
+- **Step 13b executor choices (2026-10-14), kept as orchestrator defaults — the user may overrule:** (1) a push-family
+  command that returns None (push_group, prep_push_rep, prep_push_rep_season return None on success AND failure) counts
+  as "succeeded" for auto-confirm only when the run reached its end state (entry archived / every target archived /
+  every target uploaded) — stricter than the plan's "did not return False", so no Chrome after a paused or hard-failed
+  autopilot; (2) `AUTO_CONFIRM_MIN_AGE_H = 24` (plan said 12 with a note to raise it): measured on the R1b mapping,
+  41 % of uploads were backed up within 12 h, 84 % within 24 h, 99 % within 48 h.

@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13.j gates (disarm probes on a scratch copy · full suite · smoke · live dry run · final)
+STATE: COMPLETE
 
 # IMP-C25 Step 13 — `check_photos`: download-free verification, sweep and confirm — resumable status
 
@@ -114,8 +114,15 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       "on the failed list" only when the apply did not stop, no longer points at Step 14's not-yet-existing
       resolve_photos (failed_objects.csv + map_photos --resolutions instead), and its retry hints follow the run's state;
       section comments state the refined look-elsewhere rule
-- [ ] 13.j gates: disarm probes (isolated scratch copy) · full suite · smoke · live read-only dry run if port 9222 is
-      free and no MediaVault fetch/crawl runs · self-review · STATE: COMPLETE · final feat commit
+- [x] 13.j gates: disarm probes (isolated scratch copy) · full suite · smoke · live read-only dry run if port 9222 is
+      free and no MediaVault fetch/crawl runs · self-review · STATE: COMPLETE · final feat commit — disarm 29/29 caught
+      on a `git archive` copy of 73e98ff (the copy green before and after; the worktree never modified); full suite
+      2738 passed (= 2580 + 158) in 258 s; smoke 82 passed in 28 s (sequential, on 73e98ff, tree clean); live dry run
+      `check_photos tv-en-2025-daredevilbornagain-s02 --max-minutes 6` (port 9222 free, no fetch / crawl / warm-up
+      process, no lock, only the idle `main.py web`): 8/8 confirmed in one tv session (7 legacy by S2 exact name, proof
+      filename · 1 captured push by S0b hash, proof dedupkey), 18 RPC calls 0 errors, Chrome closed gracefully, journal
+      clean, no automation Chrome / port listener / lock left; nothing printed a URL or an email. The final commit is
+      the feat commit that sets STATE: COMPLETE
 
 ## Design decisions (binding for the rest of this step — recorded early so a resumed session stays consistent)
 1. Split of work: main.py owns the CLI, scope resolution, the run directory, the report / outliers, Step 9b and every
@@ -174,6 +181,15 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
   prefix's account.
 - (A4) `--pace S` = minimum seconds between two objects' checks in a session (+ up to 25 % jitter); default 3 s after an
   object that used the web pages, 0.5 s after an RPC-only one (gprpc's own per-call pacing stays).
+- (A5) `--apply-run <dir>` accepts an unfinished run (what it settled is applied, its unfinished objects stay
+  unchecked: no record, no failed row); `latest` only takes a complete run.
+- (A6) Ctrl+C during `--apply` applies nothing; the re-run resumes the run and applies the whole of it.
+- (A7) A look elsewhere that errored or is unfinished leaves no final verdict (error / unchecked): no loss is claimed
+  and no failed row written until the look is done.
+- (A8) Until Step 14's resolve_photos exists, the report points ambiguous objects at failed_objects.csv +
+  `map_photos --resolutions` (Step 9's importer) — Step 14 may switch the wording.
+- (A9) The live dry run used the worktree's code, which has no mvconfig.json (gitignored, not copied: it holds keys):
+  no fetch_account_overrides — routing came from the id prefix (no learned homes exist yet in the real library).
 
 ## Log
 - 2026-10-13 dispatched; read-in (PLAN, DECISIONS §1c–§1f, PROGRESS, Step 12 DECISION/CRITIQUE/PICKS, mainfetch
@@ -185,3 +201,79 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
 - 2026-10-13 resumed after a limit (coordinator: 13.e–13.g committed at c79b58b, port 9222 free). The uncommitted 13.h
   main.py diff (the apply functions) was coherent: kept, completed and tested; the verdict refinements of decisions 4 /
   6 were found while writing its tests (an apply must never book a verdict that is not final).
+- 2026-10-13 13.j: the coordinator's resume note said the full run had stopped at 31 % — it had not: the background run
+  finished on 73e98ff with the tree clean (2738 passed, exit 0), so it stands as the gate; smoke then ran after it.
+- LIVE FINDING (for the orchestrator — not a Step 13 defect, nothing changed for it): the quality post-pass got NO
+  quality flag from the real service (0 quality lines for 8 pinned items; its swbisb + EWgK9e calls were answered without
+  error). gpweb's parsers return None (unknown) when the real arrays are shorter than PLAN P12's positions — swbisb
+  item[12] / [13] (partial_upload / archived) and EWgK9e's quality triple as the info array's LAST element, which
+  parse_EWgK9e itself marks UNVERIFIED. Step 13 degrades as designed (unknown quality is never claimed and never doubts
+  an item), but live the IMP-C27 (e) `inconsistent` verdict and the partial-upload / not-original-quality outliers
+  stay inert until those P12 positions are verified (Step 2b's parsers, an R2-type live item). No custom RPC probe was
+  run: the brief allows only `check_photos` dry runs live.
+
+## Step 13 — [status: done]
+- Executor: executor-fable
+- Model: fable (session env claude-fable-5-1; each commit's trailer is the harness attribution notice current at commit
+  time, which alternated Fable 5.1 / Opus 5.5 — see Log)
+- Mode: single-executor
+- Files changed: main.py (the `check_photos` section: CLI parser + scopes + run directory + child spawn + verdicts +
+  report.txt / outliers.csv + the apply; the dispatcher branch; one help line), mainfetch.py (locate_object's additive
+  `per_approach_pick`; the `python mainfetch.py check` engine; `__main__` registers the module as `mainfetch`),
+  tests/conftest.py (autouse `_hermetic_check_child`: no test can spawn the real child), tests/test_check_photos.py (new,
+  158 tests), .candidates/c25-step13/STATUS.md (this file). No other file changed: mvcommon, gpweb, gprpc, gpcapture,
+  tools/, webui/, the rollback machinery and ENTRY_TYPE_KEYS are untouched.
+- Outcome: `python main.py check_photos <scope>` verifies uploaded objects in Google Photos WITHOUT downloading —
+  scopes item (alias) · season · `series:<season|episode id|show folder>` (flat / nested / category and language
+  folders / multi-year ids / anime glued ids / Others list roots) · id prefix · `account:<a>` · pending · hinted · all,
+  always printed before running. main writes run.json under ~/.mediavault/gphotos/check/<UTC ts>/ and spawns
+  `sys.executable <abs mainfetch.py> check --run <dir>` with the streaming idiom (Ctrl+C: the parent waits for the child
+  to close Chrome). The child, under the fetch lock taken without waiting + the crawler's heartbeat, runs one Chrome
+  session per account, locate_object per object (RPC acceleration: swbisb / EWgK9e batches of ≤50 warm the locator's
+  own cache; a mapped cloud key is never a content proof), looks for an object in the other accounts only when its own
+  answered not-found / wrong-item and it was not a push of the last 7 days at that check (Step 9b), paces (UI 3 s /
+  RPC 0.5 s + jitter / --pace), breaks after 5 uncheckable objects in a row, honours --limit / --max-minutes, appends
+  results.jsonl (fsync per line) + progress.json, and closes every Chrome it launched on every way out (the shared
+  close, then a kill through the Popen handle; Ctrl+C held during the launch; a hard-killed check is cleaned by the
+  next start-up through its fetch journal). main turns the results into verdicts (confirmed · inconsistent ·
+  ambiguous · not-backed-up-yet · possible-loss · --devices: awaiting-backup / missing-after-backup /
+  missing-everywhere · partial sets · error · unchecked — only final verdicts reach the failed list), report.txt (per
+  account × category × approach), outliers.csv (10 OD-7 classes) and one summary line. A dry run writes only its run
+  directory; `--apply` checks then records (learned records source check / confirm, stale records, the failed list,
+  the apply engine, failed_objects.csv, applied.json — idempotent; nothing on Ctrl+C); `--apply-run <dir|latest>`
+  applies a reviewed run without Chrome (another scope refused; latest = the newest complete run). Re-running continues
+  the newest unfinished run (errors retried, settled objects skipped); `--recheck` starts afresh. Verified by 158 hermetic
+  tests on the fake Google Photos world, 29/29 disarm probes, the full suite and smoke, and a live read-only dry run
+  (8/8 confirmed, Chrome closed, nothing left behind).
+- Key decisions: Design decisions 1–7 above (binding, with their 13.h refinements) and assumptions A1–A9. Deviations
+  from the PLAN text: two extra options — `--devices` (Step 9b's phone opt-in, as map_photos) and `--list` (the PLAN's
+  `pending --list`); `per_approach_pick` added to locate_object (a parallel map — per_approach keeps its exact
+  {outcome, n}); the `__main__` module alias (gprpc's lazy import otherwise loaded a second mainfetch whose
+  SessionExpiredError the script never caught); the conftest guard (a child process sees no monkeypatch); a 60 s
+  page-load bound for check sessions; no separate wrong-item verdict (Step 9b's statuses, the failed row keeps reason
+  wrong-item); the look elsewhere only for not-found / wrong-item and not a recent push at the check (never for an
+  ambiguous object); the Popen-handle kill guarantee and Ctrl+C held during the launch; "re-run skips confirmed
+  objects unless --recheck" read as resume semantics (A1). Contracts for later steps — 13b: `python main.py
+  check_photos pending --apply --max-minutes 15` exits 0 (ok / partial) or 1 (error / refused / stopped / interrupted),
+  its last stdout line is the summary `🔎 check_photos pending: N object(s) — …`, a held lock prints the refusal and
+  checks nothing, `pending --list` is offline, a pending confirmation is recorded with source `confirm`, and 13b's own
+  tests must install a runner for main._cp_spawn (the autouse guard refuses the real child). 13c: a check records
+  verified_by dedupkey only for content-keyed objects (capture / proven SHA-1), filename for legacy ones, and never
+  writes a block-level sha1 / dedup_key (only captures and downloads do) — 13c's "proven" rule holds. 14: the failed
+  list gets P-18 rows (reasons not-found · wrong-item · ambiguous · inconsistent · partial-set · missing-after-backup ·
+  missing-everywhere; tried = per-stage verdicts; ≤20 candidates, the pinned item first for inconsistent;
+  expected_taken_local), the sidecars get source check / confirm records, `check_photos hinted` verifies the hints
+  map_photos --resolutions writes. LIVE FINDING for the orchestrator: see Log (the P12 quality positions return no flag
+  live — Step 2b's parsers).
+- Verification: `python -m pytest tests/test_check_photos.py -q` → 158 passed (≈22 s); neighbours `tests/test_locator.py
+  tests/test_map_photos.py tests/test_prep_push_rep_enrich_cli.py tests/test_fetch_hygiene.py tests/test_fetch_routing.py`
+  → 510 passed; disarm probes (scratchpad disarm_probes.py on a `git archive` copy of 73e98ff) → 29/29 caught, the copy
+  green before and after; `python -m pytest -q` (full) → 2738 passed, 1 warning (the pre-existing httpx deprecation) in
+  257.96 s; `python -m pytest tests/smoke -q` → 82 passed, 1 warning in 28.08 s (both on 73e98ff, tree clean, run one
+  after the other); live `python main.py check_photos tv-en-2025-daredevilbornagain-s02 --max-minutes 6` from the
+  worktree → exit 0, complete, confirmed 8, RPC calls 18 (errors 0), Chrome closed (journal clean; no port-9222
+  listener, automation Chrome or lock left). Self-review (V2 delta 4): (a) the PLAN Step 13 test list and details
+  checked one by one — all covered; (b) consumers 13b / 13c / 14 / R2–R4 — contracts above; (c) change-gates — the
+  rollback machinery and ENTRY_TYPE_KEYS untouched (no such identifier in the diff), every new whole-library pass
+  alias / season_map-safe (iter_uploaded_objects, _gp_resolve; the child skips multi_ep_alias and season_map), smoke
+  green.

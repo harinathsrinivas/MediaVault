@@ -14544,6 +14544,194 @@ def _mu_only_added(old, new, raw, newline):
     return _mu_encode(restored, newline) == raw
 
 
+class _MvmetaCommandRefused(RuntimeError):
+    """An adb argv outside mvmeta_upgrade's allowlist — a bug; it is never run."""
+
+
+def _mu_sidecar_path(path):
+    """True for a phone path mvmeta_upgrade may address: a `.mvmeta.json` strictly under a Media root
+    (DEVICE_LIST_ROOTS), on one line, without a `..` step."""
+    return _dev_statable(path) and path.endswith(MVMETA_SUFFIX) and "/../" not in path
+
+
+def _mu_local(path):
+    """True for a local file argument: an absolute path on one line (adb never reads it as an option)."""
+    return (isinstance(path, str) and os.path.isabs(path) and not path.startswith("-")
+            and not any(c in path for c in "\r\n\0"))
+
+
+def _mu_argv_ok(argv, write):
+    """mvmeta_upgrade's OWN adb allowlist (PLAN Step 13c — the device check's read-only _dev_argv_readonly stays as it
+    is): True only for these exact shapes, each naming its phone:
+         adb -s <serial> pull <sidecar> <local file>                    reading (a dry run too)
+         adb -s <serial> push <local file> <sidecar>.tmp                write=True only
+         adb -s <serial> shell mv '<sidecar>.tmp' '<sidecar>'           write=True only
+    <sidecar> is a `.mvmeta.json` strictly under a Media root (_mu_sidecar_path), <local file> an absolute local path.
+    pull / push hand adb the paths as plain arguments (no device shell); `shell mv` gets each path as ONE single-quoted
+    word ('\\'' for a quote — cmd_push's escaping), so no operator can run, and it may only rename a sidecar's own .tmp
+    over it. Everything else is refused: a media file, any other phone path, rm, a push straight onto the sidecar, a
+    phone not named, a malformed serial — and every write when `write` (the run's --apply) is False."""
+    if not (isinstance(argv, (list, tuple)) and all(isinstance(a, str) for a in argv)):
+        return False
+    argv = list(argv)
+    if len(argv) < 6 or argv[:2] != ["adb", "-s"] or not _DEV_SERIAL_RE.fullmatch(argv[2]):
+        return False
+    verb, rest = argv[3], argv[4:]
+    if verb == "pull":
+        return len(rest) == 2 and _mu_sidecar_path(rest[0]) and _mu_local(rest[1])
+    if not write:
+        return False
+    if verb == "push":
+        return (len(rest) == 2 and _mu_local(rest[0]) and rest[1].endswith(MVMETA_TMP_SUFFIX)
+                and _mu_sidecar_path(rest[1][:-len(MVMETA_TMP_SUFFIX)]))
+    if verb == "shell" and len(rest) == 3 and rest[0] == "mv":
+        if not all(_DEV_QUOTED_RE.fullmatch(word) for word in rest[1:]):
+            return False
+        source, target = _dev_unquote(rest[1]), _dev_unquote(rest[2])
+        return source == target + MVMETA_TMP_SUFFIX and _mu_sidecar_path(target)
+    return False
+
+
+def _mu_run(argv, write):
+    """Run ONE adb command of mvmeta_upgrade -> (returncode, stdout text, stderr text). Its allowlist comes first
+    (_mu_argv_ok; `write` is the run's --apply, so a dry run cannot write even if a caller asked it to): an argv off it
+    raises _MvmetaCommandRefused and never runs. stdin is DEVNULL, the output captured (decoded by _dev_text) and the
+    time bounded (MVMETA_ADB_TIMEOUT_S). OSError (no adb binary) and subprocess.TimeoutExpired propagate."""
+    if not _mu_argv_ok(argv, write):
+        raise _MvmetaCommandRefused(repr(argv)[:200])
+    result = subprocess.run(list(argv), stdin=subprocess.DEVNULL, capture_output=True, timeout=MVMETA_ADB_TIMEOUT_S)
+    return (getattr(result, "returncode", None), _dev_text(getattr(result, "stdout", None)),
+            _dev_text(getattr(result, "stderr", None)))
+
+
+def _mu_adb_problem(code, out, err):
+    """A failed adb command in one line: adb's own first error line, else its exit status."""
+    return _dev_first_line(err) or _dev_first_line(out) or f"exit status {code}"
+
+
+def _mu_pull(serial, path, local):
+    """Pull ONE sidecar from the phone into the NEW local file `local` -> (its bytes, None), or (None, why). Never
+    raises for anything adb or the phone does (a refused argv included); Ctrl+C still interrupts."""
+    try:
+        code, out, err = _mu_run(["adb", "-s", serial, "pull", path, local], write=False)
+        if code != 0:
+            return None, f"adb pull failed ({_mu_adb_problem(code, out, err)})"
+        with open(local, "rb") as fh:
+            return fh.read(), None
+    except Exception as e:     # _MvmetaCommandRefused, OSError (no adb, no file), subprocess.TimeoutExpired
+        return None, f"adb pull failed ({_gp_line(e)})"
+
+
+def _mu_mtime(serial, path):
+    """A phone file's mtime (epoch seconds), read with the device check's own read-only `stat` (_dev_run — its
+    allowlist, unchanged) -> int, or None when it cannot be read."""
+    try:
+        code, out, _err = _dev_run(["adb", "-s", serial, "shell", "stat", "-c", _dev_quote(DEVICE_STAT_FORMAT),
+                                    _dev_quote(path)], DEVICE_STAT_TIMEOUT_S)
+    except Exception:
+        return None
+    for line in _dev_lines(out) if code == 0 else ():
+        m = _DEV_STAT_RE.fullmatch(line)
+        if m and m.group(3) == path:
+            return int(m.group(2))
+    return None
+
+
+def _mu_new_run_dir(now):
+    """Create this --apply's run directory: <GPHOTOS_STATE_DIR>/mvmeta/<UTC timestamp> (read at call time), with a
+    -2, -3 … suffix when a run of the same second left one — never another run's folder. Raises OSError."""
+    base = os.path.join(mvcommon.GPHOTOS_STATE_DIR, "mvmeta", now.strftime("%Y%m%dT%H%M%SZ"))
+    for n in range(1, 1000):
+        path = base if n == 1 else f"{base}-{n}"
+        if not os.path.exists(path):
+            os.makedirs(path)      # exist_ok=False: a folder that appeared meanwhile is never shared
+            return path
+    raise OSError(f"no free run directory next to {base}")
+
+
+def _mu_keep_original(row, ctx):
+    """Keep a sidecar's ORIGINAL bytes in the run directory before its phone is touched (--apply): originals/NNNN
+    .mvmeta.json (the exact bytes) and one backup.jsonl line naming the phone file it came from — both flushed to
+    disk. -> the kept file's path. Raises OSError (then nothing is written to the phone)."""
+    if ctx["run_dir"] is None:
+        ctx["run_dir"] = _mu_new_run_dir(ctx["now"])
+    folder = os.path.join(ctx["run_dir"], "originals")
+    os.makedirs(folder, exist_ok=True)
+    ctx["kept"] += 1
+    name = f"{ctx['kept']:04d}{MVMETA_SUFFIX}"
+    kept = os.path.join(folder, name)
+    with open(kept, "xb") as fh:
+        fh.write(row["raw"])
+        fh.flush()
+        os.fsync(fh.fileno())
+    line = {"file": f"originals/{name}", "alias": row["alias"], "serial": row["serial"], "path": row["path"],
+            "mtime": row["mtime"], "manual_id": row["label"], "sha256": hashlib.sha256(row["raw"]).hexdigest()}
+    with open(os.path.join(ctx["run_dir"], "backup.jsonl"), "a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(line, ensure_ascii=False) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    return kept
+
+
+def _mu_write(row, ctx):
+    """--apply for ONE planned sidecar (its original `raw` and v2 `new` bytes, its listed `mtime`) -> True when the phone
+    now holds exactly `new` (row: upgraded — `warning` set when its mtime changed), False on any failure (row: failed,
+    `why` saying what the phone holds now). In this order, each step only after the one before succeeded:
+      1. keep the original locally (_mu_keep_original) — no local copy, no phone write;
+      2. a local file with the v2 bytes and the ORIGINAL's mtime, pushed to `<sidecar>.tmp` (adb push keeps a file's
+         mtime — RESEARCH F3);
+      3. `mv` that .tmp over the sidecar on the phone — one atomic rename, the sidecar is never half written;
+      4. pull the sidecar back: its bytes must be exactly `new`;
+      5. its mtime (a read-only stat) must still be the original's: the push time the device check reads.
+    `ctx`: apply (the run's --apply — the allowlist's `write`), work (the temporary folder), run_dir (None until the
+    first write), now, kept and n (counters). Ctrl+C still interrupts."""
+    serial, path = row["serial"], row["path"]
+    tmp, name = path + MVMETA_TMP_SUFFIX, path.rsplit("/", 1)[-1]
+
+    def failed(why):
+        row.update(status="failed", why=why)
+        return False
+
+    if not ctx["apply"]:                   # a dry run writes nothing — not even the local copy
+        return failed("a dry run writes nothing")
+    try:
+        row["kept"] = _mu_keep_original(row, ctx)
+    except OSError as e:
+        return failed(f"its original could not be kept locally ({_gp_line(e)}) — nothing was written to the phone")
+    ctx["n"] += 1
+    local = os.path.join(ctx["work"], f"{ctx['n']}.v2{MVMETA_SUFFIX}")
+    try:
+        with open(local, "wb") as fh:
+            fh.write(row["new"])
+        os.utime(local, (row["mtime"], row["mtime"]))
+        code, out, err = _mu_run(["adb", "-s", serial, "push", local, tmp], write=ctx["apply"])
+        problem = None if code == 0 else _mu_adb_problem(code, out, err)
+    except Exception as e:
+        problem = _gp_line(e)
+    if problem:
+        return failed(f"the push of {name}{MVMETA_TMP_SUFFIX} failed ({problem}) — the sidecar is unchanged")
+    try:
+        code, out, err = _mu_run(["adb", "-s", serial, "shell", "mv", _dev_quote(tmp), _dev_quote(path)],
+                                 write=ctx["apply"])
+        problem = None if code == 0 else _mu_adb_problem(code, out, err)
+    except Exception as e:
+        problem = _gp_line(e)
+    if problem:
+        return failed(f"the rename on the phone failed ({problem}) — the sidecar is unchanged; {name}"
+                      f"{MVMETA_TMP_SUFFIX} is left next to it (the next --apply replaces it)")
+    ctx["n"] += 1
+    back, why = _mu_pull(serial, path, os.path.join(ctx["work"], f"{ctx['n']}.back{MVMETA_SUFFIX}"))
+    if back != row["new"]:
+        return failed(f"it was rewritten but does not read back as written ({why or 'other bytes'}) — restore the "
+                      f"original: adb -s {serial} push \"{row['kept']}\" \"{path}\"")
+    mtime = _mu_mtime(serial, path)
+    if mtime != row["mtime"]:
+        row["warning"] = (f"its mtime — the push time the device check reads — is now {mtime}, was {row['mtime']}"
+                          if mtime is not None else "its mtime could not be read back")
+    row["status"] = "upgraded"
+    return True
+
+
 # ==========================================
 #      WEB CONSOLE READ-ONLY DATA LAYER
 # ==========================================

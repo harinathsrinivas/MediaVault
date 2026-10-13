@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13c.b (the device path: own allowlist, runner, pull, the --apply write sequence)
+STATE: IN PROGRESS — next: 13c.c (cmd_mvmeta_upgrade + parser + CLI branch + usage line, end-to-end tests)
 
 # IMP-C25 Step 13c — `mvmeta_upgrade`: v2 sidecars for the existing library (OD-4 ruling) — resumable status
 
@@ -30,13 +30,22 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       sidecar owner: an entry or an extras item, FLAC holders left out) and `_mu_taken_utc`. tests/test_mvmeta_upgrade.py
       57 passed (every sidecar produced by the REAL write_remote_mvmeta, at version 1 and at today's 2; confirmed on
       this machine: CRLF line ends, ASCII \u escapes, decode + re-encode exact); neighbours (test_gp_capture,
-      test_device_inventory, test_entry_schema_guard, test_gphotos_primitives) 502 passed; smoke 82 passed — WIP SHA
-      in the commit that ticks 13c.b
-- [ ] 13c.b main: the device path — `_mu_argv_ok` (its OWN allowlist: pull; with --apply push `<sidecar>.tmp` + `shell
+      test_device_inventory, test_entry_schema_guard, test_gphotos_primitives) 502 passed; smoke 82 passed — f193fde
+- [x] 13c.b main: the device path — `_mu_argv_ok` (its OWN allowlist: pull; with --apply push `<sidecar>.tmp` + `shell
       mv` tmp -> sidecar), `_mu_run`, `_mu_pull`, `_mu_write` (keep the original locally -> push .tmp with the
       original mtime -> mv -> pull back + compare -> stat the mtime) — tests with a directory-backed fake adb:
       ordering, -s pins, refusals, a dry run cannot write, failure at every stage, the original kept, the mtime kept,
-      `_dev_argv_readonly` NOT widened
+      `_dev_argv_readonly` NOT widened — also `_mu_mtime` (Step 8's read-only stat through `_dev_run`),
+      `_mu_new_run_dir` (bounded, never another run's folder — a first draft could loop forever when a parent was a
+      file; fixed before its test) and `_mu_keep_original` (originals/NNNN.mvmeta.json opened "xb" + backup.jsonl, both
+      fsynced). `_mu_write` refuses up front when ctx apply is False (a dry run cannot even keep a local copy), the
+      allowlist's `write` flag being the second layer. tests/test_mvmeta_upgrade.py 117 passed (+60: the fake adb —
+      a real folder per phone, THIS module's own allowlist incl. Step 8's device-shell word splitting, violations
+      fail the test at teardown; allowlist 7 allowed + 2 dry-run refusals + 30 refused shapes, the read-only allowlist
+      not widened ×3, a refused argv never runs, the write order on a hostile name ($ ` ; ' unicode), 8 failure
+      stages each saying what the phone holds, the dry-run ctx, no local copy -> no phone write, the run folder,
+      pull failures, the read-only mtime); neighbours (+ test_cmd_push_partial, test_cmd_push_mock_device) 341
+      passed; smoke 82 passed — WIP SHA in the commit that ticks 13c.c
 - [ ] 13c.c main: `cmd_mvmeta_upgrade(scope, device, apply)` (scope like map_photos, phones, owners from
       iter_uploaded_objects, sidecars located by Step 8's classify_device_objects, plan / write loop, report, the
       disabled mode, Ctrl+C) + `parse_mvmeta_upgrade_args` + the CLI branch + the usage line — tests end to end: the

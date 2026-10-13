@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13b.d (rollback journal-op pins + the web UI pin)
+STATE: IN PROGRESS — next: 13b.e (gates: disarm probes, full suite, smoke, self-review, final commit)
 
 # IMP-C25 Step 13b — auto-confirm unverified objects at the end of the next push (OD-6 ruling) — resumable status
 
@@ -57,12 +57,20 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       without the hook + their return values pinned, the plan's no-Chrome cases at the CLI ×4, the child failing ×3
       and a library broken after the push → the dispatcher still returns normally). The module docstring documents
       the six return contracts. Neighbours (enrich_cli, keeps_split_record, cli_parsers, both enrich autopilots,
-      cmd_push_partial, cmd_push_mock_device, extras) 303 passed; smoke 82 passed — WIP SHA in the commit that ticks
-      this line
-- [ ] 13b.d rollback + web pins: journal-op instrumentation (identical rollback records with and without the hook,
+      cmd_push_partial, cmd_push_mock_device, extras) 303 passed; smoke 82 passed — 8fb4d6a
+- [x] 13b.d rollback + web pins: journal-op instrumentation (identical rollback records with and without the hook,
       the hook after the last journal op, no journal file on disk at spawn time) on a real prep_push_rep with a PONR;
       the web UI's push / prep_push_rep actions run in-process and never reach the hook (no webui change: it spawns
-      no push-family command)
+      no push-family command) — tests/test_auto_confirm.py 162 passed (+4: a REAL `prep_push_rep <id> <master> COUNT
+      2` through the dispatcher run twice in the same folder — every RollbackJournal op (open / each record / PONR /
+      commit / rollback, instrumented with the originals still running) identical without and with the hook, the
+      hook's check started after the last op, no `.mediavault_txn*` file on disk at that moment, the archived entry
+      and the archive's own output unchanged; a push rolled back before any upload journals the same and never reaches
+      the check; the web console's push / prep_push_rep actions call main.cmd_* in-process — the hook is never reached;
+      webui/server.py starts no Python child (no subprocess / multiprocessing / Popen / os.system / spawn / exec /
+      sys.executable — its open-folder os.startfile opens Explorer, allowed)). Rollback / web neighbours (test_rollback,
+      test_baseline_happy_path, test_web_endpoints, test_prep_keeps_split_record, test_cmd_replace) 62 passed; smoke 82
+      passed — WIP SHA in the commit that ticks this line
 - [ ] 13b.e gates: disarm probes (isolated scratch copy) · full suite · smoke · self-review · STATE: COMPLETE · final
       feat commit
 

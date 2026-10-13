@@ -14,6 +14,10 @@ datetime/PLAN.md P-11, P-19, Step 13b).
          usage error never does; success + an old pending object -> the exact child argv; every documented handled
          failure of the REAL commands -> nothing (output identical to a run without the hook); the child failing /
          interrupted / not startable never changes the push command's output or exit code
+  13b.d  the rollback change-gate, instrumented: every RollbackJournal operation of a REAL prep_push_rep (prep, push,
+         replace and its point of no return) and of a push rolled back before any upload is identical with and without
+         the hook, the hook starts after the last of them, no journal file is on disk when it starts; the web console's
+         push actions run in-process and never reach the hook (webui/server.py spawns no process — unchanged)
 
 THE SIX RETURN CONTRACTS (PLAN Step 13b asks for them here — verified by reading main.py; the function names are
 authoritative). "Succeeded" = returned normally — no exception: RollbackHardFail, SystemExit, KeyboardInterrupt, anything;
@@ -55,6 +59,7 @@ import functools
 import hashlib
 import json
 import os
+import shutil
 import sys
 import time
 import types
@@ -62,6 +67,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import gpcapture
 import main
 import mainfetch
 import mvcommon
@@ -918,3 +924,193 @@ def test_a_library_broken_after_the_push_never_changes_its_exit_code(ac, sandbox
     out = capsys.readouterr().out.splitlines()
     assert out[0] == "<cmd_push ran>" and out[-1] == _warning("SystemExit: 1")
     assert ac.child.calls == []
+
+
+# ===========================================================================
+# 13b.d — the rollback change-gate, instrumented; the web console
+# ===========================================================================
+PINNED = "mov-en-2022-journalpin"
+
+
+def _fake_split(monkeypatch, works=True):
+    """mkvmerge --split -> a byte slicer honouring split_video_file's contract (2 chunks that concatenate back to the
+    master) — or, works=False, a split that produces nothing (cmd_push then rolls its journal back before any upload);
+    no unsplittable track; a huge disk."""
+    def split(input_path, output_dir, method, value_str, file_id=""):
+        if not works:
+            return []
+        with open(input_path, "rb") as fh:
+            data = fh.read()
+        half = len(data) // 2 + 1
+        stem = os.path.splitext(os.path.basename(input_path))[0]
+        paths = []
+        for n, part in enumerate((data[:half], data[half:]), 1):
+            path = os.path.join(output_dir, f"{stem} [{file_id}].chunk.{n:03d}.mkv")
+            with open(path, "wb") as fh:
+                fh.write(part)
+            paths.append(path)
+        return paths
+
+    monkeypatch.setattr(main, "split_video_file", split)
+    monkeypatch.setattr(main, "find_unsplittable_tracks", lambda path: [])
+    huge = 500 * 1024 ** 3
+    monkeypatch.setattr(main.shutil, "disk_usage", lambda path: types.SimpleNamespace(total=huge, used=0, free=huge))
+
+
+def _journal_log(monkeypatch, root, events):
+    """Instrument every RollbackJournal operation — behaviour unchanged, each original still runs — appending to `events`:
+    ("open", folder, id) · ("record", the record) · ("ponr", id) · ("commit", id) · ("rollback", id); paths relative to
+    `root`, so two runs in the same folder compare equal."""
+    journal = main.RollbackJournal
+    real = {name: getattr(journal, name) for name in ("__init__", "_append", "mark_point_of_no_return", "commit",
+                                                       "rollback")}
+
+    def rel(value):
+        return os.path.relpath(value, root) if isinstance(value, str) and os.path.isabs(value) else value
+
+    def open_(self, folder_path, manual_id):
+        events.append(("open", rel(folder_path), manual_id))
+        real["__init__"](self, folder_path, manual_id)
+
+    def append(self, record):
+        events.append(("record", {key: rel(value) for key, value in record.items()}))
+        real["_append"](self, record)
+
+    def ponr(self):
+        events.append(("ponr", self.manual_id))
+        real["mark_point_of_no_return"](self)
+
+    def commit(self):
+        events.append(("commit", self.manual_id))
+        real["commit"](self)
+
+    def rollback(self, library):
+        events.append(("rollback", self.manual_id))
+        return real["rollback"](self, library)
+
+    for name, fn in (("__init__", open_), ("_append", append), ("mark_point_of_no_return", ponr), ("commit", commit),
+                     ("rollback", rollback)):
+        monkeypatch.setattr(journal, name, fn)
+
+
+def _fresh_title(sandbox, make_video, mock_device, old):
+    """The same starting point for every run, in the same folder: a fresh title folder holding the master, an empty fake
+    device, a library holding only the old pending object `old`. -> the master's path."""
+    folder = sandbox["local_root"] / "Movies" / "Journal Pin (2022)"
+    if folder.exists():
+        shutil.rmtree(folder)
+    for item in mock_device.iterdir():
+        shutil.rmtree(item) if item.is_dir() else item.unlink()
+    folder.mkdir(parents=True)
+    master, _sha256 = make_video(folder / "Journal.Pin.2022.mkv")
+    mvcommon.save_library(dict([old]))
+    return master
+
+
+def _journals(root):
+    """Every rollback journal on disk under `root` (the live name and the preserved `.mediavault_txn.<ts>.json`)."""
+    return sorted(str(p) for p in root.rglob(".mediavault_txn*"))
+
+
+def test_with_or_without_the_hook_a_real_archive_journals_exactly_the_same_and_the_hook_comes_last(
+        ac, sandbox, mock_device, make_video, stub_tech_specs, fake_dummy, monkeypatch, capsys):
+    # PLAN Step 13b (the rollback change-gate): a REAL `prep_push_rep <id> <master> COUNT 2` through the dispatcher —
+    # cmd_prep's, cmd_push's and cmd_replace's journals, replace's point of no return — once without the hook, once with
+    # it (an old pending object makes it start the check). The journal operations must be identical, the hook must start
+    # after the last of them, with no journal file on disk, and the archive must end the same.
+    _fake_split(monkeypatch)
+    monkeypatch.setattr(gpcapture, "_now", lambda: _iso(NOW))     # the new push's capture: stamped at NOW (young)
+    events = []
+    _journal_log(monkeypatch, str(sandbox["local_root"]), events)
+    old = _old(ac.root)
+    real_hook = main.after_push_command
+    argv = ["prep_push_rep", PINNED, None, "COUNT", "2"]
+
+    monkeypatch.setattr(main, "after_push_command", lambda *args: None)          # 1. no hook at all
+    argv[2] = str(_fresh_title(sandbox, make_video, mock_device, old))
+    _dispatch(argv)
+    without_hook, events[:] = list(events), []
+    entry_without = mvcommon.load_library()[PINNED]
+    out_without = capsys.readouterr().out
+
+    at_spawn = []
+
+    def child(child_argv):
+        events.append(("hook starts the check",))
+        at_spawn.append(_journals(sandbox["local_root"]))
+        print(SUMMARY, flush=True)
+        return 0, False
+
+    monkeypatch.setattr(main, "_cp_spawn", child)
+    monkeypatch.setattr(main, "after_push_command", real_hook)                  # 2. the real hook
+    _fresh_title(sandbox, make_video, mock_device, old)
+    _dispatch(argv)
+
+    kinds = [event[0] for event in without_hook]
+    assert kinds.count("open") == 3 and kinds.count("ponr") == 1 and kinds.count("commit") == 3   # prep · push · replace
+    assert events == without_hook + [("hook starts the check",)]       # identical records; the hook after the last op
+    assert at_spawn == [[]]                                              # no journal on disk: no journal scope open
+    assert mvcommon.load_library()[PINNED] == entry_without and entry_without["status"] == "archived"
+    out = capsys.readouterr().out
+    # the archive's own output unchanged, then the hook's: 3 pending — the old object + the new push's two chunks
+    assert out == out_without + "\n".join([_header(3), SUMMARY]) + "\n"
+
+
+def test_a_push_rolled_back_before_any_upload_journals_the_same_and_never_reaches_the_check(
+        ac, sandbox, mock_device, make_video, stub_tech_specs, monkeypatch, capsys):
+    # cmd_push's pre-upload failure path (the split produced nothing): its journal is rolled back and it returns False —
+    # with or without the hook the journal operations are identical, and the hook starts nothing.
+    _fake_split(monkeypatch, works=False)
+    monkeypatch.setattr(gpcapture, "_now", lambda: _iso(NOW))
+    events = []
+    _journal_log(monkeypatch, str(sandbox["local_root"]), events)
+    old = _old(ac.root)
+    real_hook = main.after_push_command
+    runs = []
+    for hook in (lambda *args: None, real_hook):
+        monkeypatch.setattr(main, "after_push_command", hook)
+        master = _fresh_title(sandbox, make_video, mock_device, old)
+        assert main.cmd_prep(PINNED, str(master)) is True
+        events[:] = []
+        _dispatch(["push", PINNED, "COUNT", "2"])
+        runs.append((list(events), capsys.readouterr().out, _journals(sandbox["local_root"])))
+
+    (without_hook, out_without, left_without), (with_hook, out_with, left_with) = runs
+    assert [event[0] for event in without_hook] == ["open", "record", "record", "rollback"]
+    assert with_hook == without_hook and out_with == out_without and left_with == left_without == []
+    assert ac.child.calls == []
+    assert mvcommon.load_library()[PINNED]["status"] == "local_ready"
+
+
+def test_the_web_consoles_push_actions_run_in_process_and_never_reach_the_hook(ac, monkeypatch):
+    # webui/server.py runs push / prep_push_rep IN-PROCESS (main.cmd_* under redirect_stdout), never as a push-family
+    # child process, so a web job never reaches the CLI dispatcher's hook: no Chrome, no line. That is why the PLAN's
+    # conditional webui change (set MEDIAVAULT_WEB_JOB=1 in a spawned push-family child) does not apply.
+    server = pytest.importorskip("webui.server")
+    _save(_old(ac.root), _state(ac.root, AUTO, "archived"))
+    hooks = []
+    monkeypatch.setattr(main, "after_push_command", lambda *args: hooks.append(args))
+    monkeypatch.setattr(main, "cmd_push", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main, "cmd_prep_push_rep", lambda *args, **kwargs: None)
+
+    assert server.ACTION_TABLE["push"][0]({"id": AUTO}) is True
+    assert server.ACTION_TABLE["prep_push_rep"][0]({"id": AUTO, "filepath": "x"}) is None
+
+    assert hooks == [] and ac.child.calls == []
+
+
+def test_the_web_console_starts_no_main_py_child():
+    # If webui/server.py ever starts a Python child (a push-family command), that child must carry MEDIAVAULT_WEB_JOB=1
+    # in its environment (PLAN Step 13b) so the auto-confirm only prints its reminder there — this pin points at that
+    # rule. (Its open-folder endpoint's os.startfile opens Explorer on a vetted folder: no Python child, allowed.)
+    with open(os.path.join(REPO, "webui", "server.py"), encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    imported = {alias.name.split(".")[0] for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))
+                for alias in node.names} | {(node.module or "").split(".")[0] for node in ast.walk(tree)
+                                             if isinstance(node, ast.ImportFrom)}
+    assert not imported & {"subprocess", "multiprocessing"}, imported
+    called = {node.func.attr for node in ast.walk(tree) if isinstance(node, ast.Call)
+              and isinstance(node.func, ast.Attribute)}
+    assert not called & {"Popen", "system", "popen", "spawnv", "spawnl", "execv", "execl",
+                         "create_subprocess_exec", "create_subprocess_shell"}, called
+    assert not [node for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr == "executable"]

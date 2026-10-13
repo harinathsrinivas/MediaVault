@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13c.e (gates: disarm probes on a scratch copy, full suite, smoke, live read-only dry run, self-review)
+STATE: COMPLETE
 
 # IMP-C25 Step 13c — `mvmeta_upgrade`: v2 sidecars for the existing library (OD-4 ruling) — resumable status
 
@@ -82,10 +82,33 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       uploaded_name / gphotos_account to the anime and only date_utc + gphotos_account to the movie (a name match
       proves no content key), every v1 byte and push time kept, chunks / holder / media / other sidecars untouched;
       a re-run writes nothing; the alias id finds its primary's sidecar); neighbours (test_device_inventory,
-      test_gp_capture, test_gphotos_apply, test_extras, test_cmd_push_mock_device) 492 passed; smoke 82 passed — WIP
-      SHA in the commit that ticks 13c.e
-- [ ] 13c.e gates: disarm probes (isolated scratch copy) · full suite · smoke · live read-only dry run (only if
-      `adb devices` lists a phone; counts only) · self-review · STATE: COMPLETE · final feat commit
+      test_gp_capture, test_gphotos_apply, test_extras, test_cmd_push_mock_device) 492 passed; smoke 82 passed —
+      1e023fa
+- [x] 13c.e gates: disarm probes (isolated scratch copy) · full suite · smoke · live read-only dry run (only if
+      `adb devices` lists a phone; counts only) · self-review · STATE: COMPLETE · final feat commit — self-review
+      first (whole diff, below), its two fixes committed as 6e06df5 (after an --apply that held back a check-only
+      phone the exact command to rewrite it is printed; an interrupted run ends with the re-run line; both pinned);
+      disarm 38/38 caught on a `git archive` copy of 6e06df5 (scratchpad disarm_13c.py, results per probe in
+      disarm_13c_results.jsonl; the copy 162 green before and after, its main.py restored byte for byte; the worktree
+      never modified): P1 sha1 from a filename proof (the PLAN's named probe — caught by 4 tests: unit facts, unit
+      upgrade, end-to-end apply, the real-code round trip) · P2 from a manual proof · P3 date / account from an
+      unconfirmed record · P4 the cloud time beats the file's DateUTC · P5 / P6 disagreeing keys / DateUTCs ignored ·
+      P7 a present value overwritten · P8 other bytes upgraded (the P-2 hash check) · P9 another entry's sidecar · P10
+      the version not raised · P11 an unknown version accepted · P12 the exact form not required · P13 the
+      byte-identity check disarmed · P14 the dry run reaches the write path · P15 the dry run REALLY writes (all three
+      layers off — caught by the end-to-end dry-run test itself and the dry-run Ctrl+C test) · P16 the allowlist's
+      write flag ignored · P17 a phone command without -s · P18 push straight onto the sidecar · P19 mv before push ·
+      P20 no read-back · P21 the mtime not kept · P22 no local copy · P23 the run goes on after a failure · P24 a
+      check-only phone rewritten unnamed · P25 `_dev_argv_readonly` widened · P26 holders counted · P27 nothing-proven
+      pulled anyway · P28 an unknown push time rewritten · P29 a name two items claim · P30 the disabled switch
+      ignored · P31 the temporary folder left · P32 another run's folder reused · P33 / P34 the allowlist's mv / pull
+      widened · P35 an interrupted write left "would upgrade" · P36 the account guessed · P37 uploaded_name derived ·
+      P38 the post-write mtime check dropped. Full suite 3062 passed (= 2900 + 162), 1 warning (the pre-existing httpx
+      deprecation), 458 s, on 6e06df5 with the tree clean; smoke 82 passed (20 s) after it; `--collect-only` 3062.
+      Live read-only dry run: NOT run — `adb devices` listed no phone at the gate (checked twice, 2026-10-14).
+      Hermeticity: the real ~/.mediavault/gphotos has no mvmeta folder, no mv_mvmeta_* temp folder is left, the real
+      C:\Media\library_*.json keep their 2026-10-11 23:00 mtimes. The final commit is the feat commit that sets
+      STATE: COMPLETE
 
 ## Design decisions (binding for the rest of this step — recorded early so a resumed session stays consistent)
 1. Scope = map_photos' rule: `all` | an id | an id prefix (a season id selects its episodes; an alias resolves to its
@@ -133,11 +156,22 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
 
 ## Assumptions (also listed in the final report)
 - (A1) Every sidecar on the phones was written by write_remote_mvmeta (unchanged since 8c12680, 2026-05-30, until
-  Step 5's v2): json.dump(indent=2), text mode on Windows -> CRLF. Validated on the real sidecars by the live dry run.
+  Step 5's v2): json.dump(indent=2), text mode on Windows -> CRLF — confirmed for the REAL writer's output on this
+  machine (13c.a, 13c.d); on the real phones' files at the first live dry run (A7).
 - (A2) adb push keeps the local file's mtime and the device `mv` keeps it (RESEARCH F3, verified live 2026-09-24);
   the post-write stat checks it on the user's phones at R3/§M17.
 - (A3) A plain `mv` over an existing file is an atomic rename on the phone's /sdcard (cmd_push relies on the same
   rename for every chunk).
+- (A4) §1d's "check-only" for HT74D0202839 means: never rewritten by default — only when the user names it with
+  `device` (design decision 6). If the user wants the extra phone included by default, it is a one-line change in
+  `_mu_phones`.
+- (A5) OD-4's "you can change all existing library also" covers whole-file sidecars and every cloud-bearing status
+  (onboarded / archived / restored_local), not only "archived split entries" (deviation D1).
+- (A6) A sidecar already at v2 (a push since Step 5) may gain the keys it lacks (e.g. gphotos_account once confirmed);
+  its version stays 2 and nothing it holds changes.
+- (A7) The live dry run was not possible (no phone attached at the gate), so A1 (every real sidecar in the writer's
+  exact form) is unverified on real data: the first live dry run (R3 / §M17) shows it — a sidecar not in that form is
+  listed "left as it is", never rewritten.
 
 ## Log
 - 2026-10-14 dispatched; read-in: base contract (executor-opus.md), PLAN (journal, P-1…P-20, OD table, protocol,
@@ -154,3 +188,80 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
   lines, uncommitted, no tests yet); resumed on the coordinator's word: the diff was coherent (it parses, imports,
   additive only) -> kept; two refinements made on review before its tests: a row interrupted mid-write is marked
   failed (it would have printed as "would upgrade"), and report.txt holds the whole transcript (progress lines too).
+- 2026-10-14 13c.c: one environmental outlier (a 7 s fixture setup, not reproducible alone: 0.27 s); the dispatcher
+  harness now compiles main.py's guard once per module (~2 s a test before).
+- 2026-10-14 13c.e: `adb devices` listed no phone at the gate (twice) -> no live dry run; nothing was run against a
+  device. The commit trailers of this step all carry the notice current at each commit (Opus 5.5 every time; the
+  notice named Fable 5.1 once mid-step, between commits).
+
+## Step 13c — [status: done]
+- Executor: executor-fable
+- Model: fable (session env claude-fable-5-1; each commit's trailer is the harness attribution notice current at commit
+  time — Opus 5.5 at every commit of this step, the notice naming Fable 5.1 once in between: the quirk Steps 8–13b
+  recorded; one usage-limit pause, resumed on the coordinator's word). No MODEL-FALLBACK banner in the dispatch.
+- Mode: single-executor in its own worktree (C:\Users\harin\PycharmProjects\MediaVault-s13c, branch tmp/c25_step13c),
+  pathspec WIP commits per the PLAN's in-step checkpoint protocol (the dispatch's instruction).
+- Files changed: main.py (a new section "GOOGLE PHOTOS IDENTITY — mvmeta_upgrade" after the Step 13b auto-confirm
+  section — MVMETA_UPGRADE_APPLY_ENABLED / _DISABLED / _VERSION / _KEYS / _USAGE, MVMETA_TMP_SUFFIX,
+  MVMETA_ADB_TIMEOUT_S, _mu_owners, _mu_taken_utc, _mu_facts, _mu_encode / _mu_decode, _mu_same, _mu_upgrade,
+  _mu_only_added, _MvmetaCommandRefused, _mu_sidecar_path, _mu_local, _mu_argv_ok, _mu_run, _mu_adb_problem,
+  _mu_pull, _mu_mtime, _mu_new_run_dir, _mu_keep_original, _mu_write, parse_mvmeta_upgrade_args, _mu_phones,
+  _mu_locate, _mu_row, _mu_plan, the report helpers, cmd_mvmeta_upgrade — plus one usage line and the dispatcher
+  branch; purely additive: no existing line changed), tests/test_mvmeta_upgrade.py (new, 162 tests),
+  .candidates/c25-step13c/STATUS.md (this file). NOT changed: Step 8's device section (_dev_argv_readonly and its
+  pins), write_remote_mvmeta, gpcapture, mvcommon, mainfetch, the apply engine, the rollback machinery,
+  ENTRY_TYPE_KEYS, conftest.py, any existing test.
+- Outcome: `python main.py mvmeta_upgrade [all|<id>|<prefix>] [device <alias|serial>] [--apply]` brings the phones'
+  `.mvmeta.json` sidecars of the existing library to v2. It lists the phones read-only (Step 8's device_inventory),
+  finds each uploaded entry's / extras item's sidecar by name (Step 8's classify_device_objects), and for those whose
+  objects have PROVEN facts pulls the sidecar into a temporary folder: per chunk it would add sha1 + dedup_key (only
+  from a capture, the trusted block, or a dedupkey / sha256 record — never a name match), date_utc (the file's own
+  DateUTC, else a confirmed record's taken time), uploaded_name (block, else capture) and gphotos_account (the
+  confirmed copy's account), appended after the chunk's own keys; a v1 sidecar that gains a key becomes version 2.
+  A sidecar of other bytes, of another item, in an unknown version, not in the writer's exact bytes, with a value
+  that disagrees, an unknown push time, or a name two items claim is left as it is (listed). The dry run (default)
+  prints per sidecar the keys --apply would add and writes nothing anywhere. --apply rewrites one sidecar at a time:
+  original kept locally (~/.mediavault/gphotos/mvmeta/<UTC ts>/originals + backup.jsonl, fsynced) -> push
+  `<sidecar>.tmp` carrying the original mtime -> `mv` over the sidecar -> pull back, byte-equal -> stat, mtime kept
+  (a warning if not); the first failure stops the run, a re-run continues; report.txt = the transcript. Without
+  `device`, every device-check phone is read but only the push phones (DEVICE_ALIASES) are rewritten — the
+  check-only HT74D0202839 only when named. Offline / unauthorized / unplugged / placeholder phones get one line.
+  Exit 1 for an unknown scope, a failed write, Ctrl+C or a usage error; 0 otherwise (also for the kept disabled mode).
+- Key decisions: design decisions 1–10 and assumptions A1–A7 above. Deviations from the PLAN text, each surfaced:
+  (D1) every uploaded entry / extras item whose sidecar is found — whole files and every cloud-bearing status — not
+  only "archived split entries" (OD-4: "you can change all existing library also"; Step 5 writes the same v2 keys
+  for whole files; the series phone's sidecars are mostly whole episodes) · (D2) scope `all|<id>|<prefix>`
+  (map_photos' rule: a season id selects its episodes) where the PLAN writes `[all|<id>]` · (D3) `device` takes a
+  device-check alias (e.g. movies#2) or a serial; a check-only phone is rewritten only when named (§1d) · (D4) the
+  originals are kept locally before any rewrite (+ report.txt) — not in the PLAN; an irreversible phone write gets a
+  local undo · (D5) the original mtime is carried over and checked after the write — the device check reads a
+  sidecar's mtime as its push time · (D6) a v2 sidecar (a push since Step 5) also gains the keys it lacks ·
+  (D7) gphotos_account is per chunk (the PLAN gives no place) · (D8) uploaded_name only from a recorded fact, never
+  derived (a legacy sidecar's chunk `filename` already is the pushed name) · (D9) the disabled line carries the
+  PLAN's phrase inside a self-explanatory sentence · (D10) items without a sidecar: ids listed up to 20, else counted
+  per category · (D11) only the writer's exact bytes are rewritten (anything else is left as it is) · (D12) a sidecar
+  with nothing proven is not even pulled · (D13) "every adb argv carries -s <serial>": all but the one host query
+  `adb devices` of Step 8's listing, which addresses no phone (pinned exactly that way).
+  Contracts for later steps — 15: cmd_mvmeta_upgrade(scope="all", device=None, apply=False) -> {status, apply, scope,
+  rows, missing, devices, run_dir, counts}; a smoke dry run needs a fake adb answering devices / find / stat / pull —
+  tests/test_mvmeta_upgrade.py's directory-backed Phone + FakeAdb (and its round trip over mock_device's
+  sdcard/Media) show how; pins worth taking: MVMETA_UPGRADE_KEYS, MVMETA_UPGRADE_VERSION == MVMETA_SCHEMA_VERSION,
+  the _mu_argv_ok vocabulary, "_dev_argv_readonly not widened"; the "mvmeta sha1 only when proven" mutation is P1
+  (_MU_CONTENT_PROOFS + "filename"). 16 (docs): what changes on the phone (the five per-chunk keys, only proven ones;
+  every v1 byte kept, version 1 -> 2; the mtime kept; the originals folder and how to put one back; the check-only
+  phone needs `device <alias>`; dry run first). R3 / §M17: run it after map_photos / check_photos --apply — before
+  them most legacy sidecars read "nothing proven yet"; the first live dry run also confirms A1 / A2 on real phones.
+- Verification: tests/test_mvmeta_upgrade.py 162 passed (≈13–30 s); neighbours per sub-task (see 13c.a–d); disarm
+  38/38 caught (scratchpad disarm_13c.py on a `git archive` copy of 6e06df5, the copy green before and after);
+  full suite 3062 passed (2900 + 162), 1 pre-existing warning, 458 s; smoke 82 passed (20 s), run after it; live dry
+  run not run (no phone attached). Self-review (V2 delta 4): (a) the Step 13c bullets one by one — files, the CLI, the
+  details (Step 8 listing, pull to a temp folder, v2 = v1 unchanged + the proven per-chunk keys, the dry run prints
+  per entry the keys, --apply = push .tmp -> mv -> re-pull + compare, never a media or other file, offline phone ->
+  a line, no-sidecar entries listed only, the disabled path kept) and the test list (fake adb recording pull / push
+  / mv, every argv pinned to -s, v1 keys byte-identical, unproven sha1 never written, tmp + mv ordering, offline
+  phone, disabled mode, the disarm probe) — all covered, deviations above; (b) consumers R3 / R4 §M17, Step 15, Step
+  16 — contracts above; (c) change-gates — no rollback code or journal touched (no such symbol in the diff; 0 removed
+  lines in main.py), no library write at all, ENTRY_TYPE_KEYS untouched (guard green), the whole-library pass is
+  mvcommon.iter_uploaded_objects (alias / season_map safe — an alias resolves to its primary, a season gives its
+  extras), smoke green. The step was correctly routed as complex (device writes behind byte-identity and proven-facts
+  rules) — no misroute.

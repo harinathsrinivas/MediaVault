@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13.g main verdicts + report.txt + outliers.csv
+STATE: IN PROGRESS — next: 13.h apply (--apply / --apply-run)
 
 # IMP-C25 Step 13 — `check_photos`: download-free verification, sweep and confirm — resumable status
 
@@ -68,9 +68,20 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       push of the last MAP_RECENT_DAYS (run.json `elsewhere`, set by main) — P-19's auto-confirm then opens Chrome only
       for the accounts it needs; sessions: routed accounts first (round from the last), then the look-elsewhere work from
       the first account — each account at most twice
-- [ ] 13.g main: verdicts (found / account mismatch / inconsistent / ambiguous / wrong-item / Step 9b
+- [x] 13.g main: verdicts (found / account mismatch / inconsistent / ambiguous / wrong-item / Step 9b
       not-backed-up-yet · possible-loss (+ `--devices` phone opt-in) / partial sets / error), report.txt (per account ×
-      category × approach), outliers.csv (8 OD-7 classes + stale photo_id), summary line — tests (each outlier class)
+      category × approach), outliers.csv (8 OD-7 classes + stale photo_id), summary line — tests: tests/
+      test_check_photos.py 127 passed (+15: every outlier class from its own synthetic case (approaches-disagree,
+      single-approach, legacy-only, ambiguous-everywhere + duplicates, account-mismatch found-elsewhere + override,
+      duplicates same bytes, partial-upload + not-original-quality, taken-time-differs, stale-photo-id), the report
+      (verdicts, per account/category/approach, LOUD block, recent block, failed-list line, Next, Outputs, the summary
+      line, outliers.csv BOM + CRLF + header), a name held by other bytes (recent -> not-backed-up-yet, later ->
+      possible-loss / reason wrong-item), --devices (awaiting-backup / missing-after-backup / missing-everywhere), a
+      partial chunk set, an unfinished run, errors never failed) — WIP SHA in the commit that ticks this line.
+      REFINED: no separate `wrong-item` verdict — S1 / S3 "wrong-item" only means other items were seen (a release
+      batch's other episodes, a split's sibling chunks); an unpinned object is Step 9b's not-backed-up-yet /
+      possible-loss, its failed-list reason keeps wrong-item (the fetch's own reason chain), and a content-keyed object
+      whose exact-name search finds only other bytes gets a note
 - [ ] 13.h main: apply — `--apply` (check, then apply) and `--apply-run <dir|latest>` (no search; scope must match;
       latest = newest completed run): learned records (source check | confirm), stale records, failed rows (P-18, apply
       only), idempotent appends, the apply engine, failed_objects.csv, applied.json — tests

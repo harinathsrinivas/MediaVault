@@ -14,6 +14,9 @@ Step 13; P-5, P-8, P-9, P-10, P-11, P-15, P-18; OD-5, OD-7, OD-9; the Step 9b ru
         a mapped key never becomes a content proof), batch_info names, the UI fallback, the quality post-pass
   13.f  the other accounts (an old object not found / wrong-item in its own account — never a recent push, never an
         ambiguous one), the session order, the hinted locators (url -> photo_id, datetime -> the taken second)
+  13.g  the verdicts (confirmed · inconsistent · ambiguous · wrong-item · Step 9b not-backed-up-yet / possible-loss,
+        --devices, partial sets · error · unchecked), report.txt (per account × category × approach), outliers.csv —
+        every OD-7 class from a synthetic case — and the one summary line
 
 Hermetic: the fake Google Photos world + its batchexecute emulator (tests/gphotos_fake.py); mainfetch's and gprpc's clocks
 are fake (nothing waits); the autouse fixtures of tests/conftest.py redirect every state dir, ~/Downloads, the process
@@ -21,6 +24,7 @@ table and the Chrome profiles. No network, no browser, no adb, no real C:\\Media
 contains "FAKE").
 """
 import contextlib
+import csv
 import functools
 import json
 import os
@@ -700,11 +704,22 @@ class _Beat:
             raise gp_inventory.LockLost("the fetch session lock was taken over by another MediaVault command")
 
 
+LATER = datetime(2026, 10, 14, 0, 0, 0, tzinfo=timezone.utc)   # two weeks after test_locator._capture's push
+
+
+def _set_now(monkeypatch, when):
+    """One clock for both halves: main's now (scope, run name, Step 9b) and the child's line times."""
+    monkeypatch.setattr(mvcommon, "_now_utc", lambda: when)
+    monkeypatch.setattr(mainfetch, "_utc_now", lambda: when.strftime("%Y-%m-%dT%H:%M:%SZ"))
+
+
 @pytest.fixture()
 def cw(fake_photos, monkeypatch):
     """A check on the fake world: init_driver hands out one fake driver per account session (no Chrome), the fetch lock
-    is a stand-in with a counting heartbeat, no socket, no pacing jitter — and main's child spawner runs the REAL
-    `mainfetch.py check` command line in-process (parse_check_args + cmd_check)."""
+    is a stand-in with a counting heartbeat, no socket, no pacing jitter, both halves on one clock (LATER: a capture of
+    test_locator._capture is two weeks old) — and main's child spawner runs the REAL `mainfetch.py check` command line
+    in-process (parse_check_args + cmd_check)."""
+    _set_now(monkeypatch, LATER)
     drivers, beat = {}, _Beat()
 
     def init(profile_key="movies"):
@@ -797,7 +812,8 @@ def test_the_engine_checks_every_object_in_its_account_and_writes_only_its_run_f
     assert mvcommon.read_learned() == [] and mvcommon.read_failed() == []            # a dry run records nothing
     assert {p: p.read_bytes() for p in library_before} == library_before             # the library untouched
     assert [p for p in _tree(tmp_path) if p.split(os.sep)[0] != "mv_state"] == outside   # only the state dirs grew
-    assert sorted(os.listdir(res["run_dir"])) == ["progress.json", "results.jsonl", "run.json"]
+    assert sorted(os.listdir(res["run_dir"])) == ["outliers.csv", "progress.json", "report.txt", "results.jsonl",
+                                                  "run.json"]
     assert not any(marker in out for marker in WEB_MARKERS)                          # P-13
     assert not any(item.photo_id in out for item in items.values())                  # P-15: no photo id printed
     assert "   === CHECK 'tv' — 3 object(s) routed here · 0 looked for here from other accounts ===" in out
@@ -1200,7 +1216,7 @@ def test_an_object_found_nowhere_is_looked_for_in_every_account_that_has_a_profi
 def test_a_recent_push_that_is_not_backed_up_yet_is_not_looked_for_elsewhere(cw, sandbox, monkeypatch):
     # P-19: the auto-confirm opens Chrome only for the accounts it needs — Step 9b: a push of the last week that Google
     # Photos does not show yet is simply not backed up yet.
-    monkeypatch.setattr(mvcommon, "_now_utc", lambda: NOW)
+    _set_now(monkeypatch, NOW)
     folder = sandbox["local_root"] / "Series" / "Demo" / "Season 01"
     folder.mkdir(parents=True)
     data = _bytes("not backed up")
@@ -1302,3 +1318,280 @@ def test_a_hint_for_another_account_leaves_this_accounts_locator_alone(tmp_path)
     assert (hinted["photo_id"], hinted["alternates"], hinted["approach_best"]) == (
         "AF1QipFAKEhinted000000001", ["AF1QipFAKElearned00000001"], "photo_id")
     assert loc["photo_id"] == "AF1QipFAKElearned00000001"           # the fetch's locator itself is never changed
+
+
+# ===========================================================================
+# 13.g — the verdicts, the report, the outlier list
+# ===========================================================================
+ONE = "tv-en-2020-one-s01e01"
+
+
+def _single(sandbox, mid=ONE, name="One.mkv", sid="on1on1", data=None, block=None, capture=None, folder="One"):
+    """A library holding ONE whole-file object (its bytes `data`, default _bytes(mid)), optionally with a trusted block
+    and a capture object (test_locator._capture: pushed 2026-09-30 10:00 Z). -> (mid, data)."""
+    path = sandbox["local_root"] / "Series" / folder
+    path.mkdir(parents=True, exist_ok=True)
+    data = data if data is not None else _bytes(mid)
+    if capture is not None:
+        _capture(path, sid, [capture])
+    mvcommon.save_library({mid: _whole(path, name, data, sid, block=block)})
+    return mid, data
+
+
+def _kinds(res):
+    return [(row["manual_id"], kind) for row, kind, _detail in res["outliers"]]
+
+
+def _outlier_csv(run_dir):
+    with open(os.path.join(run_dir, "outliers.csv"), encoding="utf-8-sig", newline="") as fh:
+        return list(csv.DictReader(fh))
+
+
+def test_outlier_approaches_that_disagree(cw, sandbox):
+    old = cw.world.add_item("tv", _up(SHOW, SID), data=_bytes("first upload"), taken=TAKEN)
+    new = cw.world.add_item("tv", _up(SHOW, SID), data=_bytes("re-upload"), taken="2023-03-04T05:06:07Z")
+    held = _bytes("library")
+    _single(sandbox, EP, SHOW, SID, data=held, block=_learned(old, data=held, proof="filename", content_key=False))
+
+    res = main.cmd_check_photos(EP, approaches="all")
+
+    [row] = res["rows"]
+    assert (row["status"], row["found"]["photo_id"]) == ("confirmed", old.photo_id)
+    assert (EP, "approaches-disagree") in _kinds(res)
+    [csv_row] = [r for r in _outlier_csv(res["run_dir"]) if r["outlier"] == "approaches-disagree"]
+    assert new.photo_id in csv_row["detail"] and old.photo_id in csv_row["detail"]
+    assert csv_row["photo_url"] == f"https://photos.google.com/photo/{old.photo_id}"
+
+
+def test_outlier_only_one_approach_works(cw, sandbox):
+    data = _bytes("renamed")
+    cw.world.add_item("tv", "Renamed.Thing.2020.mkv", data=data, taken=TAKEN)        # uploaded under another name
+    _single(sandbox, data=data, capture=_obj(data, _up("One.mkv", "on1on1"), date_utc=None))
+
+    res = main.cmd_check_photos(ONE, approaches="all")
+
+    [row] = res["rows"]
+    assert row["status"] == "confirmed" and row["found"]["approach"] == "hash"
+    assert (ONE, "single-approach") in _kinds(res)
+    assert [d for _r, k, d in res["outliers"] if k == "single-approach"] == [
+        "only hash pins it — exact_name, title_sid, legacy do not"]
+
+
+def test_outlier_found_only_by_todays_legacy_queries(cw, sandbox, monkeypatch):
+    data = _bytes("plain name")
+    item = cw.world.add_item("tv", "One.mkv", data=data, taken=TAKEN)              # its old untagged name
+    _single(sandbox, data=data, capture=_obj(data, _up("One.mkv", "on1on1"), date_utc=None))
+    monkeypatch.setattr(gprpc, "hash_lookup", lambda driver, digests: {d: [] for d in digests})   # swbisb lags
+
+    res = main.cmd_check_photos(ONE)
+
+    [row] = res["rows"]
+    assert (row["status"], row["found"]["approach"], row["found"]["photo_id"]) == ("confirmed", "legacy", item.photo_id)
+    assert (ONE, "legacy-only") in _kinds(res)
+
+
+def test_outlier_ambiguous_everywhere_and_its_duplicates(cw, sandbox):
+    _single(sandbox)
+    cw.world.add_item("tv", _up("One.mkv", "on1on1"), data=_bytes("cut a"), taken=TAKEN)
+    cw.world.add_item("tv", _up("One.mkv", "on1on1"), data=_bytes("cut b"), taken="2024-01-01T00:00:00Z")
+
+    res = main.cmd_check_photos(ONE)
+
+    [row] = res["rows"]
+    assert (row["status"], row["reason"]) == ("ambiguous", "ambiguous")
+    assert _kinds(res) == [(ONE, "ambiguous-everywhere"), (ONE, "duplicates")]
+    assert "several uploads under its name hold different bytes" in res["outliers"][1][2]
+
+
+def test_outlier_account_mismatch_found_elsewhere_or_routed_by_an_override(cw, sandbox, monkeypatch):
+    _season_of(sandbox, cw.world, {1: "legacy"}, in_account="movies")
+    plain = main.cmd_check_photos(SEASON)
+    monkeypatch.setattr(mvcommon, "_CONFIG_CACHE", {"fetch_account_overrides": {SEASON: "movies"}})
+    overridden = main.cmd_check_photos(SEASON, recheck=True)
+
+    for res in (plain, overridden):
+        [row] = res["rows"]
+        assert (row["status"], row["account"], row["home"], row["mismatch"]) == ("confirmed", "movies", "tv", True)
+        assert (f"{SEASON}e01", "account-mismatch") in _kinds(res)
+    assert [d for _r, k, d in overridden["outliers"] if k == "account-mismatch"] == [
+        "found in 'movies', its home account is 'tv' (an mvconfig override routes it there)"]
+    assert list(cw.drivers) == ["tv", "movies"]                      # the override's run went straight to movies
+
+
+def test_outlier_duplicates_the_same_bytes_uploaded_twice(cw, sandbox):
+    data = _bytes("twice")
+    first = cw.world.add_item("tv", _up("One.mkv", "on1on1"), data=data, taken=TAKEN, upload_ms=1)
+    second = cw.world.add_item("tv", _up("One.mkv", "on1on1"), data=data, taken=TAKEN, upload_ms=2)
+    _single(sandbox, data=data, capture=_obj(data, _up("One.mkv", "on1on1")))
+
+    res = main.cmd_check_photos(ONE)
+
+    [row] = res["rows"]
+    assert (row["status"], row["found"]["photo_id"], row["found"]["alternates"]) == (
+        "confirmed", first.photo_id, [second.photo_id])          # the oldest upload, the other an alternate
+    assert _kinds(res) == [(ONE, "duplicates")]
+
+
+def test_outliers_partial_and_storage_saver_copies_are_inconsistent_never_confirmed(cw, sandbox):
+    items = _season_of(sandbox, cw.world, {1: "learned", 2: "pending"})
+    items[f"{SEASON}e01"].partial_upload = True
+    items[f"{SEASON}e02"].original_quality = False
+
+    res = main.cmd_check_photos(SEASON)
+
+    assert [(r["status"], r["reason"]) for r in res["rows"]] == [("inconsistent", "inconsistent")] * 2
+    assert _kinds(res) == [(f"{SEASON}e01", "partial-upload"), (f"{SEASON}e02", "not-original-quality")]
+
+
+def test_outlier_cloud_taken_time_differs_from_the_files_date_utc(cw, sandbox):
+    data = _bytes("shifted")
+    cw.world.add_item("tv", _up("One.mkv", "on1on1"), data=data, taken="2022-02-05T11:49:50Z")
+    _single(sandbox, data=data, capture=_obj(data, _up("One.mkv", "on1on1"), date_utc=TAKEN))
+
+    res = main.cmd_check_photos(ONE)
+
+    assert [d for _r, k, d in res["outliers"] if k == "taken-time-differs"] == [
+        "Google Photos dates it 2022-02-05 11:49:50 UTC, the file's DateUTC is 2022-02-05 11:49:46 UTC"]
+
+
+def test_outlier_a_stored_photo_id_that_is_gone(cw, sandbox):
+    items = _season_of(sandbox, cw.world, {1: "mapped"})
+    items[f"{SEASON}e01"].deleted = True
+
+    res = main.cmd_check_photos(SEASON)
+
+    assert (f"{SEASON}e01", "stale-photo-id") in _kinds(res)
+    assert items[f"{SEASON}e01"].photo_id in [d for _r, k, d in res["outliers"] if k == "stale-photo-id"][0]
+
+
+def test_the_report_states_verdicts_per_account_category_and_approach(cw, sandbox, monkeypatch, capsys):
+    _set_now(monkeypatch, NOW)                                        # the pending push below is 14 h old
+    items = _season_of(sandbox, cw.world, {1: "learned", 2: "legacy", 3: "missing", 4: "pending"})
+    cw.world.items("tv")[-1].deleted = True                           # e04's push has not reached Google Photos yet
+
+    res = main.cmd_check_photos(SEASON)
+
+    out = capsys.readouterr().out
+    run_dir = res["run_dir"]
+    assert [r["status"] for r in res["rows"]] == ["confirmed", "confirmed", "possible-loss", "not-backed-up-yet"]
+    assert [r["reason"] for r in res["rows"]] == [None, None, "not-found", None]
+    with open(os.path.join(run_dir, "report.txt"), encoding="utf-8") as fh:
+        report = fh.read()
+    assert report in out                                              # the report printed is the report saved
+    lines = report.splitlines()
+    assert lines[0] == (f"=== CHECK PHOTOS (dry-run) — scope: {SEASON} · approaches best — 4 object(s) — run "
+                        f"{os.path.basename(run_dir)} ===")
+    assert lines[1] == "State: complete — 4 of 4 object(s) checked"
+    assert lines[2] == "Verdicts: confirmed 2 · not-backed-up-yet 1 · possible-loss 1"
+    assert "  tv/tv: 4 — confirmed 2 · not-backed-up-yet 1 · possible-loss 1" in lines
+    assert lines[5:12] == [
+        "Per account/category/approach (the look that decided each object):",
+        "  tv/tv · photo_id: exactly-one 1",                              # e01 (S0a)
+        "  tv/tv · hash: not-found 1",                                    # e04 (its push: not backed up yet)
+        "  tv/tv · taken_second: wrong-item 1",                           # e04: its second holds the other episodes
+        "  tv/tv · exact_name: exactly-one 1 · not-found 2",              # e02 found · e03, e04 not
+        "  tv/tv · title_sid: not-found 2",
+        "  tv/tv · legacy: not-found 1"]                                  # e04's preview of today's queries
+    assert "  possible-loss: 1 — in no account, pushed over 7 days before it was checked or with no push time (no " \
+           "capture) — possible LOSS" in lines
+    assert f"    possible-loss        {SEASON}e03 · whole — push time unknown (no capture) · entry 4/5 in " \
+           f"library_series.json" in lines
+    assert "Not backed up yet (pushed in the last 7 days — not a problem yet): 1 object(s)" in lines
+    assert "Failed list (P-18): 1 object(s) would go to the failed list with --apply / --apply-run — not-found 1" in lines
+    assert lines[-2] == (f'Next: review this report and outliers.csv, then: python main.py check_photos {SEASON} '
+                         f'--apply-run "{run_dir}"')
+    assert lines[-1] == (f"Outputs: {run_dir} — report.txt, results.jsonl, outliers.csv, run.json, progress.json")
+    assert out.rstrip().splitlines()[-1] == (f"🔎 check_photos {SEASON}: 4 object(s) — confirmed 2 · not-backed-up-yet 1 "
+                                             f"· possible-loss 1")
+    assert not any(marker in out for marker in WEB_MARKERS)
+    with open(os.path.join(run_dir, "outliers.csv"), "rb") as fh:
+        raw = fh.read()
+    assert raw.startswith(b"\xef\xbb\xbf") and b"\r\n" in raw                  # Excel-friendly (BOM, CRLF)
+    assert raw[3:].split(b"\r\n")[0].decode() == ",".join(main._CP_OUTLIER_COLUMNS)
+
+
+def test_a_name_held_by_other_bytes_is_not_backed_up_yet_while_recent_and_a_loss_later(cw, sandbox, monkeypatch):
+    # Step 9b (map's rule too): a recent push whose name is held by OTHER bytes — an older upload — is just not backed up
+    # yet; two weeks later its own bytes are in no account: a possible loss, its failed-list reason wrong-item.
+    data = _bytes("new cut")
+    cw.world.add_item("tv", _up("One.mkv", "on1on1"), data=_bytes("old cut"), taken=TAKEN)
+    _single(sandbox, data=data, capture=_obj(data, _up("One.mkv", "on1on1")))
+    _set_now(monkeypatch, NOW)
+    recent = main.cmd_check_photos(ONE)
+    _set_now(monkeypatch, LATER)
+    later = main.cmd_check_photos(ONE, recheck=True)
+
+    assert [(r["status"], r["reason"]) for r in recent["rows"]] == [("not-backed-up-yet", None)]
+    assert [(r["status"], r["reason"]) for r in later["rows"]] == [("possible-loss", "wrong-item")]
+    assert "the search for its exact name finds only other bytes" in later["rows"][0]["note"]
+
+
+def test_devices_refine_what_google_photos_does_not_show(cw, sandbox, monkeypatch, capsys):
+    _season_of(sandbox, cw.world, {1: "missing", 2: "missing", 3: "missing"})
+    phone = {"alias": "series", "serial": "FAKESER0002", "status": "ok", "detail": None, "root": "/sdcard/Media/",
+             "stat_errors": 0, "files": [
+                 {"path": "/sdcard/Media/X/Demo.S01E01 [de1de1].mkv", "name": "Demo.S01E01 [de1de1].mkv",
+                  "size": None, "mtime": 1},
+                 {"path": "/sdcard/Media/X/Demo.S01E02 [de2de2].mvmeta.json", "name": "Demo.S01E02 [de2de2].mvmeta.json",
+                  "size": 300, "mtime": 1}]}
+    monkeypatch.setattr(main, "device_inventory",
+                        lambda aliases=None: {"complete": True, "unconfigured": [], "devices": {"series": phone}})
+
+    res = main.cmd_check_photos(SEASON, devices=True)
+
+    assert [(r["status"], r["reason"]) for r in res["rows"]] == [
+        ("awaiting-backup", None), ("missing-after-backup", "missing-after-backup"),
+        ("missing-everywhere", "missing-everywhere")]
+    out = capsys.readouterr().out
+    assert "Device check (read-only; DEVICE_ALIASES + DEVICE_CHECK_EXTRA_SERIALS): complete" in out
+    assert "add --devices to see" not in out
+
+
+def test_a_split_whose_last_chunk_is_in_no_account_is_a_partial_set(cw, sandbox):
+    folder = sandbox["local_root"] / "Movies" / "Split"
+    folder.mkdir(parents=True)
+    datas = [_bytes(f"chunk {n}") for n in (1, 2, 3)]
+    sid = "sp1it1"
+    chunks = [{"filename": f"Split [{sid}].chunk.{n:03d}.mkv", "hash": _sha256(d)} for n, d in enumerate(datas, 1)]
+    entry = {"filename": "Split.mkv", "short_id": sid, "folder_path": str(folder), "hash": _sha256(b"".join(datas)),
+             "search_term": f"Split [{sid}].mkv", "status": "archived", "uploaded": True,
+             "split_info": {"is_split": True, "total_chunks": 3, "chunks": chunks}}
+    mvcommon.save_library({"mov-en-2020-split": entry})
+    for chunk, data in list(zip(chunks, datas))[:2]:
+        cw.world.add_item("movies", chunk["filename"], data=data, taken=TAKEN)
+
+    res = main.cmd_check_photos("mov-en-2020-split")
+
+    assert [(r["label"], r["status"], r["partial_set"], r["reason"]) for r in res["rows"]] == [
+        ("chunk 1/3", "confirmed", False, None), ("chunk 2/3", "confirmed", False, None),
+        ("chunk 3/3", "possible-loss", True, "partial-set")]
+
+
+def test_an_unfinished_run_reports_what_is_unchecked_and_how_to_continue(cw, sandbox, capsys):
+    _season_of(sandbox, cw.world, {1: "learned", 2: "learned", 3: "learned"})
+
+    res = main.cmd_check_photos(SEASON, limit=1)
+
+    out = capsys.readouterr().out
+    assert res["status"] == "partial" and [r["status"] for r in res["rows"]] == ["confirmed", "unchecked", "unchecked"]
+    assert "State: partial (limit) — 1 of 3 object(s) checked; re-run the same command to continue (--recheck starts " \
+           "afresh)" in out
+    assert "--apply-run" not in out                                   # nothing to review yet
+    assert out.rstrip().splitlines()[-1].endswith("— partial: re-run the same command to continue")
+
+
+def test_objects_that_could_not_be_checked_are_reported_never_failed(cw, sandbox, monkeypatch, capsys):
+    _season_of(sandbox, cw.world, {1: "learned", 2: "learned"})
+    real = mainfetch.locate_object
+
+    def flaky(driver, loc, ctx, *args, **kwargs):
+        if loc["manual_id"].endswith("e02"):
+            raise RuntimeError("the page did not render")
+        return real(driver, loc, ctx, *args, **kwargs)
+
+    monkeypatch.setattr(mainfetch, "locate_object", flaky)
+    res = main.cmd_check_photos(SEASON)
+
+    assert [(r["status"], r["reason"]) for r in res["rows"]] == [("confirmed", None), ("error", None)]
+    assert "Not checked: 1 object(s) — RuntimeError 1 (a re-run of an unfinished run retries them)" in \
+        capsys.readouterr().out

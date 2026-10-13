@@ -13420,9 +13420,409 @@ def _cp_status(code, interrupted, progress):
     return "partial" if reason in _CP_PARTIAL_REASONS else "stopped"
 
 
+# ------------------------------------------------------------------ verdicts, the report, the outlier list
+# Every object's verdict, from its results.jsonl lines (in report order). confirmed = pinned to exactly one verified
+# item (its own account, or another: an account mismatch); inconsistent = pinned, but Google Photos holds a partial or
+# non-original copy (IMP-C27 (e): a restore would fail its SHA-256 check); then what was NOT pinned — ambiguous (its
+# candidates cannot be told apart), Step 9b's not-backed-up-yet / possible-loss for an object no stage pinned in any
+# account it was looked for in (a push of the last MAP_RECENT_DAYS / anything older or of unknown push time; with
+# --devices the phones refine an old one: awaiting-backup / missing-after-backup / missing-everywhere) — whether its
+# stages found nothing or only other items (wrong-item: the failed list keeps that reason, as the fetch books it) —,
+# error (it could not be checked), unchecked (the run has not reached it yet).
+CHECK_STATES = ("confirmed", "inconsistent", "ambiguous", "not-backed-up-yet", "possible-loss", "awaiting-backup",
+                "missing-after-backup", "missing-everywhere", "error", "unchecked")
+# The OD-7 outlier classes (outliers.csv — for the user's manual review), in report order.
+CHECK_OUTLIERS = ("approaches-disagree", "single-approach", "legacy-only", "ambiguous-everywhere", "account-mismatch",
+                  "duplicates", "partial-upload", "not-original-quality", "taken-time-differs", "stale-photo-id")
+_CP_OUTLIER_COLUMNS = ("account", "category", "manual_id", "object", "uploaded_name", "outlier", "detail", "photo_id",
+                       "photo_url", "other_photo_ids", "approaches_ok", "approaches_failed", "taken_utc", "date_utc",
+                       "routed_account", "home_account")
+_CP_REASONS = {"inconsistent": "inconsistent", "ambiguous": "ambiguous", "possible-loss": "not-found",
+               "missing-after-backup": "missing-after-backup",
+               "missing-everywhere": "missing-everywhere"}    # status -> P-18 failed-list reason (the rest: no row)
+_CP_LOSS_TEXT = {   # map_photos' LOUD-block wording, measured against the check instead of an inventory crawl
+    "possible-loss": f"in no account, pushed over {MAP_RECENT_DAYS} days before it was checked or with no push time "
+                     f"(no capture) — possible LOSS",
+    "missing-after-backup": _MP_LOSS_TEXT["missing-after-backup"],
+    "missing-everywhere": _MP_LOSS_TEXT["missing-everywhere"],
+    "awaiting-backup": f"in no account but still on a phone although pushed over {MAP_RECENT_DAYS} days before it was "
+                       f"checked — its backup is overdue (do NOT free it yet)",
+}
+
+
+def _cp_key(d):
+    return d.get("manual_id"), d.get("label"), d.get("sha256")
+
+
+def _cp_recent(pushed_at, checked_at):
+    """Step 9b for a live check: True when the push is no older than MAP_RECENT_DAYS at the moment its account was
+    checked (the check IS that account's look); None when either time is unknown."""
+    pushed, checked = _mp_when(pushed_at), _mp_when(checked_at)
+    if pushed is None or checked is None:
+        return None
+    return pushed >= checked - timedelta(days=MAP_RECENT_DAYS)
+
+
+def _cp_rows(doc, lines, library):
+    """Every run object's verdict row (CHECK_STATES) from its results.jsonl lines, in the run's order: status, account
+    (where it was pinned, else the account it was checked in first), found (the line that pinned it exactly-one),
+    routed_line, cross ({account: line}), decisive (found, else routed_line — the look the approach statistics count),
+    quality (the pinned item's), mismatch (pinned outside its home account), recent (Step 9b), and the map's row keys
+    its helpers read (pushed_at, library_position, partial_set, device, note, reason)."""
+    checks, quality = {}, {}
+    for line in lines:
+        if line.get("kind") == "check":
+            checks.setdefault(_cp_key(line), []).append(line)
+        elif line.get("kind") == "quality":
+            quality[(line.get("account"), line.get("photo_id"))] = line
+    positions = _mp_library_positions(library)
+    rows = []
+    for obj in doc["objects"]:
+        mine = checks.get(_cp_key(obj), [])
+        routed = next((l for l in reversed(mine) if l.get("pass") == "routed"), None)
+        cross = {}
+        for line in mine:
+            if line.get("pass") == "cross":
+                cross[line.get("account")] = line
+        found = next((l for l in [routed] + list(cross.values())
+                      if l is not None and l.get("found") and l.get("outcome") == "exactly-one"), None)
+        qline = quality.get((found["account"], found.get("photo_id"))) if found else None
+        q = {k: qline[k] for k in ("original_quality", "partial_upload", "archived")
+             if qline and isinstance(qline.get(k), bool)}
+        recent = None
+        if routed is None:
+            status = "unchecked"
+        elif found is not None:
+            status = ("inconsistent" if q.get("partial_upload") is True or q.get("original_quality") is False
+                      else "confirmed")
+        elif routed["outcome"] == "error":
+            status = "error"
+        elif routed["outcome"] == "ambiguous":
+            status = "ambiguous"
+        else:
+            recent = _cp_recent(obj.get("pushed_at"), routed.get("at"))
+            status = "not-backed-up-yet" if recent else "possible-loss"
+        row = {"manual_id": obj["manual_id"], "label": obj["label"], "sha256": obj["sha256"], "kind": obj["kind"],
+               "category": obj["category"], "uploaded_name": obj["uploaded_name"], "routed": obj["account"],
+               "home": obj.get("home") or obj["account"], "route": obj.get("route"), "pushed_at": obj.get("pushed_at"),
+               "hint": bool(obj.get("hint")), "status": status,
+               "account": found["account"] if found else obj["account"], "found": found, "routed_line": routed,
+               "cross": cross, "decisive": found or routed, "quality": q,
+               "mismatch": bool(found is not None and found["account"] != (obj.get("home") or obj["account"])),
+               "recent": recent, "library_position": positions.get(obj["manual_id"]), "partial_set": False,
+               "device": None, "note": None, "reason": None}
+        if status == "possible-loss":
+            same_name = (routed.get("content_key") and
+                         ((routed.get("per_approach") or {}).get("exact_name") or {}).get("outcome") == "wrong-item")
+            if same_name:
+                _mp_note(row, "the search for its exact name finds only other bytes (another upload or version?)")
+            unseen = [a for a in mvcommon.GP_ACCOUNTS if a != obj["account"] and a not in cross]
+            if unseen and obj.get("elsewhere", True):
+                _mp_note(row, f"not looked for in: {', '.join(unseen)} (no Chrome profile, or the run stopped first)")
+        rows.append(row)
+    return rows
+
+
+def _cp_library_objects(library, rows):
+    """The iter_entry_objects dicts of the rows' objects ({(manual_id, label): object}) — what map's helpers
+    (_mp_device_check, _mp_partial_sets) take; an object no longer in the library is absent."""
+    out = {}
+    for manual_id in dict.fromkeys(r["manual_id"] for r in rows):
+        real, entry = _gp_resolve(library, manual_id)
+        for obj in mvcommon.iter_entry_objects(real, entry) if entry is not None else ():
+            out.setdefault((obj["manual_id"], obj["label"]), obj)
+    return out
+
+
+def _cp_settle(library, rows, devices):
+    """The verdicts' last steps (Step 9b, as map_photos takes them): --devices — the read-only phone check refines an OLD
+    object Google Photos does not show (possible-loss -> awaiting-backup / missing-after-backup / missing-everywhere)
+    and annotates a recent one (map's _mp_device_check); partial chunk sets — a split (or extras item) of which Google
+    Photos shows some members but not the others (IMP-C27 (c)); the P-18 failed-list reason of every row. -> the device
+    check's summary (devices only), or None."""
+    objects = _cp_library_objects(library, rows)
+    known = [r for r in rows if (r["manual_id"], r["label"]) in objects]
+    summary = _mp_device_check(library, [objects[(r["manual_id"], r["label"])] for r in known], known) \
+        if devices else None
+    families = {}
+    for row in known:
+        family = _mp_family(objects[(row["manual_id"], row["label"])])
+        if family is not None:
+            families.setdefault(family, []).append(row)
+    for members in families.values():
+        if any(m["status"] in _MP_NOT_IN_GP for m in members) and any(
+                m["status"] in ("confirmed", "inconsistent") for m in members):
+            for m in members:
+                m["partial_set"] = m["status"] in _MP_NOT_IN_GP
+    for row in rows:
+        reason = _CP_REASONS.get(row["status"])
+        if reason == "not-found" and (row["routed_line"] or {}).get("outcome") == "wrong-item":
+            reason = "wrong-item"          # its stages proved every candidate another item (the fetch's reason chain)
+        if row["status"] in _MP_LOST and row["partial_set"]:
+            reason = "partial-set"
+        row["reason"] = reason
+    return summary
+
+
+def _cp_taken_differs(row):
+    """(Google Photos' taken time, the file's DateUTC) when they differ (to the second) for a pinned object, else None."""
+    record = (row["found"] or {}).get("record") or {}
+    date_utc = (row["found"] or {}).get("date_utc")
+    taken = record.get("taken_ms")
+    when = _mp_when(date_utc)
+    if when is None or not (isinstance(taken, int) and not isinstance(taken, bool)):
+        return None
+    if taken // 1000 == int(when.timestamp()):
+        return None
+    return _mp_utc(taken), when.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _cp_outliers(rows, approaches):
+    """PLAN Step 13 / OD-7: the objects for the user's manual review -> [(row, class, detail)] in CHECK_OUTLIERS order
+    per object: approaches that disagree (different photo_ids) · only one approach works (--approaches all) · found only
+    by today's legacy queries (S4) · ambiguous everywhere · account mismatch · duplicates (other items with its bytes, or
+    several uploads under its name) · partial or non-original-quality uploads · cloud taken time != the file's DateUTC ·
+    a stored photo_id that is gone."""
+    out = []
+    for row in rows:
+        line = row["decisive"]
+        if line is None:
+            continue
+        per = line.get("per_approach") or {}
+        picks = {a: p for a, p in (line.get("per_approach_pick") or {}).items() if p}
+        ok = [a for a, v in per.items() if v["outcome"] == "exactly-one"]
+        failed = [a for a, v in per.items() if v["outcome"] not in ("exactly-one", "error")]
+        if len(set(picks.values())) > 1:
+            out.append((row, "approaches-disagree", "; ".join(f"{a}: {p}" for a, p in picks.items())))
+        if row["found"] and approaches == "all" and len(ok) == 1 and failed:
+            out.append((row, "single-approach", f"only {ok[0]} pins it — {', '.join(failed)} do not"))
+        if row["found"] and row["found"].get("approach") == "legacy":
+            out.append((row, "legacy-only", "only today's legacy queries list it (S4) — no exact-item stage pins it"))
+        evaluated = [v["outcome"] for v in per.values() if v["outcome"] != "error"]
+        if row["status"] == "ambiguous" and evaluated and all(o == "ambiguous" for o in evaluated):
+            out.append((row, "ambiguous-everywhere", f"every approach saw candidates it could not tell apart "
+                                                     f"({', '.join(per)})"))
+        if row["mismatch"]:
+            via = " (an mvconfig override routes it there)" if row["route"] == "override" and \
+                row["account"] == row["routed"] else ""
+            out.append((row, "account-mismatch", f"found in '{row['account']}', its home account is "
+                                                 f"'{row['home']}'{via}"))
+        if line.get("alternates"):
+            what = ("several uploads under its name hold different bytes (a re-split set uploaded twice?) — the newest "
+                    "is listed" if line.get("rule") == "newest-set" else "other items hold the same bytes")
+            out.append((row, "duplicates", f"{len(line['alternates'])} other item(s): {what}"))
+        if row["quality"].get("partial_upload") is True:
+            out.append((row, "partial-upload", "Google Photos holds a partial upload — a restore would fail its SHA-256"))
+        if row["quality"].get("original_quality") is False:
+            out.append((row, "not-original-quality", "Google Photos holds a storage-saver copy, not the original — a "
+                                                     "restore would fail its SHA-256"))
+        differs = _cp_taken_differs(row) if row["found"] else None
+        if differs:
+            out.append((row, "taken-time-differs", f"Google Photos dates it {differs[0]}, the file's DateUTC is "
+                                                   f"{differs[1]}"))
+        stale = list(dict.fromkeys(p for l in [row["routed_line"]] + list(row["cross"].values()) if l
+                                   for p in l.get("stale") or []))
+        if stale:
+            out.append((row, "stale-photo-id", f"{len(stale)} stored photo_id(s) gone — Google Photos and the item page "
+                                               f"agree: {', '.join(stale)}"))
+    return out
+
+
+def _cp_outlier_row(row, kind, detail):
+    """One outliers.csv row (_CP_OUTLIER_COLUMNS) — the item's ADDRESS (photos.google.com/photo/<id>, never a download
+    link) for the review."""
+    line = row["decisive"] or {}
+    per = line.get("per_approach") or {}
+    pid = line.get("photo_id") if line.get("found") else None
+    record = line.get("record") or {}
+    return (row["account"], row["category"], row["manual_id"], row["label"], row["uploaded_name"], kind, detail, pid,
+            f"https://photos.google.com/photo/{pid}" if pid else None, " ".join(line.get("alternates") or []) or None,
+            " ".join(a for a, v in per.items() if v["outcome"] == "exactly-one") or None,
+            " ".join(f"{a}={v['outcome']}({v['n']})" for a, v in per.items() if v["outcome"] != "exactly-one") or None,
+            _mp_utc(record.get("taken_ms")) or None, line.get("date_utc"), row["routed"], row["home"])
+
+
+def _cp_counts(rows, key):
+    counter = {}
+    for row in rows:
+        counter[key(row)] = counter.get(key(row), 0) + 1
+    return counter
+
+
+def _cp_line(rows, status_counts=None):
+    """'confirmed 30 · not-backed-up-yet 2 …' in CHECK_STATES order."""
+    counts = status_counts or _cp_counts(rows, lambda r: r["status"])
+    return " · ".join(f"{s} {counts[s]:,}" for s in CHECK_STATES if counts.get(s))
+
+
+def _cp_summary_line(doc, rows, status, applied=None):
+    """The run's ONE closing line (PLAN Step 13b's auto-confirm prints it as its summary): scope, objects, verdicts,
+    state, what an apply recorded. Never a P-13 web marker."""
+    tail = {"ok": "", "partial": " — partial: re-run the same command to continue",
+            "stopped": " — stopped: re-run the same command to continue",
+            "interrupted": " — interrupted: re-run the same command to continue"}.get(status, "")
+    applied_text = ""
+    if applied is not None and applied.get("engine"):
+        engine = applied["engine"]
+        applied_text = (f" · applied: {len(engine.get('changed') or []):,} object(s) updated, "
+                        f"{engine.get('confirmed', 0):,} newly confirmed" if engine.get("status") in ("saved", "up-to-date")
+                        else f" · NOT applied ({engine.get('status')})")
+    return (f"🔎 check_photos {doc.get('scope_text') or doc.get('scope')}: {len(rows):,} object(s) — "
+            f"{_cp_line(rows) or 'nothing'}{tail}{applied_text}")
+
+
+def _cp_report_lines(ctx):
+    """The run's text report (printed, and saved as report.txt): state, verdicts, per account × category and per account
+    × category × approach (the deciding look of each object), account mismatches, the LOUD not-in-Google-Photos block
+    and the recent ones (Step 9b), the IMP-C27 inconsistencies, stale photo_ids, errors, the outliers, the failed list,
+    the apply section, the next command and the outputs."""
+    doc, rows, run_dir = ctx["doc"], ctx["rows"], ctx["run_dir"]
+    progress = ctx["progress"] or {}
+    lines = [f"=== CHECK PHOTOS ({'APPLY' if ctx['apply'] else 'dry-run'}) — scope: "
+             f"{doc.get('scope_text') or doc.get('scope')}{' · account ' + doc['account'] if doc.get('account') else ''}"
+             f" · approaches {doc.get('approaches')} — {len(rows):,} object(s) — run {os.path.basename(run_dir)} ==="]
+    checked = sum(1 for r in rows if r["status"] != "unchecked")
+    if progress.get("state") == "complete":
+        lines.append(f"State: complete — {checked:,} of {len(rows):,} object(s) checked")
+    else:
+        lines.append(f"State: {ctx['status']} ({progress.get('reason') or 'not finished'}) — {checked:,} of "
+                     f"{len(rows):,} object(s) checked; re-run the same command to continue (--recheck starts afresh)")
+    lines.append(f"Verdicts: {_cp_line(rows) or 'none yet'}")
+    groups = {}
+    for row in rows:
+        groups.setdefault(f"{row['account']}/{row['category']}", []).append(row)
+    lines.append("Per account/category:")
+    lines.extend(f"  {key}: {len(members):,} — {_cp_line(members)}" for key, members in sorted(groups.items()))
+    lines.append("Per account/category/approach (the look that decided each object):")
+    for key, members in sorted(groups.items()):
+        per = {}
+        for row in members:
+            for approach, verdict in ((row["decisive"] or {}).get("per_approach") or {}).items():
+                per.setdefault(approach, {}).setdefault(verdict["outcome"], 0)
+                per[approach][verdict["outcome"]] += 1
+        for approach in [a for a in mvcommon.GP_APPROACHES if a in per]:
+            counts = " · ".join(f"{o} {n:,}" for o, n in per[approach].items())
+            lines.append(f"  {key} · {approach}: {counts}")
+    mismatch = [r for r in rows if r["mismatch"]]
+    if mismatch:
+        lines.append(f"Account mismatch: {len(mismatch):,} object(s) found in another account than their home "
+                     f"(listed in outliers.csv; --apply records where they are — fetch then goes there):")
+        lines.extend(f"    {r['manual_id']} · {r['label']} — in '{r['account']}', home '{r['home']}'" for r in mismatch)
+    loud = [r for r in rows if r["status"] in _MP_LOSS]
+    if loud:
+        lines.append(f"⚠️⚠️⚠️  NOT IN GOOGLE PHOTOS — POSSIBLE LOSS (IMP-C27): {len(loud):,} object(s) — the local copy "
+                     f"of an archived entry is a dummy  ⚠️⚠️⚠️")
+        for state in _MP_LOSS:
+            n = sum(1 for r in loud if r["status"] == state)
+            if n:
+                lines.append(f"  {state}: {n:,} — {_CP_LOSS_TEXT[state]}")
+        if ctx["devices"] is None:
+            lines.append("  (no phone was checked — add --devices to see which of these are still on a phone or were "
+                         "freed from one)")
+        for row in loud:
+            lines.append(_mp_nowhere_line(row) + (f" · {row['note']}" if row["note"] else ""))
+    recent = [r for r in rows if r["status"] == "not-backed-up-yet"]
+    if recent:
+        lines.append(f"Not backed up yet (pushed in the last {MAP_RECENT_DAYS} days — not a problem yet): "
+                     f"{len(recent):,} object(s)")
+        lines.extend(_mp_nowhere_line(row) for row in recent)
+    if ctx["devices"] is not None:
+        lines.extend(_mp_device_lines(ctx["devices"]))
+    bad = [r for r in rows if r["status"] == "inconsistent"]
+    if bad:
+        lines.append(f"Inconsistent (IMP-C27): {len(bad):,} object(s) — Google Photos holds a partial or "
+                     f"non-original copy; a restore would fail its SHA-256 check (never confirmed):")
+        lines.extend(f"    {r['manual_id']} · {r['label']} — in '{r['account']}'" for r in bad)
+    ambiguous = [r for r in rows if r["status"] == "ambiguous"]
+    if ambiguous:
+        lines.append(f"Ambiguous: {len(ambiguous):,} object(s) — candidates that cannot be told apart (resolve them: "
+                     f"python main.py resolve_photos failed, after --apply)")
+    errors = [r for r in rows if r["status"] == "error"]
+    if errors:
+        why = _cp_counts(errors, lambda r: (r["routed_line"] or {}).get("error") or "error")
+        lines.append(f"Not checked: {len(errors):,} object(s) — {' · '.join(f'{k} {n}' for k, n in sorted(why.items()))}"
+                     f" (a re-run of an unfinished run retries them)")
+    outliers = ctx["outliers"]
+    if outliers:
+        kinds = _cp_counts(outliers, lambda o: o[1])
+        lines.append(f"Outliers (OD-7 — for your review): {len(outliers):,} row(s) in outliers.csv — "
+                     + " · ".join(f"{k} {kinds[k]:,}" for k in CHECK_OUTLIERS if kinds.get(k)))
+    failed = [r for r in rows if r["reason"]]
+    if failed:
+        reasons = _cp_counts(failed, lambda r: r["reason"])
+        where = ("added to the failed list" if ctx["applied"] is not None else
+                 "would go to the failed list with --apply / --apply-run")
+        lines.append(f"Failed list (P-18): {len(failed):,} object(s) {where} — "
+                     + " · ".join(f"{k} {n:,}" for k, n in sorted(reasons.items())))
+    lines.extend(_cp_apply_lines(ctx))
+    lines.append(f"Outputs: {run_dir} — {', '.join(ctx['files'])}")
+    return lines
+
+
+def _cp_apply_lines(ctx):
+    """The report's apply section — what --apply / --apply-run recorded — or the next command of a dry run."""
+    applied, doc, run_dir = ctx["applied"], ctx["doc"], ctx["run_dir"]
+    if applied is None:
+        if ctx["status"] == "ok":
+            account = f" --account {doc['account']}" if doc.get("account") else ""
+            return [f'Next: review this report and outliers.csv, then: python main.py check_photos '
+                    f'{doc.get("scope_text") or doc.get("scope")}{account} --apply-run "{run_dir}"']
+        return []
+    out = []
+    if applied.get("error"):
+        return [applied["error"]]
+    out.append(f"Recorded: learned records {applied['learned'][0]:,} new ({applied['learned'][1]:,} already on record) · "
+               f"failed list {applied['failed'][0]:,} new ({applied['failed'][1]:,} already listed)")
+    out.append(_mp_engine_line(applied["engine"], "updated"))
+    out.extend(f"    conflict: {c['manual_id']} · {c['label']} · {c['account'] or 'block'} — {c['code']}"
+               for c in applied["engine"].get("conflicts") or [])
+    csv_state = applied.get("failed_csv")
+    if isinstance(csv_state, dict) and "warning" in csv_state:
+        out.append(csv_state["warning"])
+    elif isinstance(csv_state, dict) and csv_state.get("kept"):
+        out.append("  failed_objects.csv: kept — it holds your edits (import them with map_photos --resolutions)")
+    elif isinstance(csv_state, dict):
+        out.append(f"  failed_objects.csv: regenerated — {csv_state['rows']:,} row(s)")
+    return out
+
+
+def _cp_finish(ctx):
+    """Write report.txt and outliers.csv (UTF-8 with BOM, CRLF — Excel-friendly) into the run directory, print the report
+    and the run's one summary line. Raises OSError when a file cannot be written (cmd_check_photos turns it into one
+    line)."""
+    run_dir = ctx["run_dir"]
+    ctx["outliers"] = _cp_outliers(ctx["rows"], ctx["doc"].get("approaches"))
+    ctx["files"] = ["report.txt", "results.jsonl", "outliers.csv", "run.json", "progress.json"] + (
+        ["applied.json"] if ctx["applied"] is not None else [])
+    _mp_write_csv(os.path.join(run_dir, "outliers.csv"), _CP_OUTLIER_COLUMNS,
+                  [_cp_outlier_row(row, kind, detail) for row, kind, detail in ctx["outliers"]])
+    lines = _cp_report_lines(ctx)
+    _mp_write_text(os.path.join(run_dir, "report.txt"), "\n".join(lines) + "\n")
+    print("\n".join(lines))
+    print(_cp_summary_line(ctx["doc"], ctx["rows"], ctx["status"], ctx["applied"]))
+
+
+def _cp_after_child(run_dir, doc, library, status, progress, apply, devices):
+    """main's half after the child has run: the verdicts (_cp_rows + _cp_settle), the apply when asked (13.h), the report
+    and the outlier list. -> the command's result."""
+    rows = _cp_rows(doc, _cp_read_results(run_dir), library)
+    summary = _cp_settle(library, rows, devices)
+    applied = None
+    ctx = {"doc": doc, "rows": rows, "run_dir": run_dir, "progress": progress, "status": status, "apply": apply,
+           "devices": summary, "applied": applied}
+    try:
+        _cp_finish(ctx)
+    except OSError as e:
+        print(f"❌ check_photos: the report could not be written to {run_dir} ({_gp_line(e)}) — close outliers.csv if "
+              f"it is open (e.g. in Excel); the results are kept in results.jsonl.")
+        return {"status": "error", "run_dir": run_dir, "rows": rows}
+    return {"status": status, "run_dir": run_dir, "rows": rows, "outliers": ctx["outliers"], "devices": summary,
+            "applied": applied, "progress": progress}
+
+
 def cmd_check_photos(scope, approaches=None, account=None, recheck=False, apply=False, apply_run=None, limit=None,
                      pace=None, max_minutes=None, devices=False, list_only=False):
-    """`check_photos` (PLAN Step 13) — see the section comment above. [WIP: the report and the apply follow.]"""
+    """`check_photos` (PLAN Step 13) — see the section comment above. [WIP: the apply follows.]"""
     if list_only:
         return _cp_pending_list(account)
     now = mvcommon._now_utc()
@@ -13465,7 +13865,11 @@ def cmd_check_photos(scope, approaches=None, account=None, recheck=False, apply=
     if status == "refused":
         print("❌ check_photos: a fetch, a crawl or the profile warm-up holds the fetch session lock — nothing was "
               "checked; re-run when it has finished.")
-    return {"status": status, "run_dir": run_dir, "progress": progress}
+        return {"status": status, "run_dir": run_dir, "progress": progress}
+    if status == "error":
+        print(f"❌ check_photos: the check could not run (exit code {code}) — see the lines above.")
+        return {"status": status, "run_dir": run_dir, "progress": progress}
+    return _cp_after_child(run_dir, doc, library, status, progress, apply, devices)
 
 
 # ==========================================

@@ -517,3 +517,8 @@ No other step of this plan uses candidates.
   every target uploaded) — stricter than the plan's "did not return False", so no Chrome after a paused or hard-failed
   autopilot; (2) `AUTO_CONFIRM_MIN_AGE_H = 24` (plan said 12 with a note to raise it): measured on the R1b mapping,
   41 % of uploads were backed up within 12 h, 84 % within 24 h, 99 % within 48 h.
+- **Step 13c executor choices (2026-10-14), kept as orchestrator defaults — the user may overrule:** (D3) the check-only
+  movies phone `HT74D0202839` (§1d) is rewritten by `mvmeta_upgrade --apply` only when named explicitly with
+  `device movies#2` (one-line change if the user wants it included by default); (D1) scope = every uploaded entry or
+  extras item that has a sidecar (whole files too), per OD-4 "you can change all existing library also"; (D4) every
+  original sidecar is saved under `~/.mediavault/gphotos/mvmeta/<ts>/` before the phone is touched.

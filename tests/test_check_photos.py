@@ -7,17 +7,23 @@ Step 13; P-5, P-8, P-9, P-10, P-11, P-15, P-18; OD-5, OD-7, OD-9; the Step 9b ru
         Others roots) · id prefix · account:<a> · pending · hinted · all · --account
   13.c  the run directory (new · resumed · --recheck · complete -> afresh), the child's command line, the streaming
         spawn (Ctrl+C waits for the child), the conftest guard (no test spawns the real child)
+  13.d  the engine (`python mainfetch.py check`): one session per account, results.jsonl + progress.json only, pacing,
+        --limit, --max-minutes, the error breaker, sign-out, Ctrl+C, the lock (held · taken over), a missing profile, the
+        Chrome guarantee (killed through its Popen handle when the shared close left it running), the child's CLI
 
 Hermetic: the fake Google Photos world + its batchexecute emulator (tests/gphotos_fake.py); mainfetch's and gprpc's clocks
 are fake (nothing waits); the autouse fixtures of tests/conftest.py redirect every state dir, ~/Downloads, the process
 table and the Chrome profiles. No network, no browser, no adb, no real C:\\Media. Synthetic ids only (every photo id
 contains "FAKE").
 """
+import contextlib
 import functools
+import json
 import os
 import subprocess
 import sys
 import textwrap
+import types
 from datetime import datetime, timezone
 
 import pytest
@@ -665,3 +671,363 @@ def test_the_spawn_streams_the_child_and_waits_for_it_after_a_ctrl_c(monkeypatch
         "closing Chrome")                                          # every line after the Ctrl+C still printed
     assert seen["env"]["PYTHONUNBUFFERED"] == "1" and seen["env"]["PYTHONIOENCODING"] == "utf-8"
     assert seen["stdout"] is main.subprocess.PIPE and seen["stderr"] is main.subprocess.STDOUT
+
+
+# ===========================================================================
+# 13.d — the engine: `python mainfetch.py check --run <dir>` (mainfetch.cmd_check)
+# ===========================================================================
+WEB_MARKERS = ("🔹 PROCESSING:", "Detected Split File", "✅ MOVED:", "✅ ENTRY COMPLETE.")   # PLAN P-13
+SEASON = "tv-en-2015-demo-s01"
+
+
+class _Beat:
+    """The lock heartbeat's stand-in (the crawler's Heartbeat refreshes the real lock file): counts beats; after
+    `lose_after` beats another command has taken the lock over."""
+
+    def __init__(self):
+        self.beats, self.lose_after = 0, None
+
+    def beat(self):
+        self.beats += 1
+        if self.lose_after is not None and self.beats > self.lose_after:
+            from tools import gp_inventory
+            raise gp_inventory.LockLost("the fetch session lock was taken over by another MediaVault command")
+
+
+@pytest.fixture()
+def cw(fake_photos, monkeypatch):
+    """A check on the fake world: init_driver hands out one fake driver per account session (no Chrome), the fetch lock
+    is a stand-in with a counting heartbeat, no socket, no pacing jitter — and main's child spawner runs the REAL
+    `mainfetch.py check` command line in-process (parse_check_args + cmd_check)."""
+    drivers, beat = {}, _Beat()
+
+    def init(profile_key="movies"):
+        drivers.setdefault(profile_key, []).append(fake_photos.driver(profile_key))
+        return drivers[profile_key][-1]
+
+    @contextlib.contextmanager
+    def lock():
+        yield beat
+
+    spawned = []
+
+    def spawn(argv):
+        spawned.append(list(argv))
+        return mainfetch.cmd_check(**mainfetch.parse_check_args(argv[1:])), False
+
+    monkeypatch.setattr(mainfetch, "init_driver", init)
+    monkeypatch.setattr(mainfetch, "_check_lock", lock)
+    monkeypatch.setattr(mainfetch, "_debug_port_free", lambda *a, **k: True)
+    monkeypatch.setattr(mainfetch, "_check_jitter", lambda low, high: 0)
+    monkeypatch.setattr(main, "_cp_spawn", spawn)
+    return types.SimpleNamespace(world=fake_photos, drivers=drivers, beat=beat, spawned=spawned)
+
+
+def _demo_season(sandbox, world, episodes=(1, 2, 3), learned=(1, 2, 3), account="tv"):
+    """A season SEASON whose episode n holds _bytes(<its id>) and lives in `account` under its uploaded name; episodes in
+    `learned` carry a trusted block naming their item (S0a's fast path), the others are legacy (found by name, S2).
+    -> {episode id: fake item}."""
+    folder = sandbox["local_root"] / "Series" / "Demo" / "Season 01"
+    folder.mkdir(parents=True, exist_ok=True)
+    lib, items = {SEASON: {"type": "season_map", "folder_path": str(folder), "total_episodes": len(episodes),
+                           "children": [f"{SEASON}e0{n}" for n in episodes]}}, {}
+    for n in episodes:
+        mid, name, sid = f"{SEASON}e0{n}", f"Demo.S01E0{n}.mkv", f"de{n}de{n}"
+        data = _bytes(mid)
+        item = world.add_item(account, _up(name, sid), data=data, taken=TAKEN)
+        block = _learned(item, account=account) if n in learned else None
+        lib[mid] = dict(_whole(folder, name, data, sid, block=block), parent_id=SEASON)
+        items[mid] = item
+    mvcommon.save_library(lib)
+    return items
+
+
+def _results(run_dir, kind="check"):
+    return [line for line in main._cp_read_results(run_dir) if line.get("kind") == kind]
+
+
+def _progress(run_dir):
+    return main._cp_read_json(os.path.join(run_dir, "progress.json"))
+
+
+def test_the_engine_checks_every_object_in_its_account_and_writes_only_its_run_files(cw, sandbox, tmp_path, capsys):
+    items = _demo_season(sandbox, cw.world, learned=(1, 2))           # e01, e02 learned · e03 legacy (by name)
+    library_before = {p: p.read_bytes() for p in (sandbox["lib_series"], sandbox["lib_movies"])}
+    outside = [p for p in _tree(tmp_path) if p.split(os.sep)[0] != "mv_state"]
+
+    res = main.cmd_check_photos(SEASON)
+
+    out = capsys.readouterr().out
+    assert res["status"] == "ok" and _progress(res["run_dir"])["state"] == "complete"
+    lines = _results(res["run_dir"])
+    assert [(l["manual_id"], l["pass"], l["account"], l["outcome"], l["stage"], l["proof"]) for l in lines] == [
+        (f"{SEASON}e01", "routed", "tv", "exactly-one", "s0_photo_id", "dedupkey"),
+        (f"{SEASON}e02", "routed", "tv", "exactly-one", "s0_photo_id", "dedupkey"),
+        (f"{SEASON}e03", "routed", "tv", "exactly-one", "s2_exact_name", "filename")]
+    assert [l["photo_id"] for l in lines] == [items[m].photo_id for m in sorted(items)]
+    assert all(set(v) == {"outcome", "n"} for l in lines for v in l["per_approach"].values())
+    assert list(cw.drivers) == ["tv"] and len(cw.drivers["tv"]) == 1               # one session, one account
+    assert cw.world.downloads == [] and "pLFTfd" not in cw.world.rpc_ids_sent()      # download-free
+    assert not [a for a in cw.drivers["tv"][0].actions if a["kind"] in ("shift_d", "open")]
+    assert mvcommon.read_learned() == [] and mvcommon.read_failed() == []            # a dry run records nothing
+    assert {p: p.read_bytes() for p in library_before} == library_before             # the library untouched
+    assert [p for p in _tree(tmp_path) if p.split(os.sep)[0] != "mv_state"] == outside   # only the state dirs grew
+    assert sorted(os.listdir(res["run_dir"])) == ["progress.json", "results.jsonl", "run.json"]
+    assert not any(marker in out for marker in WEB_MARKERS)                          # P-13
+    assert not any(item.photo_id in out for item in items.values())                  # P-15: no photo id printed
+    assert "   === CHECK 'tv' — 3 object(s) routed here · 0 looked for here from other accounts ===" in out
+    assert f"   🔎 {SEASON}e03 · whole — exactly-one · S2 exact_name · proof filename · via rpc" in out
+    journals = os.listdir(mainfetch.FETCH_JOURNAL_DIR)
+    assert len(journals) == 1 and json.load(open(os.path.join(mainfetch.FETCH_JOURNAL_DIR, journals[0]),
+                                                 encoding="utf-8"))["state"] == "clean"
+
+
+def test_progress_records_every_invocation(cw, sandbox):
+    _demo_season(sandbox, cw.world)
+    first = main.cmd_check_photos(SEASON, limit=2)
+    second = main.cmd_check_photos(SEASON)
+
+    progress = _progress(first["run_dir"])
+    assert first["run_dir"] == second["run_dir"] and (first["status"], second["status"]) == ("partial", "ok")
+    assert [(i["n"], i["state"], i["reason"], i["checked"], i["limit"]) for i in progress["invocations"]] == [
+        (1, "partial", "limit", 2, 2), (2, "complete", None, 1, None)]
+    assert progress["state"] == "complete" and len(_results(first["run_dir"])) == 3
+
+
+def test_max_minutes_stops_between_two_objects_and_a_rerun_continues(cw, sandbox, clock):
+    _demo_season(sandbox, cw.world)
+    # 1.2 s: object 1 starts at 0 s, object 2 at 0.5 s (gprpc's 0.5 s between the two item-info calls), object 3 at 1.5 s
+    res = main.cmd_check_photos(SEASON, max_minutes=0.02, pace=0.4)
+
+    assert (res["status"], _progress(res["run_dir"])["reason"]) == ("partial", "max-minutes")
+    assert len(_results(res["run_dir"])) == 2
+    assert main.cmd_check_photos(SEASON)["status"] == "ok" and len(_results(res["run_dir"])) == 3
+
+
+@pytest.mark.parametrize("ui, pace, low, high", [(False, None, 0.5, 3.0), (True, None, 3.0, None),
+                                                 (False, 2.0, 2.0, 3.0)], ids=["rpc", "web-pages", "--pace"])
+def test_objects_are_paced_by_the_path_they_took(cw, sandbox, clock, monkeypatch, ui, pace, low, high):
+    # PLAN Step 13: UI 3 s / RPC 0.5 s between two objects (+ jitter, 0 here), or --pace S. The gap after the first
+    # object is the drift check's page (one per run) — the second gap shows the path of an ordinary object.
+    _demo_season(sandbox, cw.world)
+    cw.world.wiz_token_missing["tv"] = ui
+    starts, real = [], mainfetch.locate_object
+    monkeypatch.setattr(mainfetch, "locate_object", lambda *a, **k: (starts.append(clock.now), real(*a, **k))[1])
+
+    main.cmd_check_photos(SEASON, pace=pace)
+
+    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    assert len(gaps) == 2 and all(g >= low for g in gaps)
+    assert high is None or gaps[1] < high
+
+
+def test_five_objects_in_a_row_that_cannot_be_checked_stop_the_run(cw, sandbox, monkeypatch, capsys):
+    _demo_season(sandbox, cw.world, episodes=(1, 2, 3, 4, 5, 6, 7), learned=())
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("the page did not render")
+
+    monkeypatch.setattr(mainfetch, "locate_object", broken)
+    res = main.cmd_check_photos(SEASON)
+
+    assert (res["status"], _progress(res["run_dir"])["reason"]) == ("stopped", "breaker")
+    assert [(l["outcome"], l["error"]) for l in _results(res["run_dir"])] == [("error", "RuntimeError")] * 5
+    assert "5 objects in a row could not be checked — the check stops here" in capsys.readouterr().out
+
+
+def test_a_signed_out_profile_stops_the_run_with_its_remediation(cw, sandbox, capsys):
+    _demo_season(sandbox, cw.world)
+    cw.world.session["tv"] = "expired"
+
+    res = main.cmd_check_photos(SEASON)
+
+    out = capsys.readouterr().out
+    assert (res["status"], _progress(res["run_dir"])["reason"]) == ("stopped", "signed-out")
+    assert "❌ Profile 'tv' is logged out." in out and "the check continues where it stopped" in out
+    assert _results(res["run_dir"]) == [] and cw.drivers["tv"][0].quit_called
+
+
+def test_ctrl_c_stops_after_the_current_object_and_still_closes_chrome(cw, sandbox, monkeypatch, capsys):
+    _demo_season(sandbox, cw.world)
+    real, calls, closed = mainfetch.locate_object, [], []
+
+    def locate(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mainfetch, "locate_object", locate)
+    monkeypatch.setattr(mainfetch, "_close_check_session", lambda driver, ctx, last: closed.append((ctx.account, last)))
+    res = main.cmd_check_photos(SEASON)
+
+    assert (res["status"], _progress(res["run_dir"])["reason"]) == ("interrupted", "interrupted")
+    assert len(_results(res["run_dir"])) == 1 and closed == [("tv", True)]
+    assert "🛑 Stopped by user — closing Chrome; re-run the same command to continue." in capsys.readouterr().out
+
+
+def test_a_held_lock_refuses_before_any_chrome_starts(cw, sandbox, monkeypatch, capsys):
+    _demo_season(sandbox, cw.world)
+
+    @contextlib.contextmanager
+    def held():
+        raise mvcommon.LockHeldError("held")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(mainfetch, "_check_lock", held)
+    res = main.cmd_check_photos(SEASON)
+
+    assert res["status"] == "refused" and cw.drivers == {} and _progress(res["run_dir"]) is None
+    assert "holds the fetch session lock — nothing was checked" in capsys.readouterr().out
+
+
+def test_the_real_check_lock_is_taken_without_waiting(monkeypatch, tmp_path):
+    seen = []
+
+    @contextlib.contextmanager
+    def lock(blocking=True, **kwargs):
+        seen.append(blocking)
+        yield
+
+    monkeypatch.setattr(mainfetch, "fetch_session_lock", lock)
+    monkeypatch.setattr(mvcommon, "FETCH_SESSION_LOCK", str(tmp_path / "fetch_session.lock"))
+    (tmp_path / "fetch_session.lock").write_text("1 2\n", encoding="utf-8")
+    with mainfetch._check_lock() as heartbeat:
+        from tools import gp_inventory
+        assert isinstance(heartbeat, gp_inventory.Heartbeat) and heartbeat.path == str(tmp_path / "fetch_session.lock")
+    assert seen == [False]                                                          # never waits for a running fetch
+
+
+def test_a_lock_taken_over_makes_the_check_yield(cw, sandbox, capsys):
+    _demo_season(sandbox, cw.world)
+    cw.beat.lose_after = 1
+
+    res = main.cmd_check_photos(SEASON)
+
+    assert (res["status"], _progress(res["run_dir"])["reason"]) == ("stopped", "lock-lost")
+    assert len(_results(res["run_dir"])) == 2 and "this check yields" in capsys.readouterr().out
+
+
+def test_a_missing_profile_marks_its_objects_unchecked_and_the_run_still_completes(cw, sandbox, monkeypatch, capsys):
+    _demo_season(sandbox, cw.world)
+    monkeypatch.setitem(mainfetch.CHROME_PROFILES, "tv", str(sandbox["local_root"] / "NoSuchProfile"))
+
+    res = main.cmd_check_photos(SEASON)
+
+    assert res["status"] == "ok" and cw.drivers == {}
+    assert {(l["outcome"], l["error"]) for l in _results(res["run_dir"])} == {("error", "no-profile")}
+    assert "❌ The Chrome profile for 'tv' does not exist" in capsys.readouterr().out
+
+
+class _Proc:
+    """A launched Chrome's Popen handle: it runs until kill()."""
+
+    def __init__(self, pid=4242):
+        self.pid, self.killed, self.waited = pid, 0, []
+
+    def poll(self):
+        return 1 if self.killed else None
+
+    def kill(self):
+        self.killed += 1
+
+    def wait(self, timeout=None):
+        self.waited.append(timeout)
+        return 1
+
+
+def _launched_ctx(proc, launched=True):
+    ctx = mainfetch.FetchContext()
+    ctx.chrome = {"account": "tv", "proc": proc, "pid": proc.pid, "user_data_dir": r"Z:\profiles\tv",
+                  "launched": launched}
+    ctx.journal = types.SimpleNamespace(ends=[], end_session=lambda closed: ctx.journal.ends.append(closed))
+    return ctx
+
+
+@pytest.mark.parametrize("shared", ["left-it-running", "ctrl-c", "raised"])
+def test_a_chrome_the_shared_close_left_running_is_ended_through_its_popen_handle(monkeypatch, capsys, shared):
+    proc, marked = _Proc(), []
+    ctx = _launched_ctx(proc)
+
+    def close(driver, ctx, last):
+        if shared == "ctrl-c":
+            raise KeyboardInterrupt
+        if shared == "raised":
+            raise RuntimeError("the browser went away")
+
+    monkeypatch.setattr(mainfetch, "_close_session", close)
+    monkeypatch.setattr(mainfetch, "mark_profile_clean_exit", lambda path, **kw: marked.append((path, kw)))
+    mainfetch._close_check_session(object(), ctx, last=True)
+
+    assert proc.killed == 1 and proc.waited == [mainfetch.CHROME_GONE_WAIT_S]
+    assert marked == [(r"Z:\profiles\tv", {"wait": mainfetch.CHROME_GONE_WAIT_S})] and ctx.journal.ends == ["terminated"]
+    assert "Chrome ('tv') ended (pid 4242) — the usual close left it running." in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("launched", [False, None])
+def test_a_chrome_the_check_only_attached_to_is_never_ended(monkeypatch, launched):
+    proc = _Proc()
+    monkeypatch.setattr(mainfetch, "_close_session", lambda driver, ctx, last: None)
+    mainfetch._close_check_session(object(), _launched_ctx(proc, launched=launched), last=True)
+    assert proc.killed == 0
+
+
+def test_a_chrome_that_closed_is_left_alone(monkeypatch):
+    proc = _Proc()
+    proc.killed = 1                                                       # already gone: poll() answers
+    monkeypatch.setattr(mainfetch, "_close_session", lambda driver, ctx, last: None)
+    ctx = _launched_ctx(proc)
+    mainfetch._close_check_session(object(), ctx, last=True)
+    assert proc.killed == 1 and ctx.journal.ends == []
+
+
+def test_every_session_is_closed_with_the_guarantee(cw, sandbox, monkeypatch):
+    _demo_season(sandbox, cw.world)
+    closed = []
+    monkeypatch.setattr(mainfetch, "_close_check_session", lambda driver, ctx, last: closed.append(ctx.account))
+    main.cmd_check_photos(SEASON)
+    assert closed == ["tv"] and cw.drivers["tv"][0].quit_called
+
+
+@pytest.mark.parametrize("argv, expected", [
+    (["mainfetch.py", "check", "--run", r"Z:\run"], {"run_dir": r"Z:\run", "limit": None, "max_minutes": None,
+                                                     "pace": None}),
+    (["mainfetch.py", "check", "--run", "d", "--limit", "5", "--max-minutes", "15", "--pace", "0"],
+     {"run_dir": "d", "limit": 5, "max_minutes": 15.0, "pace": 0.0}),
+])
+def test_the_check_command_line(argv, expected):
+    assert mainfetch.parse_check_args(argv) == expected
+
+
+@pytest.mark.parametrize("argv", [["mainfetch.py", "check"], ["mainfetch.py", "check", "--limit", "5"],
+                                  ["mainfetch.py", "check", "--run", "d", "--limit", "0"],
+                                  ["mainfetch.py", "check", "--run", "d", "--max-minutes", "0"],
+                                  ["mainfetch.py", "check", "--run", "d", "--pace", "nan"],
+                                  ["mainfetch.py", "check", "--run", "d", "--frob", "1"]])
+def test_a_bad_check_command_line_prints_the_usage_and_exits_1(argv, capsys):
+    with pytest.raises(SystemExit) as stop:
+        mainfetch.parse_check_args(argv)
+    assert stop.value.code == 1 and "Usage: check --run <run dir>" in capsys.readouterr().out
+
+
+def test_the_check_child_exits_with_cmd_checks_code_and_its_output_can_never_stop_it(monkeypatch):
+    seen = {}
+
+    def check(**kwargs):
+        seen.update(kwargs, stdout=sys.stdout)
+        print("a line the parent can no longer read")
+        return 3
+
+    class Broken:
+        def write(self, text):
+            raise OSError(22, "Invalid argument")
+
+        def flush(self):
+            raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(mainfetch, "cmd_check", check)
+    monkeypatch.setattr(sys, "stdout", Broken())
+    monkeypatch.setattr(sys, "stderr", Broken())
+    with pytest.raises(SystemExit) as stop:
+        mainfetch.cli(["mainfetch.py", "check", "--run", "d"])
+    assert stop.value.code == 3 and seen["run_dir"] == "d" and isinstance(seen["stdout"], mainfetch._SafeStream)

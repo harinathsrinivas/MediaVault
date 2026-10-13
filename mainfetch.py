@@ -8,6 +8,8 @@ import socket
 import hashlib
 import errno
 import json
+import random
+import contextlib
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 # --- SELENIUM IMPORTS ---
@@ -4991,11 +4993,615 @@ def _probe_direct(driver, photo_id):
     return f"no (HTTP {status}{', ' + ctype if ctype else ''})"
 
 
+# ==========================================
+#   IMP-C25 STEP 13 — `python mainfetch.py check` (check_photos' browser half)
+# ==========================================
+# docs/feature-fetch-datetime/PLAN.md Step 13. main.cmd_check_photos resolves a scope into a run directory
+# (<GPHOTOS_STATE_DIR>/check/<ts>/run.json) and runs `python mainfetch.py check --run <dir> …` — cmd_check below:
+#   * under the fetch session lock, taken WITHOUT waiting (a fetch, a crawl or the warm-up owns Chrome's debug port and
+#     the profiles) and kept fresh by the crawler's progress heartbeat: an hours-long sweep is never reclaimed as stale,
+#     and it yields when another command takes the lock over;
+#   * one Chrome session per Google account (GP_ACCOUNTS order, round and round while work is left): each object is
+#     checked first in the account it is routed to and — when it is not pinned there — in every other account that has
+#     a profile (found there: an account mismatch; nowhere: "in no account", Step 9b's rule in main);
+#   * every object through locate_object — the fetch's own exact-item engine (Step 12), READ-ONLY: no download is ever
+#     requested (no link minted, no Shift+D, no tile clicked), and nothing is written but the run's results.jsonl /
+#     progress.json and the fetch journal that records each Chrome session for crash cleanup (P-12 rule 3);
+#   * paced, circuit-broken, bounded by --limit / --max-minutes, resumable (results.jsonl is appended and fsynced per
+#     object) and Ctrl+C safe: every Chrome it launched is closed on every way out (_close_check_session).
+# Every line printed here stays clear of the P-13 web markers; photo ids are never printed (they live in results.jsonl,
+# the run directory, P-15).
+
+CHECK_UI_PACE_S = 3.0          # PLAN Step 13 pacing: at least this long between two objects that used the web pages …
+CHECK_RPC_PACE_S = 0.5         # … and this long after an RPC-only one (gprpc's own ≥0.5 s between calls also holds) …
+CHECK_PACE_JITTER = 0.25       # … plus up to this fraction of it at random
+CHECK_ERROR_BREAKER = 5        # this many objects in a row that could not be checked stop the run (it resumes later)
+CHECK_PAGE_LOAD_S = 60.0       # a check session's page-load bound (Selenium's default would wait 300 s on a stuck page)
+CHECK_BATCH = gprpc.MAX_BATCH_KEYS   # objects located together: one swbisb / EWgK9e batch warms their records (13.e)
+EXIT_CHECK_OK, EXIT_CHECK_USAGE, EXIT_CHECK_LOCK = 0, 1, 3
+_CHECK_UNCHECKABLE = ("object-changed", "nothing-to-search", "no-profile")   # errors that say nothing about Google
+_check_jitter = random.uniform  # the pacing jitter (tests make it 0)
+
+
+def parse_check_args(argv):
+    """`mainfetch.py check --run <run dir> [--limit N] [--max-minutes M] [--pace S]` (main.py check_photos builds this
+    command line) -> {run_dir, limit, max_minutes, pace}. Prints the usage and exits 1 on a bad invocation."""
+    usage = "Usage: check --run <run dir> [--limit N] [--max-minutes M] [--pace S]   (run by: main.py check_photos)"
+    opts = {"run_dir": None, "limit": None, "max_minutes": None, "pace": None}
+    rest, i = list(argv[2:]), 0
+    try:
+        if len(argv) < 2 or argv[1] != "check":
+            raise ValueError("not a check command line")
+        while i < len(rest):
+            token = rest[i]
+            if token not in ("--run", "--limit", "--max-minutes", "--pace") or i + 1 >= len(rest):
+                raise ValueError(token)
+            value = rest[i + 1]
+            i += 2
+            if token == "--run":
+                opts["run_dir"] = value
+            elif token == "--limit":
+                opts["limit"] = int(value)
+                if opts["limit"] < 1:
+                    raise ValueError(value)
+            else:
+                number = float(value)
+                if not (number == number and abs(number) != float("inf")) or number < 0 or (
+                        token == "--max-minutes" and number == 0):
+                    raise ValueError(value)
+                opts["max_minutes" if token == "--max-minutes" else "pace"] = number
+        if not opts["run_dir"]:
+            raise ValueError("--run")
+    except ValueError:
+        print(usage)
+        sys.exit(EXIT_CHECK_USAGE)
+    return opts
+
+
+class _SafeStream:
+    """The check child's stdout / stderr: a write the parent can no longer read (it stopped waiting after three Ctrl+C,
+    or died) is dropped instead of raising — whatever happens, the child must still close the Chrome it launched."""
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, text):
+        try:
+            return self._stream.write(text)
+        except (OSError, ValueError):
+            return len(text) if isinstance(text, str) else 0
+
+    def flush(self):
+        try:
+            self._stream.flush()
+        except (OSError, ValueError):
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+@contextlib.contextmanager
+def _check_lock():
+    """The fetch session lock for one check run, taken WITHOUT waiting (mvcommon.LockHeldError while a fetch, a crawl or
+    the profile warm-up holds it) -> the crawler's progress Heartbeat for it (tools/gp_inventory: the lock's mtime
+    refreshed at most every LOCK_HEARTBEAT_S while the check makes progress, so mvcommon's stale-reclaim never
+    pre-empts a long sweep; LockLost once another command took the lock over)."""
+    from tools import gp_inventory  # the crawler's Heartbeat — lazy: that module imports Selenium
+    with fetch_session_lock(blocking=False):
+        yield gp_inventory.Heartbeat(mvcommon.FETCH_SESSION_LOCK)
+
+
+def _check_key(obj):
+    return obj.get("manual_id"), obj.get("label"), obj.get("sha256")
+
+
+def _check_state(lines):
+    """{object key: {"routed": its newest routed line, "cross": {account: newest line}, "found": a line that pinned it
+    exactly-one}} from a run's results.jsonl lines (kind "check")."""
+    state = {}
+    for line in lines:
+        if not isinstance(line, dict) or line.get("kind") != "check":
+            continue
+        st = state.setdefault(_check_key(line), {"routed": None, "cross": {}, "found": None})
+        if line.get("pass") == "routed":
+            st["routed"] = line
+        elif isinstance(line.get("account"), str):
+            st["cross"][line["account"]] = line
+        if line.get("found") and line.get("outcome") == "exactly-one":
+            st["found"] = line
+    return state
+
+
+class _CheckRun:
+    """One `check` invocation over one run directory: the run (run.json), what its results already hold (state), the
+    bounds (--limit counts the objects checked in their routed account, --max-minutes a deadline, --pace), and why it
+    stopped early (`stop`: limit · max-minutes · interrupted · signed-out · lock-lost · breaker · chrome · port · error)."""
+
+    def __init__(self, run_dir, doc, lines, limit, max_minutes, pace, invocation):
+        self.dir, self.doc = run_dir, doc
+        self.results_path = os.path.join(run_dir, "results.jsonl")
+        self.objects = [o for o in doc.get("objects") or [] if isinstance(o, dict)
+                        and o.get("account") in mvcommon.GP_ACCOUNTS and mvcommon._is_sha256(o.get("sha256"))]
+        self.approaches = doc.get("approaches") if doc.get("approaches") in ("best", "all") else "best"
+        self.state = _check_state(lines)
+        self.limit, self.pace, self.invocation, self.max_minutes = limit, pace, invocation, max_minutes
+        self.deadline = time.time() + max_minutes * 60 if max_minutes else None
+        self.checked = self.looked = self.errors_in_row = self.sessions = 0
+        self.tried = set()          # (object key, account) attempted in this invocation — never twice
+        self.unavailable = {}       # account -> why it cannot be used in this invocation
+        self.stop = None
+        self.library = None
+        self.heartbeat = None
+        self.lock_lost = Exception  # tools.gp_inventory.LockLost once the lock is held
+        self.tally = {}             # this session's outcome counts
+
+    def routed_todo(self, obj):
+        st = self.state.get(_check_key(obj))
+        return ((_check_key(obj), obj["account"]) not in self.tried
+                and (st is None or st["routed"] is None or st["routed"].get("outcome") == "error"))
+
+    def cross_todo(self, obj, account):
+        st = self.state.get(_check_key(obj))
+        if account == obj["account"] or (_check_key(obj), account) in self.tried or st is None:
+            return False
+        routed, prev = st["routed"], st["cross"].get(account)
+        return (st["found"] is None and routed is not None and routed.get("outcome") != "error"
+                and (prev is None or prev.get("outcome") == "error"))
+
+    def work(self, account):
+        """(objects to check in their routed account `account`, objects to look for there from other accounts)."""
+        if account in self.unavailable:
+            return [], []
+        routed = [o for o in self.objects if o["account"] == account and self.routed_todo(o)]
+        if self.limit is not None:
+            routed = routed[:max(0, self.limit - self.checked)]
+        return routed, [o for o in self.objects if self.cross_todo(o, account)]
+
+    def left(self):
+        """Objects this run still owes a look (ignoring this invocation's bounds): no routed line yet, or — not pinned
+        and routed final — no line yet from an account that can be checked."""
+        out = []
+        for obj in self.objects:
+            st = self.state.get(_check_key(obj))
+            if st is None or st["routed"] is None:
+                out.append(obj)
+            elif st["found"] is None and st["routed"].get("outcome") != "error" and any(
+                    a != obj["account"] and a not in self.unavailable and a not in st["cross"]
+                    for a in mvcommon.GP_ACCOUNTS):
+                out.append(obj)
+        return out
+
+
+def _check_read_json(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _check_read_results(run_dir):
+    def as_dict(raw):
+        if not isinstance(raw, dict):
+            raise ValueError("not a result line")
+        return raw
+    try:
+        return mvcommon._read_jsonl(os.path.join(run_dir, "results.jsonl"), as_dict, None)
+    except OSError:
+        return []
+
+
+def _check_progress(run, path, invocations, state, reason):
+    """progress.json (atomic): v, run, state (running · complete · partial), reason (why it stopped early), pid,
+    updated_at, invocations [{n, started_at, ended_at, pid, limit, max_minutes, pace, state, reason, checked,
+    looked}]. A write failure prints one warning; the check goes on."""
+    doc = {"v": 1, "run": run.doc.get("run"), "state": state, "reason": reason, "pid": os.getpid(),
+           "updated_at": _utc_now(), "invocations": invocations}
+    try:
+        _write_json_atomic(path, doc)
+    except (OSError, TypeError, ValueError) as e:
+        print(f"   > ⚠️ progress.json could not be written ({type(e).__name__}: {e}) — the results are kept.")
+
+
+def _check_hinted(loc, obj, account):
+    """A hinted object's locator (the `hinted` scope — the user's resolutions, PLAN Step 9 (8)): in the hint's own
+    account a url hint's photo_id is tried first (S0a; the learned photo_id becomes an alternate), a datetime hint gives
+    the taken second and its offset (S1). The hint is evidence to VERIFY, never proof (P-5: manual): the item must still
+    hold the object's content key, or its exact uploaded name."""
+    hint = obj.get("hint")
+    if not isinstance(hint, dict) or hint.get("account") != account:
+        return loc
+    loc = dict(loc)
+    if hint.get("kind") == "url" and isinstance(hint.get("photo_id"), str):
+        older = [p for p in [loc.get("photo_id")] + list(loc.get("alternates") or []) if p and p != hint["photo_id"]]
+        loc.update(photo_id=hint["photo_id"], alternates=older, approach_best="photo_id")
+    elif hint.get("kind") == "datetime" and mvcommon._is_int(hint.get("taken_ms")):
+        loc.update(taken_ms=hint["taken_ms"], approach_best="taken_second")
+        if mvcommon._is_int(hint.get("gmt_offset_min")):
+            loc["tz_offset_ms"] = hint["gmt_offset_min"] * 60_000
+    return loc
+
+
+def _check_locators(run, ctx, objs):
+    """{object key: (queue item, locator)} for `objs`, built exactly as the fetch builds them — build_fetch_queue against
+    a folder that never exists, so every object is listed (cmd_locate's rule), an extra through build_extras_entries —
+    in the session's account (ctx.account: its own learned record). An object the library no longer holds (re-split,
+    re-mastered since the run began) is absent."""
+    import tempfile
+    import uuid
+    nowhere = os.path.join(tempfile.gettempdir(), f"mediavault-check-{uuid.uuid4().hex}")  # never created
+    wanted, out = {_check_key(o) for o in objs}, {}
+    owners = dict.fromkeys((o["manual_id"], o["kind"] in ("extra_whole", "extra_chunk")) for o in objs)
+    for manual_id, extra in owners:
+        entry = run.library.get(manual_id) if isinstance(run.library, dict) else None
+        if not isinstance(entry, dict) or entry.get("type") == "multi_ep_alias":
+            continue
+        entries = [(ex, None) for ex in build_extras_entries(entry, manual_id)] if extra else [(entry, manual_id)]
+        for source, entry_id in entries:
+            if source.get("type") == "season_map":
+                continue  # a season holds no file of its own (its extras come through build_extras_entries)
+            for item in build_fetch_queue(source, nowhere, ctx, entry_id=entry_id):
+                loc = item.get("locator") or {}
+                key = (loc.get("manual_id"), loc.get("label"), item.get("hash"))
+                if key in wanted:
+                    out.setdefault(key, (item, loc))
+    return out
+
+
+def _check_line(run, obj, loc, account, pass_name, res, error=None):
+    """One results.jsonl line (kind "check") — the object, the account it was checked in (pass routed | cross) and
+    locate_object's verdict: outcome (exactly-one · ambiguous · wrong-item · not-found · error), n, found, the pinning
+    stage (stage, approach, via, proof, name_normalized, rule — newest-set: several same-name uploads), its item
+    (photo_id, record, alternates), every stage's verdict (per_approach exactly {outcome, n} + per_approach_via /
+    per_approach_pick), candidates, stale photo_ids, s4_skip, the object's content_key flag, date_utc and
+    expected_taken_local (the failed list's), hint, cost. Never a URL (P-20). None values are left out."""
+    line = {"v": 1, "kind": "check", "at": _utc_now(), "inv": run.invocation, "pass": pass_name, "account": account,
+            "manual_id": obj["manual_id"], "label": obj["label"], "sha256": obj["sha256"]}
+    if res is None:
+        line.update(outcome="error", n=0, found=False, error=error or "error")
+        return line
+    per = res["per_approach"]
+    found = bool(res["found"])
+    if found:
+        outcome, n = res["outcome"], res["n"]
+    elif not per or all(v["outcome"] == "error" for v in per.values()):
+        outcome, n = "error", 0
+        line["error"] = "nothing-to-search" if not per else "stages-failed"
+    else:
+        outcomes = [v["outcome"] for v in per.values()]
+        outcome, n = next((o for o in ("ambiguous", "wrong-item") if o in outcomes), "not-found"), res["candidates_seen"]
+    line.update(outcome=outcome, n=n, found=found, stage=res["stage"], approach=res["approach"], via=res["via"],
+                proof=res["proof"], name_normalized=res["name_normalized"] or None, rule=res["rule"],
+                photo_id=res["photo_id"], record=res["record"], alternates=res["alternates"] or None,
+                per_approach=per, per_approach_via=res["per_approach_via"],
+                per_approach_pick=res.get("per_approach_pick") or {},
+                candidates=res["candidates"][:LOCATE_MAX_CANDIDATES] or None, stale=res["stale"] or None,
+                s4_skip=res["s4_skip"] or None, content_key=_content_key(loc) is not None,
+                date_utc=loc.get("date_utc"), expected_taken_local=_expected_local(loc),
+                hint=True if obj.get("hint") else None,
+                cost={"elapsed": res["elapsed"], "pages": res["pages_opened"], "searches": res["searches"],
+                      "rpc": res["rpc_calls"]})
+    return {k: v for k, v in line.items() if v is not None}
+
+
+def _check_text(line):
+    """One printed result: the verdict, the pinning stage and proof, or what was tried — never a photo id (P-15)."""
+    if line["outcome"] == "error":
+        return f"not checked ({line.get('error', 'error')})"
+    tried = " · ".join(f"{a} {v['outcome']}({v['n']})" for a, v in (line.get("per_approach") or {}).items())
+    if not line.get("found"):
+        return f"{line['outcome']} — tried: {tried or 'nothing to search by'}"
+    how = " (normalized name)" if line.get("name_normalized") else ""
+    more = f" · the newest of {len(line.get('alternates') or []) + 1} same-name uploads" \
+        if line.get("rule") == "newest-set" else ""
+    cost = line.get("cost") or {}
+    return (f"{line['outcome']} · {_STAGE_LABEL.get(line.get('stage'), '?')} {line.get('approach')} · proof "
+            f"{line.get('proof')}{how} · via {line.get('via')}{more} · {cost.get('elapsed', 0):.1f} s")
+
+
+def _check_beat(run):
+    """The lock heartbeat (at most every LOCK_HEARTBEAT_S): when another command took the lock over, the check yields."""
+    try:
+        run.heartbeat.beat()
+    except run.lock_lost as e:
+        print(f"   ❌ {e} — this check yields; re-run it when that command has finished (it continues where it "
+              f"stopped).")
+        run.stop = "lock-lost"
+
+
+def _check_pace(run, res, started):
+    """PLAN Step 13 pacing between two objects: --pace S, else CHECK_UI_PACE_S after an object whose check used the web
+    pages and CHECK_RPC_PACE_S after an RPC-only one — counted from the object's start, plus a random jitter."""
+    used_ui = res is not None and (res["pages_opened"] > 0 or "ui" in res["per_approach_via"].values())
+    pace = run.pace if run.pace is not None else (CHECK_UI_PACE_S if used_ui else CHECK_RPC_PACE_S)
+    if pace <= 0:
+        return
+    wait = pace + _check_jitter(0, CHECK_PACE_JITTER * pace) - (time.time() - started)
+    if wait > 0:
+        time.sleep(wait)
+
+
+def _check_should_stop(run):
+    """True when the invocation must end before the next object: a stop already decided, or --max-minutes reached."""
+    if run.stop:
+        return True
+    if run.deadline is not None and time.time() >= run.deadline:
+        print("   ⏸️ --max-minutes reached — the check stops here; re-run the same command to continue.")
+        run.stop = "max-minutes"
+        return True
+    return False
+
+
+def _check_record(run, obj, line):
+    """Append one result line (fsynced: a crash keeps it), fold it into the run's state, and count it."""
+    mvcommon._append_jsonl(run.results_path, line)
+    st = run.state.setdefault(_check_key(obj), {"routed": None, "cross": {}, "found": None})
+    if line["pass"] == "routed":
+        st["routed"] = line
+        run.checked += 1
+    else:
+        st["cross"][line["account"]] = line
+    if line.get("found") and line["outcome"] == "exactly-one":
+        st["found"] = line
+    run.looked += 1
+    run.tally[line["outcome"]] = run.tally.get(line["outcome"], 0) + 1
+
+
+def _check_one(run, driver, ctx, obj, located, pass_name):
+    """Check ONE object in the session's account (pass routed | cross): locate_object over its locator, the result
+    appended to results.jsonl and printed, the heartbeat, the pacing and the error breaker. Raises
+    SessionExpiredError (signed out), KeyboardInterrupt and gprpc.RpcRefused (a bug — never swallowed); any other
+    trouble is this object's `error` line."""
+    account = ctx.account
+    run.tried.add((_check_key(obj), account))
+    started, res = time.time(), None
+    if located is None:
+        line = _check_line(run, obj, {}, account, pass_name, None, "object-changed")
+    else:
+        loc = _check_hinted(located[1], obj, account)
+        try:
+            res = locate_object(driver, loc, ctx, approaches=run.approaches)
+            error = None
+        except (SessionExpiredError, KeyboardInterrupt, gprpc.RpcRefused):
+            raise
+        except Exception as e:  # one object's trouble never stops the run
+            error = type(e).__name__
+        line = _check_line(run, obj, loc, account, pass_name, res, error)
+    _check_record(run, obj, line)
+    where = f"↪ in '{account}': " if pass_name == "cross" else ""
+    print(f"   🔎 {where}{obj['manual_id']} · {obj['label']} — {_check_text(line)}")
+    counts = line["outcome"] == "error" and line.get("error") not in _CHECK_UNCHECKABLE
+    run.errors_in_row = run.errors_in_row + 1 if counts else 0
+    if run.errors_in_row >= CHECK_ERROR_BREAKER:
+        print(f"   ❌ {CHECK_ERROR_BREAKER} objects in a row could not be checked — the check stops here (re-run to "
+              f"continue; if it happens again, see whether Google Photos opens in the profile's Chrome).")
+        run.stop = "breaker"
+    _check_beat(run)
+    if not run.stop:
+        _check_pace(run, res, started)
+    return line
+
+
+def _check_prewarm(driver, ctx, account, locs):
+    """[13.e] RPC acceleration — filled by the next sub-task."""
+    return {}
+
+
+def _check_quality(run, driver, ctx, account, lines, known):
+    """[13.e] The quality post-pass — filled by the next sub-task."""
+    return None
+
+
+def _check_bound_page_loads(driver):
+    """A check session's page loads are bounded (CHECK_PAGE_LOAD_S): a stuck page fails that object's stage instead of
+    holding a long sweep for Selenium's 300 s default. A driver without the setter (a stand-in) is left as it is."""
+    setter = getattr(driver, "set_page_load_timeout", None)
+    if callable(setter):
+        try:
+            setter(CHECK_PAGE_LOAD_S)
+        except Exception:
+            pass
+
+
+def _close_check_session(driver, ctx, last):
+    """[IMP-C25 Step 13] The end of one check session — on every way out (finished, stopped, an error, Ctrl+C): first
+    the shared close of Step 11 i (_close_session: CDP Browser.close; the launched Chrome terminated after
+    _CLOSE_WAIT_S when its command line names the profile; the profile marked cleanly exited), then the guarantee the
+    shared close cannot give under heavy load — the orchestrator saw it leave the Chrome running twice (the process query
+    timed out, so the pid could not be PROVEN ours): a Chrome this run LAUNCHED that still runs — its Popen handle is
+    open and poll() says it runs, so the pid cannot have been reused — is killed through that handle, waited for, and
+    its profile marked cleanly exited. A Chrome the check only attached to (launched False / None) is never killed.
+    Never raises; a Ctrl+C during the shared close goes straight to the guarantee."""
+    try:
+        _close_session(driver, ctx, last)
+    except KeyboardInterrupt:
+        print("\n   🛑 Stopped while closing Chrome — ending the Chrome this check started.")
+    except Exception as e:
+        print(f"   > ⚠️ Closing Chrome failed ({type(e).__name__}: {e}).")
+    chrome = ctx.chrome or {}
+    proc = chrome.get("proc")
+    poll = getattr(proc, "poll", None)
+    if chrome.get("launched") is not True or not callable(poll):
+        return
+    try:
+        if poll() is not None:
+            return
+        proc.kill()
+        proc.wait(timeout=CHROME_GONE_WAIT_S)
+    except Exception as e:
+        print(f"   > ⚠️ The Chrome this check started ('{chrome.get('account')}', pid {chrome.get('pid')}) could not be "
+              f"ended ({type(e).__name__}) — close it before the next fetch.")
+        if ctx.journal is not None:
+            ctx.journal.end_session("open")
+        return
+    print(f"   > 🧹 Chrome ('{chrome.get('account')}') ended (pid {chrome.get('pid')}) — the usual close left it running.")
+    mark_profile_clean_exit(chrome.get("user_data_dir"), wait=CHROME_GONE_WAIT_S)
+    if ctx.journal is not None:
+        ctx.journal.end_session("terminated")
+
+
+def _check_has_work(run, account):
+    routed, cross = run.work(account)
+    return bool(routed or cross)
+
+
+def _check_session(run, ctx, account):
+    """One account's Chrome session: the objects routed to it (bounded by --limit), then the objects looked for there
+    from other accounts; their locators built and their records warmed in CHECK_BATCH batches (13.e). The pre-flight,
+    the port guard and the sign-out handling are cmd_fetch_route's; the session's Chrome is closed on every way out."""
+    routed, cross = run.work(account)
+    problem = profile_preflight(account)
+    if problem:
+        print(f"\n   ❌ {problem[:1].upper()}{problem[1:]}")
+        run.unavailable[account] = "no-profile"
+        for obj in routed:
+            run.tried.add((_check_key(obj), account))
+            _check_record(run, obj, _check_line(run, obj, {}, account, "routed", None, "no-profile"))
+        return
+    if run.sessions and not _debug_port_free():
+        print(f"❌ Cannot switch to profile '{account}': Chrome's debug port 9222 is still in use (the previous "
+              f"account's Chrome did not close). Close that Chrome window, then re-run — the check continues where it "
+              f"stopped.")
+        run.stop = "port"
+        return
+    print(f"\n   === CHECK '{account}' — {len(routed)} object(s) routed here · {len(cross)} looked for here from "
+          f"other accounts ===")
+    run.sessions += 1
+    driver = init_driver(account)
+    if not driver:
+        run.unavailable[account] = "chrome"
+        run.stop = "chrome"
+        return
+    ctx.start_session(account)
+    _note_session(ctx, driver, account)
+    _check_bound_page_loads(driver)
+    run.tally = {}
+    try:
+        for pass_name, objs in (("routed", routed), ("cross", cross)):
+            for start in range(0, len(objs), CHECK_BATCH):
+                if _check_should_stop(run):
+                    break
+                chunk = objs[start:start + CHECK_BATCH]
+                located = _check_locators(run, ctx, chunk)
+                known = _check_prewarm(driver, ctx, account, [located[k][1] for k in located])
+                lines = []
+                for obj in chunk:
+                    if _check_should_stop(run):
+                        break
+                    lines.append(_check_one(run, driver, ctx, obj, located.get(_check_key(obj)), pass_name))
+                _check_quality(run, driver, ctx, account, lines, known)
+    except SessionExpiredError:
+        print(f"❌ Profile '{account}' is logged out. Open Chrome with --user-data-dir={CHROME_PROFILES[account]}, sign "
+              f"in to photos.google.com, then re-run — the check continues where it stopped.")
+        run.stop, run.unavailable[account] = "signed-out", "signed-out"
+    except KeyboardInterrupt:
+        print("\n🛑 Stopped by user — closing Chrome; re-run the same command to continue.")
+        run.stop = "interrupted"
+    except Exception as e:  # a bug or a browser fault: the run stops (resumable), Chrome is still closed
+        print(f"❌ The check stopped: {type(e).__name__}: {e}")
+        run.stop = "error"
+    finally:
+        counts = " · ".join(f"{o} {n}" for o, n in sorted(run.tally.items()))
+        print(f"   > 🔎 Check ('{account}'): {sum(run.tally.values())} object(s){' — ' + counts if counts else ''} · "
+              f"{gprpc.summary_line(driver)}")
+        last = run.stop is not None or not any(_check_has_work(run, a) for a in mvcommon.GP_ACCOUNTS if a != account)
+        _close_check_session(driver, ctx, last)
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+
+def _check_sessions(run, ctx):
+    """The account sessions, round and round in GP_ACCOUNTS order while any account has work: an object's routed check
+    comes first; an account later in the round then looks for what earlier ones did not pin. Every session either
+    checks something or makes its account unavailable, so the rounds end."""
+    order = list(mvcommon.GP_ACCOUNTS)
+    last = -1
+    while run.stop is None:
+        ring = order[last + 1:] + order[:last + 1]
+        account = next((a for a in ring if _check_has_work(run, a)), None)
+        if account is None:
+            return
+        last = order.index(account)
+        _check_session(run, ctx, account)
+
+
+def cmd_check(run_dir, limit=None, max_minutes=None, pace=None):
+    """[IMP-C25 Step 13] `python mainfetch.py check --run <run dir> [--limit N] [--max-minutes M] [--pace S]` — the
+    browser half of `main.py check_photos` (see the section comment above). Reads run.json (main wrote it), continues
+    from results.jsonl, appends one line per object look and rewrites progress.json; never writes the library, a learned
+    sidecar, the failed list or anything else (main applies a run).
+    -> exit code: EXIT_CHECK_OK the invocation ended (complete, or stopped early — progress.json says why) ·
+    EXIT_CHECK_USAGE the run directory holds no readable run.json · EXIT_CHECK_LOCK the fetch session lock is held
+    (nothing ran)."""
+    doc = _check_read_json(os.path.join(run_dir, "run.json"))
+    if doc is None or not isinstance(doc.get("objects"), list):
+        print(f"❌ check: {run_dir} holds no readable run.json.")
+        return EXIT_CHECK_USAGE
+    progress_path = os.path.join(run_dir, "progress.json")
+    invocations = list((_check_read_json(progress_path) or {}).get("invocations") or [])
+    run = _CheckRun(run_dir, doc, _check_read_results(run_dir), limit, max_minutes, pace, len(invocations) + 1)
+    try:
+        with _check_lock() as heartbeat:
+            from tools import gp_inventory  # LockLost (the Heartbeat's)
+            run.heartbeat, run.lock_lost = heartbeat, gp_inventory.LockLost
+            return _check_run(run, progress_path, invocations)
+    except mvcommon.LockHeldError:
+        print("❌ A fetch, an inventory crawl or the profile warm-up holds the fetch session lock — nothing was checked; "
+              "re-run when it has finished.")
+        return EXIT_CHECK_LOCK
+
+
+def _check_run(run, progress_path, invocations):
+    """cmd_check under the lock: the invocation's record, the start-up cleanup of an interrupted fetch (P-12 rule 3)
+    and this run's fetch journal (each Chrome session recorded for crash cleanup), the sessions, then the end: the
+    run's state (complete · partial with its reason) in progress.json and one closing line."""
+    inv = {"n": run.invocation, "started_at": _utc_now(), "pid": os.getpid(), "limit": run.limit,
+           "max_minutes": run.max_minutes, "pace": run.pace}
+    invocations.append(inv)
+    _check_progress(run, progress_path, invocations, "running", None)
+    before = sum(1 for o in run.objects if not run.routed_todo(o))
+    print(f"--- CHECK: {run.doc.get('run')} — {len(run.objects)} object(s) · approaches {run.approaches} · "
+          f"download-free ---" + (f"\n   > {before} object(s) checked already — continuing." if before else ""))
+    ctx = FetchContext(run_id=f"check-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{os.getpid()}")
+    try:
+        _startup_cleanup(ctx)
+        ctx.journal = FetchJournal(ctx.run_id)
+        run.library = load_library()
+        _check_sessions(run, ctx)
+    except KeyboardInterrupt:  # between two sessions (a session handles its own)
+        print("\n🛑 Stopped by user — re-run the same command to continue.")
+        run.stop = "interrupted"
+    finally:
+        _end_run(ctx, run.stop == "interrupted")
+        left = run.left()
+        if run.stop:
+            state, reason = "partial", run.stop
+        elif left:
+            state, reason = "partial", "limit" if run.limit is not None and run.checked >= run.limit else "incomplete"
+        else:
+            state, reason = "complete", None
+        inv.update(ended_at=_utc_now(), state=state, reason=reason, checked=run.checked, looked=run.looked)
+        _check_progress(run, progress_path, invocations, state, reason)
+        verdict = "complete" if state == "complete" else f"stopped ({reason}) — {len(left)} object(s) left"
+        print(f"--- CHECK: {run.looked} look(s) at {run.checked} object(s) in this invocation — {verdict} ---")
+    return EXIT_CHECK_OK
+
+
 def cli(argv):
     """`python mainfetch.py fetch <id> [episodes <range>] [tempdir <path>]
     [--fetchExtras] [--manual]` — parse argv, then run the fetch.
     [IMP-C25 Step 12] `python mainfetch.py locate <id> …` runs the read-only
-    cmd_locate instead (parse_locate_args); every fetch argv is handled as before."""
+    cmd_locate instead (parse_locate_args); every fetch argv is handled as before.
+    [IMP-C25 Step 13] `python mainfetch.py check --run <dir> …` runs cmd_check (parse_check_args) and exits with its
+    code; its output can never stop it from closing its Chrome (_SafeStream)."""
+    if len(argv) > 1 and argv[1] == "check":
+        options = parse_check_args(argv)
+        sys.stdout, sys.stderr = _SafeStream(sys.stdout), _SafeStream(sys.stderr)
+        sys.exit(cmd_check(**options))
     if len(argv) > 1 and argv[1] == "locate":
         cmd_locate(**parse_locate_args(argv))
         return

@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13.d mainfetch check engine (cmd_check)
+STATE: IN PROGRESS — next: 13.e RPC acceleration (pre-warm) + quality post-pass
 
 # IMP-C25 Step 13 — `check_photos`: download-free verification, sweep and confirm — resumable status
 
@@ -40,12 +40,16 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       afresh, 9 statuses, refused, empty scope, the guard, the real spawn streaming + Ctrl+C waiting) — WIP SHA in the
       commit that ticks this line. tests/conftest.py gained the autouse `_hermetic_check_child` (a child process sees
       no monkeypatch: it would read the REAL library and launch a REAL Chrome — required for P-17 hermeticity)
-- [ ] 13.d mainfetch engine: `parse_check_args` + `cmd_check` (`python mainfetch.py check --run <dir> …`): fetch
+- [x] 13.d mainfetch engine: `parse_check_args` + `cmd_check` (`python mainfetch.py check --run <dir> …`): fetch
       lock (non-blocking) + heartbeat (the crawler's Heartbeat), start-up cleanup + fetch journal (crash-cleanup of
       the Chrome it launched), one session per account, locators via build_fetch_queue (folder that never exists),
       locate_object per object, results.jsonl (fsync per line), progress.json, pacing, circuit breaker, --limit,
       --max-minutes, Ctrl+C, robust Chrome close (kill the launched Chrome by its Popen handle when the shared close
-      leaves it running; profile marked clean) — tests
+      leaves it running; profile marked clean) — tests: tests/test_check_photos.py 96 passed (+29: engine end to end
+      on the fake world (only run files written, download-free, no photo id printed, P-13), invocations, max-minutes
+      + continue, pacing ×3, breaker, sign-out, Ctrl+C, lock held / no-wait / taken over, missing profile, the Chrome
+      guarantee ×6, every session closed, the child's command line ×8, the child CLI + _SafeStream) — [x] when its
+      WIP commit lands (the code for 13.f's cross pass and hints is in this commit; its tests come with 13.f)
 - [ ] 13.e mainfetch: RPC acceleration (batch hash_lookup of content keys + mapped cloud dedupKeys, batch_info names,
       ≤50 per call, warming the locator's own record cache — no second verifier) + quality post-pass
       (original_quality / partial_upload / archived) + UI fallback — tests

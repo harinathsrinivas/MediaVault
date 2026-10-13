@@ -14,9 +14,13 @@ Step 13; P-5, P-8, P-9, P-10, P-11, P-15, P-18; OD-5, OD-7, OD-9; the Step 9b ru
         a mapped key never becomes a content proof), batch_info names, the UI fallback, the quality post-pass
   13.f  the other accounts (an old object not found / wrong-item in its own account — never a recent push, never an
         ambiguous one), the session order, the hinted locators (url -> photo_id, datetime -> the taken second)
-  13.g  the verdicts (confirmed · inconsistent · ambiguous · wrong-item · Step 9b not-backed-up-yet / possible-loss,
-        --devices, partial sets · error · unchecked), report.txt (per account × category × approach), outliers.csv —
-        every OD-7 class from a synthetic case — and the one summary line
+  13.g  the verdicts (confirmed · inconsistent · ambiguous · Step 9b not-backed-up-yet / possible-loss, --devices,
+        partial sets · error · unchecked — a look elsewhere that errored / is unfinished / was ambiguous), report.txt
+        (per account × category × approach), outliers.csv — every OD-7 class from a synthetic case — and the one
+        summary line
+  13.h  the apply: --apply (check, then record: learned records, stale records, the failed list — only an apply writes
+        it —, the apply engine, failed_objects.csv, applied.json) and --apply-run <dir | latest> (a reviewed run, no
+        Chrome; refused for another scope; latest = the newest complete run); idempotent; Ctrl+C applies nothing
 
 Hermetic: the fake Google Photos world + its batchexecute emulator (tests/gphotos_fake.py); mainfetch's and gprpc's clocks
 are fake (nothing waits); the autouse fixtures of tests/conftest.py redirect every state dir, ~/Downloads, the process
@@ -376,7 +380,7 @@ def test_an_item_scope_checks_its_objects_and_an_alias_resolves_to_its_primary(s
     [obj] = item["objects"]
     assert obj == {"manual_id": "tv-en-1994-files-s02e05", "label": "whole", "sha256": _sha256(_bytes(obj["manual_id"])),
                    "kind": "whole", "category": "tv", "uploaded_name": obj["uploaded_name"], "account": "tv",
-                   "route": "prefix", "home": "tv", "pushed_at": None, "elsewhere": True}
+                   "route": "prefix", "home": "tv", "pushed_at": None}
 
 
 def test_a_season_scope_checks_its_children_and_anime_glued_ids_are_its_children(sandbox):
@@ -491,9 +495,8 @@ def test_a_prefix_scope_and_the_named_scopes(sandbox, monkeypatch):
     assert _ids(movies) == ["mov-en-2010-movie", "mov-en-2026-pushed", "tv-en-1994-files-s02e05",
                             "tv-en-1994-files-s02e06"]
     assert (pending["kind"], _ids(pending)) == ("pending", ["mov-en-2026-pushed"])
-    assert pending["objects"][0]["pushed_at"] == "2026-09-30T10:00:00Z"
-    assert pending["objects"][0]["elsewhere"] is False                     # 14 h old: not looked for elsewhere (9b)
-    assert all(o["elsewhere"] for o in everything["objects"] if o["manual_id"] != "mov-en-2026-pushed")
+    assert pending["objects"][0]["pushed_at"] == "2026-09-30T10:00:00Z"    # Step 9b's evidence (the child's rule)
+    assert all(o["pushed_at"] is None for o in everything["objects"] if o["manual_id"] != "mov-en-2026-pushed")
     assert _ids(main._cp_resolve(library, "all", "anime", NOW)) == ["ani-ja-2006-deathnote01",
                                                                     "ani-ja-2007-deathnote-s0201"]
     with pytest.raises(ValueError) as err:
@@ -563,10 +566,10 @@ def test_a_check_creates_its_run_directory_and_hands_it_to_the_child(sandbox, mo
                       "--max-minutes", "1.5", "--pace", "0"]]
     doc = main._cp_read_json(os.path.join(run_dir, "run.json"))
     assert {k: doc[k] for k in ("v", "run", "created_at", "scope", "scope_text", "kind", "account", "approaches",
-                                "source")} == {"v": 1, "run": "check-20261001T000000Z", "created_at": "2026-10-01T00:00:00Z",
-                                               "scope": "tv-en-1994-files-s02", "scope_text": "tv-en-1994-files-s02",
-                                               "kind": "season", "account": None, "approaches": "best",
-                                               "source": "check"}
+                                "source", "recent_days")} == {
+        "v": 1, "run": "check-20261001T000000Z", "created_at": "2026-10-01T00:00:00Z", "scope": "tv-en-1994-files-s02",
+        "scope_text": "tv-en-1994-files-s02", "kind": "season", "account": None, "approaches": "best", "source": "check",
+        "recent_days": main.MAP_RECENT_DAYS}
     assert [o["manual_id"] for o in doc["objects"]] == ["tv-en-1994-files-s02e05", "tv-en-1994-files-s02e06"]
     assert out.startswith("=== CHECK PHOTOS (dry-run) — scope: tv-en-1994-files-s02 · approaches best — download-free ===")
     assert "  2 object(s) in 2 entr(y/ies) — checked first in: tv 2" in out and f"  Run: {run_dir}" in out
@@ -1593,5 +1596,425 @@ def test_objects_that_could_not_be_checked_are_reported_never_failed(cw, sandbox
     res = main.cmd_check_photos(SEASON)
 
     assert [(r["status"], r["reason"]) for r in res["rows"]] == [("confirmed", None), ("error", None)]
-    assert "Not checked: 1 object(s) — RuntimeError 1 (a re-run of an unfinished run retries them)" in \
+    out = capsys.readouterr().out
+    assert "Not checked: 1 object(s) — RuntimeError 1 (check them again by id: python main.py check_photos <id>)" in out
+    assert f"    {SEASON}e02 · whole — RuntimeError" in out          # the run is complete: the ids to re-check
+
+
+def test_a_failed_look_elsewhere_is_no_loss_and_never_failed(cw, sandbox, monkeypatch, capsys):
+    # "In no account" needs every account's look: one that errored says nothing — the object is not called lost.
+    _season_of(sandbox, cw.world, {1: "missing"})
+    real = mainfetch.locate_object
+
+    def flaky(driver, loc, ctx, *args, **kwargs):
+        if ctx.account == "anime":
+            raise RuntimeError("the page did not render")
+        return real(driver, loc, ctx, *args, **kwargs)
+
+    monkeypatch.setattr(mainfetch, "locate_object", flaky)
+    res = main.cmd_check_photos(SEASON)
+
+    assert [(l["pass"], l["account"], l["outcome"]) for l in _results(res["run_dir"])] == [
+        ("routed", "tv", "not-found"), ("cross", "movies", "not-found"), ("cross", "anime", "error"),
+        ("cross", "others", "not-found")]
+    [row] = res["rows"]
+    assert (row["status"], row["error"], row["reason"]) == ("error", "RuntimeError in 'anime'", None)
+    assert "Not checked: 1 object(s) — RuntimeError in 'anime' 1" in capsys.readouterr().out
+
+
+def test_an_ambiguous_look_elsewhere_makes_it_ambiguous_in_that_account(cw, sandbox):
+    # Not in its own account; in movies its exact name holds two uploads of different bytes — the object IS there, its
+    # copy just cannot be told apart: ambiguous in movies (its failed row names movies and the candidates seen there).
+    _season_of(sandbox, cw.world, {1: "missing"})
+    name = _up("Demo.S01E01.mkv", "de1de1")
+    first = cw.world.add_item("movies", name, data=_bytes("cut a"), taken=TAKEN)
+    second = cw.world.add_item("movies", name, data=_bytes("cut b"), taken="2024-01-01T00:00:00Z")
+
+    res = main.cmd_check_photos(SEASON)
+
+    [row] = res["rows"]
+    assert (row["status"], row["account"], row["reason"]) == ("ambiguous", "movies", "ambiguous")
+    assert row["decisive"]["pass"] == "cross" and set(row["decisive"]["candidates"]) == {first.photo_id,
+                                                                                        second.photo_id}
+
+
+# ===========================================================================
+# 13.h — the apply: --apply (check, then apply) and --apply-run (a reviewed run, no browser)
+# ===========================================================================
+def _entry_block(mid):
+    return mvcommon.load_library()[mid].get("gphotos")
+
+
+def _found_record(account, mid):
+    """The learned record of `mid` in `account` that names a photo_id (the identity), or None."""
+    return next((r for r in mvcommon.read_learned(account) if r["manual_id"] == mid and "photo_id" in r
+                 and not r.get("stale")), None)
+
+
+def test_apply_records_what_the_check_proved_and_the_engine_confirms_it(cw, sandbox, capsys):
+    items = _season_of(sandbox, cw.world, {1: "learned", 2: "mapped", 3: "legacy", 4: "missing"})
+
+    res = main.cmd_check_photos(SEASON, apply=True)
+
+    out = capsys.readouterr().out
+    run_dir, run = res["run_dir"], f"check-{os.path.basename(res['run_dir'])}"
+    assert res["status"] == "ok" and [r["status"] for r in res["rows"]] == ["confirmed"] * 3 + ["possible-loss"]
+    # the learned records (P-10): the found item, its proof (P-5), the stage that pinned it, source check
+    expected = {f"{SEASON}e01": ("dedupkey", "s0_photo_id"), f"{SEASON}e02": ("filename", "s0_photo_id"),
+                f"{SEASON}e03": ("filename", "s2_exact_name")}
+    for mid, (proof, stage) in expected.items():
+        rec = _found_record("tv", mid)
+        item = items[mid]
+        assert (rec["photo_id"], rec["proof"], rec["source"], rec["approach"]["tried"], rec["approach"]["outcome"]) == (
+            item.photo_id, proof, "check", stage, "exactly-one")
+        assert (rec["at"], rec["upload_ms"], rec["dedup_key"], rec["gp_filename"]) == (
+            "2026-10-14T00:00:00Z", item.upload_ms, item.dedup_key, item.filename)
+        assert rec["original_quality"] is True and rec["partial_upload"] is False     # the quality post-pass
+        # the apply engine — the only writer of gphotos blocks — confirms each one
+        acc = _entry_block(mid)["accounts"]["tv"]
+        assert (acc["photo_id"], acc["verified_by"], acc["source"], acc["confirmed"]) == (item.photo_id, proof, "check",
+                                                                                          True)
+    assert mvcommon.read_learned("movies") == mvcommon.read_learned("anime") == mvcommon.read_learned("others") == []
+    # P-5: a mapped legacy object's cloud dedupKey stays an item fact — never the block's content key (IMP-E5)
+    for mid in (f"{SEASON}e02", f"{SEASON}e03"):
+        block = _entry_block(mid)
+        assert "sha1" not in block and "dedup_key" not in block and block["accounts"]["tv"]["verified_by"] == "filename"
+    assert _entry_block(f"{SEASON}e04") is None                     # an unconfirmed object gets no block
+    # the failed list (P-18): only the object in no account
+    [failed] = mvcommon.read_failed()
+    assert {k: failed.get(k) for k in ("run", "account", "category", "manual_id", "label", "reason")} == {
+        "run": run, "account": "tv", "category": "tv", "manual_id": f"{SEASON}e04", "label": "whole",
+        "reason": res["rows"][3]["reason"]}
+    assert failed["tried"] == [{"approach": a, "outcome": v["outcome"], "n": v["n"]}
+                               for a, v in res["rows"][3]["routed_line"]["per_approach"].items()]
+    with open(mvcommon.failed_csv_path(), encoding="utf-8-sig", newline="") as fh:
+        assert [(r["manual_id"], r["status"]) for r in csv.DictReader(fh)] == [(f"{SEASON}e04", failed["reason"])]
+    assert main._cp_read_json(os.path.join(run_dir, "applied.json")) == {
+        "v": 1, "at": "2026-10-14T00:00:00Z", "learned": {"new": 3, "known": 0}, "failed": {"new": 1, "known": 0},
+        "engine": {"status": "saved", "changed": 3, "confirmed": 3, "conflicts": 0, "orphans": 0}}
+    with open(os.path.join(run_dir, "report.txt"), encoding="utf-8") as fh:
+        report = fh.read().splitlines()
+    assert report[0].startswith(f"=== CHECK PHOTOS (APPLY) — scope: {SEASON} · approaches best — 4 object(s)")
+    assert "Recorded: learned records 3 new (0 already on record) · failed list 1 new (0 already listed)" in report
+    assert "  library (saved): 3 object(s) updated (3 newly confirmed) · conflict(s) not applied 0 · orphan(s) 0" in report
+    assert "  failed_objects.csv: regenerated — 1 row(s)" in report
+    assert f"Failed list (P-18): 1 object(s) added to the failed list — {failed['reason']} 1" in report
+    assert report[-1] == (f"Outputs: {run_dir} — report.txt, results.jsonl, outliers.csv, run.json, progress.json, "
+                          f"applied.json")
+    assert out.rstrip().splitlines()[-1] == (f"🔎 check_photos {SEASON}: 4 object(s) — confirmed 3 · possible-loss 1 · "
+                                             f"applied: 3 object(s) updated, 3 newly confirmed")
+    assert cw.world.downloads == [] and "pLFTfd" not in cw.world.rpc_ids_sent()      # still download-free
+    assert not any(item.photo_id in out for item in items.values() if item)       # P-15
+
+
+def test_a_reviewed_dry_run_is_applied_by_apply_run_without_a_browser_and_only_once(cw, sandbox, capsys):
+    _season_of(sandbox, cw.world, {1: "learned", 2: "missing"})
+    dry = main.cmd_check_photos(SEASON)
+    assert mvcommon.read_learned() == [] and mvcommon.read_failed() == []          # a dry run records nothing
+    sessions, spawned = _sessions(cw), list(cw.spawned)
+    next_line = [l for l in capsys.readouterr().out.splitlines() if l.startswith("Next: ")]
+    assert next_line == [f'Next: review this report and outliers.csv, then: python main.py check_photos {SEASON} '
+                         f'--apply-run "{dry["run_dir"]}"']
+
+    latest = main.cmd_check_photos(SEASON, apply_run="latest")
+    again = main.cmd_check_photos(SEASON, apply_run=dry["run_dir"])               # the same run, by its directory
+
+    out = capsys.readouterr().out
+    assert _sessions(cw) == sessions and cw.spawned == spawned                     # no search, no Chrome, no child
+    assert latest["status"] == again["status"] == "ok" and latest["run_dir"] == again["run_dir"] == dry["run_dir"]
+    assert [(r["manual_id"], r["source"]) for r in mvcommon.read_learned()] == [(f"{SEASON}e01", "check")]
+    assert [r["manual_id"] for r in mvcommon.read_failed()] == [f"{SEASON}e02"]     # appended once
+    assert _entry_block(f"{SEASON}e01")["accounts"]["tv"]["confirmed"] is True
+    assert (latest["applied"]["learned"], latest["applied"]["failed"]) == ((1, 0), (1, 0))
+    assert (again["applied"]["learned"], again["applied"]["failed"]) == ((0, 1), (0, 1))   # nothing twice
+    assert again["applied"]["engine"]["status"] == "up-to-date"
+    assert f"=== CHECK PHOTOS (APPLY-RUN latest) — scope: {SEASON} — no search, no Chrome ===" in out
+    assert out.rstrip().splitlines()[-1].endswith("· applied: 0 object(s) updated, 0 newly confirmed")
+    with open(os.path.join(dry["run_dir"], "report.txt"), encoding="utf-8") as fh:
+        assert fh.readline().startswith(f"=== CHECK PHOTOS (APPLY) — scope: {SEASON}")    # rewritten with the apply
+
+
+def test_apply_run_refuses_another_scope_account_or_approaches_and_a_non_run_directory(cw, sandbox, capsys, tmp_path):
+    _season_of(sandbox, cw.world, {1: "learned", 2: "learned"})
+    dry = main.cmd_check_photos(SEASON)
+    capsys.readouterr()
+
+    item = main.cmd_check_photos(f"{SEASON}e01", apply_run=dry["run_dir"])
+    account = main.cmd_check_photos(SEASON, account="movies", apply_run=dry["run_dir"])
+    approaches = main.cmd_check_photos(SEASON, approaches="all", apply_run=dry["run_dir"])
+    stranger = main.cmd_check_photos(SEASON, apply_run=str(tmp_path))
+
+    out = capsys.readouterr().out
+    assert [r["status"] for r in (item, account, approaches, stranger)] == ["error"] * 4
+    assert f"❌ check_photos: refused — that run checked scope '{SEASON}' · approaches best, not '{SEASON}e01'. Apply " \
+           f"it with its own scope." in out
+    assert f"not '{SEASON}' · account movies." in out and f"not '{SEASON}' · approaches all." in out
+    assert f"❌ check_photos: {tmp_path} is not a check_photos run directory (no readable run.json)." in out
+    assert mvcommon.read_learned() == [] and mvcommon.read_failed() == []
+    assert all(_entry_block(m)["accounts"]["tv"].get("confirmed") is None for m in (f"{SEASON}e01", f"{SEASON}e02"))
+
+
+def test_apply_run_latest_needs_a_completed_run_and_an_unfinished_one_is_applied_by_its_directory(cw, sandbox, capsys):
+    _season_of(sandbox, cw.world, {1: "learned", 2: "missing", 3: "learned"})
+    none = main.cmd_check_photos(SEASON, apply_run="latest")
+    unfinished = main.cmd_check_photos(SEASON, limit=2)          # e01 and e02 checked in tv, e02's look elsewhere too
+    latest = main.cmd_check_photos(SEASON, apply_run="latest")
+    capsys.readouterr()
+    cw.world.session["movies"] = "expired"
+    stopped = main.cmd_check_photos(SEASON, recheck=True)         # e02 not in tv; movies signed out: its look stops
+    capsys.readouterr()
+
+    applied = main.cmd_check_photos(SEASON, apply_run=stopped["run_dir"])
+
+    out = capsys.readouterr().out
+    assert none["status"] == latest["status"] == "error" and unfinished["status"] == "partial"
+    assert stopped["status"] == "stopped" and _progress(stopped["run_dir"])["reason"] == "signed-out"
+    assert applied["status"] == "ok"
+    assert "⚠️  That run is unfinished (signed-out) — what it settled is applied; the objects it has not finished stay " \
+           "unchecked." in out
+    assert [(r["manual_id"], r["status"]) for r in applied["rows"]] == [
+        (f"{SEASON}e01", "confirmed"), (f"{SEASON}e02", "unchecked"), (f"{SEASON}e03", "confirmed")]
+    assert "the run stopped before it was looked for in: movies, anime, others" in applied["rows"][1]["note"]
+    assert sorted(r["manual_id"] for r in mvcommon.read_learned()) == [f"{SEASON}e01", f"{SEASON}e03"]
+    assert mvcommon.read_failed() == []                          # e02's verdict is not final: no failed row
+    assert f"continue the check with: python main.py check_photos {SEASON}" in out
+    assert out.rstrip().splitlines()[-1].startswith(f"🔎 check_photos {SEASON}: 3 object(s) — confirmed 2 · unchecked 1 "
+                                                    f"— the run is unfinished: continue it with python main.py "
+                                                    f"check_photos {SEASON} · applied:")
+
+
+def test_apply_run_latest_names_the_unfinished_run_to_continue(cw, sandbox, capsys):
+    _season_of(sandbox, cw.world, {1: "learned", 2: "learned"})
+    first = main.cmd_check_photos(SEASON, limit=1)
+    capsys.readouterr()
+
+    res = main.cmd_check_photos(SEASON, apply_run="latest")
+
+    assert res == {"status": "error", "run_dir": None}
+    assert (f"❌ check_photos: no completed run of scope '{SEASON}' — its newest run {first['run_dir']} is unfinished: "
+            f"continue it with python main.py check_photos {SEASON}, or apply it by naming that directory.") in \
         capsys.readouterr().out
+
+
+def test_no_run_at_all_tells_how_to_make_one(cw, sandbox, capsys):
+    _season_of(sandbox, cw.world, {1: "learned"})
+    assert main.cmd_check_photos(SEASON, account="tv", apply_run="latest")["status"] == "error"
+    assert (f"❌ check_photos: no completed run of scope '{SEASON}' · account tv — run `python main.py check_photos "
+            f"{SEASON} --account tv` first.") in capsys.readouterr().out
+
+
+def test_pending_apply_confirms_the_new_pushes_and_empties_the_pending_list(cw, sandbox, capsys):
+    # PLAN P-11 / Step 13b: `check_photos pending --apply` is the post-backup confirmation (source confirm).
+    items = _season_of(sandbox, cw.world, {1: "pending", 2: "pending"})
+    assert len(main._cp_pending_list()["objects"]) == 2
+
+    res = main.cmd_check_photos("pending", apply=True)
+
+    assert res["status"] == "ok" and [r["status"] for r in res["rows"]] == ["confirmed", "confirmed"]
+    for mid, item in items.items():
+        rec = _found_record("tv", mid)
+        assert (rec["source"], rec["proof"], rec["approach"]["tried"], rec["photo_id"]) == ("confirm", "dedupkey",
+                                                                                          "s0_hash", item.photo_id)
+        block = _entry_block(mid)
+        assert block["accounts"]["tv"]["confirmed"] is True and block["accounts"]["tv"]["source"] == "confirm"
+        assert block["dedup_key"] == item.dedup_key              # the capture's content key, proven by the push
+    capsys.readouterr()
+    assert main._cp_pending_list()["objects"] == []
+    assert "  Nothing pending." in capsys.readouterr().out
+
+
+def test_an_object_found_in_another_account_is_recorded_there_and_routed_there_next(cw, sandbox):
+    items = _season_of(sandbox, cw.world, {1: "legacy"}, in_account="movies")
+
+    res = main.cmd_check_photos(SEASON, apply=True)
+
+    [row] = res["rows"]
+    assert (row["status"], row["account"], row["mismatch"]) == ("confirmed", "movies", True)
+    assert mvcommon.read_learned("tv") == [] and _found_record("movies", f"{SEASON}e01")["photo_id"] == items[
+        f"{SEASON}e01"].photo_id
+    block = _entry_block(f"{SEASON}e01")
+    assert list(block["accounts"]) == ["movies"] and block["accounts"]["movies"]["confirmed"] is True
+    assert block["home_account"] == "movies"                     # P-4: where its verified copy is — fetch goes there
+    [obj] = main._cp_resolve(mvcommon.load_library(), SEASON, None, LATER)["objects"]
+    assert (obj["account"], obj["route"]) == ("movies", "learned")
+
+
+def test_a_gone_photo_id_is_recorded_stale_and_the_reupload_becomes_the_identity(cw, sandbox):
+    items = _season_of(sandbox, cw.world, {1: "mapped"})
+    old = items[f"{SEASON}e01"]
+    old.deleted = True
+    new = cw.world.add_item("tv", old.filename, data=_bytes("re-upload"), taken="2026-09-01T00:00:00Z")
+
+    main.cmd_check_photos(SEASON, apply=True)
+
+    stale = [r for r in mvcommon.read_learned("tv") if r.get("stale")]
+    assert [(r["photo_id"], r["approach"]) for r in stale] == [
+        (old.photo_id, {"tried": "s0_photo_id", "outcome": "not-found", "n": 0, "via": "rpc"})]
+    acc = _entry_block(f"{SEASON}e01")["accounts"]["tv"]
+    assert (acc["photo_id"], acc["verified_by"], acc["confirmed"]) == (new.photo_id, "filename", True)
+    assert old.photo_id not in (acc.get("alternates") or [])     # a dead id is never an alternate
+
+
+def test_an_inconsistent_copy_is_never_confirmed_and_goes_to_the_failed_list(cw, sandbox, capsys):
+    items = _season_of(sandbox, cw.world, {1: "learned", 2: "pending"})
+    items[f"{SEASON}e01"].partial_upload = True
+    items[f"{SEASON}e02"].original_quality = False
+    before = _entry_block(f"{SEASON}e01")
+
+    res = main.cmd_check_photos(SEASON, apply=True)
+
+    assert [r["status"] for r in res["rows"]] == ["inconsistent"] * 2
+    assert res["status"] == "ok" and res["applied"]["engine"]["status"] == "nothing-to-apply"
+    assert capsys.readouterr().out.rstrip().splitlines()[-1].endswith("· applied: 0 object(s) updated, 0 newly confirmed")
+    assert mvcommon.read_learned() == []                         # no identity is recorded for a bad copy
+    assert _entry_block(f"{SEASON}e01") == before and _entry_block(f"{SEASON}e02") is None   # never confirmed
+    failed = {r["manual_id"]: r for r in mvcommon.read_failed()}
+    assert {m: (r["reason"], r["candidates"][0]) for m, r in failed.items()} == {
+        m: ("inconsistent", items[m].photo_id) for m in items}  # the pinned item first: the user sees which copy
+
+
+def test_an_interrupted_apply_records_nothing_and_its_rerun_applies_the_whole_run(cw, sandbox, monkeypatch, capsys):
+    _demo_season(sandbox, cw.world)
+    real, calls = mainfetch.locate_object, []
+
+    def locate(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mainfetch, "locate_object", locate)
+    stopped = main.cmd_check_photos(SEASON, apply=True)
+    out = capsys.readouterr().out
+    monkeypatch.setattr(mainfetch, "locate_object", real)
+    resumed = main.cmd_check_photos(SEASON, apply=True)
+
+    assert stopped["status"] == "interrupted" and stopped["applied"] is None
+    assert "⏸️ Interrupted — nothing was applied; re-run the same command to continue (it applies at its end)." in out
+    assert "Recorded:" not in out and "applied:" not in out.rstrip().splitlines()[-1]
+    assert resumed["run_dir"] == stopped["run_dir"] and resumed["status"] == "ok"
+    assert sorted(r["manual_id"] for r in mvcommon.read_learned()) == [f"{SEASON}e01", f"{SEASON}e02", f"{SEASON}e03"]
+    assert resumed["applied"]["learned"] == (3, 0)               # the first invocation's object included
+
+
+def test_an_apply_bounded_by_max_minutes_records_what_it_settled_and_the_rerun_the_rest(cw, sandbox, clock):
+    # Step 13b's call: `check_photos pending --apply --max-minutes 15` — a bounded run still applies what it settled.
+    _demo_season(sandbox, cw.world)
+    first = main.cmd_check_photos(SEASON, apply=True, max_minutes=0.02, pace=0.4)
+    assert (first["status"], first["applied"]["learned"]) == ("partial", (2, 0))
+    assert sorted(r["manual_id"] for r in mvcommon.read_learned()) == [f"{SEASON}e01", f"{SEASON}e02"]
+
+    second = main.cmd_check_photos(SEASON, apply=True)
+
+    assert second["run_dir"] == first["run_dir"] and second["status"] == "ok"
+    assert second["applied"]["learned"] == (1, 2)                # e03 new; e01 and e02 already on record
+    assert all(_entry_block(m)["accounts"]["tv"]["confirmed"] for m in (f"{SEASON}e01", f"{SEASON}e02", f"{SEASON}e03"))
+
+
+def test_approaches_all_records_every_stage_verdict(cw, sandbox):
+    # PLAN Step 13: `--approaches all` evaluates every approach and records approach.ok / approach.failed.
+    data = _bytes("renamed")
+    item = cw.world.add_item("tv", "Renamed.Thing.2020.mkv", data=data, taken=TAKEN)        # uploaded under another name
+    _single(sandbox, data=data, capture=_obj(data, _up("One.mkv", "on1on1"), date_utc=None))
+
+    res = main.cmd_check_photos(ONE, approaches="all", apply=True)
+
+    [row] = res["rows"]
+    assert row["status"] == "confirmed" and list(row["found"]["per_approach"]) == ["hash", "exact_name", "title_sid",
+                                                                                   "legacy"]
+    records = mvcommon.read_learned("tv")
+    assert [(r["approach"]["tried"], r["approach"]["outcome"], "photo_id" in r) for r in records] == [
+        ("s0_hash", "exactly-one", True), ("s2_exact_name", "not-found", False), ("s3_title_sid", "not-found", False),
+        ("s4_legacy", "not-found", False)]
+    acc = _entry_block(ONE)["accounts"]["tv"]
+    assert (acc["photo_id"], acc["confirmed"]) == (item.photo_id, True)
+    assert {k: acc["approach"][k] for k in ("best", "ok", "failed")} == {
+        "best": "hash", "ok": ["hash"], "failed": ["exact_name", "title_sid", "legacy"]}
+
+
+def test_stages_that_cannot_tell_the_uploads_apart_are_recorded_failed(cw, sandbox):
+    # The approaches-disagree case: the stored photo_id and the taken second pin the first upload; a name search sees a
+    # re-upload of other bytes too and cannot tell them apart (ambiguous — its tentative pick, the newest, is the other
+    # item). True verdicts all: photo_id / taken_second ok, exact_name / title_sid failed.
+    old = cw.world.add_item("tv", _up(SHOW, SID), data=_bytes("first upload"), taken=TAKEN)
+    new = cw.world.add_item("tv", _up(SHOW, SID), data=_bytes("re-upload"), taken="2023-03-04T05:06:07Z")
+    held = _bytes("library")
+    _single(sandbox, EP, SHOW, SID, data=held, block=_learned(old, data=held, proof="filename", content_key=False))
+
+    res = main.cmd_check_photos(EP, approaches="all", apply=True)
+
+    [row] = res["rows"]
+    assert row["found"]["per_approach_pick"] == {"photo_id": old.photo_id, "taken_second": old.photo_id,
+                                                 "exact_name": new.photo_id, "title_sid": new.photo_id}
+    assert [(r["approach"]["tried"], r["approach"]["outcome"], r.get("photo_id")) for r in mvcommon.read_learned()] == [
+        ("s0_photo_id", "exactly-one", old.photo_id), ("s1_taken_second", "exactly-one", None),
+        ("s2_exact_name", "ambiguous", None), ("s3_title_sid", "ambiguous", None)]
+    acc = _entry_block(EP)["accounts"]["tv"]
+    assert (acc["photo_id"], acc["approach"]["ok"], acc["approach"]["failed"]) == (
+        old.photo_id, ["photo_id", "taken_second"], ["exact_name", "title_sid"])
+
+
+def test_a_stage_that_pinned_another_item_makes_no_ok_claim():
+    # An exactly-one verdict naming ANOTHER item than the one recorded (approaches disagree) would be a contradicting
+    # `approach.ok`: it is left out — the user reviews the outlier. A same-bytes copy (an alternate) agrees.
+    old, new, copy_ = ("AF1QipFAKEold" + "0" * 25), ("AF1QipFAKEnew" + "0" * 25), ("AF1QipFAKEcpy" + "0" * 25)
+    found = {"account": "tv", "at": "2026-10-14T00:00:00Z", "photo_id": old, "proof": "filename",
+             "stage": "s0_photo_id", "approach": "photo_id", "n": 1, "via": "rpc", "alternates": [copy_],
+             "record": {"photo_id": old, "upload_ms": 1, "filename": "x.mkv"},
+             "per_approach": {"photo_id": {"outcome": "exactly-one", "n": 1},
+                              "taken_second": {"outcome": "exactly-one", "n": 1},
+                              "exact_name": {"outcome": "exactly-one", "n": 1},
+                              "title_sid": {"outcome": "error", "n": 0}},
+             "per_approach_via": {"photo_id": "rpc", "taken_second": "rpc", "exact_name": "ui", "title_sid": "ui"},
+             "per_approach_pick": {"photo_id": old, "taken_second": new, "exact_name": copy_, "title_sid": None}}
+    row = {"manual_id": EP, "label": "whole", "sha256": "a" * 64, "status": "confirmed", "found": found,
+           "quality": {}, "routed_line": found, "cross": {}}
+
+    records = main._cp_records({"source": "check"}, [row])
+
+    assert [(r["approach"]["tried"], r["approach"]["outcome"], r["approach"].get("via")) for r in records] == [
+        ("s0_photo_id", "exactly-one", "rpc"), ("s2_exact_name", "exactly-one", "ui")]
+
+
+def test_the_look_elsewhere_is_decided_when_its_account_is_checked_not_when_the_run_began(cw, sandbox, monkeypatch):
+    # Step 9b measured at the check (A2): e02 was a 14 h old push when the run began, but the run reached it two weeks
+    # later — then it is no longer "not backed up yet": it is looked for in the other accounts before it is called lost.
+    _set_now(monkeypatch, NOW)
+    items = _season_of(sandbox, cw.world, {1: "learned", 2: "pending"})
+    items[f"{SEASON}e02"].deleted = True
+    first = main.cmd_check_photos(SEASON, limit=1)
+    _set_now(monkeypatch, LATER)
+
+    second = main.cmd_check_photos(SEASON)
+
+    assert second["run_dir"] == first["run_dir"] and second["status"] == "ok"
+    lines = [(l["manual_id"][-3:], l["pass"], l["account"]) for l in _results(second["run_dir"])]
+    assert lines == [("e01", "routed", "tv"), ("e02", "routed", "tv"), ("e02", "cross", "movies"),
+                     ("e02", "cross", "anime"), ("e02", "cross", "others")]
+    assert [r["status"] for r in second["rows"]] == ["confirmed", "possible-loss"]
+
+
+@pytest.mark.parametrize("trouble", ["sidecar", "engine"])
+def test_an_apply_that_cannot_record_fails_and_says_so(cw, sandbox, monkeypatch, capsys, trouble):
+    _season_of(sandbox, cw.world, {1: "learned"})
+    before = sandbox["lib_series"].read_bytes()
+    if trouble == "sidecar":
+        def refuse(account, record):
+            raise OSError(28, "No space left on device")
+        monkeypatch.setattr(mvcommon, "append_learned", refuse)
+    else:
+        monkeypatch.setattr(main, "gphotos_apply", lambda *a, **k: {
+            "status": "aborted", "warning": "⚠️  Google Photos identity not applied: library changed by another process "
+                                            "— re-run when idle.", "changed": [], "confirmed": 0, "conflicts": [],
+            "orphans": []})
+
+    res = main.cmd_check_photos(SEASON, apply=True)
+
+    out = capsys.readouterr().out
+    assert res["status"] == "error" and sandbox["lib_series"].read_bytes() == before
+    if trouble == "sidecar":
+        assert "❌ check_photos: the apply stopped: OSError: [Errno 28] No space left on device — the library was not " \
+               "changed; re-run the apply (records already appended are not appended twice)" in out
+    else:
+        assert "  ❌ library: ⚠️  Google Photos identity not applied: library changed by another process" in out
+        assert out.rstrip().splitlines()[-1].endswith("· NOT applied (aborted)")

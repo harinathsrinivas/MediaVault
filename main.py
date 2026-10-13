@@ -13181,10 +13181,10 @@ def _cp_resolve(library, scope, account, now):
       objects    [{manual_id, label, sha256, kind, category, uploaded_name, account (routing: mvconfig override >
                  learned home > id prefix; a hint's own account for `hinted`), route (override | learned | prefix |
                  hint), home (the learned home, else the prefix account — what an "account mismatch" is measured
-                 against), pushed_at (capture), elsewhere (look in the other accounts when it is not found in its own:
-                 not for a push of the last MAP_RECENT_DAYS — Step 9b: not backed up yet), hint (hinted only)}] —
-                 alias-safe (an alias id resolves to its primary, a whole-library pass skips aliases), objects without
-                 a SHA-256 left out (no pin, nothing to verify)
+                 against), pushed_at (the capture's push time: Step 9b's evidence — the child looks for an object in
+                 the other accounts only when it was NOT a push of the last MAP_RECENT_DAYS at the moment its own
+                 account was checked), hint (hinted only)}] — alias-safe (an alias id resolves to its primary, a
+                 whole-library pass skips aliases), objects without a SHA-256 left out (no pin, nothing to verify)
       show, seasons   (series) the show folder and its season ids · notes: lines printed with the resolution
       unpinned   objects left out for want of a SHA-256 · gone: hints whose object no longer exists
     ValueError when the scope names nothing in the library."""
@@ -13226,14 +13226,10 @@ def _cp_resolve(library, scope, account, now):
             unpinned += 1
             continue
         route = routes[(obj["manual_id"], obj["label"])]
-        pushed = _mp_when(_mp_pushed_at(obj))
         record = {"manual_id": obj["manual_id"], "label": obj["label"], "sha256": obj["sha256"], "kind": obj["kind"],
                   "category": obj["category"], "uploaded_name": obj["uploaded_name"], "account": route["routing"],
                   "route": _cp_route_reason(route), "home": route["home"] or route["default"],
-                  "pushed_at": _mp_iso(pushed),
-                  # Step 9b: a push of the last MAP_RECENT_DAYS that is not found is simply not backed up yet — only an
-                  # older object is looked for in the other accounts before it is called lost (one Chrome each).
-                  "elsewhere": not (pushed is not None and now - pushed <= timedelta(days=MAP_RECENT_DAYS))}
+                  "pushed_at": _mp_pushed_at(obj)}
         if obj.get("hint"):
             record.update(account=obj["hint"]["account"], route="hint", hint=obj["hint"])
         out.append(record)
@@ -13347,7 +13343,9 @@ def _cp_new_run(resolved, scope_text, account, approaches, now):
     """Create a run directory <GPHOTOS_STATE_DIR>/check/<UTC yyyymmddThhmmssZ>[-n] and its run.json -> (run_dir, doc).
     run.json (written once, never changed): v, run, created_at, scope (canonical), scope_text (as typed), kind, account
     (--account or None), approaches, source (`confirm` for pending — P-11's post-backup confirmation — else `check`),
-    show + seasons (series), objects (the resolved objects, _cp_resolve's shape)."""
+    show + seasons (series), recent_days (MAP_RECENT_DAYS: Step 9b's window, which the child measures against the time
+    an object's own account was checked before it looks for it elsewhere), objects (the resolved objects, _cp_resolve's
+    shape)."""
     stamp = now.strftime("%Y%m%dT%H%M%SZ")
     root = _cp_root()
     os.makedirs(root, exist_ok=True)
@@ -13363,7 +13361,7 @@ def _cp_new_run(resolved, scope_text, account, approaches, now):
     doc = {"v": CHECK_RUN_VERSION, "run": f"check-{name}", "created_at": _mp_iso(now), "scope": resolved["canonical"],
            "scope_text": scope_text, "kind": resolved["kind"], "account": account, "approaches": approaches,
            "source": "confirm" if resolved["kind"] == "pending" else "check", "show": resolved["show"],
-           "seasons": resolved["seasons"], "objects": resolved["objects"]}
+           "seasons": resolved["seasons"], "recent_days": MAP_RECENT_DAYS, "objects": resolved["objects"]}
     _cp_write_json(os.path.join(run_dir, "run.json"), doc)
     return run_dir, doc
 
@@ -13463,12 +13461,19 @@ def _cp_recent(pushed_at, checked_at):
     return pushed >= checked - timedelta(days=MAP_RECENT_DAYS)
 
 
-def _cp_rows(doc, lines, library):
+def _cp_rows(doc, lines, library, complete):
     """Every run object's verdict row (CHECK_STATES) from its results.jsonl lines, in the run's order: status, account
     (where it was pinned, else the account it was checked in first), found (the line that pinned it exactly-one),
     routed_line, cross ({account: line}), decisive (found, else routed_line — the look the approach statistics count),
-    quality (the pinned item's), mismatch (pinned outside its home account), recent (Step 9b), and the map's row keys
-    its helpers read (pushed_at, library_position, partial_set, device, note, reason)."""
+    quality (the pinned item's), mismatch (pinned outside its home account), recent (Step 9b), error (why it could not
+    be checked), and the map's row keys its helpers read (pushed_at, library_position, partial_set, device, note,
+    reason).
+
+    An object its own account did not pin (not-found / wrong-item) that was a push of the last MAP_RECENT_DAYS when that
+    account was checked is not-backed-up-yet; an older one was looked for in the other accounts (the child's rule) and
+    is called in no account (possible-loss) only once those looks are done: one that failed makes it `error` (nothing
+    can be said), while the run is not `complete` an account still to look in leaves it `unchecked`, and an account
+    whose look was ambiguous (its name IS there) makes it `ambiguous` there."""
     checks, quality = {}, {}
     for line in lines:
         if line.get("kind") == "check":
@@ -13489,36 +13494,50 @@ def _cp_rows(doc, lines, library):
         qline = quality.get((found["account"], found.get("photo_id"))) if found else None
         q = {k: qline[k] for k in ("original_quality", "partial_upload", "archived")
              if qline and isinstance(qline.get(k), bool)}
-        recent = None
+        recent = error = None
+        decisive = found or routed
+        unseen = [a for a in mvcommon.GP_ACCOUNTS if a != obj["account"] and a not in cross]
         if routed is None:
             status = "unchecked"
         elif found is not None:
             status = ("inconsistent" if q.get("partial_upload") is True or q.get("original_quality") is False
                       else "confirmed")
         elif routed["outcome"] == "error":
-            status = "error"
+            status, error = "error", routed.get("error") or "error"
         elif routed["outcome"] == "ambiguous":
             status = "ambiguous"
         else:
             recent = _cp_recent(obj.get("pushed_at"), routed.get("at"))
-            status = "not-backed-up-yet" if recent else "possible-loss"
+            failed = next(((a, l) for a, l in cross.items() if l.get("outcome") == "error"), None)
+            there = next((l for l in cross.values() if l.get("outcome") == "ambiguous"), None)
+            if recent:
+                status = "not-backed-up-yet"
+            elif failed is not None:
+                status, error = "error", f"{failed[1].get('error') or 'error'} in '{failed[0]}'"
+            elif unseen and not complete:
+                status = "unchecked"
+            elif there is not None:
+                status, decisive = "ambiguous", there
+            else:
+                status = "possible-loss"
         row = {"manual_id": obj["manual_id"], "label": obj["label"], "sha256": obj["sha256"], "kind": obj["kind"],
                "category": obj["category"], "uploaded_name": obj["uploaded_name"], "routed": obj["account"],
                "home": obj.get("home") or obj["account"], "route": obj.get("route"), "pushed_at": obj.get("pushed_at"),
                "hint": bool(obj.get("hint")), "status": status,
-               "account": found["account"] if found else obj["account"], "found": found, "routed_line": routed,
-               "cross": cross, "decisive": found or routed, "quality": q,
+               "account": (found or decisive or {}).get("account") or obj["account"], "found": found,
+               "routed_line": routed, "cross": cross, "decisive": decisive, "quality": q,
                "mismatch": bool(found is not None and found["account"] != (obj.get("home") or obj["account"])),
-               "recent": recent, "library_position": positions.get(obj["manual_id"]), "partial_set": False,
-               "device": None, "note": None, "reason": None}
+               "recent": recent, "error": error, "library_position": positions.get(obj["manual_id"]),
+               "partial_set": False, "device": None, "note": None, "reason": None}
         if status == "possible-loss":
             same_name = (routed.get("content_key") and
                          ((routed.get("per_approach") or {}).get("exact_name") or {}).get("outcome") == "wrong-item")
             if same_name:
                 _mp_note(row, "the search for its exact name finds only other bytes (another upload or version?)")
-            unseen = [a for a in mvcommon.GP_ACCOUNTS if a != obj["account"] and a not in cross]
-            if unseen and obj.get("elsewhere", True):
-                _mp_note(row, f"not looked for in: {', '.join(unseen)} (no Chrome profile, or the run stopped first)")
+            if unseen:                 # a complete run looked in every account it could: these have no Chrome profile
+                _mp_note(row, f"not looked for in: {', '.join(unseen)} (no Chrome profile)")
+        elif status == "unchecked" and routed is not None:
+            _mp_note(row, f"not in '{obj['account']}' — the run stopped before it was looked for in: {', '.join(unseen)}")
         rows.append(row)
     return rows
 
@@ -13655,17 +13674,27 @@ def _cp_line(rows, status_counts=None):
     return " · ".join(f"{s} {counts[s]:,}" for s in CHECK_STATES if counts.get(s))
 
 
-def _cp_summary_line(doc, rows, status, applied=None):
+def _cp_check_command(doc):
+    """The check_photos command that continues a run (its resume key: scope, --account, --approaches)."""
+    return (f"python main.py check_photos {doc.get('scope_text') or doc.get('scope')}"
+            + (f" --account {doc['account']}" if doc.get("account") else "")
+            + (" --approaches all" if doc.get("approaches") == "all" else ""))
+
+
+def _cp_summary_line(doc, rows, status, applied=None, apply_run=False):
     """The run's ONE closing line (PLAN Step 13b's auto-confirm prints it as its summary): scope, objects, verdicts,
     state, what an apply recorded. Never a P-13 web marker."""
     tail = {"ok": "", "partial": " — partial: re-run the same command to continue",
             "stopped": " — stopped: re-run the same command to continue",
             "interrupted": " — interrupted: re-run the same command to continue"}.get(status, "")
+    if apply_run and tail:
+        tail = f" — the run is unfinished: continue it with {_cp_check_command(doc)}"
     applied_text = ""
     if applied is not None and applied.get("engine"):
         engine = applied["engine"]
         applied_text = (f" · applied: {len(engine.get('changed') or []):,} object(s) updated, "
-                        f"{engine.get('confirmed', 0):,} newly confirmed" if engine.get("status") in ("saved", "up-to-date")
+                        f"{engine.get('confirmed', 0):,} newly confirmed"
+                        if engine.get("status") in ("saved", "up-to-date", "nothing-to-apply")
                         else f" · NOT applied ({engine.get('status')})")
     return (f"🔎 check_photos {doc.get('scope_text') or doc.get('scope')}: {len(rows):,} object(s) — "
             f"{_cp_line(rows) or 'nothing'}{tail}{applied_text}")
@@ -13685,8 +13714,10 @@ def _cp_report_lines(ctx):
     if progress.get("state") == "complete":
         lines.append(f"State: complete — {checked:,} of {len(rows):,} object(s) checked")
     else:
+        how = (f"continue the check with: {_cp_check_command(doc)}" if ctx.get("apply_run")
+               else "re-run the same command to continue (--recheck starts afresh)")
         lines.append(f"State: {ctx['status']} ({progress.get('reason') or 'not finished'}) — {checked:,} of "
-                     f"{len(rows):,} object(s) checked; re-run the same command to continue (--recheck starts afresh)")
+                     f"{len(rows):,} object(s) checked; {how}")
     lines.append(f"Verdicts: {_cp_line(rows) or 'none yet'}")
     groups = {}
     for row in rows:
@@ -13739,9 +13770,12 @@ def _cp_report_lines(ctx):
                      f"python main.py resolve_photos failed, after --apply)")
     errors = [r for r in rows if r["status"] == "error"]
     if errors:
-        why = _cp_counts(errors, lambda r: (r["routed_line"] or {}).get("error") or "error")
+        why = _cp_counts(errors, lambda r: r["error"] or "error")
+        retry = ("re-running the same command continues this run and retries them" if progress.get("state") != "complete"
+                 else "check them again by id: python main.py check_photos <id>")
         lines.append(f"Not checked: {len(errors):,} object(s) — {' · '.join(f'{k} {n}' for k, n in sorted(why.items()))}"
-                     f" (a re-run of an unfinished run retries them)")
+                     f" ({retry})")
+        lines.extend(f"    {r['manual_id']} · {r['label']} — {r['error']}" for r in errors)
     outliers = ctx["outliers"]
     if outliers:
         kinds = _cp_counts(outliers, lambda o: o[1])
@@ -13777,11 +13811,16 @@ def _cp_apply_lines(ctx):
     out.extend(f"    conflict: {c['manual_id']} · {c['label']} · {c['account'] or 'block'} — {c['code']}"
                for c in applied["engine"].get("conflicts") or [])
     csv_state = applied.get("failed_csv")
-    if isinstance(csv_state, dict) and "warning" in csv_state:
+    if not isinstance(csv_state, dict):
+        pass
+    elif "warning" in csv_state:
         out.append(csv_state["warning"])
-    elif isinstance(csv_state, dict) and csv_state.get("kept"):
-        out.append("  failed_objects.csv: kept — it holds your edits (import them with map_photos --resolutions)")
-    elif isinstance(csv_state, dict):
+    elif csv_state.get("kept") and csv_state.get("edited_rows") is None:
+        out.append("  failed_objects.csv: kept — it no longer reads as the failed list (left as is)")
+    elif csv_state.get("kept"):
+        out.append(f"  failed_objects.csv: kept — it holds {csv_state['edited_rows']} edited row(s); import them with "
+                   f"python main.py map_photos <scope> --resolutions \"{csv_state['path']}\"")
+    else:
         out.append(f"  failed_objects.csv: regenerated — {csv_state['rows']:,} row(s)")
     return out
 
@@ -13799,15 +13838,200 @@ def _cp_finish(ctx):
     lines = _cp_report_lines(ctx)
     _mp_write_text(os.path.join(run_dir, "report.txt"), "\n".join(lines) + "\n")
     print("\n".join(lines))
-    print(_cp_summary_line(ctx["doc"], ctx["rows"], ctx["status"], ctx["applied"]))
+    print(_cp_summary_line(ctx["doc"], ctx["rows"], ctx["status"], ctx["applied"], ctx.get("apply_run", False)))
+
+
+# ------------------------------------------------------------------ the apply (--apply · --apply-run)
+_CP_STAGE_OF = {approach: stage for stage, approach in mvcommon.GP_STAGES.items()}   # approach -> learned approach.tried
+
+
+def _cp_records(doc, rows):
+    """The P-10 learned records an apply appends (PLAN Step 13) — validated by mvcommon's own normalizer:
+      * a CONFIRMED object (pinned exactly-one, quality not known bad): its item in the account it was pinned in —
+        photo_id, the item's facts, proof (dedupkey | filename: P-5 — a mapped cloud key never made a content proof),
+        source `confirm` for the pending scope (P-11's post-backup confirmation) else `check`, the pinning stage's
+        verdict, same-bytes alternates, the quality flags read — with the time of the check (verified_at); plus one
+        verdict-only record per OTHER stage evaluated there (approach.ok / approach.failed — PLAN Step 13: `all`
+        records them all). No verdict for a stage that errored (no verdict) or that answered exactly-one with ANOTHER
+        item (the approaches-disagree outlier: the user reviews it; the store gets no contradicting `ok`);
+      * every photo_id a look found gone (RPC and its own page agree) — a stale record in that account (it supersedes
+        what named it: the copy is no longer confirmed).
+    An inconsistent, ambiguous, not-found or unchecked object adds no learned record (no block is created for an
+    unconfirmed object — its row goes to the failed list)."""
+    source = doc.get("source") if doc.get("source") in ("check", "confirm") else "check"
+    records = []
+    for row in rows:
+        base = {"manual_id": row["manual_id"], "label": row["label"], "sha256": row["sha256"], "source": source}
+        found = row["found"]
+        if found is not None and row["status"] == "confirmed":
+            item = found.get("record") or {}
+            q = row["quality"]
+            records.append(mvcommon._normalize_learned(dict(
+                base, account=found["account"], at=found["at"], photo_id=found["photo_id"],
+                taken_ms=item.get("taken_ms"), tz_offset_ms=item.get("tz_offset_ms"), upload_ms=item.get("upload_ms"),
+                dedup_key=item.get("dedup_key"), gp_filename=item.get("filename"), width=item.get("width"),
+                height=item.get("height"), proof=found["proof"],
+                approach={"tried": found["stage"], "outcome": "exactly-one", "n": found["n"], "via": found["via"]},
+                alternates=list(found.get("alternates") or []) or None,
+                original_quality=q.get("original_quality"), partial_upload=q.get("partial_upload")), found["account"]))
+            via, picks = found.get("per_approach_via") or {}, found.get("per_approach_pick") or {}
+            same = {None, found["photo_id"], *(found.get("alternates") or [])}     # the item, or a same-bytes copy
+            for approach, verdict in (found.get("per_approach") or {}).items():
+                if (approach == found["approach"] or verdict["outcome"] == "error" or approach not in _CP_STAGE_OF
+                        or (verdict["outcome"] == "exactly-one" and picks.get(approach) not in same)):
+                    continue
+                records.append(mvcommon._normalize_learned(dict(
+                    base, account=found["account"], at=found["at"],
+                    approach={"tried": _CP_STAGE_OF[approach], "outcome": verdict["outcome"], "n": verdict["n"],
+                              "via": via.get(approach)}), found["account"]))
+        for line in [row["routed_line"]] + list(row["cross"].values()):
+            for photo_id in (line or {}).get("stale") or []:
+                records.append(mvcommon._normalize_learned(dict(
+                    base, account=line["account"], at=line["at"], photo_id=photo_id, stale=True,
+                    approach={"tried": "s0_photo_id", "outcome": "not-found", "n": 0, "via": "rpc"}), line["account"]))
+    return records
+
+
+def _cp_failed_records(doc, rows):
+    """The P-18 failed-list rows of an apply: every object with a reason (_cp_settle) — run, the account it was checked
+    in (pinned in, for an inconsistent one), category, object, uploaded name, expected_taken_local, tried (every stage's
+    verdict of its deciding look — exactly the {approach, outcome, n} entries locate_object gives), the candidates seen
+    (the pinned item first for an inconsistent one) and the reason. Validated by mvcommon's own normalizer."""
+    out = []
+    for row in rows:
+        if not row["reason"]:
+            continue
+        line = row["decisive"] or {}
+        tried = [{"approach": a, "outcome": v["outcome"], "n": v["n"]} for a, v in (line.get("per_approach") or {}).items()]
+        pool = ([row["found"]["photo_id"]] if row["status"] == "inconsistent" and row["found"] else []) + list(
+            line.get("candidates") or [])
+        candidates = [p for p in dict.fromkeys(pool) if isinstance(p, str) and gpweb.MEDIA_KEY_RE.match(p)]
+        out.append(mvcommon._normalize_failed({
+            "run": doc.get("run"), "account": row["account"], "category": row["category"], "manual_id": row["manual_id"],
+            "label": row["label"], "sha256": row["sha256"], "uploaded_name": row["uploaded_name"],
+            "expected_taken_local": line.get("expected_taken_local"), "tried": tried or None,
+            "candidates": candidates[:mainfetch_candidates_cap()] or None, "reason": row["reason"]}))
+    return out
+
+
+def mainfetch_candidates_cap():
+    """The failed list keeps as many candidates as the locator verifies in one stage (mainfetch.LOCATE_MAX_CANDIDATES)."""
+    import mainfetch  # its locator's constant; importing it has no side effects
+    return mainfetch.LOCATE_MAX_CANDIDATES
+
+
+def _cp_apply(run_dir, doc, rows):
+    """Record what a run proved (PLAN Step 13 --apply / --apply-run): the learned records (_cp_records) appended to the
+    per-account sidecars and the failed rows (_cp_failed_records) to the failed list — each only when not on record yet
+    (map_photos' _mp_append_new / _mp_append_failed: re-applying a run appends nothing twice) — then the apply engine (the
+    only writer of `gphotos` blocks) over the WHOLE sidecar, which re-checks every pin (a run older than a re-split cannot
+    corrupt a node: its records are orphans), and failed_objects.csv per P-18. applied.json in the run directory keeps the
+    counts. -> {learned: (new, known), failed: (new, known), engine, failed_csv, error}."""
+    summary = {"learned": (0, 0), "failed": (0, 0), "engine": None, "failed_csv": None, "error": None}
+    try:
+        records, failed = _cp_records(doc, rows), _cp_failed_records(doc, rows)
+        summary["learned"] = _mp_append_new(records, mvcommon.read_learned(),
+                                            lambda r: mvcommon.append_learned(r["account"], r))
+        summary["failed"] = _mp_append_failed(failed)
+        learned = mvcommon.read_learned()
+    except (OSError, ValueError) as e:
+        summary["error"] = (f"❌ check_photos: the apply stopped: {_gp_line(e)} — the library was not changed; re-run the "
+                            f"apply (records already appended are not appended twice)")
+        print(summary["error"])
+        return summary
+    summary["engine"] = gphotos_apply(learned, capture=True, dry_run=False)
+    summary["failed_csv"] = _mp_refresh_failed_csv(None)
+    engine = summary["engine"]
+    try:
+        _cp_write_json(os.path.join(run_dir, "applied.json"), {
+            "v": 1, "at": _mp_iso(mvcommon._now_utc()), "learned": {"new": summary["learned"][0],
+                                                                    "known": summary["learned"][1]},
+            "failed": {"new": summary["failed"][0], "known": summary["failed"][1]},
+            "engine": {"status": engine.get("status"), "changed": len(engine.get("changed") or []),
+                       "confirmed": engine.get("confirmed", 0), "conflicts": len(engine.get("conflicts") or []),
+                       "orphans": len(engine.get("orphans") or [])}})
+    except (OSError, TypeError, ValueError) as e:
+        print(f"   ⚠️  applied.json not written ({_gp_line(e)}) — the apply itself stands.")
+    return summary
+
+
+def _cp_canonical(library, scope, now):
+    """A scope as runs record it (_cp_resolve's canonical: series -> its show folder), or the scope as given when it no
+    longer resolves (its run can still be applied)."""
+    try:
+        return _cp_resolve(library, scope, None, now)["canonical"]
+    except ValueError:
+        return scope
+
+
+def _cp_apply_run(scope, account, approaches, which, devices):
+    """`check_photos <scope> --apply-run <run dir | latest>` (PLAN Step 13): apply a REVIEWED run's results without
+    searching again — no Chrome, no lock (the apply engine guards the library itself, OD-2). The run's recorded scope
+    (and --account; --approaches when given) must equal the given one, else the apply is refused; `latest` = the newest
+    COMPLETED run of that scope. An explicit run directory may be an unfinished run: what it settled is applied, the
+    objects it has not finished stay unchecked (no record, no failed row). The report and outliers.csv are written again
+    with the apply's section. -> the command's result (status ok | error)."""
+    now = mvcommon._now_utc()
+    library = load_library()
+    canonical = _cp_canonical(library, scope, now)
+    where = f" · account {account}" if account else ""
+    print(f"=== CHECK PHOTOS (APPLY-RUN {which}) — scope: {scope}{where} — no search, no Chrome ===")
+    if which == "latest":
+        runs = [(d, doc, prog) for d, doc, prog in _cp_runs() if _cp_matches(doc, canonical, account, approaches)]
+        found = next(((d, doc, prog) for d, doc, prog in runs if (prog or {}).get("state") == "complete"), None)
+        if found is None:
+            newest = (f" — its newest run {runs[0][0]} is unfinished: continue it with "
+                      f"{_cp_check_command(runs[0][1])}, or apply it by naming that directory" if runs else
+                      f" — run `python main.py check_photos {scope}{' --account ' + account if account else ''}` first")
+            print(f"❌ check_photos: no completed run of scope {scope!r}{where}{newest}.")
+            return {"status": "error", "run_dir": None}
+        run_dir, doc, progress = found
+    else:
+        run_dir = os.path.abspath(which)
+        doc = _cp_read_json(os.path.join(run_dir, "run.json"))
+        if doc is None or doc.get("v") != CHECK_RUN_VERSION or not isinstance(doc.get("objects"), list):
+            print(f"❌ check_photos: {run_dir} is not a check_photos run directory (no readable run.json).")
+            return {"status": "error", "run_dir": None}
+        if not _cp_matches(doc, canonical, account, approaches):
+            print(f"❌ check_photos: refused — that run checked scope {doc.get('scope_text') or doc.get('scope')!r}"
+                  f"{' · account ' + doc['account'] if doc.get('account') else ''} · approaches "
+                  f"{doc.get('approaches')}, not {scope!r}{where}{' · approaches ' + approaches if approaches else ''}. "
+                  f"Apply it with its own scope.")
+            return {"status": "error", "run_dir": run_dir}
+        progress = _cp_read_json(os.path.join(run_dir, "progress.json"))
+        if (progress or {}).get("state") != "complete":
+            print(f"  ⚠️  That run is unfinished ({(progress or {}).get('reason') or 'not finished'}) — what it settled is "
+                  f"applied; the objects it has not finished stay unchecked.")
+    print(f"  Run: {run_dir}")
+    complete = (progress or {}).get("state") == "complete"
+    rows = _cp_rows(doc, _cp_read_results(run_dir), library, complete)
+    summary = _cp_settle(library, rows, devices)
+    applied = _cp_apply(run_dir, doc, rows)
+    ctx = {"doc": doc, "rows": rows, "run_dir": run_dir, "progress": progress, "status": "ok" if complete else "partial",
+           "apply": True, "apply_run": True, "devices": summary, "applied": applied}
+    try:
+        _cp_finish(ctx)
+    except OSError as e:
+        print(f"❌ check_photos: the report could not be written to {run_dir} ({_gp_line(e)}) — what the apply recorded "
+              f"stays on record.")
+    failed = applied["error"] or (applied["engine"] or {}).get("status") in ("error", "aborted")
+    return {"status": "error" if failed else "ok", "run_dir": run_dir, "rows": rows, "applied": applied,
+            "outliers": ctx.get("outliers")}
 
 
 def _cp_after_child(run_dir, doc, library, status, progress, apply, devices):
-    """main's half after the child has run: the verdicts (_cp_rows + _cp_settle), the apply when asked (13.h), the report
-    and the outlier list. -> the command's result."""
-    rows = _cp_rows(doc, _cp_read_results(run_dir), library)
+    """main's half after the child has run: the verdicts (_cp_rows + _cp_settle), the apply when asked — after any run
+    but one the user interrupted (Ctrl+C: nothing is applied; re-running resumes and then applies) — the report and the
+    outlier list. -> the command's result."""
+    rows = _cp_rows(doc, _cp_read_results(run_dir), library, (progress or {}).get("state") == "complete")
     summary = _cp_settle(library, rows, devices)
     applied = None
+    if apply and status == "interrupted":
+        print("  ⏸️ Interrupted — nothing was applied; re-run the same command to continue (it applies at its end).")
+    elif apply:
+        applied = _cp_apply(run_dir, doc, rows)
+        if applied["error"] or (applied["engine"] or {}).get("status") in ("error", "aborted"):
+            status = "error"
     ctx = {"doc": doc, "rows": rows, "run_dir": run_dir, "progress": progress, "status": status, "apply": apply,
            "devices": summary, "applied": applied}
     try:
@@ -13822,9 +14046,37 @@ def _cp_after_child(run_dir, doc, library, status, progress, apply, devices):
 
 def cmd_check_photos(scope, approaches=None, account=None, recheck=False, apply=False, apply_run=None, limit=None,
                      pace=None, max_minutes=None, devices=False, list_only=False):
-    """`check_photos` (PLAN Step 13) — see the section comment above. [WIP: the apply follows.]"""
+    """`check_photos` (PLAN Step 13) — download-free verification of uploaded objects in Google Photos (see the section
+    comment above). A DRY RUN by default: it writes only its run directory.
+
+    scope        an item id (an alias resolves) · a season_map id · series:<season id | episode id | show folder> · an
+                 id prefix · account:<a> · pending (pushed, not yet confirmed) · hinted (the user's resolutions) · all —
+                 always printed before anything runs
+    approaches   best (default: stop at the first stage that pins the object) | all (every stage — approach.ok /
+                 approach.failed, the OD-7 sweep)
+    account      only the objects checked first in that account (their routing)
+    recheck      start a new run instead of continuing the newest unfinished run of the same scope / account /
+                 approaches (a complete run is never continued)
+    apply        run the check, then record what it proved (unless it was interrupted): learned records (source check,
+                 `confirm` for pending), stale photo_ids, the failed list (P-18 — only an apply writes it), the apply
+                 engine (the only writer of `gphotos` blocks; it re-checks every pin), failed_objects.csv, applied.json
+    apply_run    a run directory or `latest` (the newest COMPLETED run of the scope): apply that reviewed run without
+                 searching again — its recorded scope must be this one, else refused (no Chrome, no lock)
+    limit · max_minutes · pace   bound an invocation (objects checked in their own account · minutes) / the seconds
+                 between two objects — a bounded run is partial: the same command continues it
+    devices      Step 9b's phone opt-in: the read-only device check refines an OLD object found in no account
+    list_only    `pending --list`: the pending objects, offline (no Chrome, nothing written)
+
+    -> {status, run_dir, rows (the verdict rows, CHECK_STATES), outliers, devices, applied (the apply's summary or
+    None), progress}. status: ok (a complete run) · partial (--limit / --max-minutes: re-run to continue) · stopped
+    (signed out, Chrome, the error breaker, the lock taken over …: re-run to continue once fixed) · interrupted
+    (Ctrl+C: nothing applied) · refused (the fetch lock is held: nothing ran) · error (a bad scope, the child could
+    not run, a report or the apply failed). main.py's dispatcher exits 1 on CHECK_FAILED_STATUSES. --apply-run ->
+    {status ok | error, run_dir, rows, applied, outliers}; --list -> {status ok, objects, routes}."""
     if list_only:
         return _cp_pending_list(account)
+    if apply_run is not None:
+        return _cp_apply_run(scope, account, approaches, apply_run, devices)
     now = mvcommon._now_utc()
     library = load_library()
     approaches = approaches or "best"

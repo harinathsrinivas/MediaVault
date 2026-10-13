@@ -5096,6 +5096,15 @@ def _check_key(obj):
     return obj.get("manual_id"), obj.get("label"), obj.get("sha256")
 
 
+def _check_recent(pushed_at, checked_at, days):
+    """Step 9b (main._cp_recent's rule): True when the push ('…Z') is no older than `days` at the moment the object's
+    account was checked ('…Z'); False when a time or the window is unknown (no push time: not a recent push)."""
+    pushed, checked = mvcommon._parse_at(pushed_at), mvcommon._parse_at(checked_at)
+    if pushed is None or checked is None or not (isinstance(days, (int, float)) and not isinstance(days, bool)):
+        return False
+    return pushed >= checked - timedelta(days=days)
+
+
 def _check_state(lines):
     """{object key: {"routed": its newest routed line, "cross": {account: newest line}, "found": a line that pinned it
     exactly-one}} from a run's results.jsonl lines (kind "check")."""
@@ -5124,6 +5133,7 @@ class _CheckRun:
         self.objects = [o for o in doc.get("objects") or [] if isinstance(o, dict)
                         and o.get("account") in mvcommon.GP_ACCOUNTS and mvcommon._is_sha256(o.get("sha256"))]
         self.approaches = doc.get("approaches") if doc.get("approaches") in ("best", "all") else "best"
+        self.recent_days = doc.get("recent_days")   # Step 9b's window (main's MAP_RECENT_DAYS)
         self.state = _check_state(lines)
         self.limit, self.pace, self.invocation, self.max_minutes = limit, pace, invocation, max_minutes
         self.deadline = time.time() + max_minutes * 60 if max_minutes else None
@@ -5143,11 +5153,15 @@ class _CheckRun:
 
     def needs_elsewhere(self, obj):
         """True when an object is to be looked for in the other accounts: it is not pinned anywhere, its own account
-        answered not-found or wrong-item (its name there holds other bytes) — not ambiguous: its name IS there — and it
-        is not a push of the last MAP_RECENT_DAYS (run.json `elsewhere`, set by main — Step 9b: not backed up yet)."""
+        answered not-found or wrong-item (its name there holds other bytes) — not ambiguous: its name IS there — and,
+        Step 9b, it was not a push of the last `recent_days` (run.json: main's MAP_RECENT_DAYS) when its own account
+        was checked: such a push is simply not backed up yet (P-19: the auto-confirm opens only the accounts it needs).
+        Measured at the check — exactly main's verdict rule — so a run resumed days later decides as its verdict does."""
         st = self.state.get(_check_key(obj))
-        return (obj.get("elsewhere", True) is True and st is not None and st["found"] is None
-                and st["routed"] is not None and st["routed"].get("outcome") in ("not-found", "wrong-item"))
+        if not (st is not None and st["found"] is None and st["routed"] is not None
+                and st["routed"].get("outcome") in ("not-found", "wrong-item")):
+            return False
+        return not _check_recent(obj.get("pushed_at"), st["routed"].get("at"), self.recent_days)
 
     def cross_todo(self, obj, account):
         if account == obj["account"] or (_check_key(obj), account) in self.tried or not self.needs_elsewhere(obj):

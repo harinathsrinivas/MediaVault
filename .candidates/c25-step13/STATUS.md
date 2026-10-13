@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13.h apply (--apply / --apply-run)
+STATE: IN PROGRESS — next: 13.i resumability + never-downloads pin + whole-diff self-review
 
 # IMP-C25 Step 13 — `check_photos`: download-free verification, sweep and confirm — resumable status
 
@@ -82,9 +82,23 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       batch's other episodes, a split's sibling chunks); an unpinned object is Step 9b's not-backed-up-yet /
       possible-loss, its failed-list reason keeps wrong-item (the fetch's own reason chain), and a content-keyed object
       whose exact-name search finds only other bytes gets a note
-- [ ] 13.h main: apply — `--apply` (check, then apply) and `--apply-run <dir|latest>` (no search; scope must match;
+- [x] 13.h main: apply — `--apply` (check, then apply) and `--apply-run <dir|latest>` (no search; scope must match;
       latest = newest completed run): learned records (source check | confirm), stale records, failed rows (P-18, apply
-      only), idempotent appends, the apply engine, failed_objects.csv, applied.json — tests
+      only), idempotent appends, the apply engine, failed_objects.csv, applied.json — tests: tests/test_check_photos.py
+      147 passed (+20: the whole apply on a 4-mode season (records, proofs, stages, quality, blocks confirmed, a legacy
+      object's cloud key never a block content key, the failed row + failed_objects.csv, applied.json, report, summary),
+      a dry run then --apply-run latest / by directory (no Chrome, no child, appended once), refusals (scope · account ·
+      approaches · not a run dir), latest needs a complete run (names the unfinished one; none at all), an unfinished
+      run applied by its directory (its unfinished object stays unchecked, no failed row), pending --apply (source
+      confirm, the pending list empties), found in another account (recorded there, home_account, routed there next),
+      a gone photo_id (stale record, the re-upload the identity), inconsistent copies (no identity, failed rows,
+      nothing-to-apply is no failure), Ctrl+C (nothing applied; the re-run applies the whole run), --max-minutes +
+      --apply then the rest, --approaches all (ok / failed per stage), ambiguous stages recorded failed, an exactly-one
+      on ANOTHER item makes no ok claim, the look elsewhere decided at the check, a failed look elsewhere (error, no
+      loss), an ambiguous look elsewhere (ambiguous there), an apply that cannot record (sidecar · engine) fails);
+      test_locator + test_map_photos 230 passed — WIP SHA in the commit that ticks this line. Two 13.b assertions and
+      one 13.g assertion of this file changed with the refined rules below (`elsewhere` left run.json; a complete
+      run's retry hint)
 - [ ] 13.i resumability (resume / --recheck / limit + max-minutes continue / complete → new run) + never-downloads pin
       + whole-diff self-review fixes — tests
 - [ ] 13.j gates: disarm probes (isolated scratch copy) · full suite · smoke · live read-only dry run if port 9222 is
@@ -111,6 +125,13 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
    phone opt-in (map's `_mp_device_check`). An ambiguous object (its name IS in its account) is not looked for
    elsewhere. A newest-set pick (several same-name uploads, different bytes) is NOT confirmed
    (ambiguous). A found item flagged partial_upload / not original quality → inconsistent (never confirmed).
+   REFINED in 13.h (so an apply never books a verdict that is not final): the look-elsewhere decision is taken by the
+   child AT THE CHECK (run.json `recent_days` + each object's `pushed_at` vs its routed line's `at` — exactly main's
+   verdict rule; the creation-time `elsewhere` flag is gone: a run resumed across the 7-day boundary stays
+   consistent); an object whose look elsewhere ERRORED → `error` ("RuntimeError in 'anime'"; no loss claimed, no
+   failed row); while the run is not complete, an account still to look in → `unchecked` (note names them); a look
+   elsewhere that was AMBIGUOUS → `ambiguous` in that account (its failed row names it and its candidates). In a
+   complete run, accounts never looked in had no Chrome profile (the possible-loss note says so).
 5. Resume: re-running the same key (scope + --account + approaches) continues the newest unfinished run: objects with
    a final result are skipped, `error` results are retried; `--recheck` starts a fresh run; a completed run is never
    resumed (the next run starts fresh). Library-confirmed objects are NOT skipped (R3's check after map --apply and
@@ -119,7 +140,13 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
    filename; approach of the pinning stage; same-bytes alternates; quality flags) + one verdict-only record per other
    evaluated approach (approach.ok / approach.failed); stale photo_ids → stale records; NOT found → failed list only
    (no library block is created for an unconfirmed object). Appends are idempotent (map's `_mp_append_new` /
-   `_mp_append_failed`).
+   `_mp_append_failed`). REFINED in 13.h: no verdict-only record for a stage that errored, or that answered
+   exactly-one with ANOTHER item than the recorded one or its same-bytes alternates (a contradicting `ok` — the
+   approaches-disagree outlier is the user's to review); an ambiguous stage IS recorded failed (true: it does not pin
+   the object). `--apply` applies after any run but an interrupted one (Ctrl+C: nothing applied; the re-run applies
+   the whole run); `--apply-run <dir>` may apply an unfinished run (its unfinished objects stay unchecked);
+   `latest` = the newest COMPLETE run of the scope (else the error names the unfinished run). An apply that cannot
+   append, or whose engine errs / aborts → status error (exit 1).
 7. Chrome: every session ends with `_close_session` (Step 11 i) and then, if the Chrome this run LAUNCHED still runs
    (its Popen handle: poll() is None), it is killed through that handle and its profile marked cleanly exited — also
    after an error or Ctrl+C. The run's fetch journal records each session, so a hard-killed check is cleaned up by the
@@ -142,3 +169,6 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
   on the coordinator's word (tree clean at 5c46140).
 - Model: session env claude-fable-5-1; the harness's commit-attribution notice alternates Fable 5.1 / Opus 5.5 (the
   quirk Steps 8–12 recorded) — each commit carries the notice current at commit time.
+- 2026-10-13 resumed after a limit (coordinator: 13.e–13.g committed at c79b58b, port 9222 free). The uncommitted 13.h
+  main.py diff (the apply functions) was coherent: kept, completed and tested; the verdict refinements of decisions 4 /
+  6 were found while writing its tests (an apply must never book a verdict that is not final).

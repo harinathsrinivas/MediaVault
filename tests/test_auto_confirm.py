@@ -5,6 +5,10 @@ datetime/PLAN.md P-11, P-19, Step 13b).
          an unknown push time), the Chrome profiles of the accounts the old objects route to, the fetch lock (held ·
          stale), the exact child command line through main._cp_spawn (the check's streaming idiom), the child failing /
          interrupted / not startable and any other error -> ONE warning line; it never raises
+  13b.b  after_push_command — the success decision: False -> nothing (the library is not even read); a truthy result ->
+         the auto-confirm; None -> the run's end state (prep_push_rep: its entry archived · prep_push_rep_season: every
+         target of the run archived · push_group: every target uploaded — ranges, aliases, id prefixes); the switch
+         read first; errors -> one warning line; tests/conftest.py's guard (every other test: inert recorders)
 
 Hermetic: the sandbox library (tests/conftest.py), a fixed clock (mvcommon._now_utc), a runner standing in for
 main._cp_spawn (tests/conftest.py's _hermetic_check_child refuses the real child — a child process would see none of a
@@ -410,3 +414,193 @@ def test_the_auto_confirm_itself_writes_nothing(ac, sandbox, tmp_path):
     assert {p: p.read_bytes() for p in sandbox["lib_movies"].parent.iterdir()} == libraries
     assert {p for p in tmp_path.rglob("*")} - before == {ac.lock.parent, ac.lock.parent.parent}
     assert not os.path.exists(mvcommon.GPHOTOS_STATE_DIR)
+
+
+# ===========================================================================
+# 13b.b — after_push_command: the success decision
+# ===========================================================================
+SEASON = "tv-en-2020-acseason-s01"
+FLAT = "tv-en-2020-acflat-s01"          # a "season" of plain leaves, no season_map: push_group's id-prefix mode
+AUTO = "mov-en-2022-acauto"
+
+
+def _state(root, mid, status, uploaded=None):
+    """A leaf in a given state — no capture, so never pending itself (uploaded: onboarded / archived, unless given)."""
+    mid, entry = _leaf(root, mid, capture=False)
+    entry["status"] = status
+    entry["uploaded"] = status in ("onboarded", "archived") if uploaded is None else uploaded
+    return mid, entry
+
+
+def _season(root, base, states):
+    """A season_map `base` whose episodes e01… are in the given states -> [(id, entry)…] (the map first)."""
+    children = [f"{base}e{n:02d}" for n in range(1, len(states) + 1)]
+    leaves = [_state(root, cid, status) for cid, status in zip(children, states)]
+    return [(base, {"type": "season_map", "folder_path": str(root), "total_episodes": len(children),
+                    "children": children})] + leaves
+
+
+def _old(root):
+    """The old pending object that makes a success observable: with it, a succeeded command runs the check child."""
+    return _leaf(root, MOVIE, hours_ago=30)
+
+
+def test_a_command_that_returned_false_gets_nothing_and_nothing_is_read(ac, monkeypatch, capsys):
+    _save(_old(ac.root))
+    monkeypatch.setattr(main, "load_library", lambda: pytest.fail("a failed command must not even read the library"))
+
+    assert main.after_push_command("push", False, MOVIE) is None
+    assert capsys.readouterr().out == "" and ac.child.calls == []
+
+
+@pytest.mark.parametrize("result", [True, 1, "ok"])
+def test_a_command_that_returned_a_true_value_runs_the_auto_confirm(ac, capsys, result):
+    _save(_old(ac.root))
+
+    assert main.after_push_command("push", result, MOVIE) == "ran"
+    assert capsys.readouterr().out.splitlines() == [_header(1), SUMMARY]
+
+
+@pytest.mark.parametrize("command,result", [("push", True), ("prep_push_rep", None), ("push_group", None)])
+def test_turned_off_the_hook_reads_nothing_whatever_the_result(ac, monkeypatch, capsys, command, result):
+    _save(_old(ac.root), _state(ac.root, AUTO, "archived"))
+    monkeypatch.setattr(mvcommon, "_CONFIG_CACHE", {"auto_confirm_after_push": False})
+    monkeypatch.setattr(main, "load_library", lambda: pytest.fail("a disabled auto-confirm must not read the library"))
+
+    assert main.after_push_command(command, result, AUTO) == "disabled"
+    captured = capsys.readouterr()
+    assert captured.out == "" and captured.err == "" and ac.child.calls == []
+
+
+def test_an_invalid_switch_warns_once_per_push(ac, monkeypatch, capsys):
+    _save(_old(ac.root))
+    monkeypatch.setattr(mvcommon, "_CONFIG_CACHE", {"auto_confirm_after_push": "off"})
+
+    assert main.after_push_command("push", True, MOVIE) == "disabled"
+    captured = capsys.readouterr()
+    assert captured.out == "" and len(captured.err.splitlines()) == 1
+
+
+@pytest.mark.parametrize("state,outcome", [
+    ("archived", "ran"),        # ✅✅✅ AUTO-PILOT COMPLETE
+    ("onboarded", None),        # pushed, then replace failed — or hard-failed past its PONR before its save
+    ("local_ready", None),      # the push failed (Auto-Pilot Paused) or the unsplittable-track refusal
+    (None, None),               # prep failed: no entry at all
+])
+def test_prep_push_rep_succeeded_when_its_entry_is_archived(ac, capsys, state, outcome):
+    leaves = [_old(ac.root)] + ([_state(ac.root, AUTO, state)] if state else [])
+    _save(*leaves)
+
+    assert main.after_push_command("prep_push_rep", None, AUTO) == outcome
+    assert len(ac.child.calls) == (outcome == "ran")
+    if outcome is None:
+        assert capsys.readouterr().out == ""
+
+
+def test_prep_push_rep_on_an_alias_id_never_succeeds(ac):
+    # cmd_prep refuses an alias id ("prep the primary instead") — the run archived nothing, whatever its primary's state
+    primary, alias = f"{SEASON}e01", f"{SEASON}e02"
+    _save(_old(ac.root), _state(ac.root, primary, "archived"),
+          (alias, {"type": "multi_ep_alias", "alias_of": primary, "parent_id": SEASON}))
+
+    assert main.after_push_command("prep_push_rep", None, alias) is None
+    assert ac.child.calls == []
+
+
+@pytest.mark.parametrize("states,episode_range,outcome", [
+    (["archived", "archived", "archived"], None, "ran"),          # ✅✅✅ SEASON AUTO-PILOT COMPLETE
+    (["archived", "onboarded", "archived"], None, None),          # an already-uploaded episode's replace failed
+    (["archived", "local_ready", "local_ready"], None, None),     # stopped at e02 (push incomplete / a hard fail)
+    (["local_ready", "archived", "archived"], "2-3", "ran"),      # only the run's own range counts
+    (["archived", "archived", "local_ready"], "2-3", None),
+    (["archived", "archived"], "x-y", None),                      # an invalid range: "❌ Invalid range."
+    (["archived", "archived"], "5-6", None),                      # a range that selects nothing
+])
+def test_prep_push_rep_season_succeeded_when_every_target_of_the_run_is_archived(ac, states, episode_range, outcome):
+    _save(_old(ac.root), *_season(ac.root, SEASON, states))
+
+    assert main.after_push_command("prep_push_rep_season", None, SEASON, episode_range) == outcome
+    assert len(ac.child.calls) == (outcome == "ran")
+
+
+def test_prep_push_rep_season_whose_season_was_never_created_never_succeeds(ac):
+    # "❌ Prep failed. Base ID not found." — nothing to judge, nothing archived
+    _save(_old(ac.root))
+    assert main.after_push_command("prep_push_rep_season", None, SEASON) is None
+
+
+def test_a_season_alias_child_is_judged_as_its_primary(ac):
+    # the combined episode e02 is an alias of e01 (archived): the run's targets de-alias to [e01]
+    season = _season(ac.root, SEASON, ["archived"])
+    season[0][1]["children"].append(f"{SEASON}e02")
+    _save(_old(ac.root), *season, (f"{SEASON}e02", {"type": "multi_ep_alias", "alias_of": f"{SEASON}e01",
+                                                    "parent_id": SEASON}))
+
+    assert main.after_push_command("prep_push_rep_season", None, SEASON) == "ran"
+
+
+@pytest.mark.parametrize("states,episode_range,outcome", [
+    (["onboarded", "onboarded", "archived"], None, "ran"),        # uploaded: onboarded and archived alike
+    (["onboarded", "local_ready", "onboarded"], None, None),      # one episode's push failed — the loop went on
+    (["local_ready", "onboarded", "onboarded"], "2-3", "ran"),
+    (["onboarded", "onboarded"], "bad", None),                    # "❌ Invalid episode range format"
+])
+def test_push_group_on_a_season_succeeded_when_every_target_is_uploaded(ac, states, episode_range, outcome):
+    _save(_old(ac.root), *_season(ac.root, SEASON, states))
+
+    assert main.after_push_command("push_group", None, SEASON, episode_range) == outcome
+
+
+@pytest.mark.parametrize("episode_range,outcome", [("1-2", "ran"), (None, None), ("3-3", None)])
+def test_push_group_by_id_prefix_succeeded_when_every_matching_target_is_uploaded(ac, episode_range, outcome):
+    # no season_map: every other id starting with the group id (sorted), then the range — cmd_push_group's prefix mode
+    _save(_old(ac.root), _state(ac.root, f"{FLAT}e01", "onboarded"), _state(ac.root, f"{FLAT}e02", "archived"),
+          _state(ac.root, f"{FLAT}e03", "local_ready"), _state(ac.root, "tv-en-2020-acother-s01e01", "local_ready"))
+
+    assert main.after_push_command("push_group", None, FLAT, episode_range) == outcome
+
+
+def test_push_group_that_matched_nothing_never_succeeds(ac):
+    # "❌ No items found to push."
+    _save(_old(ac.root))
+    assert main.after_push_command("push_group", None, "tv-en-2099-nothing-s01") is None
+
+
+@pytest.mark.parametrize("command", ["push", "prep_push_rep_enrich", "prep_push_rep_season_enrich", "sort"])
+def test_a_none_from_a_command_that_never_returns_none_is_no_success(ac, command):
+    _save(_old(ac.root), _state(ac.root, AUTO, "archived"))
+    assert main.after_push_command(command, None, AUTO) is None
+    assert ac.child.calls == []
+
+
+def test_an_unreadable_library_in_the_success_decision_prints_one_warning(ac, sandbox, capsys):
+    sandbox["lib_movies"].write_text("{broken", encoding="utf-8")
+
+    assert main.after_push_command("prep_push_rep", None, AUTO) == "error"     # never raises: the exit code stays
+    out = capsys.readouterr().out.splitlines()
+    assert out[-1] == _warning("SystemExit: 1")
+    assert sum(line.startswith("⚠️  Auto-confirm") for line in out) == 1
+
+
+def test_ctrl_c_during_the_success_decision_prints_one_warning(ac, monkeypatch, capsys):
+    def interrupted():
+        raise KeyboardInterrupt
+    monkeypatch.setattr(main, "load_library", interrupted)
+
+    assert main.after_push_command("push", True, MOVIE) == "error"
+    assert capsys.readouterr().out.splitlines() == [_warning("interrupted")]
+
+
+def test_every_other_test_gets_an_inert_auto_confirm(sandbox, capsys):
+    # tests/conftest.py's autouse _hermetic_auto_confirm, without the real_auto_confirm opt-in: both entry points record
+    # their calls and do nothing — no library read, no line, no lock, no child — so a dispatcher test sees the push
+    # command exactly as before.
+    from conftest import _InertAutoConfirm
+    root = sandbox["local_root"] / "Items"
+    _save(_leaf(root, MOVIE, hours_ago=30))
+
+    assert isinstance(main.after_push_command, _InertAutoConfirm)
+    assert isinstance(main.maybe_auto_confirm, _InertAutoConfirm)
+    assert main.after_push_command("push", True, MOVIE) is None
+    assert main.after_push_command.calls == [(("push", True, MOVIE), {})]
+    assert capsys.readouterr().out == ""

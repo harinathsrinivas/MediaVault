@@ -14186,6 +14186,11 @@ def _auto_confirm_warning(why):
             f"check_photos pending --apply")
 
 
+def _auto_confirm_why(exc):
+    """What stopped the auto-confirm, in one line: Ctrl+C -> 'interrupted', anything else its type and message."""
+    return "interrupted" if isinstance(exc, KeyboardInterrupt) else _gp_line(exc)
+
+
 def maybe_auto_confirm(library=None):
     """PLAN P-19 — after a push-family command SUCCEEDED (after_push_command decided it), confirm in Google Photos the
     pushed objects that have had time to be backed up. In this order:
@@ -14239,8 +14244,90 @@ def maybe_auto_confirm(library=None):
             return "failed"
         return "ran"
     except BaseException as e:   # never raise: SystemExit (load_library on a corrupt file) and Ctrl+C included
-        print(_auto_confirm_warning("interrupted" if isinstance(e, KeyboardInterrupt) else _gp_line(e)))
+        print(_auto_confirm_warning(_auto_confirm_why(e)))
         return "error"
+
+
+# "Succeeded" for the three push-family commands whose function returns None on success AND on its handled failures
+# (cmd_push_group, cmd_prep_push_rep — which even turns a post-PONR RollbackHardFail into a bare return — and
+# cmd_prep_push_rep_season; tests/test_auto_confirm.py documents all six return contracts): None alone cannot tell them
+# apart (webui/server.py's _NONE_IS_SUCCESS reached the same conclusion), so their success is read from the end state the
+# run left in the library — the signal the IMP-D22 enrich autopilots already use for their own archive leg.
+
+def _push_group_run_target_ids(library, group_id, episode_range):
+    """The ordered, de-aliased ids a `push_group <group_id> [episodes <range>]` run targeted — cmd_push_group's own
+    derivation (keep in sync; it does not expose the list): a season_map's children (_season_run_target_ids, the same
+    steps), else every other id starting with `group_id`, sorted; then the episode range; then de-aliased. [] when
+    nothing matches, or for an invalid range (cmd_push_group then printed "❌ Invalid episode range format" and pushed
+    nothing)."""
+    entry = library.get(group_id)
+    if isinstance(entry, dict) and entry.get("type") == "season_map":
+        return _season_run_target_ids(library, group_id, episode_range)
+    target_ids = sorted(k for k in library if k.startswith(group_id) and k != group_id)
+    if episode_range:
+        try:
+            start, end = map(float, episode_range.split('-'))
+        except ValueError:
+            return []
+        filtered_ids = []
+        for mid in target_ids:
+            ep_num = episode_num_from_id(mid, group_id)
+            if ep_num is not None and start <= ep_num <= end:
+                filtered_ids.append(mid)
+        target_ids = filtered_ids
+    seen, dealiased = set(), []
+    for mid in target_ids:
+        real_id, _ = _resolve_alias(library, mid)
+        if real_id not in seen:
+            seen.add(real_id)
+            dealiased.append(real_id)
+    return dealiased
+
+
+def _push_command_completed(library, command, target, episode_range):
+    """Did THIS run of a None-returning push-family command reach its end state? Read from the library it saved:
+      prep_push_rep         its entry is archived — the id as given: cmd_prep refuses an alias id, so a run on one
+                            archives nothing (its primary's state says nothing about this run)
+      prep_push_rep_season  every target of the run (_season_run_target_ids: the season, or its episode range) is
+                            archived
+      push_group            every target of the run (_push_group_run_target_ids) is uploaded (cmd_push_group's own
+                            "already uploaded" test)
+    Any other command: False — a None it never returns is no success."""
+    if command == "prep_push_rep":
+        entry = library.get(target)
+        return isinstance(entry, dict) and entry.get("status") == "archived"
+    if command == "prep_push_rep_season":
+        ids = _season_run_target_ids(library, target, episode_range)
+        return bool(ids) and all(library.get(mid, {}).get("status") == "archived" for mid in ids)
+    if command == "push_group":
+        ids = _push_group_run_target_ids(library, target, episode_range)
+        return bool(ids) and all(library.get(mid, {}).get("uploaded") == True for mid in ids)  # noqa: E712
+    return False
+
+
+def after_push_command(command, result, target=None, episode_range=None):
+    """THE auto-confirm hook (PLAN P-19 / Step 13b). main.py's CLI dispatcher calls it right after a push-family command's
+    function RETURNED, with that function's return value (`result`) and what the run worked on (`target` — its id,
+    season id or group id — and `episode_range`). An exception — RollbackHardFail, SystemExit, KeyboardInterrupt, any —
+    never reaches it: the dispatcher does not catch one, exactly as before this hook existed.
+
+    Succeeded = returned normally and not False (PLAN Step 13b) — and, for a None result, the run reached the command's
+    end state (_push_command_completed): three of the six return None on their handled failures too. Succeeded ->
+    maybe_auto_confirm() with the library just read; not succeeded -> nothing at all (no line, no Chrome). The switch is
+    read first, so a disabled auto-confirm reads nothing. Never raises (one warning line).
+    -> maybe_auto_confirm's outcome, "disabled", "error", or None when the command did not succeed."""
+    if result is False:
+        return None
+    try:
+        if not _auto_confirm_on():
+            return "disabled"
+        library = load_library()
+        if result is None and not _push_command_completed(library, command, target, episode_range):
+            return None
+    except BaseException as e:   # never raise: SystemExit (load_library on a corrupt file) and Ctrl+C included
+        print(_auto_confirm_warning(_auto_confirm_why(e)))
+        return "error"
+    return maybe_auto_confirm(library)
 
 
 # ==========================================

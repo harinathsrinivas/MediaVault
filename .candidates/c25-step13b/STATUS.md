@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13b.b (after_push_command: the success decision + the conftest guard for it)
+STATE: IN PROGRESS — next: 13b.c (the CLI dispatcher wiring after the six push-family branches)
 
 # IMP-C25 Step 13b — auto-confirm unverified objects at the end of the next push (OD-6 ruling) — resumable status
 
@@ -32,11 +32,18 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       autouse `_hermetic_auto_confirm` (maybe_auto_confirm is an inert recorder in every test) + the opt-in
       `real_auto_confirm` (the real one, its fetch lock under tmp_path, hard-guarded). Neighbours (test_check_photos,
       test_prep_push_rep_enrich_cli, test_prep_keeps_split_record, test_cli_parsers, test_fetch_child_stream) 322
-      passed; smoke 82 passed — WIP SHA in the commit that ticks this line
-- [ ] 13b.b main: `after_push_command(command, result, target, episode_range)` — the success decision (False → nothing;
+      passed; smoke 82 passed — ea3e4bd
+- [x] 13b.b main: `after_push_command(command, result, target, episode_range)` — the success decision (False → nothing;
       None → the run's end state for the three None-returning commands) then maybe_auto_confirm; the post-condition
-      helpers; tests/conftest.py autouse guard (`_hermetic_auto_confirm`: the hook is an inert recorder in every test)
-      + the `real_after_push_command` opt-in fixture — tests
+      helpers (`_push_command_completed`, `_push_group_run_target_ids` — cmd_push_group's own target derivation;
+      prep_push_rep_season reuses D22's `_season_run_target_ids`); tests/conftest.py: the guard now also makes
+      main.after_push_command an inert recorder, `real_auto_confirm` restores both — tests/test_auto_confirm.py 84
+      passed (+37: False reads nothing, truthy ×3, off reads nothing ×3, an invalid switch warns once, prep_push_rep
+      ×4 states + an alias id, prep_push_rep_season ×7 (states, ranges, invalid / empty range) + no season + an alias
+      child, push_group on a season ×4 + by id prefix ×3 + nothing matched, a None from the other commands ×4, an
+      unreadable library / Ctrl+C in the decision → one warning, the guard in every other test). Neighbours (+
+      test_prep_push_rep_enrich, test_prep_push_rep_season_enrich) 390 passed; smoke 82 passed — WIP SHA in the commit
+      that ticks this line
 - [ ] 13b.c main: the CLI dispatcher wiring after the six push-family branches (push incl. its extras-only path,
       push_group, prep_push_rep, prep_push_rep_season, prep_push_rep_enrich, prep_push_rep_season_enrich) — tests:
       call-site pins per verb, success + old → exact argv, every failure / exception → nothing, the child failing

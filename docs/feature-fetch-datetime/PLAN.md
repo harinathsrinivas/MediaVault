@@ -1052,6 +1052,22 @@ inconsistencies. Defects found here become Step 9b fix-ups (recorded in PROGRESS
   search term → S3u tried; not uploaded; quit mid-way then resume skips answered rows; non-TTY refusal; final apply
   prompt declined → library untouched).
 
+- Follow-ups carried into Step 14 (orchestrator, 2026-10-14; sources: DECISIONS §1e/§1f, Steps 10–13 reports):
+  a. `--manual` picks up objects the locator booked `failed` (Step 12/C note: an unlocated object now ends `failed`
+     after today's attempts with a failed-list row) — run before that point or take the `failed` ones; act on
+     `ctx.manual` at the end of `_fetch_items`; add `--manual` to the fetch / fetch_restore usage lines (Step 10 note).
+  b. `resolve_photos` offers a RE-FETCH (not re-identification) for `download-lost` rows (Step 10 note); Step 13's
+     report stops pointing ambiguous objects at `map_photos --resolutions` once `resolve_photos` exists.
+  c. Chrome robustness (user requirement "close the chrome and tabs properly", DECISIONS §1e + Step 11/12 findings):
+     `warm_profiles` closes the Chrome it launched (it leaves each one on port 9222 today, so the next profile attaches
+     to the previous one); a failed attach in `init_driver` closes the Chrome it just launched; every `driver.get`
+     has a bounded page-load timeout (a probe hung ~5 min on Selenium's 300 s default); the Step 11 per-pid process
+     query uses `-ErrorAction Stop` so a WMI failure is never read as "process gone"; the shared close is made
+     reliable under heavy machine load (Step 12/C saw it fail twice) — pin each with a test.
+  d. Verify the RPC quality-flag positions (partial upload / storage saver) on a real item record (read-only live
+     probe) and fix the Step 2b parsers, so Step 13's `inconsistent` verdict and those outlier classes can fire
+     (Step 13 found they never parse live). If a live probe is impossible, emit a DATA_REQUEST.
+
 ### Step 15 — [model: opus] [effort: high] Smoke coverage, regression pins, mutation probes
 - Depends on: Steps 2–14 (incl. 2b, 13b, 13c).
 - Consumed by: 🚦 R2 (the pack starts only on a green suite), Step 18 (checklist), the PR test plan.

@@ -20,6 +20,9 @@ Pinned here:
       phone only when named; offline / unauthorized / unplugged / placeholder phones skipped with a line; the scopes;
       the items without a sidecar listed only; the first failure stops the run; Ctrl+C; the kept disabled mode; the
       CLI dispatcher;
+  (d) a round trip through the REAL code: sidecars pushed by cmd_push as it wrote them before Step 5 (version 1) and by
+      today's cmd_push / push_title_extras (version 2) onto the mock device, an identity confirmed through the REAL
+      apply engine, then mvmeta_upgrade over that very phone.
 The fake adb runs every command against a real folder standing for the phone's Media root and checks it against THIS
 module's own allowlist (independent of main's), splitting `adb shell` commands the way the device shell does.
 Synthetic data only: no real adb, phone, Google Photos, C:\\Media or library file. Every sidecar here is produced by the
@@ -42,7 +45,8 @@ import gpcapture
 import gpweb
 import main
 import mvcommon
-from test_device_inventory import device_words   # the device shell's word splitting (Step 8's test helper)
+# Step 8's test helpers: the device shell's word splitting, and split leaves whose chunks wait in _parts (cmd_push resumes)
+from test_device_inventory import _seed_parts, _split_leaf, device_words
 
 SERIES, MOVIES, EXTRA = "FAKESER0002", "FAKEMOV0001", "FAKEXTRA0003"
 ROOT = "/sdcard/Media/"
@@ -1607,3 +1611,114 @@ def test_the_help_lists_the_command(capsys):
     with pytest.raises(SystemExit):
         _dispatch([])
     assert f"  {main.MVMETA_UPGRADE_USAGE}  — upgrade the phones' .mvmeta.json sidecars to v2" in capsys.readouterr().out
+
+
+# ============================================================================ (d) round trip through the REAL code
+
+def test_round_trip_through_the_real_push_and_apply_code_on_the_mock_device(sandbox_extras, mock_device, make_video,
+                                                                          stub_tech_specs, fake_adb, monkeypatch,
+                                                                          capsys):
+    """The existing library's sidecars as cmd_push wrote them BEFORE Step 5 (version 1: a tv split + FLAC holder, an
+    others split, an anime whole file — pushed while the capture layer already ran, as between the interim capture and
+    Step 5) and TODAY's (version 2: a movie title and its extras, whole + split), all on the mock device; mvmeta_upgrade
+    upgrades the v1 ones from their captures and finds the v2 ones up to date; once the REAL apply engine has
+    confirmed two of them (one by content key, one by name), it adds what that proves — every v1 byte kept, the push
+    times kept, chunks / holder / media untouched; a re-run writes nothing; an alias id finds its primary's sidecar."""
+    monkeypatch.setattr(main, "DEVICE_ALIASES", {"series": SERIES})
+    monkeypatch.setattr(main, "DEVICE_CHECK_EXTRA_SERIALS", {})
+    media_root = sandbox_extras["sandbox"]["local_root"]
+    title_id, (bts, trailer) = sandbox_extras["title_id"], sandbox_extras["items"]
+    tv_id, alias_id = "tv-en-2015-rtshow-s01e01", "tv-en-2015-rtshow-s01e02"
+    oth_id, ani_id = "oth-en-2024-rtmatch-e01", "ani-ja-2006-rtanime01"
+    trailer_chunks = [f"Trailer [{trailer['short_id']}].chunk.{i:03d}.mkv" for i in (1, 2)]
+    trailer_hashes = _seed_parts(sandbox_extras["extras_dir"] / main.SPLIT_DIR_NAME / trailer["short_id"],
+                                 trailer_chunks, b"EXTRA-CHUNK")
+    library = mvcommon.load_library()
+    library[title_id]["extras"]["groups"]["Specials"]["items"][1]["split_info"] = {
+        "is_split": True, "method": "COUNT", "val": "2", "total_chunks": 2,
+        "chunks": [{"filename": n, "hash": trailer_hashes[n]} for n in trailer_chunks]}
+    library[tv_id] = _split_leaf(tv_id, media_root / "Series" / "RT Show" / "Season 01", "RT.Show.S01E01E02.mkv", 2,
+                                 holder=True)
+    library[alias_id] = {"type": "multi_ep_alias", "alias_of": tv_id, "parent_id": "tv-en-2015-rtshow-s01"}
+    library[oth_id] = _split_leaf(oth_id, media_root / "Sports" / "RT Match", "RT.Match.2024.mkv", 3)
+    mvcommon.save_library(library)
+    anime_dir = media_root / "Anime" / "RT Anime"
+    anime_dir.mkdir(parents=True)
+    anime_path, _ = make_video(anime_dir / "RT Anime - 01 [1080p].mkv", marker=b"RT-ANIME\n")
+    assert main.cmd_prep(ani_id, anime_path) is True
+    with monkeypatch.context() as m:            # the push code as it was before Step 5: version 1, no identity keys
+        m.setattr(main, "MVMETA_SCHEMA_VERSION", 1)
+        m.setattr(gpcapture, "mvmeta_identity", lambda *args, **kwargs: {})
+        for mid in (tv_id, oth_id, ani_id):
+            assert main.cmd_push(mid) is True
+    assert main.cmd_push(title_id) is True      # today's push: version 2
+    assert main.push_title_extras(mvcommon.load_library(), title_id, ("NONE", None)) is True
+    bts_label, trailer_label = f"{title_id}::Specials/BTS.mkv", f"{title_id}::Specials/Trailer.mkv"
+
+    phone = Phone(mock_device / "sdcard" / "Media")
+    pushed = phone.files()
+    sidecars = {json.loads(data)["manual_id"]: (path, data, mtime) for path, (data, mtime) in pushed.items()
+                if path.endswith(main.MVMETA_SUFFIX)}
+    assert {label: json.loads(data)["version"] for label, (_p, data, _m) in sidecars.items()} == {
+        tv_id: 1, oth_id: 1, ani_id: 1, title_id: 2, bts_label: 2, trailer_label: 2}
+    assert all(main._mu_decode(data)[2] is None for _p, data, _m in sidecars.values())   # the writer's exact form
+    capsys.readouterr()
+
+    fake_adb({SERIES: phone})
+    res = main.cmd_mvmeta_upgrade()
+    rows = {row["label"]: row for row in res["rows"]}
+    assert {label: row["status"] for label, row in rows.items()} == {
+        tv_id: "upgrade", oth_id: "upgrade", ani_id: "upgrade",
+        title_id: "up-to-date", bts_label: "up-to-date", trailer_label: "up-to-date"}
+    assert main._mu_adds_text(rows[tv_id]) == "v1 → v2: + sha1 2/2 · dedup_key 2/2 · uploaded_name 2/2"   # no holder
+    assert main._mu_adds_text(rows[oth_id]) == "v1 → v2: + sha1 3/3 · dedup_key 3/3 · uploaded_name 3/3"
+    assert main._mu_adds_text(rows[ani_id]) == "v1 → v2: + sha1 1/1 · dedup_key 1/1 · uploaded_name 1/1"
+    assert phone.files() == pushed                                     # the dry run wrote nothing
+
+    objects = {(o["manual_id"], o["label"]): o for o in mvcommon.iter_uploaded_objects(mvcommon.load_library())}
+    anime, movie = objects[(ani_id, "whole")], objects[(title_id, "whole")]
+    report = main.gphotos_apply([
+        {"v": 1, "at": "2026-10-10T10:00:00Z", "account": "anime", "manual_id": ani_id, "label": "whole",
+         "sha256": anime["sha256"], "photo_id": _pid("rtanime"), "taken_ms": 1_700_000_000_000,
+         "tz_offset_ms": 28_800_000, "upload_ms": 1_700_000_100_000, "dedup_key": anime["capture"]["dedup_key"],
+         "gp_filename": anime["uploaded_name"], "proof": "dedupkey", "source": "check"},
+        {"v": 1, "at": "2026-10-10T10:00:01Z", "account": "movies", "manual_id": title_id, "label": "whole",
+         "sha256": movie["sha256"], "photo_id": _pid("rtmovie"), "taken_ms": 1_600_000_000_000,
+         "tz_offset_ms": 0, "upload_ms": 1_600_000_100_000, "dedup_key": _key("rtmovie-cloud copy"),
+         "gp_filename": movie["uploaded_name"], "proof": "filename", "source": "map"}], dry_run=False)
+    assert (report["status"], report["confirmed"]) == ("saved", 2)
+
+    before = phone.files()
+    fake = fake_adb({SERIES: phone})
+    res = main.cmd_mvmeta_upgrade(apply=True)
+    rows = {row["label"]: row for row in res["rows"]}
+    assert res["status"] == "ok"
+    assert {label: row["status"] for label, row in rows.items()} == {
+        tv_id: "upgraded", oth_id: "upgraded", ani_id: "upgraded", title_id: "upgraded",
+        bts_label: "up-to-date", trailer_label: "up-to-date"}
+    assert main._mu_adds_text(rows[ani_id]) == ("v1 → v2: + sha1 1/1 · dedup_key 1/1 · date_utc 1/1 · uploaded_name 1/1 "
+                                                "· gphotos_account 1/1")
+    assert main._mu_adds_text(rows[title_id]) == "v2: + date_utc 1/1 · gphotos_account 1/1"
+    after = phone.files()
+    assert set(after) == set(before)
+    for path in after:
+        if path in {sidecars[label][0] for label in (tv_id, oth_id, ani_id, title_id)}:
+            assert after[path][1] == before[path][1]                     # the push time kept
+            assert v1_bytes_of(after[path][0], before[path][0]) == before[path][0]
+        else:
+            assert after[path] == before[path]                           # chunks, holder, media, the other sidecars
+    (anime_chunk,) = json.loads(after[sidecars[ani_id][0]][0])["chunks"]
+    assert (anime_chunk["sha1"], anime_chunk["gphotos_account"], anime_chunk["date_utc"]) == (
+        anime["capture"]["sha1"], "anime", "2023-11-14T22:13:20Z")
+    (movie_chunk,) = json.loads(after[sidecars[title_id][0]][0])["chunks"]
+    assert "sha1" not in movie_chunk and "dedup_key" not in movie_chunk  # confirmed by NAME: no content key
+    assert (movie_chunk["gphotos_account"], movie_chunk["date_utc"]) == ("movies", "2020-09-13T12:26:40Z")
+    assert {"push", "mv"} <= set(fake.verbs())
+
+    fake = fake_adb({SERIES: phone})
+    res = main.cmd_mvmeta_upgrade(apply=True)
+    assert {row["status"] for row in res["rows"]} == {"up-to-date"} and not {"push", "mv"} & set(fake.verbs())
+    fake_adb({SERIES: phone})
+    res = main.cmd_mvmeta_upgrade(scope=alias_id)                      # an alias id: its primary's sidecar
+    assert [(row["label"], row["status"]) for row in res["rows"]] == [(tv_id, "up-to-date")]
+    assert phone.files() == after

@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13c.d (round trip through the REAL writers: cmd_push / push_title_extras + the apply engine)
+STATE: IN PROGRESS — next: 13c.e (gates: disarm probes on a scratch copy, full suite, smoke, live read-only dry run, self-review)
 
 # IMP-C25 Step 13c — `mvmeta_upgrade`: v2 sidecars for the existing library (OD-4 ruling) — resumable status
 
@@ -69,10 +69,21 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       unreadable mtime, a name two items claim, no key value / photo id / web marker printed, the parser ×12, the
       dispatcher ×7); neighbours (test_device_inventory, test_gp_capture, test_map_photos,
       test_prep_push_rep_enrich_cli, test_cli_parsers, test_auto_confirm, test_entry_schema_guard) 821 passed; smoke
-      82 passed — WIP SHA in the commit that ticks 13c.d
-- [ ] 13c.d round trip through the REAL writers: v1 sidecars from write_remote_mvmeta at version 1, v2 from today's
+      82 passed — 0e05611
+- [x] 13c.d round trip through the REAL writers: v1 sidecars from write_remote_mvmeta at version 1, v2 from today's
       push (cmd_push / push_title_extras on the mock device), a confirmation through the real apply engine, then
-      mvmeta_upgrade over the same phone — all four prefixes, chunks + FLAC holder, extras whole + split, an alias
+      mvmeta_upgrade over the same phone — all four prefixes, chunks + FLAC holder, extras whole + split, an alias —
+      tests/test_mvmeta_upgrade.py 162 passed (+1: the REAL cmd_prep / cmd_push (resume branches, captures on) at
+      version 1 for a tv split + holder, an others split, an anime whole file; today's cmd_push + push_title_extras at
+      version 2 for a movie title + its extras whole and split; every real sidecar in the writer's exact form; the dry
+      run upgrades the three v1 ones from their captures (the tv chunks' SHA-1 known from the IMP-C32 resume re-hash;
+      the holder never counted) and finds the three v2 ones up to date, writing nothing; the REAL gphotos_apply
+      confirms the anime (dedupkey) and the movie (filename) -> --apply adds sha1 / dedup_key / date_utc /
+      uploaded_name / gphotos_account to the anime and only date_utc + gphotos_account to the movie (a name match
+      proves no content key), every v1 byte and push time kept, chunks / holder / media / other sidecars untouched;
+      a re-run writes nothing; the alias id finds its primary's sidecar); neighbours (test_device_inventory,
+      test_gp_capture, test_gphotos_apply, test_extras, test_cmd_push_mock_device) 492 passed; smoke 82 passed — WIP
+      SHA in the commit that ticks 13c.e
 - [ ] 13c.e gates: disarm probes (isolated scratch copy) · full suite · smoke · live read-only dry run (only if
       `adb devices` lists a phone; counts only) · self-review · STATE: COMPLETE · final feat commit
 

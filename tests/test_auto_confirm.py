@@ -17,7 +17,7 @@ datetime/PLAN.md P-11, P-19, Step 13b).
   13b.d  the rollback change-gate, instrumented: every RollbackJournal operation of a REAL prep_push_rep (prep, push,
          replace and its point of no return) and of a push rolled back before any upload is identical with and without
          the hook, the hook starts after the last of them, no journal file is on disk when it starts; the web console's
-         push actions run in-process and never reach the hook (webui/server.py spawns no process — unchanged)
+         push actions run in-process and never reach the hook (webui/server.py starts no Python child — unchanged)
 
 THE SIX RETURN CONTRACTS (PLAN Step 13b asks for them here — verified by reading main.py; the function names are
 authoritative). "Succeeded" = returned normally — no exception: RollbackHardFail, SystemExit, KeyboardInterrupt, anything;

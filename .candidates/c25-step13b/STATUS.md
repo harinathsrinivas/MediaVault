@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13b.e (gates: disarm probes, full suite, smoke, self-review, final commit)
+STATE: COMPLETE
 
 # IMP-C25 Step 13b — auto-confirm unverified objects at the end of the next push (OD-6 ruling) — resumable status
 
@@ -70,9 +70,20 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       webui/server.py starts no Python child (no subprocess / multiprocessing / Popen / os.system / spawn / exec /
       sys.executable — its open-folder os.startfile opens Explorer, allowed)). Rollback / web neighbours (test_rollback,
       test_baseline_happy_path, test_web_endpoints, test_prep_keeps_split_record, test_cmd_replace) 62 passed; smoke 82
-      passed — WIP SHA in the commit that ticks this line
-- [ ] 13b.e gates: disarm probes (isolated scratch copy) · full suite · smoke · self-review · STATE: COMPLETE · final
-      feat commit
+      passed — d016010
+- [x] 13b.e gates: disarm probes (isolated scratch copy) · full suite · smoke · self-review · STATE: COMPLETE · final
+      feat commit — disarm 24/24 caught on a `git archive` copy of d016010 (the copy green before and after: 162
+      passed; the worktree never modified; probes: P1 the hook before the success check in after_push_command · P2 the
+      push branch calling the hook BEFORE its command — the PLAN's two named probes — · P3 None as success (the literal
+      rule) · P4 a branch without its hook · P5/P6 the switch ignored (confirm / hook) · P7/P8 the web marker (absent /
+      strict) · P9/P10/P11 the minimum age (none / 12 h / unknown time = young) · P12/P13 profiles (no check / all→any)
+      · P14/P15 the lock (no probe / existence only) · P16 a failing child unreported · P17/P18 exceptions escaping
+      (confirm / hook) · P19 the argv · P20 the alias end state · P21 push_group's range · P22 the hook INSIDE cmd_push
+      before its journal commit (caught by the journal-op instrumentation test) · P23 the reminder text · P24 the
+      conftest guard removed); full suite 2900 passed (= 2738 + 162), 1 warning (the pre-existing httpx deprecation) —
+      on d016010 (471 s) and again on the final code (= d016010 + two docstring fixes from the self-review, 679 s);
+      smoke 82 passed (20 s on d016010, 13 s on the final code), run one after the other; `--collect-only` 2900;
+      self-review below. The final commit is the feat commit that sets STATE: COMPLETE
 
 ## Design decisions (binding for the rest of this step — recorded early so a resumed session stays consistent)
 1. The hook is `main.after_push_command(command, result, target=None, episode_range=None)`, called by the CLI
@@ -131,3 +142,62 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
   matched to an older cloud copy, negative delay). Backed up within 6 h 10.1 % · 12 h 40.6 % · 18 h 68.1 % · 24 h
   84.1 % · 30 h 85.5 % · 36 h 88.4 % · 48 h 98.6 % · 50 h 100 % (median 13.6 h, p90 38.2 h, max 49.6 h — the PLAN's
   numbers). Whole pushes fully backed up: 24 h 71.4 % · 48 h 92.9 %.
+- 2026-10-13 a usage-limit pause hit during 13b.c (main.py's dispatcher wiring written, uncommitted); resumed on the
+  coordinator's word: the diff was coherent (six call sites, arguments unchanged), its tests written and green → kept
+  and committed as 8fb4d6a.
+- 2026-10-13/14 13b.e: the self-review corrected two docstrings (conftest: Step 15's push-family smoke runs — today's
+  smoke does not drive the dispatcher; the test module: webui starts no Python child — its open-folder os.startfile is
+  allowed). A second usage-limit pause hit while the full suite re-ran on that final code in the background; it had
+  completed (2900 passed, exit 0); smoke then ran after it. One stray no-op `sed -i` (its pattern matched nothing) was
+  issued during 13b.d — the diff confirmed no change; every file edit otherwise went through Edit / Write.
+
+## Step 13b — [status: done]
+- Executor: executor-fable
+- Model: fable (session env claude-fable-5-1; each commit's trailer is the harness attribution notice current at commit
+  time, which alternated Opus 5.5 / Fable 5.1 — see Log; two usage-limit pauses, resumed on the coordinator's word)
+- Mode: single-executor (own worktree, WIP commits per the PLAN's execution protocol)
+- Files changed: main.py (a new section after cmd_check_photos — AUTO_CONFIRM_MIN_AGE_H = 24, AUTO_CONFIRM_MAX_MINUTES,
+  AUTO_CONFIRM_REMINDER, AUTO_CONFIRM_WEB_JOB_ENV, auto_confirm_argv, _auto_confirm_on, _auto_confirm_warning,
+  _auto_confirm_why, maybe_auto_confirm, _push_group_run_target_ids, _push_command_completed, after_push_command — and
+  the six push-family branches of the CLI dispatcher: keep the command's return value, then call the hook),
+  mvconfig.example.json (documents `auto_confirm_after_push`), tests/conftest.py (the `_REAL_*` captures,
+  `_InertAutoConfirm`, the autouse `_hermetic_auto_confirm`, the opt-in `real_auto_confirm`), tests/test_auto_confirm.py
+  (new, 162 tests), .candidates/c25-step13b/STATUS.md (this file). NOT changed: webui/server.py (it runs push /
+  prep_push_rep in-process, spawns no push-family child), any cmd_* body, RollbackJournal / recover_journal /
+  RollbackHardFail / PONR placement / the journal format / the season resume messaging, ENTRY_TYPE_KEYS, mvcommon,
+  mainfetch, gprpc, gpweb, gpcapture, any existing test.
+- Outcome: once a push-family command (push incl. its extras-only path, push_group, prep_push_rep, prep_push_rep_season,
+  prep_push_rep_enrich, prep_push_rep_season_enrich) has RETURNED successfully, the CLI dispatcher calls
+  main.after_push_command, which confirms the pushed objects Google Photos has had time to back up: `python main.py
+  check_photos pending --apply --max-minutes 15` (exact argv) runs as a child through _cp_spawn (Step 13's streaming
+  idiom), after one line saying so; the child's last line is the check's summary. Config off → silent (nothing read);
+  nothing pending → silent; a web job, only pushes younger than 24 h, no Chrome profile for any account the old objects
+  route to, or a held fetch lock → the PLAN's one reminder line; a failing / interrupted / unstartable child or any
+  error → one warning line; it never raises, so the push's output and exit code are unchanged. A failed command (False,
+  an exception, a usage error — or a None whose run did not reach its end state) gets nothing at all.
+- Key decisions: design decisions 1–7 and assumptions A1–A4 above. Deviations from the PLAN text, each surfaced: (D1)
+  "succeeded" for a None result is read from the run's end state, because three of the six commands return None on
+  their handled failures too (the PLAN's literal rule would have run the auto-confirm after e.g. "Auto-Pilot Paused"
+  or a caught post-PONR hard fail — against P-19's "never on failure"); (D2) AUTO_CONFIRM_MIN_AGE_H = 24, not 12, from
+  the measurement the PLAN asked for; (D3) one header line before the child (what runs, how to turn it off); (D4)
+  mvconfig.example.json documents the switch (consumer row 31); (D5) no webui change — the PLAN's change was conditional
+  on the web UI spawning push-family commands, which it does not; (D6) a non-boolean switch value reads as off with one
+  stderr warning. Contracts for later steps — 15: `main.after_push_command.calls` (the conftest stand-in) shows the
+  dispatcher reached the hook and with what; probes P1–P3 + P22 are the "auto-confirm only after success" mutations; the
+  real hook needs `real_auto_confirm` + a runner for main._cp_spawn. 16: the reminder / header / warning lines (exact
+  text in tests/test_auto_confirm.py), the 24 h minimum age, the switch (`auto_confirm_after_push`, false = off), that
+  web-console jobs never auto-confirm, docs/testing-strategy.md entries for `_hermetic_auto_confirm` /
+  `real_auto_confirm` (like Steps 3/11/13's guards, not documented there yet). R2 §M14: run the next push at least 24 h
+  after M11's push (earlier, it prints the reminder instead); the disable test needs an mvconfig.json in the worktree.
+- Verification: tests/test_auto_confirm.py 162 passed (≈12–18 s); neighbours per sub-task (see 13b.a–d); disarm 24/24
+  (scratchpad disarm_13b.py on a `git archive` copy of d016010, the copy green before and after); full suite 2900
+  passed, 1 warning (the pre-existing httpx deprecation) on d016010 (471 s) and on the final code (679 s); smoke 82
+  passed (20 s / 13 s), run one after the other. Self-review (V2 delta 4): (a) the Step 13b bullets one by one — files,
+  details (exactly P-19 + the six contracts documented + the exact argv + the streaming idiom + the reminder text +
+  the silent switch), the test list (success + old → exact argv · only young → reminder · failure / exception →
+  nothing · lock held → reminder · disabled → nothing · web marker → reminder only · the child failing never changes
+  the output or exit code · journal-op instrumentation identical with and without the hook · the disarm probe moving
+  the hook before the success check) and the acceptance (full + smoke; smoke cannot start Chrome: the guards) — all
+  covered; (b) consumers R2 §M14 / Step 15 / Step 16 — contracts above; (c) change-gates — no rollback code touched
+  (pinned by the instrumentation test + P22), ENTRY_TYPE_KEYS untouched, no new entry type or shared field, the one new
+  whole-library pass (_push_group_run_target_ids' prefix mode) de-aliases through _resolve_alias, smoke green.

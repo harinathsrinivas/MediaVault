@@ -159,9 +159,9 @@ def _hermetic_auto_confirm(monkeypatch):
     Once a push-family command succeeds, main.py's CLI dispatcher runs the auto-confirm (PLAN P-19: main.after_push_command
     -> main.maybe_auto_confirm): it reads the library's pending objects, probes the REAL fetch lock (~/.mediavault/locks)
     and starts a `check_photos` child that launches a REAL Chrome. Every test that drives the dispatcher
-    (tests/test_prep_push_rep_enrich_cli.py, tests/test_prep_keeps_split_record.py, the smoke suite) must see the push
-    command exactly as before, so both entry points are inert recorders here (`main.after_push_command.calls` lets a test
-    prove the dispatcher reached the hook — and with what). The dispatcher's harnesses exec its code in a copy of main's
+    (tests/test_prep_push_rep_enrich_cli.py, tests/test_prep_keeps_split_record.py, Step 15's push-family smoke runs)
+    must see the push command exactly as before, so both entry points are inert recorders here
+    (`main.after_push_command.calls` lets a test prove the dispatcher reached the hook — and with what). The dispatcher's harnesses exec its code in a copy of main's
     namespace taken at call time, so they see these stand-ins too. Its own tests opt back in with `real_auto_confirm`;
     main._cp_spawn stays refused (_hermetic_check_child) even then, so the real child can never start without a runner
     the test installs."""

@@ -12921,8 +12921,7 @@ def _mp_finish(ctx, run_dir):
 # continues its newest unfinished run (resumable; --recheck starts afresh). Nothing here prints a P-13 web marker.
 
 CHECK_APPROACHES = ("best", "all")                  # best: stop at the first stage that pins the object · all: every one
-CHECK_NAMED_SCOPES = ("all", "pending", "hinted")   # plus account:<a>, series:<season id | show folder>, an id, a prefix
-CHECK_USAGE = ("check_photos <id | season id | series:<season id|show folder> | id prefix | account:<a> | pending | "
+CHECK_USAGE =("check_photos <id | season id | series:<season id|show folder> | id prefix | account:<a> | pending | "
                "hinted | all> [--approaches best|all] [--account movies|tv|anime|others] [--recheck] "
                "[--apply | --apply-run <run dir|latest>] [--limit N] [--pace S] [--max-minutes M] [--devices] "
                "[--list]")
@@ -12989,8 +12988,10 @@ def parse_check_photos_args(tokens):
                          "account:<a>, pending, hinted or all")
     if scope.startswith("series:") and not scope[len("series:"):].strip():
         raise ValueError("series: needs a season id or a show folder (series:<season id|show folder>)")
-    if scope.startswith("account:") and scope[len("account:"):].strip() not in mvcommon.GP_ACCOUNTS:
-        raise ValueError(f"account: must name one of {', '.join(mvcommon.GP_ACCOUNTS)} (got {scope!r})")
+    if scope.startswith("account:"):
+        if scope[len("account:"):].strip() not in mvcommon.GP_ACCOUNTS:
+            raise ValueError(f"account: must name one of {', '.join(mvcommon.GP_ACCOUNTS)} (got {scope!r})")
+        opts["scope"] = "account:" + scope[len("account:"):].strip()     # one spelling: the run's key
     if opts["apply"] and opts["apply_run"] is not None:
         raise ValueError("--apply and --apply-run exclude each other")
     if opts["apply_run"] is not None and (opts["recheck"] or any(opts[k] is not None
@@ -13188,7 +13189,7 @@ def _cp_resolve(library, scope, account, now):
       show, seasons   (series) the show folder and its season ids · notes: lines printed with the resolution
       unpinned   objects left out for want of a SHA-256 · gone: hints whose object no longer exists
     ValueError when the scope names nothing in the library."""
-    notes, show, seasons, gone, hints = [], None, [], 0, {}
+    notes, show, seasons, gone = [], None, [], 0
     canonical = scope
     if scope == "all":
         kind, objects = "all", list(mvcommon.iter_uploaded_objects(library))
@@ -13403,7 +13404,8 @@ def _cp_spawn(argv):
 
 def _cp_status(code, interrupted, progress):
     """This command's status from the child's exit code and its progress.json: refused (3: the fetch lock is held —
-    nothing ran) · error (1: the child could not read its run) · interrupted (Ctrl+C) · ok (complete) · partial (a
+    nothing ran) · error (1: the child could not read its run, or it failed — its lines say why) · interrupted
+    (Ctrl+C) · ok (complete) · partial (a
     --limit / --max-minutes stop: re-run to continue) · stopped (signed out, Chrome failed, the error breaker, the lock
     lost …: re-run to continue once fixed)."""
     if code == 3:
@@ -13422,11 +13424,13 @@ def _cp_status(code, interrupted, progress):
 # Every object's verdict, from its results.jsonl lines (in report order). confirmed = pinned to exactly one verified
 # item (its own account, or another: an account mismatch); inconsistent = pinned, but Google Photos holds a partial or
 # non-original copy (IMP-C27 (e): a restore would fail its SHA-256 check); then what was NOT pinned — ambiguous (its
-# candidates cannot be told apart), Step 9b's not-backed-up-yet / possible-loss for an object no stage pinned in any
-# account it was looked for in (a push of the last MAP_RECENT_DAYS / anything older or of unknown push time; with
-# --devices the phones refine an old one: awaiting-backup / missing-after-backup / missing-everywhere) — whether its
-# stages found nothing or only other items (wrong-item: the failed list keeps that reason, as the fetch books it) —,
-# error (it could not be checked), unchecked (the run has not reached it yet).
+# candidates cannot be told apart: in its own account, or in another one its own account did not hold it in),
+# Step 9b's not-backed-up-yet / possible-loss for an object no stage pinned in any account it was looked for in (a push
+# of the last MAP_RECENT_DAYS / anything older or of unknown push time; with --devices the phones refine an old one:
+# awaiting-backup / missing-after-backup / missing-everywhere) — whether its stages found nothing or only other items
+# (wrong-item: the failed list keeps that reason, as the fetch books it) —, error (it could not be checked: in its own
+# account, or in another one it had to be looked for in), unchecked (the run has not reached it — or not finished
+# looking for it in the other accounts — yet). Only a final verdict ever reaches the failed list.
 CHECK_STATES = ("confirmed", "inconsistent", "ambiguous", "not-backed-up-yet", "possible-loss", "awaiting-backup",
                 "missing-after-backup", "missing-everywhere", "error", "unchecked")
 # The OD-7 outlier classes (outliers.csv — for the user's manual review), in report order.
@@ -13766,13 +13770,14 @@ def _cp_report_lines(ctx):
         lines.extend(f"    {r['manual_id']} · {r['label']} — in '{r['account']}'" for r in bad)
     ambiguous = [r for r in rows if r["status"] == "ambiguous"]
     if ambiguous:
-        lines.append(f"Ambiguous: {len(ambiguous):,} object(s) — candidates that cannot be told apart (resolve them: "
-                     f"python main.py resolve_photos failed, after --apply)")
+        lines.append(f"Ambiguous: {len(ambiguous):,} object(s) — candidates that cannot be told apart (an apply lists "
+                     f"them in failed_objects.csv: decide them there, then import it with map_photos --resolutions)")
     errors = [r for r in rows if r["status"] == "error"]
     if errors:
         why = _cp_counts(errors, lambda r: r["error"] or "error")
-        retry = ("re-running the same command continues this run and retries them" if progress.get("state") != "complete"
-                 else "check them again by id: python main.py check_photos <id>")
+        retry = ("check them again by id: python main.py check_photos <id>" if progress.get("state") == "complete" else
+                 f"continue the check with: {_cp_check_command(doc)} — it retries them" if ctx.get("apply_run") else
+                 "re-running the same command continues this run and retries them")
         lines.append(f"Not checked: {len(errors):,} object(s) — {' · '.join(f'{k} {n}' for k, n in sorted(why.items()))}"
                      f" ({retry})")
         lines.extend(f"    {r['manual_id']} · {r['label']} — {r['error']}" for r in errors)
@@ -13784,8 +13789,9 @@ def _cp_report_lines(ctx):
     failed = [r for r in rows if r["reason"]]
     if failed:
         reasons = _cp_counts(failed, lambda r: r["reason"])
-        where = ("added to the failed list" if ctx["applied"] is not None else
-                 "would go to the failed list with --apply / --apply-run")
+        applied = ctx["applied"]
+        where = ("would go to the failed list with --apply / --apply-run" if applied is None else
+                 "NOT recorded: the apply stopped" if applied.get("error") else "on the failed list")
         lines.append(f"Failed list (P-18): {len(failed):,} object(s) {where} — "
                      + " · ".join(f"{k} {n:,}" for k, n in sorted(reasons.items())))
     lines.extend(_cp_apply_lines(ctx))
@@ -13896,7 +13902,9 @@ def _cp_failed_records(doc, rows):
     """The P-18 failed-list rows of an apply: every object with a reason (_cp_settle) — run, the account it was checked
     in (pinned in, for an inconsistent one), category, object, uploaded name, expected_taken_local, tried (every stage's
     verdict of its deciding look — exactly the {approach, outcome, n} entries locate_object gives), the candidates seen
-    (the pinned item first for an inconsistent one) and the reason. Validated by mvcommon's own normalizer."""
+    (the pinned item first for an inconsistent one; as many as the locator verifies in one stage) and the reason.
+    Validated by mvcommon's own normalizer."""
+    import mainfetch  # LOCATE_MAX_CANDIDATES — the locator's own cap; importing it has no side effects
     out = []
     for row in rows:
         if not row["reason"]:
@@ -13910,14 +13918,8 @@ def _cp_failed_records(doc, rows):
             "run": doc.get("run"), "account": row["account"], "category": row["category"], "manual_id": row["manual_id"],
             "label": row["label"], "sha256": row["sha256"], "uploaded_name": row["uploaded_name"],
             "expected_taken_local": line.get("expected_taken_local"), "tried": tried or None,
-            "candidates": candidates[:mainfetch_candidates_cap()] or None, "reason": row["reason"]}))
+            "candidates": candidates[:mainfetch.LOCATE_MAX_CANDIDATES] or None, "reason": row["reason"]}))
     return out
-
-
-def mainfetch_candidates_cap():
-    """The failed list keeps as many candidates as the locator verifies in one stage (mainfetch.LOCATE_MAX_CANDIDATES)."""
-    import mainfetch  # its locator's constant; importing it has no side effects
-    return mainfetch.LOCATE_MAX_CANDIDATES
 
 
 def _cp_apply(run_dir, doc, rows):

@@ -21,6 +21,9 @@ Step 13; P-5, P-8, P-9, P-10, P-11, P-15, P-18; OD-5, OD-7, OD-9; the Step 9b ru
   13.h  the apply: --apply (check, then record: learned records, stale records, the failed list — only an apply writes
         it —, the apply engine, failed_objects.csv, applied.json) and --apply-run <dir | latest> (a reviewed run, no
         Chrome; refused for another scope; latest = the newest complete run); idempotent; Ctrl+C applies nothing
+  13.i  resumability end to end (errors retried, settled objects never re-checked, --recheck, a complete run followed
+        by a fresh one, a killed child's torn line, objects that joined later, the Chrome a killed check left running);
+        never a download (every request / arm / harvest path forbidden, RPC and web pages, best and all)
 
 Hermetic: the fake Google Photos world + its batchexecute emulator (tests/gphotos_fake.py); mainfetch's and gprpc's clocks
 are fake (nothing waits); the autouse fixtures of tests/conftest.py redirect every state dir, ~/Downloads, the process
@@ -160,6 +163,7 @@ _DEFAULTS = {"scope": None, "approaches": None, "account": None, "recheck": Fals
     (["tv-en-2014-show-s02"], {"scope": "tv-en-2014-show-s02"}),
     (["all", "--approaches", "all", "--apply"], {"scope": "all", "approaches": "all", "apply": True}),
     (["account:tv", "--apply-run", "latest"], {"scope": "account:tv", "apply_run": "latest"}),
+    (["account: anime "], {"scope": "account:anime"}),                             # one spelling: the run's key
     (["series:tv-en-1994-files-s02", "--account", "movies", "--recheck", "--limit", "20", "--pace", "0",
       "--max-minutes", "15", "--devices"],
      {"scope": "series:tv-en-1994-files-s02", "account": "movies", "recheck": True, "limit": 20, "pace": 0.0,
@@ -907,6 +911,29 @@ def test_ctrl_c_stops_after_the_current_object_and_still_closes_chrome(cw, sandb
 
     assert (res["status"], _progress(res["run_dir"])["reason"]) == ("interrupted", "interrupted")
     assert len(_results(res["run_dir"])) == 1 and closed == [("tv", True)]
+    assert "🛑 Stopped by user — closing Chrome; re-run the same command to continue." in capsys.readouterr().out
+
+
+def test_ctrl_c_while_chrome_launches_stops_right_after_and_closes_that_chrome(cw, sandbox, monkeypatch, capsys):
+    # The new Chrome's Popen handle lives only inside init_driver: a Ctrl+C there would leave it running unrecorded.
+    # The check holds Ctrl+C for the launch (and its record), then stops through the session's own close.
+    import signal
+    _demo_season(sandbox, cw.world)
+    before, closed, launched = signal.getsignal(signal.SIGINT), [], []
+
+    def init(profile_key="movies"):
+        signal.raise_signal(signal.SIGINT)                          # Ctrl+C while Chrome settles
+        launched.append(cw.world.driver(profile_key))
+        return launched[-1]
+
+    monkeypatch.setattr(mainfetch, "init_driver", init)
+    monkeypatch.setattr(mainfetch, "_close_check_session", lambda driver, ctx, last: closed.append(
+        (ctx.account, (ctx.chrome or {}).get("account"), last)))
+    res = main.cmd_check_photos(SEASON)
+
+    assert (res["status"], _progress(res["run_dir"])["reason"]) == ("interrupted", "interrupted")
+    assert closed == [("tv", "tv", True)] and launched[0].quit_called and _results(res["run_dir"]) == []
+    assert signal.getsignal(signal.SIGINT) is before                # Ctrl+C is the user's again
     assert "🛑 Stopped by user — closing Chrome; re-run the same command to continue." in capsys.readouterr().out
 
 
@@ -1698,7 +1725,7 @@ def test_apply_records_what_the_check_proved_and_the_engine_confirms_it(cw, sand
     assert "Recorded: learned records 3 new (0 already on record) · failed list 1 new (0 already listed)" in report
     assert "  library (saved): 3 object(s) updated (3 newly confirmed) · conflict(s) not applied 0 · orphan(s) 0" in report
     assert "  failed_objects.csv: regenerated — 1 row(s)" in report
-    assert f"Failed list (P-18): 1 object(s) added to the failed list — {failed['reason']} 1" in report
+    assert f"Failed list (P-18): 1 object(s) on the failed list — {failed['reason']} 1" in report
     assert report[-1] == (f"Outputs: {run_dir} — report.txt, results.jsonl, outliers.csv, run.json, progress.json, "
                           f"applied.json")
     assert out.rstrip().splitlines()[-1] == (f"🔎 check_photos {SEASON}: 4 object(s) — confirmed 3 · possible-loss 1 · "
@@ -2018,3 +2045,181 @@ def test_an_apply_that_cannot_record_fails_and_says_so(cw, sandbox, monkeypatch,
     else:
         assert "  ❌ library: ⚠️  Google Photos identity not applied: library changed by another process" in out
         assert out.rstrip().splitlines()[-1].endswith("· NOT applied (aborted)")
+
+
+# ===========================================================================
+# 13.i — resumability, end to end; never a download
+# ===========================================================================
+def _routed_lines(run_dir):
+    return [(l["manual_id"][-3:], l["outcome"]) for l in _results(run_dir) if l["pass"] == "routed"]
+
+
+def test_a_resumed_run_retries_its_errors_and_never_rechecks_a_settled_object(cw, sandbox, monkeypatch, capsys):
+    _demo_season(sandbox, cw.world)
+    real, seen = mainfetch.locate_object, []
+
+    def flaky(driver, loc, ctx, *args, **kwargs):
+        seen.append(loc["manual_id"][-3:])
+        if seen.count("e02") == 1 and seen[-1] == "e02":
+            raise RuntimeError("the page did not render")
+        if seen.count("e03") == 1 and seen[-1] == "e03":
+            raise KeyboardInterrupt
+        return real(driver, loc, ctx, *args, **kwargs)
+
+    monkeypatch.setattr(mainfetch, "locate_object", flaky)
+    first = main.cmd_check_photos(SEASON)
+    capsys.readouterr()
+    second = main.cmd_check_photos(SEASON)
+
+    out = capsys.readouterr().out
+    assert (first["status"], second["status"]) == ("interrupted", "ok") and first["run_dir"] == second["run_dir"]
+    assert f"  ↻ Continuing the unfinished run {os.path.basename(first['run_dir'])} (begun 2026-10-14T00:00:00Z): 1 of " \
+           f"3 object(s) checked already — --recheck starts afresh" in out          # an error is not "checked"
+    assert seen == ["e01", "e02", "e03", "e02", "e03"]                             # e01 never again; e02 retried
+    assert _routed_lines(second["run_dir"]) == [("e01", "exactly-one"), ("e02", "error"), ("e02", "exactly-one"),
+                                                ("e03", "exactly-one")]
+    assert [r["status"] for r in second["rows"]] == ["confirmed"] * 3                # the newest look decides
+    assert [(i["n"], i["reason"]) for i in _progress(second["run_dir"])["invocations"]] == [(1, "interrupted"),
+                                                                                           (2, None)]
+
+
+def test_recheck_starts_a_new_run_and_a_complete_run_is_followed_by_a_fresh_one(cw, sandbox):
+    # A1: a complete run is never continued — the next run checks every object again, confirmed ones included (R3's
+    # check after map --apply and R4's sweep verify what the library already believes).
+    _demo_season(sandbox, cw.world)
+    partial = main.cmd_check_photos(SEASON, limit=1)
+    fresh = main.cmd_check_photos(SEASON, recheck=True)
+    following = main.cmd_check_photos(SEASON)
+
+    assert len({partial["run_dir"], fresh["run_dir"], following["run_dir"]}) == 3
+    assert (_progress(partial["run_dir"])["state"], len(_results(partial["run_dir"]))) == ("partial", 1)   # left as is
+    for res in (fresh, following):
+        assert res["status"] == "ok" and _routed_lines(res["run_dir"]) == [
+            ("e01", "exactly-one"), ("e02", "exactly-one"), ("e03", "exactly-one")]
+
+
+def test_a_killed_check_leaves_a_run_the_next_one_continues_past_its_torn_line(cw, sandbox):
+    # A child killed hard (closed terminal, power) leaves progress.json "running" and maybe half a results line: the
+    # next run continues that run; the torn line is skipped and terminated before the next line is appended.
+    _demo_season(sandbox, cw.world)
+    first = main.cmd_check_photos(SEASON, limit=1)
+    run_dir = first["run_dir"]
+    progress = _progress(run_dir)
+    main._cp_write_json(os.path.join(run_dir, "progress.json"), dict(progress, state="running", reason=None))
+    with open(os.path.join(run_dir, "results.jsonl"), "ab") as fh:
+        fh.write(b'{"v":1,"kind":"check","pass":"routed","manual_id":"' + f"{SEASON}e02".encode())   # no newline
+
+    second = main.cmd_check_photos(SEASON)
+
+    assert second["run_dir"] == run_dir and second["status"] == "ok"
+    assert _routed_lines(run_dir) == [("e01", "exactly-one"), ("e02", "exactly-one"), ("e03", "exactly-one")]
+    with open(os.path.join(run_dir, "results.jsonl"), "rb") as fh:
+        raw = fh.read().split(b"\n")
+    assert sum(1 for line in raw if line.startswith(b'{"v":1,"kind":"check","pass":"routed","manual_id":"') and
+               not line.endswith(b"}")) == 1                                       # the torn line stays alone
+
+
+def test_objects_that_joined_the_scope_wait_for_the_next_run(cw, sandbox, capsys):
+    _demo_season(sandbox, cw.world, episodes=(1, 2))
+    first = main.cmd_check_photos(SEASON, limit=1)
+    lib = mvcommon.load_library()
+    folder = sandbox["local_root"] / "Series" / "Demo" / "Season 01"
+    mid, name, sid = f"{SEASON}e03", "Demo.S01E03.mkv", "de3de3"
+    item = cw.world.add_item("tv", _up(name, sid), data=_bytes(mid), taken=TAKEN)
+    lib[mid] = dict(_whole(folder, name, _bytes(mid), sid, block=_learned(item)), parent_id=SEASON)
+    lib[SEASON]["children"].append(mid)
+    mvcommon.save_library(lib)
+    capsys.readouterr()
+
+    resumed = main.cmd_check_photos(SEASON)
+    out = capsys.readouterr().out
+    following = main.cmd_check_photos(SEASON)
+
+    assert resumed["run_dir"] == first["run_dir"] and len(resumed["rows"]) == 2
+    assert "  1 object(s) of the scope joined since that run began — the next run checks them (or now: --recheck)" in out
+    assert following["run_dir"] != first["run_dir"] and [r["manual_id"][-3:] for r in following["rows"]] == [
+        "e01", "e02", "e03"]
+
+
+class _ProcessTable:
+    """mainfetch.PROCESS_TABLE's stand-in: `alive` {pid: command line}; terminate() ends a pid."""
+
+    def __init__(self, alive):
+        self.alive, self.terminated = dict(alive), []
+
+    def query(self, pid):
+        return (True, self.alive[pid]) if pid in self.alive else (False, None)
+
+    def listener(self, port):
+        return None
+
+    def chrome_command_lines(self):
+        return list(self.alive.values())
+
+    def terminate(self, pid):
+        self.terminated.append(pid)
+        self.alive.pop(pid, None)
+        return True
+
+
+def test_the_next_check_ends_the_chrome_a_killed_check_left_running(cw, sandbox, monkeypatch, capsys):
+    # A check killed hard leaves its fetch journal "running" with the Chrome it launched: the next check's start-up
+    # cleanup (Step 11's, P-12 rule 3) ends exactly that Chrome before opening its own.
+    _demo_season(sandbox, cw.world, episodes=(1,))
+    profile = mainfetch.CHROME_PROFILES["tv"]
+    table = _ProcessTable({7002: f'"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" '
+                                 f'--user-data-dir={profile} --remote-debugging-port=9222 about:blank'})
+    monkeypatch.setattr(mainfetch, "PROCESS_TABLE", table)
+    journal = os.path.join(mainfetch.FETCH_JOURNAL_DIR, "check-20261013T090000Z-7001.json")
+    os.makedirs(mainfetch.FETCH_JOURNAL_DIR, exist_ok=True)
+    with open(journal, "w", encoding="utf-8") as fh:
+        json.dump({"v": 1, "run_id": "check-20261013T090000Z-7001", "started_at": "2026-10-13T09:00:00Z",
+                   "updated_at": "2026-10-13T09:05:00Z", "pid": 7001, "state": "running", "interrupted": False,
+                   "mode": None, "sessions": [{"account": "tv", "chrome_pid": 7002, "user_data_dir": profile,
+                                               "launched": True, "started_at": "2026-10-13T09:00:01Z"}],
+                   "entries": [], "pending_delete": []}, fh)
+
+    res = main.cmd_check_photos(SEASON)
+
+    assert res["status"] == "ok" and table.terminated == [7002]
+    with open(journal, encoding="utf-8") as fh:
+        assert json.load(fh)["state"] == "recovered"
+    assert "Closed the Chrome an interrupted fetch left running (pid 7002)." in capsys.readouterr().out
+
+
+_DOWNLOAD_PATHS = ("_direct_trigger", "_shift_d_trigger", "trigger_download", "_fire", "harvest_downloads",
+                   "_fetch_window", "_another_copy", "_learn_from_download", "_run_locator_phase", "_record_unfetched",
+                   "_set_download_dir")   # every way the fetch requests, arms, harvests or books a download
+
+
+@pytest.mark.parametrize("approaches", ["best", "all"])
+@pytest.mark.parametrize("rpc", [True, False], ids=["rpc", "web-pages"])
+def test_a_check_never_requests_a_download(cw, sandbox, monkeypatch, approaches, rpc):
+    # PLAN Step 13 "never triggers a download": while a check takes every kind of object through every stage — in its
+    # own account and in the others, by RPC or on the web pages — and applies, each fetch path that could request, arm
+    # or harvest a download is forbidden; no link is minted, no Shift+D pressed, no tile opened, no file written.
+    def forbidden(name):
+        def refuse(*args, **kwargs):
+            raise AssertionError(f"check_photos reached {name}")
+        return refuse
+
+    for name in _DOWNLOAD_PATHS:
+        monkeypatch.setattr(mainfetch, name, forbidden(name))
+    monkeypatch.setattr(gprpc, "download_url", forbidden("gprpc.download_url"))
+    items = _season_of(sandbox, cw.world, {1: "learned", 2: "mapped", 3: "pending", 4: "legacy", 5: "missing",
+                                           6: "pending"})
+    items[f"{SEASON}e06"].deleted = True                       # content-keyed and gone: S4's preview runs for it too
+    for account in mvcommon.GP_ACCOUNTS:
+        cw.world.wiz_token_missing[account] = not rpc
+
+    res = main.cmd_check_photos(SEASON, approaches=approaches, apply=True)
+
+    assert res["status"] == "ok" and [r["status"] for r in res["rows"]] == ["confirmed"] * 4 + ["possible-loss"] * 2
+    assert {l["account"] for l in _results(res["run_dir"]) if l["pass"] == "cross"} == {"movies", "anime", "others"}
+    assert any("legacy" in l["per_approach"] for l in _results(res["run_dir"]))   # the S4 preview did run
+    assert cw.world.downloads == [] and "pLFTfd" not in cw.world.rpc_ids_sent()
+    assert (cw.world.rpc_log == []) is (not rpc)
+    assert not [a for drivers in cw.drivers.values() for d in drivers for a in d.actions
+                if a["kind"] in ("shift_d", "open")]
+    assert not os.path.isdir(cw.world.default_download_dir) or os.listdir(cw.world.default_download_dir) == []
+    assert not os.path.exists(mainfetch.SYSTEM_DOWNLOADS_FOLDER)

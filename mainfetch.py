@@ -5002,7 +5002,8 @@ def _probe_direct(driver, photo_id):
 #     the profiles) and kept fresh by the crawler's progress heartbeat: an hours-long sweep is never reclaimed as stale,
 #     and it yields when another command takes the lock over;
 #   * one Chrome session per Google account (GP_ACCOUNTS order, round and round while work is left): each object is
-#     checked first in the account it is routed to and — when it is not pinned there — in every other account that has
+#     checked first in the account it is routed to and — when that account answered not-found / wrong-item and it was
+#     not a push of the last recent_days at that moment (Step 9b: not backed up yet) — in every other account that has
 #     a profile (found there: an account mismatch; nowhere: "in no account", Step 9b's rule in main);
 #   * every object through locate_object — the fetch's own exact-item engine (Step 12), READ-ONLY: no download is ever
 #     requested (no link minted, no Shift+D, no tile clicked), and nothing is written but the run's results.jsonl /
@@ -5570,10 +5571,31 @@ def _check_has_work(run, account):
     return bool(routed or cross)
 
 
+@contextlib.contextmanager
+def _ctrl_c_held():
+    """[IMP-C25 Step 13] Ctrl+C held back while a check session launches its Chrome (init_driver — shared, unchanged):
+    the new Chrome's Popen handle exists only inside that call, so an interrupt there would leave a Chrome running that
+    nothing records or closes. -> a function telling whether Ctrl+C was pressed meanwhile; the session then stops right
+    after the launch, through its own close (the Chrome it launched is closed or ended). Only the main thread may set a
+    signal handler: elsewhere nothing is held."""
+    import signal
+    import threading
+    if threading.current_thread() is not threading.main_thread():
+        yield lambda: False
+        return
+    pressed = []
+    previous = signal.signal(signal.SIGINT, lambda signum, frame: pressed.append(signum))
+    try:
+        yield lambda: bool(pressed)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
 def _check_session(run, ctx, account):
     """One account's Chrome session: the objects routed to it (bounded by --limit), then the objects looked for there
     from other accounts; their locators built and their records warmed in CHECK_BATCH batches (13.e). The pre-flight,
-    the port guard and the sign-out handling are cmd_fetch_route's; the session's Chrome is closed on every way out."""
+    the port guard and the sign-out handling are cmd_fetch_route's; the session's Chrome is closed on every way out —
+    a Ctrl+C during its launch included (_ctrl_c_held)."""
     routed, cross = run.work(account)
     problem = profile_preflight(account)
     if problem:
@@ -5592,16 +5614,21 @@ def _check_session(run, ctx, account):
     print(f"\n   === CHECK '{account}' — {len(routed)} object(s) routed here · {len(cross)} looked for here from "
           f"other accounts ===")
     run.sessions += 1
-    driver = init_driver(account)
+    ctx.chrome = None                     # never the previous session's Chrome
+    with _ctrl_c_held() as pressed:       # the launch and its record (ctx.chrome, the journal) are never torn apart
+        driver = init_driver(account)
+        if driver:
+            ctx.start_session(account)
+            _note_session(ctx, driver, account)
     if not driver:
         run.unavailable[account] = "chrome"
-        run.stop = "chrome"
+        run.stop = "interrupted" if pressed() else "chrome"
         return
-    ctx.start_session(account)
-    _note_session(ctx, driver, account)
-    _check_bound_page_loads(driver)
     run.tally = {}
     try:
+        _check_bound_page_loads(driver)
+        if pressed():
+            raise KeyboardInterrupt       # pressed during the launch: stop now, through this session's close
         for pass_name, objs in (("routed", routed), ("cross", cross)):
             for start in range(0, len(objs), CHECK_BATCH):
                 if _check_should_stop(run):

@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13.i resumability + never-downloads pin + whole-diff self-review
+STATE: IN PROGRESS — next: 13.j gates (disarm probes on a scratch copy · full suite · smoke · live dry run · final)
 
 # IMP-C25 Step 13 — `check_photos`: download-free verification, sweep and confirm — resumable status
 
@@ -99,8 +99,21 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       test_locator + test_map_photos 230 passed — WIP SHA in the commit that ticks this line. Two 13.b assertions and
       one 13.g assertion of this file changed with the refined rules below (`elsewhere` left run.json; a complete
       run's retry hint)
-- [ ] 13.i resumability (resume / --recheck / limit + max-minutes continue / complete → new run) + never-downloads pin
-      + whole-diff self-review fixes — tests
+- [x] 13.i resumability (resume / --recheck / limit + max-minutes continue / complete → new run) + never-downloads pin
+      + whole-diff self-review fixes — tests: tests/test_check_photos.py 158 passed (+11: an error retried and a settled
+      object never re-checked on resume, --recheck + a complete run followed by a fresh one, a killed child's torn line,
+      objects that joined after the run began, the Chrome a killed check left running ended by the next check's start-up
+      cleanup, Ctrl+C during Chrome's launch, never a download ×4 (RPC / web pages × best / all: every request, arm,
+      harvest and booking path of the fetch forbidden; no pLFTfd, no Shift+D, no tile opened, no file), `account: x`
+      spelled one way); test_locator + test_map_photos + test_prep_push_rep_enrich_cli + test_fetch_hygiene +
+      test_fetch_routing 510 passed — WIP SHA in the commit that ticks this line. Self-review fixes: Ctrl+C is held while
+      a session launches and records its Chrome (`_ctrl_c_held`: the Popen handle exists only inside init_driver — an
+      interrupt there left a Chrome nothing recorded; init_driver itself, shared, unchanged) and ctx.chrome is reset per
+      session; dead `CHECK_NAMED_SCOPES` and the `hints` local removed; `mainfetch_candidates_cap` inlined; the
+      `account:` scope normalized by the parser (it was stripped when validated, not when filtered); the report says
+      "on the failed list" only when the apply did not stop, no longer points at Step 14's not-yet-existing
+      resolve_photos (failed_objects.csv + map_photos --resolutions instead), and its retry hints follow the run's state;
+      section comments state the refined look-elsewhere rule
 - [ ] 13.j gates: disarm probes (isolated scratch copy) · full suite · smoke · live read-only dry run if port 9222 is
       free and no MediaVault fetch/crawl runs · self-review · STATE: COMPLETE · final feat commit
 

@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13.e RPC acceleration (pre-warm) + quality post-pass
+STATE: IN PROGRESS — next: 13.f cross-account pass + hinted locators (tests; the code is in)
 
 # IMP-C25 Step 13 — `check_photos`: download-free verification, sweep and confirm — resumable status
 
@@ -50,9 +50,14 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       + continue, pacing ×3, breaker, sign-out, Ctrl+C, lock held / no-wait / taken over, missing profile, the Chrome
       guarantee ×6, every session closed, the child's command line ×8, the child CLI + _SafeStream) — [x] when its
       WIP commit lands (the code for 13.f's cross pass and hints is in this commit; its tests come with 13.f)
-- [ ] 13.e mainfetch: RPC acceleration (batch hash_lookup of content keys + mapped cloud dedupKeys, batch_info names,
+- [x] 13.e mainfetch: RPC acceleration (batch hash_lookup of content keys + mapped cloud dedupKeys, batch_info names,
       ≤50 per call, warming the locator's own record cache — no second verifier) + quality post-pass
-      (original_quality / partial_upload / archived) + UI fallback — tests
+      (original_quality / partial_upload / archived) + UI fallback — tests: tests/test_check_photos.py 103 passed (+7:
+      pending by one swbisb batch, mapped legacy objects batch-confirmed with proof filename (never dedupkey), 120
+      objects -> swbisb 50+50+20 and no item info / search, RPC down -> web pages and no quality claimed, a failing
+      batch -> per-object lookups, quality lines, a gone mapped item -> stale + re-upload by name); test_locator 96 —
+      WIP SHA in the commit that ticks this line. `_check_locators` also hands back each object's learned record (the
+      fetch's locator shape is pinned EXACTLY by test_fetch_routing — nothing was added to it)
 - [ ] 13.f mainfetch: cross-account pass (object not found in its routed account → looked for in every other account
       whose profile exists: "account mismatch" / "in no account") + hinted locators (url → photo_id, datetime → taken
       second) — tests

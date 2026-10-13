@@ -10,6 +10,8 @@ Step 13; P-5, P-8, P-9, P-10, P-11, P-15, P-18; OD-5, OD-7, OD-9; the Step 9b ru
   13.d  the engine (`python mainfetch.py check`): one session per account, results.jsonl + progress.json only, pacing,
         --limit, --max-minutes, the error breaker, sign-out, Ctrl+C, the lock (held · taken over), a missing profile, the
         Chrome guarantee (killed through its Popen handle when the shared close left it running), the child's CLI
+  13.e  RPC acceleration: hash_lookup batches of 50 warm the locator's own cache (content keys + mapped cloud keys —
+        a mapped key never becomes a content proof), batch_info names, the UI fallback, the quality post-pass
 
 Hermetic: the fake Google Photos world + its batchexecute emulator (tests/gphotos_fake.py); mainfetch's and gprpc's clocks
 are fake (nothing waits); the autouse fixtures of tests/conftest.py redirect every state dir, ~/Downloads, the process
@@ -723,23 +725,42 @@ def cw(fake_photos, monkeypatch):
     return types.SimpleNamespace(world=fake_photos, drivers=drivers, beat=beat, spawned=spawned)
 
 
-def _demo_season(sandbox, world, episodes=(1, 2, 3), learned=(1, 2, 3), account="tv"):
-    """A season SEASON whose episode n holds _bytes(<its id>) and lives in `account` under its uploaded name; episodes in
-    `learned` carry a trusted block naming their item (S0a's fast path), the others are legacy (found by name, S2).
-    -> {episode id: fake item}."""
+def _season_of(sandbox, world, modes, account="tv", in_account=None):
+    """A season SEASON with one whole-file episode per entry of `modes` {n: mode}; episode n's item lives in
+    `in_account` (default `account`) under its uploaded name, holding _bytes(<episode id>). Modes:
+      learned  a trusted block with the content key and the item's photo_id (S0a, proof dedupkey)
+      mapped   a LEGACY object mapped by name: the library holds dummy bytes, the block's record names the item and its
+               cloud dedupKey but the block has NO content key (S0a, proof filename)
+      pending  a new push: a capture with the SHA-1 + DateUTC, no block (S0b, proof dedupkey)
+      legacy   nothing but the library entry (S2 exact name, proof filename)
+      missing  like legacy, but no item anywhere
+    -> {episode id: fake item or None}."""
     folder = sandbox["local_root"] / "Series" / "Demo" / "Season 01"
     folder.mkdir(parents=True, exist_ok=True)
-    lib, items = {SEASON: {"type": "season_map", "folder_path": str(folder), "total_episodes": len(episodes),
-                           "children": [f"{SEASON}e0{n}" for n in episodes]}}, {}
-    for n in episodes:
+    lib, items = {SEASON: {"type": "season_map", "folder_path": str(folder), "total_episodes": len(modes),
+                           "children": [f"{SEASON}e0{n}" for n in modes]}}, {}
+    for n, mode in modes.items():
         mid, name, sid = f"{SEASON}e0{n}", f"Demo.S01E0{n}.mkv", f"de{n}de{n}"
         data = _bytes(mid)
-        item = world.add_item(account, _up(name, sid), data=data, taken=TAKEN)
-        block = _learned(item, account=account) if n in learned else None
-        lib[mid] = dict(_whole(folder, name, data, sid, block=block), parent_id=SEASON)
+        item = None if mode == "missing" else world.add_item(in_account or account, _up(name, sid), data=data,
+                                                             taken=TAKEN)
+        block, held = None, data
+        if mode == "learned":
+            block = _learned(item, account=account)
+        elif mode == "mapped":
+            held = _bytes(mid + " dummy")
+            block = _learned(item, data=held, account=account, proof="filename", content_key=False)
+        elif mode == "pending":
+            _capture(folder, sid, [_obj(data, _up(name, sid))])
+        lib[mid] = dict(_whole(folder, name, held, sid, block=block), parent_id=SEASON)
         items[mid] = item
     mvcommon.save_library(lib)
     return items
+
+
+def _demo_season(sandbox, world, episodes=(1, 2, 3), learned=(1, 2, 3), account="tv"):
+    """_season_of with episodes in `learned` learned and the others legacy."""
+    return _season_of(sandbox, world, {n: "learned" if n in learned else "legacy" for n in episodes}, account)
 
 
 def _results(run_dir, kind="check"):
@@ -1031,3 +1052,106 @@ def test_the_check_child_exits_with_cmd_checks_code_and_its_output_can_never_sto
     with pytest.raises(SystemExit) as stop:
         mainfetch.cli(["mainfetch.py", "check", "--run", "d"])
     assert stop.value.code == 3 and seen["run_dir"] == "d" and isinstance(seen["stdout"], mainfetch._SafeStream)
+
+
+# ===========================================================================
+# 13.e — RPC acceleration and the quality post-pass
+# ===========================================================================
+def _calls(world, rpcid):
+    return sum(1 for r in world.rpc_ids_sent() if r == rpcid)
+
+
+def test_new_pushes_are_confirmed_by_one_hash_lookup_batch(cw, sandbox):
+    items = _season_of(sandbox, cw.world, {1: "pending", 2: "pending", 3: "pending"})
+
+    res = main.cmd_check_photos("pending")
+
+    lines = _results(res["run_dir"])
+    assert [(l["outcome"], l["stage"], l["proof"], l["via"]) for l in lines] == [
+        ("exactly-one", "s0_hash", "dedupkey", "rpc")] * 3
+    assert [l["photo_id"] for l in lines] == [items[m].photo_id for m in sorted(items)]
+    assert cw.world.rpc_ids_sent() == ["swbisb", "EWgK9e"]       # one hash batch + one name/quality batch for all three
+    assert sorted(cw.world.rpc_log[0]["request"][0]) == sorted(items[m].hash_b64 for m in items)
+
+
+def test_mapped_legacy_objects_are_confirmed_in_batches_and_keep_their_filename_proof(cw, sandbox):
+    # A legacy object's local copy is a dummy: its block knows the cloud item's dedupKey only from the MAPPING. The hash
+    # lookup under that key says the item still holds those bytes; the proof stays `filename` (P-5) — never dedupkey.
+    items = _season_of(sandbox, cw.world, {1: "mapped", 2: "mapped", 3: "mapped"})
+
+    res = main.cmd_check_photos(SEASON)
+
+    lines = _results(res["run_dir"])
+    assert [(l["outcome"], l["stage"], l["proof"], l["content_key"]) for l in lines] == [
+        ("exactly-one", "s0_photo_id", "filename", False)] * 3
+    assert [l["photo_id"] for l in lines] == [items[m].photo_id for m in sorted(items)]
+    assert cw.world.rpc_ids_sent() == ["swbisb", "EWgK9e"]       # no per-object item info (VrseUb / fDcn4b)
+
+
+def test_hash_lookups_go_in_batches_of_fifty(cw, sandbox):
+    _season_of(sandbox, cw.world, {n: "learned" for n in range(1, 121)})
+
+    res = main.cmd_check_photos(SEASON)
+
+    assert res["status"] == "ok" and len(_results(res["run_dir"])) == 120
+    assert _calls(cw.world, "swbisb") == 3                        # 50 + 50 + 20
+    assert [len(r["request"][0]) for r in cw.world.rpc_log if r["rpcid"] == "swbisb"] == [50, 50, 20]
+    assert _calls(cw.world, "VrseUb") == _calls(cw.world, "fDcn4b") == 0
+    assert _calls(cw.world, "EzkLib") == 0                        # no search at all
+
+
+def test_without_rpc_every_object_is_checked_on_the_web_pages(cw, sandbox):
+    items = _season_of(sandbox, cw.world, {1: "learned", 2: "pending", 3: "legacy"})
+    cw.world.wiz_token_missing["tv"] = True
+
+    res = main.cmd_check_photos(SEASON)
+
+    lines = _results(res["run_dir"])
+    assert cw.world.rpc_log == []                                 # no page tokens: not one RPC was sent
+    assert [(l["outcome"], l["via"]) for l in lines] == [("exactly-one", "ui"), ("exactly-one", "ui"),
+                                                         ("exactly-one", "ui")]
+    assert [l["proof"] for l in lines] == ["dedupkey", "dedupkey", "filename"]
+    assert [l["photo_id"] for l in lines] == [items[m].photo_id for m in sorted(items)]
+    assert _results(res["run_dir"], "quality") == []              # RPC off: quality unknown, nothing claimed
+
+
+def test_a_failing_batch_leaves_the_objects_to_their_own_lookups(cw, sandbox, capsys):
+    items = _season_of(sandbox, cw.world, {1: "learned", 2: "learned"})
+    cw.world.fail_next_rpc("http500", count=4, rpcid="swbisb")   # the batch gives up after its retries
+
+    res = main.cmd_check_photos(SEASON)
+
+    lines = _results(res["run_dir"])
+    assert [(l["outcome"], l["photo_id"]) for l in lines] == [("exactly-one", items[m].photo_id) for m in sorted(items)]
+    assert _calls(cw.world, "VrseUb") == 2                        # each object asked on its own
+    assert "A batched Google Photos call failed (RpcUnavailable)" in capsys.readouterr().out
+
+
+def test_the_quality_of_every_pinned_item_is_recorded(cw, sandbox):
+    items = _season_of(sandbox, cw.world, {1: "learned", 2: "pending", 3: "legacy"})
+    items[f"{SEASON}e01"].partial_upload = True
+    items[f"{SEASON}e02"].original_quality = False
+
+    res = main.cmd_check_photos(SEASON)
+
+    quality = {q["photo_id"]: {k: q.get(k) for k in ("original_quality", "partial_upload", "archived")}
+               for q in _results(res["run_dir"], "quality")}
+    assert quality == {
+        items[f"{SEASON}e01"].photo_id: {"original_quality": True, "partial_upload": True, "archived": False},
+        items[f"{SEASON}e02"].photo_id: {"original_quality": False, "partial_upload": False, "archived": False},
+        items[f"{SEASON}e03"].photo_id: {"original_quality": True, "partial_upload": False, "archived": False}}
+    assert {q["manual_id"] for q in _results(res["run_dir"], "quality")} == set(items)
+
+
+def test_a_mapped_item_that_is_gone_is_reported_stale_and_its_reupload_is_found_by_name(cw, sandbox):
+    items = _season_of(sandbox, cw.world, {1: "mapped"})
+    old = items[f"{SEASON}e01"]
+    old.deleted = True                                            # removed from Google Photos …
+    new = cw.world.add_item("tv", old.filename, data=_bytes("re-upload"), taken="2026-09-01T00:00:00Z")   # … uploaded again
+
+    res = main.cmd_check_photos(SEASON)
+
+    [line] = _results(res["run_dir"])
+    assert line["stale"] == [old.photo_id]                        # RPC and its own page agree: gone
+    assert (line["outcome"], line["photo_id"], line["stage"], line["proof"]) == ("exactly-one", new.photo_id,
+                                                                                 "s2_exact_name", "filename")

@@ -5225,10 +5225,11 @@ def _check_hinted(loc, obj, account):
 
 
 def _check_locators(run, ctx, objs):
-    """{object key: (queue item, locator)} for `objs`, built exactly as the fetch builds them — build_fetch_queue against
-    a folder that never exists, so every object is listed (cmd_locate's rule), an extra through build_extras_entries —
-    in the session's account (ctx.account: its own learned record). An object the library no longer holds (re-split,
-    re-mastered since the run began) is absent."""
+    """{object key: (queue item, locator, learned record)} for `objs`, built exactly as the fetch builds them —
+    build_fetch_queue against a folder that never exists, so every object is listed (cmd_locate's rule), an extra
+    through build_extras_entries — in the session's account (ctx.account: its own learned record, which is also handed
+    back for the RPC acceleration — the locator's shape is the fetch's, unchanged). An object the library no longer holds
+    (re-split, re-mastered since the run began) is absent."""
     import tempfile
     import uuid
     nowhere = os.path.join(tempfile.gettempdir(), f"mediavault-check-{uuid.uuid4().hex}")  # never created
@@ -5242,11 +5243,12 @@ def _check_locators(run, ctx, objs):
         for source, entry_id in entries:
             if source.get("type") == "season_map":
                 continue  # a season holds no file of its own (its extras come through build_extras_entries)
+            blocks = {sha: obj["block"] for sha, obj in _entry_objects(source, entry_id or manual_id).items()}
             for item in build_fetch_queue(source, nowhere, ctx, entry_id=entry_id):
                 loc = item.get("locator") or {}
                 key = (loc.get("manual_id"), loc.get("label"), item.get("hash"))
                 if key in wanted:
-                    out.setdefault(key, (item, loc))
+                    out.setdefault(key, (item, loc, mvcommon.account_record(blocks.get(item.get("hash")), ctx.account)))
     return out
 
 
@@ -5384,14 +5386,116 @@ def _check_one(run, driver, ctx, obj, located, pass_name):
     return line
 
 
-def _check_prewarm(driver, ctx, account, locs):
-    """[13.e] RPC acceleration — filled by the next sub-task."""
-    return {}
+_QUALITY_KEYS = ("original_quality", "partial_upload", "archived")
+
+
+def _check_note_rpc(ctx, error):
+    """One line per run when a batched call of the check failed (its objects are then asked one by one, or on the web
+    pages — locate_object's own fallback)."""
+    run = _locator_run(ctx)
+    if "check-batch" not in run.told:
+        run.told.add("check-batch")
+        print(f"   > ⚠️ A batched Google Photos call failed ({type(error).__name__}) — the objects are looked up one by "
+              f"one instead.")
+
+
+def _check_remember_quality(known, rec, *keys):
+    """Keep the quality facts (_QUALITY_KEYS) an answer gave about its item."""
+    facts = known.setdefault(rec["photo_id"], {})
+    for k in keys:
+        if isinstance(rec.get(k), bool):
+            facts[k] = rec[k]
+
+
+def _check_prewarm(driver, ctx, account, entries):
+    """[IMP-C25 Step 13 — RPC acceleration, OD-9 ruling] Before a batch of ≤ CHECK_BATCH objects is located (`entries`
+    = [(locator, learned record of this account or None)]): warm the locator's OWN per-run record cache (the
+    _LocatorRun that locate_object reads) with batched read-only calls, so S0a / S0b answer from that cache instead of
+    one item-info call per object — "confirmed in hash_lookup batches of 50" (PLAN Step 13):
+      * swbisb (gprpc.hash_lookup, ≤50 hashes per request) for every content key (capture / proven SHA-1) and every
+        MAPPED cloud dedupKey — a learned record's dedup_key, what its item held when it was mapped: the answer tells
+        whether that item still holds those bytes. Each answer is kept exactly as S0b keeps its own (_hash_ids);
+      * EWgK9e (gprpc.batch_info) for the names of the items an object without a content key is verified by (its
+        stored photo_id and alternates) and of every item a hash lookup returned — their quality on the way.
+    The verdicts stay locate_object's (_verdict / _judge): a mapped cloud key is NEVER the object's content key (P-5:
+    a legacy object's proof stays `filename` — IMP-E5 relies on dedupkey meaning OUR bytes). -> {photo_id: quality
+    facts the answers carried}. A failing batch leaves the cache cold (locate_object then asks per object, falling back
+    to the web pages itself); RPC off -> nothing is asked. Raises only SessionExpiredError and gprpc.RpcRefused."""
+    known = {}
+    if not entries or not _rpc_ok(driver, ctx):
+        return known
+    run = _locator_run(ctx)
+    digests, named = [], []
+    for loc, record in entries:
+        key = _content_key(loc)
+        sha1 = _sha1_of(loc, key)
+        if not sha1:
+            cloud = gpweb.normalize_dedup_key((record or {}).get("dedup_key")) if (record or {}).get("photo_id") else None
+            sha1 = gpweb.dedup_key_to_sha1_hex(cloud) if cloud else None
+            named += [p for p in [loc.get("photo_id")] + list(loc.get("alternates") or [])
+                      if isinstance(p, str) and gpweb.MEDIA_KEY_RE.match(p)]
+        if sha1 and sha1 not in digests and (account, "hash", sha1) not in run.listings:
+            digests.append(sha1)
+    try:
+        if digests:
+            found = gprpc.hash_lookup(driver, digests)
+            for digest in digests:
+                held = []
+                for rec in found.get(digest, []):
+                    cached = _remember(ctx, account, rec, "rpc")
+                    if cached is not None:
+                        held.append(cached["photo_id"])
+                        _check_remember_quality(known, rec, "partial_upload", "archived")
+                run.listings[(account, "hash", digest)] = {"ids": held, "complete": True}
+                named += held
+        named = [p for p in dict.fromkeys(named) if not (run.records.get((account, p)) or {}).get("filename")]
+        if named:
+            for pid, row in gprpc.batch_info(driver, named).items():
+                if row and row.get("filename"):
+                    _remember(ctx, account, {"photo_id": pid, "filename": row["filename"],
+                                             "size_bytes": row.get("size_bytes")}, "rpc")
+                    _check_remember_quality(known, row, "original_quality")
+    except gprpc.RpcUnavailable as e:
+        _check_note_rpc(ctx, e)
+    return known
 
 
 def _check_quality(run, driver, ctx, account, lines, known):
-    """[13.e] The quality post-pass — filled by the next sub-task."""
-    return None
+    """[IMP-C25 Step 13] The quality of the items this batch pinned (PLAN Step 13 outliers: "partial or
+    non-original-quality uploads"; IMP-C27 (e): such a copy would fail a restore's SHA-256 check): original_quality
+    from EWgK9e, partial_upload / archived from the item record (swbisb), each asked once per batch for the items the
+    pre-warm did not already describe. One results.jsonl line (kind "quality") per pinned item: {account, photo_id,
+    manual_id, label, sha256, original_quality, partial_upload, archived — the ones known}. RPC off or a failing call:
+    the facts stay unknown (never a reason to doubt an item). Raises only SessionExpiredError and gprpc.RpcRefused."""
+    pinned = [line for line in lines if line.get("found") and line.get("outcome") == "exactly-one"
+              and isinstance(line.get("photo_id"), str)]
+    if not pinned:
+        return
+    if _rpc_ok(driver, ctx):
+        try:
+            wants = [l["photo_id"] for l in pinned if "original_quality" not in known.get(l["photo_id"], {})]
+            if wants:
+                for pid, row in gprpc.batch_info(driver, list(dict.fromkeys(wants))).items():
+                    if row:
+                        _check_remember_quality(known, dict(row, photo_id=pid), "original_quality")
+            wants = {}
+            for l in pinned:
+                key = gpweb.normalize_dedup_key((l.get("record") or {}).get("dedup_key"))
+                if key and "partial_upload" not in known.get(l["photo_id"], {}):
+                    wants[gpweb.dedup_key_to_sha1_hex(key)] = l["photo_id"]
+            if wants:
+                for digest, recs in gprpc.hash_lookup(driver, list(wants)).items():
+                    for rec in recs:
+                        if rec["photo_id"] == wants[digest]:
+                            _check_remember_quality(known, rec, "partial_upload", "archived")
+        except gprpc.RpcUnavailable as e:
+            _check_note_rpc(ctx, e)
+    for l in pinned:
+        facts = {k: v for k, v in (known.get(l["photo_id"]) or {}).items() if k in _QUALITY_KEYS}
+        if facts:
+            mvcommon._append_jsonl(run.results_path, dict(
+                {"v": 1, "kind": "quality", "at": _utc_now(), "account": account, "photo_id": l["photo_id"],
+                 "manual_id": l["manual_id"], "label": l["label"], "sha256": l["sha256"]}, **facts))
 
 
 def _check_bound_page_loads(driver):
@@ -5485,7 +5589,12 @@ def _check_session(run, ctx, account):
                     break
                 chunk = objs[start:start + CHECK_BATCH]
                 located = _check_locators(run, ctx, chunk)
-                known = _check_prewarm(driver, ctx, account, [located[k][1] for k in located])
+                entries = []
+                for obj in chunk:
+                    hit = located.get(_check_key(obj))
+                    if hit is not None:
+                        entries.append((_check_hinted(hit[1], obj, account), hit[2]))
+                known = _check_prewarm(driver, ctx, account, entries)
                 lines = []
                 for obj in chunk:
                     if _check_should_stop(run):

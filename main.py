@@ -13181,8 +13181,10 @@ def _cp_resolve(library, scope, account, now):
       objects    [{manual_id, label, sha256, kind, category, uploaded_name, account (routing: mvconfig override >
                  learned home > id prefix; a hint's own account for `hinted`), route (override | learned | prefix |
                  hint), home (the learned home, else the prefix account — what an "account mismatch" is measured
-                 against), pushed_at (capture), hint (hinted only)}] — alias-safe (an alias id resolves to its primary,
-                 a whole-library pass skips aliases), objects without a SHA-256 left out (no pin, nothing to verify)
+                 against), pushed_at (capture), elsewhere (look in the other accounts when it is not found in its own:
+                 not for a push of the last MAP_RECENT_DAYS — Step 9b: not backed up yet), hint (hinted only)}] —
+                 alias-safe (an alias id resolves to its primary, a whole-library pass skips aliases), objects without
+                 a SHA-256 left out (no pin, nothing to verify)
       show, seasons   (series) the show folder and its season ids · notes: lines printed with the resolution
       unpinned   objects left out for want of a SHA-256 · gone: hints whose object no longer exists
     ValueError when the scope names nothing in the library."""
@@ -13224,10 +13226,14 @@ def _cp_resolve(library, scope, account, now):
             unpinned += 1
             continue
         route = routes[(obj["manual_id"], obj["label"])]
+        pushed = _mp_when(_mp_pushed_at(obj))
         record = {"manual_id": obj["manual_id"], "label": obj["label"], "sha256": obj["sha256"], "kind": obj["kind"],
                   "category": obj["category"], "uploaded_name": obj["uploaded_name"], "account": route["routing"],
                   "route": _cp_route_reason(route), "home": route["home"] or route["default"],
-                  "pushed_at": _mp_pushed_at(obj)}
+                  "pushed_at": _mp_iso(pushed),
+                  # Step 9b: a push of the last MAP_RECENT_DAYS that is not found is simply not backed up yet — only an
+                  # older object is looked for in the other accounts before it is called lost (one Chrome each).
+                  "elsewhere": not (pushed is not None and now - pushed <= timedelta(days=MAP_RECENT_DAYS))}
         if obj.get("hint"):
             record.update(account=obj["hint"]["account"], route="hint", hint=obj["hint"])
         out.append(record)

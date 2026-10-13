@@ -12,6 +12,8 @@ Step 13; P-5, P-8, P-9, P-10, P-11, P-15, P-18; OD-5, OD-7, OD-9; the Step 9b ru
         Chrome guarantee (killed through its Popen handle when the shared close left it running), the child's CLI
   13.e  RPC acceleration: hash_lookup batches of 50 warm the locator's own cache (content keys + mapped cloud keys —
         a mapped key never becomes a content proof), batch_info names, the UI fallback, the quality post-pass
+  13.f  the other accounts (an old object not found / wrong-item in its own account — never a recent push, never an
+        ambiguous one), the session order, the hinted locators (url -> photo_id, datetime -> the taken second)
 
 Hermetic: the fake Google Photos world + its batchexecute emulator (tests/gphotos_fake.py); mainfetch's and gprpc's clocks
 are fake (nothing waits); the autouse fixtures of tests/conftest.py redirect every state dir, ~/Downloads, the process
@@ -370,7 +372,7 @@ def test_an_item_scope_checks_its_objects_and_an_alias_resolves_to_its_primary(s
     [obj] = item["objects"]
     assert obj == {"manual_id": "tv-en-1994-files-s02e05", "label": "whole", "sha256": _sha256(_bytes(obj["manual_id"])),
                    "kind": "whole", "category": "tv", "uploaded_name": obj["uploaded_name"], "account": "tv",
-                   "route": "prefix", "home": "tv", "pushed_at": None}
+                   "route": "prefix", "home": "tv", "pushed_at": None, "elsewhere": True}
 
 
 def test_a_season_scope_checks_its_children_and_anime_glued_ids_are_its_children(sandbox):
@@ -486,6 +488,8 @@ def test_a_prefix_scope_and_the_named_scopes(sandbox, monkeypatch):
                             "tv-en-1994-files-s02e06"]
     assert (pending["kind"], _ids(pending)) == ("pending", ["mov-en-2026-pushed"])
     assert pending["objects"][0]["pushed_at"] == "2026-09-30T10:00:00Z"
+    assert pending["objects"][0]["elsewhere"] is False                     # 14 h old: not looked for elsewhere (9b)
+    assert all(o["elsewhere"] for o in everything["objects"] if o["manual_id"] != "mov-en-2026-pushed")
     assert _ids(main._cp_resolve(library, "all", "anime", NOW)) == ["ani-ja-2006-deathnote01",
                                                                     "ani-ja-2007-deathnote-s0201"]
     with pytest.raises(ValueError) as err:
@@ -1155,3 +1159,146 @@ def test_a_mapped_item_that_is_gone_is_reported_stale_and_its_reupload_is_found_
     assert line["stale"] == [old.photo_id]                        # RPC and its own page agree: gone
     assert (line["outcome"], line["photo_id"], line["stage"], line["proof"]) == ("exactly-one", new.photo_id,
                                                                                  "s2_exact_name", "filename")
+
+
+# ===========================================================================
+# 13.f — the other accounts, and the hinted locators
+# ===========================================================================
+def _sessions(cw):
+    return [(account, n) for account, drivers in cw.drivers.items() for n in range(len(drivers))]
+
+
+def test_an_object_not_in_its_own_account_is_found_in_another_one(cw, sandbox, capsys):
+    # The X-Files case before any override or learned home: routed by its prefix to tv, its item lives in movies.
+    items = _season_of(sandbox, cw.world, {1: "legacy", 2: "legacy"}, in_account="movies")
+
+    res = main.cmd_check_photos(SEASON)
+
+    lines = _results(res["run_dir"])
+    assert [(l["manual_id"], l["pass"], l["account"], l["outcome"]) for l in lines] == [
+        (f"{SEASON}e01", "routed", "tv", "not-found"), (f"{SEASON}e02", "routed", "tv", "not-found"),
+        (f"{SEASON}e01", "cross", "movies", "exactly-one"), (f"{SEASON}e02", "cross", "movies", "exactly-one")]
+    assert [l["photo_id"] for l in lines[2:]] == [items[m].photo_id for m in sorted(items)]
+    assert list(cw.drivers) == ["tv", "movies"]                    # found in the first other account: no further session
+    assert res["status"] == "ok" and _progress(res["run_dir"])["state"] == "complete"
+    assert "   🔎 ↪ in 'movies': tv-en-2015-demo-s01e01 · whole — exactly-one · S2 exact_name" in capsys.readouterr().out
+
+
+def test_an_object_found_nowhere_is_looked_for_in_every_account_that_has_a_profile(cw, sandbox, monkeypatch):
+    _season_of(sandbox, cw.world, {1: "missing"})
+    monkeypatch.setitem(mainfetch.CHROME_PROFILES, "others", str(sandbox["local_root"] / "NoOthersProfile"))
+
+    res = main.cmd_check_photos(SEASON)
+
+    lines = _results(res["run_dir"])
+    assert [(l["pass"], l["account"], l["outcome"]) for l in lines] == [
+        ("routed", "tv", "not-found"), ("cross", "movies", "not-found"), ("cross", "anime", "not-found")]
+    assert list(cw.drivers) == ["tv", "movies", "anime"]          # others: no profile, nothing launched
+    assert res["status"] == "ok" and _progress(res["run_dir"])["state"] == "complete"
+
+
+def test_a_recent_push_that_is_not_backed_up_yet_is_not_looked_for_elsewhere(cw, sandbox, monkeypatch):
+    # P-19: the auto-confirm opens Chrome only for the accounts it needs — Step 9b: a push of the last week that Google
+    # Photos does not show yet is simply not backed up yet.
+    monkeypatch.setattr(mvcommon, "_now_utc", lambda: NOW)
+    folder = sandbox["local_root"] / "Series" / "Demo" / "Season 01"
+    folder.mkdir(parents=True)
+    data = _bytes("not backed up")
+    _capture(folder, "nb0nb0", [_obj(data, _up("Fresh.mkv", "nb0nb0"))])
+    mvcommon.save_library({"tv-en-2026-fresh-s01e01": _whole(folder, "Fresh.mkv", data, "nb0nb0")})
+
+    res = main.cmd_check_photos("pending")
+
+    assert [(l["pass"], l["outcome"]) for l in _results(res["run_dir"])] == [("routed", "not-found")]
+    assert list(cw.drivers) == ["tv"] and res["status"] == "ok"
+
+
+def test_an_ambiguous_object_is_not_looked_for_elsewhere(cw, sandbox):
+    items = _season_of(sandbox, cw.world, {1: "legacy"})
+    cw.world.add_item("tv", items[f"{SEASON}e01"].filename, data=_bytes("another upload"), taken="2025-01-01T00:00:00Z")
+
+    res = main.cmd_check_photos(SEASON)
+
+    [line] = _results(res["run_dir"])
+    assert (line["outcome"], line["rule"], line["found"]) == ("ambiguous", "newest-set", True)
+    assert list(cw.drivers) == ["tv"]                             # its name IS in its account: no other account asked
+
+
+def test_a_wrong_item_object_is_looked_for_elsewhere(cw, sandbox):
+    # A new push whose name in its own account holds OTHER bytes (an old upload of another cut): its own bytes are in
+    # movies — found there by its content key.
+    folder = sandbox["local_root"] / "Series" / "Demo" / "Season 01"
+    folder.mkdir(parents=True)
+    data = _bytes("the real cut")
+    _capture(folder, "wr0wr0", [_obj(data, _up("Cut.mkv", "wr0wr0"))])
+    entry = _whole(folder, "Cut.mkv", data, "wr0wr0")
+    mvcommon.save_library({"tv-en-2020-cut-s01e01": entry})
+    cw.world.add_item("tv", _up("Cut.mkv", "wr0wr0"), data=_bytes("another cut"), taken=TAKEN)
+    item = cw.world.add_item("movies", _up("Cut.mkv", "wr0wr0"), data=data, taken=TAKEN)
+
+    res = main.cmd_check_photos("tv-en-2020-cut-s01e01")          # its capture is from 09-30: by NOW it is two weeks old
+
+    lines = _results(res["run_dir"])
+    assert [(l["pass"], l["account"], l["outcome"]) for l in lines] == [("routed", "tv", "wrong-item"),
+                                                                         ("cross", "movies", "exactly-one")]
+    assert (lines[1]["photo_id"], lines[1]["proof"]) == (item.photo_id, "dedupkey")
+
+
+def test_routed_checks_go_round_the_accounts_before_the_look_elsewhere_starts_again_from_the_first(cw, sandbox):
+    # movies-routed and anime-routed objects found nowhere: movies (its own), anime (its own + movies' object), then
+    # from the first account again: movies (anime's object), tv (both), others (both).
+    folder = sandbox["local_root"] / "Mixed"
+    folder.mkdir(parents=True)
+    mvcommon.save_library({"mov-en-2001-lost": _whole(folder, "Lost.mkv", _bytes("lost movie"), "lo5t01"),
+                           "ani-ja-2002-lost01": _whole(folder, "Lost01.mkv", _bytes("lost anime"), "lo5t02")})
+
+    res = main.cmd_check_photos("all")
+
+    order = [(l["account"], l["manual_id"][:3]) for l in _results(res["run_dir"])]
+    assert order == [("movies", "mov"), ("anime", "ani"), ("anime", "mov"), ("movies", "ani"), ("tv", "ani"),
+                     ("tv", "mov"), ("others", "ani"), ("others", "mov")]   # within a session: the run's object order
+    assert [a for a, drivers in cw.drivers.items() for _ in drivers] == ["movies", "movies", "anime", "tv", "others"]
+
+
+def _hint(sandbox, obj_id, **hint):
+    lib = mvcommon.load_library()
+    [obj] = [o for o in mvcommon.iter_entry_objects(obj_id, lib[obj_id])]
+    mvcommon.append_hint(dict({"manual_id": obj_id, "label": obj["label"], "sha256": obj["sha256"]}, **hint))
+
+
+def test_a_url_hint_is_tried_first_and_verified_by_the_items_name(cw, sandbox):
+    items = _season_of(sandbox, cw.world, {1: "legacy", 2: "legacy"})
+    other = cw.world.add_item("tv", "Something.Else [zz9zz9].mkv", data=_bytes("else"), taken=TAKEN)
+    _hint(sandbox, f"{SEASON}e01", account="tv", kind="url", photo_id=items[f"{SEASON}e01"].photo_id)
+    _hint(sandbox, f"{SEASON}e02", account="tv", kind="url", photo_id=other.photo_id)    # the user pasted another item
+
+    res = main.cmd_check_photos("hinted")
+
+    lines = {l["manual_id"]: l for l in _results(res["run_dir"])}
+    one, two = lines[f"{SEASON}e01"], lines[f"{SEASON}e02"]
+    assert (one["stage"], one["outcome"], one["proof"], one["hint"]) == ("s0_photo_id", "exactly-one", "filename", True)
+    assert two["per_approach"]["photo_id"] == {"outcome": "wrong-item", "n": 1}       # its name is not the object's
+    assert (two["stage"], two["photo_id"]) == ("s2_exact_name", items[f"{SEASON}e02"].photo_id)   # the right one
+
+
+def test_a_datetime_hint_gives_the_taken_second(cw, sandbox):
+    items = _season_of(sandbox, cw.world, {1: "legacy"})
+    item = items[f"{SEASON}e01"]
+    _hint(sandbox, f"{SEASON}e01", account="tv", kind="datetime", taken_ms=item.taken_ms, gmt_offset_min=480,
+          taken_local="2022-02-05T19:49:46")
+
+    res = main.cmd_check_photos("hinted")
+
+    [line] = _results(res["run_dir"])
+    assert (line["stage"], line["outcome"], line["photo_id"], line["proof"]) == ("s1_taken_second", "exactly-one",
+                                                                                 item.photo_id, "filename")
+
+
+def test_a_hint_for_another_account_leaves_this_accounts_locator_alone(tmp_path):
+    loc = {"photo_id": "AF1QipFAKElearned00000001", "alternates": [], "approach_best": None, "taken_ms": None}
+    obj = {"hint": {"kind": "url", "account": "movies", "photo_id": "AF1QipFAKEhinted000000001"}}
+    assert mainfetch._check_hinted(loc, obj, "tv") is loc
+    hinted = mainfetch._check_hinted(loc, obj, "movies")
+    assert (hinted["photo_id"], hinted["alternates"], hinted["approach_best"]) == (
+        "AF1QipFAKEhinted000000001", ["AF1QipFAKElearned00000001"], "photo_id")
+    assert loc["photo_id"] == "AF1QipFAKElearned00000001"           # the fetch's locator itself is never changed

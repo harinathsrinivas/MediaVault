@@ -5141,13 +5141,19 @@ class _CheckRun:
         return ((_check_key(obj), obj["account"]) not in self.tried
                 and (st is None or st["routed"] is None or st["routed"].get("outcome") == "error"))
 
-    def cross_todo(self, obj, account):
+    def needs_elsewhere(self, obj):
+        """True when an object is to be looked for in the other accounts: it is not pinned anywhere, its own account
+        answered not-found or wrong-item (its name there holds other bytes) — not ambiguous: its name IS there — and it
+        is not a push of the last MAP_RECENT_DAYS (run.json `elsewhere`, set by main — Step 9b: not backed up yet)."""
         st = self.state.get(_check_key(obj))
-        if account == obj["account"] or (_check_key(obj), account) in self.tried or st is None:
+        return (obj.get("elsewhere", True) is True and st is not None and st["found"] is None
+                and st["routed"] is not None and st["routed"].get("outcome") in ("not-found", "wrong-item"))
+
+    def cross_todo(self, obj, account):
+        if account == obj["account"] or (_check_key(obj), account) in self.tried or not self.needs_elsewhere(obj):
             return False
-        routed, prev = st["routed"], st["cross"].get(account)
-        return (st["found"] is None and routed is not None and routed.get("outcome") != "error"
-                and (prev is None or prev.get("outcome") == "error"))
+        prev = self.state[_check_key(obj)]["cross"].get(account)
+        return prev is None or prev.get("outcome") == "error"
 
     def work(self, account):
         """(objects to check in their routed account `account`, objects to look for there from other accounts)."""
@@ -5159,16 +5165,15 @@ class _CheckRun:
         return routed, [o for o in self.objects if self.cross_todo(o, account)]
 
     def left(self):
-        """Objects this run still owes a look (ignoring this invocation's bounds): no routed line yet, or — not pinned
-        and routed final — no line yet from an account that can be checked."""
+        """Objects this run still owes a look (ignoring this invocation's bounds): no routed line yet, or — to be looked
+        for elsewhere (needs_elsewhere) — no line yet from another account that can be checked."""
         out = []
         for obj in self.objects:
             st = self.state.get(_check_key(obj))
             if st is None or st["routed"] is None:
                 out.append(obj)
-            elif st["found"] is None and st["routed"].get("outcome") != "error" and any(
-                    a != obj["account"] and a not in self.unavailable and a not in st["cross"]
-                    for a in mvcommon.GP_ACCOUNTS):
+            elif self.needs_elsewhere(obj) and any(a != obj["account"] and a not in self.unavailable
+                                                   and a not in st["cross"] for a in mvcommon.GP_ACCOUNTS):
                 out.append(obj)
         return out
 
@@ -5624,16 +5629,20 @@ def _check_session(run, ctx, account):
 
 
 def _check_sessions(run, ctx):
-    """The account sessions, round and round in GP_ACCOUNTS order while any account has work: an object's routed check
-    comes first; an account later in the round then looks for what earlier ones did not pin. Every session either
-    checks something or makes its account unavailable, so the rounds end."""
+    """The account sessions, in GP_ACCOUNTS order. First every account whose objects await their check in it (their
+    routed account) — round from the last session; each of those sessions also looks for what earlier ones did not pin.
+    Then the remaining look-elsewhere work, from the first account again. Every session either checks something or
+    makes its account unavailable, so the sessions end — each account at most twice."""
     order = list(mvcommon.GP_ACCOUNTS)
     last = -1
     while run.stop is None:
-        ring = order[last + 1:] + order[:last + 1]
-        account = next((a for a in ring if _check_has_work(run, a)), None)
-        if account is None:
-            return
+        routed = [a for a in order if run.work(a)[0]]
+        if routed:
+            account = next(a for a in order[last + 1:] + order[:last + 1] if a in routed)
+        else:
+            account = next((a for a in order if _check_has_work(run, a)), None)
+            if account is None:
+                return
         last = order.index(account)
         _check_session(run, ctx, account)
 

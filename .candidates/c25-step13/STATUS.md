@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13.f cross-account pass + hinted locators (tests; the code is in)
+STATE: IN PROGRESS — next: 13.g main verdicts + report.txt + outliers.csv
 
 # IMP-C25 Step 13 — `check_photos`: download-free verification, sweep and confirm — resumable status
 
@@ -58,9 +58,16 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       batch -> per-object lookups, quality lines, a gone mapped item -> stale + re-upload by name); test_locator 96 —
       WIP SHA in the commit that ticks this line. `_check_locators` also hands back each object's learned record (the
       fetch's locator shape is pinned EXACTLY by test_fetch_routing — nothing was added to it)
-- [ ] 13.f mainfetch: cross-account pass (object not found in its routed account → looked for in every other account
+- [x] 13.f mainfetch: cross-account pass (object not found in its routed account → looked for in every other account
       whose profile exists: "account mismatch" / "in no account") + hinted locators (url → photo_id, datetime → taken
-      second) — tests
+      second) — tests: tests/test_check_photos.py 112 passed (+9: found in another account (2 sessions only), found
+      nowhere (every account with a profile), a recent push not looked for elsewhere, ambiguous not looked for
+      elsewhere, wrong-item looked for elsewhere (by its content key), the session order, url hint ×2, datetime hint,
+      the hint leaves the fetch's locator alone) — WIP SHA in the commit that ticks this line. REFINED RULE (decision
+      4): the cross pass runs only for an object whose own account answered not-found / wrong-item AND that is not a
+      push of the last MAP_RECENT_DAYS (run.json `elsewhere`, set by main) — P-19's auto-confirm then opens Chrome only
+      for the accounts it needs; sessions: routed accounts first (round from the last), then the look-elsewhere work from
+      the first account — each account at most twice
 - [ ] 13.g main: verdicts (found / account mismatch / inconsistent / ambiguous / wrong-item / Step 9b
       not-backed-up-yet · possible-loss (+ `--devices` phone opt-in) / partial sets / error), report.txt (per account ×
       category × approach), outliers.csv (8 OD-7 classes + stale photo_id), summary line — tests (each outlier class)
@@ -85,11 +92,13 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
    (content keys AND mapped cloud dedupKeys) and EWgK9e (names) — S0a / S0b then hit the cache; the verdict logic is
    the locator's (`_verdict` / `_judge`). A mapped cloud dedupKey is NEVER treated as the object's content key: a
    legacy object's proof stays `filename` (P-5; IMP-E5 relies on dedupkey/sha256 meaning "our bytes").
-4. Per object: routed account first (override > learned home > prefix; a hint's account for `hinted`); not exactly-one
-   there → the other accounts whose profile exists (cross pass, stop at the first find) → found elsewhere = account
-   mismatch; found nowhere = "in no account" → Step 9b: pushed within MAP_RECENT_DAYS before the CHECK time →
-   not-backed-up-yet (no failed row), else / push time unknown → possible-loss; `--devices` = the phone opt-in
-   (map's `_mp_device_check`). A newest-set pick (several same-name uploads, different bytes) is NOT confirmed
+4. Per object: routed account first (override > learned home > prefix; a hint's account for `hinted`); not-found or
+   wrong-item there AND not a push of the last MAP_RECENT_DAYS → the other accounts whose profile exists (cross pass,
+   stop at the first find) → found elsewhere = account mismatch; found nowhere = "in no account" → Step 9b: pushed
+   within MAP_RECENT_DAYS before the CHECK time → not-backed-up-yet (no failed row; NOT looked for elsewhere — the
+   auto-confirm opens only the accounts it needs, P-19), else / push time unknown → possible-loss; `--devices` = the
+   phone opt-in (map's `_mp_device_check`). An ambiguous object (its name IS in its account) is not looked for
+   elsewhere. A newest-set pick (several same-name uploads, different bytes) is NOT confirmed
    (ambiguous). A found item flagged partial_upload / not original quality → inconsistent (never confirmed).
 5. Resume: re-running the same key (scope + --account + approaches) continues the newest unfinished run: objects with
    a final result are skipped, `error` results are retried; `--recheck` starts a fresh run; a completed run is never

@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13b.a (maybe_auto_confirm + its tests)
+STATE: IN PROGRESS — next: 13b.b (after_push_command: the success decision + the conftest guard for it)
 
 # IMP-C25 Step 13b — auto-confirm unverified objects at the end of the next push (OD-6 ruling) — resumable status
 
@@ -17,13 +17,22 @@ uncommitted diff belongs to the first unticked sub-task: keep it when coherent a
 SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRESS.md (the orchestrator does).
 
 ## Sub-tasks (one WIP commit each)
-- [x] 13b.0 this status file: the sub-task plan + the design decisions below (no code) — WIP SHA in the commit that
-      ticks this line (back-filled by the next commit)
-- [ ] 13b.a main: AUTO_CONFIRM_MIN_AGE_H (measured choice) + the config switch (mvconfig `auto_confirm_after_push`,
+- [x] 13b.0 this status file: the sub-task plan + the design decisions below (no code) — fa30871
+- [x] 13b.a main: AUTO_CONFIRM_MIN_AGE_H (measured choice) + the config switch (mvconfig `auto_confirm_after_push`,
       mvconfig.example.json documents it) + `maybe_auto_confirm(library=None)`: disabled → silent · nothing pending →
       silent · web job / only young / no profile for any due account / fetch lock held → the ONE reminder line ·
       else one line + `check_photos pending --apply --max-minutes 15` through `_cp_spawn` (the check's streaming
-      idiom) · non-zero / interrupted / any error → ONE warning line · never raises — tests/test_auto_confirm.py
+      idiom) · non-zero / interrupted / any error → ONE warning line · never raises — tests/test_auto_confirm.py 47
+      passed (exact argv + header + summary last, lock free at spawn and none left, the caller's library, young →
+      reminder, the 24 h boundary ×3, unknown push time = old, one old is enough, nothing pending ×2, off in mvconfig
+      reads nothing, on ×4, non-boolean → off + one stderr warning ×7, web marker ×3 / not set ×3 / web + nothing
+      pending, lock held (left alone) / stale (reclaimed), profiles: none / one of two / only the old objects' / the
+      routing override, child exit 1 / interrupted ×3 / partial (exit 0) / not startable, any error ×3 never raises, a
+      corrupt library (SystemExit contained), the auto-confirm itself writes nothing); tests/conftest.py gained the
+      autouse `_hermetic_auto_confirm` (maybe_auto_confirm is an inert recorder in every test) + the opt-in
+      `real_auto_confirm` (the real one, its fetch lock under tmp_path, hard-guarded). Neighbours (test_check_photos,
+      test_prep_push_rep_enrich_cli, test_prep_keeps_split_record, test_cli_parsers, test_fetch_child_stream) 322
+      passed; smoke 82 passed — WIP SHA in the commit that ticks this line
 - [ ] 13b.b main: `after_push_command(command, result, target, episode_range)` — the success decision (False → nothing;
       None → the run's end state for the three None-returning commands) then maybe_auto_confirm; the post-condition
       helpers; tests/conftest.py autouse guard (`_hermetic_auto_confirm`: the hook is an inert recorder in every test)

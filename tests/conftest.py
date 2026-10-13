@@ -23,6 +23,9 @@ _REAL_SHORT_INCOMING_ROOT = mainfetch._short_incoming_root
 # autouse fixture _hermetic_chrome_profiles replaces it for every test; its own tests ask for the
 # `real_mark_profile_clean_exit` fixture (tmp_path profiles only).
 _REAL_MARK_PROFILE_CLEAN_EXIT = mainfetch.mark_profile_clean_exit
+# The real auto-confirm after a push (IMP-C25 Step 13b) — read once, before the autouse guard _hermetic_auto_confirm
+# replaces it; the auto-confirm's own tests put it back through the `real_auto_confirm` fixture.
+_REAL_MAYBE_AUTO_CONFIRM = main.maybe_auto_confirm
 
 FAKE_ORIGINAL_BYTES = b"ORIGINAL-MASTER-BYTES"
 FAKE_DUMMY_BYTES    = b"DUMMY"
@@ -132,6 +135,50 @@ def _hermetic_check_child(monkeypatch):
                              f"install an in-process runner: monkeypatch.setattr(main, '_cp_spawn', …)")
 
     monkeypatch.setattr(main, "_cp_spawn", refuse)
+
+
+class _InertAutoConfirm:
+    """IMP-C25 Step 13b — the autouse stand-in for the auto-confirm after a push (main.maybe_auto_confirm): it records
+    each call's arguments in `.calls` and does nothing else — no library read, no line, no lock, no child."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_auto_confirm(monkeypatch):
+    """IMP-C25 Step 13b — AUTOUSE, every test: the auto-confirm after a push is OFF.
+
+    Once a push-family command succeeds, main.py's CLI dispatcher runs the auto-confirm (PLAN P-19): it reads the
+    library's pending objects, probes the REAL fetch lock (~/.mediavault/locks) and starts a `check_photos` child that
+    launches a REAL Chrome. Every test that drives the dispatcher (tests/test_prep_push_rep_enrich_cli.py,
+    tests/test_prep_keeps_split_record.py, the smoke suite) must see the push command exactly as before, so the
+    auto-confirm is an inert recorder here (`.calls` lets a test prove the dispatcher reached it). Its own tests opt back
+    in with `real_auto_confirm`; main._cp_spawn stays refused (_hermetic_check_child) even then, so the real child can
+    never start without a runner the test installs."""
+    monkeypatch.setattr(main, "maybe_auto_confirm", _InertAutoConfirm())
+
+
+@pytest.fixture()
+def real_auto_confirm(tmp_path, monkeypatch):
+    """IMP-C25 Step 13b — the REAL auto-confirm, for its own tests (tests/test_auto_confirm.py): undoes
+    _hermetic_auto_confirm for this test, and moves the fetch lock the auto-confirm probes (mvcommon.MV_LOCK_DIR +
+    mvcommon.FETCH_SESSION_LOCK — read at call time) under this test's tmp_path. Hard guard: never the real
+    ~/.mediavault/locks. main._cp_spawn is still refused: install a runner before anything can start the child.
+    Yields the lock file's path (absent = the lock is free)."""
+    lock = tmp_path / "mv_state" / "locks" / "fetch_session.lock"
+    assert tmp_path.resolve() in lock.resolve().parents, f"Safety check failed: the fetch lock escaped tmp_path: {lock}"
+    real_state = os.path.normcase(os.path.join(os.path.expanduser("~"), ".mediavault"))
+    assert not os.path.normcase(os.path.abspath(lock)).startswith(real_state), \
+        f"Safety check failed: the fetch lock points at the real state: {lock}"
+    monkeypatch.setattr(mvcommon, "MV_LOCK_DIR", str(lock.parent))
+    monkeypatch.setattr(mvcommon, "FETCH_SESSION_LOCK", str(lock))
+    monkeypatch.setattr(main, "maybe_auto_confirm", _REAL_MAYBE_AUTO_CONFIRM)
+    yield lock
 
 
 @pytest.fixture()

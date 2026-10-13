@@ -14127,6 +14127,123 @@ def cmd_check_photos(scope, approaches=None, account=None, recheck=False, apply=
 
 
 # ==========================================
+#   GOOGLE PHOTOS IDENTITY — AUTO-CONFIRM AFTER A PUSH (IMP-C25 Step 13b)
+# ==========================================
+# docs/feature-fetch-datetime/PLAN.md P-19 / Step 13b — the OD-6 ruling: "when doing other push, can check all
+# unverified one in google photos and note down". A push only reaches the phone; Google Photos backs its objects up
+# hours or days later, so a new archival stays `unverified` (P-11: its capture records the push, no confirmed block).
+# At the end of the NEXT push-family command that succeeded, main.py's CLI dispatcher confirms them: `python main.py
+# check_photos pending --apply --max-minutes 15` runs as a child process, its output streamed (Chrome opens for the
+# accounts it needs; confirmed -> the node through the apply engine, not found -> the failed list; the child's last
+# line is the check's summary line). Turned off by mvconfig.json "auto_confirm_after_push": false.
+#
+# Rollback change-gate (CLAUDE.md; docs/feature-auto-rollback/ROLLBACK_MECHANISM.md §10): nothing here runs inside a
+# cmd_* function. The dispatcher calls after_push_command only once the command's function has RETURNED, so every
+# RollbackJournal it opened was committed or rolled back and every point of no return lies behind; an exception
+# (RollbackHardFail, SystemExit, …) never reaches it. Nothing here touches RollbackJournal, a journal file, a PONR or
+# the season resume messaging, and the check it starts never does either. It prints only after the push command's own
+# last line and never raises, so the command's output contract and exit code stay exactly as they were.
+
+# AUTO_CONFIRM_MIN_AGE_H — how long ago the OLDEST pending object must have been pushed before a push opens Chrome to
+# confirm (the check then covers every pending object, young ones included). The PLAN proposed 12 h and asked for a
+# measurement: on the R1b mapping of 2026-10-03 (69 captured objects in 14 pushes) Google Photos held 41 % of them 12 h
+# after their push, 84 % after 24 h, 88 % after 36 h and 99 % after 48 h (median 14 h, slowest 49.6 h). 24 h — "next
+# day", the OD-6 ruling's own words — confirms most objects at the first try without making every confirmation wait two
+# days; the slow tail is simply checked again at a later push, which is harmless (an object pushed in the last
+# MAP_RECENT_DAYS that is not found yet is `not-backed-up-yet`: no failed row — Step 13).
+AUTO_CONFIRM_MIN_AGE_H = 24
+AUTO_CONFIRM_MAX_MINUTES = 15            # the child's --max-minutes: a push is never held up longer (a partial run resumes)
+AUTO_CONFIRM_REMINDER = ("🔎 {n} pushed object(s) await Google Photos confirmation — run: main.py check_photos pending "
+                         "--apply")
+AUTO_CONFIRM_WEB_JOB_ENV = "MEDIAVAULT_WEB_JOB"   # set (and not "0") in a web job's environment: never open Chrome there
+_AC_SCRIPT = os.path.abspath(__file__)   # this main.py, absolute — the child's script
+
+
+def auto_confirm_argv():
+    """The auto-confirm child's command line, exactly as PLAN Step 13b fixes it: [sys.executable, <abs main.py>,
+    "check_photos", "pending", "--apply", "--max-minutes", "15"]."""
+    return [sys.executable, _AC_SCRIPT, "check_photos", "pending", "--apply", "--max-minutes",
+            str(AUTO_CONFIRM_MAX_MINUTES)]
+
+
+def _auto_confirm_on():
+    """mvconfig.json "auto_confirm_after_push" (PLAN P-19): absent, null or true -> on; false -> off. Any other value is
+    read as off — a present non-boolean is an attempt to set the switch, and the safe reading never opens Chrome — with
+    one warning on stderr, like mainfetch's fetch_account_overrides warnings. Read at call time (mvcommon's RUNTIME
+    CONFIG binding-hazard rule)."""
+    value = mvcommon._load_config().get("auto_confirm_after_push")
+    if value is None or value is True:
+        return True
+    if value is not False:
+        print(f"⚠️  mvconfig.json: auto_confirm_after_push must be true or false, got {value!r} — read as false (no "
+              f"auto-confirm after a push).", file=sys.stderr)
+    return False
+
+
+def _auto_confirm_warning(why):
+    """The ONE warning line of an auto-confirm that did not finish (P-19: any error -> one warning line)."""
+    return (f"⚠️  Auto-confirm did not finish ({why}) — the push itself is done; confirm later with: main.py "
+            f"check_photos pending --apply")
+
+
+def maybe_auto_confirm(library=None):
+    """PLAN P-19 — after a push-family command SUCCEEDED (after_push_command decided it), confirm in Google Photos the
+    pushed objects that have had time to be backed up. In this order:
+      * the config switch is off (_auto_confirm_on) -> nothing at all: no line, the library is not even read;
+      * nothing is pending (mvcommon.unverified_objects: a capture records the push, no confirmed block) -> nothing;
+      * a web job (AUTO_CONFIRM_WEB_JOB_ENV set) · no pending object pushed AUTO_CONFIRM_MIN_AGE_H ago or earlier (an
+        unknown push time counts as old — Step 13's verdict rule) · no Chrome profile for ANY account the old objects
+        route to (P-4: override > learned home > id prefix; one missing of several: the check reports those objects and
+        confirms the rest) · the fetch lock held (probed exactly as the check takes it: without waiting, a stale lock
+        reclaimable) -> the ONE reminder line AUTO_CONFIRM_REMINDER, N = every pending object, and no Chrome;
+      * else one line saying what runs, then `check_photos pending --apply --max-minutes 15` (auto_confirm_argv) as a
+        child process through _cp_spawn — the check's own streaming idiom: every line re-printed as it comes, Ctrl+C
+        waits for the child to close its Chrome. Exit 0 (ok / partial) -> the child's last line is the check's summary;
+        a non-zero exit or an interruption -> ONE warning line.
+    Any error -> ONE warning line. It never raises — SystemExit (a corrupt library) and Ctrl+C included — so the push
+    command's exit code never changes. `library`: the caller's freshly loaded library, else it is loaded here.
+    -> what happened: disabled | nothing | web | young | no-profile | locked | ran | failed | error."""
+    try:
+        if not _auto_confirm_on():
+            return "disabled"
+        if library is None:
+            library = load_library()
+        pending = mvcommon.unverified_objects(library, mvcommon._now_utc())
+        if not pending:
+            return "nothing"
+        reminder = AUTO_CONFIRM_REMINDER.format(n=len(pending))
+        if os.environ.get(AUTO_CONFIRM_WEB_JOB_ENV, "").strip() not in ("", "0"):
+            print(reminder)
+            return "web"
+        due = [o for o in pending if o["age_hours"] is None or o["age_hours"] >= AUTO_CONFIRM_MIN_AGE_H]
+        if not due:
+            print(reminder)
+            return "young"
+        import mainfetch  # profile_preflight (OD-10); importing it has no side effects
+        accounts = {route["routing"] for route in _cp_routes(due).values()}
+        if all(mainfetch.profile_preflight(account) for account in accounts):
+            print(reminder)
+            return "no-profile"
+        try:
+            with mvcommon.fetch_session_lock(blocking=False):
+                pass   # free (or stale): released at once — the check takes it itself
+        except mvcommon.LockHeldError:
+            print(reminder)
+            return "locked"
+        print(f"🔎 {len(pending)} pushed object(s) await Google Photos confirmation — confirming them now "
+              f"(check_photos pending --apply, at most {AUTO_CONFIRM_MAX_MINUTES} min; to turn this off: "
+              f"\"auto_confirm_after_push\": false in mvconfig.json)", flush=True)
+        code, interrupted = _cp_spawn(auto_confirm_argv())
+        if interrupted or code != 0:
+            print(_auto_confirm_warning("interrupted" if interrupted else f"check_photos exited with code {code}"))
+            return "failed"
+        return "ran"
+    except BaseException as e:   # never raise: SystemExit (load_library on a corrupt file) and Ctrl+C included
+        print(_auto_confirm_warning("interrupted" if isinstance(e, KeyboardInterrupt) else _gp_line(e)))
+        return "error"
+
+
+# ==========================================
 #      WEB CONSOLE READ-ONLY DATA LAYER
 # ==========================================
 # Five module-level PURE / READ-ONLY helpers behind the `web` operations

@@ -3008,12 +3008,12 @@ def _stage_order(loc):
     return sorted(_LOCATE_STAGES, key=lambda s: s[0] != best)  # stable: the P-8 order otherwise
 
 
-def _locate_result(found, per, per_via, stale, s4_skip):
+def _locate_result(found, per, per_via, stale, s4_skip, per_pick=None):
     """locate_object's dict before its counters (see its docstring)."""
     res = {"found": False, "photo_id": None, "record": None, "proof": None, "name_normalized": False, "stage": None,
            "approach": None, "via": None, "outcome": None, "n": 0, "rule": None, "alternates": [], "query": None,
-           "per_approach": per, "per_approach_via": per_via, "stale": list(dict.fromkeys(stale)),
-           "s4_skip": bool(s4_skip)}
+           "per_approach": per, "per_approach_via": per_via, "per_approach_pick": dict(per_pick or {}),
+           "stale": list(dict.fromkeys(stale)), "s4_skip": bool(s4_skip)}
     if found is not None:
         approach, stage, out = found
         pick = out["pick"]
@@ -3028,13 +3028,14 @@ def _waterfall(driver, loc, ctx, account, st, approaches):
     """Run the stages in order until one pins the object (approaches "all": every stage), then — for a
     content-keyed object nothing pinned — the legacy preview (OD-5)."""
     key = _content_key(loc)
-    per, per_via, stale, found, preview = {}, {}, [], None, None
+    per, per_via, per_pick, stale, found, preview = {}, {}, {}, [], None, None
     for approach, stage, _label in _stage_order(loc):
         out = _STAGE_RUNS[approach](driver, loc, ctx, account, st, key)
         if out is None:
             continue  # the object gives this stage nothing to work with
         per[approach] = {"outcome": out["outcome"], "n": out["n"]}  # exactly the contract's shape (Step 13 reuses it)
         per_via[approach] = out["via"]
+        per_pick[approach] = out["pick"]["photo_id"] if out["pick"] else None
         stale += out.get("stale") or []
         if out["pick"] is not None and found is None:
             found = (approach, stage, out)
@@ -3045,10 +3046,11 @@ def _waterfall(driver, loc, ctx, account, st, approaches):
         if preview is not None:
             per[_LEGACY_STAGE[0]] = {"outcome": preview["outcome"], "n": preview["n"]}
             per_via[_LEGACY_STAGE[0]] = preview["via"]
+            per_pick[_LEGACY_STAGE[0]] = preview["pick"]["photo_id"] if preview["pick"] else None
             if found is None and preview["pick"] is not None:
                 found = (_LEGACY_STAGE[0], _LEGACY_STAGE[1], preview)
     return _locate_result(found, per, per_via, stale,
-                          found is None and preview is not None and preview.get("skip"))
+                          found is None and preview is not None and preview.get("skip"), per_pick)
 
 
 def _arbitrate(driver, res, loc, ctx, account, st, approaches):
@@ -3111,6 +3113,9 @@ def locate_object(driver, locator, ctx, approaches="best", exclude=()):
                        each entry is a failed-list `tried` row as it stands ({approach} + it, P-18)
       per_approach_via {approach: rpc | ui} — the path each of those verdicts came by (a parallel map, so
                        per_approach keeps the contract's shape)
+      per_approach_pick {approach: photo_id | None} — the item each of those stages picked, None when it picked
+                       none (a parallel map like per_approach_via; check_photos' "approaches disagree" outlier —
+                       PLAN Step 13, OD-7)
     plus outcome / n (the pinning stage's), rule ("newest-set" when a name matched several uploads with
     different bytes), alternates (other items holding the same bytes or name), query (the text query that listed
     the item — the Shift+D click path searches it), stale (learned photo_ids RPC AND the item page call gone),
@@ -5000,4 +5005,9 @@ def cli(argv):
 
 
 if __name__ == "__main__":
+    # [IMP-C25 Step 13] Run as a script, this module is `__main__`. gprpc imports `mainfetch` lazily (its signed-out
+    # check) and so does tools/gp_inventory: without this line each would load a SECOND copy of this file, and a
+    # SessionExpiredError raised by that copy (the RPC path's sign-out detection) is a class this script never
+    # catches — a signed-out profile then surfaced as an unexpected error instead of the remediation line.
+    sys.modules.setdefault("mainfetch", sys.modules[__name__])
     cli(sys.argv)

@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13.0 locator per_approach_pick + mainfetch __main__ module alias
+STATE: IN PROGRESS — next: 13.a main CLI parser + dispatcher + pending --list
 
 # IMP-C25 Step 13 — `check_photos`: download-free verification, sweep and confirm — resumable status
 
@@ -18,10 +18,12 @@ uncommitted diff belongs to the first unticked sub-task: keep it when coherent a
 SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRESS.md (the orchestrator does).
 
 ## Sub-tasks (one WIP commit each)
-- [ ] 13.0 locator: `per_approach_pick` (parallel map {approach: photo_id of its pick | None}, for the OD-7
+- [x] 13.0 locator: `per_approach_pick` (parallel map {approach: photo_id of its pick | None}, for the OD-7
       "approaches disagree" outlier) + `if __name__ == "__main__"` registers the script as module `mainfetch`
       (gprpc's lazy `import mainfetch` and tools.gp_inventory otherwise load a SECOND copy whose
-      SessionExpiredError the script never catches) — tests
+      SessionExpiredError the script never catches) — tests: tests/test_check_photos.py 5 passed (per_approach_pick
+      ×4, the one-module subprocess test — disarm-checked on a scratch copy: without the alias it prints
+      TWO-COPIES); tests/test_locator.py 96 passed unchanged — WIP SHA in the commit that ticks this line
 - [ ] 13.a main: `parse_check_photos_args` + CHECK_USAGE + dispatcher branch + `check_photos pending --list` (offline)
       — tests
 - [ ] 13.b main: scope resolution — item (alias resolves) · season_map (children, anime glued ids) ·

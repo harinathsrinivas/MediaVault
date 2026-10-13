@@ -14331,6 +14331,220 @@ def after_push_command(command, result, target=None, episode_range=None):
 
 
 # ==========================================
+#   GOOGLE PHOTOS IDENTITY — mvmeta_upgrade: v2 PHONE SIDECARS FOR THE EXISTING LIBRARY (IMP-C25 Step 13c)
+# ==========================================
+# docs/feature-fetch-datetime/PLAN.md Step 13c — the OD-4 ruling ("ok fine - you can change all existing library also")
+# and G0 question 2, answered 2026-09-28: "Yes, with --apply only" (DECISIONS.md §1). Every push leaves a
+# `<base> [<short_id>].mvmeta.json` next to what it uploaded (write_remote_mvmeta — for a whole file too, as a one-chunk
+# list). Since Step 5 a NEW push writes it as v2: per chunk the content key Google Photos dedups on (sha1 + dedup_key),
+# the DateUTC it shows (date_utc) and the exact pushed name (uploaded_name). The EXISTING library's sidecars are v1;
+# `mvmeta_upgrade` brings them to v2 with what is PROVEN about each chunk's own bytes, plus `gphotos_account` — the
+# Google account a confirmed copy lives in (_mu_facts names the sources; the content key never comes from a filename or
+# manual proof: a legacy object's cloud key belongs to the cloud copy, and IMP-E5 will trust a sidecar's key before
+# freeing a phone). A sidecar is rewritten only when it is exactly its owner's (manual_id, short_id and the CURRENT
+# chunk SHA-256s — the P-2 pin), in MediaVault's own bytes and a known version, and no value it already holds disagrees
+# with a proven one; the missing keys are appended and nothing else changes — the new bytes minus the added keys are
+# the original bytes, checked before anything is written.
+# A DRY RUN by default: the phones are listed (Step 8's read-only device_inventory) and each sidecar that could gain a
+# key is pulled into a temporary folder that is removed again — nothing is written anywhere. --apply rewrites one
+# sidecar at a time: the original is kept locally first (<GPHOTOS_STATE_DIR>/mvmeta/<UTC ts>/), the v2 file is pushed
+# as `<name>.tmp` carrying the original's mtime (adb push keeps it — RESEARCH F3 — and a sidecar's mtime is its push
+# time in the device check's evidence), renamed over the original on the phone (`mv`: atomic), then pulled back and
+# compared byte for byte; the first failure stops the run, and a re-run continues (an upgraded sidecar is up to date).
+# Phones: `device <alias|serial>` names one; without it every phone the device check lists is read, and --apply
+# rewrites only the push phones' sidecars (DEVICE_ALIASES) — a check-only phone (DEVICE_CHECK_EXTRA_SERIALS,
+# DECISIONS.md §1d) only when it is named. Its adb commands pass ITS OWN allowlist (_mu_argv_ok: `pull` of a sidecar;
+# with --apply `push` to `<sidecar>.tmp` and `shell mv` of that .tmp over the sidecar — never a media file, never any
+# other file, always `-s <serial>`); the device check's read-only _dev_argv_readonly is NOT widened. The library is
+# only read; no rollback journal is involved. Nothing printed carries a P-13 web-progress marker.
+
+MVMETA_UPGRADE_APPLY_ENABLED = True   # G0 question 2 (the OD-4 clarification), answered 2026-09-28: "Yes, with --apply only"
+MVMETA_UPGRADE_DISABLED = "device rewrites disabled (OD-4 clarification)"   # --apply's line while the switch is off
+MVMETA_UPGRADE_VERSION = 2            # the version an upgraded sidecar carries: today's push writer's (pinned by a test)
+MVMETA_UPGRADE_KEYS = gpcapture.MVMETA_KEYS + ("gphotos_account",)          # the per-chunk keys it adds, in this order
+MVMETA_UPGRADE_USAGE = "mvmeta_upgrade [all|<id>|<prefix>] [device <alias|serial>] [--apply]"
+MVMETA_TMP_SUFFIX = ".tmp"            # a rewritten sidecar is pushed as `<sidecar>.tmp`, then renamed over the sidecar
+MVMETA_ADB_TIMEOUT_S = 60             # one pull / push / mv of a sidecar (a few KB)
+_MU_CONTENT_PROOFS = ("dedupkey", "sha256")   # PLAN P-5: the proofs that make a record's dedup_key THESE bytes' key
+
+
+def _mu_owners(objects):
+    """The sidecars the uploaded `objects` (mvcommon.iter_uploaded_objects dicts) were pushed with -> [owner] in object
+    order. An owner is write_remote_mvmeta's unit — one library entry (its whole file, or its chunks) or one extras item
+    (whole, or its chunks):
+      key        (manual_id, group_rel, sub_rel) — group_rel / sub_rel None for an entry's own objects
+      manual_id  the library id (the TITLE id for an extras item); category its id prefix's
+      extra      True for an extras item
+      label      the manual_id its sidecar carries: the entry's id, or '<title id>::<group_rel>/<sub_rel>'
+                 (push_one_extra's label, gpcapture.extras_label)
+      short_id   the short id of its sidecar's name and content
+      objects    its whole file, or its chunks in order — FLAC holders are left out: no sidecar lists them
+      hashes     their CURRENT SHA-256s in that order: exactly what its sidecar's `chunks` must list (P-2)"""
+    owners = {}
+    for obj in objects:
+        if obj.get("kind") == "holder":
+            continue
+        key = (obj["manual_id"], obj.get("group_rel"), obj.get("sub_rel"))
+        owner = owners.get(key)
+        if owner is None:
+            extra = obj.get("group_rel") is not None
+            owner = owners[key] = {
+                "key": key, "manual_id": obj["manual_id"], "category": obj.get("category"), "extra": extra,
+                "label": gpcapture.extras_label(*key) if extra else obj["manual_id"],
+                "short_id": obj.get("short_id"), "objects": []}
+        owner["objects"].append(obj)
+    for owner in owners.values():
+        owner["hashes"] = [obj.get("sha256") for obj in owner["objects"]]
+    return list(owners.values())
+
+
+def _mu_taken_utc(taken_ms):
+    """Google Photos' taken time (epoch milliseconds) as a DateUTC string 'YYYY-MM-DDTHH:MM:SSZ' — to the second,
+    floored, the way check_photos compares the two — or None."""
+    if not _gp_is_int(taken_ms):
+        return None
+    try:
+        text = (datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=taken_ms // 1000)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, ValueError):
+        return None
+    return text if mvcommon._DATE_UTC_RE.match(text) else None
+
+
+def _mu_facts(obj):
+    """The v2 facts PROVEN for ONE uploaded object's bytes (PLAN Step 13c) -> (facts {key: value}, None), or ({}, why).
+    `obj` is an mvcommon.iter_entry_objects dict: `capture` = its capture facts and `block` = its TRUSTED gphotos block
+    (an untrusted one is None there — P-2), both pinned to its CURRENT SHA-256.
+      sha1, dedup_key   the capture's (hashed at prep / push), the trusted block's own content key (only a capture or a
+                        download's SHA-256 match writes one), or the dedup_key of an account record verified BY CONTENT
+                        (verified_by dedupkey | sha256) — never a record verified by `filename` or `manual` (PLAN P-5:
+                        that key is the cloud copy's, not proven to be these bytes)
+      date_utc          the file's own DateUTC — the capture's, or the trusted block's (only a capture writes it) — else
+                        the taken time of the CONFIRMED record of gphotos_account (Google Photos shows the DateUTC — F20)
+      uploaded_name     the trusted block's (a capture's, or a proven `map_photos --repair names`), else the capture's —
+                        never derived from a file name
+      gphotos_account   the account holding the confirmed copy: the block's home_account when its record there is
+                        confirmed, else the only confirmed account; none when several are and the home is not one
+    Only known facts are returned. Content keys or DateUTCs that disagree -> ({}, why): nothing of the object is used."""
+    capture = obj.get("capture") if isinstance(obj.get("capture"), dict) else {}
+    block = obj.get("block") if isinstance(obj.get("block"), dict) else {}
+    held = block.get("accounts") if isinstance(block.get("accounts"), dict) else {}
+    records = {a: r for a, r in held.items() if a in mvcommon.GP_ACCOUNTS and isinstance(r, dict)}
+    keys = {gpweb.normalize_dedup_key(capture.get("dedup_key")), gpweb.normalize_dedup_key(block.get("dedup_key"))}
+    if isinstance(block.get("sha1"), str) and _GP_SHA1_RE.match(block["sha1"]):
+        keys.add(gpweb.dedup_key(block["sha1"].lower()))
+    keys.update(gpweb.normalize_dedup_key(r.get("dedup_key")) for r in records.values()
+                if r.get("verified_by") in _MU_CONTENT_PROOFS)
+    keys.discard(None)
+    if len(keys) > 1:
+        return {}, "its proven content keys disagree"
+    dates = {d for d in (capture.get("date_utc"), block.get("date_utc"))
+             if isinstance(d, str) and mvcommon._DATE_UTC_RE.match(d)}
+    if len(dates) > 1:
+        return {}, "its recorded DateUTCs disagree"
+    confirmed = [a for a in mvcommon.GP_ACCOUNTS if records.get(a, {}).get("confirmed") is True]
+    home = block.get("home_account")
+    account = home if home in confirmed else (confirmed[0] if len(confirmed) == 1 else None)
+    facts = {}
+    if keys:
+        key = keys.pop()
+        facts.update(sha1=gpweb.dedup_key_to_sha1_hex(key), dedup_key=key)
+    date = dates.pop() if dates else (_mu_taken_utc(records[account].get("taken_ms")) if account else None)
+    if date:
+        facts["date_utc"] = date
+    name = block.get("uploaded_name") if mvcommon._text(block.get("uploaded_name")) else capture.get("uploaded_name")
+    if mvcommon._text(name):
+        facts["uploaded_name"] = name
+    if account:
+        facts["gphotos_account"] = account
+    return facts, None
+
+
+def _mu_encode(doc, newline):
+    """A sidecar's bytes exactly as write_remote_mvmeta writes them: json.dump(indent=2) — ASCII, anything else as a
+    \\u escape — with `newline` ending its lines ("\\r\\n" for a sidecar written in text mode on Windows)."""
+    return json.dumps(doc, indent=2).replace("\n", newline).encode("utf-8")
+
+
+def _mu_decode(raw):
+    """A pulled sidecar's bytes -> (doc, newline, None) when they are EXACTLY what write_remote_mvmeta writes — the
+    _mu_encode of their own content, the only form a rewrite can keep byte for byte — else (None, None, why)."""
+    try:
+        text = raw.decode("utf-8")
+        doc = json.loads(text)
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return None, None, "it is not a JSON file"
+    newline = "\r\n" if "\r\n" in text else "\n"
+    if _mu_encode(doc, newline) != raw:
+        return None, None, "its bytes are not in the exact form MediaVault writes (edited by hand?)"
+    return doc, newline, None
+
+
+def _mu_same(key, held, value):
+    """True when a sidecar's present `key` holds the proven `value` (a SHA-1 in either case, a dedupKey in any base64
+    spelling)."""
+    if key == "sha1":
+        return isinstance(held, str) and held.lower() == value
+    if key == "dedup_key":
+        return gpweb.normalize_dedup_key(held) == value
+    return held == value
+
+
+def _mu_upgrade(doc, owner, facts):
+    """ONE sidecar's v2 form (PLAN Step 13c) — PURE -> (new doc, {key: chunks it is added to}, None), or (None, None,
+    why) when the sidecar must be left as it is. `owner` (_mu_owners) gives the label, short_id and CURRENT SHA-256s
+    its sidecar must carry; `facts` = {sha256: _mu_facts(...)[0]} of its objects. The sidecar must be the owner's
+    (manual_id == label, short_id) in a version this code knows (1 … MVMETA_UPGRADE_VERSION), listing EXACTLY the
+    owner's SHA-256s in order (P-2: other bytes -> nothing applies to it), and a key it already holds must hold the
+    proven value. Each missing proven key is APPENDED to its chunk (MVMETA_UPGRADE_KEYS order); a sidecar below
+    MVMETA_UPGRADE_VERSION that gains a key is raised to it. Nothing else changes; the input is never modified."""
+    if not isinstance(doc, dict):
+        return None, None, "it is not a JSON object"
+    version = doc.get("version")
+    if not (_gp_is_int(version) and 1 <= version <= MVMETA_UPGRADE_VERSION):
+        return None, None, f"its version {version!r} is not one this code knows (1–{MVMETA_UPGRADE_VERSION})"
+    if doc.get("manual_id") != owner["label"] or doc.get("short_id") != owner["short_id"]:
+        return None, None, (f"it names {doc.get('manual_id')!r} / short id {doc.get('short_id')!r}, not this "
+                            f"{'extras item' if owner['extra'] else 'entry'}")
+    chunks = doc.get("chunks")
+    if not (isinstance(chunks, list) and all(isinstance(c, dict) for c in chunks)):
+        return None, None, "its chunk list is malformed"
+    if [c.get("hash") for c in chunks] != owner["hashes"]:
+        return None, None, "it lists other bytes than the library holds now (re-split or re-mastered since its push)"
+    new, adds = copy.deepcopy(doc), {}
+    for n, chunk in enumerate(new["chunks"], 1):
+        proven = facts.get(chunk["hash"]) or {}
+        for key in MVMETA_UPGRADE_KEYS:
+            value = proven.get(key)
+            if value is None:
+                continue
+            if key not in chunk:
+                chunk[key] = value
+                adds[key] = adds.get(key, 0) + 1
+            elif not _mu_same(key, chunk[key], value):
+                return None, None, f"its {key} of chunk {n}/{len(chunks)} differs from the proven one"
+    if adds and version < MVMETA_UPGRADE_VERSION:
+        new["version"] = MVMETA_UPGRADE_VERSION
+    return new, adds, None
+
+
+def _mu_only_added(old, new, raw, newline):
+    """THE byte-identity check (PLAN Step 13c: "every v1 key byte-identical inside v2"): True only when `new` differs
+    from the sidecar `old` by nothing but MVMETA_UPGRADE_KEYS appended at the END of chunks and its version, AND `new`
+    with those keys removed and the version restored encodes to the original bytes `raw` exactly."""
+    if not (isinstance(new, dict) and list(new) == list(old) and isinstance(new.get("chunks"), list)
+            and len(new["chunks"]) == len(old["chunks"])):
+        return False
+    restored = dict(new, version=old["version"], chunks=[])
+    for c_new, c_old in zip(new["chunks"], old["chunks"]):
+        keys = list(c_new)
+        if keys[:len(c_old)] != list(c_old) or not set(keys[len(c_old):]) <= set(MVMETA_UPGRADE_KEYS):
+            return False
+        restored["chunks"].append({k: c_new[k] for k in c_old})
+    return _mu_encode(restored, newline) == raw
+
+
+# ==========================================
 #      WEB CONSOLE READ-ONLY DATA LAYER
 # ==========================================
 # Five module-level PURE / READ-ONLY helpers behind the `web` operations

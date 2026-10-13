@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13c.a (the pure core: proven facts, sidecar codec, upgrade builder, byte-identity check)
+STATE: IN PROGRESS — next: 13c.b (the device path: own allowlist, runner, pull, the --apply write sequence)
 
 # IMP-C25 Step 13c — `mvmeta_upgrade`: v2 sidecars for the existing library (OD-4 ruling) — resumable status
 
@@ -21,12 +21,17 @@ uncommitted diff belongs to the first unticked sub-task: keep it when coherent a
 SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRESS.md (the orchestrator does).
 
 ## Sub-tasks (one WIP commit each)
-- [ ] 13c.0 this status file: the sub-task plan + the design decisions below (no code)
-- [ ] 13c.a main: the PURE core — `_mu_facts(obj)` (the proven v2 facts of one uploaded object), `_mu_decode` /
+- [x] 13c.0 this status file: the sub-task plan + the design decisions below (no code) — 17b801e
+- [x] 13c.a main: the PURE core — `_mu_facts(obj)` (the proven v2 facts of one uploaded object), `_mu_decode` /
       `_mu_encode` (the sidecar's exact bytes: json.dump indent=2, ASCII, the file's own line ends), `_mu_upgrade`
       (validate + append the missing proven keys) and the byte-identity check — tests: facts rules (sha1 never from
       filename / manual proof, untrusted block ignored, date_utc ladder, account rule, conflicts), v1 keys
-      byte-identical, version handling, canonical-form refusals, present-value conflicts
+      byte-identical, version handling, canonical-form refusals, present-value conflicts — also `_mu_owners` (the
+      sidecar owner: an entry or an extras item, FLAC holders left out) and `_mu_taken_utc`. tests/test_mvmeta_upgrade.py
+      57 passed (every sidecar produced by the REAL write_remote_mvmeta, at version 1 and at today's 2; confirmed on
+      this machine: CRLF line ends, ASCII \u escapes, decode + re-encode exact); neighbours (test_gp_capture,
+      test_device_inventory, test_entry_schema_guard, test_gphotos_primitives) 502 passed; smoke 82 passed — WIP SHA
+      in the commit that ticks 13c.b
 - [ ] 13c.b main: the device path — `_mu_argv_ok` (its OWN allowlist: pull; with --apply push `<sidecar>.tmp` + `shell
       mv` tmp -> sidecar), `_mu_run`, `_mu_pull`, `_mu_write` (keep the original locally -> push .tmp with the
       original mtime -> mv -> pull back + compare -> stat the mtime) — tests with a directory-backed fake adb:

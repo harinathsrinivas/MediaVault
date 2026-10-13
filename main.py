@@ -12904,6 +12904,165 @@ def _mp_finish(ctx, run_dir):
 
 
 # ==========================================
+#   GOOGLE PHOTOS IDENTITY — THE CHECK: check_photos (IMP-C25 Step 13)
+# ==========================================
+# docs/feature-fetch-datetime/PLAN.md Step 13 (P-5, P-8, P-9, P-10, P-11, P-18; OD-5, OD-7, OD-9; the Step 9b rule):
+# verify uploaded objects in Google Photos WITHOUT downloading anything — an item, a season, a series, an id prefix, an
+# account, the pending (pushed, not yet confirmed) objects, the hinted ones (the user's manual resolutions) or the whole
+# library — and, with --apply, record what was proven: the learned sidecar (P-10), the failed list (P-18) and the apply
+# engine (the only writer of `gphotos` blocks). The work is split in two processes:
+#   * main (this section) — the CLI, the scope, the run directory <GPHOTOS_STATE_DIR>/check/<UTC ts>/, the report, the
+#     outlier list, Step 9b, and every write: it is the only side that appends to the sidecars or touches the library;
+#   * the child `python mainfetch.py check --run <run dir> …` (mainfetch.cmd_check) — the browser: one Chrome session
+#     per account under the fetch lock, mainfetch.locate_object per object (the fetch's own exact-item engine, read-only
+#     — no download is ever triggered), every result appended to the run's results.jsonl as it is known.
+# A dry run (the default) writes only its run directory. --apply runs the check, then applies the run; --apply-run applies
+# a REVIEWED run (`latest` = the newest completed run of the scope) without opening Chrome. Re-running the same scope
+# continues its newest unfinished run (resumable; --recheck starts afresh). Nothing here prints a P-13 web marker.
+
+CHECK_APPROACHES = ("best", "all")                  # best: stop at the first stage that pins the object · all: every one
+CHECK_NAMED_SCOPES = ("all", "pending", "hinted")   # plus account:<a>, series:<season id | show folder>, an id, a prefix
+CHECK_USAGE = ("check_photos <id | season id | series:<season id|show folder> | id prefix | account:<a> | pending | "
+               "hinted | all> [--approaches best|all] [--account movies|tv|anime|others] [--recheck] "
+               "[--apply | --apply-run <run dir|latest>] [--limit N] [--pace S] [--max-minutes M] [--devices] "
+               "[--list]")
+_CP_FLAGS = {"--recheck": "recheck", "--apply": "apply", "--devices": "devices", "--list": "list_only"}
+_CP_VALUED = ("--approaches", "--account", "--apply-run", "--limit", "--pace", "--max-minutes")
+
+
+def _cp_number(option, text, kind, minimum, strict):
+    """A numeric option value: kind(text) (int or float), finite, > minimum (strict) or >= minimum. ValueError naming the
+    option otherwise."""
+    try:
+        value = kind(text)
+    except ValueError:
+        raise ValueError(f"{option} needs a number (got {text!r})") from None
+    if not math.isfinite(value) or (value <= minimum if strict else value < minimum):
+        raise ValueError(f"{option} must be {'above' if strict else 'at least'} {minimum:g} (got {text})")
+    return value
+
+
+def parse_check_photos_args(tokens):
+    """The `check_photos` CLI tokens (after the verb) -> cmd_check_photos keyword arguments (CHECK_USAGE). Raises
+    ValueError naming the problem: no scope or a second one, an unknown option, a missing or invalid value, --apply with
+    --apply-run, an option --apply-run cannot use (it never searches: no --limit / --pace / --max-minutes / --recheck),
+    or --list outside `pending` (it takes only --account)."""
+    opts = {"scope": None, "approaches": None, "account": None, "recheck": False, "apply": False, "apply_run": None,
+            "limit": None, "pace": None, "max_minutes": None, "devices": False, "list_only": False}
+    tokens, i = list(tokens), 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token in _CP_VALUED:
+            if i + 1 >= len(tokens) or not tokens[i + 1].strip() or tokens[i + 1].startswith("--"):
+                raise ValueError(f"{token} needs a value")
+            value = tokens[i + 1].strip()
+            i += 2
+            if token == "--approaches":
+                if value not in CHECK_APPROACHES:
+                    raise ValueError(f"--approaches must be one of {', '.join(CHECK_APPROACHES)} (got {value!r})")
+                opts["approaches"] = value
+            elif token == "--account":
+                if value not in mvcommon.GP_ACCOUNTS:
+                    raise ValueError(f"--account must be one of {', '.join(mvcommon.GP_ACCOUNTS)} (got {value!r})")
+                opts["account"] = value
+            elif token == "--apply-run":
+                opts["apply_run"] = value
+            elif token == "--limit":
+                opts["limit"] = _cp_number(token, value, int, 1, strict=False)
+            elif token == "--pace":
+                opts["pace"] = _cp_number(token, value, float, 0, strict=False)
+            else:
+                opts["max_minutes"] = _cp_number(token, value, float, 0, strict=True)
+        elif token in _CP_FLAGS:
+            opts[_CP_FLAGS[token]] = True
+            i += 1
+        elif token.startswith("--"):
+            raise ValueError(f"unknown option {token}")
+        else:
+            if opts["scope"] is not None:
+                raise ValueError(f"one scope only (got {opts['scope']!r} and {token!r})")
+            opts["scope"] = token.strip()
+            i += 1
+    scope = opts["scope"]
+    if not scope:
+        raise ValueError("a scope is required: an id, a season id, series:<season id|show folder>, an id prefix, "
+                         "account:<a>, pending, hinted or all")
+    if scope.startswith("series:") and not scope[len("series:"):].strip():
+        raise ValueError("series: needs a season id or a show folder (series:<season id|show folder>)")
+    if scope.startswith("account:") and scope[len("account:"):].strip() not in mvcommon.GP_ACCOUNTS:
+        raise ValueError(f"account: must name one of {', '.join(mvcommon.GP_ACCOUNTS)} (got {scope!r})")
+    if opts["apply"] and opts["apply_run"] is not None:
+        raise ValueError("--apply and --apply-run exclude each other")
+    if opts["apply_run"] is not None and (opts["recheck"] or any(opts[k] is not None
+                                                                  for k in ("limit", "pace", "max_minutes"))):
+        raise ValueError("--apply-run applies a finished run without searching: it takes no --limit, --pace, "
+                         "--max-minutes or --recheck")
+    if opts["list_only"]:
+        if scope != "pending":
+            raise ValueError("--list works with the pending scope only (check_photos pending --list)")
+        if any(opts[k] for k in ("recheck", "apply", "devices")) or any(
+                opts[k] is not None for k in ("approaches", "apply_run", "limit", "pace", "max_minutes")):
+            raise ValueError("pending --list is offline: it takes only --account")
+    return opts
+
+
+def _cp_routes(objects):
+    """{(manual_id, label): route} — each object's account layers (PLAN P-4, map_photos' _mp_route): default (id prefix),
+    override (mvconfig fetch_account_overrides), home (the trusted block's learned home_account) and routing (override >
+    home > default) — read through mainfetch, the routing constants' single source."""
+    import mainfetch  # P-4's routing constants and the validated mvconfig overrides; importing it has no side effects
+    overrides = mainfetch._account_overrides()
+    prefix_map, default = mainfetch.ID_PREFIX_PROFILE, mainfetch.DEFAULT_PROFILE
+    return {(o["manual_id"], o["label"]): _mp_route(o, overrides, prefix_map, default) for o in objects}
+
+
+def _cp_age(hours):
+    """'14 h' / '3.2 days' for an age in hours (None: '')."""
+    if hours is None:
+        return ""
+    return f"{hours:.0f} h" if hours < 48 else f"{hours / 24:.1f} days"
+
+
+def _cp_pending_list(account=None):
+    """`check_photos pending --list` (PLAN Step 13, P-11) — OFFLINE: the objects a capture records as pushed that no
+    trusted block confirms yet (mvcommon.unverified_objects), oldest push first, each with its push time, age and the
+    account it is routed to. No Chrome, no lock, nothing written. -> {status: ok, objects, routes}."""
+    now = mvcommon._now_utc()
+    objects = mvcommon.unverified_objects(load_library(), now)
+    routes = _cp_routes(objects)
+    if account:
+        objects = [o for o in objects if routes[(o["manual_id"], o["label"])]["routing"] == account]
+    objects.sort(key=lambda o: (o["age_hours"] is None, -(o["age_hours"] or 0.0), o["manual_id"], o["label"]))
+    where = f" in '{account}'" if account else ""
+    lines = [f"=== CHECK PHOTOS — pending{where}: pushed, not yet confirmed in Google Photos (offline: nothing is "
+             f"opened or written) ==="]
+    if not objects:
+        lines.append(f"  Nothing pending{where}.")
+    else:
+        lines.append(f"  {len(objects):,} object(s) in {len({o['manual_id'] for o in objects}):,} entr(y/ies) await "
+                     f"confirmation:")
+        for o in objects:
+            when = _mp_when(o["pushed_at"])
+            pushed = (f"pushed {when.strftime('%Y-%m-%d %H:%M')} UTC ({_cp_age(o['age_hours'])} ago)" if when
+                      else "push time unknown")
+            lines.append(f"    {o['manual_id']} · {o['label']} — {o['uploaded_name'] or '(no uploaded name)'} · "
+                         f"{pushed} · account {routes[(o['manual_id'], o['label'])]['routing']}")
+        lines.append("  Confirm them in Google Photos (once their phone has backed them up) with: "
+                     "python main.py check_photos pending --apply")
+    print("\n".join(lines))
+    return {"status": "ok", "objects": objects, "routes": routes}
+
+
+def cmd_check_photos(scope, approaches=None, account=None, recheck=False, apply=False, apply_run=None, limit=None,
+                     pace=None, max_minutes=None, devices=False, list_only=False):
+    """`check_photos` (PLAN Step 13) — see the section comment above. [WIP: only `pending --list` is wired so far.]"""
+    if list_only:
+        return _cp_pending_list(account)
+    print("❌ check_photos: not wired yet (IMP-C25 Step 13 work in progress).")
+    return {"status": "error"}
+
+
+# ==========================================
 #      WEB CONSOLE READ-ONLY DATA LAYER
 # ==========================================
 # Five module-level PURE / READ-ONLY helpers behind the `web` operations
@@ -14727,6 +14886,8 @@ if __name__ == "__main__":
         print("  normalize_season_folders [id_or_prefix] [--apply]  — two-phase structural rename: Phase A gives the show folder its TMDB token, Phase B renames each season folder to '<Show Name> Season NN (air year)' with NO id on the season (dry-run by default; --apply writes a JSON report under migration_reports/)")
         print("  add_extras <title_id> \"<folders>\" [--extras-size <v|none>] [device <id>] [no-replace]  — attach extras (Specials/Trailers/BTS) to an existing title")
         print(f"  {MAP_USAGE}  — map the uploaded objects to the Google Photos inventory (dry-run by default; --apply writes)")
+        print(f"  {CHECK_USAGE}  — verify objects in Google Photos without downloading (dry-run by default; --apply / "
+              f"--apply-run record; pending --list is offline)")
         print("  web [--port N] [--host H] [--no-browser] [--demo]  — Launch the local web operations console (Disk Reclaim view); --demo = SAFE build, all actions simulated")
         print("  token create [--label \"X\"] [--ttl 1h|8h|12h|1d|3d|7d|30d|never]  — Mint a web access token (default --ttl 7d)")
         print("  token list                                          — List minted web access tokens")
@@ -15411,6 +15572,19 @@ if __name__ == "__main__":
             print(f"   Usage: {MAP_USAGE}")
             sys.exit(1)
         if cmd_map_photos(**_mp_opts).get("status") == "error":
+            sys.exit(1)
+
+    elif cmd == "check_photos":
+        # [IMP-C25 Step 13] check_photos <scope> [--approaches best|all] [--account a] [--recheck]
+        #   [--apply | --apply-run <run dir|latest>] [--limit N] [--pace S] [--max-minutes M] [--devices] [--list]
+        #   — download-free; a DRY RUN unless --apply / --apply-run
+        try:
+            _cp_opts = parse_check_photos_args(sys.argv[2:])
+        except ValueError as _cp_err:
+            print(f"❌ check_photos: {_cp_err}")
+            print(f"   Usage: {CHECK_USAGE}")
+            sys.exit(1)
+        if cmd_check_photos(**_cp_opts).get("status") in ("error", "refused"):
             sys.exit(1)
 
     elif cmd == "fetch":

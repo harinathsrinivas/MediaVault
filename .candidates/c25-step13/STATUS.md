@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13.a main CLI parser + dispatcher + pending --list
+STATE: IN PROGRESS — next: 13.b main scope resolution
 
 # IMP-C25 Step 13 — `check_photos`: download-free verification, sweep and confirm — resumable status
 
@@ -24,8 +24,10 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       SessionExpiredError the script never catches) — tests: tests/test_check_photos.py 5 passed (per_approach_pick
       ×4, the one-module subprocess test — disarm-checked on a scratch copy: without the alias it prints
       TWO-COPIES); tests/test_locator.py 96 passed unchanged — WIP SHA in the commit that ticks this line
-- [ ] 13.a main: `parse_check_photos_args` + CHECK_USAGE + dispatcher branch + `check_photos pending --list` (offline)
-      — tests
+- [x] 13.a main: `parse_check_photos_args` + CHECK_USAGE + dispatcher branch + `check_photos pending --list` (offline)
+      — tests: tests/test_check_photos.py 37 passed (parser 7 + 20 errors, dispatcher 3, pending --list 2);
+      test_map_photos + test_prep_push_rep_enrich_cli 236 passed (the dispatcher harness) — WIP SHA in the commit
+      that ticks this line (cmd_check_photos is a stub for every other scope until 13.c)
 - [ ] 13.b main: scope resolution — item (alias resolves) · season_map (children, anime glued ids) ·
       `series:<season id | show folder>` (show-folder rule + same-show guard) · id prefix · `account:<a>` · pending ·
       hinted · all · `--account` filter; ALWAYS printed before running — tests (flat + nested series, anime, oth-)

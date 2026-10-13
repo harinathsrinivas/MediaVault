@@ -2,6 +2,7 @@
 Step 13; P-5, P-8, P-9, P-10, P-11, P-15, P-18; OD-5, OD-7, OD-9; the Step 9b rule; DECISIONS §1e/§1f).
 
   13.0  the locator's per_approach_pick; `python mainfetch.py …` is ONE module (gprpc's lazy import)
+  13.a  the command line, main.py's dispatcher branch, `check_photos pending --list` (offline)
 
 Hermetic: the fake Google Photos world + its batchexecute emulator (tests/gphotos_fake.py); mainfetch's and gprpc's clocks
 are fake (nothing waits); the autouse fixtures of tests/conftest.py redirect every state dir, ~/Downloads, the process
@@ -12,17 +13,21 @@ import os
 import subprocess
 import sys
 import textwrap
+from datetime import datetime, timezone
 
 import pytest
 
 import gprpc
+import main
 import mainfetch
 import mvcommon
 from test_fetch_harvester import _Clock
-from test_locator import (EP, SHOW, SID, TAKEN, _assert_read_only_rpc, _bytes, _ctx, _folder, _learned, _locators,
-                          _up, _whole)
+from test_locator import (EP, SHOW, SID, TAKEN, _assert_read_only_rpc, _bytes, _capture, _ctx, _folder, _learned,
+                          _locators, _obj, _sha256, _tree, _up, _whole)
+from test_map_photos import _main_guard
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+NOW = datetime(2026, 10, 1, 0, 0, 0, tzinfo=timezone.utc)   # 14 h after test_locator._capture's push (09-30 10:00 Z)
 
 
 @pytest.fixture(autouse=True)
@@ -118,3 +123,156 @@ def test_run_as_a_script_mainfetch_is_one_module_for_gprpc():
     done = subprocess.run([sys.executable, "-c", script], cwd=REPO, capture_output=True, text=True,
                           encoding="utf-8", errors="replace", timeout=120)
     assert done.stdout.strip().splitlines()[-1] == "ONE-MODULE", done.stdout + done.stderr
+
+
+# ===========================================================================
+# 13.a — the command line, the dispatcher, `pending --list`
+# ===========================================================================
+_DEFAULTS = {"scope": None, "approaches": None, "account": None, "recheck": False, "apply": False, "apply_run": None,
+             "limit": None, "pace": None, "max_minutes": None, "devices": False, "list_only": False}
+
+
+@pytest.mark.parametrize("tokens, expected", [
+    (["tv-en-2014-show-s02"], {"scope": "tv-en-2014-show-s02"}),
+    (["all", "--approaches", "all", "--apply"], {"scope": "all", "approaches": "all", "apply": True}),
+    (["account:tv", "--apply-run", "latest"], {"scope": "account:tv", "apply_run": "latest"}),
+    (["series:tv-en-1994-files-s02", "--account", "movies", "--recheck", "--limit", "20", "--pace", "0",
+      "--max-minutes", "15", "--devices"],
+     {"scope": "series:tv-en-1994-files-s02", "account": "movies", "recheck": True, "limit": 20, "pace": 0.0,
+      "max_minutes": 15.0, "devices": True}),
+    ([r"series:C:\Media\Series\Show (2020)", "--max-minutes", "0.5"],
+     {"scope": r"series:C:\Media\Series\Show (2020)", "max_minutes": 0.5}),
+    (["pending", "--list", "--account", "tv"], {"scope": "pending", "list_only": True, "account": "tv"}),
+    (["--apply", "hinted"], {"scope": "hinted", "apply": True}),                   # options in any order
+])
+def test_the_command_line(tokens, expected):
+    assert main.parse_check_photos_args(tokens) == dict(_DEFAULTS, **expected)
+
+
+@pytest.mark.parametrize("tokens, problem", [
+    ([], "a scope is required"),
+    (["--apply"], "a scope is required"),
+    (["a", "b"], "one scope only"),
+    (["all", "--frobnicate"], "unknown option --frobnicate"),
+    (["all", "--approaches"], "--approaches needs a value"),
+    (["all", "--approaches", "some"], "--approaches must be one of best, all"),
+    (["all", "--account", "music"], "--account must be one of movies, tv, anime, others"),
+    (["all", "--limit", "0"], "--limit must be at least 1"),
+    (["all", "--limit", "two"], "--limit needs a number"),
+    (["all", "--pace", "-1"], "--pace must be at least 0"),
+    (["all", "--max-minutes", "0"], "--max-minutes must be above 0"),
+    (["all", "--max-minutes", "inf"], "--max-minutes must be above 0"),
+    (["series:"], "series: needs a season id or a show folder"),
+    (["account:music"], "account: must name one of"),
+    (["all", "--apply", "--apply-run", "latest"], "--apply and --apply-run exclude each other"),
+    (["all", "--apply-run", "latest", "--limit", "5"], "--apply-run applies a finished run without searching"),
+    (["all", "--apply-run", "latest", "--recheck"], "--apply-run applies a finished run without searching"),
+    (["all", "--list"], "--list works with the pending scope only"),
+    (["pending", "--list", "--apply"], "pending --list is offline: it takes only --account"),
+    (["pending", "--list", "--approaches", "all"], "pending --list is offline: it takes only --account"),
+])
+def test_a_bad_command_line_names_its_problem(tokens, problem):
+    with pytest.raises(ValueError) as err:
+        main.parse_check_photos_args(tokens)
+    assert problem in str(err.value)
+
+
+def _dispatch(argv, status="ok"):
+    """Run main.py's dispatcher with `argv` against a recorder for cmd_check_photos -> its recorded kwargs."""
+    import sys as real_sys
+
+    class Sys:
+        def __init__(self):
+            self.argv = ["main.py", "check_photos", *argv]
+
+        def __getattr__(self, name):
+            return getattr(real_sys, name)
+
+    calls = []
+    namespace = dict(main.__dict__, sys=Sys(),
+                     cmd_check_photos=lambda **kwargs: calls.append(kwargs) or {"status": status})
+    exec(_main_guard(), namespace)
+    return calls
+
+
+def test_the_dispatcher_hands_the_parsed_options_to_cmd_check_photos():
+    calls = _dispatch(["account:anime", "--approaches", "all", "--limit", "20", "--apply"])
+    assert calls == [dict(_DEFAULTS, scope="account:anime", approaches="all", limit=20, apply=True)]
+
+
+@pytest.mark.parametrize("status", ["error", "refused"])
+def test_the_dispatcher_exits_1_on_a_usage_error_a_failed_or_a_refused_run(capsys, status):
+    with pytest.raises(SystemExit) as stop:
+        _dispatch(["all", "--frobnicate"])
+    assert stop.value.code == 1
+    out = capsys.readouterr().out
+    assert "❌ check_photos: unknown option --frobnicate" in out and f"   Usage: {main.CHECK_USAGE}" in out
+    with pytest.raises(SystemExit) as stop:
+        _dispatch(["all"], status=status)
+    assert stop.value.code == 1
+    assert _dispatch(["pending", "--list"], status="ok") == [dict(_DEFAULTS, scope="pending", list_only=True)]
+
+
+def _no_chrome(monkeypatch):
+    def refuse(*args, **kwargs):
+        raise AssertionError("Chrome must not be started")
+    monkeypatch.setattr(mainfetch, "init_driver", refuse)
+
+
+def _pending_library(sandbox):
+    """E1 pushed (captured), not confirmed · E2 pushed and confirmed · E3 legacy (no capture) · E4 pushed, an
+    X-Files-like episode an mvconfig override routes to movies -> {id: data}."""
+    folder = sandbox["local_root"] / "Series" / "Demo" / "Season 01"
+    folder.mkdir(parents=True)
+    datas = {mid: _bytes(mid) for mid in ("tv-en-2015-demo-s01e01", "tv-en-2015-demo-s01e02", "mov-en-2010-legacy",
+                                          "tv-en-1994-files-s02e05")}
+    lib = {}
+    for n, mid in enumerate(datas, 1):
+        sid = f"pe{n}pe{n}"
+        name = f"Item{n}.mkv"
+        sub = folder / mid
+        sub.mkdir()
+        block = None
+        if mid != "mov-en-2010-legacy":
+            _capture(sub, sid, [_obj(datas[mid], _up(name, sid))])
+        if mid == "tv-en-2015-demo-s01e02":
+            block = mvcommon.new_gphotos_block(_sha256(datas[mid]), accounts={"tv": {
+                "photo_id": "AF1QipFAKEconfirmed000001", "upload_ms": 1, "verified_by": "dedupkey", "source": "check",
+                "confirmed": True}})
+        lib[mid] = _whole(sub, name, datas[mid], sid, block=block)
+    mvcommon.save_library(lib)
+    return datas
+
+
+def test_pending_list_is_offline_and_lists_only_unconfirmed_pushes(sandbox, monkeypatch, capsys, tmp_path):
+    _pending_library(sandbox)
+    monkeypatch.setattr(mvcommon, "_now_utc", lambda: NOW)
+    monkeypatch.setattr(mvcommon, "_CONFIG_CACHE", {"fetch_account_overrides": {"tv-en-1994-files": "movies"}})
+    _no_chrome(monkeypatch)
+    before = _tree(tmp_path)
+
+    res = main.cmd_check_photos("pending", list_only=True)
+
+    out = capsys.readouterr().out
+    assert res["status"] == "ok"
+    assert [(o["manual_id"], o["label"]) for o in res["objects"]] == [("tv-en-1994-files-s02e05", "whole"),
+                                                                   ("tv-en-2015-demo-s01e01", "whole")]
+    assert "2 object(s) in 2 entr(y/ies) await confirmation:" in out
+    assert ("    tv-en-2015-demo-s01e01 · whole — Item1 [pe1pe1].mkv · pushed 2026-09-30 10:00 UTC (14 h ago) · "
+            "account tv") in out
+    assert "tv-en-1994-files-s02e05 · whole — Item4 [pe4pe4].mkv" in out and "account movies" in out
+    assert "demo-s01e02" not in out and "mov-en-2010-legacy" not in out          # confirmed · legacy (no capture)
+    assert "python main.py check_photos pending --apply" in out
+    assert _tree(tmp_path) == before                                             # nothing written anywhere
+
+
+def test_pending_list_filters_by_account_and_says_when_nothing_waits(sandbox, monkeypatch, capsys):
+    _pending_library(sandbox)
+    monkeypatch.setattr(mvcommon, "_now_utc", lambda: NOW)
+    _no_chrome(monkeypatch)
+
+    res = main.cmd_check_photos("pending", account="anime", list_only=True)
+
+    assert res["objects"] == [] and "  Nothing pending in 'anime'." in capsys.readouterr().out
+    res = main.cmd_check_photos("pending", account="tv", list_only=True)
+    assert {o["manual_id"] for o in res["objects"]} == {"tv-en-2015-demo-s01e01", "tv-en-1994-files-s02e05"}

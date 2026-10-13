@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13c.c (cmd_mvmeta_upgrade + parser + CLI branch + usage line, end-to-end tests)
+STATE: IN PROGRESS — next: 13c.d (round trip through the REAL writers: cmd_push / push_title_extras + the apply engine)
 
 # IMP-C25 Step 13c — `mvmeta_upgrade`: v2 sidecars for the existing library (OD-4 ruling) — resumable status
 
@@ -45,13 +45,31 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       not widened ×3, a refused argv never runs, the write order on a hostile name ($ ` ; ' unicode), 8 failure
       stages each saying what the phone holds, the dry-run ctx, no local copy -> no phone write, the run folder,
       pull failures, the read-only mtime); neighbours (+ test_cmd_push_partial, test_cmd_push_mock_device) 341
-      passed; smoke 82 passed — WIP SHA in the commit that ticks 13c.c
-- [ ] 13c.c main: `cmd_mvmeta_upgrade(scope, device, apply)` (scope like map_photos, phones, owners from
+      passed; smoke 82 passed — 269b509
+- [x] 13c.c main: `cmd_mvmeta_upgrade(scope, device, apply)` (scope like map_photos, phones, owners from
       iter_uploaded_objects, sidecars located by Step 8's classify_device_objects, plan / write loop, report, the
       disabled mode, Ctrl+C) + `parse_mvmeta_upgrade_args` + the CLI branch + the usage line — tests end to end: the
       dry run writes nothing anywhere, --apply, offline / unauthorized / not-connected / placeholder phones, the
       check-only phone, scopes (id, alias, season prefix, extras, unknown), the no-sidecar list, idempotent re-run,
-      the dispatcher
+      the dispatcher — also `_mu_phones`, `_mu_locate`, `_mu_row` (one row shape for planned and not-reached
+      sidecars), `_mu_plan`, the report helpers; the transcript (every printed line) is the run's report.txt; a row
+      interrupted mid-write is marked failed. tests/test_mvmeta_upgrade.py 161 passed (+44 end to end on a 12-item
+      world over all four prefixes — whole, chunks + FLAC holder, extras whole + split, a season's extras, an alias,
+      a re-mastered entry, a never-uploaded one — on movies / series / the check-only movies#2 phones with media and a
+      foreign file beside the sidecars; every sidecar from the REAL writer: the dry run (rows, keys per row, nothing
+      written to the library / state folder / system temp / phones, only devices / find / stat / pull, every argv
+      but `adb devices` with -s, the exact pull sequence, the report and Next lines), --apply (exactly the five
+      rewritten, media / other files untouched, no .tmp left, every v1 byte by THIS module's own check, the mtimes
+      kept, the proven values, the per-sidecar pull -> push .tmp -> mv -> pull -> stat order on its own phone, the
+      originals + backup.jsonl, report.txt == the transcript, nothing else in the state folder, the library only
+      read), a second apply writes nothing, the check-only phone by alias and by serial, unplugged / offline /
+      unauthorized phones, an unconfigured attached phone, the disabled mode (no library read, no adb; the dry run
+      unaffected), 5 scopes + unknown + nothing uploaded, > 20 without a sidecar, the first failure stops + a re-run
+      finishes (its leftover .tmp replaced, a -2 run folder), Ctrl+C mid-write / in a dry run, a leftover .tmp, an
+      unreadable mtime, a name two items claim, no key value / photo id / web marker printed, the parser ×12, the
+      dispatcher ×7); neighbours (test_device_inventory, test_gp_capture, test_map_photos,
+      test_prep_push_rep_enrich_cli, test_cli_parsers, test_auto_confirm, test_entry_schema_guard) 821 passed; smoke
+      82 passed — WIP SHA in the commit that ticks 13c.d
 - [ ] 13c.d round trip through the REAL writers: v1 sidecars from write_remote_mvmeta at version 1, v2 from today's
       push (cmd_push / push_title_extras on the mock device), a confirmation through the real apply engine, then
       mvmeta_upgrade over the same phone — all four prefixes, chunks + FLAC holder, extras whole + split, an alias
@@ -121,3 +139,7 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
   dispatcher harnesses. git history: write_remote_mvmeta's v1 body is unchanged since 8c12680.
 - Model: session env claude-fable-5-1; the harness's commit-attribution notice alternates Fable 5.1 / Opus 5.5 (the
   quirk Steps 8–13b recorded) — each commit carries the notice current at commit time.
+- 2026-10-14 a usage-limit pause hit during 13c.c (main.py's cmd_mvmeta_upgrade + parser + helpers written, +332
+  lines, uncommitted, no tests yet); resumed on the coordinator's word: the diff was coherent (it parses, imports,
+  additive only) -> kept; two refinements made on review before its tests: a row interrupted mid-write is marked
+  failed (it would have printed as "would upgrade"), and report.txt holds the whole transcript (progress lines too).

@@ -14732,6 +14732,346 @@ def _mu_write(row, ctx):
     return True
 
 
+_MU_LIST_MAX = 20     # uploaded items without a sidecar: their ids are listed up to this many (else a count per category)
+# Row statuses in report order, and their words. upgrade = a dry run's "would upgrade" (an --apply rewrites it next).
+_MU_STATUS_TEXT = {"upgrade": "would upgrade", "upgraded": "upgraded", "check-only": "not rewritten (check-only phone)",
+                   "failed": "FAILED", "not-reached": "not reached (stopped)", "skipped": "left as they are",
+                   "up-to-date": "up to date", "nothing-proven": "nothing proven yet"}
+
+
+def parse_mvmeta_upgrade_args(tokens):
+    """The `mvmeta_upgrade` CLI tokens (after the verb) -> cmd_mvmeta_upgrade keyword arguments (MVMETA_UPGRADE_USAGE).
+    Raises ValueError naming the problem: an unknown option, `device` without a value or given twice, a second scope."""
+    opts, scope, tokens, i = {"scope": "all", "device": None, "apply": False}, None, list(tokens), 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "--apply":
+            opts["apply"] = True
+            i += 1
+        elif token == "device":
+            value = tokens[i + 1].strip() if i + 1 < len(tokens) else ""
+            if not value or value.startswith("--"):
+                raise ValueError("device needs a phone: an alias (e.g. series) or a serial")
+            if opts["device"] is not None:
+                raise ValueError(f"one device only (got {opts['device']!r} and {value!r})")
+            opts["device"] = value
+            i += 2
+        elif token.startswith("--"):
+            raise ValueError(f"unknown option {token}")
+        else:
+            if scope is not None:
+                raise ValueError(f"one scope only (got {scope!r} and {token!r})")
+            scope = token.strip()
+            i += 1
+    opts["scope"] = scope or "all"
+    return opts
+
+
+def _mu_phones(device):
+    """(phones {alias: serial} to list, the serials --apply may rewrite). `device` names one phone — an alias of
+    device_check_aliases(), one of its serials, or any other serial (adb's own name for a phone); None = every phone
+    the device check lists (DEVICE_ALIASES + the check-only DEVICE_CHECK_EXTRA_SERIALS). --apply rewrites a NAMED
+    phone, and without a name only the push phones (DEVICE_ALIASES): a check-only phone serves the device check, not
+    pushes (DECISIONS.md §1d), so its sidecars are rewritten only when the user names it."""
+    known = device_check_aliases()
+    if device is None:
+        return known, {serial for serial in DEVICE_ALIASES.values() if isinstance(serial, str)}
+    if device in known:
+        return {device: known[device]}, {known[device]}
+    for alias, serial in known.items():
+        if serial == device:
+            return {alias: serial}, {serial}
+    return {device: device}, {device}
+
+
+def _mu_locate(library, inventory, owners):
+    """Where each owner's sidecar is — Step 8's classify_device_objects looks every object's `.mvmeta.json` up by its
+    exact (else PLAN P-6 normalized) name on every listed phone -> (locations [{alias, serial, path, size, mtime,
+    name_match, owners: [owner]}] in the phones' order, then by path; [owners whose sidecar is on no listed phone])."""
+    objects = [obj for owner in owners for obj in owner["objects"]]
+    claimed_by = [owner for owner in owners for _obj in owner["objects"]]
+    found, seen = {}, set()
+    for owner, row in zip(claimed_by, classify_device_objects(library, inventory, objects=objects)["objects"]):
+        for where in row["sidecars"]:
+            location = found.setdefault((where["serial"], where["path"]), {**where, "owners": []})
+            if all(other is not owner for other in location["owners"]):
+                location["owners"].append(owner)
+            seen.add(owner["key"])
+    order = {alias: n for n, alias in enumerate(inventory.get("devices") or {})}
+    locations = sorted(found.values(), key=lambda loc: (order.get(loc["alias"], len(order)), loc["path"]))
+    return locations, [owner for owner in owners if owner["key"] not in seen]
+
+
+def _mu_row(location, ctx, status=None):
+    """A sidecar's row (what one run did with it): its phone (alias, serial, path, mtime as listed), its owner (label —
+    several labels when several items claim the file name — and manual_id), status, why (when skipped / failed), adds
+    {key: chunks} and chunks, the version before and after, writable (may --apply rewrite this phone), raw / new (an
+    upgrade's original and v2 bytes), warning, kept (--apply: the local copy of its original)."""
+    owners = location["owners"]
+    return {"alias": location["alias"], "serial": location["serial"], "path": location["path"],
+            "mtime": location.get("mtime"), "label": ", ".join(o["label"] for o in owners),
+            "manual_id": owners[0]["manual_id"] if len(owners) == 1 else None, "status": status, "why": None,
+            "adds": {}, "chunks": 0, "version": None, "new_version": None,
+            "writable": location["serial"] in ctx["writable"], "raw": None, "new": None, "warning": None, "kept": None}
+
+
+def _mu_plan(location, ctx):
+    """Plan ONE sidecar found on a phone — a dry run and --apply alike -> its row (_mu_row). Decided without a pull: a
+    file name two items claim, an owner without a SHA-256 for every object, facts that disagree -> skipped; nothing
+    proven for any of its objects -> nothing-proven; its mtime (the push time) unknown -> skipped. Otherwise the sidecar
+    is pulled into the temporary folder and planned (_mu_decode, _mu_upgrade, _mu_only_added): up-to-date, upgrade
+    (with its original `raw` and v2 `new` bytes) or skipped (why)."""
+    owners = location["owners"]
+    row = _mu_row(location, ctx)
+
+    def skipped(why):
+        row.update(status="skipped", why=why)
+        return row
+
+    if len(owners) != 1:
+        return skipped(f"{len(owners)} library items claim this file name")
+    (owner,) = owners
+    row["chunks"] = len(owner["hashes"])
+    if not all(mvcommon._is_sha256(h) for h in owner["hashes"]):
+        return skipped("the library holds no SHA-256 for every object it lists")
+    facts = {}
+    for obj in owner["objects"]:
+        proven, why = _mu_facts(obj)
+        if why:
+            return skipped(f"{obj['label']}: {why}")
+        facts[obj["sha256"]] = proven
+    if not any(facts.values()):
+        row["status"] = "nothing-proven"
+        return row
+    if not _gp_is_int(row["mtime"]):
+        return skipped("its mtime (the push time) could not be read on the phone — re-run to try again")
+    ctx["n"] += 1
+    raw, why = _mu_pull(row["serial"], row["path"], os.path.join(ctx["work"], f"{ctx['n']}.pull{MVMETA_SUFFIX}"))
+    if raw is None:
+        return skipped(why)
+    doc, newline, why = _mu_decode(raw)
+    if doc is None:
+        return skipped(why)
+    new, adds, why = _mu_upgrade(doc, owner, facts)
+    if why:
+        return skipped(why)
+    row["version"] = row["new_version"] = doc["version"]
+    if not adds:
+        row["status"] = "up-to-date"
+        return row
+    if not _mu_only_added(doc, new, raw, newline):
+        return skipped("the byte-identity check failed — a bug, nothing is written; please report it")
+    row.update(status="upgrade", raw=raw, new=_mu_encode(new, newline), adds=adds, new_version=new["version"])
+    return row
+
+
+def _mu_adds_text(row):
+    """'v1 → v2: + sha1 2/3 · date_utc 3/3 · …' — the keys a sidecar gains, with how many of its chunks get each."""
+    keys = " · ".join(f"{key} {row['adds'][key]}/{row['chunks']}" for key in MVMETA_UPGRADE_KEYS if key in row["adds"])
+    version = (f"v{row['version']} → v{row['new_version']}" if row["new_version"] != row["version"]
+               else f"v{row['version']}")
+    return f"{version}: + {keys}"
+
+
+def _mu_row_lines(row, indent="  "):
+    """A row's two report lines: what it is (and what changes, or why not), then its phone path."""
+    what = _mu_adds_text(row) if row["adds"] and row["status"] != "skipped" else (row["why"] or "")
+    return [f"{indent}{row['label']} — {row['alias']} {row['serial']} — {what}".rstrip(" —"),
+            f"{indent}    {row['path']}"]
+
+
+def _mu_phone_lines(inventory, writable, named):
+    """The listed phones, one line each: its status, how many files, and whether --apply may rewrite it."""
+    lines = ["Phones (listed read-only by the device check):"]
+    for alias, d in (inventory.get("devices") or {}).items():
+        status = d.get("status")
+        if status in ("ok", "partial"):
+            what = f"{len(d.get('files') or []):,} file(s)" + (f" ({d['detail']})" if d.get("detail") else "")
+            if d.get("serial") not in writable:
+                what += f" · check-only phone: --apply rewrites it only when named — device {alias}"
+        else:
+            what = (d.get("detail") or "") + ("" if status == "skipped" else " — skipped")
+        lines.append(f"  {alias:<9} {str(d.get('serial')):<18} {status} — {what}")
+    if not named:
+        for phone in inventory.get("unconfigured") or []:
+            lines.append(f"  ⚠️  attached but not configured: {phone['serial']} ({phone['state']}) — to include it: "
+                         f"device {phone['serial']}")
+    return lines
+
+
+def _mu_missing_lines(missing, inventory):
+    """The uploaded items whose sidecar is on no listed phone — listed only (PLAN Step 13c: creating a missing sidecar
+    is out of scope): a count per category, the ids when there are at most _MU_LIST_MAX."""
+    if not missing:
+        return []
+    per = {}
+    for owner in missing:
+        per[owner["category"] or "other"] = per.get(owner["category"] or "other", 0) + 1
+    lines = [f"No sidecar on the listed phones: {len(missing):,} uploaded item(s) ("
+             + " · ".join(f"{category} {n:,}" for category, n in sorted(per.items()))
+             + ") — listed only: creating a missing sidecar is out of scope"]
+    away = [f"{alias} ({d.get('serial')}) {d.get('status')}" for alias, d in (inventory.get("devices") or {}).items()
+            if d.get("status") not in ("ok", "skipped")]
+    if away:
+        lines.append("    a phone was not listed in full, so their sidecars may be there: " + ", ".join(away))
+    if len(missing) <= _MU_LIST_MAX:
+        lines.extend(f"    {owner['label']}" for owner in missing)
+    else:
+        lines.append(f"    (more than {_MU_LIST_MAX} — run with one id or season id to list them)")
+    return lines
+
+
+def _mu_leftover_lines(inventory, rows):
+    """`<sidecar>.tmp` files an interrupted --apply left on the listed phones (the ones this run did not replace)."""
+    replaced = {(r["serial"], r["path"] + MVMETA_TMP_SUFFIX) for r in rows if r["status"] in ("upgraded", "failed")}
+    left = [(alias, d.get("serial"), f.get("path")) for alias, d in (inventory.get("devices") or {}).items()
+            for f in d.get("files") or () if str(f.get("name")).endswith(MVMETA_SUFFIX + MVMETA_TMP_SUFFIX)
+            and (d.get("serial"), f.get("path")) not in replaced]
+    if not left:
+        return []
+    return ([f"⚠️  {len(left):,} leftover <sidecar>{MVMETA_TMP_SUFFIX} file(s) of an interrupted --apply — harmless "
+             f"(not media); the next --apply of their item replaces them:"]
+            + [f"    {alias} {serial} {path}" for alias, serial, path in left])
+
+
+def cmd_mvmeta_upgrade(scope="all", device=None, apply=False):
+    """`mvmeta_upgrade` (PLAN Step 13c; the OD-4 ruling) — bring the phones' `.mvmeta.json` sidecars of the existing
+    library to v2 with the facts PROVEN for each chunk's own bytes; the rules are in the section comment above. A DRY
+    RUN unless `apply`: it pulls into a temporary folder and writes nothing anywhere.
+      scope   all (the whole library) | a library id | an id prefix (a season id selects its episodes; an alias id
+              upgrades its primary's sidecar; an entry's extras items come with it)
+      device  one phone: an alias of device_check_aliases(), one of its serials, any serial; None = every phone the
+              device check lists — --apply then rewrites only the push phones' sidecars (DEVICE_ALIASES)
+      apply   rewrite, one sidecar at a time (_mu_write: its original kept locally first); the first failure stops
+    -> {status: ok | error (an unknown scope; a write failed) | interrupted (Ctrl+C) | disabled (--apply while
+        MVMETA_UPGRADE_APPLY_ENABLED is off), apply, scope, rows (one per sidecar found), missing (uploaded items whose
+        sidecar is on no listed phone), devices (the listing), run_dir (--apply: the originals' folder, once a write
+        began), counts {row status: n}}."""
+    done = {"status": "ok", "apply": apply, "scope": scope, "rows": [], "missing": [], "devices": {}, "run_dir": None,
+            "counts": {}}
+    if apply and not MVMETA_UPGRADE_APPLY_ENABLED:
+        print(f"⚠️  mvmeta_upgrade --apply: {MVMETA_UPGRADE_DISABLED} — nothing was read or written; without --apply "
+              f"the dry run still lists what it would add.")
+        return dict(done, status="disabled")
+    library = load_library()
+    if scope in (None, "", "all"):
+        scope, ids = "all", None
+    else:
+        ids = sorted(mid for mid in library if isinstance(mid, str) and (mid == scope or mid.startswith(scope)))
+        if not ids:
+            print(f"❌ mvmeta_upgrade: no library id is or starts with {scope!r}.")
+            return dict(done, status="error")
+    done["scope"] = scope
+    transcript = []
+
+    def say(line):
+        print(line, flush=True)
+        transcript.append(line)
+
+    owners = _mu_owners(mvcommon.iter_uploaded_objects(library, ids))
+    mode = "--apply: rewriting the phones' sidecars" if apply else "dry run: nothing is written"
+    say(f"=== MVMETA UPGRADE — {mode} — scope: {scope}{' · device ' + device if device else ''} — "
+        f"{len(owners):,} uploaded item(s) ===")
+    if not owners:
+        say("Nothing in this scope was uploaded — there is no sidecar to look for.")
+        return done
+    phones, writable = _mu_phones(device)
+    inventory = device_inventory(phones)
+    locations, missing = _mu_locate(library, inventory, owners)
+    done.update(missing=missing, devices=inventory.get("devices") or {})
+    for line in _mu_phone_lines(inventory, writable, device is not None):
+        say(line)
+    ctx = {"apply": apply, "work": tempfile.mkdtemp(prefix="mv_mvmeta_"), "run_dir": None,
+           "now": mvcommon._now_utc(), "kept": 0, "n": 0, "writable": writable}
+    rows, writing, stop = done["rows"], None, None
+    try:
+        for location in locations:
+            if stop:
+                rows.append(_mu_row(location, ctx, status="not-reached"))
+                continue
+            row = _mu_plan(location, ctx)
+            rows.append(row)
+            if not apply or row["status"] != "upgrade":
+                continue
+            if not row["writable"]:
+                row["status"] = "check-only"
+                continue
+            writing = row
+            ok = _mu_write(row, ctx)
+            writing = None
+            if ok:
+                say(f"   ✅ upgraded {row['label']} — {row['alias']} — {_mu_adds_text(row)}")
+                if row["warning"]:
+                    say(f"      ⚠️  {row['warning']}")
+            else:
+                say(f"   ❌ FAILED {row['label']} — {row['alias']} {row['serial']} — {row['why']}")
+                stop = "error"
+            say(f"         {row['path']}")
+    except KeyboardInterrupt:
+        stop = "interrupted"
+        if writing is not None:
+            writing.update(status="failed", why="interrupted while it was being rewritten — it holds its original or "
+                                                "the new v2 (at most a leftover .tmp): re-run to see which")
+            say(f"⚠️  Interrupted (Ctrl+C) while rewriting {writing['label']} on {writing['alias']} — it holds its "
+                f"original or the new v2 (at most a leftover .tmp): re-run to see which.")
+            say(f"         {writing['path']}")
+        else:
+            say("⚠️  Interrupted (Ctrl+C) — no sidecar was being written.")
+        listed = {(r["serial"], r["path"]) for r in rows}
+        rows.extend(_mu_row(loc, ctx, status="not-reached") for loc in locations
+                    if (loc["serial"], loc["path"]) not in listed)
+    finally:
+        shutil.rmtree(ctx["work"], ignore_errors=True)
+    done.update(run_dir=ctx["run_dir"], status=stop or "ok")
+    done["counts"] = {status: sum(1 for r in rows if r["status"] == status) for status in _MU_STATUS_TEXT
+                      if any(r["status"] == status for r in rows)}
+    upgrades = [r for r in rows if r["status"] == "upgrade"]
+    if upgrades:
+        say(f"Would upgrade ({len(upgrades):,}) — the keys --apply adds (how many of the sidecar's chunks get each):")
+        for row in upgrades:
+            first, second = _mu_row_lines(row)
+            say(first + ("" if row["writable"] else f"   (check-only phone: --apply needs it named — device "
+                                                    f"{row['alias']})"))
+            say(second)
+    for status, title in (("check-only", "Not rewritten — on a check-only phone (name it to rewrite it: device "
+                                         "<alias>)"),
+                          ("skipped", "Left as they are — nothing is changed in them"),
+                          ("not-reached", "Not reached — the run stopped first")):
+        chosen = [r for r in rows if r["status"] == status]
+        if chosen:
+            say(f"{title} ({len(chosen):,}):")
+            for row in chosen:
+                for line in _mu_row_lines(row):
+                    say(line)
+    summary = " · ".join(f"{_MU_STATUS_TEXT[status]} {n:,}" for status, n in done["counts"].items())
+    say(f"Summary: {summary or 'no sidecar of this scope on the listed phones'}"
+        + (" — nothing proven yet = no capture and not confirmed in Google Photos: map_photos / check_photos --apply "
+           "first" if done["counts"].get("nothing-proven") else ""))
+    for line in _mu_missing_lines(missing, inventory) + _mu_leftover_lines(inventory, rows):
+        say(line)
+    if ctx["run_dir"]:
+        say(f"Originals kept in {ctx['run_dir']} — backup.jsonl names each one's phone file; to put one back: "
+            f"adb -s <serial> push \"<file>\" \"<phone path>\"")
+    if stop == "error":
+        say("❌ Stopped at the first failure (above) — once it is fixed, re-run the same command: the upgraded "
+            "sidecars are up to date and skipped.")
+    elif upgrades and not apply:
+        writable_rows = [r for r in upgrades if r["writable"]]
+        if writable_rows:
+            say(f"Next: python main.py mvmeta_upgrade {scope}{' device ' + device if device else ''} --apply — "
+                f"rewrites the {len(writable_rows):,} sidecar(s) marked above"
+                + (" (not those on a check-only phone)" if len(writable_rows) < len(upgrades) else ""))
+        for alias in sorted({r["alias"] for r in upgrades if not r["writable"]}):
+            say(f"Next (check-only phone): python main.py mvmeta_upgrade {scope} device {alias} --apply")
+    if ctx["run_dir"]:
+        try:
+            with open(os.path.join(ctx["run_dir"], "report.txt"), "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("\n".join(transcript) + "\n")
+        except OSError as e:
+            print(f"⚠️  report.txt not written to {ctx['run_dir']} ({_gp_line(e)}) — the run itself is complete.")
+    return done
+
+
 # ==========================================
 #      WEB CONSOLE READ-ONLY DATA LAYER
 # ==========================================
@@ -16558,6 +16898,8 @@ if __name__ == "__main__":
         print(f"  {MAP_USAGE}  — map the uploaded objects to the Google Photos inventory (dry-run by default; --apply writes)")
         print(f"  {CHECK_USAGE}  — verify objects in Google Photos without downloading (dry-run by default; --apply / "
               f"--apply-run record; pending --list is offline)")
+        print(f"  {MVMETA_UPGRADE_USAGE}  — upgrade the phones' .mvmeta.json sidecars to v2 with the proven identity "
+              f"facts (dry-run by default; --apply rewrites them, keeping each original locally)")
         print("  web [--port N] [--host H] [--no-browser] [--demo]  — Launch the local web operations console (Disk Reclaim view); --demo = SAFE build, all actions simulated")
         print("  token create [--label \"X\"] [--ttl 1h|8h|12h|1d|3d|7d|30d|never]  — Mint a web access token (default --ttl 7d)")
         print("  token list                                          — List minted web access tokens")
@@ -17267,6 +17609,18 @@ if __name__ == "__main__":
             print(f"   Usage: {CHECK_USAGE}")
             sys.exit(1)
         if cmd_check_photos(**_cp_opts).get("status") in CHECK_FAILED_STATUSES:
+            sys.exit(1)
+
+    elif cmd == "mvmeta_upgrade":
+        # [IMP-C25 Step 13c] mvmeta_upgrade [all|<id>|<prefix>] [device <alias|serial>] [--apply] — a DRY RUN unless
+        # --apply (OD-4; G0 q2: "Yes, with --apply only"): the phones' .mvmeta.json sidecars -> v2 with proven facts
+        try:
+            _mu_opts = parse_mvmeta_upgrade_args(sys.argv[2:])
+        except ValueError as _mu_err:
+            print(f"❌ mvmeta_upgrade: {_mu_err}")
+            print(f"   Usage: {MVMETA_UPGRADE_USAGE}")
+            sys.exit(1)
+        if cmd_mvmeta_upgrade(**_mu_opts).get("status") in ("error", "interrupted"):
             sys.exit(1)
 
     elif cmd == "fetch":

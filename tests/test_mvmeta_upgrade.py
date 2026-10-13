@@ -13,6 +13,13 @@ Pinned here:
       over the sidecar; every command names its phone with -s) while the device check's read-only allowlist is NOT
       widened; the --apply order keep-the-original -> push .tmp (the original's mtime) -> mv -> pull back -> stat, a
       failure at every stage, and that a dry run cannot write;
+  (c) the command end to end over a library of all four prefixes (whole files, chunks + a FLAC holder, extras whole +
+      split, a season's extras, an alias) on three fake phones (two push phones and the check-only extra one): the dry
+      run lists per sidecar the keys it would add and writes NOTHING anywhere; --apply rewrites exactly those, every v1
+      byte kept, the push time kept, the originals kept locally; a second run finds them up to date; the check-only
+      phone only when named; offline / unauthorized / unplugged / placeholder phones skipped with a line; the scopes;
+      the items without a sidecar listed only; the first failure stops the run; Ctrl+C; the kept disabled mode; the
+      CLI dispatcher;
 The fake adb runs every command against a real folder standing for the phone's Media root and checks it against THIS
 module's own allowlist (independent of main's), splitting `adb shell` commands the way the device shell does.
 Synthetic data only: no real adb, phone, Google Photos, C:\\Media or library file. Every sidecar here is produced by the
@@ -574,8 +581,9 @@ class Phone:
     """One fake phone whose Media root is the real folder `root` (both listing roots address it), read and written at
     call time. state: what `adb devices` lists (None = not attached). fail: {verb: mode} for every call of a verb
     (find / stat / pull / push / mv), or {(verb, n): mode} for its n-th call only (1-based); mode error | timeout |
-    corrupt (push: the bytes that land are not the bytes sent). keeps_mtime=False: a push stamps PUSH_NOW instead of
-    keeping the pushed file's mtime (RESEARCH F3: real phones keep it)."""
+    corrupt (push: the bytes that land are not the bytes sent) | interrupt (Ctrl+C during the call).
+    keeps_mtime=False: a push stamps PUSH_NOW instead of keeping the pushed file's mtime (RESEARCH F3: real phones
+    keep it)."""
 
     def __init__(self, root, state="device", fail=None, keeps_mtime=True):
         self.root, self.state, self.fail, self.keeps_mtime = root, state, dict(fail or {}), keeps_mtime
@@ -676,6 +684,8 @@ class FakeAdb:
         if phone.state != "device":
             return result(1, b"", crlf([f"adb: device {phone.state}"]))
         mode = phone.mode(verb)
+        if mode == "interrupt":
+            raise KeyboardInterrupt
         if mode == "timeout":
             raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
         if mode == "error":
@@ -985,3 +995,615 @@ def test_the_mtime_is_read_with_the_device_check_s_read_only_stat(tmp_path, fake
     assert main._mu_mtime(SERIES, path + ".gone") is None
     fake_adb({SERIES: Phone(tmp_path / "phone_series", fail={"stat": "timeout"})})
     assert main._mu_mtime(SERIES, path) is None
+
+
+# ============================================================================ (c) the command end to end
+
+EPISODE, EP_NEW, EP_COMBINED, EP_ALIAS = ("tv-en-2015-mushow-s02e03", "tv-en-2015-mushow-s02e04",
+                                          "tv-en-2015-mushow-s02e05", "tv-en-2015-mushow-s02e06")
+STALE, NOSIDECAR, LOCAL = "tv-en-2015-mushow-s02e07", "tv-en-2015-mushow-s02e08", "tv-en-2015-mushow-s02e09"
+SEASON, MOVIE, SPLITMOVIE = "tv-en-2015-mushow-s02", "mov-en-2001-amelie", "mov-en-2019-split"
+ANIME, OTHER = "ani-ja-2006-muanime07", "oth-en-2024-mufinal-e01"
+BTS, MAKING, RECAP = f"{MOVIE}::Specials/BTS.mkv", f"{MOVIE}::Specials/Bonus/Making Of.mkv", f"{SEASON}::Specials/Recap.mkv"
+ALIASES = {"movies": MOVIES, "series": SERIES, "others": "<NEW_PIXEL_SERIAL>"}
+# label -> (what a dry run of `all` does with its sidecar, the keys it adds / why it is left alone)
+EXPECTED = {
+    MOVIE: ("upgrade", "v1 → v2: + date_utc 1/1 · gphotos_account 1/1"),                 # legacy: confirmed by NAME
+    BTS: ("nothing-proven", None),
+    MAKING: ("upgrade", "v1 → v2: + sha1 1/2 · dedup_key 1/2 · date_utc 1/2 · uploaded_name 1/2"),
+    ANIME: ("nothing-proven", None),
+    EPISODE: ("upgrade", "v1 → v2: + sha1 1/1 · dedup_key 1/1 · date_utc 1/1 · uploaded_name 1/1 · gphotos_account 1/1"),
+    EP_NEW: ("up-to-date", None),                                                         # a new push: already v2
+    EP_COMBINED: ("upgrade", "v1 → v2: + date_utc 1/1 · gphotos_account 1/1"),
+    STALE: ("skipped", "it lists other bytes than the library holds now (re-split or re-mastered since its push)"),
+    RECAP: ("nothing-proven", None),
+    OTHER: ("upgrade", "v1 → v2: + sha1 1/2 · dedup_key 1/2 · date_utc 1/2 · gphotos_account 1/2"),
+    SPLITMOVIE: ("upgrade", "v1 → v2: + sha1 3/3 · dedup_key 3/3 · date_utc 3/3 · uploaded_name 3/3"),
+}
+ORDER = list(EXPECTED)     # the processing order: phones in device_check_aliases order, then by phone path
+WRITTEN = (MOVIE, MAKING, EPISODE, EP_COMBINED, OTHER)   # what --apply rewrites (SPLITMOVIE: the check-only phone)
+
+
+@pytest.fixture()
+def world(sandbox, monkeypatch, tmp_path, capsys):
+    """The library (on disk, through the sandbox) and three fake phones holding its sidecars — each written by the
+    REAL write_remote_mvmeta: version 1 (the existing library) except EP_NEW, a new push's version 2 with its capture's
+    identity. Phones: movies (MOVIES), series (SERIES) and the check-only movies#2 (EXTRA); others is a placeholder.
+    Proven (EXPECTED): EPISODE captured + confirmed by its content key; MOVIE and EP_COMBINED (an alias points at it)
+    confirmed by NAME only; OTHER's chunk 1 downloaded (sha256 proof), its chunk 2 nothing; MAKING's chunk 1 captured;
+    SPLITMOVIE captured (3 chunks + its FLAC holder); EP_NEW captured; STALE captured, but its sidecar lists older bytes;
+    ANIME, BTS and RECAP nothing; NOSIDECAR has no sidecar anywhere; LOCAL was never uploaded. Media and a foreign file
+    sit next to the sidecars (never to be touched)."""
+    monkeypatch.setattr(main, "DEVICE_ALIASES", dict(ALIASES))
+    monkeypatch.setattr(main, "DEVICE_CHECK_EXTRA_SERIALS", {"movies": [EXTRA]})
+    monkeypatch.setattr(mvcommon, "_now_utc", lambda: NOW)
+    media = sandbox["local_root"]
+    season = media / "Series" / "Mu Show" / "Season 02"
+    lib = {
+        MOVIE: leaf(MOVIE, media / "Movies" / "Amelie (2001)", "Amelie.2001.mkv"),
+        SPLITMOVIE: leaf(SPLITMOVIE, media / "Movies" / "Split (2019)", "Split.2019.mkv", chunks=3, holder=True),
+        SEASON: {"type": "season_map", "folder_path": str(season), "total_episodes": 7,
+                 "children": [EPISODE, EP_NEW, EP_COMBINED, EP_ALIAS, STALE, NOSIDECAR, LOCAL],
+                 "extras": {"groups": {"Specials": {"added_date": "2026-09-01",
+                                                    "items": [extra(SEASON, "Specials", "Recap.mkv")]}}}},
+        EPISODE: {**leaf(EPISODE, season, "Mu.Show.S02E03.mkv"), "parent_id": SEASON},
+        EP_NEW: {**leaf(EP_NEW, season, "Mu.Show.S02E04.mkv", status="onboarded"), "parent_id": SEASON},
+        EP_COMBINED: {**leaf(EP_COMBINED, season, "Mu.Show.S02E05E06.mkv"), "parent_id": SEASON},
+        EP_ALIAS: {"type": "multi_ep_alias", "alias_of": EP_COMBINED, "parent_id": SEASON},
+        STALE: {**leaf(STALE, season, "Mu.Show.S02E07.mkv"), "parent_id": SEASON},
+        NOSIDECAR: {**leaf(NOSIDECAR, season, "Mu.Show.S02E08.mkv"), "parent_id": SEASON},
+        LOCAL: {**leaf(LOCAL, season, "Mu.Show.S02E09.mkv", status="local_ready"), "uploaded": False,
+                "parent_id": SEASON},
+        ANIME: leaf(ANIME, media / "Anime" / "Mu Anime", "Mu Anime - 07.mkv"),
+        OTHER: leaf(OTHER, media / "Sports" / "Mu Final", "Mu.Final.mkv", chunks=2),
+    }
+    lib[MOVIE]["extras"] = {"groups": {"Specials": {"added_date": "2026-09-01", "items": [
+        extra(MOVIE, "Specials", "BTS.mkv"), extra(MOVIE, "Specials", "Bonus/Making Of.mkv", chunks=2)]}}}
+    episode, new, combined, stale, movie = lib[EPISODE], lib[EP_NEW], lib[EP_COMBINED], lib[STALE], lib[MOVIE]
+    write_capture(episode["folder_path"], EPISODE, episode["short_id"],
+                  prep=cap_facts(episode["hash"], "ep3", episode["search_term"]))
+    episode["gphotos"] = mvcommon.new_gphotos_block(
+        episode["hash"], sha1=_sha1("ep3"), date_utc="2022-02-05T11:49:46Z", uploaded_name=episode["search_term"],
+        accounts=record("tv", "dedupkey", "ep3"), home_account="tv")
+    write_capture(new["folder_path"], EP_NEW, new["short_id"], prep=cap_facts(new["hash"], "ep4", new["search_term"]))
+    combined["gphotos"] = mvcommon.new_gphotos_block(combined["hash"], accounts=record("tv", "filename", "ep5-cloud"),
+                                                     home_account="tv")
+    write_capture(stale["folder_path"], STALE, stale["short_id"], prep=cap_facts(stale["hash"], "ep7", stale["search_term"]))
+    movie["gphotos"] = mvcommon.new_gphotos_block(movie["hash"], accounts=record("movies", "filename", "amelie-cloud"),
+                                                  home_account="movies")
+    bts, making = movie["extras"]["groups"]["Specials"]["items"]
+    making_dir = os.path.join(movie["folder_path"], "Specials", "Bonus")
+    m1 = making["split_info"]["chunks"][0]
+    write_capture(making_dir, MAKING, making["short_id"],
+                  pushes=[[cap_facts(m1["hash"], "making1", m1["filename"], role="chunk", index=1)]])
+    split = lib[SPLITMOVIE]
+    holder = split["split_info"]["carried_out_tracks"][0]
+    write_capture(split["folder_path"], SPLITMOVIE, split["short_id"], pushes=[
+        [cap_facts(c["hash"], f"split{i}", c["filename"], role="chunk", index=i, date="2026-09-24T06:03:02Z")
+         for i, c in enumerate(split["split_info"]["chunks"], 1)]
+        + [cap_facts(holder["holder_hash"], "holder", holder["holder_filename"], role="holder")]])
+    o1 = lib[OTHER]["split_info"]["chunks"][0]
+    o1["gphotos"] = mvcommon.new_gphotos_block(o1["hash"], accounts=record("others", "sha256", "o1-bytes"),
+                                               home_account="others")
+    mvcommon.save_library(lib)
+    lib = mvcommon.load_library()
+
+    phones = {MOVIES: Phone(tmp_path / "phone_movies"), SERIES: Phone(tmp_path / "phone_series"),
+              EXTRA: Phone(tmp_path / "phone_extra")}
+    sidecars, stamps = {}, iter(range(1_630_000_000, 1_700_000_000, 86_400))
+
+    def place(serial, label, entry, remote_dir, version=1, identity=None):
+        path, raw = written_sidecar(monkeypatch, entry, label, version=version, identity=identity, remote_dir=remote_dir)
+        mtime = next(stamps)
+        phones[serial].put(path[len(ROOT):], raw, mtime)
+        sidecars[label] = {"serial": serial, "path": path, "raw": raw, "mtime": mtime}
+
+    show, specials = "/sdcard/Media/Series/Mu Show/Season 02", "/sdcard/Media/Movies/Amelie (2001)/Specials"
+    place(MOVIES, MOVIE, lib[MOVIE], "/sdcard/Media/Movies/Amelie (2001)")
+    place(MOVIES, BTS, dict(bts, folder_path=os.path.join(movie["folder_path"], "Specials")), specials)
+    place(MOVIES, MAKING, dict(making, folder_path=making_dir), specials + "/Bonus")
+    place(SERIES, ANIME, lib[ANIME], "/sdcard/Media/Anime/Mu Anime")
+    place(SERIES, EPISODE, lib[EPISODE], show)
+    place(SERIES, EP_NEW, lib[EP_NEW], show, version=2,
+          identity=gpcapture.mvmeta_identity(new["folder_path"], new["short_id"], []))
+    place(SERIES, EP_COMBINED, lib[EP_COMBINED], show)
+    place(SERIES, STALE, dict(lib[STALE], hash=_sha("ep7-before-the-re-master")), show)
+    recap = lib[SEASON]["extras"]["groups"]["Specials"]["items"][0]
+    place(SERIES, RECAP, dict(recap, folder_path=os.path.join(str(season), "Specials")), show + "/Specials")
+    place(SERIES, OTHER, lib[OTHER], "/sdcard/Media/Sports/Mu Final")
+    place(EXTRA, SPLITMOVIE, lib[SPLITMOVIE], "/sdcard/Media/Movies/Split (2019)")
+    phones[MOVIES].put(f"Movies/Amelie (2001)/Amelie.2001 [{lib[MOVIE]['short_id']}].mkv", b"AMELIE-MEDIA", 1)
+    phones[SERIES].put(f"Series/Mu Show/Season 02/Mu.Show.S02E04 [{new['short_id']}].mkv", b"EP4-MEDIA", 2)
+    phones[SERIES].put("Series/notes.json", b'{"not": "ours"}', 3)
+    capsys.readouterr()            # the writer's own "sidecar written" lines
+    return types.SimpleNamespace(lib=lib, phones=phones, sidecars=sidecars, sandbox=sandbox)
+
+
+def library_files(sandbox):
+    """The library files' bytes and mtimes (ns) — a run must leave them exactly as they were."""
+    return {key: (path.read_bytes(), path.stat().st_mtime_ns) for key, path in sandbox.items() if key.startswith("lib_")}
+
+
+def phone_files(world):
+    return {serial: phone.files() for serial, phone in world.phones.items()}
+
+
+def statuses(result):
+    return {row["label"]: row["status"] for row in result["rows"]}
+
+
+def v1_bytes_of(new_raw, old_raw):
+    """THIS module's own byte-identity check: the rewritten sidecar with every key the original lacks removed (its
+    version put back), encoded exactly like write_remote_mvmeta -> must be the original bytes."""
+    old, new = json.loads(old_raw), json.loads(new_raw)
+    new["version"] = old["version"]
+    new["chunks"] = [{k: v for k, v in chunk.items() if k in held} for chunk, held in zip(new["chunks"], old["chunks"])]
+    newline = "\r\n" if b"\r\n" in old_raw else "\n"
+    return json.dumps(new, indent=2).replace("\n", newline).encode("utf-8")
+
+
+def _word(word):
+    """The literal of a single-quoted device-shell word."""
+    assert word[:1] == word[-1:] == "'"
+    return word[1:-1].replace("'\\''", "'")
+
+
+def device_steps(fake):
+    """(verb, serial, path) of every call after the phones were listed (from the first pull on)."""
+    calls = fake.argvs()
+    first = next((i for i, a in enumerate(calls) if a[3:4] == ["pull"]), len(calls))
+    steps = []
+    for argv in calls[first:]:
+        verb = argv[4] if argv[3] == "shell" else argv[3]
+        path = {"pull": lambda: argv[4], "push": lambda: argv[5], "mv": lambda: _word(argv[6]),
+                "stat": lambda: _word(argv[7])}[verb]()
+        steps.append((verb, argv[2], path))
+    return steps
+
+
+def expected_steps(world, rows):
+    """The adb steps a run's rows imply, in their order: a write is pull -> push .tmp -> mv -> pull -> stat; a planned
+    sidecar is one pull; a sidecar with nothing proven, or one not reached, is never touched."""
+    steps = []
+    for row in rows:
+        serial, path = world.sidecars[row["label"]]["serial"], world.sidecars[row["label"]]["path"]
+        if row["status"] in ("upgraded", "failed"):
+            steps += [("pull", serial, path), ("push", serial, path + ".tmp"), ("mv", serial, path),
+                      ("pull", serial, path), ("stat", serial, path)]
+        elif row["status"] in ("upgrade", "up-to-date", "skipped", "check-only"):
+            steps.append(("pull", serial, path))
+    return steps
+
+
+def test_a_dry_run_lists_per_sidecar_the_keys_it_would_add_and_writes_nothing_anywhere(world, fake_adb, capsys,
+                                                                                       tmp_path):
+    before_library, before_phones = library_files(world.sandbox), phone_files(world)
+    fake = fake_adb(world.phones)
+    res = main.cmd_mvmeta_upgrade()
+    out = capsys.readouterr().out
+    assert (res["status"], res["apply"], res["scope"], res["run_dir"]) == ("ok", False, "all", None)
+    assert [row["label"] for row in res["rows"]] == ORDER
+    assert statuses(res) == {label: status for label, (status, _what) in EXPECTED.items()}
+    for row in res["rows"]:
+        status, what = EXPECTED[row["label"]]
+        assert (row["serial"], row["path"]) == (world.sidecars[row["label"]]["serial"],
+                                                world.sidecars[row["label"]]["path"])
+        if status == "upgrade":
+            assert main._mu_adds_text(row) == what
+            assert f"  {row['label']} — {row['alias']} {row['serial']} — {what}" in out
+            assert f"      {row['path']}" in out
+        if status == "skipped":
+            assert row["why"] == what and what in out
+    assert [owner["label"] for owner in res["missing"]] == [NOSIDECAR]
+    # NOTHING written anywhere: the library, the state folder, the system temp folder, the phones
+    assert library_files(world.sandbox) == before_library
+    assert not os.path.exists(mvcommon.GPHOTOS_STATE_DIR)
+    assert os.listdir(tmp_path / "systmp") == []
+    assert phone_files(world) == before_phones
+    assert set(fake.verbs()) == {"devices", "find", "stat", "pull"}
+    # every adb command names its phone, but the one `adb devices`; only sidecars that could gain a key are pulled
+    assert [argv for argv in fake.argvs() if argv[1:2] != ["-s"]] == [["adb", "devices"]]
+    assert {argv[2] for argv in fake.argvs() if argv[1:2] == ["-s"]} == {MOVIES, SERIES, EXTRA}
+    assert device_steps(fake) == expected_steps(world, res["rows"])
+    assert out.splitlines()[0] == "=== MVMETA UPGRADE — dry run: nothing is written — scope: all — 12 uploaded item(s) ==="
+    assert "  others    <NEW_PIXEL_SERIAL> skipped — placeholder" in out.splitlines()
+    assert (f"  movies#2  {EXTRA}       ok — 1 file(s) · check-only phone: --apply rewrites it only when named — "
+            f"device movies#2") in out.splitlines()
+    assert f"{SPLITMOVIE} — movies#2 {EXTRA} — {EXPECTED[SPLITMOVIE][1]}   (check-only phone: --apply needs it named — " \
+           f"device movies#2)" in out
+    assert "Would upgrade (6) — the keys --apply adds (how many of the sidecar's chunks get each):" in out
+    assert ("Summary: would upgrade 6 · left as they are 1 · up to date 1 · nothing proven yet 3 — nothing proven yet = "
+            "no capture and not confirmed in Google Photos: map_photos / check_photos --apply first") in out
+    assert ("No sidecar on the listed phones: 1 uploaded item(s) (tv 1) — listed only: creating a missing sidecar is "
+            "out of scope") in out and f"    {NOSIDECAR}" in out.splitlines()
+    assert ("Next: python main.py mvmeta_upgrade all --apply — rewrites the 5 sidecar(s) marked above (not those on a "
+            "check-only phone)") in out
+    assert "Next (check-only phone): python main.py mvmeta_upgrade all device movies#2 --apply" in out
+
+
+def test_apply_rewrites_exactly_those_sidecars_keeping_every_v1_byte_and_the_push_time(world, fake_adb, capsys,
+                                                                                       tmp_path):
+    before_library, before = library_files(world.sandbox), phone_files(world)
+    fake = fake_adb(world.phones)
+    res = main.cmd_mvmeta_upgrade(apply=True)
+    out = capsys.readouterr().out
+    assert res["status"] == "ok"
+    assert statuses(res) == {**{label: status for label, (status, _w) in EXPECTED.items()},
+                             **dict.fromkeys(WRITTEN, "upgraded"), SPLITMOVIE: "check-only"}
+    after = phone_files(world)
+    for serial in world.phones:
+        assert set(after[serial]) == set(before[serial])                    # no file added or removed: no .tmp left
+        changed = {path for path, held in after[serial].items() if held != before[serial][path]}
+        assert changed == {world.sidecars[label]["path"] for label in WRITTEN
+                           if world.sidecars[label]["serial"] == serial}     # media + other files untouched
+    for label in WRITTEN:
+        where = world.sidecars[label]
+        data, mtime = after[where["serial"]][where["path"]]
+        assert mtime == where["mtime"]                                      # the push time kept
+        assert v1_bytes_of(data, where["raw"]) == where["raw"]              # every v1 byte kept
+        assert json.loads(data)["version"] == 2
+    chunks = {label: json.loads(after[world.sidecars[label]["serial"]][world.sidecars[label]["path"]][0])["chunks"]
+              for label in WRITTEN}
+    (episode,) = chunks[EPISODE]
+    assert {k: episode[k] for k in main.MVMETA_UPGRADE_KEYS} == {
+        "sha1": _sha1("ep3"), "dedup_key": _key("ep3"), "date_utc": "2022-02-05T11:49:46Z",
+        "uploaded_name": world.lib[EPISODE]["search_term"], "gphotos_account": "tv"}
+    (combined,) = chunks[EP_COMBINED]
+    assert "sha1" not in combined and "dedup_key" not in combined                # a name match proves no content key
+    assert (combined["date_utc"], combined["gphotos_account"]) == ("2022-02-05T11:49:46Z", "tv")
+    o1, o2 = chunks[OTHER]
+    assert (o1["sha1"], o1["dedup_key"], o1["gphotos_account"]) == (_sha1("o1-bytes"), _key("o1-bytes"), "others")
+    assert set(o2) == {"filename", "hash"}
+    assert device_steps(fake) == expected_steps(world, res["rows"])           # pull, push .tmp, mv, pull, stat each
+    for argv in fake.argvs():                                               # every write on the sidecar's own phone
+        if argv[3:4] == ["push"] or argv[4:5] == ["mv"]:
+            target = argv[5][:-len(".tmp")] if argv[3] == "push" else _word(argv[6])
+            assert argv[2] == next(w["serial"] for w in world.sidecars.values() if w["path"] == target)
+    assert {"push", "mv"}.isdisjoint(fake.verbs(EXTRA))                      # the check-only phone: never written
+    run_dir = os.path.join(mvcommon.GPHOTOS_STATE_DIR, "mvmeta", "20261014T120000Z")
+    assert res["run_dir"] == run_dir
+    with open(os.path.join(run_dir, "backup.jsonl"), encoding="utf-8") as fh:
+        kept = [json.loads(line) for line in fh]
+    assert [line["manual_id"] for line in kept] == [label for label in ORDER if label in WRITTEN]
+    for n, line in enumerate(kept, 1):
+        where = world.sidecars[line["manual_id"]]
+        assert line == {"file": f"originals/{n:04d}.mvmeta.json", "alias": {MOVIES: "movies", SERIES: "series"}[
+            where["serial"]], "serial": where["serial"], "path": where["path"], "mtime": where["mtime"],
+            "manual_id": line["manual_id"], "sha256": hashlib.sha256(where["raw"]).hexdigest()}
+        with open(os.path.join(run_dir, line["file"]), "rb") as fh:
+            assert fh.read() == where["raw"]
+    with open(os.path.join(run_dir, "report.txt"), encoding="utf-8") as fh:
+        assert fh.read() == out                                             # the whole transcript
+    assert sorted(os.listdir(mvcommon.GPHOTOS_STATE_DIR)) == ["mvmeta"]      # no other state written
+    assert library_files(world.sandbox) == before_library                    # the library is only read
+    assert os.listdir(tmp_path / "systmp") == []
+    for label in WRITTEN:
+        assert f"   ✅ upgraded {label} — " in out
+    assert "Not rewritten — on a check-only phone (name it to rewrite it: device <alias>) (1):" in out
+    assert "Summary: upgraded 5 · not rewritten (check-only phone) 1 · left as they are 1 · up to date 1 · nothing " \
+           "proven yet 3" in out
+    assert f"Originals kept in {run_dir} — backup.jsonl names each one's phone file" in out
+
+
+def test_a_second_apply_finds_them_up_to_date_and_writes_nothing(world, fake_adb, capsys):
+    fake_adb(world.phones)
+    main.cmd_mvmeta_upgrade(apply=True)
+    after_first = phone_files(world)
+    fake = fake_adb(world.phones)
+    res = main.cmd_mvmeta_upgrade(apply=True)
+    assert res["status"] == "ok" and res["run_dir"] is None                  # nothing kept: nothing written
+    assert {label: statuses(res)[label] for label in WRITTEN} == dict.fromkeys(WRITTEN, "up-to-date")
+    assert not {"push", "mv"} & set(fake.verbs())
+    assert phone_files(world) == after_first
+
+
+@pytest.mark.parametrize("name", ["movies#2", EXTRA])
+def test_the_check_only_phone_is_rewritten_only_when_it_is_named(world, fake_adb, capsys, name):
+    fake = fake_adb(world.phones)
+    res = main.cmd_mvmeta_upgrade(device=name, apply=True)
+    assert res["status"] == "ok" and statuses(res) == {SPLITMOVIE: "upgraded"}
+    assert {argv[2] for argv in fake.argvs() if argv[1:2] == ["-s"]} == {EXTRA}     # only that phone is listed
+    where = world.sidecars[SPLITMOVIE]
+    data, mtime = world.phones[EXTRA].files()[where["path"]]
+    assert mtime == where["mtime"] and v1_bytes_of(data, where["raw"]) == where["raw"]
+    assert [c["sha1"] for c in json.loads(data)["chunks"]] == [_sha1(f"split{i}") for i in (1, 2, 3)]
+    out = capsys.readouterr().out
+    assert f"=== MVMETA UPGRADE — --apply: rewriting the phones' sidecars — scope: all · device {name} — 12 uploaded " \
+           f"item(s) ===" in out
+    assert "check-only phone" not in out.splitlines()[2]                     # named: it may be rewritten
+    assert len(res["missing"]) == 11                                         # the other phones were not listed
+
+
+@pytest.mark.parametrize("state,status", [(None, "not-connected"), ("offline", "offline"),
+                                          ("unauthorized", "unauthorized")])
+def test_a_phone_that_cannot_be_listed_is_skipped_with_a_line(world, fake_adb, capsys, state, status):
+    world.phones[SERIES].state = state
+    before = phone_files(world)
+    fake = fake_adb(world.phones)
+    res = main.cmd_mvmeta_upgrade(apply=True)
+    out = capsys.readouterr().out
+    (line,) = [line for line in out.splitlines() if line.startswith("  series ")]
+    assert f" {status} — " in line and line.endswith(" — skipped")
+    assert not [argv for argv in fake.argvs() if argv[2:3] == [SERIES]]      # nothing asked of that phone
+    assert phone_files(world)[SERIES] == before[SERIES]
+    assert {row["serial"] for row in res["rows"]} == {MOVIES, EXTRA}
+    assert statuses(res)[MOVIE] == "upgraded"                                # the other phones are still done
+    assert f"series ({SERIES}) {status}" in out and "a phone was not listed in full" in out
+
+
+def test_an_attached_phone_that_is_not_configured_is_named_never_listed(world, fake_adb, capsys, tmp_path):
+    stranger = Phone(tmp_path / "phone_stranger")
+    stranger.put("Movies/x [abc123].mvmeta.json", b"{}", 1)
+    fake = fake_adb({**world.phones, "FAKEUNCF0004": stranger})
+    main.cmd_mvmeta_upgrade()
+    out = capsys.readouterr().out
+    assert "  ⚠️  attached but not configured: FAKEUNCF0004 (device) — to include it: device FAKEUNCF0004" in out
+    assert not [argv for argv in fake.argvs() if argv[2:3] == ["FAKEUNCF0004"]]
+
+
+def test_the_disabled_mode_prints_its_line_and_touches_nothing(world, fake_adb, capsys, monkeypatch):
+    """PLAN Step 13c: had G0 question 2 been answered "no", --apply prints `device rewrites disabled (OD-4
+    clarification)` and exits 0. It was answered yes; the path is kept behind MVMETA_UPGRADE_APPLY_ENABLED."""
+    real_load = main.load_library
+    monkeypatch.setattr(main, "MVMETA_UPGRADE_APPLY_ENABLED", False)
+    monkeypatch.setattr(main, "load_library", lambda: pytest.fail("a disabled --apply must not even read the library"))
+    before = phone_files(world)
+    fake = fake_adb(world.phones)
+    res = main.cmd_mvmeta_upgrade(apply=True)
+    assert res["status"] == "disabled" and fake.calls == [] and res["rows"] == []
+    assert capsys.readouterr().out.splitlines() == [
+        "⚠️  mvmeta_upgrade --apply: device rewrites disabled (OD-4 clarification) — nothing was read or written; "
+        "without --apply the dry run still lists what it would add."]
+    assert phone_files(world) == before and not os.path.exists(mvcommon.GPHOTOS_STATE_DIR)
+    monkeypatch.setattr(main, "load_library", real_load)
+    assert statuses(main.cmd_mvmeta_upgrade()) == {label: s for label, (s, _w) in EXPECTED.items()}  # dry run unaffected
+
+
+@pytest.mark.parametrize("scope,labels,missing", [
+    (EPISODE, [EPISODE], []),
+    (EP_ALIAS, [EP_COMBINED], []),                                           # an alias: its primary's sidecar
+    (SEASON, [EPISODE, EP_NEW, EP_COMBINED, STALE, RECAP], [NOSIDECAR]),     # a season: its episodes + its extras
+    (MOVIE, [MOVIE, BTS, MAKING], []),                                       # a title brings its extras items
+    ("oth-", [OTHER], []),                                                   # an id prefix
+])
+def test_the_scope_selects_its_items(world, fake_adb, capsys, scope, labels, missing):
+    fake_adb(world.phones)
+    res = main.cmd_mvmeta_upgrade(scope=scope)
+    assert res["status"] == "ok" and res["scope"] == scope
+    assert [row["label"] for row in res["rows"]] == labels
+    assert [owner["label"] for owner in res["missing"]] == missing
+
+
+def test_an_unknown_scope_is_an_error_before_any_adb(world, fake_adb, capsys):
+    fake = fake_adb(world.phones)
+    res = main.cmd_mvmeta_upgrade(scope="tv-en-1999-nothing")
+    assert res["status"] == "error" and fake.calls == []
+    assert capsys.readouterr().out == "❌ mvmeta_upgrade: no library id is or starts with 'tv-en-1999-nothing'.\n"
+
+
+def test_a_scope_with_nothing_uploaded_needs_no_phone(world, fake_adb, capsys):
+    fake = fake_adb(world.phones)
+    res = main.cmd_mvmeta_upgrade(scope=LOCAL)
+    assert (res["status"], res["rows"], fake.calls) == ("ok", [], [])
+    assert capsys.readouterr().out.splitlines()[-1] == ("Nothing in this scope was uploaded — there is no sidecar to "
+                                                        "look for.")
+
+
+def test_more_than_20_items_without_a_sidecar_are_counted_per_category(sandbox, fake_adb, capsys, monkeypatch,
+                                                                       tmp_path):
+    monkeypatch.setattr(main, "DEVICE_ALIASES", {"series": SERIES})
+    monkeypatch.setattr(main, "DEVICE_CHECK_EXTRA_SERIALS", {})
+    folder = sandbox["local_root"] / "Series" / "Many"
+    lib = {f"tv-en-2020-many-s01e{n:02d}": leaf(f"tv-en-2020-many-s01e{n:02d}", folder, f"Many.S01E{n:02d}.mkv")
+           for n in range(1, 22)}
+    lib["mov-en-2020-one"] = leaf("mov-en-2020-one", sandbox["local_root"] / "Movies" / "One", "One.mkv")
+    mvcommon.save_library(lib)
+    fake_adb({SERIES: Phone(tmp_path / "phone_series")})
+    res = main.cmd_mvmeta_upgrade()
+    out = capsys.readouterr().out
+    assert len(res["missing"]) == 22 and res["rows"] == []
+    assert ("No sidecar on the listed phones: 22 uploaded item(s) (movies 1 · tv 21) — listed only: creating a missing "
+            "sidecar is out of scope") in out
+    assert "    (more than 20 — run with one id or season id to list them)" in out
+    assert not any(mid in out for mid in lib)
+
+
+def test_the_first_failed_write_stops_the_run_and_a_re_run_finishes_it(world, fake_adb, capsys):
+    world.phones[MOVIES].fail = {("mv", 1): "error"}                          # MOVIE, the first write, cannot be renamed
+    before = phone_files(world)
+    fake = fake_adb(world.phones)
+    res = main.cmd_mvmeta_upgrade(apply=True)
+    out = capsys.readouterr().out
+    assert res["status"] == "error"
+    assert statuses(res) == {MOVIE: "failed", **{label: "not-reached" for label in ORDER[1:]}}
+    where = world.sidecars[MOVIE]
+    assert device_steps(fake) == [("pull", MOVIES, where["path"]), ("push", MOVIES, where["path"] + ".tmp"),
+                                  ("mv", MOVIES, where["path"])]               # nothing after the failure
+    after = phone_files(world)
+    assert after[MOVIES][where["path"]] == before[MOVIES][where["path"]]       # the sidecar is unchanged
+    assert where["path"] + ".tmp" in after[MOVIES]                            # its .tmp is left (replaced next time)
+    assert {s: f for s, f in after.items() if s != MOVIES} == {s: f for s, f in before.items() if s != MOVIES}
+    assert f"   ❌ FAILED {MOVIE} — movies {MOVIES} — the rename on the phone failed (adb: error: mv failed on the " \
+           f"fake phone) — the sidecar is unchanged" in out
+    assert "Not reached — the run stopped first (10):" in out and "❌ Stopped at the first failure (above)" in out
+    world.phones[MOVIES].fail = {}
+    fake_adb(world.phones)
+    res = main.cmd_mvmeta_upgrade(apply=True)
+    assert res["status"] == "ok" and statuses(res)[MOVIE] == "upgraded"
+    assert where["path"] + ".tmp" not in world.phones[MOVIES].files()          # the leftover was replaced
+    assert sorted(os.listdir(os.path.dirname(res["run_dir"]))) == ["20261014T120000Z", "20261014T120000Z-2"]
+
+
+def test_ctrl_c_during_a_write_marks_that_sidecar_and_stops(world, fake_adb, capsys, tmp_path):
+    world.phones[SERIES].fail = {("push", 1): "interrupt"}                    # EPISODE: the series phone's first write
+    fake_adb(world.phones)
+    res = main.cmd_mvmeta_upgrade(apply=True)
+    out = capsys.readouterr().out
+    assert res["status"] == "interrupted"
+    assert statuses(res) == {MOVIE: "upgraded", BTS: "nothing-proven", MAKING: "upgraded", ANIME: "nothing-proven",
+                             EPISODE: "failed", **{label: "not-reached" for label in ORDER[5:]}}
+    episode = next(row for row in res["rows"] if row["label"] == EPISODE)
+    assert episode["why"].startswith("interrupted while it was being rewritten")
+    assert f"⚠️  Interrupted (Ctrl+C) while rewriting {EPISODE} on series" in out
+    assert world.phones[SERIES].files()[world.sidecars[EPISODE]["path"]][0] == world.sidecars[EPISODE]["raw"]
+    assert os.listdir(tmp_path / "systmp") == []                              # the temporary folder went anyway
+    assert len(os.listdir(os.path.join(res["run_dir"], "originals"))) == 3     # kept before each write began
+
+
+def test_ctrl_c_during_a_dry_run_writes_nothing(world, fake_adb, capsys, tmp_path):
+    world.phones[SERIES].fail = {("pull", 1): "interrupt"}                    # EPISODE's pull
+    before = phone_files(world)
+    fake_adb(world.phones)
+    res = main.cmd_mvmeta_upgrade()
+    assert res["status"] == "interrupted"
+    assert statuses(res) == {**{label: EXPECTED[label][0] for label in ORDER[:4]},
+                             **{label: "not-reached" for label in ORDER[4:]}}
+    assert "⚠️  Interrupted (Ctrl+C) — no sidecar was being written." in capsys.readouterr().out
+    assert phone_files(world) == before and not os.path.exists(mvcommon.GPHOTOS_STATE_DIR)
+    assert os.listdir(tmp_path / "systmp") == []
+
+
+def test_a_leftover_tmp_is_listed_and_the_next_apply_replaces_it(world, fake_adb, capsys):
+    where = world.sidecars[EPISODE]
+    world.phones[SERIES].put(where["path"][len(ROOT):] + ".tmp", b"half a sidecar", 1)
+    fake_adb(world.phones)
+    main.cmd_mvmeta_upgrade()
+    out = capsys.readouterr().out
+    assert ("⚠️  1 leftover <sidecar>.tmp file(s) of an interrupted --apply — harmless (not media); the next --apply of "
+            "their item replaces them:") in out
+    assert f"    series {SERIES} {where['path']}.tmp" in out.splitlines()
+    fake_adb(world.phones)
+    res = main.cmd_mvmeta_upgrade(apply=True)
+    assert statuses(res)[EPISODE] == "upgraded" and where["path"] + ".tmp" not in world.phones[SERIES].files()
+    assert "leftover <sidecar>.tmp" not in capsys.readouterr().out
+
+
+def test_a_sidecar_whose_push_time_cannot_be_read_is_left_alone(world, fake_adb, capsys):
+    world.phones[SERIES].fail = {"stat": "error"}                             # the listing gets no size / mtime
+    fake = fake_adb(world.phones)
+    res = main.cmd_mvmeta_upgrade(apply=True)
+    for label in (EPISODE, EP_NEW, EP_COMBINED, STALE, OTHER):
+        row = next(row for row in res["rows"] if row["label"] == label)
+        assert (row["status"], row["why"]) == ("skipped", "its mtime (the push time) could not be read on the phone — "
+                                                          "re-run to try again")
+    assert statuses(res)[MOVIE] == "upgraded"
+    assert not [argv for argv in fake.argvs() if argv[2:3] == [SERIES] and argv[3] in ("pull", "push")]
+
+
+def test_a_sidecar_two_library_items_claim_is_left_alone(sandbox, fake_adb, capsys, monkeypatch, tmp_path):
+    monkeypatch.setattr(main, "DEVICE_ALIASES", {"series": SERIES})
+    monkeypatch.setattr(main, "DEVICE_CHECK_EXTRA_SERIALS", {})
+    folder = sandbox["local_root"] / "Series" / "Dup"
+    a, b = leaf("tv-en-2001-dup-s01e01", folder, "Dup.mkv"), leaf("tv-en-2001-dup-s01e02", folder, "dup.mkv")
+    b["short_id"] = a["short_id"]             # a short-id clash: b's sidecar name differs from a's by case alone
+    b["search_term"] = f"dup [{a['short_id']}].mkv"
+    for mid, entry in (("tv-en-2001-dup-s01e01", a), ("tv-en-2001-dup-s01e02", b)):
+        write_capture(entry["folder_path"], mid, entry["short_id"],
+                      prep=cap_facts(entry["hash"], mid, entry["search_term"]))
+    mvcommon.save_library({"tv-en-2001-dup-s01e01": a, "tv-en-2001-dup-s01e02": b})
+    path, raw = written_sidecar(monkeypatch, a, "tv-en-2001-dup-s01e01", remote_dir="/sdcard/Media/Series/Dup")
+    phone = Phone(tmp_path / "phone_series")
+    phone.put(path[len(ROOT):], raw, 5)
+    fake = fake_adb({SERIES: phone})
+    (row,) = main.cmd_mvmeta_upgrade(apply=True)["rows"]
+    assert (row["status"], row["why"]) == ("skipped", "2 library items claim this file name")
+    assert row["label"] == "tv-en-2001-dup-s01e01, tv-en-2001-dup-s01e02"
+    assert "pull" not in fake.verbs() and phone.files() == {path: (raw, 5)}
+
+
+def test_the_output_names_keys_never_values_and_carries_no_web_marker(world, fake_adb, capsys):
+    fake_adb(world.phones)
+    main.cmd_mvmeta_upgrade()
+    main.cmd_mvmeta_upgrade(apply=True)
+    out = capsys.readouterr().out
+    for marker in ("🔹 PROCESSING:", "> Detected Split File (", "✅ MOVED:", "✅ ENTRY COMPLETE."):   # PLAN P-13
+        assert marker not in out
+    for tag in ("ep3", "ep4", "o1-bytes", "making1", "split1", "split2", "split3"):                 # PLAN P-15
+        assert _sha1(tag) not in out and _key(tag) not in out
+    assert "AF1QipFAKE" not in out
+
+
+@pytest.mark.parametrize("tokens,expected", [
+    ([], {"scope": "all", "device": None, "apply": False}),
+    (["all"], {"scope": "all", "device": None, "apply": False}),
+    (["tv-en-2015-mushow"], {"scope": "tv-en-2015-mushow", "device": None, "apply": False}),
+    (["--apply", "tv-x"], {"scope": "tv-x", "device": None, "apply": True}),
+    (["device", "movies#2", "--apply"], {"scope": "all", "device": "movies#2", "apply": True}),
+    (["tv-x", "device", " series "], {"scope": "tv-x", "device": "series", "apply": False}),
+])
+def test_parse_mvmeta_upgrade_args(tokens, expected):
+    assert main.parse_mvmeta_upgrade_args(tokens) == expected
+
+
+@pytest.mark.parametrize("tokens,error", [
+    (["--frob"], "unknown option --frob"), (["device"], "device needs a phone"),
+    (["device", "--apply"], "device needs a phone"), (["device", " "], "device needs a phone"),
+    (["tv-a", "tv-b"], "one scope only"), (["device", "x", "device", "y"], "one device only"),
+])
+def test_parse_mvmeta_upgrade_args_refuses(tokens, error):
+    with pytest.raises(ValueError, match=re.escape(error)):
+        main.parse_mvmeta_upgrade_args(tokens)
+
+
+_GUARD = []
+
+
+def _main_guard():
+    """main.py's `if __name__ == "__main__":` body, compiled alone (the harness of test_prep_push_rep_enrich_cli) —
+    once per module: parsing main.py is not cheap."""
+    if not _GUARD:
+        import ast
+        with open(main.__file__, encoding="utf-8") as fh:
+            tree = ast.parse(fh.read(), filename=main.__file__)
+        node = next(n for n in tree.body if isinstance(n, ast.If) and isinstance(n.test, ast.Compare)
+                    and getattr(n.test.left, "id", None) == "__name__")
+        _GUARD.append(compile(ast.Module(body=node.body, type_ignores=[]), main.__file__, "exec"))
+    return _GUARD[0]
+
+
+def _dispatch(argv, status="ok"):
+    """Run the dispatcher with `argv` (after the program name) against a recorder for cmd_mvmeta_upgrade -> its calls."""
+    import sys as real_sys
+
+    class Sys:
+        def __init__(self):
+            self.argv = ["main.py", *argv]
+
+        def __getattr__(self, name):
+            return getattr(real_sys, name)
+
+    calls = []
+    namespace = dict(main.__dict__, sys=Sys(),
+                     cmd_mvmeta_upgrade=lambda **kwargs: calls.append(kwargs) or {"status": status})
+    exec(_main_guard(), namespace)
+    return calls
+
+
+def test_the_dispatcher_hands_the_parsed_options_to_cmd_mvmeta_upgrade():
+    assert _dispatch(["mvmeta_upgrade", "tv-en", "device", "series", "--apply"]) == [
+        {"scope": "tv-en", "device": "series", "apply": True}]
+    assert _dispatch(["mvmeta_upgrade"]) == [{"scope": "all", "device": None, "apply": False}]
+
+
+@pytest.mark.parametrize("status,exit_code", [("ok", None), ("disabled", None), ("error", 1), ("interrupted", 1)])
+def test_the_dispatcher_s_exit_code(status, exit_code):
+    if exit_code is None:
+        assert len(_dispatch(["mvmeta_upgrade", "--apply"], status=status)) == 1   # returns normally: exit 0
+    else:
+        with pytest.raises(SystemExit) as stop:
+            _dispatch(["mvmeta_upgrade", "--apply"], status=status)
+        assert stop.value.code == exit_code
+
+
+def test_a_usage_error_exits_1_with_the_usage_line(capsys):
+    with pytest.raises(SystemExit) as stop:
+        _dispatch(["mvmeta_upgrade", "--frob"])
+    assert stop.value.code == 1
+    assert capsys.readouterr().out.splitlines() == ["❌ mvmeta_upgrade: unknown option --frob",
+                                                    f"   Usage: {main.MVMETA_UPGRADE_USAGE}"]
+
+
+def test_the_help_lists_the_command(capsys):
+    with pytest.raises(SystemExit):
+        _dispatch([])
+    assert f"  {main.MVMETA_UPGRADE_USAGE}  — upgrade the phones' .mvmeta.json sidecars to v2" in capsys.readouterr().out

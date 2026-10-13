@@ -16245,8 +16245,10 @@ if __name__ == "__main__":
 
         filepath = " ".join(filepath_parts)
         _er_ppr = parse_extras_tokens(_et_ppr)
-        cmd_prep_push_rep(mid, filepath, method, val, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
-                          extras=_er_ppr["folders"] or None, extras_size=_er_ppr["extras_size"])
+        _ac_result = cmd_prep_push_rep(mid, filepath, method, val, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
+                                       extras=_er_ppr["folders"] or None, extras_size=_er_ppr["extras_size"])
+        # [IMP-C25 Step 13b] the auto-confirm (PLAN P-19) — only once the command RETURNED; an exception never gets here
+        after_push_command("prep_push_rep", _ac_result, mid)
 
     elif cmd == "prep_push_rep_season":
         if len(sys.argv) < 4:
@@ -16308,8 +16310,10 @@ if __name__ == "__main__":
 
         folder_path = " ".join(folder_parts)
         _er_pprs = parse_extras_tokens(_et_pprs)
-        cmd_prep_push_rep_season(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
-                                 extras=_er_pprs["folders"] or None, extras_size=_er_pprs["extras_size"])
+        _ac_result = cmd_prep_push_rep_season(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
+                                              extras=_er_pprs["folders"] or None, extras_size=_er_pprs["extras_size"])
+        # [IMP-C25 Step 13b] the auto-confirm (PLAN P-19) — only once the command RETURNED; an exception never gets here
+        after_push_command("prep_push_rep_season", _ac_result, group_id, ep_range)
 
     elif cmd == "prep_push_rep_enrich":
         # IMP-D22 — same token walk as `prep_push_rep` above (SIZE_*/COUNT, device,
@@ -16402,10 +16406,12 @@ if __name__ == "__main__":
 
         filepath = " ".join(filepath_parts)
         _er_ppre = parse_extras_tokens(_et_ppre)
-        cmd_prep_push_rep_enrich(mid, filepath, method, val, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
-                                 extras=_er_ppre["folders"] or None, extras_size=_er_ppre["extras_size"],
-                                 tmdb_id=cli_tmdb_id, tvdb_id=cli_tvdb_id,
-                                 write_nfo=write_nfo_flag, no_web=no_web_flag, rename_choice=rename_choice)
+        _ac_result = cmd_prep_push_rep_enrich(mid, filepath, method, val, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
+                                              extras=_er_ppre["folders"] or None, extras_size=_er_ppre["extras_size"],
+                                              tmdb_id=cli_tmdb_id, tvdb_id=cli_tvdb_id,
+                                              write_nfo=write_nfo_flag, no_web=no_web_flag, rename_choice=rename_choice)
+        # [IMP-C25 Step 13b] the auto-confirm (PLAN P-19) — only once the command RETURNED; an exception never gets here
+        after_push_command("prep_push_rep_enrich", _ac_result, mid)
 
     elif cmd == "prep_push_rep_season_enrich":
         # IMP-D22 — same token walk as `prep_push_rep_season` above (SIZE_*/COUNT,
@@ -16503,10 +16509,12 @@ if __name__ == "__main__":
 
         folder_path = " ".join(folder_parts)
         _er_pprse = parse_extras_tokens(_et_pprse)
-        cmd_prep_push_rep_season_enrich(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
-                                        extras=_er_pprse["folders"] or None, extras_size=_er_pprse["extras_size"],
-                                        tmdb_id=cli_tmdb_id, tvdb_id=cli_tvdb_id,
-                                        write_nfo=write_nfo_flag, no_web=no_web_flag, rename_choice=rename_choice)
+        _ac_result = cmd_prep_push_rep_season_enrich(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
+                                                     extras=_er_pprse["folders"] or None, extras_size=_er_pprse["extras_size"],
+                                                     tmdb_id=cli_tmdb_id, tvdb_id=cli_tvdb_id,
+                                                     write_nfo=write_nfo_flag, no_web=no_web_flag, rename_choice=rename_choice)
+        # [IMP-C25 Step 13b] the auto-confirm (PLAN P-19) — only once the command RETURNED; an exception never gets here
+        after_push_command("prep_push_rep_season_enrich", _ac_result, group_id, ep_range)
 
     elif cmd == "set_search":
         if len(sys.argv) >= 4:
@@ -16721,12 +16729,14 @@ if __name__ == "__main__":
             _lib_probe = load_library()
             if mid in _lib_probe and _resolve_alias(_lib_probe, mid)[1].get("status") == "archived":
                 print(f"ℹ️  {mid} main is archived — pushing extras only (main untouched).")
-                _push_title_extras_or_warn(_lib_probe, _extras_title_id(_lib_probe, mid), _extras_folders,
-                                            _extras_size_val, _dev_push, method, val)
+                _ac_result = _push_title_extras_or_warn(_lib_probe, _extras_title_id(_lib_probe, mid), _extras_folders,
+                                                        _extras_size_val, _dev_push, method, val)
                 _skip_main = True
         if not _skip_main:
-            cmd_push(mid, method, val, c_range, device_id=_dev_push, eager_rehash=eager, temp_dir=tdir,
-                     extras=_extras_folders, extras_size=_extras_size_val)
+            _ac_result = cmd_push(mid, method, val, c_range, device_id=_dev_push, eager_rehash=eager, temp_dir=tdir,
+                                  extras=_extras_folders, extras_size=_extras_size_val)
+        # [IMP-C25 Step 13b] the auto-confirm (PLAN P-19) — only once the command RETURNED; an exception never gets here
+        after_push_command("push", _ac_result, mid)
 
     elif cmd == "push_group":
         _pgg_all = sys.argv[2:]
@@ -16749,8 +16759,10 @@ if __name__ == "__main__":
                 _pgg_i += 1
         group_id, method, val, ep_range, dev, eager, tdir = parse_push_group_args(_other_pgg)
         _er_pgg = parse_extras_tokens(_et_pgg)
-        cmd_push_group(group_id, method, val, ep_range, device_id=resolve_device(dev), eager_rehash=eager, temp_dir=tdir,
-                       extras=_er_pgg["folders"] or None, extras_size=_er_pgg["extras_size"])
+        _ac_result = cmd_push_group(group_id, method, val, ep_range, device_id=resolve_device(dev), eager_rehash=eager, temp_dir=tdir,
+                                    extras=_er_pgg["folders"] or None, extras_size=_er_pgg["extras_size"])
+        # [IMP-C25 Step 13b] the auto-confirm (PLAN P-19) — only once the command RETURNED; an exception never gets here
+        after_push_command("push_group", _ac_result, group_id, ep_range)
 
     elif cmd == "sort":
         cmd_sort()

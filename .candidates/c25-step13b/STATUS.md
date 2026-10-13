@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13b.c (the CLI dispatcher wiring after the six push-family branches)
+STATE: IN PROGRESS — next: 13b.d (rollback journal-op pins + the web UI pin)
 
 # IMP-C25 Step 13b — auto-confirm unverified objects at the end of the next push (OD-6 ruling) — resumable status
 
@@ -42,12 +42,23 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       ×4 states + an alias id, prep_push_rep_season ×7 (states, ranges, invalid / empty range) + no season + an alias
       child, push_group on a season ×4 + by id prefix ×3 + nothing matched, a None from the other commands ×4, an
       unreadable library / Ctrl+C in the decision → one warning, the guard in every other test). Neighbours (+
-      test_prep_push_rep_enrich, test_prep_push_rep_season_enrich) 390 passed; smoke 82 passed — WIP SHA in the commit
-      that ticks this line
-- [ ] 13b.c main: the CLI dispatcher wiring after the six push-family branches (push incl. its extras-only path,
+      test_prep_push_rep_enrich, test_prep_push_rep_season_enrich) 390 passed; smoke 82 passed — c5c06b9
+- [x] 13b.c main: the CLI dispatcher wiring after the six push-family branches (push incl. its extras-only path,
       push_group, prep_push_rep, prep_push_rep_season, prep_push_rep_enrich, prep_push_rep_season_enrich) — tests:
       call-site pins per verb, success + old → exact argv, every failure / exception → nothing, the child failing
-      never changes the output contract or the exit code, the six return contracts documented in the test file
+      never changes the output contract or the exit code, the six return contracts documented in the test file —
+      each branch now keeps its command's return value (`_ac_result = …`, arguments unchanged) and then calls
+      `after_push_command(<verb>, _ac_result, <id>[, ep_range])`; no cmd_* body touched. tests/test_auto_confirm.py
+      158 passed (+74: wiring ×8 (order cmd → hook, the hook's arguments) + the extras-only path, no other command
+      ×8, the auto-confirm's own child line parses as `check_photos pending --apply --max-minutes 15` and never
+      reaches the hook, an exception ×24 (6 branches × RuntimeError / RollbackHardFail / SystemExit /
+      KeyboardInterrupt) never reaches the REAL hook, usage errors ×9, success → the exact argv ×8 (incl. the
+      extras-only path and a push_group range), the REAL commands' documented failures ×7 → output identical to a run
+      without the hook + their return values pinned, the plan's no-Chrome cases at the CLI ×4, the child failing ×3
+      and a library broken after the push → the dispatcher still returns normally). The module docstring documents
+      the six return contracts. Neighbours (enrich_cli, keeps_split_record, cli_parsers, both enrich autopilots,
+      cmd_push_partial, cmd_push_mock_device, extras) 303 passed; smoke 82 passed — WIP SHA in the commit that ticks
+      this line
 - [ ] 13b.d rollback + web pins: journal-op instrumentation (identical rollback records with and without the hook,
       the hook after the last journal op, no journal file on disk at spawn time) on a real prep_push_rep with a PONR;
       the web UI's push / prep_push_rep actions run in-process and never reach the hook (no webui change: it spawns

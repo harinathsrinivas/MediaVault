@@ -9,12 +9,49 @@ datetime/PLAN.md P-11, P-19, Step 13b).
          the auto-confirm; None -> the run's end state (prep_push_rep: its entry archived · prep_push_rep_season: every
          target of the run archived · push_group: every target uploaded — ranges, aliases, id prefixes); the switch
          read first; errors -> one warning line; tests/conftest.py's guard (every other test: inert recorders)
+  13b.c  main.py's CLI dispatcher: each of the six push-family branches calls the hook once, AFTER its command returned,
+         with what it returned (the push branch's extras-only path too); no other command reaches it; an exception or a
+         usage error never does; success + an old pending object -> the exact child argv; every documented handled
+         failure of the REAL commands -> nothing (output identical to a run without the hook); the child failing /
+         interrupted / not startable never changes the push command's output or exit code
+
+THE SIX RETURN CONTRACTS (PLAN Step 13b asks for them here — verified by reading main.py; the function names are
+authoritative). "Succeeded" = returned normally — no exception: RollbackHardFail, SystemExit, KeyboardInterrupt, anything;
+the dispatcher catches none, so none reaches the hook — and did not return False. A None is judged by the run's end
+state (after_push_command / _push_command_completed), because three of the six return None on their failures too:
+
+  push                        cmd_push -> True: a full push ("✅ SUCCESS.") or a `chunks N-M` partial push ("Partial
+                              Upload Complete"). False on every handled failure: an unknown id, a bad temp dir, a missing
+                              source, the adb mkdir failing, a resume with no recorded chunk / a damaged chunk, the
+                              free-space and unsplittable refusals, a split or FLAC carry-out failure, an empty / invalid
+                              chunk range, an upload failure (left resumable, or rolled back before any upload). Never
+                              None. Its trailing --extras upload never changes the True. The branch's extras-only path (an
+                              ARCHIVED main + --extras) returns _push_title_extras_or_warn -> push_title_extras: True iff
+                              every extra uploaded (also when there is nothing to push), False when the title cannot be
+                              resolved or an extra failed.
+  push_group                  cmd_push_group -> None on EVERY path: success, an invalid range, no items, a bad temp dir,
+                              too little space; a failed episode does not stop the loop and is not reported. -> succeeded
+                              = every target of the run (season children or id prefix, the range, de-aliased) uploaded.
+  prep_push_rep               cmd_prep_push_rep -> None on EVERY path: success ("✅✅✅ AUTO-PILOT COMPLETE"), the
+                              unsplittable refusal, a prep failure (Aborted), a push failure (Paused), a replace failure,
+                              and a post-PONR RollbackHardFail from replace (caught: "Auto-Pilot Stopped"). -> succeeded =
+                              its entry (the id as given) archived.
+  prep_push_rep_season        cmd_prep_push_rep_season -> None on EVERY path: success ("✅✅✅ SEASON AUTO-PILOT
+                              COMPLETE"), the unsplittable refusal, a prep failure (no season), an invalid range, a bad
+                              temp dir, too little space, a push failure mid-season and a RollbackHardFail (both caught,
+                              the resume range printed). -> succeeded = every target of the run archived.
+  prep_push_rep_enrich        cmd_prep_push_rep_enrich -> True once the archive completed (its entry archived — the
+                              enrich leg only warns), False when it did not, or for -tvdbid (refused before anything runs).
+  prep_push_rep_season_enrich cmd_prep_push_rep_season_enrich -> True once every target of the run is archived (the
+                              enrich leg only warns), False otherwise, or for -tvdbid.
 
 Hermetic: the sandbox library (tests/conftest.py), a fixed clock (mvcommon._now_utc), a runner standing in for
 main._cp_spawn (tests/conftest.py's _hermetic_check_child refuses the real child — a child process would see none of a
 test's patches: the REAL library, a REAL Chrome), the fetch lock moved under tmp_path by `real_auto_confirm`. No
 network, no browser, no adb, no real C:\\Media, no real ~/.mediavault. Synthetic ids only.
 """
+import ast
+import functools
 import hashlib
 import json
 import os
@@ -604,3 +641,280 @@ def test_every_other_test_gets_an_inert_auto_confirm(sandbox, capsys):
     assert main.after_push_command("push", True, MOVIE) is None
     assert main.after_push_command.calls == [(("push", True, MOVIE), {})]
     assert capsys.readouterr().out == ""
+
+
+# ===========================================================================
+# 13b.c — main.py's CLI dispatcher
+# ===========================================================================
+@functools.lru_cache(maxsize=1)
+def _main_guard():
+    """main.py's `if __name__ == "__main__":` body, compiled once — the harness of tests/test_prep_push_rep_enrich_cli.py
+    and tests/test_prep_keeps_split_record.py (line numbers point at the real main.py)."""
+    with open(main.__file__, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read(), filename=main.__file__)
+    guard = next(node for node in tree.body if isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
+                 and isinstance(node.test.left, ast.Name) and node.test.left.id == "__name__")
+    return compile(ast.Module(body=guard.body, type_ignores=[]), main.__file__, "exec")
+
+
+class _Argv:
+    """`sys` for the dispatcher: the test's argv; everything else is the real module (pytest's argv is never touched)."""
+
+    def __init__(self, argv):
+        self.argv = ["main.py", *argv]
+
+    def __getattr__(self, name):
+        return getattr(sys, name)
+
+
+def _dispatch(argv, **names):
+    """`python main.py <argv>` without the process: main.py's dispatcher run in a copy of main's namespace taken NOW (so
+    it sees the hook this test installed), with `names` swapped in (e.g. cmd_push=…). Returning normally is what makes a
+    real run exit 0; otherwise it raises what the dispatcher raises (SystemExit for a usage error)."""
+    exec(_main_guard(), dict(main.__dict__, sys=_Argv(argv), **names))
+
+
+class _Command:
+    """A push-family command stand-in: notes its call in `events`, prints its own line, runs `effect` (the end state a
+    real run leaves in the library), then returns `result` — or raises."""
+
+    def __init__(self, events, name, result=True, raises=None, effect=None):
+        self.events, self.name, self.result, self.raises, self.effect = events, name, result, raises, effect
+
+    def __call__(self, *args, **kwargs):
+        self.events.append(("cmd", self.name))
+        print(f"<{self.name} ran>")
+        if self.effect is not None:
+            self.effect()
+        if self.raises is not None:
+            raise self.raises
+        return self.result
+
+
+def _hook_recorder(monkeypatch, events):
+    """main.after_push_command -> a recorder appending ("hook", its arguments) to `events`."""
+    monkeypatch.setattr(main, "after_push_command", lambda *args: events.append(("hook", args)))
+
+
+def _set(ids, status):
+    """The end state a real run leaves: these entries now `status` (uploaded with onboarded / archived)."""
+    library = mvcommon.load_library()
+    for mid in ids:
+        library[mid]["status"] = status
+        library[mid]["uploaded"] = status in ("onboarded", "archived")
+    mvcommon.save_library(library)
+
+
+PUSH_FAMILY = ("cmd_push", "cmd_push_group", "cmd_prep_push_rep", "cmd_prep_push_rep_season", "cmd_prep_push_rep_enrich",
+               "cmd_prep_push_rep_season_enrich")
+# (argv, the function the branch calls, what it returns, the hook's arguments) — one line per push-family branch
+WIRING = [
+    (["push", MOVIE], "cmd_push", True, ("push", True, MOVIE)),
+    (["push", MOVIE, "SIZE_GB", "4", "chunks", "1-2", "device", "series"], "cmd_push", False, ("push", False, MOVIE)),
+    (["push_group", SEASON, "episodes", "1-3"], "cmd_push_group", None, ("push_group", None, SEASON, "1-3")),
+    (["push_group", FLAT, "SIZE_MB", "700"], "cmd_push_group", None, ("push_group", None, FLAT, None)),
+    (["prep_push_rep", AUTO, r"Z:\Movies\Auto (2022)\Auto.mkv"], "cmd_prep_push_rep", None,
+     ("prep_push_rep", None, AUTO)),
+    (["prep_push_rep_season", SEASON, r"Z:\Series\S01", "episodes", "2-4", "COUNT", "3"], "cmd_prep_push_rep_season",
+     None, ("prep_push_rep_season", None, SEASON, "2-4")),
+    (["prep_push_rep_enrich", AUTO, r"Z:\Movies\Auto.mkv", "-tmdbid", "550", "--yes"], "cmd_prep_push_rep_enrich",
+     True, ("prep_push_rep_enrich", True, AUTO)),
+    (["prep_push_rep_season_enrich", SEASON, r"Z:\Series\S01"], "cmd_prep_push_rep_season_enrich", False,
+     ("prep_push_rep_season_enrich", False, SEASON, None)),
+]
+ONE_PER_BRANCH = [WIRING[i] for i in (0, 2, 4, 5, 6, 7)]
+
+
+@pytest.mark.parametrize("argv,function,result,hook_args", WIRING, ids=[f"{w[0][0]}-{i}" for i, w in enumerate(WIRING)])
+def test_each_push_family_branch_calls_the_hook_once_after_its_command(sandbox, monkeypatch, argv, function, result,
+                                                                       hook_args):
+    events = []
+    _hook_recorder(monkeypatch, events)
+
+    _dispatch(argv, **{function: _Command(events, function, result)})
+
+    assert events == [("cmd", function), ("hook", hook_args)]      # once, AFTER the command, with what it returned
+
+
+def test_the_push_branchs_extras_only_path_hands_its_result_to_the_hook(ac, monkeypatch, capsys):
+    # an ARCHIVED main + --extras pushes the extras only (IMP-D19 Card D): that upload's result is the command's
+    _save(_old(ac.root))                                              # MOVIE is archived
+    events = []
+    _hook_recorder(monkeypatch, events)
+
+    _dispatch(["push", MOVIE, "--extras", "Specials"],
+              _push_title_extras_or_warn=_Command(events, "_push_title_extras_or_warn", False),
+              cmd_push=_Command(events, "cmd_push"))
+
+    assert events == [("cmd", "_push_title_extras_or_warn"), ("hook", ("push", False, MOVIE))]
+
+
+@pytest.mark.parametrize("argv,function", [
+    (["prep", AUTO, r"Z:\Movies\Auto.mkv"], "cmd_prep"),
+    (["replace", MOVIE], "cmd_replace"),
+    (["replace_group", SEASON], "cmd_replace_group"),
+    (["restore", MOVIE], "cmd_restore"),
+    (["fetch", MOVIE], "cmd_dispatch_fetch"),
+    (["fetch_restore", MOVIE], "cmd_fetch_restore"),
+    (["add_extras", MOVIE, "Specials"], "cmd_add_extras"),
+    (["sort"], "cmd_sort"),
+])
+def test_no_other_command_reaches_the_hook(sandbox, monkeypatch, argv, function):
+    events = []
+    _hook_recorder(monkeypatch, events)
+
+    _dispatch(argv, **{function: _Command(events, function)})
+
+    assert events == [("cmd", function)]
+
+
+def test_the_auto_confirms_own_child_command_line_is_a_valid_check_and_never_reaches_the_hook(sandbox, monkeypatch):
+    events, checks = [], []
+    _hook_recorder(monkeypatch, events)
+
+    _dispatch(main.auto_confirm_argv()[2:], cmd_check_photos=lambda **kw: checks.append(kw) or {"status": "ok"})
+
+    assert [(c["scope"], c["apply"], c["max_minutes"]) for c in checks] == [("pending", True, 15)]
+    assert events == []                                               # no hook in the child: no recursion
+
+
+@pytest.mark.parametrize("argv,function,result,hook_args", ONE_PER_BRANCH, ids=[w[1] for w in ONE_PER_BRANCH])
+@pytest.mark.parametrize("error", [RuntimeError("boom"), main.RollbackHardFail("X archived", "failed past the PONR",
+                                                                               "fetch_restore X"),
+                                   SystemExit(1), KeyboardInterrupt()],
+                         ids=["RuntimeError", "RollbackHardFail", "SystemExit", "KeyboardInterrupt"])
+def test_an_exception_never_reaches_the_hook(ac, capsys, argv, function, result, hook_args, error):
+    # the REAL hook, and an old pending object: had the hook been reached, it would have started the check
+    _save(_old(ac.root))
+
+    with pytest.raises(type(error)):
+        _dispatch(argv, **{function: _Command([], function, raises=error)})
+
+    assert ac.child.calls == []
+    assert capsys.readouterr().out.splitlines() == [f"<{function} ran>"]
+
+
+@pytest.mark.parametrize("argv", [["push"], ["push", MOVIE, "SIZE_GB"], ["push", MOVIE, "--extras"], ["push_group"],
+                                  ["push_group", SEASON, "episodes"], ["prep_push_rep", AUTO],
+                                  ["prep_push_rep_season", SEASON], ["prep_push_rep_enrich", AUTO],
+                                  ["prep_push_rep_season_enrich", SEASON]])
+def test_a_usage_error_never_reaches_the_hook(ac, argv):
+    _save(_old(ac.root))
+    events = []
+    stubs = {name: _Command(events, name) for name in PUSH_FAMILY + ("_push_title_extras_or_warn",)}
+
+    with pytest.raises(SystemExit) as stop:
+        _dispatch(argv, **stubs)
+
+    assert stop.value.code == 1 and events == [] and ac.child.calls == []
+
+
+@pytest.mark.parametrize("argv,function,result,end_state,lead", [
+    (["push", AUTO], "cmd_push", True, None, []),
+    (["push", MOVIE, "--extras", "Specials"], "_push_title_extras_or_warn", True, None,
+     [f"ℹ️  {MOVIE} main is archived — pushing extras only (main untouched)."]),
+    (["push_group", SEASON], "cmd_push_group", None, ("onboarded", [f"{SEASON}e01", f"{SEASON}e02"]), []),
+    (["push_group", SEASON, "episodes", "2-2"], "cmd_push_group", None, ("onboarded", [f"{SEASON}e02"]), []),
+    (["prep_push_rep", AUTO, r"Z:\Movies\Auto.mkv"], "cmd_prep_push_rep", None, ("archived", [AUTO]), []),
+    (["prep_push_rep_season", SEASON, r"Z:\Series\S01"], "cmd_prep_push_rep_season", None,
+     ("archived", [f"{SEASON}e01", f"{SEASON}e02"]), []),
+    (["prep_push_rep_enrich", AUTO, r"Z:\Movies\Auto.mkv"], "cmd_prep_push_rep_enrich", True, None, []),
+    (["prep_push_rep_season_enrich", SEASON, r"Z:\Series\S01"], "cmd_prep_push_rep_season_enrich", True, None, []),
+], ids=["push", "push-extras-only", "push_group", "push_group-range", "prep_push_rep", "prep_push_rep_season",
+        "prep_push_rep_enrich", "prep_push_rep_season_enrich"])
+def test_a_succeeded_push_family_command_then_runs_the_exact_check_child(ac, capsys, argv, function, result, end_state,
+                                                                         lead):
+    _save(_old(ac.root), _state(ac.root, AUTO, "local_ready"), *_season(ac.root, SEASON, ["local_ready"] * 2))
+    effect = (lambda: _set(end_state[1], end_state[0])) if end_state else None
+
+    _dispatch(argv, **{function: _Command([], function, result, effect=effect)})      # returns: the run exits 0
+
+    assert ac.child.calls == [[sys.executable, os.path.abspath(main.__file__), *CHILD_ARGV_TAIL]]
+    assert capsys.readouterr().out.splitlines() == lead + [f"<{function} ran>", _header(1), SUMMARY]
+
+
+@pytest.mark.parametrize("argv,function,returned", [
+    (["push", "mov-en-2099-nosuchid"], "cmd_push", False),                               # ❌ ID not found.
+    (["push_group", "tv-en-2099-nosuchgroup-s01"], "cmd_push_group", None),              # ❌ No items found to push.
+    (["prep_push_rep", AUTO, "<missing>"], "cmd_prep_push_rep", None),                   # ❌ File not found -> Aborted
+    (["prep_push_rep_season", SEASON, "<missing>"], "cmd_prep_push_rep_season", None),   # ❌ Folder not found -> Prep failed
+    (["prep_push_rep_enrich", AUTO, "<missing>"], "cmd_prep_push_rep_enrich", False),    # the archive did not complete
+    (["prep_push_rep_enrich", AUTO, "<missing>", "-tvdbid", "1"], "cmd_prep_push_rep_enrich", False),         # refused
+    (["prep_push_rep_season_enrich", SEASON, "<missing>", "-tvdbid", "1"], "cmd_prep_push_rep_season_enrich", False),
+], ids=["push", "push_group", "prep_push_rep", "prep_push_rep_season", "prep_push_rep_enrich",
+        "prep_push_rep_enrich-tvdbid", "prep_push_rep_season_enrich-tvdbid"])
+def test_a_failed_push_family_command_gets_nothing_from_the_hook(ac, monkeypatch, capsys, tmp_path, argv, function,
+                                                                 returned):
+    # The REAL commands on their documented handled failures (the return contracts above, pinned here) with an old
+    # pending object in the library: a hook that fired would print its line and start the check. Its output must be
+    # exactly the command's own — the same as a run without any hook.
+    _save(_old(ac.root))
+    argv = [str(tmp_path / "missing" / "Auto.mkv") if token == "<missing>" else token for token in argv]
+    real, returns = getattr(main, function), []
+
+    def spy(*args, **kwargs):
+        returns.append(real(*args, **kwargs))
+        return returns[-1]
+
+    real_hook = main.after_push_command                                 # the real one (the `ac` fixture restored it)
+    monkeypatch.setattr(main, "after_push_command", lambda *args: None)
+    _dispatch(argv, **{function: spy})
+    without_hook = capsys.readouterr().out
+    monkeypatch.setattr(main, "after_push_command", real_hook)
+    _dispatch(argv, **{function: spy})
+
+    assert capsys.readouterr().out == without_hook and "❌" in without_hook
+    assert returns == [returned, returned]                              # the documented contract
+    assert ac.child.calls == []
+
+
+@pytest.mark.parametrize("case", ["young", "locked", "disabled", "web"])
+def test_after_a_push_the_no_chrome_cases_print_at_most_the_reminder(ac, monkeypatch, capsys, case):
+    # PLAN Step 13b's test list at the CLI level: only young -> reminder · lock held -> reminder · disabled -> nothing ·
+    # web marker -> reminder only
+    _save(_leaf(ac.root, TV1, hours_ago=2 if case == "young" else 30))
+    if case == "locked":
+        ac.lock.parent.mkdir(parents=True)
+        ac.lock.write_text("4242 1.0\n", encoding="utf-8")
+    elif case == "disabled":
+        monkeypatch.setattr(mvcommon, "_CONFIG_CACHE", {"auto_confirm_after_push": False})
+    elif case == "web":
+        monkeypatch.setenv("MEDIAVAULT_WEB_JOB", "1")
+
+    _dispatch(["push", AUTO], cmd_push=_Command([], "cmd_push", True))
+
+    assert ac.child.calls == []
+    assert capsys.readouterr().out.splitlines() == ["<cmd_push ran>"] + ([] if case == "disabled" else [_reminder(1)])
+
+
+@pytest.mark.parametrize("child,why", [
+    (lambda: _Child(code=1, lines=["❌ check_photos: the check could not run (exit code 1) — see the lines above."]),
+     "check_photos exited with code 1"),
+    (lambda: _Child(code=None, interrupted=True, lines=["🛑 No longer waiting — the check closes its Chrome on its own."]),
+     "interrupted"),
+    (lambda: _Child(raises=OSError("cannot start the child")), "OSError: cannot start the child"),
+], ids=["exit-1", "interrupted", "not-startable"])
+def test_the_child_failing_never_changes_the_push_commands_output_or_exit_code(ac, monkeypatch, capsys, child, why):
+    _save(_old(ac.root))
+    monkeypatch.setattr(main, "_cp_spawn", child())
+
+    _dispatch(["push", AUTO], cmd_push=_Command([], "cmd_push", True))     # returns normally: the run still exits 0
+
+    out = capsys.readouterr().out.splitlines()
+    assert out[:2] == ["<cmd_push ran>", _header(1)]          # the push's own output, unchanged and first
+    assert out[-1] == _warning(why)
+    assert sum(line.startswith("⚠️  Auto-confirm") for line in out) == 1
+
+
+def test_a_library_broken_after_the_push_never_changes_its_exit_code(ac, sandbox, capsys):
+    # load_library() sys.exit(1)s on a corrupt file — inside the hook that SystemExit is contained (one warning line)
+    def push(*args, **kwargs):
+        print("<cmd_push ran>")
+        sandbox["lib_series"].write_text("{not json", encoding="utf-8")
+        return True
+
+    _dispatch(["push", AUTO], cmd_push=push)                                # no SystemExit escapes
+
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "<cmd_push ran>" and out[-1] == _warning("SystemExit: 1")
+    assert ac.child.calls == []

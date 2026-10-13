@@ -3,6 +3,8 @@ Step 13; P-5, P-8, P-9, P-10, P-11, P-15, P-18; OD-5, OD-7, OD-9; the Step 9b ru
 
   13.0  the locator's per_approach_pick; `python mainfetch.py …` is ONE module (gprpc's lazy import)
   13.a  the command line, main.py's dispatcher branch, `check_photos pending --list` (offline)
+  13.b  the scope: item (alias) · season (anime glued ids) · series (nested, flat, category / language folders, list-capable
+        Others roots) · id prefix · account:<a> · pending · hinted · all · --account
 
 Hermetic: the fake Google Photos world + its batchexecute emulator (tests/gphotos_fake.py); mainfetch's and gprpc's clocks
 are fake (nothing waits); the autouse fixtures of tests/conftest.py redirect every state dir, ~/Downloads, the process
@@ -276,3 +278,219 @@ def test_pending_list_filters_by_account_and_says_when_nothing_waits(sandbox, mo
     assert res["objects"] == [] and "  Nothing pending in 'anime'." in capsys.readouterr().out
     res = main.cmd_check_photos("pending", account="tv", list_only=True)
     assert {o["manual_id"] for o in res["objects"]} == {"tv-en-2015-demo-s01e01", "tv-en-1994-files-s02e05"}
+
+
+# ===========================================================================
+# 13.b — the scope
+# ===========================================================================
+class _Lib:
+    """A library under construction in the sandbox: leaves (one whole uploaded file each) and season_maps."""
+
+    def __init__(self, sandbox):
+        self.root, self.lib = sandbox["local_root"], {}
+
+    def folder(self, *parts):
+        path = self.root.joinpath(*parts)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def leaf(self, mid, folder, parent=None, **extra):
+        sid = mvcommon.generate_short_id(mid)
+        entry = _whole(folder, f"{mid}.mkv", _bytes(mid), sid)
+        if parent:
+            entry["parent_id"] = parent
+        entry.update(extra)
+        self.lib[mid] = entry
+        return entry
+
+    def season(self, sid, folder, episodes, **extra):
+        self.lib[sid] = dict({"type": "season_map", "folder_path": str(folder), "total_episodes": len(episodes),
+                              "children": list(episodes)}, **extra)
+        for mid in episodes:
+            self.leaf(mid, folder, parent=sid)
+
+    def save(self):
+        mvcommon.save_library(self.lib)
+        return mvcommon.load_library()
+
+
+def _scope_library(sandbox):
+    b = _Lib(sandbox)
+    files = ("Series", "English", "Files (1993) {tmdb-4087}")
+    b.season("tv-en-1994-files-s02", b.folder(*files, "Season 02"), ["tv-en-1994-files-s02e05", "tv-en-1994-files-s02e06"])
+    b.season("tv-en-1995-files-s03", b.folder(*files, "Season 03"), ["tv-en-1995-files-s03e01"])
+    b.season("tv-en-1996-files-s04", b.folder(*files, "Season 04"), ["tv-en-1996-files-s04e02"])
+    b.season("tv-en-2001-othershow-s01", b.folder("Series", "English", "Other Show", "Season 01"),
+             ["tv-en-2001-othershow-s01e01"])
+    classic = ("Series", "English", "Classic")
+    b.season("tv-en-2019-chernobyl", b.folder(*classic, "Chernobyl (Miniseries) 2019"), ["tv-en-2019-chernobyle01"])
+    b.season("tv-en-2001-bandofbrothers", b.folder(*classic, "Band Of Brothers 2001"), ["tv-en-2001-bandofbrotherse01"])
+    b.season("ani-ja-2006-deathnote", b.folder("Anime", "Death Note (2006)", "Season 1"), ["ani-ja-2006-deathnote01"])
+    b.season("ani-ja-2007-deathnote-s02", b.folder("Anime", "Death Note (2006)", "Season 2"),
+             ["ani-ja-2007-deathnote-s0201"])
+    b.season("oth-en-2023-f1", b.folder("Sports", "F1", "2023"), ["oth-en-2023-f1e01"])
+    b.season("oth-en-2024-f1", b.folder("Sports", "F1", "2024"), ["oth-en-2024-f1e01"])
+    b.leaf("mov-en-2010-movie", b.folder("Movies", "English", "Movie (2010)"))
+    b.lib["tv-en-1994-files-s02e07"] = {"type": "multi_ep_alias", "alias_of": "tv-en-1994-files-s02e06",
+                                        "parent_id": "tv-en-1994-files-s02"}
+    b.lib["tv-en-1994-files-s02"]["children"].append("tv-en-1994-files-s02e07")
+    return b
+
+
+def _ids(resolved):
+    return [o["manual_id"] for o in resolved["objects"]]
+
+
+def test_an_item_scope_checks_its_objects_and_an_alias_resolves_to_its_primary(sandbox):
+    library = _scope_library(sandbox).save()
+
+    item = main._cp_resolve(library, "tv-en-1994-files-s02e05", None, NOW)
+    alias = main._cp_resolve(library, "tv-en-1994-files-s02e07", None, NOW)
+
+    assert (item["kind"], item["canonical"], _ids(item)) == ("item", "tv-en-1994-files-s02e05", ["tv-en-1994-files-s02e05"])
+    assert (alias["kind"], _ids(alias)) == ("item", ["tv-en-1994-files-s02e06"])          # its primary, once
+    [obj] = item["objects"]
+    assert obj == {"manual_id": "tv-en-1994-files-s02e05", "label": "whole", "sha256": _sha256(_bytes(obj["manual_id"])),
+                   "kind": "whole", "category": "tv", "uploaded_name": obj["uploaded_name"], "account": "tv",
+                   "route": "prefix", "home": "tv", "pushed_at": None}
+
+
+def test_a_season_scope_checks_its_children_and_anime_glued_ids_are_its_children(sandbox):
+    library = _scope_library(sandbox).save()
+
+    season = main._cp_resolve(library, "tv-en-1994-files-s02", None, NOW)
+    anime = main._cp_resolve(library, "ani-ja-2006-deathnote", None, NOW)
+
+    assert season["kind"] == "season"
+    assert _ids(season) == ["tv-en-1994-files-s02e05", "tv-en-1994-files-s02e06"]       # the alias: its primary, once
+    assert (anime["kind"], _ids(anime)) == ("season", ["ani-ja-2006-deathnote01"])        # glued, not a prefix match
+    assert {o["account"] for o in anime["objects"]} == {"anime"}
+
+
+@pytest.mark.parametrize("target", ["tv-en-1995-files-s03", "tv-en-1994-files-s02e05", "tv-en-1994-files-s02e07"])
+def test_a_series_is_every_season_under_the_show_folder_whatever_the_years_in_the_ids(sandbox, target):
+    b = _scope_library(sandbox)
+    library = b.save()
+
+    res = main._cp_resolve(library, f"series:{target}", None, NOW)
+
+    show = os.path.join(str(b.root), "Series", "English", "Files (1993) {tmdb-4087}")
+    assert res["kind"] == "series" and res["show"] == show and res["canonical"] == "series:" + main._cp_norm(show)
+    assert res["seasons"] == ["tv-en-1994-files-s02", "tv-en-1995-files-s03", "tv-en-1996-files-s04"]
+    assert _ids(res) == ["tv-en-1994-files-s02e05", "tv-en-1994-files-s02e06", "tv-en-1995-files-s03e01",
+                         "tv-en-1996-files-s04e02"]                   # a prefix (tv-en-1994-files) would get one season
+    lines = main._cp_scope_lines(res, library)
+    assert lines[0] == (f"  Series: {show} — 3 season(s): tv-en-1994-files-s02 (Season 02), "
+                        f"tv-en-1995-files-s03 (Season 03), tv-en-1996-files-s04 (Season 04)")
+    assert lines[1] == "  4 object(s) in 4 entr(y/ies) — checked first in: tv 4"
+
+
+def test_a_series_given_as_its_show_folder_is_the_same_scope(sandbox):
+    b = _scope_library(sandbox)
+    library = b.save()
+    show = os.path.join(str(b.root), "Series", "English", "Files (1993) {tmdb-4087}")
+
+    by_folder = main._cp_resolve(library, f'series:"{show}"', None, NOW)
+    by_id = main._cp_resolve(library, "series:tv-en-1996-files-s04", None, NOW)
+
+    assert by_folder["canonical"] == by_id["canonical"] and by_folder["seasons"] == by_id["seasons"]
+
+
+def test_a_flat_show_in_a_folder_of_other_shows_is_only_its_own_folder(sandbox):
+    library = _scope_library(sandbox).save()
+
+    res = main._cp_resolve(library, "series:tv-en-2019-chernobyl", None, NOW)
+
+    assert res["seasons"] == ["tv-en-2019-chernobyl"] and _ids(res) == ["tv-en-2019-chernobyle01"]
+    assert res["show"].endswith("Chernobyl (Miniseries) 2019")
+    assert any("holds the seasons of more than one show" in n for n in res["notes"])
+
+
+def test_a_season_shaped_folder_in_a_language_folder_widens_only_while_that_holds_one_show(sandbox):
+    b = _scope_library(sandbox)
+    b.season("tv-ta-2024-aindhamvedham-s01", b.folder("Series", "Tamil", "Aindham Vedham (2024) S01 EP (01-08)"),
+             ["tv-ta-2024-aindhamvedham-s01e01"])
+    alone = main._cp_resolve(b.save(), "series:tv-ta-2024-aindhamvedham-s01", None, NOW)
+    b.season("tv-ta-2023-othertamil-s01", b.folder("Series", "Tamil", "Other Tamil S01"),
+             ["tv-ta-2023-othertamil-s01e01"])
+    crowded = main._cp_resolve(b.save(), "series:tv-ta-2024-aindhamvedham-s01", None, NOW)
+
+    assert alone["seasons"] == crowded["seasons"] == ["tv-ta-2024-aindhamvedham-s01"]
+    assert crowded["show"].endswith("Aindham Vedham (2024) S01 EP (01-08)") and crowded["notes"]
+
+
+def test_anime_seasons_with_glued_episode_ids_form_one_series(sandbox):
+    library = _scope_library(sandbox).save()
+
+    res = main._cp_resolve(library, "series:ani-ja-2006-deathnote01", None, NOW)
+
+    assert res["seasons"] == ["ani-ja-2006-deathnote", "ani-ja-2007-deathnote-s02"]
+    assert _ids(res) == ["ani-ja-2006-deathnote01", "ani-ja-2007-deathnote-s0201"]
+
+
+def test_others_series_and_every_list_capable_root_is_a_category_folder(sandbox, monkeypatch):
+    b = _scope_library(sandbox)
+    monkeypatch.setattr(main, "CATEGORY_ROOTS", dict(main.CATEGORY_ROOTS, other=["Sports", "Documentary"]))
+    b.season("oth-en-2024-planet-s01", b.folder("Documentary", "Planet S01"), ["oth-en-2024-planet-s01e01"])
+    b.season("oth-en-2020-ocean-s01", b.folder("Documentary", "Ocean S01"), ["oth-en-2020-ocean-s01e01"])
+    library = b.save()
+
+    f1 = main._cp_resolve(library, "series:oth-en-2023-f1", None, NOW)
+    planet = main._cp_resolve(library, "series:oth-en-2024-planet-s01", None, NOW)
+
+    assert f1["seasons"] == ["oth-en-2023-f1", "oth-en-2024-f1"] and f1["show"].endswith(os.path.join("Sports", "F1"))
+    assert {o["account"] for o in f1["objects"]} == {"others"}
+    assert planet["seasons"] == ["oth-en-2024-planet-s01"]                  # its parent IS the second Others root
+    assert any("category folder" in n for n in planet["notes"])
+
+
+def test_a_prefix_scope_and_the_named_scopes(sandbox, monkeypatch):
+    b = _scope_library(sandbox)
+    folder = b.folder("Movies", "English", "Pushed (2026)")
+    data = _bytes("pushed")
+    b.lib["mov-en-2026-pushed"] = _whole(folder, "Pushed.mkv", data, "pu5hed")
+    _capture(folder, "pu5hed", [_obj(data, _up("Pushed.mkv", "pu5hed"))])
+    b.lib["mov-en-2011-nohash"] = dict(_whole(folder, "NoHash.mkv", b"x", "n0hash"), hash=None)
+    library = b.save()
+    monkeypatch.setattr(mvcommon, "_CONFIG_CACHE", {"fetch_account_overrides": {"tv-en-1994-files": "movies"}})
+
+    prefix = main._cp_resolve(library, "tv-en-1994-files", None, NOW)
+    everything = main._cp_resolve(library, "all", None, NOW)
+    movies = main._cp_resolve(library, "account:movies", None, NOW)
+    pending = main._cp_resolve(library, "pending", None, NOW)
+
+    assert (prefix["kind"], _ids(prefix)) == ("prefix", ["tv-en-1994-files-s02e05", "tv-en-1994-files-s02e06"])
+    assert {o["account"] for o in prefix["objects"]} == {"movies"} and {o["route"] for o in prefix["objects"]} == {
+        "override"}
+    assert len(everything["objects"]) == 13 and "mov-en-2011-nohash" not in _ids(everything)
+    assert any("1 object(s) left out: the library holds no SHA-256" in n for n in everything["notes"])
+    assert _ids(movies) == ["mov-en-2010-movie", "mov-en-2026-pushed", "tv-en-1994-files-s02e05",
+                            "tv-en-1994-files-s02e06"]
+    assert (pending["kind"], _ids(pending)) == ("pending", ["mov-en-2026-pushed"])
+    assert pending["objects"][0]["pushed_at"] == "2026-09-30T10:00:00Z"
+    assert _ids(main._cp_resolve(library, "all", "anime", NOW)) == ["ani-ja-2006-deathnote01",
+                                                                    "ani-ja-2007-deathnote-s0201"]
+    with pytest.raises(ValueError) as err:
+        main._cp_resolve(library, "tv-xx-nothing", None, NOW)
+    assert "no library id is or starts with 'tv-xx-nothing'" in str(err.value)
+    with pytest.raises(ValueError):
+        main._cp_resolve(library, "series:mov-en-2010-movie", None, NOW)       # a movie is no season
+
+
+def test_the_hinted_scope_checks_each_hinted_object_in_the_hints_account(sandbox):
+    library = _scope_library(sandbox).save()
+    target = next(o for o in mvcommon.iter_entry_objects("tv-en-1995-files-s03e01", library["tv-en-1995-files-s03e01"]))
+    base = {"manual_id": "tv-en-1995-files-s03e01", "label": "whole", "sha256": target["sha256"]}
+    mvcommon.append_hint(dict(base, account="tv", kind="url", photo_id="AF1QipFAKEhintedfirst001"))
+    mvcommon.append_hint(dict(base, account="movies", kind="datetime", taken_ms=1_700_000_000_000, gmt_offset_min=480,
+                              taken_local="2023-11-15T06:13:20"))                           # the newer hint wins
+    mvcommon.append_hint(dict(base, manual_id="tv-en-1996-files-s04e02", sha256="0" * 64, account="tv", kind="url",
+                              photo_id="AF1QipFAKEhintedgone0001"))                         # its object is gone
+
+    res = main._cp_resolve(library, "hinted", None, NOW)
+
+    assert res["kind"] == "hinted" and _ids(res) == ["tv-en-1995-files-s03e01"]
+    [obj] = res["objects"]
+    assert (obj["account"], obj["route"]) == ("movies", "hint")
+    assert obj["hint"] == {"kind": "datetime", "account": "movies", "taken_ms": 1_700_000_000_000, "gmt_offset_min": 480}
+    assert any("1 hint(s) name an object no longer in the library" in n for n in res["notes"])

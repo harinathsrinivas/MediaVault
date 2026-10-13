@@ -13053,6 +13053,214 @@ def _cp_pending_list(account=None):
     return {"status": "ok", "objects": objects, "routes": routes}
 
 
+# ------------------------------------------------------------------ the scope (PLAN Step 13: scope = …)
+_CP_YEAR_RE = re.compile(r"-(?:19|20)\d{2}(?=-)")   # the year token of an id: 'tv-en-2013-…'
+
+
+def _cp_show_key(season_id):
+    """A season's SHOW identity from its id: the id without its season tag (-sNN) and its year token
+    ('tv-en-2013-peakyblinders-s01' -> 'tv-en-peakyblinders'). MediaVault ids carry each SEASON's own year (IMP-U7: the
+    seasons of one show differ in the year), so the seasons of one show share everything else."""
+    return _CP_YEAR_RE.sub("", _SEASON_ID_RE.sub("", season_id), count=1)
+
+
+def _cp_norm(path):
+    """A folder as Windows compares it: absolute, normalized, case-folded."""
+    return os.path.normcase(os.path.normpath(os.path.abspath(path)))
+
+
+def _cp_under(folder, root):
+    """True when the (normalized) `folder` is `root` or lies beneath it."""
+    return folder == root or folder.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def _cp_seasons(library):
+    """{season id: normalized folder} of every season_map that has a folder."""
+    return {sid: _cp_norm(e["folder_path"]) for sid, e in library.items()
+            if isinstance(sid, str) and isinstance(e, dict) and e.get("type") == "season_map"
+            and isinstance(e.get("folder_path"), str) and e["folder_path"].strip()}
+
+
+def _cp_same_show(library, season_ids):
+    """True when the seasons belong to ONE show: one show key (_cp_show_key), or every one carries the same
+    metadata.tmdb_id (the show id enrich stamps on every season of a show)."""
+    if len({_cp_show_key(s) for s in season_ids}) <= 1:
+        return True
+    ids = {str((library[s].get("metadata") or {}).get("tmdb_id") or "") for s in season_ids}
+    return "" not in ids and len(ids) == 1
+
+
+def _cp_category_roots():
+    """The normalized category folders (CATEGORY_ROOTS under LOCAL_ROOT — Movies, Series, Anime and every Others root,
+    a list) — never a show folder."""
+    return {_cp_norm(os.path.join(LOCAL_ROOT, sub)) for subs in CATEGORY_ROOTS.values() for sub in subs}
+
+
+def _cp_series(library, target):
+    """`series:<season id | episode id | show folder>` (PLAN Step 13) -> (show folder as stored, [season ids], notes).
+
+    The show folder of a season: its PARENT when the season folder's name is season-shaped ('Season 02', 'S02',
+    'Show.S02.1080p' — _season_folder_looks_season_shaped) or when two or more season_maps sit directly in that parent;
+    else the season folder itself (a flat show). The parent is refused — the season's own folder is used, with a note —
+    when it is a category root or holds the seasons of more than one show (a category or language folder: 'Classic'
+    holding Friends and The Wire; the shows are told apart by _cp_same_show). Every season_map whose folder lies under the
+    show folder belongs to the series, its seasons' ids may carry different years (IMP-U7). A folder given directly is
+    taken as the show folder (a note warns when it holds more than one show). ValueError when the target names no
+    season."""
+    seasons, notes = _cp_seasons(library), []
+    if target in library:
+        real, entry = _gp_resolve(library, target)
+        if entry is None:
+            raise ValueError(f"{target} is an alias whose primary entry is missing")
+        season_id = real if entry.get("type") == "season_map" else entry.get("parent_id")
+        if season_id not in seasons:
+            raise ValueError(f"{target} belongs to no season — series: takes a season id, an episode id or a show folder")
+        stored = os.path.normpath(library[season_id]["folder_path"])
+        folder, parent = seasons[season_id], _cp_norm(os.path.dirname(stored))
+        show, shown = folder, stored
+        siblings = [s for s, f in seasons.items() if os.path.dirname(f) == parent]
+        if _season_folder_looks_season_shaped(os.path.basename(stored)) or len(siblings) >= 2:
+            members = [s for s, f in seasons.items() if _cp_under(f, parent)]
+            if parent in _cp_category_roots():
+                notes.append("its parent folder is a category folder — only the season's own folder is used")
+            elif not _cp_same_show(library, members):
+                notes.append(f"its parent folder holds the seasons of more than one show — only the season's own folder "
+                             f"is used (give the show folder itself as series:<folder> to widen it)")
+            else:
+                show, shown = parent, os.path.dirname(stored)
+    else:
+        raw = target.strip().strip('"')
+        if not os.path.isabs(raw):
+            raise ValueError(f"{target!r} is neither a library id nor an absolute show folder")
+        show, shown = _cp_norm(raw), os.path.normpath(raw)
+    members = sorted((s for s, f in seasons.items() if _cp_under(f, show)),
+                     key=lambda s: (_season_number_of(s) or 0, s))
+    if not members:
+        raise ValueError(f"no season of the library lies under {shown}")
+    if target not in library and not _cp_same_show(library, members):
+        notes.append("⚠️  this folder holds the seasons of more than one show — every one of them is checked")
+    return shown, members, notes
+
+
+def _cp_hinted(library):
+    """The `hinted` scope (PLAN Step 9 (8)): every object a hint names (hints.jsonl — map_photos --resolutions; the
+    newest hint per object wins), as iter_entry_objects dicts plus `hint` {kind, account, photo_id | taken_ms +
+    gmt_offset_min}. -> (objects, hints whose object no longer exists). ValueError when hints.jsonl is unreadable."""
+    try:
+        hints = mvcommon.read_hints()
+    except OSError as e:
+        raise ValueError(f"hints.jsonl could not be read ({_gp_line(e)})") from None
+    latest = {}
+    for hint in hints:                     # append order: a later hint about the same object replaces the earlier one
+        latest[(hint["manual_id"], hint["sha256"])] = hint
+    objects, gone = [], 0
+    for (manual_id, sha256), hint in sorted(latest.items()):
+        real, entry = _gp_resolve(library, manual_id)
+        obj = next((o for o in mvcommon.iter_entry_objects(real, entry) if o["sha256"] == sha256), None) \
+            if entry is not None else None
+        if obj is None:
+            gone += 1
+            continue
+        objects.append(dict(obj, hint={k: hint[k] for k in ("kind", "account", "photo_id", "taken_ms",
+                                                            "gmt_offset_min") if k in hint}))
+    return objects, gone
+
+
+def _cp_route_reason(route):
+    """Why an object is checked in its account first: override (mvconfig) · learned (its block's home_account) · prefix."""
+    if route["override"]:
+        return "override"
+    return "learned" if route["home"] and route["home"] != route["default"] else "prefix"
+
+
+def _cp_resolve(library, scope, account, now):
+    """The objects of one `check_photos` scope (PLAN Step 13), each with the account it is checked in first -> dict:
+      kind       item | season | series | prefix | account | pending | hinted | all
+      canonical  the scope as a run records it (series: its show folder, normalized — two seasons of one show are ONE
+                 series scope; everything else as typed)
+      objects    [{manual_id, label, sha256, kind, category, uploaded_name, account (routing: mvconfig override >
+                 learned home > id prefix; a hint's own account for `hinted`), route (override | learned | prefix |
+                 hint), home (the learned home, else the prefix account — what an "account mismatch" is measured
+                 against), pushed_at (capture), hint (hinted only)}] — alias-safe (an alias id resolves to its primary,
+                 a whole-library pass skips aliases), objects without a SHA-256 left out (no pin, nothing to verify)
+      show, seasons   (series) the show folder and its season ids · notes: lines printed with the resolution
+      unpinned   objects left out for want of a SHA-256 · gone: hints whose object no longer exists
+    ValueError when the scope names nothing in the library."""
+    notes, show, seasons, gone, hints = [], None, [], 0, {}
+    canonical = scope
+    if scope == "all":
+        kind, objects = "all", list(mvcommon.iter_uploaded_objects(library))
+    elif scope == "pending":
+        kind, objects = "pending", mvcommon.unverified_objects(library, now)
+    elif scope == "hinted":
+        kind, (objects, gone) = "hinted", _cp_hinted(library)
+    elif scope.startswith("account:"):
+        kind, objects = "account", list(mvcommon.iter_uploaded_objects(library))
+    elif scope.startswith("series:"):
+        kind = "series"
+        show, seasons, notes = _cp_series(library, scope[len("series:"):].strip())
+        canonical = "series:" + _cp_norm(show)
+        ids = []
+        for sid in seasons:
+            ids += [sid] + [c for c in library[sid].get("children") or [] if isinstance(c, str)]
+        objects = list(mvcommon.iter_uploaded_objects(library, ids))
+    elif scope in library:
+        entry = library[scope]
+        if isinstance(entry, dict) and entry.get("type") == "season_map":
+            kind, ids = "season", [scope] + [c for c in entry.get("children") or [] if isinstance(c, str)]
+        else:
+            kind, ids = "item", [scope]
+        objects = list(mvcommon.iter_uploaded_objects(library, ids))
+    else:
+        ids = sorted(mid for mid in library if isinstance(mid, str) and mid.startswith(scope))
+        if not ids:
+            raise ValueError(f"no library id is or starts with {scope!r} (a scope is an id, a season id, "
+                             f"series:<…>, an id prefix, account:<a>, pending, hinted or all)")
+        kind, objects = "prefix", list(mvcommon.iter_uploaded_objects(library, ids))
+    routes = _cp_routes(objects)
+    out, unpinned = [], 0
+    for obj in objects:
+        if not mvcommon._is_sha256(obj["sha256"]):
+            unpinned += 1
+            continue
+        route = routes[(obj["manual_id"], obj["label"])]
+        record = {"manual_id": obj["manual_id"], "label": obj["label"], "sha256": obj["sha256"], "kind": obj["kind"],
+                  "category": obj["category"], "uploaded_name": obj["uploaded_name"], "account": route["routing"],
+                  "route": _cp_route_reason(route), "home": route["home"] or route["default"],
+                  "pushed_at": _mp_pushed_at(obj)}
+        if obj.get("hint"):
+            record.update(account=obj["hint"]["account"], route="hint", hint=obj["hint"])
+        out.append(record)
+    if kind == "account":
+        out = [o for o in out if o["account"] == scope[len("account:"):]]
+    if account:
+        out = [o for o in out if o["account"] == account]
+    if unpinned:
+        notes.append(f"{unpinned:,} object(s) left out: the library holds no SHA-256 for them (nothing to pin a check to)")
+    if gone:
+        notes.append(f"{gone:,} hint(s) name an object no longer in the library (re-split or re-mastered?) — skipped")
+    return {"kind": kind, "canonical": canonical, "objects": out, "show": show, "seasons": seasons, "notes": notes,
+            "unpinned": unpinned, "gone": gone}
+
+
+def _cp_scope_lines(resolved, library):
+    """What a scope resolved to — ALWAYS printed before anything runs (PLAN Step 13: the seasons of a series and the
+    object count; IMP-U7: a show's season ids carry different years)."""
+    objects, lines = resolved["objects"], []
+    if resolved["kind"] == "series":
+        names = ", ".join(f"{s} ({os.path.basename(os.path.normpath(library[s]['folder_path']))})"
+                          for s in resolved["seasons"])
+        lines.append(f"  Series: {resolved['show']} — {len(resolved['seasons'])} season(s): {names}")
+    by_account = {}
+    for o in objects:
+        by_account[o["account"]] = by_account.get(o["account"], 0) + 1
+    accounts = " · ".join(f"{a} {by_account[a]:,}" for a in mvcommon.GP_ACCOUNTS if a in by_account)
+    lines.append(f"  {len(objects):,} object(s) in {len({o['manual_id'] for o in objects}):,} entr(y/ies)"
+                 + (f" — checked first in: {accounts}" if accounts else ""))
+    lines.extend(f"  {note}" for note in resolved["notes"])
+    return lines
+
+
 def cmd_check_photos(scope, approaches=None, account=None, recheck=False, apply=False, apply_run=None, limit=None,
                      pace=None, max_minutes=None, devices=False, list_only=False):
     """`check_photos` (PLAN Step 13) — see the section comment above. [WIP: only `pending --list` is wired so far.]"""

@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 13.b main scope resolution
+STATE: IN PROGRESS — next: 13.c run directory + child spawn + conftest guard
 
 # IMP-C25 Step 13 — `check_photos`: download-free verification, sweep and confirm — resumable status
 
@@ -28,9 +28,12 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       — tests: tests/test_check_photos.py 37 passed (parser 7 + 20 errors, dispatcher 3, pending --list 2);
       test_map_photos + test_prep_push_rep_enrich_cli 236 passed (the dispatcher harness) — WIP SHA in the commit
       that ticks this line (cmd_check_photos is a stub for every other scope until 13.c)
-- [ ] 13.b main: scope resolution — item (alias resolves) · season_map (children, anime glued ids) ·
+- [x] 13.b main: scope resolution — item (alias resolves) · season_map (children, anime glued ids) ·
       `series:<season id | show folder>` (show-folder rule + same-show guard) · id prefix · `account:<a>` · pending ·
-      hinted · all · `--account` filter; ALWAYS printed before running — tests (flat + nested series, anime, oth-)
+      hinted · all · `--account` filter; ALWAYS printed before running — tests (flat + nested series, anime, oth-):
+      tests/test_check_photos.py 49 passed (+12: item/alias, season/anime, series ×3 targets, folder = same scope,
+      flat show, language folder, anime series, Others + a 2nd list root, prefix/all/account/pending/--account/errors,
+      hinted) — WIP SHA in the commit that ticks this line
 - [ ] 13.c main: run directory (create / resume by key / `--recheck`), run.json, child spawn with the streaming idiom
       (Ctrl+C-safe: the parent waits for the child to close Chrome), conftest guard (no test spawns the real child) —
       tests

@@ -13261,13 +13261,205 @@ def _cp_scope_lines(resolved, library):
     return lines
 
 
+# ------------------------------------------------------------------ the run directory (resumable) and the child
+CHECK_RUN_VERSION = 1
+_CP_CHILD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mainfetch.py")   # the browser half (absolute)
+# How a run ended (progress.json `reason`, written by mainfetch.cmd_check) -> this command's status: a clean stop the user
+# asked for is `partial` (re-run to continue); anything else that ended a run early is `stopped`.
+_CP_PARTIAL_REASONS = ("limit", "max-minutes")
+# The statuses main.py's dispatcher exits 1 on (ok and partial exit 0).
+CHECK_FAILED_STATUSES = ("error", "refused", "stopped", "interrupted")
+
+
+def _cp_root():
+    """<GPHOTOS_STATE_DIR>/check — every run's directory lives here (read at call time: tests redirect it)."""
+    return os.path.join(mvcommon.GPHOTOS_STATE_DIR, "check")
+
+
+def _cp_read_json(path):
+    """A JSON object file -> dict, or None when it is missing, unreadable or not an object."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _cp_write_json(path, doc):
+    """Write a run file atomically (mainfetch's writer: temp file, fsync, os.replace)."""
+    import mainfetch  # the one atomic JSON writer of the check's files; importing it has no side effects
+    mainfetch._write_json_atomic(path, doc)
+
+
+def _cp_read_results(run_dir):
+    """The run's results.jsonl lines (mainfetch.cmd_check appends them, fsynced), in append order — a torn line (a
+    killed child) is skipped."""
+    def as_dict(raw):
+        if not isinstance(raw, dict):
+            raise ValueError("not a result line")
+        return raw
+    try:
+        return mvcommon._read_jsonl(os.path.join(run_dir, "results.jsonl"), as_dict, None)
+    except OSError:
+        return []
+
+
+def _cp_runs():
+    """[(run_dir, run.json, progress.json or None)] of every check run, newest first (a run directory is named by its
+    UTC start; a second run in the same second gets '-2', which sorts after it)."""
+    root = _cp_root()
+    try:
+        names = sorted(os.listdir(root), reverse=True)
+    except OSError:
+        return []
+    runs = []
+    for name in names:
+        run_dir = os.path.join(root, name)
+        doc = _cp_read_json(os.path.join(run_dir, "run.json"))
+        if doc is not None and doc.get("v") == CHECK_RUN_VERSION and isinstance(doc.get("objects"), list):
+            runs.append((run_dir, doc, _cp_read_json(os.path.join(run_dir, "progress.json"))))
+    return runs
+
+
+def _cp_matches(doc, scope, account, approaches):
+    """A run of this scope? Its recorded scope and --account must be the given ones; approaches only when given."""
+    return (doc.get("scope") == scope and doc.get("account") == account
+            and (approaches is None or doc.get("approaches") == approaches))
+
+
+def _cp_unfinished(scope, account, approaches):
+    """(run_dir, run.json, progress.json) of the NEWEST run of this scope + --account + approaches when that run is not
+    complete — the one a re-run continues — else None (a complete newest run means: start afresh)."""
+    for run_dir, doc, progress in _cp_runs():
+        if _cp_matches(doc, scope, account, approaches):
+            return (run_dir, doc, progress) if (progress or {}).get("state") != "complete" else None
+    return None
+
+
+def _cp_new_run(resolved, scope_text, account, approaches, now):
+    """Create a run directory <GPHOTOS_STATE_DIR>/check/<UTC yyyymmddThhmmssZ>[-n] and its run.json -> (run_dir, doc).
+    run.json (written once, never changed): v, run, created_at, scope (canonical), scope_text (as typed), kind, account
+    (--account or None), approaches, source (`confirm` for pending — P-11's post-backup confirmation — else `check`),
+    show + seasons (series), objects (the resolved objects, _cp_resolve's shape)."""
+    stamp = now.strftime("%Y%m%dT%H%M%SZ")
+    root = _cp_root()
+    os.makedirs(root, exist_ok=True)
+    name, n = stamp, 1
+    while True:
+        try:
+            os.mkdir(os.path.join(root, name))
+            break
+        except FileExistsError:
+            n += 1
+            name = f"{stamp}-{n}"
+    run_dir = os.path.join(root, name)
+    doc = {"v": CHECK_RUN_VERSION, "run": f"check-{name}", "created_at": _mp_iso(now), "scope": resolved["canonical"],
+           "scope_text": scope_text, "kind": resolved["kind"], "account": account, "approaches": approaches,
+           "source": "confirm" if resolved["kind"] == "pending" else "check", "show": resolved["show"],
+           "seasons": resolved["seasons"], "objects": resolved["objects"]}
+    _cp_write_json(os.path.join(run_dir, "run.json"), doc)
+    return run_dir, doc
+
+
+def _cp_child_argv(run_dir, limit=None, max_minutes=None, pace=None):
+    """The check child's command line — [python, <abs mainfetch.py>, check, --run, <run dir>, …] (PLAN Step 13:
+    sys.executable and the absolute script path; --limit / --max-minutes / --pace only when given)."""
+    argv = [sys.executable, _CP_CHILD, "check", "--run", run_dir]
+    for option, value in (("--limit", limit), ("--max-minutes", max_minutes), ("--pace", pace)):
+        if value is not None:
+            argv += [option, f"{value:g}" if isinstance(value, float) else str(value)]
+    return argv
+
+
+def _cp_spawn(argv):
+    """Run the check child with cmd_dispatch_fetch's streaming idiom — every line re-printed through the CURRENT
+    sys.stdout as it comes (UTF-8 and unbuffered: _mainfetch_child_env) — -> (exit code, interrupted).
+
+    Ctrl+C reaches the child as well (one console): it stops after its current object and closes the Chrome it launched.
+    So this side keeps reading and waits for it to end; only a third Ctrl+C stops the waiting (exit code None) — the
+    child then finishes on its own, and the fetch journal it keeps lets the next fetch or check close a Chrome it could
+    not. Raises OSError when the child cannot be started. (tests/conftest.py replaces this for every test.)"""
+    stops = 0
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                            encoding="utf-8", errors="replace", env=_mainfetch_child_env())
+    while True:
+        try:
+            for line in proc.stdout:
+                print(line, end="", flush=True)
+            return proc.wait(), stops > 0
+        except KeyboardInterrupt:
+            stops += 1
+            if stops >= 3:
+                print("\n🛑 No longer waiting — the check closes its Chrome on its own.", flush=True)
+                return None, True
+            print("\n🛑 Stopping — waiting for the check to close its Chrome (press Ctrl+C twice more to stop "
+                  "waiting)…", flush=True)
+
+
+def _cp_status(code, interrupted, progress):
+    """This command's status from the child's exit code and its progress.json: refused (3: the fetch lock is held —
+    nothing ran) · error (1: the child could not read its run) · interrupted (Ctrl+C) · ok (complete) · partial (a
+    --limit / --max-minutes stop: re-run to continue) · stopped (signed out, Chrome failed, the error breaker, the lock
+    lost …: re-run to continue once fixed)."""
+    if code == 3:
+        return "refused"
+    if code == 1:
+        return "error"
+    state, reason = (progress or {}).get("state"), (progress or {}).get("reason")
+    if interrupted or code is None or reason == "interrupted":
+        return "interrupted"
+    if state == "complete":
+        return "ok"
+    return "partial" if reason in _CP_PARTIAL_REASONS else "stopped"
+
+
 def cmd_check_photos(scope, approaches=None, account=None, recheck=False, apply=False, apply_run=None, limit=None,
                      pace=None, max_minutes=None, devices=False, list_only=False):
-    """`check_photos` (PLAN Step 13) — see the section comment above. [WIP: only `pending --list` is wired so far.]"""
+    """`check_photos` (PLAN Step 13) — see the section comment above. [WIP: the report and the apply follow.]"""
     if list_only:
         return _cp_pending_list(account)
-    print("❌ check_photos: not wired yet (IMP-C25 Step 13 work in progress).")
-    return {"status": "error"}
+    now = mvcommon._now_utc()
+    library = load_library()
+    approaches = approaches or "best"
+    print(f"=== CHECK PHOTOS ({'APPLY' if apply else 'dry-run'}) — scope: {scope}"
+          f"{' · account ' + account if account else ''} · approaches {approaches} — download-free ===")
+    try:
+        resolved = _cp_resolve(library, scope, account, now)
+    except ValueError as e:
+        print(f"❌ check_photos: {e}")
+        return {"status": "error", "run_dir": None}
+    for line in _cp_scope_lines(resolved, library):
+        print(line)
+    if not resolved["objects"]:
+        print("  Nothing to check.")
+        return {"status": "ok", "run_dir": None}
+    found = None if recheck else _cp_unfinished(resolved["canonical"], account, approaches)
+    if found is not None:
+        run_dir, doc, _progress = found
+        done = {(r.get("manual_id"), r.get("label"), r.get("sha256")) for r in _cp_read_results(run_dir)
+                if r.get("kind") == "check" and r.get("pass") == "routed" and r.get("outcome") != "error"}
+        ran = {(o["manual_id"], o["label"], o["sha256"]) for o in doc["objects"]}
+        now_keys = {(o["manual_id"], o["label"], o["sha256"]) for o in resolved["objects"]}
+        print(f"  ↻ Continuing the unfinished run {os.path.basename(run_dir)} (begun {doc.get('created_at')}): "
+              f"{len(done & ran):,} of {len(ran):,} object(s) checked already — --recheck starts afresh")
+        if now_keys - ran:
+            print(f"  {len(now_keys - ran):,} object(s) of the scope joined since that run began — the next run checks "
+                  f"them (or now: --recheck)")
+    else:
+        run_dir, doc = _cp_new_run(resolved, scope, account, approaches, now)
+        print(f"  Run: {run_dir}")
+    try:
+        code, interrupted = _cp_spawn(_cp_child_argv(run_dir, limit, max_minutes, pace))
+    except OSError as e:
+        print(f"❌ check_photos: the check could not be started ({_gp_line(e)}).")
+        return {"status": "error", "run_dir": run_dir}
+    progress = _cp_read_json(os.path.join(run_dir, "progress.json"))
+    status = _cp_status(code, interrupted, progress)
+    if status == "refused":
+        print("❌ check_photos: a fetch, a crawl or the profile warm-up holds the fetch session lock — nothing was "
+              "checked; re-run when it has finished.")
+    return {"status": status, "run_dir": run_dir, "progress": progress}
 
 
 # ==========================================
@@ -15792,7 +15984,7 @@ if __name__ == "__main__":
             print(f"❌ check_photos: {_cp_err}")
             print(f"   Usage: {CHECK_USAGE}")
             sys.exit(1)
-        if cmd_check_photos(**_cp_opts).get("status") in ("error", "refused"):
+        if cmd_check_photos(**_cp_opts).get("status") in CHECK_FAILED_STATUSES:
             sys.exit(1)
 
     elif cmd == "fetch":

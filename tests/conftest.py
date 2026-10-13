@@ -119,6 +119,21 @@ class _InertProcessTable:
         raise AssertionError(f"a test tried to terminate a real process (pid {pid})")
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_check_child(monkeypatch):
+    """IMP-C25 Step 13 — AUTOUSE, every test: no test spawns the real `python mainfetch.py check` child.
+
+    `main.cmd_check_photos` runs its browser half in a CHILD PROCESS (main._cp_spawn). A child sees none of a test's
+    monkeypatches: it would read the REAL libraries and ~/.mediavault and launch a REAL Chrome. So every test starts
+    with main._cp_spawn refusing; a test that drives check_photos end to end installs its own runner (tests/
+    test_check_photos.py runs mainfetch.cmd_check in-process against the fake Google Photos world)."""
+    def refuse(argv, *args, **kwargs):
+        raise AssertionError(f"a test tried to spawn the real check_photos child ({' '.join(map(str, argv[2:4]))}) — "
+                             f"install an in-process runner: monkeypatch.setattr(main, '_cp_spawn', …)")
+
+    monkeypatch.setattr(main, "_cp_spawn", refuse)
+
+
 @pytest.fixture()
 def real_short_incoming_root():
     """IMP-C25 Step 11 — mainfetch's REAL <drive>:\\MV_incoming locator (pure path arithmetic; it creates nothing),

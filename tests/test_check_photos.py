@@ -5,12 +5,15 @@ Step 13; P-5, P-8, P-9, P-10, P-11, P-15, P-18; OD-5, OD-7, OD-9; the Step 9b ru
   13.a  the command line, main.py's dispatcher branch, `check_photos pending --list` (offline)
   13.b  the scope: item (alias) · season (anime glued ids) · series (nested, flat, category / language folders, list-capable
         Others roots) · id prefix · account:<a> · pending · hinted · all · --account
+  13.c  the run directory (new · resumed · --recheck · complete -> afresh), the child's command line, the streaming
+        spawn (Ctrl+C waits for the child), the conftest guard (no test spawns the real child)
 
 Hermetic: the fake Google Photos world + its batchexecute emulator (tests/gphotos_fake.py); mainfetch's and gprpc's clocks
 are fake (nothing waits); the autouse fixtures of tests/conftest.py redirect every state dir, ~/Downloads, the process
 table and the Chrome profiles. No network, no browser, no adb, no real C:\\Media. Synthetic ids only (every photo id
 contains "FAKE").
 """
+import functools
 import os
 import subprocess
 import sys
@@ -30,6 +33,7 @@ from test_map_photos import _main_guard
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NOW = datetime(2026, 10, 1, 0, 0, 0, tzinfo=timezone.utc)   # 14 h after test_locator._capture's push (09-30 10:00 Z)
+REAL_SPAWN = main._cp_spawn          # main's real child spawner — captured before tests/conftest.py's guard replaces it
 
 
 @pytest.fixture(autouse=True)
@@ -179,6 +183,12 @@ def test_a_bad_command_line_names_its_problem(tokens, problem):
     assert problem in str(err.value)
 
 
+@functools.lru_cache(maxsize=1)
+def _guard():
+    """main.py's `if __name__ == "__main__":` body, compiled once for this module (parsing main.py is not cheap)."""
+    return _main_guard()
+
+
 def _dispatch(argv, status="ok"):
     """Run main.py's dispatcher with `argv` against a recorder for cmd_check_photos -> its recorded kwargs."""
     import sys as real_sys
@@ -193,7 +203,7 @@ def _dispatch(argv, status="ok"):
     calls = []
     namespace = dict(main.__dict__, sys=Sys(),
                      cmd_check_photos=lambda **kwargs: calls.append(kwargs) or {"status": status})
-    exec(_main_guard(), namespace)
+    exec(_guard(), namespace)
     return calls
 
 
@@ -202,7 +212,7 @@ def test_the_dispatcher_hands_the_parsed_options_to_cmd_check_photos():
     assert calls == [dict(_DEFAULTS, scope="account:anime", approaches="all", limit=20, apply=True)]
 
 
-@pytest.mark.parametrize("status", ["error", "refused"])
+@pytest.mark.parametrize("status", ["error", "refused", "stopped", "interrupted"])
 def test_the_dispatcher_exits_1_on_a_usage_error_a_failed_or_a_refused_run(capsys, status):
     with pytest.raises(SystemExit) as stop:
         _dispatch(["all", "--frobnicate"])
@@ -494,3 +504,164 @@ def test_the_hinted_scope_checks_each_hinted_object_in_the_hints_account(sandbox
     assert (obj["account"], obj["route"]) == ("movies", "hint")
     assert obj["hint"] == {"kind": "datetime", "account": "movies", "taken_ms": 1_700_000_000_000, "gmt_offset_min": 480}
     assert any("1 hint(s) name an object no longer in the library" in n for n in res["notes"])
+
+
+# ===========================================================================
+# 13.c — the run directory and the child
+# ===========================================================================
+def _fake_child(monkeypatch, state="partial", reason="limit", code=0, interrupted=False, results=()):
+    """main._cp_spawn replaced by a recorder that plays the child: it writes progress.json (state, reason) and the given
+    results.jsonl lines into the run directory it was handed -> the recorded argv lists."""
+    calls = []
+
+    def spawn(argv):
+        calls.append(list(argv))
+        run_dir = argv[argv.index("--run") + 1]
+        if state is not None:
+            main._cp_write_json(os.path.join(run_dir, "progress.json"), {"v": 1, "state": state, "reason": reason})
+        for line in results:
+            mvcommon._append_jsonl(os.path.join(run_dir, "results.jsonl"), line)
+        return code, interrupted
+
+    monkeypatch.setattr(main, "_cp_spawn", spawn)
+    return calls
+
+
+def _routed(obj, outcome="exactly-one"):
+    return {"v": 1, "kind": "check", "pass": "routed", "account": obj["account"], "manual_id": obj["manual_id"],
+            "label": obj["label"], "sha256": obj["sha256"], "outcome": outcome}
+
+
+def test_a_check_creates_its_run_directory_and_hands_it_to_the_child(sandbox, monkeypatch, capsys):
+    _scope_library(sandbox).save()
+    monkeypatch.setattr(mvcommon, "_now_utc", lambda: NOW)
+    calls = _fake_child(monkeypatch)
+
+    res = main.cmd_check_photos("tv-en-1994-files-s02", limit=20, max_minutes=1.5, pace=0.0)
+
+    out = capsys.readouterr().out
+    run_dir = res["run_dir"]
+    assert res["status"] == "partial" and os.path.dirname(run_dir) == os.path.join(mvcommon.GPHOTOS_STATE_DIR, "check")
+    assert os.path.basename(run_dir) == "20261001T000000Z"
+    assert calls == [[sys.executable, os.path.join(REPO, "mainfetch.py"), "check", "--run", run_dir, "--limit", "20",
+                      "--max-minutes", "1.5", "--pace", "0"]]
+    doc = main._cp_read_json(os.path.join(run_dir, "run.json"))
+    assert {k: doc[k] for k in ("v", "run", "created_at", "scope", "scope_text", "kind", "account", "approaches",
+                                "source")} == {"v": 1, "run": "check-20261001T000000Z", "created_at": "2026-10-01T00:00:00Z",
+                                               "scope": "tv-en-1994-files-s02", "scope_text": "tv-en-1994-files-s02",
+                                               "kind": "season", "account": None, "approaches": "best",
+                                               "source": "check"}
+    assert [o["manual_id"] for o in doc["objects"]] == ["tv-en-1994-files-s02e05", "tv-en-1994-files-s02e06"]
+    assert out.startswith("=== CHECK PHOTOS (dry-run) — scope: tv-en-1994-files-s02 · approaches best — download-free ===")
+    assert "  2 object(s) in 2 entr(y/ies) — checked first in: tv 2" in out and f"  Run: {run_dir}" in out
+
+
+def test_a_re_run_continues_the_unfinished_run_and_recheck_starts_afresh(sandbox, monkeypatch, capsys):
+    _scope_library(sandbox).save()
+    monkeypatch.setattr(mvcommon, "_now_utc", lambda: NOW)
+    calls = _fake_child(monkeypatch)
+    first = main.cmd_check_photos("tv-en-1994-files-s02")["run_dir"]
+    doc = main._cp_read_json(os.path.join(first, "run.json"))
+    mvcommon._append_jsonl(os.path.join(first, "results.jsonl"), _routed(doc["objects"][0]))
+    capsys.readouterr()
+
+    again = main.cmd_check_photos("tv-en-1994-files-s02")["run_dir"]
+    resumed = capsys.readouterr().out
+    fresh = main.cmd_check_photos("tv-en-1994-files-s02", recheck=True)["run_dir"]
+    other = main.cmd_check_photos("tv-en-1994-files-s02", approaches="all")["run_dir"]
+
+    assert again == first and len(calls) == 4
+    assert "↻ Continuing the unfinished run 20261001T000000Z (begun 2026-10-01T00:00:00Z): 1 of 2 object(s) checked " \
+           "already — --recheck starts afresh" in resumed
+    assert fresh != first and os.path.basename(fresh) == "20261001T000000Z-2"                # same second: -2
+    assert other not in (first, fresh)                                                        # another key: its own run
+
+
+def test_a_complete_run_is_never_continued(sandbox, monkeypatch):
+    _scope_library(sandbox).save()
+    monkeypatch.setattr(mvcommon, "_now_utc", lambda: NOW)
+    _fake_child(monkeypatch, state="complete", reason=None)
+    first = main.cmd_check_photos("tv-en-1994-files-s02")
+    second = main.cmd_check_photos("tv-en-1994-files-s02")
+    assert first["status"] == second["status"] == "ok" and first["run_dir"] != second["run_dir"]
+
+
+@pytest.mark.parametrize("code, interrupted, progress, status", [
+    (3, False, None, "refused"),
+    (1, False, None, "error"),
+    (0, True, {"state": "partial", "reason": "interrupted"}, "interrupted"),
+    (None, True, None, "interrupted"),
+    (0, False, {"state": "complete"}, "ok"),
+    (0, False, {"state": "partial", "reason": "limit"}, "partial"),
+    (0, False, {"state": "partial", "reason": "max-minutes"}, "partial"),
+    (0, False, {"state": "partial", "reason": "signed-out"}, "stopped"),
+    (0, False, {"state": "running"}, "stopped"),
+])
+def test_the_status_of_a_child_run(code, interrupted, progress, status):
+    assert main._cp_status(code, interrupted, progress) == status
+
+
+def test_a_refused_child_is_reported(sandbox, monkeypatch, capsys):
+    _scope_library(sandbox).save()
+    _fake_child(monkeypatch, state=None, code=3)
+    assert main.cmd_check_photos("tv-en-1994-files-s02")["status"] == "refused"
+    assert "holds the fetch session lock — nothing was checked" in capsys.readouterr().out
+
+
+def test_an_empty_scope_starts_nothing(sandbox, monkeypatch, capsys):
+    _scope_library(sandbox).save()
+    calls = _fake_child(monkeypatch)
+    res = main.cmd_check_photos("pending")
+    assert res == {"status": "ok", "run_dir": None} and calls == []
+    assert "  Nothing to check." in capsys.readouterr().out
+    assert not os.path.exists(os.path.join(mvcommon.GPHOTOS_STATE_DIR, "check"))
+
+
+def test_no_test_can_spawn_the_real_check_child():
+    with pytest.raises(AssertionError) as err:
+        main._cp_spawn([sys.executable, "mainfetch.py", "check", "--run", "x"])
+    assert "a test tried to spawn the real check_photos child" in str(err.value)
+
+
+class _FakeProc:
+    """subprocess.Popen's stand-in for the streaming idiom: its stdout yields the lines; Ctrl+C arrives once, after the
+    `stop_after`-th line (the child keeps writing its closing lines)."""
+
+    def __init__(self, lines, stop_after=None):
+        self.lines, self.stop_after, self.waited = list(lines), stop_after, 0
+        self.stdout = self
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.stop_after is not None and self.stop_after == 0:
+            self.stop_after = None
+            raise KeyboardInterrupt
+        if not self.lines:
+            raise StopIteration
+        if self.stop_after is not None:
+            self.stop_after -= 1
+        return self.lines.pop(0)
+
+    def wait(self):
+        self.waited += 1
+        return 0
+
+
+def test_the_spawn_streams_the_child_and_waits_for_it_after_a_ctrl_c(monkeypatch, capsys):
+    proc, seen = _FakeProc(["one\n", "two\n", "closing Chrome\n"], stop_after=1), {}
+
+    def popen(argv, **kwargs):
+        seen.update(argv=argv, **kwargs)
+        return proc
+
+    monkeypatch.setattr(main.subprocess, "Popen", popen)
+    code, interrupted = REAL_SPAWN(["python", "mainfetch.py", "check", "--run", "x"])
+
+    out = capsys.readouterr().out
+    assert (code, interrupted, proc.waited) == (0, True, 1)
+    assert out.index("one") < out.index("🛑 Stopping — waiting for the check to close its Chrome") < out.index(
+        "closing Chrome")                                          # every line after the Ctrl+C still printed
+    assert seen["env"]["PYTHONUNBUFFERED"] == "1" and seen["env"]["PYTHONIOENCODING"] == "utf-8"
+    assert seen["stdout"] is main.subprocess.PIPE and seen["stderr"] is main.subprocess.STDOUT

@@ -1287,6 +1287,8 @@ def test_apply_rewrites_exactly_those_sidecars_keeping_every_v1_byte_and_the_pus
     assert "Summary: upgraded 5 · not rewritten (check-only phone) 1 · left as they are 1 · up to date 1 · nothing " \
            "proven yet 3" in out
     assert f"Originals kept in {run_dir} — backup.jsonl names each one's phone file" in out
+    assert out.splitlines()[-1] == "Next (check-only phone): python main.py mvmeta_upgrade all device movies#2 --apply"
+    assert "Next: python main.py" not in out                                 # nothing else left to run
 
 
 def test_a_second_apply_finds_them_up_to_date_and_writes_nothing(world, fake_adb, capsys):
@@ -1449,6 +1451,7 @@ def test_ctrl_c_during_a_write_marks_that_sidecar_and_stops(world, fake_adb, cap
     episode = next(row for row in res["rows"] if row["label"] == EPISODE)
     assert episode["why"].startswith("interrupted while it was being rewritten")
     assert f"⚠️  Interrupted (Ctrl+C) while rewriting {EPISODE} on series" in out
+    assert out.splitlines()[-1] == "⚠️  Re-run the same command to finish: whatever was upgraded is up to date and skipped."
     assert world.phones[SERIES].files()[world.sidecars[EPISODE]["path"]][0] == world.sidecars[EPISODE]["raw"]
     assert os.listdir(tmp_path / "systmp") == []                              # the temporary folder went anyway
     assert len(os.listdir(os.path.join(res["run_dir"], "originals"))) == 3     # kept before each write began
@@ -1462,7 +1465,9 @@ def test_ctrl_c_during_a_dry_run_writes_nothing(world, fake_adb, capsys, tmp_pat
     assert res["status"] == "interrupted"
     assert statuses(res) == {**{label: EXPECTED[label][0] for label in ORDER[:4]},
                              **{label: "not-reached" for label in ORDER[4:]}}
-    assert "⚠️  Interrupted (Ctrl+C) — no sidecar was being written." in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "⚠️  Interrupted (Ctrl+C) — no sidecar was being written." in out and "Next:" not in out
+    assert "⚠️  Re-run the same command to finish" in out
     assert phone_files(world) == before and not os.path.exists(mvcommon.GPHOTOS_STATE_DIR)
     assert os.listdir(tmp_path / "systmp") == []
 

@@ -15055,13 +15055,15 @@ def cmd_mvmeta_upgrade(scope="all", device=None, apply=False):
     if stop == "error":
         say("❌ Stopped at the first failure (above) — once it is fixed, re-run the same command: the upgraded "
             "sidecars are up to date and skipped.")
-    elif upgrades and not apply:
+    elif stop == "interrupted":
+        say("⚠️  Re-run the same command to finish: whatever was upgraded is up to date and skipped.")
+    else:
         writable_rows = [r for r in upgrades if r["writable"]]
-        if writable_rows:
+        if writable_rows and not apply:
             say(f"Next: python main.py mvmeta_upgrade {scope}{' device ' + device if device else ''} --apply — "
                 f"rewrites the {len(writable_rows):,} sidecar(s) marked above"
                 + (" (not those on a check-only phone)" if len(writable_rows) < len(upgrades) else ""))
-        for alias in sorted({r["alias"] for r in upgrades if not r["writable"]}):
+        for alias in sorted({r["alias"] for r in rows if r["status"] in ("upgrade", "check-only") and not r["writable"]}):
             say(f"Next (check-only phone): python main.py mvmeta_upgrade {scope} device {alias} --apply")
     if ctx["run_dir"]:
         try:

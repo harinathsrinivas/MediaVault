@@ -13770,8 +13770,8 @@ def _cp_report_lines(ctx):
         lines.extend(f"    {r['manual_id']} · {r['label']} — in '{r['account']}'" for r in bad)
     ambiguous = [r for r in rows if r["status"] == "ambiguous"]
     if ambiguous:
-        lines.append(f"Ambiguous: {len(ambiguous):,} object(s) — candidates that cannot be told apart (an apply lists "
-                     f"them in failed_objects.csv: decide them there, then import it with map_photos --resolutions)")
+        lines.append(f"Ambiguous: {len(ambiguous):,} object(s) — candidates that cannot be told apart (an apply puts "
+                     f"them on the failed list: pick the right item with python main.py resolve_photos failed)")
     errors = [r for r in rows if r["status"] == "error"]
     if errors:
         why = _cp_counts(errors, lambda r: r["error"] or "error")
@@ -14124,6 +14124,549 @@ def cmd_check_photos(scope, approaches=None, account=None, recheck=False, apply=
         print(f"❌ check_photos: the check could not run (exit code {code}) — see the lines above.")
         return {"status": status, "run_dir": run_dir, "progress": progress}
     return _cp_after_child(run_dir, doc, library, status, progress, apply, devices)
+
+
+# ==========================================
+#   GOOGLE PHOTOS IDENTITY — resolve_photos: THE USER RESOLVES THE FAILED LIST (IMP-C25 Step 14)
+# ==========================================
+# docs/feature-fetch-datetime/PLAN.md Step 14 (OD-14 ruling: CLI only, interactive) + follow-up b. Per unresolved object
+# of the failed list (P-18), grouped by account — one Chrome session per account under the fetch lock — its
+# identification block (mainfetch.identification_lines), the session's Photos tab at its best start
+# (mainfetch.open_best_start) and the question  [p]aste photo URL | [s]earch term | [n]ot uploaded | s[k]ip | [q]uit:
+#   paste         the item is read and checked download-free (mainfetch.verify_item — the stages' own P-5 check): its
+#                 dedupKey is the object's content key (proof dedupkey) or, without one, its name is the exact uploaded
+#                 name (proof filename) -> a learned record, source `check` (the apply may confirm it). A mismatch that
+#                 proves nothing (another name, a record that does not say) -> "accept as a manual match (a later fetch
+#                 verifies it by SHA-256)?" -> proof and source `manual` (never confirmed by itself;
+#                 `fetch <id> --manual` opens it and keeps its download only when the SHA-256 matches). PROVEN other
+#                 bytes (another content key) -> refused: a restore could never use them;
+#   search        the term becomes the object's search_override (source manual, P-10) and stage S3u alone tries it at
+#                 once, verified like any stage — a verified find adds a `check` record;
+#   not uploaded  the IMP-C27 list: the user's word that it never reached Google Photos;
+#   skip / quit   nothing recorded — the object comes back next time.
+# Every answer is written at once — to the learned sidecar (P-10) and the answer log resolved.jsonl (a resumed session
+# skips what was answered) — so a quit or a crash keeps it. Only at the end, Chrome closed and the lock released, does
+# the library change: the apply engine's dry-run summary over the WHOLE sidecar, then "Apply these N changes to the
+# library? [y/N]". download-lost objects (their item WAS found; the transfer broke twice — Step 10) are not identified
+# again: listed with their fetch commands and offered a re-fetch at the end. Ctrl+C stops at once; nothing is applied.
+
+RESOLVE_USAGE = "resolve_photos [failed|<csv>] [--account movies|tv|anime|others] [--id <manual_id>]"
+RESOLVE_PROMPT = "   [p]aste photo URL | [s]earch term | [n]ot uploaded | s[k]ip | [q]uit: "
+RESOLVE_FAILED_STATUSES = ("refused", "error", "interrupted")   # main's dispatcher exits 1 on these
+
+
+def parse_resolve_photos_args(tokens):
+    """`resolve_photos [failed|<csv>] [--account a] [--id <manual_id>]` -> {source, account, manual_id}: source "failed"
+    (the default: the failed list) or the path of a failed_objects.csv / resolutions_todo.csv to walk instead; --id an
+    id (an alias resolves), a season id or any id prefix. Raises ValueError naming the problem."""
+    opts = {"source": None, "account": None, "manual_id": None}
+    rest, i = list(tokens), 0
+    while i < len(rest):
+        token = rest[i]
+        if token in ("--account", "--id"):
+            value = rest[i + 1].strip() if i + 1 < len(rest) else ""
+            if not value or value.startswith("--"):
+                raise ValueError(f"{token} needs a value")
+            if token == "--account" and value.lower() not in mvcommon.GP_ACCOUNTS:
+                raise ValueError(f"--account must be one of {', '.join(mvcommon.GP_ACCOUNTS)}")
+            opts["account" if token == "--account" else "manual_id"] = value.lower() if token == "--account" else value
+            i += 2
+            continue
+        if token.startswith("--"):
+            raise ValueError(f"unknown option {token}")
+        if opts["source"] is not None:
+            raise ValueError("one source only: failed, or the path of a failed_objects.csv / resolutions_todo.csv")
+        opts["source"] = token
+        i += 1
+    opts["source"] = opts["source"] or "failed"
+    return opts
+
+
+def _rp_stdin_is_tty():
+    """The keyboard is a terminal (the OD-14 ruling: resolve_photos is interactive — never a pipe or the web UI)."""
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def _rp_ask(prompt):
+    """One answer from the keyboard, stripped — None at the end of the input (Ctrl+Z / Ctrl+D: quit, or no)."""
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        print()
+        return None
+
+
+def _rp_key(obj):
+    return obj["manual_id"], obj["label"], obj["sha256"]
+
+
+def _rp_id_matches(library, wanted, manual_id):
+    """--id: the id itself, the primary an alias names, or an id prefix (a season id selects its episodes)."""
+    if wanted is None:
+        return True
+    real, _entry = _gp_resolve(library, wanted)
+    return manual_id in (wanted, real) or manual_id.startswith(wanted)
+
+
+def _rp_csv_rows(library, path, records):
+    """`resolve_photos <csv>`: every object row of the CSV (mvcommon.read_failed_csv_rows), matched to its library
+    object by manual_id (an alias resolves) and sha256 (else its `object` label) -> ([(record, object)], problems). The
+    record is the object's newest failed-list row (for what was tried and seen), else one made from the CSV row; the
+    CSV's account wins (the user may have changed it). An object gone from the library is a problem line."""
+    rows, errors = mvcommon.read_failed_csv_rows(path)
+    problems = [f"line {e['line']} · {e['manual_id'] or '?'} — {e['error']}" for e in errors]
+    newest = {}
+    for rec in records:
+        newest[(rec["manual_id"], rec.get("sha256") or "label:" + rec.get("label", ""))] = rec
+    out = []
+    for row in rows:
+        real, entry = _gp_resolve(library, row["manual_id"])
+        objs = list(mvcommon.iter_entry_objects(real, entry)) if entry is not None else []
+        obj = next((o for o in objs if (o["sha256"] == row["sha256"] if row.get("sha256")
+                                        else o["label"] == row.get("object"))), None)
+        if obj is None or not obj["sha256"]:
+            problems.append(f"line {row['line']} · {row['manual_id']} — not in the library any more (re-split, "
+                            f"re-mastered or removed?)")
+            continue
+        held = newest.get((obj["manual_id"], obj["sha256"])) or newest.get((obj["manual_id"], "label:" + obj["label"]))
+        rec = dict(held) if held else {"manual_id": obj["manual_id"], "label": obj["label"], "sha256": obj["sha256"],
+                                       "reason": row.get("status") or "listed",
+                                       "uploaded_name": row.get("uploaded_name"),
+                                       "expected_taken_local": row.get("expected_taken_local")}
+        rec["account"] = row["account"]
+        out.append((rec, obj))
+    return out, problems
+
+
+def _rp_rows(library, source, account, manual_id):
+    """The objects to resolve -> {rows: [(record, object)] to walk, lost: the download-lost ones, answered: how many
+    the answer log already settled, confirmed: how many are confirmed by now, problems: lines}. source "failed" = the
+    failed list against the library (mvcommon.failed_objects: newest row per object, confirmed and vanished objects
+    left out), else a CSV path. An object counts as answered when the answer log holds an answer for it (same
+    account, object and bytes) given at or after its newest failed row. Raises OSError / ValueError for a CSV that
+    cannot be read."""
+    records = mvcommon.read_failed()
+    out = {"rows": [], "lost": [], "answered": 0, "confirmed": 0, "problems": []}
+    if source == "failed":
+        listed = mvcommon.failed_objects(library, records)["rows"]
+    else:
+        listed, out["problems"] = _rp_csv_rows(library, source, records)
+    answers = {}
+    for answer in mvcommon.read_resolved():
+        answers[(answer["account"], answer["manual_id"], answer["sha256"])] = answer["at"]
+    seen = set()
+    for rec, obj in listed:
+        if (account and rec["account"] != account) or not _rp_id_matches(library, manual_id, obj["manual_id"]):
+            continue
+        key = (rec["account"],) + _rp_key(obj)
+        if key in seen:
+            continue
+        seen.add(key)
+        if obj["cloud_state"] == "confirmed":
+            out["confirmed"] += 1
+            continue
+        when = answers.get((rec["account"], obj["manual_id"], obj["sha256"]))
+        if when is not None and mvcommon._at_ts(when) >= mvcommon._at_ts(rec.get("at")):
+            out["answered"] += 1
+            continue
+        out["lost" if rec.get("reason") == "download-lost" else "rows"].append((rec, obj))
+    return out
+
+
+def _rp_size(obj, library):
+    """The object's exact size: its trusted block's or capture's, else a whole file's tech_spec size — or None."""
+    for facts in (obj.get("block"), obj.get("capture")):
+        if isinstance(facts, dict) and _gp_is_int(facts.get("size_bytes")) and facts["size_bytes"] > 0:
+            return facts["size_bytes"]
+    entry = library.get(obj["manual_id"]) if obj["kind"] == "whole" else None
+    size = ((entry or {}).get("tech_spec") or {}).get("size_bytes")
+    return size if _gp_is_int(size) and size > 0 else None
+
+
+def _rp_fetch_command(obj):
+    """The fetch that re-fetches one object: its owner, with --fetchExtras for an extra."""
+    extra = " --fetchExtras" if obj["kind"] in ("extra_whole", "extra_chunk") else ""
+    return f"python main.py fetch {obj['manual_id']}{extra}"
+
+
+def _rp_learned(obj, item, photo_id, proof, source, approach=None):
+    """The P-10 learned record of one answer naming an item (validated when appended)."""
+    item = item or {}
+    return {"manual_id": obj["manual_id"], "label": obj["label"], "sha256": obj["sha256"], "photo_id": photo_id,
+            "taken_ms": item.get("taken_ms"), "tz_offset_ms": item.get("tz_offset_ms"),
+            "upload_ms": item.get("upload_ms"), "dedup_key": item.get("dedup_key"),
+            "gp_filename": item.get("filename") or None, "width": item.get("width"), "height": item.get("height"),
+            "proof": proof, "source": source, "approach": approach}
+
+
+def _rp_record(state, rec, obj, answer, learned=()):
+    """Write one answer at once: its learned records (the object's account sidecar, P-10) and its line in the answer
+    log. True when written; a write that fails prints one line and records nothing more (the question is asked
+    again)."""
+    try:
+        for record in learned:
+            mvcommon.append_learned(rec["account"], record)
+        mvcommon.append_resolved(dict(answer, account=rec["account"], manual_id=obj["manual_id"], label=obj["label"],
+                                      sha256=obj["sha256"]))
+    except (OSError, ValueError) as e:
+        print(f"      ⚠️ not recorded ({_gp_line(e)}) — answer again, or skip it")
+        return False
+    state["answered"].add(_rp_key(obj))
+    return True
+
+
+def _rp_paste(driver, ctx, rec, obj, loc, text, state):
+    """The paste answer: the item named by `text` (a photo link, a bare photo id, or — empty — the item the browser
+    shows now), checked by mainfetch.verify_item -> True (recorded), False (back to the question), None (quit)."""
+    import mainfetch
+    if text:
+        photo_id = gpweb.photo_id_from_url(text) or (text if gpweb.MEDIA_KEY_RE.fullmatch(text) else None)
+    else:
+        try:
+            photo_id = gpweb.photo_id_from_url(driver.current_url)
+        except Exception:
+            photo_id = None
+    if not photo_id:
+        print("      not a Google Photos photo link (…/photo/<id>) — open the item and press Enter, or paste its link")
+        return False
+    res = mainfetch.verify_item(driver, loc, photo_id, ctx)
+    item = res["record"] or {}
+    if res["verdict"] == "match":
+        how = " (normalized name)" if res["name_normalized"] else ""
+        if not _rp_record(state, rec, obj, {"answer": "url", "photo_id": photo_id, "proof": res["proof"]},
+                          [_rp_learned(obj, item, photo_id, res["proof"], "check")]):
+            return False
+        print(f"      ✔ verified — proof {res['proof']}{how}; recorded: a fetch now goes straight to it")
+        return True
+    if res["verdict"] == "gone":
+        print(f"      ✘ the '{rec['account']}' account holds no such item — is it in another account?")
+        return False
+    if res["content_mismatch"]:
+        print(f"      ✘ this item holds OTHER bytes than the object (its dedupKey {item.get('dedup_key')} is not the "
+              f"object's content key) — not recorded: a restore could never use it")
+        return False
+    why = (f"its name is '{item['filename']}', the object was uploaded as '{loc.get('uploaded_name')}'"
+           if item.get("filename") else "its record does not show whether it holds these bytes")
+    print(f"      ? not verified — {why}")
+    answer = _rp_ask("      accept as a manual match (a later fetch verifies it by SHA-256)? [y/N]: ")
+    if answer is None:
+        return None
+    if answer.lower() not in ("y", "yes"):
+        print("      not recorded")
+        return False
+    if not _rp_record(state, rec, obj, {"answer": "url", "photo_id": photo_id, "proof": "manual"},
+                      [_rp_learned(obj, item, photo_id, "manual", "manual")]):
+        return False
+    print(f"      ✋ recorded as a manual match — `{_rp_fetch_command(obj)} --manual` opens it and keeps its download "
+          f"only when the SHA-256 matches")
+    return True
+
+
+def _rp_search(driver, ctx, rec, obj, loc, term, state):
+    """The search answer: `term` becomes the object's search_override (source manual) at once, then stage S3u alone
+    tries it (mainfetch.locate_object(stages=("user_query",)) — verified like any stage); a verified find adds a
+    `check` record. -> True (recorded) / False (not written)."""
+    import gprpc
+    import mainfetch
+    try:
+        mvcommon.append_learned(rec["account"], {"manual_id": obj["manual_id"], "label": obj["label"],
+                                                 "sha256": obj["sha256"], "source": "manual", "search_override": term})
+    except (OSError, ValueError) as e:
+        print(f"      ⚠️ not recorded ({_gp_line(e)}) — answer again, or skip it")
+        return False
+    res = None
+    try:
+        res = mainfetch.locate_object(driver, dict(loc, search_override=term, queries=dict(loc.get("queries") or {},
+                                                                                           s3u=[term])),
+                                      ctx, stages=("user_query",))
+    except (mainfetch.SessionExpiredError, gprpc.RpcRefused):
+        raise
+    except Exception as e:  # the term is kept either way: a fetch tries it (S3u)
+        print(f"      ⚠️ the search could not run ({type(e).__name__})")
+    found = bool(res and res["found"])
+    learned, answer = [], {"answer": "search", "search_term": term, "found": found}
+    if found:
+        approach = {"tried": "s3u_user_query", "outcome": "exactly-one", "n": res["n"], "via": res["via"]}
+        learned.append(_rp_learned(obj, res["record"], res["photo_id"], res["proof"], "check", approach))
+        answer.update(photo_id=res["photo_id"], proof=res["proof"])
+    if not _rp_record(state, rec, obj, answer, learned):
+        return False
+    if found:
+        print(f"      ✔ your term found it — proof {res['proof']}; recorded (and kept as its search term)")
+    else:
+        tried = mainfetch._tried_text(res) if res else "the search did not run"
+        print(f"      🔍 your term found no verified item ({tried}) — kept as its search term: every fetch tries it "
+              f"(S3u)")
+    return True
+
+
+def _rp_object(driver, ctx, rec, obj, loc, library, n, total, state):
+    """One object: its identification block, the browser at its best start, the question until it is answered.
+    -> "next" or "quit"."""
+    import mainfetch
+    key = mainfetch._content_key(loc)
+    print(f"\n   🧭 [{n}/{total}] {obj['manual_id']} · {obj['label']} — {rec.get('reason')}"
+          + (f" ({rec['at']})" if rec.get("at") else ""))
+    facts = {"account": rec["account"], "uploaded_name": loc.get("uploaded_name") or obj.get("uploaded_name"),
+             "expected_local": rec.get("expected_taken_local") or mainfetch._expected_local(loc), "dedup_key": key,
+             "sha1": mainfetch._sha1_of(loc, key), "size_bytes": _rp_size(obj, library),
+             "tried": rec.get("tried") or "not recorded", "candidates": rec.get("candidates")}
+    for line in mainfetch.identification_lines(facts):
+        print(f"      {line}")
+    try:
+        what, _pid, _record = mainfetch.open_best_start(driver, loc, ctx, None, rec.get("candidates") or ())
+    except mainfetch.SessionExpiredError:
+        raise
+    except Exception as e:  # a page that cannot be opened: the user can still look by hand
+        what = f"nothing — the page could not be opened ({type(e).__name__}); look for it yourself"
+    print(f"      opened        {what}")
+    while True:
+        state["heartbeat"].beat()
+        answer = _rp_ask(RESOLVE_PROMPT)
+        if answer is None:
+            return "quit"
+        choice = answer.lower()
+        if choice in ("q", "quit"):
+            return "quit"
+        if choice in ("k", "skip"):
+            print("      skipped — it stays on the failed list")
+            return "next"
+        if choice in ("n", "not uploaded", "not_uploaded"):
+            if _rp_record(state, rec, obj, {"answer": "not_uploaded"}):
+                print("      recorded: not uploaded — listed in the IMP-C27 report at the end")
+                return "next"
+            continue
+        if choice in ("s", "search"):
+            term = _rp_ask("      search term: ")
+            if term is None:
+                return "quit"
+            if term and _rp_search(driver, ctx, rec, obj, loc, term, state):
+                return "next"
+            continue
+        if choice in ("p", "paste") or gpweb.photo_id_from_url(answer):
+            text = answer if choice not in ("p", "paste") else _rp_ask(
+                "      photo URL (Enter = the item the browser shows now): ")
+            if text is None:
+                return "quit"
+            done = _rp_paste(driver, ctx, rec, obj, loc, text, state)
+            if done is None:
+                return "quit"
+            if done:
+                return "next"
+            continue
+        print("      ? answer p, s, n, k or q")
+
+
+def _rp_walk(library, rows, state):
+    """Walk `rows` account by account (GP_ACCOUNTS order), one Chrome session each, under the fetch lock taken WITHOUT
+    waiting: the fetch's start-up cleanup and a fetch journal first (crash cleanup, P-12), the shared close
+    (_close_session) after each and _end_run at the end. -> "done" | "quit" | "locked" | "lock-lost" | "port" |
+    "interrupted" | "error"."""
+    import mainfetch
+    from tools import gp_inventory  # LockLost — the crawler's heartbeat (mainfetch._check_lock)
+    ctx = mainfetch.FetchContext(run_id=f"resolve-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{os.getpid()}")
+    by_account = {}
+    for rec, obj in rows:
+        by_account.setdefault(rec["account"], []).append((rec, obj))
+    accounts = [a for a in mvcommon.GP_ACCOUNTS if a in by_account]
+    outcome, interrupted, n, total = "done", False, 0, len(rows)
+    try:
+        with mainfetch._check_lock() as heartbeat:
+            state["heartbeat"] = heartbeat
+            sessions = 0
+            try:
+                for account in accounts:
+                    problem = mainfetch.profile_preflight(account)
+                    if problem:
+                        print(f"\n⏭️  {len(by_account[account])} object(s) of '{account}' skipped: {problem}")
+                        n += len(by_account[account])
+                        continue
+                    if sessions and not mainfetch._debug_port_free():
+                        print(f"\n❌ Cannot switch to profile '{account}': Chrome's debug port 9222 is still in use "
+                              f"(the previous account's Chrome did not close) — close it, then re-run resolve_photos.")
+                        outcome = "port"
+                        break
+                    if not sessions:
+                        mainfetch._startup_cleanup(ctx)   # [Step 11] an interrupted earlier fetch first (P-12 rule 3)
+                        ctx.journal = mainfetch.FetchJournal(ctx.run_id)
+                    print(f"\n=== '{account}' — {len(by_account[account])} object(s) ===")
+                    driver = mainfetch.init_driver(account)
+                    if not driver:
+                        print(f"⏭️  '{account}': Chrome could not be started — its objects are left for next time.")
+                        n += len(by_account[account])
+                        continue
+                    sessions += 1
+                    ctx.start_session(account)
+                    mainfetch._note_session(ctx, driver, account)
+                    last = account == accounts[-1]
+                    try:
+                        objects = [obj for _rec, obj in by_account[account]]
+                        located = mainfetch.object_locators(library, ctx, objects)
+                        for rec, obj in by_account[account]:
+                            n += 1
+                            entry = located.get(_rp_key(obj))
+                            if entry is None:
+                                print(f"\n   ⏭️ {obj['manual_id']} · {obj['label']}: not in the library as listed")
+                                continue
+                            if _rp_object(driver, ctx, rec, obj, entry[1], library, n, total, state) == "quit":
+                                outcome = "quit"
+                                break
+                    except mainfetch.SessionExpiredError:
+                        print(f"❌ Profile '{account}' is logged out. Open Chrome with --user-data-dir="
+                              f"{mainfetch.CHROME_PROFILES[account]}, sign in to photos.google.com, then re-run "
+                              f"resolve_photos (answers given so far are kept).")
+                    except KeyboardInterrupt:
+                        interrupted = True   # _end_run terminates the Chrome at once, as a fetch's Ctrl+C does
+                        raise
+                    finally:
+                        if not interrupted:
+                            try:
+                                mainfetch._close_session(driver, ctx, last=last or outcome != "done")
+                            except Exception as e:
+                                print(f"   > ⚠️ Closing Chrome failed ({type(e).__name__}: {e}).")
+                        try:
+                            driver.quit()
+                        except Exception:
+                            pass
+                    if outcome != "done":
+                        break
+            except KeyboardInterrupt:
+                interrupted, outcome = True, "interrupted"
+            except gp_inventory.LockLost as e:
+                outcome = "lock-lost"
+                print(f"\n❌ {e} — stopping; the answers given so far are kept.")
+            except Exception as e:  # a browser fault, a bug: stop the walk, never lose an answer already written
+                interrupted, outcome = True, "error"
+                print(f"\n❌ resolve_photos stopped: {_gp_line(e)} — the answers given so far are kept.")
+            finally:
+                mainfetch._end_run(ctx, interrupted)
+    except mvcommon.LockHeldError:
+        print("❌ resolve_photos: a fetch, a check, a crawl or the profile warm-up holds the fetch session lock — it "
+              "needs the same Chrome profiles and port; re-run when it has finished.")
+        return "locked"
+    return outcome
+
+
+def _rp_not_uploaded_lines(library):
+    """The IMP-C27 list: every object whose newest answer is "not uploaded" and that is still in the library, not
+    confirmed."""
+    newest = {}
+    for answer in mvcommon.read_resolved():
+        newest[(answer["account"], answer["manual_id"], answer["sha256"])] = answer
+    told = []
+    for (account, manual_id, sha256), answer in newest.items():
+        if answer["answer"] != "not_uploaded":
+            continue
+        real, entry = _gp_resolve(library, manual_id)
+        obj = next((o for o in mvcommon.iter_entry_objects(real, entry) if o["sha256"] == sha256), None)
+        if obj is not None and obj["cloud_state"] != "confirmed":
+            told.append(f"    {real} · {obj['label']} — in '{account}' (answered {answer['at']})")
+    if not told:
+        return []
+    return [f"\n⚠️⚠️⚠️  YOU SAY NOT UPLOADED (IMP-C27): {len(told):,} object(s) — an archived entry keeps only a dummy "
+            f"locally  ⚠️⚠️⚠️"] + told
+
+
+def _rp_apply(state):
+    """The end: the apply engine's dry run over the WHOLE learned sidecar — its summary, this session's objects marked
+    — then "Apply these N changes to the library? [y/N]" (anything but y: no). -> the engine's report when applied,
+    else None."""
+    try:
+        records = mvcommon.read_learned()
+    except (OSError, ValueError) as e:
+        print(f"⚠️  The learned sidecar could not be read ({_gp_line(e)}) — nothing applied.")
+        return None
+    preview = gphotos_apply(records, capture=True, dry_run=True)
+    if preview["status"] == "error":
+        return None   # the engine printed its one warning line
+    changed = preview["changed"]
+    if not changed:
+        print("\nLibrary: nothing to apply — the learned sidecar holds nothing new for it.")
+        return None
+    print(f"\nApply preview (dry run — nothing written yet): {len(changed):,} object(s) would change")
+    for change in changed:
+        mark = "  ← answered now" if (change["manual_id"], change["label"], change["sha256"]) in state["answered"] \
+            else ""
+        print(f"    {change['manual_id']} · {change['label']} — {change['action']}{mark}")
+    print(_mp_engine_line(preview, "would change"))
+    answer = _rp_ask(f"Apply these {len(changed):,} changes to the library? [y/N]: ")
+    if not answer or answer.lower() not in ("y", "yes"):
+        print("Not applied — the library is untouched. The answers stay in the learned sidecar: the next fetch's "
+              "merge, check_photos --apply or resolve_photos folds them.")
+        return None
+    report = gphotos_apply(records, capture=True, dry_run=False)
+    print(_mp_engine_line(report, "updated"))
+    return report
+
+
+def cmd_resolve_photos(source="failed", account=None, manual_id=None):
+    """`resolve_photos [failed|<csv>] [--account a] [--id <manual_id>]` (PLAN Step 14 — see the section comment): the
+    user resolves the failed list (or a failed_objects.csv / resolutions_todo.csv) by hand, one object at a time, in
+    the account's Chrome. Refused when the keyboard is not a terminal (OD-14: CLI only). Every answer is recorded at
+    once (learned sidecar + resolved.jsonl); the library changes only after the final "Apply these N changes to the
+    library? [y/N]". -> {status: ok | refused | error | interrupted, answered (objects answered now), applied (the
+    engine's report or None), walk (how the walk ended)}."""
+    result = {"status": "ok", "answered": 0, "applied": None, "walk": None}
+    if not _rp_stdin_is_tty():
+        print("❌ resolve_photos is interactive: run it in a terminal — its questions cannot be answered from a pipe or "
+              "the web UI.")
+        return dict(result, status="refused")
+    library = load_library()
+    if source != "failed" and not os.path.isfile(source):
+        print(f"❌ resolve_photos: no such file: {source}")
+        return dict(result, status="error")
+    try:
+        found = _rp_rows(library, source, account, manual_id)
+    except (OSError, ValueError) as e:
+        print(f"❌ resolve_photos: {source} could not be read ({_gp_line(e)}).")
+        return dict(result, status="error")
+    where = " · ".join(p for p in (f"account {account}" if account else "",
+                                   f"id {manual_id}" if manual_id else "") if p)
+    print(f"=== RESOLVE PHOTOS — {'the failed list' if source == 'failed' else source}{' · ' + where if where else ''} "
+          f"— {len(found['rows']):,} object(s) to resolve ===")
+    extra = [f"{found['answered']:,} answered before" if found["answered"] else "",
+             f"{found['confirmed']:,} confirmed by now" if found["confirmed"] else ""]
+    if any(extra):
+        print("  (" + " · ".join(e for e in extra if e) + " — left out)")
+    for line in found["problems"]:
+        print(f"  ⚠️ {line}")
+    if found["lost"]:
+        print(f"Lost downloads: {len(found['lost']):,} object(s) — their item WAS found, the transfer broke twice; not "
+              f"asked again here — re-fetch them:")
+        for _rec, obj in found["lost"]:
+            print(f"    {_rp_fetch_command(obj)}   ({obj['label']})")
+    state = {"answered": set(), "heartbeat": None}
+    if found["rows"]:
+        print("Answer each with [p]aste photo URL | [s]earch term | [n]ot uploaded | s[k]ip | [q]uit — every answer is "
+              "recorded at once; the library changes only if you say so at the end.")
+        result["walk"] = _rp_walk(library, found["rows"], state)
+        if result["walk"] == "locked":
+            return dict(result, status="refused")
+        result["answered"] = len(state["answered"])
+        if result["walk"] == "interrupted":
+            print("\n🛑 Stopped by user — the answers given so far are kept (learned sidecar + resolved.jsonl); "
+                  "nothing was applied to the library.")
+            return dict(result, status="interrupted")
+        if result["walk"] == "error":
+            return dict(result, status="error")   # nothing applied: a stopped walk is re-run, not applied blind
+    elif not found["lost"]:
+        print("Nothing to resolve.")
+    for line in _rp_not_uploaded_lines(load_library()):
+        print(line)
+    if result["walk"] != "lock-lost":
+        result["applied"] = _rp_apply(state)   # answers declined earlier are offered again (they wait in the sidecar)
+    if found["lost"]:
+        answer = _rp_ask(f"Re-fetch the {len(found['lost']):,} lost download(s) now? (a fetch also folds the learned "
+                         f"sidecar into the library when it ends) [y/N]: ")
+        if answer and answer.lower() in ("y", "yes"):
+            owners = dict.fromkeys((obj["manual_id"], obj["kind"] in ("extra_whole", "extra_chunk"))
+                                   for _rec, obj in found["lost"])
+            for owner, extra in owners:
+                cmd_dispatch_fetch(owner, fetch_extras=extra)
+    return result
 
 
 # ==========================================
@@ -16900,6 +17443,8 @@ if __name__ == "__main__":
         print(f"  {MAP_USAGE}  — map the uploaded objects to the Google Photos inventory (dry-run by default; --apply writes)")
         print(f"  {CHECK_USAGE}  — verify objects in Google Photos without downloading (dry-run by default; --apply / "
               f"--apply-run record; pending --list is offline)")
+        print(f"  {RESOLVE_USAGE}  — resolve the failed list by hand in Chrome (interactive, a terminal only): paste a "
+              f"photo URL, give a search term or mark it not uploaded; the library changes only when you say so")
         print(f"  {MVMETA_UPGRADE_USAGE}  — upgrade the phones' .mvmeta.json sidecars to v2 with the proven identity "
               f"facts (dry-run by default; --apply rewrites them, keeping each original locally)")
         print("  web [--port N] [--host H] [--no-browser] [--demo]  — Launch the local web operations console (Disk Reclaim view); --demo = SAFE build, all actions simulated")
@@ -17611,6 +18156,18 @@ if __name__ == "__main__":
             print(f"   Usage: {CHECK_USAGE}")
             sys.exit(1)
         if cmd_check_photos(**_cp_opts).get("status") in CHECK_FAILED_STATUSES:
+            sys.exit(1)
+
+    elif cmd == "resolve_photos":
+        # [IMP-C25 Step 14] resolve_photos [failed|<csv>] [--account a] [--id <manual_id>] — interactive, CLI only
+        # (OD-14): every answer recorded at once; the library changes only after the final "Apply …? [y/N]"
+        try:
+            _rp_opts = parse_resolve_photos_args(sys.argv[2:])
+        except ValueError as _rp_err:
+            print(f"❌ resolve_photos: {_rp_err}")
+            print(f"   Usage: {RESOLVE_USAGE}")
+            sys.exit(1)
+        if cmd_resolve_photos(**_rp_opts).get("status") in RESOLVE_FAILED_STATUSES:
             sys.exit(1)
 
     elif cmd == "mvmeta_upgrade":

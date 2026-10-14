@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 14.f (main: resolve_photos — the command, its prompts, the apply, follow-up b)
+STATE: IN PROGRESS — next: 14.g (gates: disarm probes on a scratch copy · full suite · smoke · self-review · COMPLETE)
 
 # IMP-C25 Step 14 — `--manual`, `resolve_photos` (manual confirm + match), robust fetch_restore resume, web behavior
 # (+ follow-ups a–d) — resumable status
@@ -127,14 +127,37 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       export_failed_csv now writes from it (its tests green). Tests: test_resolve_photos 35 passed (14.e part); disarm
       (scratch copy) ×3: only edited rows → 8 fail · not_uploaded with an item → 1 · confirmed listed → 2 (incl. the
       existing export test). Consumers (primitives, map_photos, check_photos, gphotos_apply, schema guard,
-      auto_confirm, mvmeta_upgrade) 930 passed; smoke 82 passed — the WIP SHA is in the commit that ticks 14.f
-- [ ] 14.f main: `resolve_photos [failed|<csv>] [--account a] [--id <manual_id>]` — the TTY refusal, the rows (newest
+      auto_confirm, mvmeta_upgrade) 930 passed; smoke 82 passed — d7d2c0b
+- [x] 14.f main: `resolve_photos [failed|<csv>] [--account a] [--id <manual_id>]` — the TTY refusal, the rows (newest
       failed row per object, confirmed / orphaned / answered ones left out), grouped by account, one Chrome session per
       account under the fetch lock (start-up cleanup + journal + robust close), the identification block, the best
       start, `[p]aste photo URL | [s]earch term | [n]ot uploaded | s[k]ip | [q]uit`, every answer recorded at once, the
       final dry-run summary + `Apply these N changes to the library? [y/N]`, the download-lost re-fetch offer, the C27
       list · check_photos' report points ambiguous objects at resolve_photos (follow-up b) · the CLI branch + usage
-      line — tests: tests/test_resolve_photos.py
+      line — tests: tests/test_resolve_photos.py.
+      Done (main.py, a new section after cmd_check_photos): RESOLVE_USAGE / RESOLVE_PROMPT / RESOLVE_FAILED_STATUSES
+      (refused, error, interrupted -> exit 1) · parse_resolve_photos_args · `_rp_stdin_is_tty()` seam (refused, exit 1,
+      nothing launched) · `_rp_rows` (failed list via mvcommon.failed_objects or a CSV via read_failed_csv_rows; --account;
+      --id = the id, an alias's primary, or any prefix; answered = an answer at/after the newest failed row; download-
+      lost rows apart) · `_rp_walk` (mainfetch._check_lock without waiting + its heartbeat beaten at every question;
+      GP_ACCOUNTS order; profile_preflight; the port guard before a 2nd session; _startup_cleanup + FetchJournal once;
+      init_driver; _note_session; object_locators; shared close / Ctrl+C -> _end_run terminates; signed out -> that
+      account's line, the walk goes on; LockLost / any other fault -> the walk stops, answers kept) · `_rp_object` (the
+      block via identification_lines with the failed row's tried + candidates, open_best_start, the question; a pasted
+      URL is accepted at the question too) · paste -> verify_item: match -> learned (source check, proof dedupkey |
+      filename) + answer url; gone -> named; content mismatch -> refused; else the manual-match question -> proof /
+      source manual · search -> search_override at once + locate_object(stages=("user_query",)) -> found adds a check
+      record (approach s3u_user_query) · not uploaded -> answer only · the IMP-C27 list at the end · `_rp_apply`: the
+      engine's dry run over the whole sidecar, "← answered now" marks, `Apply these N changes to the library? [y/N]` —
+      also offered when nothing is left to walk (declined answers wait in the sidecar) · download-lost: listed with
+      their fetch commands, `Re-fetch … now? (a fetch also folds the learned sidecar …) [y/N]` -> cmd_dispatch_fetch
+      per owner (--fetchExtras for an extra) · dispatcher branch + the no-args usage line · follow-up b: the check
+      report's Ambiguous line now says "pick the right item with python main.py resolve_photos failed". Tests:
+      test_resolve_photos 71 passed (14.e 35 + 14.f 36). Disarm (scratch copy) ×8: no TTY check → 1 fail · proven
+      other bytes offered → 1 · applied without asking → 2 · answered rows walked again → 2 · verified paste as manual
+      → 1 · answer log not written → 9 · download-lost walked → 1 · the old ambiguous line → 1. Neighbours 1141 passed;
+      smoke 82 passed (49.6 s right after the neighbours — re-timed at 14.g) — the WIP SHA is in the commit that ticks
+      14.g
 - [ ] 14.g gates: disarm probes (isolated scratch copy) · full suite · smoke · self-review · STATE: COMPLETE · the
       final feat commit `feat(imp-c25): Step 14 — --manual, resolve_photos, robust fetch_restore resume, Chrome robustness`
 

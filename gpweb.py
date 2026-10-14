@@ -304,11 +304,35 @@ def rpc_records(body):
 _DURATION_EXT_KEY = "76647426"  # PLAN P12: the item's trailing extension object → duration
 
 
+def _jspb_field(arr, index):
+    """One field of a JSPB message array by its 0-based index -> (where, value):
+      ("dense", arr[index])   the array's dense part reaches the index (a trailing object is not a dense slot);
+      ("sparse", value)       a trailing object — the array's last element, a dict — holds the field under its FIELD
+                              NUMBER, str(index + 1);
+      ("absent", None)        neither: the record does not carry the field.
+    Live 2026-10-14 (IMP-C25 Step 14, follow-up d — one read-only probe of a real TV item): lcxiM / VrseUb / EzkLib item
+    arrays are dense up to index 14 with the extension object at [15]; a swbisb record is dense only up to index 8 and
+    carries later fields in a trailing object keyed by field number — its "15" holds the very value the dense arrays hold
+    at [14] (same item). That record is also field-masked: a field the full item carries ([7]) is null in it, so a field
+    it does not carry is UNKNOWN, never "unset"."""
+    if not isinstance(arr, list):
+        return "absent", None
+    tail = arr[-1] if arr and isinstance(arr[-1], dict) else None
+    dense = len(arr) - (1 if tail is not None else 0)
+    if index < dense:
+        return "dense", arr[index]
+    if tail is not None and str(index + 1) in tail:
+        return "sparse", tail[str(index + 1)]
+    return "absent", None
+
+
 def _partial_upload(arr):
-    """PLAN P12: item[12][0] == 20 ⇒ partial upload. None when the item is too short to tell."""
-    if not isinstance(arr, list) or len(arr) <= 12:
+    """PLAN P12: item[12] (field 13) = [20, …] ⇒ partial upload. Null in the dense part ⇒ False (live 2026-10-14: [12] is
+    null for a complete item in lcxiM / VrseUb / EzkLib). A compact record (swbisb) carries the field — if at all — in
+    its trailing object (_jspb_field); a record that does not carry it ⇒ None (unknown, never guessed)."""
+    where, v = _jspb_field(arr, 12)
+    if where == "absent":
         return None
-    v = arr[12]
     if v is None:
         return False
     if isinstance(v, list):
@@ -317,10 +341,11 @@ def _partial_upload(arr):
 
 
 def _archived(arr):
-    """PLAN P12: item[13] = archived. None when absent."""
-    if not isinstance(arr, list) or len(arr) <= 13:
+    """PLAN P12: item[13] (field 14) = archived (live 2026-10-14: false for an item in the timeline). Read like
+    _partial_upload: dense, else a compact record's trailing object; not carried ⇒ None (unknown)."""
+    where, v = _jspb_field(arr, 13)
+    if where == "absent":
         return None
-    v = arr[13]
     if v is None:
         return False
     if isinstance(v, bool):
@@ -385,7 +410,9 @@ def _items_page(payload):
 def parse_lcxiM(payload):
     """Timeline by taken date — request [pageId, timestamp_ms|null, pageSize≤500, null, 1, source]
     (source 1 library, 2 archive, 3 both) → payload [items, nextPageId, lastItemTimestamp] (PLAN P12) →
-    {items: [record + partial_upload, archived, duration_ms], next_page_id, last_timestamp_ms, rejected}."""
+    {items: [record + partial_upload, archived, duration_ms], next_page_id, last_timestamp_ms, rejected}.
+    Live 2026-10-14: its items are the FULL dense records (16 entries; [12] / [13] carry partial / archived) — the
+    source of those flags for a found item (check_photos' quality pass asks it when swbisb's compact record cannot)."""
     page = _items_page(payload)
     if page is not None:
         page["last_timestamp_ms"] = _int_or_none(_get(payload, 2), allow_str=True)
@@ -403,7 +430,9 @@ def parse_swbisb(payload):
     """Hash lookup — request [[<SHA-1 as STANDARD base64, padded>, …], null, 3, 0] → payload
     [[[hash, record], …]] (PLAN P12) → {matches: [record + flags + hash_b64 + dedup_consistent], rejected}.
     `dedup_consistent` is True when the record's dedupKey is the queried hash (it should always be);
-    unmatched hashes are simply absent."""
+    unmatched hashes are simply absent.
+    Live 2026-10-14: a swbisb record is COMPACT and field-masked (dense to index 8, later fields in a trailing object by
+    field number — _jspb_field): partial_upload / archived are None (unknown) unless that object carries them."""
     if not isinstance(payload, list):
         return None
     pairs = _get(payload, 0)
@@ -431,7 +460,11 @@ def parse_VrseUb(payload):
     The dedupKey is read at [0][3] (P3); only when that slot holds no key is [0][11] tried (the
     item-info-ext position — UNVERIFIED for VrseUb). `original_quality` is always None here: no
     pre-resolved fact places the quality flag in this payload — read it from parse_EWgK9e (PLAN P12).
-    The two URLs are short-lived bearer credentials: never store, print or log them (P-20)."""
+    The two URLs are short-lived bearer credentials: never store, print or log them (P-20).
+    Live 2026-10-14 (one probe, request [id, null×4]): payload[0] is the full dense record (16 entries; [12] null and
+    [13] false for a complete item in the timeline). That answer had only 5 entries — [1] a long URL (its role not
+    verified), [4] a trailing object without field 8 — so P14's payload[7] was absent: download_original_url None, and
+    gprpc.download_url falls back to pLFTfd, as it is built to."""
     if not isinstance(payload, list):
         return None
     item = _get(payload, 0)
@@ -467,7 +500,11 @@ def parse_EWgK9e(payload):
     [takesUpSpace, spaceTaken, quality]]] (PLAN P12) → {items: [{photo_id, filename, size_bytes,
     taken_ms, tz_offset_ms, upload_ms, original_quality}], rejected}.
     The quality triple is read as the LAST element of the info array, exactly as P12 lists it (its
-    absolute index is elided there — UNVERIFIED); original_quality is None when it is absent."""
+    absolute index is elided there — UNVERIFIED); original_quality is None when it is absent.
+    Live 2026-10-14 (IMP-C25 Step 14, follow-up d): the real info array (26 entries for an original-quality video the web
+    page labels "Original quality") holds NO such triple — original_quality stays None (unknown). Several of its fields
+    (and of fDcn4b's / VrseUb's) hold 2, but with no storage-saver item to compare, which one is the quality code cannot
+    be told — so none is read (never a guess)."""
     if not isinstance(payload, list):
         return None
     head = _get(payload, 0)

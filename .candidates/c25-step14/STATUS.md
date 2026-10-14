@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 14.b (the RPC quality flags, follow-up d — the read-only live probe)
+STATE: IN PROGRESS — next: 14.c (`--manual` + the identification block)
 
 # IMP-C25 Step 14 — `--manual`, `resolve_photos` (manual confirm + match), robust fetch_restore resume, web behavior
 # (+ follow-ups a–d) — resumable status
@@ -42,12 +42,25 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       stand-ins never probe the real port); neighbours (fetch hygiene, restore bubble, warm profiles, photos tab, check,
       locator, gp_inventory ×2, harvester, routing ×2, session detector, trigger retry, cli parsers, search wait) 772
       passed; smoke 82 passed; live read-only: the new query on this process → alive + its command line (1.6 s), on a
-      missing pid → (False, None) (0.8 s) — the WIP SHA is in the commit that ticks 14.b
-- [ ] 14.b follow-up d — the RPC quality flags: ONE read-only live probe (TV profile, one known item, port 9222 free,
+      missing pid → (False, None) (0.8 s) — 1ba0bda
+- [x] 14.b follow-up d — the RPC quality flags: ONE read-only live probe (TV profile, one known item, port 9222 free,
       no fetch/crawl running, nothing downloaded, Chrome closed, no URL/cookie/email printed) of the raw item records
       (swbisb / lcxiM / VrseUb / EWgK9e) → fix gpweb's parsers where the probe establishes a position with certainty,
       else keep "unknown" and say so — tests: tests/test_rpc_quality_flags.py (+ the fake updated only where the probe
-      proved the real layout)
+      proved the real layout). Findings: Log 2026-10-14 "14.b live probe". Changes: gpweb `_jspb_field` (dense slot,
+      else the trailing object by FIELD NUMBER str(index+1), else absent) — `_partial_upload` / `_archived` read through
+      it: a field the record does not carry is None (unknown), never False; every dense (Step 2b) layout reads exactly
+      as before · the four parsers' docstrings record the live layouts · mainfetch `_check_quality`: the pinned items
+      whose partial_upload is still unknown after the swbisb ask are read from the timeline at their taken second
+      (lcxiM, second*1000+999, TIMELINE_PAGE_SIZE — one call per distinct second, the item's own full record taken
+      from it) → Step 13's `inconsistent` verdict and its partial-upload outlier can fire live; a failing call leaves
+      them unknown (the one note line) · original_quality stays unknown live (no triple; the code cannot be told) ·
+      tests/gphotos_fake.py: `compact_array`, `batch_info_row(live=True)`, knobs `swbisb_compact` / `ewgk9e_live`
+      (default off: every existing test sees the same fake). Tests: test_rpc_quality_flags 20 passed; disarm (scratch
+      copy) no timeline pass → 4 fail · no field-number read → 3 fail · an absent field read as unset → 6 fail;
+      neighbours (check_photos, schema guard, harvester, hygiene, routing, search wait, gp_inventory, gphotos_apply,
+      primitives, gprpc, gpweb, locator, map_photos, mvmeta_upgrade, chrome robustness, quality flags) 1551 passed;
+      smoke 82 passed — the WIP SHA is in the commit that ticks 14.c
 - [ ] 14.c `--manual` + the identification block (mainfetch): at the end of `_fetch_items`, before `_finish_downloads`,
       every object of the entry part not fetched gets its identification block (account, exact uploaded name, local
       taken time, content key, size, what was tried, its failed-list status, the CLI next steps); with ctx.manual the
@@ -123,10 +136,21 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
    answer — while it is open the pid cannot have been reused, and the run launched that chrome.exe with that profile.
    A positive answer naming another profile, or an unreadable command line, still means "never" (Step 11's pins).
    The start-up cleanup (journaled pids, no handle) keeps the command-line rule unchanged.
+12. The quality flags (follow-up d): a fact the record does not carry is UNKNOWN (None), never False; nothing is read
+   from a position the live probe could not establish (the original-quality code: several fields hold 2 for the one
+   original-quality item, none can be told apart without a storage-saver item). check_photos' quality pass takes
+   partial upload / archived from the item's full timeline record when the hash record lacks them — the price is ≤ 1
+   lcxiM call per pinned object live (same-second items share one; gprpc paces ≥ 0.5 s), so a long sweep runs about
+   0.6–1 s per object longer: the one source the probe showed that carries them, and the follow-up's goal ("so the
+   inconsistent verdict and those outlier classes can fire") needs it. Flagged in the report for the orchestrator.
 
 ## Assumptions (also listed in the final report)
 - (A1) The harness's commit-attribution notice names the model for each commit's trailer (it said Opus 5.5 at dispatch;
   the session environment reports claude-fable-5-1; no MODEL-FALLBACK banner) — the quirk Steps 8–13c recorded.
+- (A2) P12's partial-upload / archived markers ([12][0] == 20, [13] true) are kept as given: the probe could confirm only
+  the negative case (one complete, non-archived item: [12] null, [13] false); no partial or archived item was probed.
+- (A3) One item stands for the TV account's record layouts (the dispatch allowed ONE item); the inventory agrees
+  (2374 TV records: original_quality absent for all, partial/archived False for the 1122 rpc-sourced ones).
 
 ## Log
 - 2026-10-14 dispatched; read-in: base contract (executor-opus.md); PLAN (journal, P-1…P-20, OD table, protocol, Steps
@@ -139,3 +163,30 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
   docs/testing-strategy.md; the pins in test_fetch_harvester / test_fetch_hygiene / test_fetch_photos_tab /
   test_chrome_restore_bubble / test_warm_profiles / test_gphotos_apply / test_check_photos / test_locator /
   test_fetch_search_wait / test_cli_parsers.
+- 2026-10-14 14.b live probe (ONE read-only session; redacted — structure only, no URL / key / name / email printed or
+  stored). Preconditions: nothing listening on 9222, no fetch lock, no fetch / crawl running (the only python was an
+  idle `main.py web`), no automation Chrome. Item: S02E03, found in the TV inventory by its PUBLISHED dedupKey (P2).
+  A scratch script (outside the repo) wrapped gpweb.PARSERS to see the raw payloads. A first attempt stopped BEFORE any
+  launch (the scratch script's cp1252 console could not print an emoji; lock released, nothing started); the re-run
+  with PYTHONIOENCODING=utf-8: downloads denied for the session (CDP), 6 calls (VrseUb, fDcn4b, swbisb, lcxiM,
+  EWgK9e, EzkLib), 0 errors, nothing clicked but the info button, Chrome closed through the fetch's own close; after:
+  no automation Chrome, no lock, port free, the TV profile exited cleanly. Raw layouts:
+  * full dense record — lcxiM / EzkLib items and VrseUb payload[0]: 16 entries; [0] id, [1] thumbnail (10 entries),
+    [2] taken, [3] dedupKey, [4] tz, [5] upload, [6] null or a 1-entry list, [7] 12 capability-like codes, [8] 2,
+    [9]–[11] null, [12] null, [13] false, [14] an int, [15] the extension object (76647426 → [0] the duration, 1920,
+    1080, …; 163238866; 318563170 → [[2,0,2,0,null,1]]; …) → parsed partial False, archived False, duration known.
+  * swbisb record: [hash, record of 10 entries]: [0]–[5] the P3 fields, [6] null, [7] null (the full record sets
+    [7]: field-masked), [8] 2, [9] a trailing object keyed by FIELD NUMBER — "15" holds the full record's [14],
+    "76647426" the duration → partial / archived not carried → None for every item (why Step 13 never saw them).
+  * EWgK9e: [[null, rows]]; a row has 6 entries [id, info, null, null, null, 2-entry list]; info has 26 entries:
+    [2] '', [3] the name, [6] taken, [7] tz, [8] upload, [9] size (as P12), [10] 100, [18] 2, [23] 1, [25] = the
+    record's [14] → NO [takesUpSpace, spaceTaken, quality] triple → original_quality None.
+  * fDcn4b payload[0]: 33 entries — [2] name, [3] taken, [4] tz, [5] size, [6]/[7] 1920/1080, [11] dedupKey (as the
+    Step 2 text), [14] 2, [29] 2, [30] [2,0,2,0,null,1].
+  * VrseUb payload: 5 entries — [1] a 1189-char URL (role not verified), [2] the codes, [3] an 18-entry list, [4] a
+    trailing object (fields 11, 13 = a URL, 155147258) without field 8 → P14's payload[7] absent →
+    download_original_url None (gprpc.download_url falls back to pLFTfd as built; not changed — R2 verifies downloads).
+  * the item's web info panel: "Original quality", "Backed up", "doesn't take up space"; no "Storage saver".
+  Reading: 2 sits at [8] of every item record, fDcn4b [14] / [29], the [2,0,2,0,null,1] list and EWgK9e [18] — any
+  could be the quality code; one original-quality item cannot tell which → original_quality stays unknown (said in the
+  report; a storage-saver item would settle it). No partial / archived item → P12's markers kept (A2).

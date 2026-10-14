@@ -19,7 +19,8 @@ WORLD — FakePhotos(root)  (the `fake_photos` fixture in tests/conftest.py buil
           "html" | "wrong_bytes" · mint_refused · vrseub_original_url · refuse_download_redirect ·
           viewport_tiles · scroll_step_tiles · ezklib_page_size · escape_slashes_in_pages · now (year omission)
           script_search(account, query, photo_ids) · fail_next_rpc(kind, count=1, rpcid=None) ·
-          expire_download_urls()
+          expire_download_urls() · swbisb_compact / ewgk9e_live (IMP-C25 Step 14 d: answer swbisb / EWgK9e in the
+          layouts a live probe of a real item showed on 2026-10-14 — compact_array, batch_info_row(live=True))
   logs:   rpc_log (every batchexecute call MediaVault SENT, refused ids included) · downloads
 
 SEARCH SEMANTICS — scripted results first; an ISO day 'YYYY-MM-DD' → the items taken on that LOCAL date
@@ -217,9 +218,23 @@ def ext_array(item):
             item.width, item.height, None, None, None, item.dedup_key]
 
 
-def batch_info_row(item):
+def compact_array(item):
+    """The swbisb record as a live probe of a real item showed it (2026-10-14, IMP-C25 Step 14 d): COMPACT and
+    field-masked — dense only up to index 8 ([0]–[5] the P3 fields, [6] / [7] null although the full record sets [7],
+    [8] 2), every later field in a trailing object keyed by FIELD NUMBER ("15": the value the full record holds at [14];
+    "76647426": the duration extension). Partial upload / archived are NOT carried."""
+    return item_array(item)[:6] + [None, None, 2, {"15": 4242, "76647426": [item.duration_ms]}]
+
+
+def batch_info_row(item, live=False):
     """EWgK9e per item (PLAN P12): [photo_id, [_, _, description, file name, _, _, taken_ms, tz_ms,
-    upload_ms, size, …, [takesUpSpace, spaceTaken, quality]]] — the triple is both index 30 and last."""
+    upload_ms, size, …, [takesUpSpace, spaceTaken, quality]]] — the triple is both index 30 and last.
+    live=True: the layout a live probe showed (2026-10-14, IMP-C25 Step 14 d) — a 26-entry info array with NO quality
+    triple ([10] 100, [18] 2, [23] 1, [25] an int) and a 6-entry row."""
+    if live:
+        info = [None, None, "", item.filename, None, None, item.taken_ms, item.tz_offset_ms, item.upload_ms,
+                item.size_bytes, 100] + [None] * 7 + [2] + [None] * 4 + [1, None, 4242]
+        return [item.photo_id, info, None, None, None, [None, None]]
     triple = [0, 0, 2] if item.original_quality else [1, item.size_bytes, 1]
     info = [None, None, "", item.filename, None, None, item.taken_ms, item.tz_offset_ms, item.upload_ms,
             item.size_bytes] + [None] * 20 + [triple]
@@ -286,6 +301,8 @@ class FakePhotos:
         self.scroll_step_tiles = 12
         self.ezklib_page_size = 50
         self.escape_slashes_in_pages = False
+        self.swbisb_compact = False   # swbisb records in the live compact layout (compact_array)
+        self.ewgk9e_live = False      # EWgK9e rows in the live layout (batch_info_row(live=True))
         self.rpc_log = []
         self.downloads = []
         self.minted = {}
@@ -490,7 +507,8 @@ class FakePhotos:
 
     def _h_swbisb(self, acc, req):
         hashes = req[0] if isinstance(req, list) and req and isinstance(req[0], list) else []
-        pairs = [[h, item_array(it)] for h in hashes for it in self._newest_first(self._live(acc.name))
+        record = compact_array if self.swbisb_compact else item_array
+        pairs = [[h, record(it)] for h in hashes for it in self._newest_first(self._live(acc.name))
                  if isinstance(h, str) and it.hash_b64 == h]
         return ([pairs] if pairs else []), None
 
@@ -516,7 +534,7 @@ class FakePhotos:
         except (IndexError, KeyError, TypeError):
             wrapped = []
         keys = [k[0] for k in (wrapped if isinstance(wrapped, list) else []) if isinstance(k, list) and k]
-        rows = [batch_info_row(it) for it in (self._live_item(acc, k) for k in keys) if it]
+        rows = [batch_info_row(it, live=self.ewgk9e_live) for it in (self._live_item(acc, k) for k in keys) if it]
         return [[None, rows]], None
 
     def _h_pLFTfd(self, acc, req):

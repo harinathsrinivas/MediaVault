@@ -5605,7 +5605,12 @@ def _check_quality(run, driver, ctx, account, lines, known):
     from EWgK9e, partial_upload / archived from the item record (swbisb), each asked once per batch for the items the
     pre-warm did not already describe. One results.jsonl line (kind "quality") per pinned item: {account, photo_id,
     manual_id, label, sha256, original_quality, partial_upload, archived — the ones known}. RPC off or a failing call:
-    the facts stay unknown (never a reason to doubt an item). Raises only SessionExpiredError and gprpc.RpcRefused."""
+    the facts stay unknown (never a reason to doubt an item). Raises only SessionExpiredError and gprpc.RpcRefused.
+    [IMP-C25 Step 14, follow-up d — live 2026-10-14] A real swbisb record is compact and field-masked: it does not carry
+    partial_upload / archived (gpweb.parse_swbisb), so they used to stay unknown for every item. The full dense record
+    does carry them: for each item still unknown, the timeline at its taken second (lcxiM — one call per distinct
+    second: a release batch or a chunk set shares one) is read and the item's own record taken from it. EWgK9e's quality
+    triple does not exist live: original_quality stays unknown (gpweb.parse_EWgK9e)."""
     pinned = [line for line in lines if line.get("found") and line.get("outcome") == "exactly-one"
               and isinstance(line.get("photo_id"), str)]
     if not pinned:
@@ -5627,6 +5632,15 @@ def _check_quality(run, driver, ctx, account, lines, known):
                     for rec in recs:
                         if rec["photo_id"] == wants[digest]:
                             _check_remember_quality(known, rec, "partial_upload", "archived")
+            seconds = {}
+            for l in pinned:
+                taken = (l.get("record") or {}).get("taken_ms")
+                if "partial_upload" not in known.get(l["photo_id"], {}) and mvcommon._is_int(taken):
+                    seconds.setdefault(taken // 1000, set()).add(l["photo_id"])
+            for second, ids in sorted(seconds.items()):
+                for rec in gprpc.timeline_at(driver, second * 1000 + 999, TIMELINE_PAGE_SIZE)["items"]:
+                    if rec["photo_id"] in ids:
+                        _check_remember_quality(known, rec, "partial_upload", "archived")
         except gprpc.RpcUnavailable as e:
             _check_note_rpc(ctx, e)
     for l in pinned:

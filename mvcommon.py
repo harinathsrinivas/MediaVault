@@ -1028,6 +1028,10 @@ _FAILED_KEYS = ("at", "run", "account", "category", "manual_id", "label", "sha25
 GP_HINT_KINDS = ("url", "datetime")   # the user's manual resolutions (PLAN Step 9 (8)) check_photos hinted verifies
 _HINT_KEYS = ("v", "at", "account", "manual_id", "label", "sha256", "kind", "photo_id", "taken_ms", "gmt_offset_min",
               "taken_local", "source")
+# [IMP-C25 Step 14] resolve_photos' answer log (resolved.jsonl): what the user answered for a failed object
+GP_RESOLVE_ANSWERS = ("url", "search", "not_uploaded")
+_RESOLVED_KEYS = ("v", "at", "account", "manual_id", "label", "sha256", "answer", "photo_id", "proof", "search_term",
+                  "found")
 _TAKEN_LOCAL_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
 _TRIED_KEYS = ("approach", "outcome", "n")
 _OBJECT_KINDS_WHOLE = ("whole", "extra_whole")
@@ -2168,6 +2172,76 @@ def read_hints(errors=None):
     return _read_jsonl(hints_path(), lambda raw: _normalize_hint(raw, fill=False), errors)
 
 
+# ------------------------------------------------------------- resolve_photos' answers (PLAN Step 14)
+
+def resolved_path():
+    """~/.mediavault/gphotos/resolved.jsonl — what the user answered in `resolve_photos` for a failed object (IMP-C25
+    Step 14): the log a resumed session skips answered rows by, and the IMP-C27 list of objects the user says never
+    reached Google Photos. The facts an answer proves go to the learned sidecar (P-10) as they always do."""
+    return os.path.join(GPHOTOS_STATE_DIR, "resolved.jsonl")
+
+
+def _normalize_resolved(record, fill=True):
+    """Validate one answer; -> its canonical form (None values dropped, keys in order). fill: stamp a missing `v` /
+    `at` (the write path). Raises ValueError."""
+    if not isinstance(record, dict):
+        raise ValueError("resolved answer: expected a dict")
+    unknown = sorted(str(k) for k in record if k not in _RESOLVED_KEYS)
+    if unknown:
+        raise ValueError(f"resolved answer: unknown key(s) {unknown}")
+    r = {k: v for k, v in record.items() if v is not None}
+    if fill:
+        r.setdefault("v", _LEARNED_VERSION)
+        r.setdefault("at", _iso_now())
+    if not (_is_int(r.get("v")) and r["v"] == _LEARNED_VERSION):
+        raise ValueError(f"resolved answer: v must be {_LEARNED_VERSION}")
+    if _parse_at(r.get("at")) is None:
+        raise ValueError("resolved answer: `at` must be an ISO-8601 UTC time ending in Z")
+    if r.get("account") not in GP_ACCOUNTS:
+        raise ValueError(f"resolved answer: account must be one of {GP_ACCOUNTS}")
+    if not _text(r.get("manual_id")):
+        raise ValueError("resolved answer: manual_id is required")
+    if not _is_sha256(r.get("sha256")):
+        raise ValueError("resolved answer: sha256 must be the object's 64-hex SHA-256")
+    if "label" in r and not isinstance(r["label"], str):
+        raise ValueError("resolved answer: label must be a string")
+    if r.get("answer") not in GP_RESOLVE_ANSWERS:
+        raise ValueError(f"resolved answer: answer must be one of {GP_RESOLVE_ANSWERS}")
+    if "photo_id" in r and not (isinstance(r["photo_id"], str) and gpweb.MEDIA_KEY_RE.match(r["photo_id"])):
+        raise ValueError("resolved answer: photo_id is not a Google Photos media key")
+    if "proof" in r and r["proof"] not in GP_PROOF_LADDER:
+        raise ValueError(f"resolved answer: proof must be one of {GP_PROOF_LADDER}")
+    if "found" in r and not isinstance(r["found"], bool):
+        raise ValueError("resolved answer: found must be true or false")
+    if r["answer"] == "url" and not ("photo_id" in r and "proof" in r):
+        raise ValueError("resolved answer: a url answer names the item's photo_id and its proof")
+    if r["answer"] == "search" and not _text(r.get("search_term")):
+        raise ValueError("resolved answer: a search answer carries the user's search_term")
+    if r["answer"] == "not_uploaded" and any(k in r for k in ("photo_id", "proof", "search_term", "found")):
+        raise ValueError("resolved answer: a not_uploaded answer carries no item, proof or search term")
+    if "search_term" in r:
+        if r["answer"] != "search":
+            raise ValueError("resolved answer: only a search answer carries a search_term")
+        r["search_term"] = r["search_term"].strip()
+    return _ordered(r, _RESOLVED_KEYS)
+
+
+def append_resolved(record):
+    """Append one resolve_photos answer to resolved.jsonl: {account, manual_id, label, sha256 (the object's CURRENT
+    hash), answer: url (photo_id + proof: dedupkey | filename | manual) | search (search_term, found: whether the
+    user's term found it verified — then photo_id + proof) | not_uploaded}; `v` and `at` are filled. One UTF-8 JSON
+    line, fsynced at once (a quit or a crash keeps every answer given). Returns the record; ValueError for an invalid
+    one, OSError when it cannot be written."""
+    rec = _normalize_resolved(record)
+    _append_jsonl(resolved_path(), rec)
+    return rec
+
+
+def read_resolved(errors=None):
+    """The resolve_photos answers in append order; torn-line tolerant like read_learned. [] when there are none."""
+    return _read_jsonl(resolved_path(), lambda raw: _normalize_resolved(raw, fill=False), errors)
+
+
 def write_failed_csv(path, rows):
     """Write `rows` (dicts keyed by GP_FAILED_CSV_COLUMNS; a missing key is an empty cell) as the Excel-friendly
     CSV P-18 specifies — UTF-8 with BOM, CRLF line ends, the GP_FAILED_CSV_COLUMNS header — atomically (temp
@@ -2222,7 +2296,21 @@ def export_failed_csv(library):
     `set_search_cmd` carries the ready-made `set_search` command. Returns {path, rows, dropped_confirmed,
     dropped_orphans} (orphans counted per distinct missing object key). Raises OSError when the CSV cannot be
     written (e.g. open in Excel) — the failed list itself is never touched."""
-    records = read_failed()
+    listed = failed_objects(library)
+    path = failed_csv_path()
+    write_failed_csv(path, [_failed_row(rec, obj) for rec, obj in listed["rows"]])
+    return {"path": path, "rows": len(listed["rows"]), "dropped_confirmed": listed["confirmed"],
+            "dropped_orphans": listed["orphans"]}
+
+
+def failed_objects(library, records=None):
+    """The failed list against `library` — export_failed_csv's rows, shared with resolve_photos (IMP-C25 Step 14):
+    each record matched to its object by (manual_id, sha256), or by its label when it has no hash; the newest record
+    per object wins; an object now confirmed, or no longer in the library, is left out. records: the failed list
+    (default read_failed()). -> {"rows": [(newest record, object)] sorted by account, id and the object's position in
+    its entry (the object as iter_entry_objects gives it), "confirmed": how many were left out as confirmed,
+    "orphans": distinct missing object keys}."""
+    records = read_failed() if records is None else records
     objects = {}
     for mid in sorted({rec["manual_id"] for rec in records}):
         entry = library.get(mid) if isinstance(library, dict) else None
@@ -2245,11 +2333,9 @@ def export_failed_csv(library):
         if obj["cloud_state"] == "confirmed":
             confirmed += 1
             continue
-        rows.append(((rec["account"], rec["manual_id"], pos), _failed_row(rec, obj)))
+        rows.append(((rec["account"], rec["manual_id"], pos), rec, obj))
     rows.sort(key=lambda t: t[0])
-    path = failed_csv_path()
-    write_failed_csv(path, [row for _key, row in rows])
-    return {"path": path, "rows": len(rows), "dropped_confirmed": confirmed, "dropped_orphans": len(orphans)}
+    return {"rows": [(rec, obj) for _key, rec, obj in rows], "confirmed": confirmed, "orphans": len(orphans)}
 
 
 def _csv_header(cell):
@@ -2349,6 +2435,49 @@ def read_failed_csv(path):
     search_term; not_uploaded / skip -> nothing more. An invalid edit goes to `errors` as {line, manual_id,
     error} — never into `rows`. Raises ValueError when the file lacks the account / manual_id / decision
     columns, OSError when it cannot be read."""
+    rows, errors = [], []
+    for line, cell in _failed_csv_cells(path):
+        decision = cell.get("decision", "").lower()
+        if not decision:
+            continue  # not edited (or a blank line)
+        try:
+            rows.append(_csv_edit(cell, decision, line))
+        except ValueError as e:
+            errors.append({"line": line, "manual_id": cell.get("manual_id", ""), "error": str(e)})
+    return rows, errors
+
+
+def read_failed_csv_rows(path):
+    """[IMP-C25 Step 14] EVERY object row of a failed_objects.csv / resolutions_todo.csv — edited or not — for
+    `resolve_photos <csv>`: the same Excel-tolerant reading as read_failed_csv -> (rows, errors). A row -> {line,
+    account, manual_id, and the category / object / uploaded_name / status / expected_taken_local / sha256 present};
+    blank rows are skipped; a row without its account / manual_id, or whose sha256 column was changed, goes to
+    `errors` as {line, manual_id, error}. Raises ValueError / OSError like read_failed_csv."""
+    rows, errors = [], []
+    for line, cell in _failed_csv_cells(path):
+        if not any(cell.values()):
+            continue
+        account, manual_id = cell.get("account", "").lower(), cell.get("manual_id", "")
+        problem = ("manual_id is empty" if not manual_id else
+                   f"account {cell.get('account', '')!r} is not one of {', '.join(GP_ACCOUNTS)}"
+                   if account not in GP_ACCOUNTS else
+                   "the sha256 column was changed — it must stay the object's 64-hex SHA-256"
+                   if cell.get("sha256") and not _is_sha256(cell["sha256"]) else None)
+        if problem:
+            errors.append({"line": line, "manual_id": manual_id, "error": problem})
+            continue
+        row = {"line": line, "account": account, "manual_id": manual_id}
+        for key in ("category", "object", "uploaded_name", "status", "expected_taken_local", "sha256"):
+            if cell.get(key):
+                row[key] = cell[key]
+        rows.append(row)
+    return rows, errors
+
+
+def _failed_csv_cells(path):
+    """read_failed_csv's Excel-tolerant reading of one failed-objects / resolutions CSV -> [(line, {column: stripped
+    value})] for every row after the header (blank rows included). Raises ValueError when the file lacks the
+    account / manual_id / decision columns, OSError when it cannot be read."""
     with open(path, "rb") as fh:
         raw = fh.read()
     try:
@@ -2371,17 +2500,11 @@ def read_failed_csv(path):
     if missing:
         raise ValueError(f"{os.path.basename(path)} is not a failed-objects / resolutions CSV: "
                          f"missing column(s) {', '.join(missing)}")
-    rows, errors = [], []
+    out = []
     for cells in reader:
         cell = {}
         for name, value in zip(columns, cells):
             if name and name not in cell:
                 cell[name] = value.strip()
-        decision = cell.get("decision", "").lower()
-        if not decision:
-            continue  # not edited (or a blank line)
-        try:
-            rows.append(_csv_edit(cell, decision, reader.line_num))
-        except ValueError as e:
-            errors.append({"line": reader.line_num, "manual_id": cell.get("manual_id", ""), "error": str(e)})
-    return rows, errors
+        out.append((reader.line_num, cell))
+    return out

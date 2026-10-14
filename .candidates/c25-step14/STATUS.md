@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 14.e (mvcommon: the resolve answer log resolved.jsonl + read_failed_csv_rows)
+STATE: IN PROGRESS — next: 14.f (main: resolve_photos — the command, its prompts, the apply, follow-up b)
 
 # IMP-C25 Step 14 — `--manual`, `resolve_photos` (manual confirm + match), robust fetch_restore resume, web behavior
 # (+ follow-ups a–d) — resumable status
@@ -112,10 +112,22 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       runs only S3u, no preview; object_locators == _check_locators. 31 passed. Disarm (scratch copy) ×6: no hints → 3
       fail · dead ids kept → 1 (after adding the journal-named dead id) · stages ignored → 1 · name mismatch called a
       content mismatch → 1 · journal hints from every account → 1 · the name filter back in open_best_start → 1.
-      Neighbours 1591 passed; smoke 82 passed (19 s) — the WIP SHA is in the commit that ticks 14.e
-- [ ] 14.e mvcommon: the resolve answer log `resolved.jsonl` (append_resolved / read_resolved: resume + the IMP-C27
+      Neighbours 1591 passed; smoke 82 passed (19 s) — ce56e95
+- [x] 14.e mvcommon: the resolve answer log `resolved.jsonl` (append_resolved / read_resolved: resume + the IMP-C27
       "not uploaded" list) and `read_failed_csv_rows` (every object row of a failed_objects.csv / resolutions_todo.csv,
-      sharing read_failed_csv's Excel-tolerant decoding, read_failed_csv unchanged) — tests: tests/test_resolve_photos.py
+      sharing read_failed_csv's Excel-tolerant decoding, read_failed_csv unchanged) — tests: tests/test_resolve_photos.py.
+      Done: `resolved_path()` (GPHOTOS_STATE_DIR/resolved.jsonl), `GP_RESOLVE_ANSWERS` = url | search | not_uploaded,
+      `_RESOLVED_KEYS` (v, at, account, manual_id, label, sha256, answer, photo_id, proof, search_term, found),
+      `append_resolved` (validated, fsynced at once) / `read_resolved` (torn-line tolerant) — a url answer names
+      photo_id + proof, a search answer its search_term (+ found, + photo_id/proof when the term found it), not_uploaded
+      nothing else · `read_failed_csv_rows(path)` -> (rows {line, account, manual_id + category / object /
+      uploaded_name / status / expected_taken_local / sha256}, errors) · `_failed_csv_cells` = read_failed_csv's
+      reading, now shared (read_failed_csv's behaviour unchanged: its tests green) · `failed_objects(library,
+      records=None)` = export_failed_csv's join (newest record per object, confirmed and orphans left out, sorted),
+      export_failed_csv now writes from it (its tests green). Tests: test_resolve_photos 35 passed (14.e part); disarm
+      (scratch copy) ×3: only edited rows → 8 fail · not_uploaded with an item → 1 · confirmed listed → 2 (incl. the
+      existing export test). Consumers (primitives, map_photos, check_photos, gphotos_apply, schema guard,
+      auto_confirm, mvmeta_upgrade) 930 passed; smoke 82 passed — the WIP SHA is in the commit that ticks 14.f
 - [ ] 14.f main: `resolve_photos [failed|<csv>] [--account a] [--id <manual_id>]` — the TTY refusal, the rows (newest
       failed row per object, confirmed / orphaned / answered ones left out), grouped by account, one Chrome session per
       account under the fetch lock (start-up cleanup + journal + robust close), the identification block, the best

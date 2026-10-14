@@ -62,8 +62,36 @@ EXACT_LOCATOR_ENABLED = True
 # ==========================================
 #      AUTOMATION LOGIC (SELENIUM)
 # ==========================================
+# [IMP-C25 Step 14 c] Every navigation of an automation session is bounded. Selenium's (W3C's) default page-load
+# timeout is 300 s, and a live probe hung ~5 min in one driver.get (DECISIONS §1e). A page that does not load within
+# this long raises Selenium's timeout, so the caller's own error path runs (a stage falls back, an attempt is retried)
+# instead of the session hanging. The direct download lowers it for its own navigation (_bounded_get) and restores this
+# value; check sessions set the same bound (CHECK_PAGE_LOAD_S).
+FETCH_PAGE_LOAD_S = 60.0
+
+
+def bound_page_loads(driver, seconds=FETCH_PAGE_LOAD_S):
+    """[IMP-C25 Step 14 c] Bound every page load of a Selenium session to `seconds` (FETCH_PAGE_LOAD_S): a navigation
+    that does not finish raises Selenium's timeout instead of waiting out its 300 s default. A driver without
+    set_page_load_timeout (a test stand-in) is left as it is. Never raises; True when the bound was set."""
+    setter = getattr(driver, "set_page_load_timeout", None)
+    if not callable(setter):
+        return False
+    try:
+        setter(seconds)
+    except Exception:
+        return False
+    return True
+
+
 def init_driver(profile_key="movies"):
-    """Initializes the Chrome Driver with the selected profile."""
+    """Initializes the Chrome Driver with the selected profile.
+
+    [IMP-C25 Step 14 c — DECISIONS §1e] The session's page loads are bounded (bound_page_loads) before its first
+    navigation. An attach that fails — chromedriver-manager's online check, the attach itself, the Photos tab, or a
+    Ctrl+C meanwhile — ends the Chrome this call launched (_end_launched_chrome), so it never stays behind on the debug
+    port and the profile. A chrome.exe that handed over to a Chrome already running has exited at once: that Chrome
+    is never touched."""
 
     user_data_dir = CHROME_PROFILES.get(profile_key, CHROME_PROFILES["movies"])
     print(f"   > 🤖 Launching Chrome ({profile_key.upper()}) on Debug Port 9222...")
@@ -94,13 +122,18 @@ def init_driver(profile_key="movies"):
 
     # [IMP-C25 2026-10-08] A profile whose last Chrome did not record a clean exit would open with "Restore pages?".
     mark_profile_clean_exit(user_data_dir)
+    chrome = None
     try:
         chrome = subprocess.Popen(cmd)  # [IMP-C25 Step 11 d] kept: the fetch journal records its pid
         print("     Waiting 3 seconds for Chrome to stabilize...")
         time.sleep(3)
     except Exception as e:
         print(f"❌ Failed to launch Chrome binary: {e}")
+        _end_launched_chrome(chrome, user_data_dir)  # [IMP-C25 Step 14 c] (nothing when the launch itself failed)
         return None
+    except BaseException:  # [IMP-C25 Step 14 c] Ctrl+C while Chrome settles: it must not stay behind
+        _end_launched_chrome(chrome, user_data_dir)
+        raise
 
     print("   > 🔗 Attaching Selenium to localhost:9222...")
     options = Options()
@@ -111,7 +144,12 @@ def init_driver(profile_key="movies"):
         driver = webdriver.Chrome(service=service, options=options)
     except Exception as e:
         print(f"❌ Selenium Connection Error: {e}")
+        _end_launched_chrome(chrome, user_data_dir)  # [IMP-C25 Step 14 c] e.g. chromedriver-manager's online check
         return None
+    except BaseException:
+        _end_launched_chrome(chrome, user_data_dir)
+        raise
+    bound_page_loads(driver)  # [IMP-C25 Step 14 c] before the first navigation (use_photos_tab may open Photos)
 
     # [IMP-C29] Attaching leaves Selenium on whichever target chromedriver picked.
     # On Chrome 154 that is the Gemini side panel, where every search went nowhere.
@@ -123,7 +161,15 @@ def init_driver(profile_key="movies"):
             driver.quit()  # attach mode: ends the Selenium session only; Chrome stays open
         except Exception:
             pass
+        _end_launched_chrome(chrome, user_data_dir)  # [IMP-C25 Step 14 c] ... unless this call launched it
         return None
+    except BaseException:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        _end_launched_chrome(chrome, user_data_dir)
+        raise
     print(f"   > 🗂️ {_TAB_NOTE[outcome]}")
     # [IMP-C25 Step 11 d] Additive: the Chrome this call launched and its profile, for the fetch journal and the
     # interruption cleanup (a chrome.exe that handed over to an already-running browser has exited by now).
@@ -1055,11 +1101,14 @@ class _ProcessTable:
 
     def query(self, pid):
         """(alive, command line) of `pid`: (True, text or None) while it runs, (False, None) when
-        there is no such process, (None, None) when that cannot be told — never a guess."""
+        there is no such process, (None, None) when that cannot be told — never a guess.
+        [IMP-C25 Step 14 c] `-ErrorAction Stop`: a query that FAILS (a WMI / CIM error) ends the
+        script with exit code 1 — "cannot be told". Without it the error was non-terminating, $p
+        stayed empty and the script printed GONE: a failed query read as "the process is gone"."""
         if os.name != "nt" or not mvcommon._is_int(pid) or pid <= 0:
             return None, None
         script = ("[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
-                  f"$p = Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}'; "
+                  f"$p = Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}' -ErrorAction Stop; "
                   "if ($p) { 'ALIVE'; $p.CommandLine } else { 'GONE' }")
         try:
             run = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
@@ -1708,17 +1757,87 @@ def _terminate_session_chrome(ctx):
     Chrome this run LAUNCHED that still runs (the Popen handle init_driver kept: while it is open
     the pid cannot be reused) AND whose command line still names that profile (_chrome_still_ours,
     the start-up cleanup's guard). A Chrome the run attached to is never terminated. Returns the
-    pid terminated, or None."""
+    pid terminated, or None.
+
+    [IMP-C25 Step 14 c — the shared close under heavy load] When the process table cannot answer
+    (its PowerShell query timed out or failed: under load the close left a Chrome running twice that
+    way, Step 12/C), or answers "gone" while the handle says the process runs, the open Popen handle
+    is the proof (_launched_chrome_is_ours). A table that names ANOTHER profile, or a command line it
+    cannot read, still means never. taskkill /T /F (the whole tree) first; the handle's own kill()
+    when taskkill fails."""
     chrome = ctx.chrome or {}
     pid = chrome.get("pid")
     if chrome.get("launched") is not True or not mvcommon._is_int(pid):
         return None
-    poll = getattr(chrome.get("proc"), "poll", None)
+    proc = chrome.get("proc")
+    poll = getattr(proc, "poll", None)
     if callable(poll) and poll() is not None:
         return None  # it has exited already
-    if not _chrome_still_ours(pid, chrome.get("user_data_dir")):
+    if not _launched_chrome_is_ours(pid, chrome.get("user_data_dir"), poll):
         return None  # never a Chrome that is not ours
-    return pid if PROCESS_TABLE.terminate(pid) else None
+    if PROCESS_TABLE.terminate(pid):
+        return pid
+    return pid if _kill_by_handle(proc) else None
+
+
+def _launched_chrome_is_ours(pid, user_data_dir, poll):
+    """[IMP-C25 Step 14 c] May the session's LAUNCHED Chrome `pid` be terminated? Yes when the process table names exactly
+    its profile folder (_chrome_still_ours' rule) — or when the table cannot tell, or says it is gone, while the
+    session's open Popen handle (`poll`) says it still runs: this run launched that very chrome.exe on that profile, and
+    a pid cannot be reused while its handle is open. Never when the table names another profile, or answers alive with a
+    command line it cannot read (Step 11's guard). One table query."""
+    alive, cmdline = PROCESS_TABLE.query(pid)
+    if alive is True:
+        return (cmdline is not None and isinstance(user_data_dir, str) and bool(user_data_dir)
+                and _cmdline_user_data_dir(cmdline) == os.path.normcase(os.path.abspath(user_data_dir)))
+    return callable(poll) and poll() is None
+
+
+def _handle_gone(proc, wait=None):
+    """[IMP-C25 Step 14 c] Wait up to `wait` seconds (CHROME_GONE_WAIT_S) for the process behind a Popen handle to exit.
+    True once it has; never raises."""
+    try:
+        proc.wait(timeout=CHROME_GONE_WAIT_S if wait is None else wait)
+    except Exception:
+        return False
+    return True
+
+
+def _kill_by_handle(proc, wait=None):
+    """[IMP-C25 Step 14 c] End the process behind a Popen handle this run holds — its own TerminateProcess (the browser
+    process; Chrome's helper processes exit with it) — and wait up to `wait` seconds (CHROME_GONE_WAIT_S) for it to be
+    gone. True once it has exited; never raises."""
+    try:
+        proc.kill()
+    except Exception:
+        return False
+    return _handle_gone(proc, wait)
+
+
+def _end_launched_chrome(proc, user_data_dir):
+    """[IMP-C25 Step 14 c — DECISIONS §1e] The Chrome init_driver launched when attaching to it failed (chromedriver-
+    manager's online check, the attach, the Photos tab, a Ctrl+C): end it, so it never stays behind holding the debug
+    port and the profile (the live probe of 2026-10-07 left one when the online check failed). Only that very process,
+    and only while it still runs — its Popen handle (while it is open the pid cannot have been reused, and this call
+    launched it on this profile). A chrome.exe that handed over to a Chrome already running has exited at once: that
+    Chrome is never touched. taskkill /T /F (the whole tree), else the handle's kill(); once it is gone, its profile is
+    marked cleanly exited (no "Restore pages?"). One line; never raises. -> True when it was ended."""
+    poll = getattr(proc, "poll", None)
+    if not callable(poll):
+        return False
+    pid = getattr(proc, "pid", None)
+    try:
+        if poll() is not None:
+            return False  # exited at once: a hand-over to a Chrome that was already running
+        if not (PROCESS_TABLE.terminate(pid) and _handle_gone(proc)) and not _kill_by_handle(proc):
+            raise RuntimeError("it is still running")
+    except Exception as e:
+        print(f"   > ⚠️ The Chrome this launch started (pid {pid}) could not be ended ({type(e).__name__}) — close it "
+              f"before the next fetch.")
+        return False
+    print(f"   > 🧹 Closed the Chrome this launch started (pid {pid}) — attaching to it failed.")
+    mark_profile_clean_exit(user_data_dir, wait=CHROME_GONE_WAIT_S)
+    return True
 
 
 def _release_leftovers(ctx, wait):

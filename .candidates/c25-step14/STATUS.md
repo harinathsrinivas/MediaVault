@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 14.a (Chrome robustness, follow-up c)
+STATE: IN PROGRESS — next: 14.b (the RPC quality flags, follow-up d — the read-only live probe)
 
 # IMP-C25 Step 14 — `--manual`, `resolve_photos` (manual confirm + match), robust fetch_restore resume, web behavior
 # (+ follow-ups a–d) — resumable status
@@ -20,8 +20,8 @@ uncommitted diff belongs to the first unticked sub-task: keep it when coherent a
 SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRESS.md (the orchestrator does).
 
 ## Sub-tasks (one WIP commit each)
-- [ ] 14.0 this status file: the sub-task plan + the design decisions below (no code)
-- [ ] 14.a follow-up c — Chrome robustness (mainfetch, tools/warm_profiles.py, tools/gp_inventory.py connect):
+- [x] 14.0 this status file: the sub-task plan + the design decisions below (no code) — 41501c4
+- [x] 14.a follow-up c — Chrome robustness (mainfetch, tools/warm_profiles.py, tools/gp_inventory.py connect):
       `_ProcessTable.query` with `-ErrorAction Stop` (a WMI failure is "cannot tell", never "gone") · the shared close
       under load: `_terminate_session_chrome` takes the open Popen handle as the identity proof when the process table
       cannot tell (or says gone while the handle says running), taskkill /T /F then the handle's kill() — never a pid
@@ -31,6 +31,18 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       FETCH_PAGE_LOAD_S, before the first navigation; the crawler's connect too) · warm_profiles closes the Chrome it
       launched (`_close_session`, last=True: an attached Chrome only loses this run's tabs) and refuses to attach to a
       previous profile's Chrome (port guard only when that Chrome may still run) — tests: tests/test_chrome_robustness.py
+      35 passed (the query ×5 incl. a timed-out query; the terminate rule ×5 table answers + taskkill failing → the
+      handle + neither works + attached / unknown never + exited never queried; the Step 12/C load replay through
+      `_close_session`: listener and query both unable to tell → only the run's tab closed, then terminated through the
+      handle, journal `terminated`, profile marked; init_driver: driver-manager / attach failures ×2, the Photos tab,
+      taskkill failing → kill(), an unendable Chrome → one warning, a hand-over never touched, a failed launch, Ctrl+C
+      ×3 (settling / attach / Photos tab), the bound set before the first navigation; bound_page_loads; the crawler's
+      connect; warm-up ×6: closed before the next profile, a close ignored → terminated, logged out still closed, an
+      attached Chrome keeps its windows and blocks the next profiles while the port is held, a port freed in time,
+      stand-ins never probe the real port); neighbours (fetch hygiene, restore bubble, warm profiles, photos tab, check,
+      locator, gp_inventory ×2, harvester, routing ×2, session detector, trigger retry, cli parsers, search wait) 772
+      passed; smoke 82 passed; live read-only: the new query on this process → alive + its command line (1.6 s), on a
+      missing pid → (False, None) (0.8 s) — the WIP SHA is in the commit that ticks 14.b
 - [ ] 14.b follow-up d — the RPC quality flags: ONE read-only live probe (TV profile, one known item, port 9222 free,
       no fetch/crawl running, nothing downloaded, Chrome closed, no URL/cookie/email printed) of the raw item records
       (swbisb / lcxiM / VrseUb / EWgK9e) → fix gpweb's parsers where the probe establishes a position with certainty,

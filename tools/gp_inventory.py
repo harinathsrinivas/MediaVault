@@ -811,10 +811,14 @@ def launch_chrome(profile_dir, port):
 
 
 def connect(port):
-    """Selenium, attached to the Chrome that listens on 127.0.0.1:<port>."""
+    """Selenium, attached to the Chrome that listens on 127.0.0.1:<port>. [IMP-C25 Step 14 c] Its page loads are bounded
+    (mainfetch.bound_page_loads: Selenium's 300 s default hung a live probe ~5 min in one driver.get) — a page that does
+    not load raises, which crawl_item records as that item's error (retried by the next run)."""
     opts = Options()
     opts.add_experimental_option("debuggerAddress", f"127.0.0.1:{port}")
-    return webdriver.Chrome(options=opts)
+    driver = webdriver.Chrome(options=opts)
+    mainfetch.bound_page_loads(driver)
+    return driver
 
 
 def _session(a, account, out_dir, log, heartbeat):

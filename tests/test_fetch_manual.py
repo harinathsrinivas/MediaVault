@@ -11,6 +11,11 @@ PLAN.md Step 14 + "Follow-ups carried into Step 14" a; P-5, P-12, P-13, P-18; th
         deleted, the wait goes on), learned with source manual — a photo_id only when the item opened for it holds
         exactly those bytes — the failed ones taken too (follow-up a), statuses restored after a wait, Ctrl+C, the
         usage lines.
+  14.d  robust resume — a re-run goes straight to S0: what an interrupted run located (its fetch journal) and what the
+        learned sidecar holds unmerged (an interrupted run's finds, resolve_photos answers not applied yet) are tried
+        first by S0a, still verified (a manual match is never downloaded by the stages — --manual opens it); dead ids
+        never; no hint, the same locator; the helpers resolve_photos shares: locate_object(stages=), verify_item,
+        object_locators.
 
 Hermetic: the fake Google Photos world (tests/gphotos_fake.py) through test_locator's `flow` harness; mainfetch's and
 gprpc's clocks are fake, so a 30-minute wait takes no time and the user's own download is a clock event; every state dir,
@@ -456,3 +461,220 @@ def test_the_fetch_usage_lines_name_manual(capsys):
         with pytest.raises(SystemExit):
             exec(_main_guard(), dict(main.__dict__, sys=fake))
         assert line in capsys.readouterr().out.splitlines()
+
+
+# ===========================================================================
+# 14.d — a re-run goes straight to S0 (the fetch journals, the learned sidecar)
+# ===========================================================================
+def _stopped_in_the_first_harvest(monkeypatch):
+    """Run 1 is stopped (Ctrl+C) while it waits for its first download — located, requested, never fetched.
+    -> a callable that puts the real harvester back for the re-run."""
+    real = mainfetch.harvest_downloads
+
+    def ctrl_c(queue, ctx, timeout=300, stop=None):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(mainfetch, "harvest_downloads", ctrl_c)
+    return lambda: monkeypatch.setattr(mainfetch, "harvest_downloads", real)
+
+
+def _rpc_since(world, mark):
+    return [e["rpcid"] for e in world.rpc_log[mark:]]
+
+
+def _distinct_run_ids(monkeypatch):
+    """Two runs of one test start within the same second in the same process — a real run is its own process: give
+    each its own run id (and so its own fetch journal)."""
+    ids, real = iter(f"fetch-20261014T1000{n:02d}Z-1" for n in range(60)), mainfetch.FetchContext.__init__
+    monkeypatch.setattr(mainfetch.FetchContext, "__init__",
+                        lambda self, manual=False, run_id=None: real(self, manual, run_id or next(ids)))
+
+
+def test_a_rerun_goes_straight_to_the_item_an_interrupted_run_located(flow, sandbox, capsys, monkeypatch):
+    folder = _episode_folder(sandbox)
+    data = _bytes("resume-me")
+    item = flow.world.add_item("tv", _up(NAME, SID), data=data, taken=TAKEN)
+    mvcommon.save_library({EP: _whole(folder, NAME, data, SID)})            # legacy: no capture, no learned block
+    _distinct_run_ids(monkeypatch)
+    resume = _stopped_in_the_first_harvest(monkeypatch)
+
+    mainfetch.cmd_fetch_route(EP)                                           # run 1: S2 located it, then Ctrl+C
+    first = capsys.readouterr().out
+    assert "S2 exact_name" in first and "🛑 Stopped by user." in first
+    assert not (folder / "restore" / NAME).exists() and mvcommon.read_learned("tv") == []
+    resume()
+    mark = len(flow.world.rpc_log)
+
+    mainfetch.cmd_fetch_route(EP)                                           # run 2
+
+    out = capsys.readouterr().out
+    assert f"   > ↩️ {NAME}: 1 item(s) an earlier run found or learned are tried first." in out
+    assert f"   > 🎯 {NAME}: S0a photo_id · proof filename · via rpc" in out
+    assert (folder / "restore" / NAME).read_bytes() == data and "✅ ENTRY COMPLETE." in out
+    assert "EzkLib" not in _rpc_since(flow.world, mark)                     # no search at all: straight to S0
+    [learned] = mvcommon.read_learned("tv")
+    assert (learned["photo_id"], learned["approach"]["tried"]) == (item.photo_id, "s0_photo_id")
+
+
+def test_a_learned_photo_id_not_merged_yet_is_tried_first_and_a_dead_one_never(flow, sandbox, capsys):
+    # e.g. a resolve_photos answer the user did not apply yet: the sidecar names the item, the library does not. An
+    # older run's journal still names an item the sidecar has since declared dead (stale): never tried.
+    folder = _episode_folder(sandbox)
+    data = _bytes("learned-not-merged")
+    item = flow.world.add_item("tv", _up(NAME, SID), data=data, taken=TAKEN)
+    dead = flow.world.add_item("tv", _up(NAME, SID), data=data, taken=TAKEN, deleted=True)
+    mvcommon.save_library({EP: _whole(folder, NAME, data, SID)})
+    sha256 = mvcommon.load_library()[EP]["hash"]
+    for record in ({"photo_id": dead.photo_id, "proof": "filename", "source": "check"},
+                   {"photo_id": dead.photo_id, "source": "fetch", "stale": True},
+                   {"photo_id": item.photo_id, "proof": "filename", "source": "check"}):
+        mvcommon.append_learned("tv", dict(record, manual_id=EP, label="whole", sha256=sha256))
+    os.makedirs(mainfetch.FETCH_JOURNAL_DIR, exist_ok=True)
+    mainfetch._write_json_atomic(os.path.join(mainfetch.FETCH_JOURNAL_DIR, "fetch-20260101T000000Z-1.json"), {
+        "v": 1, "run_id": "fetch-20260101T000000Z-1", "state": "recovered", "entries": [{"account": "tv", "objects": [
+            {"label": "whole", "sha256": sha256, "state": "located", "photo_id": dead.photo_id}]}]})
+
+    mainfetch.cmd_fetch_route(EP)
+
+    out = capsys.readouterr().out
+    assert f"   > ↩️ {NAME}: 1 item(s) an earlier run found or learned are tried first." in out
+    assert f"   > 🎯 {NAME}: S0a photo_id · proof filename · via rpc" in out
+    assert (folder / "restore" / NAME).read_bytes() == data
+    asked = [e["request"][0] for e in flow.world.rpc_log if e["rpcid"] == "VrseUb"]
+    assert dead.photo_id not in asked and item.photo_id in asked           # the dead id is never even read
+    assert "EzkLib" not in flow.world.rpc_ids_sent()
+
+
+def test_a_manual_match_is_verified_by_the_stages_and_never_downloaded_by_them(flow, sandbox, capsys, monkeypatch,
+                                                                               clock):
+    # resolve_photos' accepted mismatch (proof manual): the item holds the object's bytes under another name. The
+    # stages read it (S0a) but a differing name proves nothing for them — they never request it (D3 / Goal 2). With
+    # --manual it is the page opened first; the user's download of it is verified by SHA-256 and teaches its photo_id.
+    folder = _episode_folder(sandbox)
+    data = _bytes("renamed-upload")
+    match = flow.world.add_item("tv", "Renamed.By.Hand.mkv", data=data, taken="2021-01-01T00:00:00Z")
+    mvcommon.save_library({EP: _whole(folder, NAME, data, SID)})
+    mvcommon.append_learned("tv", {"manual_id": EP, "label": "whole", "sha256": mvcommon.load_library()[EP]["hash"],
+                                   "photo_id": match.photo_id, "proof": "manual", "source": "manual"})
+    opened = _when_opened(monkeypatch, clock, (50, _user_downloads(flow, match)))
+
+    mainfetch.cmd_fetch_route(EP, manual=True)
+
+    out = capsys.readouterr().out
+    assert f"   > ↩️ {NAME}: 1 item(s) an earlier run found or learned are tried first." in out
+    assert f"   > 🔍 {NAME}: not located (photo_id wrong-item(1)" in out
+    assert [(what, pid) for what, pid, _rec in opened] == [
+        ("the item its library record names (no stage could verify it)", match.photo_id)]
+    assert [r["via"] for r in flow.world.downloads] == ["user"]             # the stages requested nothing
+    assert (folder / "restore" / NAME).read_bytes() == data
+    learned = [r for r in mvcommon.read_learned("tv") if r["proof"] == "sha256"]
+    assert [(r["photo_id"], r["source"]) for r in learned] == [(match.photo_id, "manual")]
+
+
+def test_a_journal_of_another_account_or_of_this_run_gives_no_hint(flow, sandbox):
+    sha256 = "a" * 64
+    os.makedirs(mainfetch.FETCH_JOURNAL_DIR, exist_ok=True)
+    ctx = mainfetch.FetchContext()
+    ctx.start_session("tv")
+    for run_id, account in (("fetch-20260101T000000Z-1", "movies"), (ctx.run_id, "tv")):
+        mainfetch._write_json_atomic(os.path.join(mainfetch.FETCH_JOURNAL_DIR, f"{run_id}.json"), {
+            "v": 1, "run_id": run_id, "state": "clean", "entries": [{"account": account, "objects": [
+                {"label": "whole", "sha256": sha256, "state": "located", "photo_id": "AF1QipFAKEhint0000000001"}]}]})
+    loc = {"sha256": sha256, "account": "tv", "photo_id": None, "alternates": []}
+
+    hinted, added = mainfetch._with_resume_hints(loc, ctx)
+
+    assert added == 0 and hinted is loc                                     # the same locator: today's run
+
+
+def test_journal_hints_follow_the_librarys_own_ids_newest_run_first(flow, sandbox):
+    sha256 = "b" * 64
+    os.makedirs(mainfetch.FETCH_JOURNAL_DIR, exist_ok=True)
+    for n, pid in ((1, "AF1QipFAKEhintOLD0000001"), (2, "AF1QipFAKEhintNEW0000002")):
+        run_id = f"fetch-2026010{n}T000000Z-{n}"
+        mainfetch._write_json_atomic(os.path.join(mainfetch.FETCH_JOURNAL_DIR, f"{run_id}.json"), {
+            "v": 1, "run_id": run_id, "state": "recovered", "entries": [{"account": "tv", "objects": [
+                {"label": "whole", "sha256": sha256, "state": "triggered", "photo_id": pid}]}]})
+    ctx = mainfetch.FetchContext()
+    ctx.start_session("tv")
+    loc = {"sha256": sha256, "account": "tv", "photo_id": "AF1QipFAKEblock00000001", "alternates": []}
+
+    hinted, added = mainfetch._with_resume_hints(loc, ctx)
+
+    assert added == 2 and hinted["photo_id"] == "AF1QipFAKEblock00000001"   # the library's own stays first
+    assert hinted["alternates"] == ["AF1QipFAKEhintNEW0000002", "AF1QipFAKEhintOLD0000001"]
+    assert loc["alternates"] == []                                          # the built locator is never changed
+
+
+# ===========================================================================
+# 14.d — the helpers resolve_photos shares: locate_object(stages=), verify_item, object_locators
+# ===========================================================================
+def _locator(sandbox, data, content_key, name=NAME):
+    folder = _episode_folder(sandbox)
+    if content_key:
+        _capture(folder, SID, [_obj(data, _up(name, SID))])
+    entry = _whole(folder, name, data, SID)
+    ctx = mainfetch.FetchContext()
+    ctx.start_session("tv")
+    [item] = mainfetch.build_fetch_queue(entry, str(folder / "nowhere"), ctx, EP)
+    return item["locator"], ctx
+
+
+@pytest.mark.parametrize("content_key, other_bytes, other_name, deleted, rpc, verdict, proof, mismatch", [
+    (True, False, False, False, True, "match", "dedupkey", False),
+    (True, True, False, False, True, "wrong", None, True),
+    (False, False, False, False, True, "match", "filename", False),
+    (False, False, True, False, True, "wrong", None, False),
+    (False, True, False, False, True, "match", "filename", False),          # no content key: the name decides
+    (True, False, False, True, True, "gone", None, False),
+    (True, False, False, False, False, "match", "dedupkey", False),         # RPC off: the item page decides
+])
+def test_verify_item_is_the_stages_own_check(flow, sandbox, content_key, other_bytes, other_name, deleted, rpc,
+                                             verdict, proof, mismatch):
+    data = _bytes("verify-me")
+    item = flow.world.add_item("tv", "Something.Else.mkv" if other_name else _up(NAME, SID),
+                               data=_bytes("other") if other_bytes else data, taken=TAKEN, deleted=deleted)
+    loc, ctx = _locator(sandbox, data, content_key)
+    flow.world.wiz_token_missing["tv"] = not rpc
+
+    res = mainfetch.verify_item(flow.world.driver("tv"), loc, item.photo_id, ctx)
+
+    assert (res["verdict"], res["proof"], res["content_mismatch"]) == (verdict, proof, mismatch)
+    assert (res["record"] or {}).get("photo_id") == (None if deleted else item.photo_id)
+    assert res["via"] == ("rpc" if rpc else "ui")                           # the path that answered
+    assert flow.world.downloads == []
+
+
+def test_locate_object_runs_only_the_stages_asked_for(flow, sandbox):
+    data = _bytes("stages")
+    item = flow.world.add_item("tv", _up(NAME, SID), data=data, taken=TAKEN)
+    loc, ctx = _locator(sandbox, data, content_key=True)
+    loc = dict(loc, queries=dict(loc["queries"], s3u=["Demo.S04E01"]))     # the user's own search term
+    driver = flow.world.driver("tv")
+
+    only_user = mainfetch.locate_object(driver, loc, ctx, stages=("user_query",))
+    every = mainfetch.locate_object(driver, loc, ctx)
+
+    assert list(only_user["per_approach"]) == ["user_query"] and only_user["photo_id"] == item.photo_id
+    assert only_user["stage"] == "s3u_user_query"
+    assert every["stage"] == "s0_hash"                                      # unchanged without `stages`
+    nothing = mainfetch.locate_object(driver, dict(loc, queries=dict(loc["queries"], s3u=[])), ctx,
+                                      stages=("user_query",))
+    assert nothing["per_approach"] == {} and not nothing["found"] and not nothing["s4_skip"]   # no legacy preview
+
+
+def test_object_locators_is_what_check_photos_builds(flow, sandbox):
+    data = _bytes("shared")
+    folder = _episode_folder(sandbox)
+    library = {EP: _whole(folder, NAME, data, SID)}
+    objs = [{"manual_id": EP, "kind": "whole", "label": "whole", "sha256": library[EP]["hash"]}]
+    ctx = mainfetch.FetchContext()
+    ctx.start_session("tv")
+
+    shared = mainfetch.object_locators(library, ctx, objs)
+    check = mainfetch._check_locators(type("Run", (), {"library": library})(), ctx, objs)
+
+    key = (EP, "whole", library[EP]["hash"])
+    assert list(shared) == list(check) == [key]
+    item, loc, record = shared[key]
+    assert loc == check[key][1] and loc["uploaded_name"] == _up(NAME, SID) and record is None

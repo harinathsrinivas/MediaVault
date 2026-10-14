@@ -2526,7 +2526,9 @@ class _LocatorRun:
       direct_off  None, or why the direct download (P-20) is off for the rest of the run: "other-bytes" — a link
                 served other bytes than a content-verified item (P14: a transcode), so Shift+D fetches the rest
       told      the one-time notes already printed
-      stats     {account: counters} — each account session's summary line (_locator_session_line)"""
+      stats     {account: counters} — each account session's summary line (_locator_session_line)
+      hints     {account: {sha256: hint}} — [IMP-C25 Step 14] what earlier runs know that the library does not hold
+                yet (_resume_hints), read once per run and account"""
 
     def __init__(self):
         self.records, self.listings, self.gone, self.wanted = {}, {}, set(), {}
@@ -2534,6 +2536,7 @@ class _LocatorRun:
         self.drift_tries = 0
         self.told = set()
         self.stats = {}
+        self.hints = {}
 
 
 def _locator_run(ctx):
@@ -3147,12 +3150,15 @@ def _locate_result(found, per, per_via, stale, s4_skip, per_pick=None):
     return res
 
 
-def _waterfall(driver, loc, ctx, account, st, approaches):
+def _waterfall(driver, loc, ctx, account, st, approaches, stages=None):
     """Run the stages in order until one pins the object (approaches "all": every stage), then — for a
-    content-keyed object nothing pinned — the legacy preview (OD-5)."""
+    content-keyed object nothing pinned — the legacy preview (OD-5). [IMP-C25 Step 14] stages = only these
+    approaches run (None: all of them; the preview only when "legacy" is among them)."""
     key = _content_key(loc)
     per, per_via, per_pick, stale, found, preview = {}, {}, {}, [], None, None
     for approach, stage, _label in _stage_order(loc):
+        if stages is not None and approach not in stages:
+            continue
         out = _STAGE_RUNS[approach](driver, loc, ctx, account, st, key)
         if out is None:
             continue  # the object gives this stage nothing to work with
@@ -3164,7 +3170,7 @@ def _waterfall(driver, loc, ctx, account, st, approaches):
             found = (approach, stage, out)
             if approaches != "all":
                 break
-    if key and (found is None or approaches == "all"):
+    if key and (found is None or approaches == "all") and (stages is None or _LEGACY_STAGE[0] in stages):
         preview = _stage_legacy_preview(driver, loc, ctx, account, st, key)
         if preview is not None:
             per[_LEGACY_STAGE[0]] = {"outcome": preview["outcome"], "n": preview["n"]}
@@ -3176,7 +3182,7 @@ def _waterfall(driver, loc, ctx, account, st, approaches):
                           found is None and preview is not None and preview.get("skip"), per_pick)
 
 
-def _arbitrate(driver, res, loc, ctx, account, st, approaches):
+def _arbitrate(driver, res, loc, ctx, account, st, approaches, stages=None):
     """The drift detector (candidate C): ONCE per run, the first object RPC located is cross-checked against its
     item page's record (P-7: the primary source) — dedupKey, taken / upload time, timezone offset. They agree: RPC
     stays trusted for the run. They differ: one warning line, RPC off for the rest of the run, every RPC-fed cache
@@ -3206,10 +3212,10 @@ def _arbitrate(driver, res, loc, ctx, account, st, approaches):
     run.listings.clear()
     print(f"   > ⚠️ Google Photos' internal answers disagree with the item page ({', '.join(differ)}) — RPC is off "
           f"for the rest of this run; the web pages decide.")
-    return _waterfall(driver, loc, ctx, account, st, approaches)
+    return _waterfall(driver, loc, ctx, account, st, approaches, stages)
 
 
-def locate_object(driver, locator, ctx, approaches="best", exclude=()):
+def locate_object(driver, locator, ctx, approaches="best", exclude=(), stages=None):
     """[IMP-C25 Step 12 — candidate C, hybrid arbitration] Find ONE uploaded object's Google Photos item in the
     session's account — READ-ONLY: it navigates the session's Photos tab, types searches and asks read-only RPCs
     (gprpc's allowlist); it never downloads, clicks a tile, presses Shift+D or writes anything — what it learns is
@@ -3219,7 +3225,9 @@ def locate_object(driver, locator, ctx, approaches="best", exclude=()):
     account; its locator state caches records across objects). approaches "best" stops at the first stage that
     pins the object; "all" evaluates every stage (check_photos --approaches all, PLAN Step 13). exclude = photo
     ids no stage may pick or count as a candidate — the items already requested for the object (P-20's fallback
-    chain: the waterfall once more finds another verified copy, or nothing).
+    chain: the waterfall once more finds another verified copy, or nothing). [IMP-C25 Step 14] stages = the P-1
+    approaches to run (e.g. ("user_query",) — resolve_photos tries the user's search term alone); None: all of them
+    ("legacy" names the OD-5 preview of today's queries).
 
     Returns (PLAN Step 12's contract — Step 13 reuses it and per_approach unchanged):
       found            the object is pinned to one item (P-5 proof)
@@ -3253,13 +3261,50 @@ def locate_object(driver, locator, ctx, approaches="best", exclude=()):
         res = _locate_result(None, {}, {}, [], False)
     else:
         before = gprpc.stats(driver)["calls"]
-        res = _waterfall(driver, loc, ctx, account, st, approaches)
+        res = _waterfall(driver, loc, ctx, account, st, approaches, stages)
         if res["found"]:
-            res = _arbitrate(driver, res, loc, ctx, account, st, approaches)
+            res = _arbitrate(driver, res, loc, ctx, account, st, approaches, stages)
         calls = gprpc.stats(driver)["calls"] - before
     res.update(candidates_seen=len(st["seen"]), candidates=list(st["seen"]), pages_opened=st["pages"],
                searches=st["searches"], rpc_calls=calls, elapsed=round(time.time() - started, 3))
     return res
+
+
+def verify_item(driver, locator, photo_id, ctx):
+    """[IMP-C25 Step 14 — resolve_photos' paste] Is the item `photo_id` (a photo URL the user pasted) the object of
+    `locator`? READ-ONLY, the stages' own check (P-5): the item's record by RPC item info, else its item page — the
+    run's record cache first — then its dedupKey against the object's content key, or (no content key) its file
+    name against the exact uploaded name (P-6 normalized counts). Nothing is clicked or downloaded.
+    -> {photo_id, verdict, proof, name_normalized, record, via}:
+      match    it IS the object — proof dedupkey | filename;
+      wrong    its record proves another item: a content key that differs (other bytes) or, without one, another
+               file name — `content_mismatch` says which;
+      unknown  its record does not say (no dedupKey for a content-keyed object, no readable name);
+      gone     this account holds no such item (RPC and its page agree).
+    record = the item's facts (_RECORD_FIELDS) or None. Raises SessionExpiredError (signed out)."""
+    loc = locator if isinstance(locator, dict) else {}
+    key, account = _content_key(loc), getattr(ctx, "account", None) or loc.get("account")
+    st = {"pages": 0, "searches": 0, "seen": [], "exclude": frozenset()}
+    rec, gone, via = None, False, None
+    if _rpc_ok(driver, ctx):
+        try:
+            rec, gone = _rpc_item(driver, photo_id, ctx, account, key)
+            via = "rpc"
+        except gprpc.RpcUnavailable as e:
+            _note_fallback(ctx, e)
+    if rec is None:
+        rec = _ui_item(driver, photo_id, ctx, account, st, key, fresh=gone)
+        via = "ui" if rec is not None else via
+    out = {"photo_id": photo_id, "verdict": "unknown", "proof": None, "name_normalized": False, "record": None,
+           "via": via, "content_mismatch": False}
+    if rec is None:
+        if gone:
+            out["verdict"] = "gone"
+        return out
+    verdict, proof, normalized = _verdict(rec, loc, key)
+    out.update(verdict=verdict, proof=proof, name_normalized=normalized,
+               record={k: rec.get(k) for k in _RECORD_FIELDS}, content_mismatch=bool(key) and verdict == "wrong")
+    return out
 
 
 # ------------------------------------------------------------------ the triggers (P-20: (ii) direct, then (i) Shift+D)
@@ -3667,9 +3712,81 @@ def _keep_other_bytes(items):
             item["_other_bytes"] = item.get("_other_bytes", 0) + item.pop("_wrong")
 
 
+def _resume_hints(ctx, account):
+    """[IMP-C25 Step 14 — robust resume] What earlier runs know about `account`'s objects that the library may not hold
+    yet -> {sha256: {"photo_id": the learned sidecar's identity or None, "more": [other photo ids], "dead": {ids}}}:
+      * the learned sidecar (P-10), reduced exactly as the apply engine will fold it — the finds of an interrupted
+        fetch that was never merged (a Ctrl+C skips the merge), resolve_photos answers the user has not applied yet;
+        its alternates; the ids a stale record declared dead (never tried);
+      * the fetch journals of other runs (Step 11 d), newest first: the photo_ids their exact-item stages LOCATED (a
+        P-5-verified item at that time) for objects of this account — an interrupted run's located-but-not-fetched
+        objects above all.
+    Read once per run and account (ctx.locator). Unreadable state yields what could be read (never stops a fetch)."""
+    run = _locator_run(ctx)
+    if account in run.hints:
+        return run.hints[account]
+    hints = {}
+
+    def hint(sha256):
+        return hints.setdefault(sha256, {"photo_id": None, "more": [], "dead": set()})
+
+    try:
+        for (_acc, sha256), red in mvcommon.reduce_learned(mvcommon.read_learned(account)).items():
+            h = hint(sha256)
+            h["photo_id"] = red.get("photo_id")
+            h["more"] += [p for p in red.get("alternates") or () if p not in h["more"]]
+            h["dead"].update(red.get("dead") or ())
+    except (OSError, ValueError) as e:
+        print(f"   > ⚠️ The learned sidecar could not be read for resuming ({type(e).__name__}) — the search starts "
+              f"from the library's own facts.")
+    for _path, doc in reversed(read_fetch_journals()):  # newest first
+        if not doc or doc.get("run_id") == ctx.run_id:
+            continue
+        for entry in doc.get("entries") or ():
+            if not isinstance(entry, dict) or entry.get("account") != account:
+                continue
+            for obj in entry.get("objects") or ():
+                pid, sha256 = (obj.get("photo_id"), obj.get("sha256")) if isinstance(obj, dict) else (None, None)
+                if isinstance(pid, str) and gpweb.MEDIA_KEY_RE.match(pid) and mvcommon._is_sha256(sha256):
+                    h = hint(sha256)
+                    if pid not in h["more"]:
+                        h["more"].append(pid)
+    run.hints[account] = hints
+    return hints
+
+
+def _with_resume_hints(loc, ctx):
+    """[IMP-C25 Step 14] The fetch's locator for one object plus _resume_hints: the learned sidecar's identity becomes
+    its photo_id when the library holds none (what the merge would make it), every other hinted photo_id an extra
+    S0a alternate after the library's own — dead ids never. S0a still verifies each (P-5) before anything is
+    requested. -> (locator, how many photo ids were added); a locator that gains nothing is returned AS IS (the same
+    object), so a run without hints is exactly today's."""
+    account = getattr(ctx, "account", None) or loc.get("account")
+    sha256 = loc.get("sha256")
+    h = _resume_hints(ctx, account).get(sha256) if account in mvcommon.GP_ACCOUNTS and sha256 else None
+    if not h:
+        return loc, 0
+    have = {p for p in [loc.get("photo_id")] + list(loc.get("alternates") or []) if p}
+    first = h["photo_id"] if not loc.get("photo_id") and h["photo_id"] not in h["dead"] else None
+    extra = list(dict.fromkeys(p for p in ([h["photo_id"]] if h["photo_id"] else []) + h["more"]
+                               if p and p not in have and p != first and p not in h["dead"]))
+    if not first and not extra:
+        return loc, 0
+    out = dict(loc, alternates=list(loc.get("alternates") or []) + extra)
+    if first:
+        out["photo_id"] = first
+    return out, len(extra) + bool(first)
+
+
 def _locate_item(driver, item, ctx):
-    """Step 1 of _run_locator_phase for one object; True when it was located (its _trigger is set)."""
+    """Step 1 of _run_locator_phase for one object; True when it was located (its _trigger is set).
+    [IMP-C25 Step 14] A re-run goes straight to S0: what earlier runs located or learned for the object
+    (_with_resume_hints) is tried first — the item's locator then carries those photo ids (one line says so)."""
     name, loc, stats = item["filename"], item.get("locator") or {}, _session_stats(ctx)
+    hinted, added = _with_resume_hints(loc, ctx)
+    if added:
+        item["locator"] = loc = hinted
+        print(f"   > ↩️ {name}: {added} item(s) an earlier run found or learned are tried first.")
     try:
         res = locate_object(driver, loc, ctx)
     except (SessionExpiredError, gprpc.RpcRefused):
@@ -4340,7 +4457,9 @@ def open_best_start(driver, loc, ctx, located=None, candidates=()):
     likely is, for the user to find it by eye (--manual; resolve_photos), best first:
       its located item's page   `located` — a locate_object result that pinned it;
       the item its record names  loc['photo_id'] — a learned or manual match no stage verified;
-      a candidate                the first of `candidates`, then of located's, that no record proves another item;
+      a candidate                the first of `candidates`, then of located's, that no record proves to hold other
+                                 bytes (for an object without a content key a differing name is no such proof: the
+                                 user's own eye decides — resolve_photos' manual match is opened);
       its day                    the search for its expected LOCAL day (the taken second's, in its own timezone);
       its exact uploaded name    the search for it;
       else the Photos start page.
@@ -4353,9 +4472,9 @@ def open_best_start(driver, loc, ctx, located=None, candidates=()):
     key, run = _content_key(loc), _locator_run(ctx)
     account = getattr(ctx, "account", None) or loc.get("account")
 
-    def unproven(pid):  # no record read this run proves it another item (P-5)
-        held = run.records.get((account, pid))
-        return held is None or _verdict(held, loc, key)[0] != "wrong"
+    def unproven(pid):  # no record read this run proves other BYTES (a name alone proves nothing to the user's eye)
+        held = gpweb.normalize_dedup_key((run.records.get((account, pid)) or {}).get("dedup_key"))
+        return not (key and held and held != key)
 
     pages = []
     if located.get("found") and located.get("photo_id"):
@@ -5642,18 +5761,24 @@ def _check_hinted(loc, obj, account):
 
 
 def _check_locators(run, ctx, objs):
-    """{object key: (queue item, locator, learned record)} for `objs`, built exactly as the fetch builds them —
-    build_fetch_queue against a folder that never exists, so every object is listed (cmd_locate's rule), an extra
-    through build_extras_entries — in the session's account (ctx.account: its own learned record, which is also handed
-    back for the RPC acceleration — the locator's shape is the fetch's, unchanged). An object the library no longer holds
-    (re-split, re-mastered since the run began) is absent."""
+    """{object key: (queue item, locator, learned record)} for `objs` — object_locators over the run's library."""
+    return object_locators(run.library, ctx, objs)
+
+
+def object_locators(library, ctx, objs):
+    """{object key (manual_id, label, sha256): (queue item, locator, learned record)} for `objs` ({manual_id, kind,
+    label, sha256} — mvcommon's object rows), built exactly as the fetch builds them — build_fetch_queue against a
+    folder that never exists, so every object is listed (cmd_locate's rule), an extra through build_extras_entries — in
+    the session's account (ctx.account: its own learned record, which is also handed back for the RPC acceleration —
+    the locator's shape is the fetch's, unchanged). An object the library no longer holds (re-split, re-mastered since
+    the run began) is absent. [IMP-C25 Step 14] Public: check_photos (Step 13) and resolve_photos share it."""
     import tempfile
     import uuid
     nowhere = os.path.join(tempfile.gettempdir(), f"mediavault-check-{uuid.uuid4().hex}")  # never created
     wanted, out = {_check_key(o) for o in objs}, {}
     owners = dict.fromkeys((o["manual_id"], o["kind"] in ("extra_whole", "extra_chunk")) for o in objs)
     for manual_id, extra in owners:
-        entry = run.library.get(manual_id) if isinstance(run.library, dict) else None
+        entry = library.get(manual_id) if isinstance(library, dict) else None
         if not isinstance(entry, dict) or entry.get("type") == "multi_ep_alias":
             continue
         entries = [(ex, None) for ex in build_extras_entries(entry, manual_id)] if extra else [(entry, manual_id)]

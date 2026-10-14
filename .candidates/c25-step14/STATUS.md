@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 14.d (robust fetch_restore resume + the public helpers for resolve_photos)
+STATE: IN PROGRESS — next: 14.e (mvcommon: the resolve answer log resolved.jsonl + read_failed_csv_rows)
 
 # IMP-C25 Step 14 — `--manual`, `resolve_photos` (manual confirm + match), robust fetch_restore resume, web behavior
 # (+ follow-ups a–d) — resumable status
@@ -87,13 +87,32 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       other bytes never learned (inconsistent); the ~/Downloads fallback; a best start that cannot open still waits;
       Ctrl+C; the usage lines). Disarm (scratch copy) ×7: kept without SHA-256 → 3 fail · photo_id without the
       dedupKey check → 1 · no status restore → 1 · no legacy gate → 1 · source fetch → 5 · no stop → 1 (after adding
-      the per-object wait test) · other objects not pending → 1. Neighbours 1154 passed; smoke 82 passed — the WIP SHA
-      is in the commit that ticks 14.d
-- [ ] 14.d robust fetch_restore resume (mainfetch): a re-run goes straight to S0 — the session account's learned
+      the per-object wait test) · other objects not pending → 1. Neighbours 1154 passed; smoke 82 passed — ac74bd1
+- [x] 14.d robust fetch_restore resume (mainfetch): a re-run goes straight to S0 — the session account's learned
       sidecar (photo_ids proven but not merged yet: an interrupted parent never merged) and the fetch journals (the
       photo_ids an interrupted run located) add S0a candidates (still verified, P-5) · public helpers for resolve_photos:
       `locate_object(..., stages=)`, `verify_item`, `open_best_start`, `object_locators` (extracted from
-      `_check_locators`, check unchanged) — tests: tests/test_fetch_manual.py (resume) + tests/test_resolve_photos.py
+      `_check_locators`, check unchanged) — tests: tests/test_fetch_manual.py (resume) + tests/test_resolve_photos.py.
+      Done: `_resume_hints(ctx, account)` (once per run + account on ctx.locator.hints: the reduced learned sidecar —
+      identity, alternates, dead — and other runs' journals, newest first, this account's entries only, this run's own
+      skipped) · `_with_resume_hints(loc, ctx)` -> (locator, n added): the sidecar identity becomes photo_id only when
+      the library has none, the rest are S0a alternates after the library's own, dead ids never; nothing added → the
+      SAME locator object · `_locate_item` puts the hinted locator on the item and prints `↩️ <name>: N item(s) an
+      earlier run found or learned are tried first.` · `locate_object(..., stages=None)` through `_waterfall` /
+      `_arbitrate` (the OD-5 preview only with "legacy") · `verify_item(driver, loc, photo_id, ctx)` -> {photo_id,
+      verdict match|wrong|unknown|gone, proof, name_normalized, record, via, content_mismatch} · `object_locators(
+      library, ctx, objs)` (`_check_locators` now delegates — check unchanged) · open_best_start's filter: only a
+      PROVEN content mismatch skips an item (a no-key object's name mismatch does not: a manual match is opened).
+      Tests (in tests/test_fetch_manual.py — resolve_photos' own come with 14.f): run 1 Ctrl+C after S2 located +
+      requested → run 2 S0a from the journal, no EzkLib at all; an unmerged sidecar photo_id first, a journal-named
+      dead id never read; a manual match (proof manual) read by S0a, never requested by the stages, opened first by
+      --manual and learned after the user's SHA-256-verified download; another account's / this run's journal → the
+      same locator; journal ids after the library's own, newest run first; verify_item ×7 (dedupkey match, content
+      mismatch, filename match, name mismatch, no-key other bytes = filename match, gone, RPC off → page); stages=
+      runs only S3u, no preview; object_locators == _check_locators. 31 passed. Disarm (scratch copy) ×6: no hints → 3
+      fail · dead ids kept → 1 (after adding the journal-named dead id) · stages ignored → 1 · name mismatch called a
+      content mismatch → 1 · journal hints from every account → 1 · the name filter back in open_best_start → 1.
+      Neighbours 1591 passed; smoke 82 passed (19 s) — the WIP SHA is in the commit that ticks 14.e
 - [ ] 14.e mvcommon: the resolve answer log `resolved.jsonl` (append_resolved / read_resolved: resume + the IMP-C27
       "not uploaded" list) and `read_failed_csv_rows` (every object row of a failed_objects.csv / resolutions_todo.csv,
       sharing read_failed_csv's Excel-tolerant decoding, read_failed_csv unchanged) — tests: tests/test_resolve_photos.py

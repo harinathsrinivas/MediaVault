@@ -2174,7 +2174,9 @@ class FetchContext:
 
     run_id     'fetch-<UTC yyyymmddThhmmssZ>-<pid>' — the run named in the failed
                list (P-18) and, later, the fetch journal (Step 11)
-    manual     --manual was given (parse_fetch_options; acted on by Step 14)
+    manual     --manual was given (parse_fetch_options): [IMP-C25 Step 14] at the end
+               of each entry's part the user downloads what nothing fetched, one
+               object at a time, in the session's Chrome (_help_unfetched)
     account    the Google account (CHROME_PROFILES key) of the Chrome session now
                running; None outside a session (a stand-alone fetch_single_entry)
     downloads  {name: (size, mtime_ns)} of the Downloads folder when this session's
@@ -3841,22 +3843,34 @@ def _learn_from_download(item, sha1, ctx):
     the stage's approach verdict when it gives one (item['_trigger']['approach']).
     The apply engine folds the record in after the run (main.merge_learned_gphotos).
     Silent; a failed write prints one warning line and the fetch goes on. Nothing is
-    learned outside a session or for an object without an owning id."""
+    learned outside a session or for an object without an owning id.
+    [IMP-C25 Step 14] A download the USER made in --manual mode (item['_manual']) is
+    recorded with source `manual` — proof stays sha256 (its bytes matched), and the
+    apply engine never confirms a manual record (P-5: a later check does). Its photo_id
+    is the located item's, else the item --manual opened for it
+    (item['_manual_opened']) — each only when that item's dedupKey is exactly the
+    verified bytes' key, never the item the user may have clicked elsewhere."""
     loc = item.get("locator") or {}
     if ctx.account not in mvcommon.GP_ACCOUNTS or not loc.get("manual_id"):
         return
     key = gpweb.dedup_key(sha1) if sha1 else None
+    manual = bool(item.get("_manual"))
     record = {"manual_id": loc["manual_id"], "label": loc.get("label"), "sha256": item["hash"],
-              "proof": "sha256", "source": "fetch", "dedup_key": key}
+              "proof": "sha256", "source": "manual" if manual else "fetch", "dedup_key": key}
     trigger = item.get("_trigger") if isinstance(item.get("_trigger"), dict) else {}
     found = trigger.get("record") if isinstance(trigger.get("record"), dict) else {}
-    if key and found.get("photo_id") and gpweb.dedup_keys_equal(found.get("dedup_key"), key):
-        record["photo_id"] = found["photo_id"]
-        for k in ("taken_ms", "tz_offset_ms", "upload_ms", "width", "height"):
-            record[k] = found.get(k)
-        record["gp_filename"] = found.get("gp_filename") or found.get("filename")
-        if isinstance(trigger.get("approach"), dict):
-            record["approach"] = trigger["approach"]
+    named = [(found, trigger.get("approach"))]
+    if manual and isinstance(item.get("_manual_opened"), dict):
+        named.append((item["_manual_opened"], None))
+    for found, approach in named:
+        if key and found.get("photo_id") and gpweb.dedup_keys_equal(found.get("dedup_key"), key):
+            record["photo_id"] = found["photo_id"]
+            for k in ("taken_ms", "tz_offset_ms", "upload_ms", "width", "height"):
+                record[k] = found.get(k)
+            record["gp_filename"] = found.get("gp_filename") or found.get("filename")
+            if isinstance(approach, dict):
+                record["approach"] = approach
+            break
     try:
         mvcommon.append_learned(ctx.account, record)
     except (OSError, ValueError) as e:
@@ -3866,7 +3880,7 @@ def _learn_from_download(item, sha1, ctx):
     ctx.stats["learned"] += 1
 
 
-def harvest_downloads(queue, ctx):
+def harvest_downloads(queue, ctx, timeout=300, stop=None):
     """[IMP-C25 Step 10 c] One harvest round over the Downloads folder — today's
     loop, its timeouts, extensions and prints (IMP-C29: the timeout is decided
     after the scan): every finished .mkv / .mp4 is SHA-256-routed to a pending
@@ -3904,7 +3918,10 @@ def harvest_downloads(queue, ctx):
       fallback  ~/Downloads as below, but a file is deleted ONLY when it appeared
                 during this run, belongs to the entry's expected-name family and is
                 not moved; other run-new files are listed when the run ends.
-      legacy    ~/Downloads exactly as described above."""
+      legacy    ~/Downloads exactly as described above.
+
+    [IMP-C25 Step 14] timeout = the base timeout in seconds (today's 300); stop = a callable — once it returns
+    True the round ends at once (--manual: the object being waited for has arrived)."""
     target = ctx.target or {"mode": "legacy", "dir": SYSTEM_DOWNLOADS_FOLDER}
     mode, folder = target["mode"], target["dir"]
     if mode == "incoming":
@@ -3912,7 +3929,7 @@ def harvest_downloads(queue, ctx):
     else:
         print("   > Watching Downloads (Infinite wait if active)...")
     start_time = time.time()
-    base_timeout = 300  # 5 mins initial timeout
+    base_timeout = timeout  # 5 mins initial timeout (--manual: MANUAL_WAIT_S per object)
 
     processed_files = set()  # this round's files ([IMP-B10] their hashes outlive it in ctx.hashed)
     saw_download = False  # [IMP-C29] was a .crdownload ever seen during this wait?
@@ -3920,6 +3937,8 @@ def harvest_downloads(queue, ctx):
     wrong = []  # [live check 2026-10-05] their names: what the round's requests fetched instead
 
     while True:
+        if stop is not None and stop():  # [IMP-C25 Step 14] what this round waited for has arrived
+            return {"timed_out": False, "saw_download": saw_download, "unmatched": unmatched}
         # Check Active Downloads
         active_downloads = [f for f in _watched_names(folder, mode) if f.endswith(".crdownload")]
         is_active = len(active_downloads) > 0
@@ -4044,7 +4063,8 @@ def _record_failed(item, ctx, reason, tried=None, candidates=None, expected_take
     resolve_photos shows them) and the `expected_taken_local` time (the exact-item
     stages, IMP-C25 Step 12). True when written. Needs the session account and the
     owning id — a stand-alone call has neither and writes nothing; a failed write
-    prints one warning line."""
+    prints one warning line. [IMP-C25 Step 14] A written row is remembered on the
+    item (item['_failed'] = {reason, tried}) for its identification block."""
     loc = item.get("locator") or {}
     if ctx.account not in mvcommon.GP_ACCOUNTS or not loc.get("manual_id"):
         return False
@@ -4058,6 +4078,7 @@ def _record_failed(item, ctx, reason, tried=None, candidates=None, expected_take
     except (OSError, ValueError) as e:
         print(f"     ⚠️ Not recorded in the failed list ({type(e).__name__}: {e}).")
         return False
+    item["_failed"] = {"reason": reason, "tried": tried}
     return True
 
 
@@ -4199,13 +4220,266 @@ def _lost_downloads_line(ctx):
             f"{s['lost_twice']} lost twice — see the failed list.")
 
 
-def _fetch_items(driver, queue, ctx, entry=None, owner_id=None):
+# ==========================================
+#   IMP-C25 STEP 14 — WHAT NOTHING FETCHED: THE IDENTIFICATION BLOCK AND --manual
+# ==========================================
+# docs/feature-fetch-datetime/PLAN.md Step 14 (+ follow-up a). At the end of an entry's part, every object nothing
+# fetched — the `failed` ones included — gets its identification block: what to look for in Google Photos, in the
+# words one searches with, and the commands that resolve it. With --manual (CLI only — the web UI never passes it)
+# the same block, then the session's Photos tab opens at the object's best start and the fetch WATCHES the entry's
+# download folder for up to MANUAL_WAIT_S per object: a download the user starts in that Chrome lands there and is
+# kept only when its SHA-256 is the object's (the harvester decides — never the user's word; nothing is read from
+# the keyboard). Only for a real Chrome (incoming / fallback mode): a stand-in driver keeps today's transcript.
+
+MANUAL_WAIT_S = 1800  # --manual: how long the fetch watches for the user's download of ONE object (30 min)
+
+
+def _cli_arg(text):
+    """One command-line argument as the user types it: quoted when it holds a space."""
+    text = str(text)
+    return f'"{text}"' if not text or any(c.isspace() for c in text) else text
+
+
+def identification_lines(facts):
+    """[IMP-C25 Step 14] The identification block of ONE object nothing fetched or matched — what to look for in
+    Google Photos (PLAN Step 14; the fetch's block, resolve_photos' too). `facts`: account, uploaded_name,
+    expected_local (the taken time as Google Photos shows it), dedup_key, sha1, size_bytes, tried ([{approach,
+    outcome, n}] or a text), failed (its failed-list status, a text), candidates (photo ids — resolve_photos only:
+    the fetch's block, which the web job output shows too, names none) — any of them may be missing.
+    -> the lines, unindented: never a P-13 web marker, never a URL."""
+    key, sha1, size, tried = facts.get("dedup_key"), facts.get("sha1"), facts.get("size_bytes"), facts.get("tried")
+    if isinstance(tried, list):
+        tried = " · ".join(f"{t['approach']} {t['outcome']}({t['n']})" for t in tried) or "nothing to search by"
+    content = " · ".join(p for p in (f"dedupKey {key}" if key else "", f"SHA-1 {sha1}" if sha1 else "") if p)
+    when = facts.get("expected_local")
+    when = f"{when} (the time Google Photos shows)" if when else "unknown (no capture, no learned time)"
+    size = f"{mvcommon.human_readable_size(size)} ({size:,} bytes)" if mvcommon._is_int(size) else "unknown"
+    lines = [f"account       {facts.get('account') or 'unknown'}",
+             f"uploaded as   {facts.get('uploaded_name') or 'unknown'}",
+             f"taken         {when}",
+             f"content key   {content or 'unknown — never captured or downloaded (its exact name tells it)'}",
+             f"size          {size}",
+             f"tried         {tried or 'nothing yet'}"]
+    if facts.get("failed"):
+        lines.append(f"failed list   {facts['failed']}")
+    candidates = [c for c in facts.get("candidates") or () if isinstance(c, str)]
+    if candidates:
+        lines.append(f"candidates    {len(candidates)} seen: {', '.join(candidates)}")
+    return lines
+
+
+def _object_size(objects, entry, item):
+    """The object's exact size in bytes — its trusted block's, else its capture's (`objects` = _entry_objects), else
+    a whole file's tech_spec size — or None: a chunk without a recorded size is never estimated here."""
+    obj = objects.get(item["hash"]) or {}
+    for facts in (obj.get("block"), obj.get("capture")):
+        if isinstance(facts, dict) and mvcommon._is_int(facts.get("size_bytes")) and facts["size_bytes"] > 0:
+            return facts["size_bytes"]
+    size = ((entry or {}).get("tech_spec") or {}).get("size_bytes")
+    whole = (item.get("locator") or {}).get("kind") in ("whole", "extra_whole")
+    return size if whole and mvcommon._is_int(size) and size > 0 else None
+
+
+def _unfetched_facts(item, ctx, objects, entry):
+    """identification_lines' facts for a queue item this entry part did not fetch."""
+    loc = item.get("locator") or {}
+    key = _content_key(loc)
+    failed = item.get("_failed") or {}
+    first = item.get("_first_located") or item.get("_located")
+    if failed.get("tried"):
+        tried = failed["tried"]
+    elif first:
+        tried = _tried(first)
+    else:
+        tried = "today's search only (the exact-item stages did not run)"
+    if failed:
+        status = f"{failed['reason']} — added by this run"
+    elif (item.get("_located") or {}).get("found"):
+        status = "not listed — its item was found, only its download failed: a re-run fetches it"
+    else:
+        status = "not listed"
+    return {"account": ctx.account or loc.get("account"), "uploaded_name": loc.get("uploaded_name"),
+            "expected_local": _expected_local(loc), "dedup_key": key, "sha1": _sha1_of(loc, key),
+            "size_bytes": _object_size(objects, entry, item), "tried": tried, "failed": status}
+
+
+def _unfetched_title(item):
+    loc = item.get("locator") or {}
+    owner = f" · {loc['manual_id']} ({loc.get('label') or 'whole'})" if loc.get("manual_id") else ""
+    return f"{item['filename']}{owner}"
+
+
+def _fetch_command(loc, entry, temp_dir):
+    """`python main.py fetch <id> [--fetchExtras] [tempdir <path>] --manual` for one object's owner — an extra's
+    owner is its title, fetched with --fetchExtras; the run's tempdir again, so the file lands where this one
+    looked for it."""
+    parts = ["python", "main.py", "fetch", _cli_arg(loc["manual_id"])]
+    if isinstance(entry, dict) and "group_rel" in entry:
+        parts.append("--fetchExtras")
+    if temp_dir:
+        parts += ["tempdir", _cli_arg(temp_dir)]
+    return " ".join(parts + ["--manual"])
+
+
+def _next_steps(item, entry, temp_dir):
+    """The block's `next` lines: the --manual fetch, and resolve_photos for an object on the failed list."""
+    loc = item.get("locator") or {}
+    if not loc.get("manual_id"):
+        return []
+    lines = [f"next          {_fetch_command(loc, entry, temp_dir)}",
+             "                the browser opens where it most likely is; download it there — only its own bytes "
+             "are kept"]
+    if item.get("_failed"):
+        lines += [f"              python main.py resolve_photos --id {_cli_arg(loc['manual_id'])}",
+                  "                paste its photo URL or a search term, or mark it not uploaded"]
+    return lines
+
+
+def open_best_start(driver, loc, ctx, located=None, candidates=()):
+    """[IMP-C25 Step 14] Open the session's Photos tab where the object of `loc` (a build_fetch_queue locator) most
+    likely is, for the user to find it by eye (--manual; resolve_photos), best first:
+      its located item's page   `located` — a locate_object result that pinned it;
+      the item its record names  loc['photo_id'] — a learned or manual match no stage verified;
+      a candidate                the first of `candidates`, then of located's, that no record proves another item;
+      its day                    the search for its expected LOCAL day (the taken second's, in its own timezone);
+      its exact uploaded name    the search for it;
+      else the Photos start page.
+    An item page counts only once it shows the item's record (a deleted item falls to the next choice). READ-ONLY
+    like locate_object: it navigates and types a search — nothing is clicked, pressed or downloaded.
+    -> (what was opened — a phrase for the user, the photo_id of the item page opened or None, that page's record or
+    None). Raises SessionExpiredError (signed out); a browser fault propagates."""
+    loc = loc if isinstance(loc, dict) else {}
+    located = located if isinstance(located, dict) else {}
+    key, run = _content_key(loc), _locator_run(ctx)
+    account = getattr(ctx, "account", None) or loc.get("account")
+
+    def unproven(pid):  # no record read this run proves it another item (P-5)
+        held = run.records.get((account, pid))
+        return held is None or _verdict(held, loc, key)[0] != "wrong"
+
+    pages = []
+    if located.get("found") and located.get("photo_id"):
+        pages.append((located["photo_id"], f"its item page ({_STAGE_LABEL.get(located.get('stage'), 'a stage')} "
+                                           f"found it)"))
+    if loc.get("photo_id") and unproven(loc["photo_id"]):
+        pages.append((loc["photo_id"], "the item its library record names (no stage could verify it)"))
+    named = {pid for pid, _what in pages}
+    first = next((p for p in list(candidates or ()) + list(located.get("candidates") or ())
+                  if isinstance(p, str) and p not in named and unproven(p)), None)
+    if first:
+        pages.append((first, "the first item a search showed (not verified)"))
+    if hasattr(driver, "execute_cdp_cmd"):
+        use_photos_tab(driver)  # focused, downloads re-armed into the entry's folder (P-12)
+    for pid, what in pages:
+        if not gpweb.MEDIA_KEY_RE.match(pid):
+            continue
+        driver.get(f"{PHOTOS_URL}/photo/{pid}")
+        check_session_alive(driver)
+        if _shows_item(driver, pid, None):
+            return what, pid, gpweb.page_record(driver.page_source, pid) or None
+    days = gpweb.local_days(loc.get("taken_ms"), loc.get("tz_offset_ms"), loc.get("device_tz_offset_min"), window=0)
+    searches = [(gpweb.day_query(days[0]), f"the search for its day ({gpweb.day_query(days[0])})")] if days else []
+    if loc.get("uploaded_name"):
+        searches.append((loc["uploaded_name"], "the search for its exact uploaded name"))
+    for query, what in searches:
+        try:
+            _ui_search(driver, query)
+            return what, None, None
+        except _SearchProblem:
+            continue
+    driver.get(PHOTOS_URL)
+    check_session_alive(driver)
+    return "the Google Photos start page", None, None
+
+
+def _manual_wait(queue, item, ctx):
+    """One --manual wait (harvest_downloads, MANUAL_WAIT_S): every object of the entry part not fetched yet is
+    pending — the user may download any of them, so none is deleted as a wrong item — none counts as requested (no
+    lost-download note), and the wait ends as soon as `item` arrived. Afterwards each object still not fetched gets
+    its status back (a `failed` one stays failed: its failed-list row stands)."""
+    held = {id(i): (i["status"], i.get("triggered")) for i in queue if i["status"] != "done"}
+    try:
+        for i in queue:
+            if id(i) in held:
+                i["status"], i["triggered"], i["_manual"] = "pending", False, True
+        harvest_downloads(queue, ctx, timeout=MANUAL_WAIT_S, stop=lambda: item["status"] == "done")
+    finally:
+        for i in queue:
+            if id(i) in held and i["status"] != "done":
+                i["status"], i["triggered"] = held[id(i)]
+
+
+def _manual_round(driver, queue, left, ctx, objects, entry):
+    """--manual (PLAN Step 14 + follow-up a): for each object of `left` (the entry part's objects nothing fetched,
+    `failed` ones included), one at a time — its identification block, the session's Photos tab at its best start
+    (open_best_start), and a wait of up to MANUAL_WAIT_S for the download the user starts in that Chrome
+    (_manual_wait). Kept only when its SHA-256 is an object's own; it is learned with source `manual`
+    (_learn_from_download). Nothing is read from the keyboard; Ctrl+C stops the fetch as anywhere else."""
+    minutes = MANUAL_WAIT_S // 60
+    print(f"\n   === MANUAL ({len(left)} file(s)) — find each one in this Chrome window and download it ===")
+    print(f"   > Downloads are saved into {ctx.target['dir']} and kept only when their SHA-256 is the file's own; the "
+          f"fetch waits up to {minutes} min per file (nothing is read from the keyboard — Ctrl+C stops it).")
+    for n, item in enumerate(left, 1):
+        name = item["filename"]
+        if item["status"] == "done":
+            print(f"\n   > ✋ {name}: already fetched while waiting for another file.")
+            continue
+        loc = item.get("locator") or {}
+        print(f"\n   🧭 [{n}/{len(left)}] {_unfetched_title(item)}")
+        for line in identification_lines(_unfetched_facts(item, ctx, objects, entry)):
+            print(f"      {line}")
+        seen = (item.get("_first_located") or {}).get("candidates") or ()
+        try:
+            what, opened, record = open_best_start(driver, loc, ctx, item.get("_located"), seen)
+        except SessionExpiredError:
+            raise
+        except Exception as e:  # one page's trouble never ends the wait: the user can still look by hand
+            what, opened, record = (f"nothing — the page could not be opened ({type(e).__name__}); look for it "
+                                    f"yourself"), None, None
+        item["_manual_opened"] = dict(record or {}, photo_id=opened) if opened else None
+        print(f"      opened        {what}")
+        print(f"      waiting       up to {minutes} min for its download")
+        _manual_wait(queue, item, ctx)
+        _journal_sync(ctx, queue)
+        if item["status"] == "done":
+            print(f"   > ✋ {name}: fetched by hand — its SHA-256 matched; recorded as a manual find.")
+        else:
+            print(f"   > ⏱️ {name}: no download with its bytes within {minutes} min.")
+    done = sum(1 for i in left if i["status"] == "done")
+    print(f"\n   > ✋ Manual: {done} of {len(left)} file(s) fetched by hand.")
+
+
+def _help_unfetched(driver, queue, ctx, entry=None, owner_id=None, temp_dir=None):
+    """[IMP-C25 Step 14] The end of an entry's part, after the failed-list booking and before its downloads end
+    (_finish_downloads): every object of `queue` nothing fetched — `failed` ones included (follow-up a) — gets its
+    identification block. With ctx.manual the --manual round follows (_manual_round); without it, the commands that
+    resolve it: `fetch <id> --manual` and, for an object on the failed list, `resolve_photos --id <id>`. Only for a
+    real Chrome (ctx.target mode incoming | fallback): a stand-in driver (legacy mode) keeps today's transcript;
+    nothing at all when everything was fetched."""
+    left = [i for i in queue if i["status"] != "done"]
+    if not left or (ctx.target or {}).get("mode") not in ("incoming", "fallback"):
+        return
+    objects = _entry_objects(entry, owner_id) if entry is not None else {}
+    if ctx.manual:
+        _manual_round(driver, queue, left, ctx, objects, entry)
+        return
+    print(f"\n   === NOT FETCHED ({len(left)} file(s)) — what to look for in Google Photos ===")
+    for item in left:
+        print(f"   🧭 {_unfetched_title(item)}")
+        for line in identification_lines(_unfetched_facts(item, ctx, objects, entry)) + _next_steps(item, entry,
+                                                                                                     temp_dir):
+            print(f"      {line}")
+
+
+def _fetch_items(driver, queue, ctx, entry=None, owner_id=None, temp_dir=None):
     """Fetch the pending items of one entry in the running session: [IMP-C25 Step 11]
     first where its downloads land (_prepare_downloads — the disk pre-flight may refuse
     the entry: then nothing is requested), the exact-item stages, today's two legacy
-    attempts, IMP-C34's one retry, the wrong-item booking (_record_wrong_items) and
-    last the end of the entry's downloads (_finish_downloads). `entry` / `owner_id`
-    size the pre-flight."""
+    attempts, IMP-C34's one retry, the wrong-item booking (_record_wrong_items),
+    [IMP-C25 Step 14] what nothing fetched — its identification block, or the --manual
+    round (_help_unfetched) — and last the end of the entry's downloads
+    (_finish_downloads). `entry` / `owner_id` size the pre-flight; `temp_dir` (the
+    run's tempdir) goes into the block's commands."""
     if not _prepare_downloads(driver, queue, ctx, entry, owner_id):
         return
 
@@ -4256,6 +4530,9 @@ def _fetch_items(driver, queue, ctx, entry=None, owner_id=None):
     _record_wrong_items(queue, ctx)
     _journal_sync(ctx, queue)
 
+    # [IMP-C25 Step 14] What nothing fetched: its identification block — with --manual, the user's own download.
+    _help_unfetched(driver, queue, ctx, entry, owner_id, temp_dir)
+
     # [IMP-C25 Step 11] Only now — after the retry's harvest — the entry's downloads end.
     _finish_downloads(driver, ctx)
 
@@ -4297,7 +4574,7 @@ def fetch_single_entry(driver, entry, temp_dir=None, entry_id=None, ctx=None):
               f"fetched in the {_session_names(plan['accounts'][1:])} session.")
 
     if mine:
-        _fetch_items(driver, mine, ctx, entry, entry_id or entry.get("manual_id"))
+        _fetch_items(driver, mine, ctx, entry, entry_id or entry.get("manual_id"), temp_dir=temp_dir)
     elif plan is None:
         print("   ✅ All files already exist.")
         return
@@ -4744,7 +5021,8 @@ def _debug_port_free(port=9222, timeout=15.0):
 
 
 def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None, manual=False):
-    # [IMP-C25] manual = --manual (parse_fetch_options), carried in the run's FetchContext for Step 14.
+    # [IMP-C25] manual = --manual (parse_fetch_options), carried in the run's FetchContext: [Step 14] each entry ends
+    # with a watch for the user's own download of what nothing fetched (_help_unfetched).
     print(f"--- FETCH ROUTER: {manual_id} ---")
 
     active_profile = profile_for_id(manual_id)
@@ -4885,7 +5163,7 @@ def parse_fetch_args(argv):
     flag, the `episodes <range>` pair, and `tempdir <path>` may appear in any
     order after the id."""
     if len(argv) < 3 or argv[1] != "fetch":
-        print("Usage: fetch [id] [episodes] [range] [tempdir <path>] [--fetchExtras]")
+        print("Usage: fetch [id] [episodes] [range] [tempdir <path>] [--fetchExtras] [--manual]")
         sys.exit(1)
     mid = argv[2]
     rest = argv[3:]

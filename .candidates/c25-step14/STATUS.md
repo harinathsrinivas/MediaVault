@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 14.c (`--manual` + the identification block)
+STATE: IN PROGRESS — next: 14.d (robust fetch_restore resume + the public helpers for resolve_photos)
 
 # IMP-C25 Step 14 — `--manual`, `resolve_photos` (manual confirm + match), robust fetch_restore resume, web behavior
 # (+ follow-ups a–d) — resumable status
@@ -60,13 +60,35 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       copy) no timeline pass → 4 fail · no field-number read → 3 fail · an absent field read as unset → 6 fail;
       neighbours (check_photos, schema guard, harvester, hygiene, routing, search wait, gp_inventory, gphotos_apply,
       primitives, gprpc, gpweb, locator, map_photos, mvmeta_upgrade, chrome robustness, quality flags) 1551 passed;
-      smoke 82 passed — the WIP SHA is in the commit that ticks 14.c
-- [ ] 14.c `--manual` + the identification block (mainfetch): at the end of `_fetch_items`, before `_finish_downloads`,
+      smoke 82 passed — a268b7c
+- [x] 14.c `--manual` + the identification block (mainfetch): at the end of `_fetch_items`, before `_finish_downloads`,
       every object of the entry part not fetched gets its identification block (account, exact uploaded name, local
       taken time, content key, size, what was tried, its failed-list status, the CLI next steps); with ctx.manual the
       same block + the browser at the best start + a per-object watch of ctx.target["dir"] (MANUAL_WAIT_S = 30 min,
       harvest_downloads(timeout=, stop=)), SHA-256 verification, learned record source `manual` (proof sha256); the
-      `failed` ones are taken too (follow-up a) · usage lines name `--manual` — tests: tests/test_fetch_manual.py
+      `failed` ones are taken too (follow-up a) · usage lines name `--manual` — tests: tests/test_fetch_manual.py.
+      Done: `_help_unfetched` (after `_record_unfetched` / `_record_wrong_items`, before `_finish_downloads`; incoming /
+      fallback only) · `identification_lines(facts)` (public, shared with resolve_photos; never a URL, never a P-13
+      marker; the fetch's block names no photo id) · `open_best_start(driver, loc, ctx, located, candidates)` (public:
+      located page → the record's photo_id → first candidate no record proves wrong → day search → exact-name search
+      → start page; an item page counts only once it shows its record) · `_manual_round` / `_manual_wait` (all the
+      part's unfetched objects pending during a wait, none "requested", statuses restored in a finally) ·
+      `harvest_downloads(queue, ctx, timeout=300, stop=None)` · `_record_failed` keeps item['_failed'] · learn-on-fetch:
+      source manual for item['_manual'], photo_id from the located record, else item['_manual_opened'] — only with the
+      verified bytes' dedupKey · the next commands: `python main.py fetch <id> [--fetchExtras] [tempdir "<p>"]
+      --manual` and (failed-list rows) `python main.py resolve_photos --id <id>` · usage lines: main.py ×4 (no-args
+      fetch_restore + fetch, the two "❌ Usage" lines, the fetch_restore comment) + parse_fetch_args. Tests:
+      test_fetch_manual 17 passed (block exact lines for an s4-skipped object; a located-unfetched one "a re-run fetches
+      it" without resolve_photos; the command flags; a stand-in driver with --manual: no block, no wait; all fetched:
+      nothing; --manual: kept after SHA-256 + learned source manual without photo_id + the wait ends with the download;
+      30-min timeout + journal state back to failed; a wrong download deleted, the wait goes on; the failed ones taken
+      (s4-skipped, RPC off, day search opened); another missing chunk downloaded during a wait kept; each wait ends at
+      its own object; the located page opened + photo_id learned + not confirmed by apply_learned; an opened item with
+      other bytes never learned (inconsistent); the ~/Downloads fallback; a best start that cannot open still waits;
+      Ctrl+C; the usage lines). Disarm (scratch copy) ×7: kept without SHA-256 → 3 fail · photo_id without the
+      dedupKey check → 1 · no status restore → 1 · no legacy gate → 1 · source fetch → 5 · no stop → 1 (after adding
+      the per-object wait test) · other objects not pending → 1. Neighbours 1154 passed; smoke 82 passed — the WIP SHA
+      is in the commit that ticks 14.d
 - [ ] 14.d robust fetch_restore resume (mainfetch): a re-run goes straight to S0 — the session account's learned
       sidecar (photo_ids proven but not merged yet: an interrupted parent never merged) and the fetch journals (the
       photo_ids an interrupted run located) add S0a candidates (still verified, P-5) · public helpers for resolve_photos:
@@ -146,7 +168,12 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
 
 ## Assumptions (also listed in the final report)
 - (A1) The harness's commit-attribution notice names the model for each commit's trailer (it said Opus 5.5 at dispatch;
-  the session environment reports claude-fable-5-1; no MODEL-FALLBACK banner) — the quirk Steps 8–13c recorded.
+  the session environment reports claude-fable-5-1; no MODEL-FALLBACK banner) — the quirk Steps 8–13c recorded. It
+  alternates between "Claude Opus 5.5" and "Claude Fable 5.1" during this step; each commit uses the notice current
+  when it is made.
+- (A4) A `--manual` download teaches the content key (proof sha256, source manual) and a photo_id only from an item
+  this run READ whose dedupKey is the verified bytes' — never from the user's clicks (no stdin); the apply engine does
+  not confirm source manual (a later check_photos does), so the object's failed-list row stays until then.
 - (A2) P12's partial-upload / archived markers ([12][0] == 20, [13] true) are kept as given: the probe could confirm only
   the negative case (one complete, non-archived item: [12] null, [13] false); no partial or archived item was probed.
 - (A3) One item stands for the TV account's record layouts (the dispatch allowed ONE item); the inventory agrees

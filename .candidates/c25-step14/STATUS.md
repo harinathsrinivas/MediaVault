@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 14.g (gates: disarm probes on a scratch copy · full suite · smoke · self-review · COMPLETE)
+STATE: COMPLETE
 
 # IMP-C25 Step 14 — `--manual`, `resolve_photos` (manual confirm + match), robust fetch_restore resume, web behavior
 # (+ follow-ups a–d) — resumable status
@@ -156,10 +156,21 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       test_resolve_photos 71 passed (14.e 35 + 14.f 36). Disarm (scratch copy) ×8: no TTY check → 1 fail · proven
       other bytes offered → 1 · applied without asking → 2 · answered rows walked again → 2 · verified paste as manual
       → 1 · answer log not written → 9 · download-lost walked → 1 · the old ambiguous line → 1. Neighbours 1141 passed;
-      smoke 82 passed (49.6 s right after the neighbours — re-timed at 14.g) — the WIP SHA is in the commit that ticks
-      14.g
-- [ ] 14.g gates: disarm probes (isolated scratch copy) · full suite · smoke · self-review · STATE: COMPLETE · the
-      final feat commit `feat(imp-c25): Step 14 — --manual, resolve_photos, robust fetch_restore resume, Chrome robustness`
+      smoke 82 passed (49.6 s right after the neighbours — re-timed at 14.g) — b1d31d1
+- [x] 14.g gates: disarm probes (isolated scratch copy) · full suite · smoke · self-review · STATE: COMPLETE · the
+      final feat commit `feat(imp-c25): Step 14 — --manual, resolve_photos, robust fetch_restore resume, Chrome robustness`.
+      Disarm, all on ONE fresh scratch copy of b1d31d1 (the unmutated probed files first: 587 passed): 39/39 caught —
+      14.a ×10 (the -ErrorAction Stop query · another profile terminated · the handle not trusted when the table cannot
+      tell · no handle kill after a failed taskkill · a failed attach / a failed Photos tab leaving the launched Chrome ·
+      no page-load bound in init_driver / the crawler's connect · the warm-up not closing its Chrome / attaching to the
+      previous one), 14.b ×3, 14.c ×8 (incl. --manual reading the keyboard), 14.d ×6, 14.e ×3, 14.f ×9 (incl. the lock
+      taken waiting); every file restored byte for byte. Full suite 3219 passed (baseline 3062 + 157 new: chrome
+      robustness 35, quality flags 20, fetch manual 31, resolve photos 71), 0 failed, 5 min 24 s; then smoke 82 passed
+      in 11.7 s. Self-review: the acceptance bullets of PLAN Step 14 and follow-ups a–d one by one; the consumers (Step
+      15 smoke/pins, R2 §M9 / §M10 / §M15, R4, Step 16 wording); the change-gates (rollback untouched — no RollbackJournal
+      / recover_journal / PONR / cmd_restore / txn line in the diff; ENTRY_TYPE_KEYS untouched, guard green; the new
+      library readers are alias/season_map-safe: iter_entry_objects / _gp_resolve; webui/server.py unchanged — it never
+      passes --manual, pinned by test_fetch_routing) — findings in the final report
 
 ## Design decisions (binding for the rest of this step — recorded early so a resumed session stays consistent)
 1. Legacy mode keeps today's transcript: the identification block and `--manual` act only when the entry's downloads
@@ -225,13 +236,19 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
   the session environment reports claude-fable-5-1; no MODEL-FALLBACK banner) — the quirk Steps 8–13c recorded. It
   alternates between "Claude Opus 5.5" and "Claude Fable 5.1" during this step; each commit uses the notice current
   when it is made.
-- (A4) A `--manual` download teaches the content key (proof sha256, source manual) and a photo_id only from an item
-  this run READ whose dedupKey is the verified bytes' — never from the user's clicks (no stdin); the apply engine does
-  not confirm source manual (a later check_photos does), so the object's failed-list row stays until then.
 - (A2) P12's partial-upload / archived markers ([12][0] == 20, [13] true) are kept as given: the probe could confirm only
   the negative case (one complete, non-archived item: [12] null, [13] false); no partial or archived item was probed.
 - (A3) One item stands for the TV account's record layouts (the dispatch allowed ONE item); the inventory agrees
   (2374 TV records: original_quality absent for all, partial/archived False for the 1122 rpc-sourced ones).
+- (A4) A `--manual` download teaches the content key (proof sha256, source manual) and a photo_id only from an item
+  this run READ whose dedupKey is the verified bytes' — never from the user's clicks (no stdin); the apply engine does
+  not confirm source manual (a later check_photos does), so the object's failed-list row stays until then.
+- (A5) The automation Chrome saves a download the USER starts in the tab MediaVault opened into the entry's folder (the
+  CDP download behaviour is re-armed on that tab — use_photos_tab); whether a tab the user opens himself does too is
+  unverified live (PLAN P6 / R2 §M10) — the block says to download "in this Chrome window", and the fallback mode
+  watches ~/Downloads.
+- (A6) Two fetch runs never share a run id in real use (one mainfetch process per run: the id holds the second and the
+  pid) — a test with two runs in one second and one process gives each its own id (test_fetch_manual).
 
 ## Log
 - 2026-10-14 dispatched; read-in: base contract (executor-opus.md); PLAN (journal, P-1…P-20, OD table, protocol, Steps
@@ -271,3 +288,43 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
   Reading: 2 sits at [8] of every item record, fDcn4b [14] / [29], the [2,0,2,0,null,1] list and EWgK9e [18] — any
   could be the quality code; one original-quality item cannot tell which → original_quality stays unknown (said in the
   report; a storage-saver item would settle it). No partial / archived item → P12's markers kept (A2).
+- 2026-10-19 14.g: disarm 39/39 on one scratch copy of b1d31d1; full suite 3219 passed (5 min 24 s); smoke 82 passed
+  (11.7 s); self-review done; STATE: COMPLETE.
+
+## Result (for the orchestrator, Steps 15 / 16 and the R2 pack)
+- Commands: `python main.py fetch <id> [episodes <r>] [tempdir <p>] [--fetchExtras] [--manual]` (and fetch_restore, the
+  same flags; --manual forwarded only when given — the web never passes it) · `python main.py resolve_photos
+  [failed|<csv>] [--account movies|tv|anime|others] [--id <id | alias | prefix>]` (a terminal only: otherwise
+  "❌ resolve_photos is interactive: run it in a terminal — …" and exit 1; exit 1 also for refused / error /
+  interrupted). The question: `   [p]aste photo URL | [s]earch term | [n]ot uploaded | s[k]ip | [q]uit: ` (a photo URL
+  is accepted at it directly); then `      photo URL (Enter = the item the browser shows now): ` · `      search term: `
+  · `      accept as a manual match (a later fetch verifies it by SHA-256)? [y/N]: ` · at the end
+  `Apply these N changes to the library? [y/N]: ` and, for lost downloads, `Re-fetch the N lost download(s) now? (a
+  fetch also folds the learned sidecar into the library when it ends) [y/N]: `.
+- The identification block (mainfetch.identification_lines, unindented lines): account · uploaded as · taken
+  (`… (the time Google Photos shows)`) · content key (`dedupKey … · SHA-1 …`) · size (`… (N bytes)`) · tried
+  (`approach outcome(n) · …`) · failed list (`<reason> — added by this run` | `not listed — its item was found, only its
+  download failed: a re-run fetches it` | `not listed`) · candidates (resolve_photos only); the fetch adds `next` with
+  `python main.py fetch <id> [--fetchExtras] [tempdir "<p>"] --manual` and, for a failed-list row, `python main.py
+  resolve_photos --id <id>`. Header `=== NOT FETCHED (N file(s)) — what to look for in Google Photos ===`, a title line
+  `🧭 <file> · <id> (<label>)`; --manual: `=== MANUAL (N file(s)) — find each one in this Chrome window and download it
+  ===`, `opened <what>`, `waiting up to 30 min for its download`, `> ✋ … fetched by hand …` / `> ⏱️ … no download with
+  its bytes within 30 min.` / `> ✋ Manual: D of N file(s) fetched by hand.`; resume: `> ↩️ <file>: N item(s) an
+  earlier run found or learned are tried first.` None carries a P-13 web marker or a URL.
+- New public helpers: mainfetch.identification_lines · open_best_start · verify_item · object_locators ·
+  locate_object(..., stages=) · harvest_downloads(..., timeout=300, stop=None) · MANUAL_WAIT_S = 1800 · mvcommon.
+  resolved_path / append_resolved / read_resolved / GP_RESOLVE_ANSWERS · read_failed_csv_rows · failed_objects ·
+  main.parse_resolve_photos_args / cmd_resolve_photos / RESOLVE_USAGE / RESOLVE_PROMPT / RESOLVE_FAILED_STATUSES /
+  _rp_stdin_is_tty (the TTY seam) · gpweb._jspb_field · the fake's swbisb_compact / ewgk9e_live knobs (default off).
+- State: ~/.mediavault/gphotos/resolved.jsonl (v, at, account, manual_id, label, sha256, answer url|search|not_uploaded,
+  photo_id, proof, search_term, found). No library field, entry type or rollback behaviour changed.
+- Deviations (each in a design decision above): legacy-mode gating (1); --manual learns proof sha256 + source manual,
+  not proof manual (3); a manual match is never downloaded by the stages — `fetch <id> --manual` (4); a PROVEN content
+  mismatch is refused, not offered as a manual match (5); verified pastes are source check (6); not-uploaded answers live
+  in resolved.jsonl (6); the apply is offered even when nothing is left to walk (7); the warm-up's port guard reports
+  LAUNCH_FAIL; the crawler's connect bounds page loads; the check's quality pass reads lcxiM per distinct taken second
+  (12); open_best_start also opens "the item its library record names".
+- Observations, not changed: warm_profiles runs no profile_preflight (it could create an empty ChromeProfile_Others);
+  live VrseUb carried no payload[7] (download_original_url None → pLFTfd, as built — R2 verifies downloads); the shared
+  close says "this fetch" in resolve_photos too; fetch journals are never pruned (_resume_hints reads them all once per
+  run and account).

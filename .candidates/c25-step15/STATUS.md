@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 15.e pins (tests/test_c25_regression_pins.py: the registry of the existing pins + only the missing ones)
+STATE: IN PROGRESS — next: 15.f disarm (verify every guard's code site + catcher, write the consolidated probe script, run it on an isolated copy, DISARM.md)
 
 # IMP-C25 Step 15 — smoke coverage, regression pins, mutation probes — resumable status
 
@@ -96,10 +96,26 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
         its own account — movies / tv / anime / others; each mapped with proof dedupkey; the merge: saved, 4 changed,
         4 newly confirmed; each block read back from ITS library file — library_movies / _series / _anime /
         _others.json; pending empty afterwards; no adb). -k TestC25FourPrefixes 1 passed (0.64 s); smoke 102 passed
-        (14.9 s) — SHA in the 15.e commit
-- [ ] 15.e pins: tests/test_c25_regression_pins.py — a registry that the existing pins still exist (referenced, never
+        (14.9 s) — d6f95ca
+- [x] 15.e pins: tests/test_c25_regression_pins.py — a registry that the existing pins still exist (referenced, never
       duplicated) + only the missing pins (candidates: the exact spawned fetch argv · the P-13 marker literals on both
-      sides · calculate_file_hash's return contract · the mvmeta v1 key order) — each checked against what exists first
+      sides · calculate_file_hash's return contract · the mvmeta v1 key order) — each checked against what exists first.
+      Done (39 tests, 3.7 s — main.py's ast.parse is ~3 s of it): (1) test_the_pin_still_exists × 24 — the registry
+      of the EXISTING pins by file + name (a method must sit in its class): parse_fetch_args (TestParseFetchArgs ×4,
+      the 4-tuple with --manual, parse_fetch_options) · spawned argv (argv + env + kwargs, the child-env structural
+      pin, --manual only when given ×2, the web UI never passes it, the check child, the auto-confirm child) · web
+      markers (today's transcripts' counts) · trigger_download + search-wait digests · calculate_file_hash ×3 ·
+      ENTRY_TYPE_KEYS (d1) · mvmeta v1 ×3 · ALLOWED_RPCIDS. (2) the MISSING pins:
+      test_fetch_restore_spawns_exactly_the_fetch_child_argv × 4 (bare / episodes / extras + tempdir / manual — the
+      fetch_restore path, i.e. the web UI's action, was unpinned) · test_the_p13_markers_are_printed_only_where_they_
+      always_were × 6 (the exact source of every marker-bearing string literal, docstrings excluded: mainfetch 4 ·
+      main.py 2 (cmd_restore's split lines) · gprpc / gpweb / mvcommon / gpcapture none) ·
+      test_the_web_progress_parser_scans_exactly_these_markers (the three regex patterns + re.M + _PROGRESS_SIGNALS) ·
+      test_calculate_file_hash_signature_and_return_type (filepath, block_size=65536; a lowercase 64-hex str;
+      main's name is the same function) · test_calculate_file_hash_returns_none_and_never_raises_when_the_file_cannot_
+      be_read (a directory: None + the ❌ line, no cached SHA-1) · test_the_mvmeta_writer_keeps_the_v1_key_order_and_
+      its_exact_byte_form × 2 (whole / split: the 14 v1 keys in writer order, chunks [filename, hash], ASCII,
+      main._mu_decode accepts the bytes — mvmeta_upgrade's byte-identity precondition) — SHA in the 15.f commit
 - [ ] 15.f disarm: one consolidated probe script (session scratchpad, outside the repo) run on an isolated `git archive`
       copy of the final code — every guard of the PLAN's list has ≥ 1 probe re-run there; a test is added only where a
       guard turns out uncovered; `.candidates/c25-step15/DISARM.md` = guard → test → probe → caught, `disarm N/N`

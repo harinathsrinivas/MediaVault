@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 15.d3 all four prefixes (prep + push → pending --list → map_photos → merge → nothing pending)
+STATE: IN PROGRESS — next: 15.e pins (tests/test_c25_regression_pins.py: the registry of the existing pins + only the missing ones)
 
 # IMP-C25 Step 15 — smoke coverage, regression pins, mutation probes — resumable status
 
@@ -88,10 +88,15 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
         un-prepped primary records no SHA-1, so map_photos rates that fresh push `not-backed-up-yet` (only its own
         bytes could prove a push newer than the crawl) — hence the legacy object in the map test. `_c25_inventory`
         takes (name, dedupKey) pairs and returns the item records. -k TestC25AliasSweep 4 passed (1.23 s); smoke 101
-        passed (12.6 s) — SHA in the 15.d3 commit
-  - [ ] 15.d3 all four prefixes (mov- tv- ani- oth-): real prep + push of one object each → pending --list (four
+        passed (12.6 s) — 4a20ea3
+  - [x] 15.d3 all four prefixes (mov- tv- ani- oth-): real prep + push of one object each → pending --list (four
         accounts) → map_photos dry run (four mapped by their own bytes) → the merge of four learned records (four
-        blocks, each in its own library file, confirmed) → nothing pending
+        blocks, each in its own library file, confirmed) → nothing pending.
+        Done: C25_FOUR + class TestC25FourPrefixes::test_every_prefix_goes_from_push_to_confirmed (each routed to
+        its own account — movies / tv / anime / others; each mapped with proof dedupkey; the merge: saved, 4 changed,
+        4 newly confirmed; each block read back from ITS library file — library_movies / _series / _anime /
+        _others.json; pending empty afterwards; no adb). -k TestC25FourPrefixes 1 passed (0.64 s); smoke 102 passed
+        (14.9 s) — SHA in the 15.e commit
 - [ ] 15.e pins: tests/test_c25_regression_pins.py — a registry that the existing pins still exist (referenced, never
       duplicated) + only the missing pins (candidates: the exact spawned fetch argv · the P-13 marker literals on both
       sides · calculate_file_hash's return contract · the mvmeta v1 key order) — each checked against what exists first

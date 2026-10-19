@@ -2644,3 +2644,58 @@ class TestC25AliasSweep:
         assert res["status"] == "ok"
         assert [r["label"] for r in res["rows"]] == [sandbox_alias["primary_id"]]   # the primary's own sidecar
         assert os.listdir(systmp) == []
+
+
+# One object per category prefix (PLAN P-17: all four prefixes): id -> (folder under LOCAL_ROOT, file, its account,
+# the library file holding it).
+C25_FOUR = {
+    "mov-en-2024-smkfour": (("Movies", "Four Movie (2024)"), "Four.Movie.2024.mkv", "movies", "lib_movies"),
+    "tv-en-2020-smkfour-s01e01": (("Series", "Four Show", "Season 01"), "Four.Show.S01E01.mkv", "tv", "lib_series"),
+    "ani-ja-2020-smkfour01": (("Anime", "Four Anime"), "Four Anime - 01.mkv", "anime", "lib_anime"),
+    "oth-football-2026-smkfour-s01e01": (("Sports", "Football", "Four Cup"), "FourCup.e01.mkv", "others",
+                                         "lib_others"),
+}
+
+
+class TestC25FourPrefixes:
+    """PLAN P-17 across the new identity layer: mov- / tv- / ani- / oth- each go prep → push (capture) → pending →
+    mapped by their own bytes → confirmed through the apply engine, each block in its own library file."""
+
+    def test_every_prefix_goes_from_push_to_confirmed(self, sandbox, make_video, stub_tech_specs, mock_device,
+                                                      monkeypatch, capsys):
+        _empty_libs(sandbox)
+        sandbox["lib_others"].write_text("{}", encoding="utf-8")
+        keys = {}
+        for mid, (parts, name, _account, _lib) in C25_FOUR.items():
+            folder = sandbox["local_root"].joinpath(*parts)
+            folder.mkdir(parents=True, exist_ok=True)
+            path, _sha256 = make_video(folder / name, marker=mid.encode())
+            assert main.cmd_prep(mid, path) is True and main.cmd_push(mid) is True
+            with open(path, "rb") as fh:
+                keys[mid] = gpweb.dedup_key(hashlib.sha1(fh.read()).hexdigest())
+        library = mvcommon.load_library()
+        uploaded = {mid: library[mid]["search_term"] for mid in C25_FOUR}
+
+        pending = main.cmd_check_photos("pending", list_only=True)           # offline: every push awaits backup
+        assert {o["manual_id"]: pending["routes"][(o["manual_id"], "whole")]["routing"]
+                for o in pending["objects"]} == {mid: spec[2] for mid, spec in C25_FOUR.items()}
+
+        items = _c25_inventory({spec[2]: [(uploaded[mid], keys[mid])] for mid, spec in C25_FOUR.items()})
+        monkeypatch.setattr(main.subprocess, "run", _c25_no_adb)
+        mapping = main.cmd_map_photos()                                      # dry run: proven by their own bytes
+        assert {r["manual_id"]: (r["status"], r.get("proof")) for r in mapping["rows"]} == {
+            mid: ("mapped", "dedupkey") for mid in C25_FOUR}
+
+        for mid, (_parts, _name, account, _lib) in C25_FOUR.items():
+            [item] = items[account]
+            mvcommon.append_learned(account, {
+                "manual_id": mid, "label": "whole", "sha256": library[mid]["hash"], "photo_id": item["photo_id"],
+                "taken_ms": item["taken_ms"], "tz_offset_ms": item["tz_offset_ms"], "upload_ms": item["upload_ms"],
+                "dedup_key": keys[mid], "gp_filename": uploaded[mid], "proof": "dedupkey", "source": "check"})
+        report = main.merge_learned_gphotos()
+
+        assert (report["status"], len(report["changed"]), report["confirmed"]) == ("saved", 4, 4)
+        for mid, (_parts, _name, account, lib_file) in C25_FOUR.items():
+            stored = json.loads(sandbox[lib_file].read_text(encoding="utf-8"))[mid]["gphotos"]   # ITS library file
+            assert stored["accounts"][account]["confirmed"] is True and stored["sha256"] == library[mid]["hash"]
+        assert main.cmd_check_photos("pending", list_only=True)["objects"] == []   # confirmed: nothing pending

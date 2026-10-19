@@ -48,12 +48,17 @@ Anti-patterns avoided (docs/testing-strategy.md §8): never touch real C:\\Media
 library_*.json; never assert absolute device paths (rglob("*.mkv") + .name, never a
 bracketed "[id]" glob); stdout via capsys.
 """
+import contextlib
 import hashlib
 import json
 import os
+import types
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import gprpc
+import gpweb
 import main
 import mainfetch
 import mvcommon
@@ -2083,6 +2088,120 @@ def _c25_prep_push(sandbox, make_video):
     return mvcommon.load_library()[C25_MOVIE_ID], data
 
 
+def _c25_no_adb(*_a, **_k):
+    raise AssertionError("no adb command may run here (map_photos / check_photos touch a phone only with --devices)")
+
+
+def _c25_bytes(tag):
+    return f"FAKE-SMOKE-BYTES:{tag}:".encode() * 40
+
+
+class _C25Clock:
+    """mainfetch's `time` and gprpc's pacing clock in one: sleep() only advances it — nothing ever waits."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def time(self):
+        return self.now
+
+    def sleep(self, seconds=0):
+        self.now += seconds
+
+
+class _C25Disk:
+    free, total, used = 10 ** 15, 2 * 10 ** 15, 10 ** 15     # P-12's disk pre-flight always passes
+
+
+def _c25_wire(monkeypatch, world):
+    """Run mainfetch IN-PROCESS on the fake Google Photos world: one fake clock for mainfetch + gprpc (nothing waits),
+    one fake driver per account session (never a Chrome), no lock file (the real one lives in ~/.mediavault), no
+    debug-port probe, no pacing jitter, plenty of disk; main's check_photos child = the REAL `mainfetch.py check`
+    command line run in-process (the conftest guard refuses a real child); today's legacy trigger_download (S4) a
+    recorder. -> namespace(spawned = the check command lines, legacy = the S4 queries)."""
+    clock = _C25Clock()
+    monkeypatch.setattr(mainfetch, "time", clock)
+    monkeypatch.setattr(gprpc, "_monotonic", clock.time)
+    monkeypatch.setattr(gprpc, "_sleep", clock.sleep)
+    monkeypatch.setattr(gprpc, "_uniform", lambda low, high: low)
+    monkeypatch.setattr(mainfetch, "init_driver", lambda profile_key="movies": world.driver(profile_key))
+    monkeypatch.setattr(mainfetch, "fetch_session_lock", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(mainfetch, "_check_lock",
+                        lambda: contextlib.nullcontext(types.SimpleNamespace(beat=lambda: None)))
+    monkeypatch.setattr(mainfetch, "_debug_port_free", lambda *a, **k: True)
+    monkeypatch.setattr(mainfetch, "_check_jitter", lambda low, high: 0)
+    monkeypatch.setattr(mainfetch.shutil, "disk_usage", lambda path: _C25Disk())
+    spawned, legacy = [], []
+    monkeypatch.setattr(mainfetch, "trigger_download",
+                        lambda driver, query, index=0: legacy.append((query, index)) or False)
+
+    def spawn(argv):
+        spawned.append(list(argv))
+        return mainfetch.cmd_check(**mainfetch.parse_check_args(argv[1:])), False
+
+    monkeypatch.setattr(main, "_cp_spawn", spawn)
+    return types.SimpleNamespace(spawned=spawned, legacy=legacy)
+
+
+def _c25_season(sandbox, world, episodes=(EP1_ID, EP2_ID)):
+    """SEASON_ID with archived whole-file episodes whose items live in the fake world's tv account under their
+    uploaded names; EP1_ID carries a TRUSTED `gphotos` block naming its item (content key + photo_id — the fast
+    path / S0a), any other episode is legacy (nothing learned — S2 by exact name). -> ({id: item}, season folder)."""
+    folder = sandbox["local_root"] / "Series" / "SMK" / "Season 01"
+    folder.mkdir(parents=True, exist_ok=True)
+    library = {SEASON_ID: {"type": "season_map", "folder_path": str(folder), "total_episodes": len(episodes),
+                           "children": list(episodes)}}
+    items = {}
+    for ep_id in episodes:
+        data, sid = _c25_bytes(ep_id), _short(ep_id)
+        name = f"SMK.S01E{ep_id[-2:]}.mkv"
+        stem, ext = os.path.splitext(name)
+        item = world.add_item("tv", f"{stem} [{sid}]{ext}", data=data, taken="2022-02-05T11:49:46Z")
+        entry = {"filename": name, "short_id": sid, "folder_path": str(folder),
+                 "hash": hashlib.sha256(data).hexdigest(), "search_term": f"{stem} [{sid}]{ext}",
+                 "status": "archived", "uploaded": True, "tech_spec": {"size_bytes": len(data)},
+                 "parent_id": SEASON_ID}
+        if ep_id == EP1_ID:
+            entry["gphotos"] = mvcommon.new_gphotos_block(
+                entry["hash"], sha1=hashlib.sha1(data).hexdigest(), accounts={"tv": {
+                    "photo_id": item.photo_id, "taken_ms": item.taken_ms, "tz_offset_ms": item.tz_offset_ms,
+                    "upload_ms": item.upload_ms, "dedup_key": item.dedup_key, "verified_by": "dedupkey",
+                    "verified_at": "2026-10-01T00:00:00Z", "source": "map"}})
+        library[ep_id] = entry
+        items[ep_id] = item
+    _write_all_libs(sandbox, library)
+    return items, folder
+
+
+def _c25_inventory(names_by_account):
+    """The crawler's own files (tools/gp_inventory.py's format) in the conftest-redirected GP_INVENTORY_DIR: one
+    detailed item per uploaded name and a COMPLETE enumeration that began an hour ago (fresh — PLAN Step 9 (1))."""
+    started = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=1)
+    os.makedirs(mvcommon.GP_INVENTORY_DIR, exist_ok=True)
+    for account, names in names_by_account.items():
+        records = []
+        for n, name in enumerate(names, 1):
+            data = _c25_bytes(f"{account}/{name}")
+            records.append({"photo_id": f"AF1QipFAKEsmokeMap{n:04d}{account}", "filename": name, "width": 1920,
+                            "height": 1080, "taken_ms": 1644061786000, "tz_offset_ms": 28800000,
+                            "upload_ms": 1644148186000,
+                            "dedup_key": gpweb.dedup_key(hashlib.sha1(data).hexdigest()),
+                            "account": account, "crawled_at": (started + timedelta(minutes=3)).isoformat(),
+                            "source": "rpc"})
+        runs = [{"run": "run001", "event": "start", "at": started.isoformat(), "account": account, "mode": "rpc",
+                 "phase": "all"}]
+        runs += [{"photo_id": r["photo_id"], "seen_run": "run001"} for r in records]
+        runs += [{"run": "run001", "event": "enumerated", "at": (started + timedelta(minutes=2)).isoformat(),
+                  "mode": "rpc", "ids": len(records)},
+                 {"run": "run001", "event": "end", "at": (started + timedelta(minutes=5)).isoformat(),
+                  "result": "ok", "detailed": len(records), "upgraded": 0, "errors": 0, "mode": "rpc",
+                  "new": len(records)}]
+        for kind, lines in (("items", records), ("runs", runs)):
+            with open(os.path.join(mvcommon.GP_INVENTORY_DIR, f"{account}.{kind}.jsonl"), "w",
+                      encoding="utf-8") as fh:
+                fh.writelines(json.dumps(line) + "\n" for line in lines)
+
+
 class TestC25ExactItem:
     """One smoke per new IMP-C25 command / hook (PLAN Step 15's list)."""
 
@@ -2141,3 +2260,79 @@ class TestC25ExactItem:
 
         main.cmd_dispatch_fetch(info["id"])    # idempotent: the folded sidecar changes nothing the second time
         assert "Google Photos identity" not in capsys.readouterr().out
+
+    # ---- check_photos --approaches best on the fake Google Photos (Step 13; download-free) ----
+    def test_check_photos_best_on_the_fake_world_writes_only_its_run(self, sandbox, fake_photos, tmp_path,
+                                                                     monkeypatch, capsys):
+        items, _folder = _c25_season(sandbox, fake_photos)
+        world = _c25_wire(monkeypatch, fake_photos)
+        library_before = {p: p.read_bytes() for p in (sandbox["lib_series"], sandbox["lib_movies"])}
+        before = _c25_tree(tmp_path)
+
+        res = main.cmd_check_photos(**main.parse_check_photos_args([SEASON_ID, "--approaches", "best"]))
+
+        lines = [l for l in main._cp_read_results(res["run_dir"]) if l.get("kind") == "check"]
+        assert res["status"] == "ok" and len(world.spawned) == 1         # main's child, run in-process
+        assert [(l["manual_id"], l["outcome"], l["proof"]) for l in lines] == [
+            (EP1_ID, "exactly-one", "dedupkey"), (EP2_ID, "exactly-one", "filename")]
+        assert [l["photo_id"] for l in lines] == [items[EP1_ID].photo_id, items[EP2_ID].photo_id]
+        assert fake_photos.downloads == [] and "pLFTfd" not in fake_photos.rpc_ids_sent()   # download-free
+        assert set(fake_photos.rpc_ids_sent()) <= gprpc.ALLOWED_RPCIDS                      # read-only (P-9)
+        assert {p: p.read_bytes() for p in library_before} == library_before                 # library untouched
+        assert mvcommon.read_learned() == [] and mvcommon.read_failed() == []                # a dry run records nothing
+        written = [p for p in _c25_tree(tmp_path) if p not in before]
+        state = os.path.relpath(os.path.dirname(mvcommon.GPHOTOS_STATE_DIR), tmp_path)       # tmp/mv_state
+        assert written and all(p.startswith(state) for p in written), written                # run dir + journal only
+
+    # ---- map_photos dry run over a fresh synthetic inventory (Step 9) ---------
+    def test_map_photos_dry_run_maps_and_writes_only_its_run_directory(self, sandbox, make_video, tmp_path,
+                                                                       monkeypatch, capsys):
+        info = _seed_single(sandbox, make_video, uploaded=True, status="archived")
+        uploaded = f"SMK.S01E01 [{info['short_id']}].mkv"
+        _c25_inventory({"tv": [uploaded]})
+        monkeypatch.setattr(main.subprocess, "run", _c25_no_adb)          # Step 9b: no phone without --devices
+        library_before = {p: p.read_bytes() for p in (sandbox["lib_series"], sandbox["lib_movies"])}
+        before = _c25_tree(tmp_path)
+
+        res = main.cmd_map_photos(**main.parse_map_photos_args([]))
+
+        assert res["status"] == "ok"
+        assert [(r["manual_id"], r["label"], r["status"]) for r in res["rows"]] == [(info["id"], "whole", "mapped")]
+        assert {p: p.read_bytes() for p in library_before} == library_before
+        assert mvcommon.read_learned() == [] and mvcommon.read_failed() == []                # recorded nothing
+        run = os.path.relpath(res["run_dir"], tmp_path)
+        written = [p for p in _c25_tree(tmp_path) if p not in before]
+        assert written and all(p == run or p.startswith(run + os.sep) or run.startswith(p + os.sep)
+                               for p in written), written                                     # its run dir only
+        assert {"summary.txt", "mapping.jsonl", "mapping.csv"} <= set(os.listdir(res["run_dir"]))
+
+    # ---- a fetch on the fake Google Photos: destination-direct (Steps 10–12, P-12 / P-20) ----
+    def test_a_fetch_leaves_no_incoming_folder_and_never_touches_downloads(self, sandbox, fake_photos, monkeypatch,
+                                                                           capsys):
+        items, folder = _c25_season(sandbox, fake_photos, episodes=(EP1_ID,))
+        world = _c25_wire(monkeypatch, fake_photos)
+        downloads = mainfetch.SYSTEM_DOWNLOADS_FOLDER                     # the conftest redirect (tmp_path)
+        os.makedirs(downloads)
+        for name, data in ((items[EP1_ID].filename, b"a same-named older file"), ("holiday.jpg", b"not ours")):
+            with open(os.path.join(downloads, name), "wb") as fh:
+                fh.write(data)
+        downloads_before = _c25_tree(downloads)
+
+        mainfetch.cmd_fetch_route(EP1_ID)
+
+        out = capsys.readouterr().out
+        restore = folder / main.RESTORE_DIR_NAME
+        incoming = restore / ".mv_incoming"
+        [download] = fake_photos.downloads
+        assert (download["via"], world.legacy) == ("direct", [])                           # P-20; S4 never ran
+        assert os.path.normcase(os.path.dirname(download["path"])) == os.path.normcase(str(incoming))  # Chrome -> it
+        assert (restore / "SMK.S01E01.mkv").read_bytes() == items[EP1_ID].data              # verified, in place
+        assert not incoming.exists()                                                        # P-12 (2): removed
+        assert sorted(os.listdir(restore)) == ["SMK.S01E01.mkv"]                            # nothing left behind
+        assert _c25_tree(downloads) == downloads_before                                     # ~/Downloads untouched
+        assert "✅ MOVED: SMK.S01E01.mkv" in out and "ENTRY COMPLETE." in out
+        [journal] = os.listdir(mainfetch.FETCH_JOURNAL_DIR)
+        with open(os.path.join(mainfetch.FETCH_JOURNAL_DIR, journal), encoding="utf-8") as fh:
+            doc = json.load(fh)
+        assert doc["state"] == "clean"
+        assert [(e["mode"], e["cleaned"]) for e in doc["entries"]] == [("incoming", True)]

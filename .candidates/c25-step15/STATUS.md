@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 15.b smoke II (check_photos best in-process · map_photos dry run · fake fetch: .mv_incoming gone, ~/Downloads untouched)
+STATE: IN PROGRESS — next: 15.c smoke III (mvmeta_upgrade dry run on the mock device · resolve_photos non-TTY refusal · fetch_cleanup dry run)
 
 # IMP-C25 Step 15 — smoke coverage, regression pins, mutation probes — resumable status
 
@@ -29,12 +29,24 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       test_fetch_merges_a_seeded_learned_sidecar_into_the_library (the merge line after the child's output; block
       pinned + confirmed; a second fetch folds nothing). `import mainfetch` added to the smoke file's imports.
       Tests: -k TestC25 3 passed (0.98 s); smoke 85 passed (19.8–21.9 s; the real-split fixture's setup is 6.9 s of
-      it) — SHA in the 15.b commit
-- [ ] 15.b smoke II (the fake Google Photos world, in-process): `check_photos <season> --approaches best` with an
+      it) — 00f6ec9
+- [x] 15.b smoke II (the fake Google Photos world, in-process): `check_photos <season> --approaches best` with an
       in-process runner for main._cp_spawn (dry run: only its run dir written, nothing downloaded) · `map_photos` dry
       run over a synthetic fresh inventory (only its run dir written; library bytes unchanged) · a fake fetch in incoming
       mode: the entry's `restore\.mv_incoming` is gone afterwards, the file is in `restore\`, the redirected
-      ~/Downloads is byte-for-byte untouched (a pre-existing file there survives)
+      ~/Downloads is byte-for-byte untouched (a pre-existing file there survives).
+      Done: helpers `_c25_wire` (fake clock for mainfetch + gprpc, fake driver per session, lock / _check_lock /
+      port probe / jitter / disk stubbed, S4 recorder, main._cp_spawn = the real `mainfetch.py check` command line
+      in-process), `_c25_season` (EP1_ID trusted block → S0a / fast path; EP2_ID legacy → S2), `_c25_inventory` (the
+      crawler's files, a complete enumeration begun an hour ago), `_c25_no_adb`, `_c25_bytes`, `_C25Clock`,
+      `_C25Disk`; imports contextlib / types / datetime / gprpc / gpweb. Tests:
+      test_check_photos_best_on_the_fake_world_writes_only_its_run (one in-process child; e01 dedupkey + e02 filename;
+      no download, no pLFTfd, only allowlisted rpcids; library bytes + sidecars unchanged; only mv_state written) ·
+      test_map_photos_dry_run_maps_and_writes_only_its_run_directory (mapped; no adb; only its run dir) ·
+      test_a_fetch_leaves_no_incoming_folder_and_never_touches_downloads (the direct download landed IN
+      restore\.mv_incoming, the file is in restore\ alone, the folder is gone, the redirected ~/Downloads with a
+      same-named and an unrelated file byte-identical, journal clean + entry mode incoming / cleaned). -k TestC25 6
+      passed (0.96 s, each ≤ 0.17 s); smoke 88 passed (12.9 s) — SHA in the 15.c commit
 - [ ] 15.c smoke III: `mvmeta_upgrade` dry run on the mock device (devices / find / stat / pull answered from
       mock_device's tree; writes nothing anywhere) · `resolve_photos` non-TTY refusal (exit status refused, nothing
       launched, nothing recorded) · `fetch_cleanup` dry run lists a leftover and writes nothing (tree snapshot)

@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 15.a smoke I (prep/push capture · check_photos pending --list · fetch + apply merge)
+STATE: IN PROGRESS — next: 15.b smoke II (check_photos best in-process · map_photos dry run · fake fetch: .mv_incoming gone, ~/Downloads untouched)
 
 # IMP-C25 Step 15 — smoke coverage, regression pins, mutation probes — resumable status
 
@@ -18,12 +18,18 @@ uncommitted diff belongs to the first unticked sub-task: keep it when coherent a
 SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRESS.md (the orchestrator does).
 
 ## Sub-tasks (one WIP commit each)
-- [x] 15.0 this status file: the sub-task plan, the design decisions, the draft guard map (no code) — the first WIP
-      commit (its SHA is filled in by 15.a's commit)
-- [ ] 15.a smoke I (offline, tests/smoke/test_smoke_all_commands.py): prep + push write the capture (prep record, one
+- [x] 15.0 this status file: the sub-task plan, the design decisions, the draft guard map (no code) — f35cc56
+- [x] 15.a smoke I (offline, tests/smoke/test_smoke_all_commands.py): prep + push write the capture (prep record, one
       complete push record, the library gains no `gphotos` block — P-11) · `check_photos pending --list` lists the
       unverified push offline (no Chrome, no child) · fetch + apply merge: a seeded learned sidecar is folded into the
-      library by cmd_dispatch_fetch's post-child merge (mock_device's neutralized child) — the block lands, pinned
+      library by cmd_dispatch_fetch's post-child merge (mock_device's neutralized child) — the block lands, pinned.
+      Done: Group 5 header + helpers (`_c25_tree` file/folder snapshot, `_c25_no_chrome`, `_c25_prep_push`) and
+      class TestC25ExactItem: test_prep_and_push_capture_the_facts_and_never_confirm ·
+      test_check_photos_pending_list_is_offline (through parse_check_photos_args; tmp tree unchanged) ·
+      test_fetch_merges_a_seeded_learned_sidecar_into_the_library (the merge line after the child's output; block
+      pinned + confirmed; a second fetch folds nothing). `import mainfetch` added to the smoke file's imports.
+      Tests: -k TestC25 3 passed (0.98 s); smoke 85 passed (19.8–21.9 s; the real-split fixture's setup is 6.9 s of
+      it) — SHA in the 15.b commit
 - [ ] 15.b smoke II (the fake Google Photos world, in-process): `check_photos <season> --approaches best` with an
       in-process runner for main._cp_spawn (dry run: only its run dir written, nothing downloaded) · `map_photos` dry
       run over a synthetic fresh inventory (only its run dir written; library bytes unchanged) · a fake fetch in incoming

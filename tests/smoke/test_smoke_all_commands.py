@@ -55,6 +55,7 @@ import os
 import pytest
 
 import main
+import mainfetch
 import mvcommon
 from conftest import _ffmpeg_available, _mkvmerge_available  # skip-gate helpers
 
@@ -2031,3 +2032,112 @@ class TestPrepPushRepEnrich:
         assert mvcommon.load_library() == {}, "nothing may be prepped on a refusal"
         assert os.path.isfile(path) and os.path.getsize(path) > main.DUMMY_MAX_BYTES, \
             "the source file must be untouched (not dummied)"
+
+
+# ===========================================================================
+# Group 5 — IMP-C25: the EXACT Google Photos item (docs/feature-fetch-datetime/PLAN.md Step 15)
+#
+# SMOKE SCOPE ONLY, like every group above: each new command / hook runs end to end, produces its top-level
+# effect, and keeps the one safety property its step promised — "writes nothing" for the dry runs, "nothing
+# launched" for the refusals, "no auto-confirm child" for the push family, "the incoming folder is gone" for a
+# fetch. The behaviour matrices live in the focused modules (test_gp_capture, test_gphotos_apply, test_map_photos,
+# test_check_photos, test_fetch_hygiene, test_locator, test_fetch_manual, test_resolve_photos, test_mvmeta_upgrade,
+# test_auto_confirm); the cross-command pins in tests/test_c25_regression_pins.py.
+#
+# HERMETIC by the autouse guards of tests/conftest.py (every Google Photos state dir, the fetch journal, the
+# redirected ~/Downloads, the inert process table, the Chrome profiles, the refused check_photos child, the inert
+# auto-confirm). The fake Google Photos world is tests/gphotos_fake.py (the `fake_photos` fixture); this group's
+# few helpers are self-contained on purpose — a refactor of a focused module's private helper must never break the
+# pre-PR gate. Synthetic ids only (every photo id carries "FAKE").
+# ===========================================================================
+
+C25_MOVIE_ID = "mov-en-2024-smkcapture"
+C25_PHOTO_ID = "AF1QipFAKEsmokeMergeItem01"
+
+
+def _c25_tree(root):
+    """{relative path: (size, mtime_ns)} of every file and folder under `root` — "writes nothing" = unchanged."""
+    out = {}
+    for dirpath, dirs, files in os.walk(root):
+        for name in dirs:
+            out[os.path.relpath(os.path.join(dirpath, name), root)] = None
+        for name in files:
+            st = os.stat(os.path.join(dirpath, name))
+            out[os.path.relpath(os.path.join(dirpath, name), root)] = (st.st_size, st.st_mtime_ns)
+    return out
+
+
+def _c25_no_chrome(*_a, **_k):
+    raise AssertionError("this command must not launch Chrome")
+
+
+def _c25_prep_push(sandbox, make_video):
+    """prep + push ONE movie (mock_device): the push-time capture records it -> one `unverified` object (P-11).
+    -> (its library entry, its bytes)."""
+    _empty_libs(sandbox)
+    path, _sha256 = make_video(sandbox["media_dir"] / "SmokeCapture.mkv")
+    with open(path, "rb") as fh:
+        data = fh.read()
+    assert main.cmd_prep(C25_MOVIE_ID, path) is True
+    assert main.cmd_push(C25_MOVIE_ID) is True
+    return mvcommon.load_library()[C25_MOVIE_ID], data
+
+
+class TestC25ExactItem:
+    """One smoke per new IMP-C25 command / hook (PLAN Step 15's list)."""
+
+    # ---- prep / push capture (Step 5; P-11) -----------------------------------
+    def test_prep_and_push_capture_the_facts_and_never_confirm(self, sandbox, make_video, stub_tech_specs,
+                                                               mock_device, capsys):
+        entry, data = _c25_prep_push(sandbox, make_video)
+
+        with open(main.gpcapture.capture_path(entry["folder_path"], entry["short_id"]), encoding="utf-8") as fh:
+            doc = json.load(fh)
+        assert doc["manual_id"] == C25_MOVIE_ID
+        assert doc["prep"]["source"]["sha256"] == entry["hash"] == hashlib.sha256(data).hexdigest()
+        [push] = doc["pushes"]
+        [obj] = push["objects"]
+        assert push["complete"] is True and obj["role"] == "whole"
+        assert (obj["sha256"], obj["sha1"]) == (entry["hash"], hashlib.sha1(data).hexdigest())   # the content key
+        assert obj["uploaded_name"] == entry["search_term"]          # "<name> [<short_id>].mkv", as pushed
+        assert "gphotos" not in entry                                  # prep / push never write identity (P-11)
+        [o] = mvcommon.iter_uploaded_objects(mvcommon.load_library(), C25_MOVIE_ID)
+        assert o["cloud_state"] == "unverified"                        # a capture alone never confirms
+
+    # ---- check_photos pending --list (Step 13; offline) -----------------------
+    def test_check_photos_pending_list_is_offline(self, sandbox, make_video, stub_tech_specs, mock_device,
+                                                  tmp_path, monkeypatch, capsys):
+        entry, _data = _c25_prep_push(sandbox, make_video)
+        capsys.readouterr()
+        monkeypatch.setattr(mainfetch, "init_driver", _c25_no_chrome)
+        before = _c25_tree(tmp_path)
+
+        res = main.cmd_check_photos(**main.parse_check_photos_args(["pending", "--list"]))
+
+        out = capsys.readouterr().out
+        assert res["status"] == "ok"
+        assert [(o["manual_id"], o["label"]) for o in res["objects"]] == [(C25_MOVIE_ID, "whole")]
+        assert f"{C25_MOVIE_ID} · whole — {entry['search_term']} · pushed" in out and "account movies" in out
+        assert _c25_tree(tmp_path) == before         # offline: nothing opened (no child, no Chrome), nothing written
+
+    # ---- fetch + the post-fetch merge of a seeded learned sidecar (Steps 6 / 10) ----
+    def test_fetch_merges_a_seeded_learned_sidecar_into_the_library(self, sandbox, make_video, mock_device,
+                                                                     capsys):
+        info = _seed_single(sandbox, make_video, uploaded=True, status="archived")
+        mvcommon.append_learned("tv", {
+            "manual_id": info["id"], "label": "whole", "sha256": info["hash"], "photo_id": C25_PHOTO_ID,
+            "taken_ms": 1644061786000, "tz_offset_ms": 28800000, "upload_ms": 1644100000000,
+            "gp_filename": f"SMK.S01E01 [{info['short_id']}].mkv", "proof": "filename", "source": "check"})
+
+        main.cmd_dispatch_fetch(info["id"])    # mock_device's neutralized child, then the merge
+
+        out = capsys.readouterr().out
+        merged = "> Google Photos identity: 1 object(s) updated in the library"
+        assert merged in out and out.index("ENTRY COMPLETE.") < out.index(merged)   # after the child's output
+        block = mvcommon.load_library()[info["id"]]["gphotos"]
+        assert block["sha256"] == info["hash"]                         # P-2: pinned to the object's own bytes
+        record = block["accounts"]["tv"]
+        assert (record["photo_id"], record["verified_by"], record["confirmed"]) == (C25_PHOTO_ID, "filename", True)
+
+        main.cmd_dispatch_fetch(info["id"])    # idempotent: the folded sidecar changes nothing the second time
+        assert "Google Photos identity" not in capsys.readouterr().out

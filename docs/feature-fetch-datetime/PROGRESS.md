@@ -38,7 +38,7 @@ full 2558 · smoke 82). Next:
 1. ~~**G12 cherry-picks**~~ DONE 1e6a66f (full 2580 · smoke 82 · disarm 47/47; orchestrator re-run green) — the judge's 10 items (`.candidates/c25-step-12/DECISION.md` "Cherry-picks worth taking into
    C"; DECISIONS §1f) applied to the merged locator as one follow-up (own worktree, tests + disarm + full + smoke,
    then fast-forward here), BEFORE Step 13 (item 1 is the `per_approach` contract Step 13 reuses).
-2. ~~Step 13~~ a62e7d4 · ~~13b~~ 1bce2e6 · ~~13c~~ 03bdd64 DONE; next **Step 14**, then 13c, 14, 15 → 🚦 R2 / R3 → 16–18. Step 14/15 carry the robustness
+2. ~~Step 13~~ a62e7d4 · ~~13b~~ 1bce2e6 · ~~13c~~ 03bdd64 · ~~14~~ 5b21c3f DONE; next **Step 15**, then 13c, 14, 15 → 🚦 R2 / R3 → 16–18. Step 14/15 carry the robustness
    follow-ups listed in the sub-state (warm_profiles close, WMI query -ErrorAction, close under load, page-load
    timeout, failed-attach Chrome).
 The user archives from this folder — check for a running `main.py` before any fast-forward/merge here.
@@ -86,7 +86,7 @@ The user archives from this folder — check for a running `main.py` before any 
 | 13 | check_photos | done | executor-fable (own worktree) | a62e7d4 (WIP de66a19..73e98ff) | full 2738 · smoke 82 (orchestrator re-run) · disarm 29/29 · live dry run 8/8 (Daredevil BA S02) | quality flags (partial/not-original) never parse from the real RPC — Step 2b parser positions unverified → follow-up; 13b contract: `check_photos pending --apply --max-minutes 15`, exit 0 ok/partial, last stdout line = summary |
 | 13b | auto-confirm on next push | done | executor-fable (own worktree) | 1bce2e6 (WIP fa30871..d016010) | full 2900 · smoke 82 (orchestrator re-run) · disarm 24/24 | None-return success = end state reached; MIN_AGE 24 h (DECISIONS); web jobs never reach the hook; journal records identical with/without |
 | 13c | mvmeta_upgrade | done | executor-fable (own worktree) | 03bdd64 (WIP 17b801e..6e06df5) | full 3062 · smoke 82 (orchestrator re-run) · disarm 38/38 · live dry run skipped (no phone attached) | --apply enabled (G0 q2); check-only phone only when named; originals backed up; A1/A2 (real sidecar bytes, adb mtime) verify at R3 §M17 |
-| 14 | --manual + resolve_photos + resume | in_progress | | | | |
+| 14 | --manual + resolve_photos + resume | done | executor-fable (fable, no fallback; own worktree) | 5b21c3f (WIP 41501c4..b1d31d1) | full 3219 · smoke 82 (orchestrator re-run) · disarm 39/39 · one read-only live probe (quality flags) | follow-ups a–d done; quality flags from the timeline record (+1 call/object, DECISIONS); A5 (user-opened tab's download dir) for R2 §M10 |
 | 15 | smoke + pins + disarm probes | pending | | | | |
 | R2 | live verification pack (user) | pending | user | | | |
 | R3 | real-library apply (user) | pending | user | | | |
@@ -113,7 +113,7 @@ A d8dd71f (UI-first) · B 868cd27 (RPC-first) · C 5e7f0f6 (hybrid) — all COMP
 `Step 13 DONE 2026-10-13 a62e7d4 (fast-forwarded here). Follow-up (no ruling needed): gprpc quality-flag positions (partial upload / storage saver) read nothing live — verify the array positions on a real item record and fix the Step 2b parsers before R2/R4 rely on the `inconsistent` verdict and those outlier classes. Next: Step 13b.`
 `Step 13b DONE 2026-10-14 1bce2e6 (fast-forwarded here). Next: Step 13c (mvmeta_upgrade).`
 `Step 13c DONE 2026-10-14 03bdd64 (fast-forwarded here). Next: Step 14.`
-`Step 14 — dispatched 2026-10-14 to executor-fable in worktree C:/Users/harin/PycharmProjects/MediaVault-s14 (branch tmp/c25_step14); checklist .candidates/c25-step14/STATUS.md; carries follow-ups a–d (PLAN Step 14).`
+`Step 14 DONE 2026-10-19 5b21c3f (fast-forwarded here). Noticed, not changed (Step 15/16 candidates): warm_profiles has no profile pre-check (could create an empty ChromeProfile_Others); the shared close says "this fetch" inside resolve_photos; fetch journals are never pruned. Next: Step 15.`
 `Step 12 — 3 candidates dispatched 2026-10-05 (executor-fable each); worktrees C:/Users/harin/PycharmProjects/MediaVault-c25-cand/step-12/{A,B,C} on branches feature/imp_c25_fetch_exact_gp_item__cand_{a,b,c} from 8968f26 · A UI-first (no RPC for locating) · B RPC-first · C hybrid arbitration · each: WIP commits on its own branch + .candidates/c25-step-12/<X>/CANDIDATE_STATUS.md + CRITIQUE.md · then judge-v2 → .candidates/c25-step-12/DECISION.md → 🚦 G12 (the user picks; optional live locate per worktree, §M4)`
 `Step 12 DONE 2026-10-12: all three candidates COMPLETE + gate-verified (A 2493/82 · B 2512/82 · C 2502/82); judge-v2 → C; user picked C at 🚦 G12; squash-merged 6553390; candidate history in tags candidates/imp_c25/step-12/{c-chosen,a-rejected,b-rejected}.`
 `Side fix (user request 2026-10-08) DONE: Chrome never shows "Restore pages?" — 537ff7e (code 0d47140, tests 49367a1, d444f12): --hide-crash-restore-bubble on every launch + profiles marked cleanly exited before every launch and after every close; full 2484 · smoke 82 · disarm 37/37. Follow-ups for Step 14/15: warm_profiles leaves Chrome running (already Step 14); Step 11's per-pid process query lacks -ErrorAction Stop (a WMI failure reads as 'process gone'); under heavy load the Step 11 close twice failed to close Chrome (cand C); bounded driver.get page-load timeout; close a launched Chrome when attach fails (DECISIONS §1e).`

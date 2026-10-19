@@ -522,3 +522,9 @@ No other step of this plan uses candidates.
   `device movies#2` (one-line change if the user wants it included by default); (D1) scope = every uploaded entry or
   extras item that has a sidecar (whole files too), per OD-4 "you can change all existing library also"; (D4) every
   original sidecar is saved under `~/.mediavault/gphotos/mvmeta/<ts>/` before the phone is touched.
+- **Step 14 executor choices (2026-10-19), kept as orchestrator defaults — the user may overrule:** (10) `check_photos`'
+  quality pass reads partial-upload / archived from the timeline record (the only source the live probe showed carries
+  them; the swbisb hash record is compact) — at most one extra paced call per checked object (~0.6–1 s on a long
+  sweep), kept because it makes the `inconsistent` verdict and the partial-upload outlier work; original-quality stays
+  `unknown` until a storage-saver item is compared. (2) a `--manual` download records proof `sha256` / source `manual`
+  (unconfirmed until a check). (4) resolve_photos refuses a pasted item proven to hold other bytes.

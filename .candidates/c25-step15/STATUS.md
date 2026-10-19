@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 15.c smoke III (mvmeta_upgrade dry run on the mock device · resolve_photos non-TTY refusal · fetch_cleanup dry run)
+STATE: IN PROGRESS — next: 15.d smoke IV (alias sweep over the new passes · all four prefixes · push-family dispatcher runs: hook reached, no auto-confirm child)
 
 # IMP-C25 Step 15 — smoke coverage, regression pins, mutation probes — resumable status
 
@@ -46,10 +46,22 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       test_a_fetch_leaves_no_incoming_folder_and_never_touches_downloads (the direct download landed IN
       restore\.mv_incoming, the file is in restore\ alone, the folder is gone, the redirected ~/Downloads with a
       same-named and an unrelated file byte-identical, journal clean + entry mode incoming / cleaned). -k TestC25 6
-      passed (0.96 s, each ≤ 0.17 s); smoke 88 passed (12.9 s) — SHA in the 15.c commit
-- [ ] 15.c smoke III: `mvmeta_upgrade` dry run on the mock device (devices / find / stat / pull answered from
+      passed (0.96 s, each ≤ 0.17 s); smoke 88 passed (12.9 s) — 558a952
+- [x] 15.c smoke III: `mvmeta_upgrade` dry run on the mock device (devices / find / stat / pull answered from
       mock_device's tree; writes nothing anywhere) · `resolve_photos` non-TTY refusal (exit status refused, nothing
-      launched, nothing recorded) · `fetch_cleanup` dry run lists a leftover and writes nothing (tree snapshot)
+      launched, nothing recorded) · `fetch_cleanup` dry run lists a leftover and writes nothing (tree snapshot).
+      Done: `_C25ReadOnlyAdb` (devices · shell find · shell stat · pull over one phone folder; push / mv / anything
+      else fails the smoke) · test_mvmeta_upgrade_dry_run_on_the_mock_device_writes_nothing (prep + a version-1 push
+      on mock_device — the pre-Step-5 writer, as the focused round trip does — then the dry run proposes the v1 → v2
+      upgrade; read verbs only; tempfile.tempdir under tmp_path; the whole tmp tree unchanged) ·
+      test_resolve_photos_refuses_without_a_terminal (a seeded failed row; stdin = io.StringIO, explicitly not a
+      TTY even under -s; init_driver AND mainfetch._check_lock forbidden — a regression past the TTY check must never
+      take the real fetch lock; status refused, nothing written) ·
+      test_fetch_cleanup_dry_run_lists_the_leftovers_and_writes_nothing (family name + its .crdownload in the
+      redirected ~/Downloads, an unrelated file never listed, a marked .mv_incoming leftover listed, the marker not;
+      every listed / scanned path under tmp_path — FETCH_SESSION_LOCK pointed at tmp too; nothing written). Imports
+      io / shlex / shutil / sys / tempfile. -k TestC25 9 passed (1.18 s); smoke 91 passed (13.5 s) — SHA in the 15.d
+      commit
 - [ ] 15.d smoke IV: the alias sweep over the new whole-library passes (iter_entry_objects / iter_uploaded_objects /
       unverified_objects / failed_objects / gphotos_apply + merge / check_photos scopes + pending --list / map_photos /
       mvmeta_upgrade / fetch_cleanup / resolve_photos) · all four prefixes (mov- tv- ani- oth-) through the new offline

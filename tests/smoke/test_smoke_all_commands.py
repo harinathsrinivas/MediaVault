@@ -50,8 +50,13 @@ bracketed "[id]" glob); stdout via capsys.
 """
 import contextlib
 import hashlib
+import io
 import json
 import os
+import shlex
+import shutil
+import sys
+import tempfile
 import types
 from datetime import datetime, timedelta, timezone
 
@@ -2073,7 +2078,7 @@ def _c25_tree(root):
 
 
 def _c25_no_chrome(*_a, **_k):
-    raise AssertionError("this command must not launch Chrome")
+    raise AssertionError("this command must not launch Chrome (nor take the fetch lock a Chrome session needs)")
 
 
 def _c25_prep_push(sandbox, make_video):
@@ -2171,6 +2176,48 @@ def _c25_season(sandbox, world, episodes=(EP1_ID, EP2_ID)):
         items[ep_id] = item
     _write_all_libs(sandbox, library)
     return items, folder
+
+
+class _C25ReadOnlyAdb:
+    """`adb` for ONE phone whose Media root is a real folder (here mock_device's tree): `devices`, `shell find`,
+    `shell stat` and `pull` — the read side mvmeta_upgrade's dry run needs. Any other command (push, shell mv, rm …)
+    FAILS the smoke: a dry run may never write to a phone. Installed as main.subprocess.run; .verbs records what ran."""
+
+    ROOT = "/sdcard/Media/"
+
+    def __init__(self, serial, root):
+        self.serial, self.root, self.verbs = serial, root, []
+
+    @staticmethod
+    def _answer(stdout=b"", code=0):
+        return types.SimpleNamespace(returncode=code, stdout=stdout, stderr=b"")
+
+    def _file(self, remote):
+        assert remote.startswith(self.ROOT), f"not a Media path: {remote!r}"
+        return self.root / remote[len(self.ROOT):]
+
+    def run(self, argv, *args, **kwargs):
+        argv = list(argv)
+        if argv == ["adb", "devices"]:
+            self.verbs.append("devices")
+            return self._answer(f"List of devices attached\r\n{self.serial}\tdevice\r\n\r\n".encode())
+        assert argv[:3] == ["adb", "-s", self.serial], f"a phone command must name its phone: {argv!r}"
+        if argv[3] == "pull":
+            remote, local = argv[4:]
+            shutil.copyfile(self._file(remote), local)
+            self.verbs.append("pull")
+            return self._answer(b"1 file pulled, 0 skipped.\r\n")
+        assert argv[3] == "shell", f"a dry run must never write to a phone: {argv!r}"
+        words = shlex.split(" ".join(argv[4:]))           # the device shell's word splitting (single quotes)
+        self.verbs.append(words[0])
+        if words[0] == "find" and words[2:] == ["-type", "f"]:
+            files = sorted(p.relative_to(self.root).as_posix() for p in self.root.rglob("*") if p.is_file())
+            return self._answer("".join(f"{words[1]}{rel}\r\n" for rel in files).encode("utf-8")
+                                if words[1] == self.ROOT else b"")
+        if words[0] == "stat" and words[1:3] == ["-c", "%s %Y %n"]:
+            lines = [f"{self._file(p).stat().st_size} {int(self._file(p).stat().st_mtime)} {p}\r\n" for p in words[3:]]
+            return self._answer("".join(lines).encode("utf-8"))
+        raise AssertionError(f"a dry run must never write to a phone: {argv!r}")
 
 
 def _c25_inventory(names_by_account):
@@ -2336,3 +2383,78 @@ class TestC25ExactItem:
             doc = json.load(fh)
         assert doc["state"] == "clean"
         assert [(e["mode"], e["cleaned"]) for e in doc["entries"]] == [("incoming", True)]
+
+    # ---- mvmeta_upgrade dry run on the mock device (Step 13c) -----------------
+    def test_mvmeta_upgrade_dry_run_on_the_mock_device_writes_nothing(self, sandbox, make_video, stub_tech_specs,
+                                                                      mock_device, tmp_path, monkeypatch, capsys):
+        _empty_libs(sandbox)
+        path, _sha256 = make_video(sandbox["media_dir"] / "SmokeMeta.mkv")
+        assert main.cmd_prep(C25_MOVIE_ID, path) is True
+        with monkeypatch.context() as m:          # a sidecar as cmd_push wrote it before IMP-C25 Step 5 (version 1)
+            m.setattr(main, "MVMETA_SCHEMA_VERSION", 1)
+            m.setattr(main.gpcapture, "mvmeta_identity", lambda *a, **k: {})
+            assert main.cmd_push(C25_MOVIE_ID) is True
+        phone = mock_device / "sdcard" / "Media"
+        [sidecar] = [p for p in phone.rglob("*.json") if p.name.endswith(main.MVMETA_SUFFIX)]   # never a "[id]" glob
+        assert json.loads(sidecar.read_text(encoding="utf-8"))["version"] == 1
+        adb = _C25ReadOnlyAdb("FAKESMOKE01", phone)
+        monkeypatch.setattr(main, "DEVICE_ALIASES", {"movies": adb.serial})
+        monkeypatch.setattr(main, "DEVICE_CHECK_EXTRA_SERIALS", {})
+        monkeypatch.setattr(main.subprocess, "run", adb.run)
+        systmp = tmp_path / "systmp"
+        systmp.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(systmp))       # the dry run's pull folder: under tmp_path
+        capsys.readouterr()
+        before = _c25_tree(tmp_path)
+
+        res = main.cmd_mvmeta_upgrade(**main.parse_mvmeta_upgrade_args([]))
+
+        assert res["status"] == "ok"
+        assert [(r["label"], r["status"]) for r in res["rows"]] == [(C25_MOVIE_ID, "upgrade")]  # v1 -> v2 proposed
+        assert "pull" in adb.verbs and set(adb.verbs) <= {"devices", "find", "stat", "pull"}   # read side only
+        assert _c25_tree(tmp_path) == before      # nothing written anywhere: phone, library, state, temp folder
+
+    # ---- resolve_photos refuses without a terminal (Step 14; OD-14) ----------
+    def test_resolve_photos_refuses_without_a_terminal(self, sandbox, make_video, tmp_path, monkeypatch, capsys):
+        info = _seed_single(sandbox, make_video, uploaded=True, status="archived")
+        mvcommon.append_failed({"account": "tv", "manual_id": info["id"], "label": "whole", "sha256": info["hash"],
+                                "uploaded_name": f"SMK.S01E01 [{info['short_id']}].mkv", "reason": "not-found"})
+        monkeypatch.setattr(sys, "stdin", io.StringIO("p\n"))     # a pipe: explicitly NOT a terminal (even under -s)
+        monkeypatch.setattr(mainfetch, "init_driver", _c25_no_chrome)
+        monkeypatch.setattr(mainfetch, "_check_lock", _c25_no_chrome)   # nor the (real) fetch lock
+        before = _c25_tree(tmp_path)
+
+        res = main.cmd_resolve_photos(**main.parse_resolve_photos_args([]))
+
+        assert res["status"] == "refused" and res["answered"] == 0
+        assert "❌ resolve_photos is interactive: run it in a terminal" in capsys.readouterr().out
+        assert _c25_tree(tmp_path) == before      # nothing launched, nothing recorded (no answer log, no sidecar)
+
+    # ---- fetch_cleanup dry run (Step 11 g) -------------------------------------
+    def test_fetch_cleanup_dry_run_lists_the_leftovers_and_writes_nothing(self, sandbox, make_video, tmp_path,
+                                                                          monkeypatch, capsys):
+        info = _seed_single(sandbox, make_video, uploaded=True, status="archived")
+        uploaded = f"SMK.S01E01 [{info['short_id']}].mkv"
+        # The scan scope stays in tmp_path: ~/Downloads, the fetch journals and <drive>:\MV_incoming are the conftest
+        # redirects; the fetch lock it looks at is pointed here too (a real fetch must not change the smoke's answer).
+        monkeypatch.setattr(mvcommon, "FETCH_SESSION_LOCK", str(tmp_path / "no_fetch_running.lock"))
+        downloads = mainfetch.SYSTEM_DOWNLOADS_FOLDER
+        os.makedirs(downloads)
+        for name in (uploaded, uploaded + ".crdownload", "holiday.jpg"):
+            with open(os.path.join(downloads, name), "wb") as fh:
+                fh.write(b"a leftover")
+        incoming = info["folder"] / main.RESTORE_DIR_NAME / mainfetch.INCOMING_DIR_NAME
+        incoming.mkdir(parents=True)
+        (incoming / mainfetch.INCOMING_MARKER).write_bytes(b"")
+        (incoming / "Unconfirmed 1234.crdownload").write_bytes(b"half a download")
+        before = _c25_tree(tmp_path)
+
+        plan = main.cmd_fetch_cleanup()
+
+        assert {(f["where"], os.path.basename(f["path"])) for f in plan["files"]} == {
+            ("downloads", uploaded), ("downloads", uploaded + ".crdownload"),       # the expected-name family
+            ("incoming", "Unconfirmed 1234.crdownload")}                            # holiday.jpg is never listed
+        root = os.path.normcase(str(tmp_path.resolve()))
+        assert all(os.path.normcase(os.path.realpath(p)).startswith(root)
+                   for p in [f["path"] for f in plan["files"]] + plan["folders"] + plan["skipped"])
+        assert _c25_tree(tmp_path) == before      # a dry run deletes, creates and writes nothing

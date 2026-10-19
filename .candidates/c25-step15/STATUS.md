@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 15.d smoke IV (alias sweep over the new passes · all four prefixes · push-family dispatcher runs: hook reached, no auto-confirm child)
+STATE: IN PROGRESS — next: 15.d2 the alias sweep over the new passes (then 15.d3 all four prefixes)
 
 # IMP-C25 Step 15 — smoke coverage, regression pins, mutation probes — resumable status
 
@@ -60,13 +60,25 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       test_fetch_cleanup_dry_run_lists_the_leftovers_and_writes_nothing (family name + its .crdownload in the
       redirected ~/Downloads, an unrelated file never listed, a marked .mv_incoming leftover listed, the marker not;
       every listed / scanned path under tmp_path — FETCH_SESSION_LOCK pointed at tmp too; nothing written). Imports
-      io / shlex / shutil / sys / tempfile. -k TestC25 9 passed (1.18 s); smoke 91 passed (13.5 s) — SHA in the 15.d
-      commit
-- [ ] 15.d smoke IV: the alias sweep over the new whole-library passes (iter_entry_objects / iter_uploaded_objects /
-      unverified_objects / failed_objects / gphotos_apply + merge / check_photos scopes + pending --list / map_photos /
-      mvmeta_upgrade / fetch_cleanup / resolve_photos) · all four prefixes (mov- tv- ani- oth-) through the new offline
-      commands · push-family dispatcher runs (push, push_group, prep_push_rep, prep_push_rep_season,
-      prep_push_rep_enrich, prep_push_rep_season_enrich) reach the hook recorder and never spawn the auto-confirm child
+      io / shlex / shutil / sys / tempfile. -k TestC25 9 passed (1.18 s); smoke 91 passed (13.5 s) — bac0f1b
+- 15.d smoke IV — split into three WIP commits (usage limits hit every few hours):
+  - [x] 15.d1 push-family dispatcher runs (push, push_group, prep_push_rep, prep_push_rep_season,
+        prep_push_rep_enrich, prep_push_rep_season_enrich) reach the hook recorder and never spawn the auto-confirm
+        child. Done: `_c25_dispatcher` (main.py's `if __name__ == "__main__":` block is the file's tail — compiled
+        ALONE with main.py's line numbers: a whole-file ast.parse costs ~3 s of the gate), `_C25Argv`, `_c25_main`,
+        `_c25_push_family_case`; class TestC25PushFamilyHook::test_a_push_family_run_reaches_the_hook_and_spawns_no_child
+        [6 verbs] — the REAL commands (mock_device / fake_dummy / stub_tech_specs / mock_tmdb + the by-id details,
+        _forbid_input), each run reaches its end state, `main.after_push_command.calls` == [(the exact hook args, {})],
+        maybe_auto_confirm never called, main._cp_spawn AND main.subprocess.Popen record + refuse: nothing spawned.
+        -k TestC25PushFamilyHook 6 passed (1.67 s, each ≤ 0.23 s) — SHA in the 15.d2 commit
+  - [ ] 15.d2 the alias sweep over the new whole-library passes: iter_entry_objects / iter_uploaded_objects /
+        unverified_objects / pending --list / fetch_cleanup's family (offline) · check_photos with the ALIAS scope on
+        the fake world · map_photos with the alias scope + the apply engine fed a record naming the alias id · mvmeta_
+        upgrade with the alias scope. (resolve_photos is left out of the sweep: its first act is the TTY refusal —
+        15.c — and its `--id <alias>` row selection is pinned in test_resolve_photos.)
+  - [ ] 15.d3 all four prefixes (mov- tv- ani- oth-): real prep + push of one object each → pending --list (four
+        accounts) → map_photos dry run (four mapped by their own bytes) → the merge of four learned records (four
+        blocks, each in its own library file, confirmed) → nothing pending
 - [ ] 15.e pins: tests/test_c25_regression_pins.py — a registry that the existing pins still exist (referenced, never
       duplicated) + only the missing pins (candidates: the exact spawned fetch argv · the P-13 marker literals on both
       sides · calculate_file_hash's return contract · the mvmeta v1 key order) — each checked against what exists first

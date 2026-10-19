@@ -49,6 +49,7 @@ library_*.json; never assert absolute device paths (rglob("*.mkv") + .name, neve
 bracketed "[id]" glob); stdout via capsys.
 """
 import contextlib
+import functools
 import hashlib
 import io
 import json
@@ -2458,3 +2459,94 @@ class TestC25ExactItem:
         assert all(os.path.normcase(os.path.realpath(p)).startswith(root)
                    for p in [f["path"] for f in plan["files"]] + plan["folders"] + plan["skipped"])
         assert _c25_tree(tmp_path) == before      # a dry run deletes, creates and writes nothing
+
+
+@functools.lru_cache(maxsize=1)
+def _c25_dispatcher():
+    """main.py's CLI dispatcher — its `if __name__ == "__main__":` block, which is the TAIL of main.py — compiled
+    alone with main.py's own line numbers (parsing the whole 18k-line file would cost the gate ~3 s)."""
+    with open(main.__file__, encoding="utf-8") as fh:
+        lines = fh.read().split("\n")
+    start = lines.index('if __name__ == "__main__":')
+    return compile("\n" * start + "\n".join(lines[start:]), main.__file__, "exec")
+
+
+class _C25Argv:
+    """`sys` for the dispatcher: the test's argv; everything else is the real module (pytest's argv is untouched)."""
+
+    def __init__(self, argv):
+        self.argv = ["main.py", *argv]
+
+    def __getattr__(self, name):
+        return getattr(sys, name)
+
+
+def _c25_main(argv):
+    """`python main.py <argv>` without a process: the dispatcher run in a copy of main's namespace taken NOW — the
+    conftest guards and this test's patches included (returning normally is what makes a real run exit 0)."""
+    exec(_c25_dispatcher(), dict(main.__dict__, __name__="__main__", sys=_C25Argv(argv)))
+
+
+def _c25_push_family_case(verb, sandbox, make_video, monkeypatch, mock_tmdb):
+    """Set up ONE push-family run -> (argv, the hook's expected arguments, a check of the run's end state)."""
+    lib = mvcommon.load_library
+    if verb == "push":
+        _seed_single(sandbox, make_video)
+        return (["push", EP1_ID], ("push", True, EP1_ID), lambda: lib()[EP1_ID]["uploaded"] is True)
+    if verb == "push_group":
+        _seed_season_two(sandbox, make_video)
+        return (["push_group", SEASON_ID], ("push_group", None, SEASON_ID, None),
+                lambda: lib()[EP1_ID]["uploaded"] is True and lib()[EP2_ID]["uploaded"] is True)
+    _empty_libs(sandbox)
+    _forbid_input(monkeypatch)
+    folder = sandbox["media_dir"]
+    if verb == "prep_push_rep":
+        path, _h = make_video(folder / "Auto.mkv")
+        return (["prep_push_rep", "mov-en-2024-auto", path], ("prep_push_rep", None, "mov-en-2024-auto"),
+                lambda: lib()["mov-en-2024-auto"]["status"] == "archived")
+    if verb == "prep_push_rep_season":
+        make_video(folder / "SMK.S01E01.mkv", marker=b"e1")
+        make_video(folder / "SMK.S01E02.mkv", marker=b"e2")
+        return (["prep_push_rep_season", SEASON_ID, str(folder), "episodes", "1-1"],
+                ("prep_push_rep_season", None, SEASON_ID, "1-1"),
+                lambda: lib()[EP1_ID]["status"] == "archived" and lib()[EP2_ID]["status"] == "local_ready")
+    if verb == "prep_push_rep_enrich":
+        _serve_tmdb_details(monkeypatch, mock_tmdb, {f"/movie/{ENRICH_TMDB_ID}": _ENRICH_MOVIE_DETAILS})
+        path, _h = make_video(folder / "AutoEnrich.mkv")
+        return (["prep_push_rep_enrich", ENRICH_MOVIE_ID, path, "-tmdbid", str(ENRICH_TMDB_ID), "--yes"],
+                ("prep_push_rep_enrich", True, ENRICH_MOVIE_ID),
+                lambda: lib()[ENRICH_MOVIE_ID]["status"] == "archived")
+    assert verb == "prep_push_rep_season_enrich"
+    _serve_tmdb_details(monkeypatch, mock_tmdb, {f"/tv/{ENRICH_TMDB_ID}": _ENRICH_SHOW_DETAILS})
+    season_dir = sandbox["local_root"] / "Series" / "SMK.S01.2020"
+    season_dir.mkdir(parents=True, exist_ok=True)
+    make_video(season_dir / "SMK.S01E01.mkv", marker=b"e1")
+    return (["prep_push_rep_season_enrich", SEASON_ID, str(season_dir), "-tmdbid", str(ENRICH_TMDB_ID), "--yes"],
+            ("prep_push_rep_season_enrich", True, SEASON_ID, None), lambda: lib()[EP1_ID]["status"] == "archived")
+
+
+class TestC25PushFamilyHook:
+    """PLAN P-19 / Step 13b under the conftest guard: every push-family command, run through main.py's REAL CLI
+    dispatcher, reaches the auto-confirm hook exactly once, after the command and with its result — and no
+    auto-confirm child (nor any other child process) is ever spawned: the guard keeps the smoke Chrome-free."""
+
+    @pytest.mark.parametrize("verb", ["push", "push_group", "prep_push_rep", "prep_push_rep_season",
+                                      "prep_push_rep_enrich", "prep_push_rep_season_enrich"])
+    def test_a_push_family_run_reaches_the_hook_and_spawns_no_child(self, verb, sandbox, make_video, stub_tech_specs,
+                                                                   mock_device, fake_dummy, mock_tmdb, monkeypatch,
+                                                                   capsys):
+        argv, hook_args, done = _c25_push_family_case(verb, sandbox, make_video, monkeypatch, mock_tmdb)
+        spawned = []
+
+        def refuse(cmd, *a, **k):
+            spawned.append(list(cmd))
+            raise AssertionError("a push-family run spawned a child process (the auto-confirm check?)")
+
+        monkeypatch.setattr(main, "_cp_spawn", refuse)
+        monkeypatch.setattr(main.subprocess, "Popen", refuse)
+
+        _c25_main(argv)
+
+        assert done(), capsys.readouterr().out                      # the command ran to its end state
+        assert main.after_push_command.calls == [(hook_args, {})]   # the dispatcher reached the hook, once
+        assert main.maybe_auto_confirm.calls == [] and spawned == []   # ... and nothing was started

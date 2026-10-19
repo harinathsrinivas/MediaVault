@@ -2223,19 +2223,22 @@ class _C25ReadOnlyAdb:
 
 def _c25_inventory(names_by_account):
     """The crawler's own files (tools/gp_inventory.py's format) in the conftest-redirected GP_INVENTORY_DIR: one
-    detailed item per uploaded name and a COMPLETE enumeration that began an hour ago (fresh — PLAN Step 9 (1))."""
+    detailed item per uploaded name — a name, or (name, the item's dedupKey) — and a COMPLETE enumeration that began
+    an hour ago (fresh — PLAN Step 9 (1)). -> {account: [the item records]}."""
     started = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=1)
     os.makedirs(mvcommon.GP_INVENTORY_DIR, exist_ok=True)
+    written = {}
     for account, names in names_by_account.items():
         records = []
         for n, name in enumerate(names, 1):
-            data = _c25_bytes(f"{account}/{name}")
+            name, key = name if isinstance(name, tuple) else (name, None)
+            key = key or gpweb.dedup_key(hashlib.sha1(_c25_bytes(f"{account}/{name}")).hexdigest())
             records.append({"photo_id": f"AF1QipFAKEsmokeMap{n:04d}{account}", "filename": name, "width": 1920,
                             "height": 1080, "taken_ms": 1644061786000, "tz_offset_ms": 28800000,
-                            "upload_ms": 1644148186000,
-                            "dedup_key": gpweb.dedup_key(hashlib.sha1(data).hexdigest()),
+                            "upload_ms": 1644148186000, "dedup_key": key,
                             "account": account, "crawled_at": (started + timedelta(minutes=3)).isoformat(),
                             "source": "rpc"})
+        written[account] = records
         runs = [{"run": "run001", "event": "start", "at": started.isoformat(), "account": account, "mode": "rpc",
                  "phase": "all"}]
         runs += [{"photo_id": r["photo_id"], "seen_run": "run001"} for r in records]
@@ -2248,6 +2251,7 @@ def _c25_inventory(names_by_account):
             with open(os.path.join(mvcommon.GP_INVENTORY_DIR, f"{account}.{kind}.jsonl"), "w",
                       encoding="utf-8") as fh:
                 fh.writelines(json.dumps(line) + "\n" for line in lines)
+    return written
 
 
 class TestC25ExactItem:
@@ -2550,3 +2554,93 @@ class TestC25PushFamilyHook:
         assert done(), capsys.readouterr().out                      # the command ran to its end state
         assert main.after_push_command.calls == [(hook_args, {})]   # the dispatcher reached the hook, once
         assert main.maybe_auto_confirm.calls == [] and spawned == []   # ... and nothing was started
+
+
+class TestC25AliasSweep:
+    """Group 2's anti-PR#21 sweep over IMP-C25's NEW whole-library passes (PLAN Step 15: iterators / apply / check):
+    over the `sandbox_alias` library a multi_ep_alias is never an object of its own — iterators skip it, an alias id
+    resolves (one hop) to its primary — the alias entry keeps its exact 3-key shape, and nothing raises."""
+
+    @staticmethod
+    def _pushed(sandbox_alias):
+        """Push the primary THROUGH THE ALIAS id (mock_device): uploaded, with its push capture. -> (its uploaded
+        name, its bytes, the alias entry as seeded)."""
+        alias_before = dict(mvcommon.load_library()[sandbox_alias["alias_id"]])
+        assert main.cmd_push(sandbox_alias["alias_id"]) is True
+        uploaded = mvcommon.load_library()[sandbox_alias["primary_id"]]["search_term"]
+        return uploaded, sandbox_alias["orig_path"].read_bytes(), alias_before
+
+    def test_the_new_iterators_skip_the_alias(self, sandbox_alias, mock_device, tmp_path, monkeypatch, capsys):
+        primary, alias = sandbox_alias["primary_id"], sandbox_alias["alias_id"]
+        uploaded, data, alias_before = self._pushed(sandbox_alias)
+        mvcommon.append_failed({"account": "tv", "manual_id": primary, "label": "whole",
+                                "sha256": hashlib.sha256(data).hexdigest(), "uploaded_name": uploaded,
+                                "reason": "not-found"})
+        library = mvcommon.load_library()
+
+        assert list(mvcommon.iter_entry_objects(alias, library[alias])) == []
+        assert [(o["manual_id"], o["label"]) for o in mvcommon.iter_uploaded_objects(library)] == [(primary, "whole")]
+        assert [o["manual_id"] for o in mvcommon.unverified_objects(library, mvcommon._now_utc())] == [primary]
+        assert [obj["manual_id"] for _rec, obj in mvcommon.failed_objects(library)["rows"]] == [primary]
+        res = main.cmd_check_photos("pending", list_only=True)
+        assert [(o["manual_id"], o["label"]) for o in res["objects"]] == [(primary, "whole")]
+        monkeypatch.setattr(mvcommon, "FETCH_SESSION_LOCK", str(tmp_path / "no_fetch_running.lock"))
+        assert main.cmd_fetch_cleanup()["files"] == []            # its expected-name family walks the alias library
+        assert mvcommon.load_library()[alias] == alias_before
+
+    def test_check_photos_resolves_an_alias_scope_to_its_primary(self, sandbox_alias, mock_device, fake_photos,
+                                                                 monkeypatch, capsys):
+        primary = sandbox_alias["primary_id"]
+        uploaded, data, alias_before = self._pushed(sandbox_alias)
+        item = fake_photos.add_item("tv", uploaded, data=data, taken="2009-01-16T02:00:00Z")
+        _c25_wire(monkeypatch, fake_photos)
+
+        res = main.cmd_check_photos(sandbox_alias["alias_id"])
+
+        lines = [l for l in main._cp_read_results(res["run_dir"]) if l.get("kind") == "check"]
+        assert res["status"] == "ok"
+        assert [(l["manual_id"], l["outcome"], l["photo_id"]) for l in lines] == [(primary, "exactly-one",
+                                                                                   item.photo_id)]
+        assert mvcommon.load_library()[sandbox_alias["alias_id"]] == alias_before
+
+    def test_map_photos_and_the_apply_engine_resolve_the_alias(self, sandbox_alias, monkeypatch, capsys):
+        # The bulk of the real library: a LEGACY object (archived before IMP-C25 — no capture, no content key),
+        # mapped by its exact uploaded name.
+        primary, alias = sandbox_alias["primary_id"], sandbox_alias["alias_id"]
+        library = mvcommon.load_library()
+        alias_before = dict(library[alias])
+        library[primary].update(status="archived", uploaded=True)
+        mvcommon.save_library(library)
+        uploaded, sha256 = library[primary]["search_term"], library[primary]["hash"]
+        [item] = _c25_inventory({"tv": [uploaded]})["tv"]
+        monkeypatch.setattr(main.subprocess, "run", _c25_no_adb)
+
+        res = main.cmd_map_photos(alias)                               # a dry run over an alias scope
+
+        assert [(r["manual_id"], r["label"], r["status"]) for r in res["rows"]] == [(primary, "whole", "mapped")]
+        mvcommon.append_learned("tv", {                                 # a record naming the ALIAS id …
+            "manual_id": alias, "label": "whole", "sha256": sha256, "photo_id": item["photo_id"],
+            "taken_ms": item["taken_ms"], "tz_offset_ms": item["tz_offset_ms"], "upload_ms": item["upload_ms"],
+            "dedup_key": item["dedup_key"], "gp_filename": uploaded, "proof": "filename", "source": "check"})
+        report = main.merge_learned_gphotos()
+        assert report["status"] == "saved" and [c["manual_id"] for c in report["changed"]] == [primary]
+        library = mvcommon.load_library()
+        assert library[primary]["gphotos"]["accounts"]["tv"]["confirmed"] is True   # … lands on the primary
+        assert library[alias] == alias_before                                      # the alias: untouched
+
+    def test_mvmeta_upgrade_resolves_an_alias_scope_to_its_primary(self, sandbox_alias, mock_device, tmp_path,
+                                                                   monkeypatch, capsys):
+        self._pushed(sandbox_alias)
+        adb = _C25ReadOnlyAdb("FAKESMOKE02", mock_device / "sdcard" / "Media")
+        monkeypatch.setattr(main, "DEVICE_ALIASES", {"series": adb.serial})
+        monkeypatch.setattr(main, "DEVICE_CHECK_EXTRA_SERIALS", {})
+        monkeypatch.setattr(main.subprocess, "run", adb.run)
+        systmp = tmp_path / "systmp"
+        systmp.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(systmp))
+
+        res = main.cmd_mvmeta_upgrade(scope=sandbox_alias["alias_id"])
+
+        assert res["status"] == "ok"
+        assert [r["label"] for r in res["rows"]] == [sandbox_alias["primary_id"]]   # the primary's own sidecar
+        assert os.listdir(systmp) == []

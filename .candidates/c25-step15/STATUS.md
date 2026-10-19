@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 15.d2 the alias sweep over the new passes (then 15.d3 all four prefixes)
+STATE: IN PROGRESS — next: 15.d3 all four prefixes (prep + push → pending --list → map_photos → merge → nothing pending)
 
 # IMP-C25 Step 15 — smoke coverage, regression pins, mutation probes — resumable status
 
@@ -70,12 +70,25 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
         [6 verbs] — the REAL commands (mock_device / fake_dummy / stub_tech_specs / mock_tmdb + the by-id details,
         _forbid_input), each run reaches its end state, `main.after_push_command.calls` == [(the exact hook args, {})],
         maybe_auto_confirm never called, main._cp_spawn AND main.subprocess.Popen record + refuse: nothing spawned.
-        -k TestC25PushFamilyHook 6 passed (1.67 s, each ≤ 0.23 s) — SHA in the 15.d2 commit
-  - [ ] 15.d2 the alias sweep over the new whole-library passes: iter_entry_objects / iter_uploaded_objects /
+        -k TestC25PushFamilyHook 6 passed (1.67 s, each ≤ 0.23 s) — ae2871a
+  - [x] 15.d2 the alias sweep over the new whole-library passes: iter_entry_objects / iter_uploaded_objects /
         unverified_objects / pending --list / fetch_cleanup's family (offline) · check_photos with the ALIAS scope on
         the fake world · map_photos with the alias scope + the apply engine fed a record naming the alias id · mvmeta_
         upgrade with the alias scope. (resolve_photos is left out of the sweep: its first act is the TTY refusal —
         15.c — and its `--id <alias>` row selection is pinned in test_resolve_photos.)
+        Done: class TestC25AliasSweep (the primary pushed THROUGH the alias id on mock_device, its push capture) —
+        test_the_new_iterators_skip_the_alias (alias yields no object; uploaded / unverified / failed_objects /
+        pending --list = the primary alone; fetch_cleanup's family walk; the alias entry byte-equal) ·
+        test_check_photos_resolves_an_alias_scope_to_its_primary (fake world, in-process child: one line, the
+        primary, exactly-one, the item's photo id) · test_map_photos_and_the_apply_engine_resolve_the_alias (a LEGACY
+        archived primary — no capture — mapped by exact name over the alias scope; a learned record naming the ALIAS
+        id lands on the primary, confirmed; the alias untouched; no adb) ·
+        test_mvmeta_upgrade_resolves_an_alias_scope_to_its_primary (the row is the primary's own sidecar; the temp
+        folder empty). Finding while writing it (not a defect — the Step 9b rule working): a push via the alias of an
+        un-prepped primary records no SHA-1, so map_photos rates that fresh push `not-backed-up-yet` (only its own
+        bytes could prove a push newer than the crawl) — hence the legacy object in the map test. `_c25_inventory`
+        takes (name, dedupKey) pairs and returns the item records. -k TestC25AliasSweep 4 passed (1.23 s); smoke 101
+        passed (12.6 s) — SHA in the 15.d3 commit
   - [ ] 15.d3 all four prefixes (mov- tv- ani- oth-): real prep + push of one object each → pending --list (four
         accounts) → map_photos dry run (four mapped by their own bytes) → the merge of four learned records (four
         blocks, each in its own library file, confirmed) → nothing pending

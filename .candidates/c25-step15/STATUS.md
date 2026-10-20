@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 15.f2 DISARM.md (the run is done: 62/62 caught), then 15.g gates
+STATE: IN PROGRESS — next: 15.g gates (full suite, then smoke, sequential; hermeticity; self-review; STATE: COMPLETE; the final commit)
 
 # IMP-C25 Step 15 — smoke coverage, regression pins, mutation probes — resumable status
 
@@ -139,7 +139,10 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
         unmutated copy + adb safety net 1334 passed (112 s); **62/62 CAUGHT** (G1–G15 55/55 · S 7/7), every
         mutated file restored byte for byte; the restored copy 1334 passed (122 s). Results:
         <scratchpad>\disarm_15_results.jsonl + disarm_15_run.log — fc4be59 is the probed code
-  - [ ] 15.f2 survivors analysed (a test added only for a guard really uncovered, in a NEW file) · DISARM.md
+  - [x] 15.f2 survivors analysed (a test added only for a guard really uncovered, in a NEW file) · DISARM.md
+        DISARM.md written: per guard G1–G15 a table (probe · code · mutation · the failing tests, first ones + total ·
+        the earlier step's probe of the same guard) + the S table + notes (the G4 / G14 split, the copy's adb net,
+        the probes first written here: G5c, G6c, G7b, G9b, G13b — each caught by an existing test)
         No survivor (no test needed). Precision pass (`<scratchpad>\s15_smoke_confirm.py`: the mutation again, ONLY the
         named smoke / focused node): the new smokes catch G3b, G3c, G3e, G8a, G11b by themselves; G7a was caught
         only by test_map_photos (the map smoke's one object was mapped, so no object ever needed a phone) → the map

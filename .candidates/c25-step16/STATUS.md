@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 16.e docs/README.md + INVENTORY_AND_CAPTURE.md
+STATE: IN PROGRESS — next: 16.f parser replays + smoke gate + final commit
 
 # IMP-C25 Step 16 — Documentation (architect) — resumable status
 
@@ -36,8 +36,8 @@ Commit THIS file (force-added: `.candidates/` is gitignored) with every WIP comm
       confirm by hand, can't-find options incl. kill switch, failed list in Excel, outliers, mvmeta_upgrade);
       R2/R3 placeholder at the top of §6d; Last updated bumped. (§6d instead of "§6b": §6b/§6c already existed
       from IMP-C26/C29.) — c809a50
-- [x] 16.d docs/testing-strategy.md — §3 two new mock boundaries, §4.6 mock_fetch status, NEW §4.11 fake_photos, §4.12 the IMP-C25 autouse guards (+ opt-outs), §4.13 smoke Group 5 helpers + the swallowed-raise rule + disarm probes, §11 fetch round-trip done, §12 C25 test commands — WIP SHA: the commit that ticks this line
-- [ ] 16.e docs/README.md (index) + docs/feature-fetch-datetime/INVENTORY_AND_CAPTURE.md (status update)
+- [x] 16.d docs/testing-strategy.md — §3 two new mock boundaries, §4.6 mock_fetch status, NEW §4.11 fake_photos, §4.12 the IMP-C25 autouse guards (+ opt-outs), §4.13 smoke Group 5 helpers + the swallowed-raise rule + disarm probes, §11 fetch round-trip done, §12 C25 test commands — 89070ba
+- [x] 16.e docs/README.md (feature-fetch-datetime row, testing-strategy + OPERATIONS_QA rows) + INVENTORY_AND_CAPTURE.md (status banner, crawler Step 7, capture v2 + readers, §3 implemented + Step 9b) — WIP SHA: the commit that ticks this line
 - [ ] 16.f parser replays (offline) + smoke gate + final commit, STATE: COMPLETE
 
 ## Parser replays

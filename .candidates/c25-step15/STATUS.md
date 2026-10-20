@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 15.g gates (full suite, then smoke, sequential; hermeticity; self-review; STATE: COMPLETE; the final commit)
+STATE: COMPLETE
 
 # IMP-C25 Step 15 — smoke coverage, regression pins, mutation probes — resumable status
 
@@ -116,7 +116,7 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       be_read (a directory: None + the ❌ line, no cached SHA-1) · test_the_mvmeta_writer_keeps_the_v1_key_order_and_
       its_exact_byte_form × 2 (whole / split: the 14 v1 keys in writer order, chunks [filename, hash], ASCII,
       main._mu_decode accepts the bytes — mvmeta_upgrade's byte-identity precondition) — ef29600
-- [ ] 15.f disarm: one consolidated probe script (session scratchpad, outside the repo) run on an isolated `git archive`
+- [x] 15.f disarm: one consolidated probe script (session scratchpad, outside the repo) run on an isolated `git archive`
       copy of the final code — every guard of the PLAN's list has ≥ 1 probe re-run there; a test is added only where a
       guard turns out uncovered; `.candidates/c25-step15/DISARM.md` = guard → test → probe → caught, `disarm N/N`
   - [x] 15.f0 (found while designing the probes) the smoke's adb stand-ins RECORD every call before refusing it —
@@ -127,7 +127,7 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
   - [x] 15.f1 the probe script `<scratchpad>\disarm_15.py` (check mode: every target occurs exactly once; run mode:
         `git archive HEAD` → scratch copy, a copy-only adb safety net appended to ITS tests/conftest.py — a probe
         that switches the device check on must never reach the real adb — baseline of every catcher file green,
-        each probe: edits → catchers with -x → restore + sha256 check; results.jsonl, resumable) and its run.
+        each probe: edits → catchers → restore + sha256 check; results.jsonl, resumable) and its run.
         Written: C:\Users\harin\AppData\Local\Temp\claude\C--Users-harin-PycharmProjects-MediaVault\63b4ae7b-212c-4a85-
         8e4a-1436806bc271\scratchpad\disarm_15.py — 62 probes (G1–G15: 55 · S: 7); catchers run WITHOUT -x so every
         failing test is listed; a timeout counts as caught (flagged). `check` on the worktree at e94f495: 62 probes,
@@ -147,7 +147,8 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
         named smoke / focused node): the new smokes catch G3b, G3c, G3e, G8a, G11b by themselves; G7a was caught
         only by test_map_photos (the map smoke's one object was mapped, so no object ever needed a phone) → the map
         smoke now also holds an episode found in no account (possible-loss, still no adb); re-confirmed on the
-        copy: it catches G7a and still G3b; the copy's smoke 102 green unmutated
+        copy: it catches G7a and still G3b; the copy's smoke 102 green unmutated — d73e636 (the smoke) · 32f6143
+        (DISARM.md)
   Probe design (re-verified against the current code — every target text occurs exactly once):
     G1 pin rule — block_trusted without the pin · without the version · the engine folds an untrusted block
     G2 verification-before-trigger — Step 12 C P1 (any dedupKey verifies) · P2 (any name verifies) · P8 (Shift+D
@@ -175,9 +176,16 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
        · the start-up terminates an attached Chrome (Step 11 P11)
     S  Step 15's own additions bite — the post-fetch merge removed · a new P-13 marker line · a read error raises ·
        the mvmeta writer's form changed · fetch_restore drops tempdir · the incoming folder kept · no TTY check
-- [ ] 15.g gates: full suite (baseline 3219 + this step's) and smoke (82 + this step's) sequential, smoke runtime
+- [x] 15.g gates: full suite (baseline 3219 + this step's) and smoke (82 + this step's) sequential, smoke runtime
       recorded · self-review · STATE: COMPLETE · final commit
-      `test(imp-c25): Step 15 — smoke coverage, regression pins, mutation probes for every new guard`
+      `test(imp-c25): Step 15 — smoke coverage, regression pins, mutation probes for every new guard`.
+      On 32f6143 (tree clean), one after the other on an otherwise idle machine: full suite **3278 passed** (= 3219 +
+      20 smoke + 39 pins), 1 warning (the pre-existing httpx / Starlette deprecation), 250.6 s, exit 0; then smoke
+      **102 passed** (82 + 20), 1 warning, **12.4 s**. Hermeticity: a listing (path, size, mtime) of the real
+      ~/.mediavault/gphotos, fetch_journal and locks and of ~/Downloads, taken before the disarm run, is identical after
+      the run, the full suite and the smoke (their live 2026-10-18 artefacts are not mine); the real C:\Media\library_
+      *.json were last written 2026-10-18 17:36 — before this step began. The scratch copy was removed. Self-review:
+      the step report below — the final commit sets STATE: COMPLETE
 
 ## Design decisions (binding for the rest of this step — recorded early so a resumed session stays consistent)
 1. Smoke additions go in ONE new group at the end of tests/smoke/test_smoke_all_commands.py ("Group 5 — IMP-C25"),
@@ -193,9 +201,10 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
 4. Pins: tests/test_c25_regression_pins.py does NOT re-assert what an existing pin asserts — it holds a registry
    (module + test name) of the existing pins, so a deleted or renamed pin fails here, and adds only the pins that are
    missing.
-5. Disarm: each probe = one exact, single-occurrence source replacement on the scratch copy (the earlier steps'
-   harness, scratchpad disarm_all.py), the named catcher files run with -x; caught = at least one test fails; every
-   mutated file is restored and compared byte for byte; the unmutated copy must be green first.
+5. Disarm: each probe = exact, single-occurrence source replacement(s) on the scratch copy (the earlier steps'
+   harness, scratchpad disarm_all.py), the named catchers run WITHOUT -x (every failing test is listed); caught = at
+   least one test fails; every mutated file is restored and compared byte for byte; the unmutated copy must be green
+   first and the restored copy green after.
 6. Two guards overlap in the PLAN's list; they are split by WHAT is protected, so each gets its own probes:
    "never-delete-foreign" = a file MediaVault did not cause to exist is never deleted (a pre-existing or non-family
    file in ~/Downloads in the fallback and start-up cleanups, a file that changed between fetch_cleanup's listing and
@@ -234,3 +243,60 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
   test_entry_schema_guard, test_gp_capture), the scratchpad probe harness disarm_all.py.
 - 2026-10-20 a usage-limit pause hit during the read-in (nothing on disk yet); resumed on the coordinator's word —
   this file first.
+- 2026-10-20 further limit pauses during 15.c, 15.e and the disarm run; each resume found the tree clean at the last
+  WIP commit (nothing to keep or discard). The coordinator's last note said the disarm run had likely died at 22/22;
+  it had not — it completed (exit 0, 62/62, restored copy green), so it was not re-run.
+- 2026-10-20 commit messages are passed with `git commit -m …` (no heredoc); file edits only through Edit / Write. One
+  stray `sed -i` replaced line 1 of this file at 15.a (a mechanical STATE-line change, checked in the diff).
+
+## Step 15 — [status: done]
+- Executor: executor-opus (dispatched as Framework v2, [model: opus] [effort: high])
+- Model: opus (claude-opus-5-5); every commit's trailer `Co-Authored-By: Claude Opus 5.5`
+- Mode: single-executor in its own worktree (MediaVault-s15, branch tmp/c25_step15), pathspec WIP commits per the PLAN's
+  in-step checkpoint protocol (the dispatch's instruction). The main folder was never touched.
+- Files changed: tests/smoke/test_smoke_all_commands.py (Group 5 — IMP-C25, +681 lines, purely additive: 20 smokes in
+  4 classes + self-contained helpers + imports; no existing line changed), tests/test_c25_regression_pins.py (new, 39
+  tests), .candidates/c25-step15/STATUS.md (this file), .candidates/c25-step15/DISARM.md (new). Nothing else: no
+  product code, no conftest, no existing test, no PROGRESS.md.
+- Outcome: (1) SMOKE 82 → 102 (12.4 s): prep/push capture (+ never confirmed) · `check_photos pending --list` offline ·
+  fetch + the post-fetch merge of a seeded learned sidecar (+ idempotent) · `check_photos --approaches best` in-process
+  on the fake Google Photos (download-free, allowlisted rpcids, only its run dir) · `map_photos` dry run on a fresh
+  synthetic inventory (mapped + possible-loss, no adb, only its run dir) · an incoming-mode fake fetch (the download
+  landed in `restore\.mv_incoming`, the folder is gone, the redirected ~/Downloads byte-identical, journal clean) ·
+  `mvmeta_upgrade` dry run over mock_device's tree (v1 → v2 proposed, read verbs only, nothing written anywhere) ·
+  `resolve_photos` refused without a terminal (nothing launched, nothing recorded) · `fetch_cleanup` dry run (lists
+  the family leftovers + a marked incoming leftover, never an unrelated file; scan scope in tmp; writes nothing) · the
+  six push-family verbs through main.py's REAL dispatcher (each reaches its end state and the hook exactly once; no
+  child of any kind) · an alias sweep over the new passes (iterators, failed list, pending, fetch_cleanup, check alias
+  scope, map alias scope + an engine record naming the alias, mvmeta alias scope) · all four prefixes from push to
+  confirmed (each block in its own library file). (2) PINS: a registry of the 24 existing pins (by file + name — a
+  deleted / renamed pin fails, nothing re-asserted) + the missing ones: fetch_restore's (= the web action's) spawned
+  argv ×4, the P-13 marker literals on both sides (the exact source of every marker-bearing literal in mainfetch, main
+  and the other child modules ×6; the web parser's three patterns + signals), calculate_file_hash's signature / lowercase
+  64-hex / None-never-raise on a read error, the mvmeta v1 document's key order and exact byte form ×2. (3) DISARM
+  62/62 (G1–G15 55/55, S 7/7) on an isolated copy — DISARM.md.
+- Key decisions: design decisions 1–6 above. Deviations, each surfaced: (D1) resolve_photos is not in the alias sweep
+  (its first act is the TTY refusal; its `--id <alias>` selection is pinned in test_resolve_photos); (D2) the P-13
+  producer pin also freezes main.py's two cmd_restore split lines (a web fetch_restore job parses the restore phase
+  too) and asserts that gprpc / gpweb / mvcommon / gpcapture carry no marker; (D3) the pins' registry checks
+  existence by file text (no import of the focused modules, so it costs nothing and cannot import-break); (D4) the
+  probe copy alone got an autouse adb safety net (no repo change) — two probes switch a device check on; (D5) 62
+  probes instead of one per guard: 2–6 per guard, plus 7 proving Step 15's own tests bite; (D6) 15.f0 fixed this
+  step's own smoke stand-ins (device_inventory swallows a raise → record + assert the list) and 15.f2 strengthened the
+  map smoke after the precision pass showed it could not catch G7a; (D7) the guard pair "never-delete-foreign" /
+  "deletions only inside .mv_incoming / run-new family" is split by what each protects (design decision 6).
+- Contracts for later steps — 16 (docs): docs/testing-strategy.md could list the smoke's Group 5 helpers
+  (`_c25_wire` = mainfetch in-process on the fake world; `_c25_record_adb`; `_C25ReadOnlyAdb`; `_c25_dispatcher` = the
+  dispatcher compiled from main.py's tail) and the rule "a stand-in inside a swallowing path must record, not only
+  raise". 18 (checklist / PR test plan): smoke 102 in 12.4 s; tests/test_c25_regression_pins.py is the one place that
+  names every C25 pin; disarm 62/62 (DISARM.md). R2 starts on a green suite: 3278.
+- Verification: per sub-task targeted runs (see 15.a–15.f); disarm 62/62 (`<scratchpad>\disarm_15.py`, a `git archive`
+  copy of fc4be59; baseline and restored copy 1334 passed; every file restored byte for byte) + the precision pass;
+  full suite 3278 passed / 250.6 s and then smoke 102 passed / 12.4 s on 32f6143, sequential; hermeticity listing
+  identical; `git diff 068212e..HEAD -- tests/` 0 removed lines; no product file in the diff.
+- Self-review (V2 delta 4): (a) PLAN Step 15 — every smoke item (12/12), every named pin (8/8: four by registry +
+  additions, four with new pins), every guard of the list (15/15, each ≥ 2 probes, all caught) and the acceptance
+  (full + smoke green, runtime recorded); (b) consumers — R2 (green suite), Step 16 (the helpers + the swallowed-raise
+  rule worth documenting), Step 18 (the pins file + DISARM.md for the checklist and the PR test plan); (c)
+  change-gates — no rollback symbol, ENTRY_TYPE_KEYS untouched (its guard green in the full run), no product code,
+  smoke green and under 30 s. Correctly routed as opus/high (no misroute).

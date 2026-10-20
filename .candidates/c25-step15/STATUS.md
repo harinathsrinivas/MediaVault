@@ -123,11 +123,17 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
         device_inventory swallows errors (test_map_photos says so: "the list is the pin"), so a raising stand-in
         alone could be absorbed: `_c25_no_adb` → `_c25_record_adb(monkeypatch)` (returns the list; the three
         map_photos smokes assert it empty) · `_C25ReadOnlyAdb` records the verb of EVERY call first. Smoke 102
-        passed (14.5 s) — SHA in the 15.f1 commit
+        passed (14.5 s) — e94f495
   - [ ] 15.f1 the probe script `<scratchpad>\disarm_15.py` (check mode: every target occurs exactly once; run mode:
         `git archive HEAD` → scratch copy, a copy-only adb safety net appended to ITS tests/conftest.py — a probe
         that switches the device check on must never reach the real adb — baseline of every catcher file green,
-        each probe: edits → catchers with -x → restore + sha256 check; results.jsonl, resumable) and its run
+        each probe: edits → catchers with -x → restore + sha256 check; results.jsonl, resumable) and its run.
+        Written: C:\Users\harin\AppData\Local\Temp\claude\C--Users-harin-PycharmProjects-MediaVault\63b4ae7b-212c-4a85-
+        8e4a-1436806bc271\scratchpad\disarm_15.py — 62 probes (G1–G15: 55 · S: 7); catchers run WITHOUT -x so every
+        failing test is listed; a timeout counts as caught (flagged). `check` on the worktree at e94f495: 62 probes,
+        0 problems (every target exactly once, every catcher file / test present). Run command (resumable — re-run the
+        same; results.jsonl keeps the finished probes): `python disarm_15.py run C:/Users/harin/PycharmProjects/
+        MediaVault-s15 <scratchpad>/disarm_15_copy <scratchpad>/disarm_15_results.jsonl`
   - [ ] 15.f2 survivors analysed (a test added only for a guard really uncovered, in a NEW file) · DISARM.md
   Probe design (re-verified against the current code — every target text occurs exactly once):
     G1 pin rule — block_trusted without the pin · without the version · the engine folds an untrusted block

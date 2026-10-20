@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 15.f disarm (verify every guard's code site + catcher, write the consolidated probe script, run it on an isolated copy, DISARM.md)
+STATE: IN PROGRESS — next: 15.f1 the probe script (scratchpad disarm_15.py: check mode, then the run on an isolated copy)
 
 # IMP-C25 Step 15 — smoke coverage, regression pins, mutation probes — resumable status
 
@@ -115,10 +115,47 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
       main's name is the same function) · test_calculate_file_hash_returns_none_and_never_raises_when_the_file_cannot_
       be_read (a directory: None + the ❌ line, no cached SHA-1) · test_the_mvmeta_writer_keeps_the_v1_key_order_and_
       its_exact_byte_form × 2 (whole / split: the 14 v1 keys in writer order, chunks [filename, hash], ASCII,
-      main._mu_decode accepts the bytes — mvmeta_upgrade's byte-identity precondition) — SHA in the 15.f commit
+      main._mu_decode accepts the bytes — mvmeta_upgrade's byte-identity precondition) — ef29600
 - [ ] 15.f disarm: one consolidated probe script (session scratchpad, outside the repo) run on an isolated `git archive`
       copy of the final code — every guard of the PLAN's list has ≥ 1 probe re-run there; a test is added only where a
       guard turns out uncovered; `.candidates/c25-step15/DISARM.md` = guard → test → probe → caught, `disarm N/N`
+  - [x] 15.f0 (found while designing the probes) the smoke's adb stand-ins RECORD every call before refusing it —
+        device_inventory swallows errors (test_map_photos says so: "the list is the pin"), so a raising stand-in
+        alone could be absorbed: `_c25_no_adb` → `_c25_record_adb(monkeypatch)` (returns the list; the three
+        map_photos smokes assert it empty) · `_C25ReadOnlyAdb` records the verb of EVERY call first. Smoke 102
+        passed (14.5 s) — SHA in the 15.f1 commit
+  - [ ] 15.f1 the probe script `<scratchpad>\disarm_15.py` (check mode: every target occurs exactly once; run mode:
+        `git archive HEAD` → scratch copy, a copy-only adb safety net appended to ITS tests/conftest.py — a probe
+        that switches the device check on must never reach the real adb — baseline of every catcher file green,
+        each probe: edits → catchers with -x → restore + sha256 check; results.jsonl, resumable) and its run
+  - [ ] 15.f2 survivors analysed (a test added only for a guard really uncovered, in a NEW file) · DISARM.md
+  Probe design (re-verified against the current code — every target text occurs exactly once):
+    G1 pin rule — block_trusted without the pin · without the version · the engine folds an untrusted block
+    G2 verification-before-trigger — Step 12 C P1 (any dedupKey verifies) · P2 (any name verifies) · P8 (Shift+D
+       without the page check) · P25 (a record anywhere in the page)
+    G3 dry-run-writes-nothing — engine dry run saves · map_photos dry run applies · check_photos dry run applies ·
+       fetch_cleanup dry run deletes · mvmeta dry run writes (13c P15: all three layers)
+    G4 never-delete-foreign — Step 11 P3 (fallback: pre-existing files) · P4 (non-family files) · P6 (start-up:
+       snapshot ignored) · P18 (--apply without the re-check) · 13c P33 (mvmeta mv over any phone file)
+    G5 home-account routing — fetch: the learned layer removed · learned outranks the override · map/check: the
+       learned home ignored (_mp_route)
+    G6 freshness gate — the 24 h limit off · a stale default account still decides · recency judged by the default
+       (not the routed) account · map recency off · check-child recency off · check verdict recency off
+    G7 no adb without --devices — map_photos' device check always on · check_photos' always on
+    G8 capture-never-confirms — a capture makes cloud_state confirmed · the engine's capture fold confirms
+    G9 RPC allowlist — both checks off · a mutating id allowlisted · the send-site check removed
+    G10 apply fingerprint re-check — no re-check · without SHA-256 · taken after the load
+    G11 auto-confirm only after success — 13b P1 · P2 · P3 · P22
+    G12 mvmeta sha1 only when proven — 13c P1 (filename) · P2 (manual)
+    G13 download URL never persisted / printed — a plain-string link · the repr reveals it · the journal keeps the
+       trigger's strings (Step 11 P20) · locate --probe-direct's error text (Step 12 C P14)
+    G14 deletions only inside .mv_incoming / run-new family — Step 11 P1 (marker) · P2 (folder name) · P5 (family
+       widened) · P7 (pending anywhere) · P32 (unmarked folders listed)
+    G15 Chrome kill only for the journaled pid + matching user-data-dir — start-up: the command-line check off ·
+       session close: another profile accepted (14.a-2) · an attached Chrome terminated at the close (Step 11 P10)
+       · the start-up terminates an attached Chrome (Step 11 P11)
+    S  Step 15's own additions bite — the post-fetch merge removed · a new P-13 marker line · a read error raises ·
+       the mvmeta writer's form changed · fetch_restore drops tempdir · the incoming folder kept · no TTY check
 - [ ] 15.g gates: full suite (baseline 3219 + this step's) and smoke (82 + this step's) sequential, smoke runtime
       recorded · self-review · STATE: COMPLETE · final commit
       `test(imp-c25): Step 15 — smoke coverage, regression pins, mutation probes for every new guard`

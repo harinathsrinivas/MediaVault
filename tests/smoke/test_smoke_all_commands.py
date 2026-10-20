@@ -2094,8 +2094,18 @@ def _c25_prep_push(sandbox, make_video):
     return mvcommon.load_library()[C25_MOVIE_ID], data
 
 
-def _c25_no_adb(*_a, **_k):
-    raise AssertionError("no adb command may run here (map_photos / check_photos touch a phone only with --devices)")
+def _c25_record_adb(monkeypatch):
+    """main.subprocess.run -> a recorder that refuses every command. -> the list of argvs it was asked to run. The
+    LIST is the pin, not the raise: device_inventory swallows errors (a phone that cannot be listed is reported, never
+    raised), so a refused `adb devices` would otherwise go unnoticed."""
+    asked = []
+
+    def refuse(argv, *_a, **_k):
+        asked.append(list(argv))
+        raise AssertionError("no adb command may run here (map_photos / check_photos touch a phone only with --devices)")
+
+    monkeypatch.setattr(main.subprocess, "run", refuse)
+    return asked
 
 
 def _c25_bytes(tag):
@@ -2182,7 +2192,8 @@ def _c25_season(sandbox, world, episodes=(EP1_ID, EP2_ID)):
 class _C25ReadOnlyAdb:
     """`adb` for ONE phone whose Media root is a real folder (here mock_device's tree): `devices`, `shell find`,
     `shell stat` and `pull` — the read side mvmeta_upgrade's dry run needs. Any other command (push, shell mv, rm …)
-    FAILS the smoke: a dry run may never write to a phone. Installed as main.subprocess.run; .verbs records what ran."""
+    FAILS the smoke: a dry run may never write to a phone. Installed as main.subprocess.run. .verbs records the verb of
+    EVERY call before anything is answered or refused (the device code swallows errors, so the record is the pin)."""
 
     ROOT = "/sdcard/Media/"
 
@@ -2199,18 +2210,16 @@ class _C25ReadOnlyAdb:
 
     def run(self, argv, *args, **kwargs):
         argv = list(argv)
+        words = shlex.split(" ".join(argv[4:])) if argv[3:4] == ["shell"] else []   # the device shell's splitting
+        self.verbs.append("devices" if argv == ["adb", "devices"] else (words[0] if words else argv[3]))
         if argv == ["adb", "devices"]:
-            self.verbs.append("devices")
             return self._answer(f"List of devices attached\r\n{self.serial}\tdevice\r\n\r\n".encode())
         assert argv[:3] == ["adb", "-s", self.serial], f"a phone command must name its phone: {argv!r}"
         if argv[3] == "pull":
             remote, local = argv[4:]
             shutil.copyfile(self._file(remote), local)
-            self.verbs.append("pull")
             return self._answer(b"1 file pulled, 0 skipped.\r\n")
         assert argv[3] == "shell", f"a dry run must never write to a phone: {argv!r}"
-        words = shlex.split(" ".join(argv[4:]))           # the device shell's word splitting (single quotes)
-        self.verbs.append(words[0])
         if words[0] == "find" and words[2:] == ["-type", "f"]:
             files = sorted(p.relative_to(self.root).as_posix() for p in self.root.rglob("*") if p.is_file())
             return self._answer("".join(f"{words[1]}{rel}\r\n" for rel in files).encode("utf-8")
@@ -2342,13 +2351,13 @@ class TestC25ExactItem:
         info = _seed_single(sandbox, make_video, uploaded=True, status="archived")
         uploaded = f"SMK.S01E01 [{info['short_id']}].mkv"
         _c25_inventory({"tv": [uploaded]})
-        monkeypatch.setattr(main.subprocess, "run", _c25_no_adb)          # Step 9b: no phone without --devices
+        adb = _c25_record_adb(monkeypatch)                                # Step 9b: no phone without --devices
         library_before = {p: p.read_bytes() for p in (sandbox["lib_series"], sandbox["lib_movies"])}
         before = _c25_tree(tmp_path)
 
         res = main.cmd_map_photos(**main.parse_map_photos_args([]))
 
-        assert res["status"] == "ok"
+        assert res["status"] == "ok" and adb == []
         assert [(r["manual_id"], r["label"], r["status"]) for r in res["rows"]] == [(info["id"], "whole", "mapped")]
         assert {p: p.read_bytes() for p in library_before} == library_before
         assert mvcommon.read_learned() == [] and mvcommon.read_failed() == []                # recorded nothing
@@ -2613,11 +2622,12 @@ class TestC25AliasSweep:
         mvcommon.save_library(library)
         uploaded, sha256 = library[primary]["search_term"], library[primary]["hash"]
         [item] = _c25_inventory({"tv": [uploaded]})["tv"]
-        monkeypatch.setattr(main.subprocess, "run", _c25_no_adb)
+        adb = _c25_record_adb(monkeypatch)
 
         res = main.cmd_map_photos(alias)                               # a dry run over an alias scope
 
         assert [(r["manual_id"], r["label"], r["status"]) for r in res["rows"]] == [(primary, "whole", "mapped")]
+        assert adb == []
         mvcommon.append_learned("tv", {                                 # a record naming the ALIAS id …
             "manual_id": alias, "label": "whole", "sha256": sha256, "photo_id": item["photo_id"],
             "taken_ms": item["taken_ms"], "tz_offset_ms": item["tz_offset_ms"], "upload_ms": item["upload_ms"],
@@ -2681,10 +2691,11 @@ class TestC25FourPrefixes:
                 for o in pending["objects"]} == {mid: spec[2] for mid, spec in C25_FOUR.items()}
 
         items = _c25_inventory({spec[2]: [(uploaded[mid], keys[mid])] for mid, spec in C25_FOUR.items()})
-        monkeypatch.setattr(main.subprocess, "run", _c25_no_adb)
+        adb = _c25_record_adb(monkeypatch)
         mapping = main.cmd_map_photos()                                      # dry run: proven by their own bytes
         assert {r["manual_id"]: (r["status"], r.get("proof")) for r in mapping["rows"]} == {
             mid: ("mapped", "dedupkey") for mid in C25_FOUR}
+        assert adb == []                                                     # and no phone was asked
 
         for mid, (_parts, _name, account, _lib) in C25_FOUR.items():
             [item] = items[account]

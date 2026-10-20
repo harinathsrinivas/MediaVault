@@ -74,7 +74,9 @@ a boundary (ADB, browser, library file) to be exercised.
 |---|---|---|
 | Library JSON files | `sandbox` fixture | `load_library`, `save_library`, all JSON parsing |
 | Android device (ADB) | `mock_device` (stateful) or `FakeAdb` (recorder) | File I/O, path math, library updates |
-| Browser / Selenium | `mock_fetch` fixture (future) | Restore logic, hash verification |
+| Browser / Selenium | `mock_fetch` fixture (legacy trigger only) | Restore logic, hash verification |
+| Google Photos (web UI + internal RPC) — IMP-C25 | `fake_photos` (§4.11) | Selenium `ActionChains` / `WebDriverWait`, gpweb parsers, gprpc client, the locator, the harvester, `.mv_incoming` hygiene |
+| `~/.mediavault`, `~/Downloads`, the inventory dir, processes, child processes — IMP-C25 | the autouse guards (§4.12) | every state path computed at call time |
 
 ---
 
@@ -171,10 +173,12 @@ def test_partial_then_mv_protocol(split_entry, monkeypatch):
     assert len(fake.mvs()) == len(fake.chunk_pushes())
 ```
 
-### 4.6 `mock_fetch` — browser download stub *(future — implement in C2)*
+### 4.6 `mock_fetch` — browser download stub *(implemented in IMP-C2)*
 
-**File:** `tests/conftest.py` (to be added during C2)
-**Use for:** End-to-end fetch → restore tests without Selenium or a real browser.
+**File:** `tests/conftest.py`
+**Use for:** End-to-end fetch → restore tests without Selenium or a real browser — of today's
+legacy trigger only. For the IMP-C25 exact-item fetch (locator, direct download, `.mv_incoming`),
+use the fake Google Photos world `fake_photos` (§4.11) instead.
 Monkeypatches `mainfetch.trigger_download` to copy a pre-seeded file from
 `mock_device` (or any temp dir) to the local restore directory.
 
@@ -292,6 +296,71 @@ def test_override_routes_to_movies(monkeypatch):
                         {"fetch_account_overrides": {"tv-en-2001-demo-s01e02": "movies"}})
     assert mainfetch.profile_for_id("tv-en-2001-demo-s01e02") == "movies"
 ```
+
+### 4.11 `fake_photos` — the fake Google Photos world (IMP-C25)
+
+**File:** `tests/gphotos_fake.py` (the model) + `tests/conftest.py` (fixture `fake_photos`)
+**Use for:** anything that talks to Google Photos — the locator, the direct download, the harvester in
+incoming mode, `check_photos`, `resolve_photos`, the crawler, `gprpc`. **No test ever touches live
+Google, a real Chrome, adb or the network** (PLAN P-17).
+
+A deterministic in-memory model of the Google Photos web app for the four accounts (movies renders UK
+English, tv / anime / others US English — RESEARCH P4), driven through the REAL Selenium surface:
+`fake_photos.driver(account)` returns a driver that Selenium's own `ActionChains` / `WebDriverWait` and
+the shared `gpweb` page scripts work against — so the legacy `trigger_download` runs unmodified on it.
+It models search pages (without the "Most relevant to your search" strip — `tests/test_fetch_search_wait.py`'s
+own `_Page` models that), item pages with embedded records, downloads into the folder CDP points at, signed-out modes, and the
+`batchexecute` emulator behind `gprpc` (`fail_next_rpc(...)` injects failures; `rpc_ids_sent()` is the
+request log the read-only allowlist check reads). Items: `fake_photos.add_item(account, filename,
+data=..., taken=..., ...)`; their dedupKey / SHA-1 are computed by the fake itself, independently of the
+code under test. Knobs `swbisb_compact` / `ewgk9e_live` (default off) switch to the record layouts the
+Step 14 live probe saw.
+
+Isolation: the fixture patches NOTHING — a test wires the fake in itself (e.g.
+`monkeypatch.setattr(mainfetch, "init_driver", lambda p: fake_photos.driver(p))`); every file the fake
+writes must lie under `tmp_path` (it raises otherwise); the default download folder is
+`tmp_path/fake_photos/Downloads`. Tests that drive `gprpc` / mainfetch pacing must install a fake clock
+(the `clock` fixture in `tests/test_gprpc.py`, `FakeTime` in `test_gp_inventory.py`) — pacing and backoff
+really sleep. `tests/test_locator.py` checks, after EVERY test that used the fake, that only allowlisted
+read-only rpcids were sent.
+
+### 4.12 IMP-C25 autouse guards — hermetic state, profiles, children
+
+**File:** `tests/conftest.py`. All autouse; each has a hard guard that fails the test if a redirect
+escapes `tmp_path`.
+
+| Guard | What it does | Opt-out for the feature's own tests |
+|---|---|---|
+| `_hermetic_gphotos_state` | `mvcommon.GPHOTOS_STATE_DIR` / `GP_INVENTORY_DIR` → `tmp_path`; `mainfetch.FETCH_JOURNAL_DIR` → `tmp_path/mv_state/fetch_journal`; `mainfetch.SYSTEM_DOWNLOADS_FOLDER` → `tmp_path/mv_downloads` (not created); the `<drive>:\MV_incoming` locator → a tmp folder; `mainfetch.PROCESS_TABLE` → `_InertProcessTable` (tells nothing, refuses to terminate) | `real_short_incoming_root`; a test installs its own fake process table |
+| `_hermetic_chrome_profiles` | `profile_preflight` answers "present" for the real profile paths (never launched anyway); `mark_profile_clean_exit` is inert, so no real `Preferences` is read or rewritten | `real_mark_profile_clean_exit` (only on `tmp_path` profiles) |
+| `_hermetic_check_child` | `main._cp_spawn` refuses: a child process sees no monkeypatch and would read the REAL library and launch a REAL Chrome | install an in-process runner (`test_check_photos.py`) |
+| `_hermetic_auto_confirm` | `main.after_push_command` and `main.maybe_auto_confirm` are inert recorders (`.calls`) — every dispatcher-driving test sees the push exactly as before | `real_auto_confirm` (moves the fetch lock under `tmp_path`; `_cp_spawn` stays refused) |
+
+Rule for state paths: production code reads them **module-qualified at call time**
+(`mvcommon.GPHOTOS_STATE_DIR`, `mainfetch.FETCH_JOURNAL_DIR`) — the same binding hazard as §6.3 — so
+patching the owning module is complete. A new state path must follow that rule and be added to
+`_hermetic_gphotos_state`.
+
+### 4.13 Smoke Group 5 (IMP-C25) helpers
+
+**File:** `tests/smoke/test_smoke_all_commands.py` (`TestC25*` classes — self-contained: no import from the
+focused test modules, so refactoring their helpers can never break the pre-PR gate):
+- `_c25_wire` — runs mainfetch in-process on the fake world (fake clock for mainfetch + gprpc, a fake
+  driver per session, lock / port probe / jitter / disk stubbed, an S4 recorder, `main._cp_spawn` = the real
+  `mainfetch.py check` command line run in-process);
+- `_c25_record_adb` / `_C25ReadOnlyAdb` — adb stand-ins that **record every call before refusing it**
+  (read verbs only for the mvmeta smoke);
+- `_c25_dispatcher` — compiles only `main.py`'s `if __name__ == "__main__":` tail (with its line numbers) to
+  drive the six push-family verbs through the real dispatcher;
+- `_c25_tree` — a file/folder snapshot to prove "writes nothing".
+
+**Rule learned in Step 15:** a stand-in placed inside a code path that swallows errors (e.g.
+`device_inventory` reports adb failures instead of raising) must RECORD its calls and the test must
+assert the record is empty — a raise alone is absorbed and proves nothing.
+
+**Mutation (disarm) probes.** Every IMP-C25 guard has ≥ 1 probe that removes the guard on an isolated
+`git archive` copy and proves a test fails (`.candidates/c25-step15/DISARM.md`: 62/62). Do the same for a
+new guard: the copy green before, the probe caught, the copy restored byte for byte and green after.
 
 ---
 
@@ -595,13 +664,14 @@ def my_fixture(tmp_path, monkeypatch):
 
 ## 11. Future test areas
 
-### Fetch round-trip (implement in C2)
+### Fetch round-trip (done)
 
-C2 adds the `retry()` helper and needs mocked ADB for its retry tests. At the same
-time, add `mock_fetch` to `conftest.py` (design in section 4.6). First fetch
-round-trip test: seed `mock_device` with chunks → mock fetch copies to restore dir
-→ `cmd_restore` merges → assert output hash. This tests the entire download +
-restore pipeline without a browser or device.
+`mock_fetch` landed with IMP-C2 (§4.6) for the legacy trigger. The IMP-C25 exact-item fetch is covered
+end to end on the fake Google Photos world (§4.11): `tests/test_locator.py`, `test_fetch_hygiene.py`,
+`test_fetch_manual.py` and the smoke's incoming-mode fetch (`.mv_incoming` → `restore\`, the folder
+gone, the redirected `~/Downloads` byte-identical). What no hermetic test can show — the real
+direct-download link, Shift+D on a directly loaded page, the CDP download redirect, `Browser.close`,
+`taskkill` — is verified live at 🚦 R2 (results pending R2/R3).
 
 ### Auto-rollback (implement when auto-rollback lands)
 
@@ -639,6 +709,13 @@ pytest tests/test_cmd_push_partial.py -q           # ADB protocol (FakeAdb)
 pytest tests/test_cmd_push_mock_device.py -q       # ADB data-integrity (mock_device)
 pytest tests/test_cmd_replace.py -q                # cmd_replace (C9)
 pytest tests/test_cmd_restore_quarantine.py -q     # cmd_restore (C11)
+
+# IMP-C25 (exact Google Photos item) — all on the fake world, no live Google
+pytest tests/test_gpweb.py tests/test_gprpc.py tests/test_rpc_quality_flags.py -q        # parsers + RPC client
+pytest tests/test_gphotos_primitives.py tests/test_gphotos_apply.py -q                    # identity + apply engine
+pytest tests/test_locator.py tests/test_fetch_hygiene.py tests/test_fetch_manual.py -q    # fetch
+pytest tests/test_map_photos.py tests/test_check_photos.py tests/test_resolve_photos.py -q
+pytest tests/test_auto_confirm.py tests/test_mvmeta_upgrade.py tests/test_c25_regression_pins.py -q
 
 # Verbose (shows test names)
 pytest -v

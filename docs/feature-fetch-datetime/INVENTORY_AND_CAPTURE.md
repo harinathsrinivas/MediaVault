@@ -4,7 +4,17 @@ Two pieces that run **before** the IMP-C25 plan is implemented, so that no ident
 while the plan is being built (user request, 2026-09-24/25). Both are read-only towards Google
 Photos and neither changes any existing command's behaviour.
 
-**Last updated:** 2026-09-25
+**Last updated:** 2026-10-20
+
+> **Status (2026-10-20, IMP-C25 Steps 2–15 done):** both interim pieces are now productized parts of
+> IMP-C25 and no longer "interim". The crawler gained an **rpc mode** (the default — read-only internal
+> calls, minutes instead of hours), a run log with a completeness proof, a lock + heartbeat, a profile
+> pre-flight and `--status` (Step 7; `ARCHITECTURE.md` §9.3). The capture is **v2** (device timezone,
+> width / height, duration, `approach_hint`) and covers extras scans and extras pushes too (Step 5;
+> `ARCHITECTURE.md` §6.5). Its readers exist: `check_photos pending`, the fetch's locator, `map_photos`
+> and the apply engine (Steps 6–13). Section 3's plan has been implemented as `map_photos` /
+> `check_photos` / `resolve_photos` (`ARCHITECTURE.md` §8.10; how to run it: `docs/OPERATIONS_QA.md`
+> §6d). The sections below keep the original interim description, with the changes marked.
 
 ---
 
@@ -38,8 +48,13 @@ python tools/gp_inventory.py movies --port 9223
 python tools/gp_inventory.py anime --port 9224       # needs the anime profile signed in
 python tools/gp_inventory.py tv --attach 9222        # or attach to an already-open Chrome
 python tools/gp_inventory.py tv --port 9225 --phase details --max 3   # smoke
+python tools/gp_inventory.py all --status            # (Step 7) offline counts: no Chrome, writes nothing
+python tools/gp_inventory.py tv --port 9225 --mode dom   # (Step 7) the original browser crawl
 ```
-Do not run a MediaVault `fetch` on the same account while it runs (same Chrome profile).
+Do not run a MediaVault `fetch` on the same account while it runs (same Chrome profile). Since Step 7
+the crawler takes the fetch session lock without waiting (refused, exit 3, while a fetch / warm-up /
+another crawl holds it — so crawl the accounts one after another), and writes `<account>.runs.jsonl`
+(the run log whose `enumerated` line proves a complete listing — `map_photos` needs one ≤ 24 h old).
 
 **Run log.** 2026-09-25 00:06 — tv (1,109 ids) and movies (795 ids) crawling as detached processes;
 anime STOPPED: `ChromeProfile_Anime` is signed out (user to sign in, then re-run); others: no
@@ -67,11 +82,19 @@ After a **successful** `prep` / `push` (post-commit, never journalled, never rai
 - `date_utc` is read from the Matroska header in pure Python (validated against mkvmerge/ffprobe on
   every probe file). `dedup_key` is what Google Photos will show for that exact upload.
 - Covered: `cmd_prep`, `cmd_push` (whole, chunks, FLAC holder, partial `chunk_range` pushes) and every
-  autopilot built on them. **Not yet covered:** extras pushes (`push_one_extra`) — the inventory covers
-  them by filename.
-- No MediaVault command reads the capture yet; the IMP-C25 sweep will.
+  autopilot built on them. ~~Not yet covered: extras pushes~~ — **covered since Step 5** (the extras scan
+  and `push_one_extra`, at `<title>/<group_rel>/<dir of sub_rel>/<item short_id>.gpcapture.json`).
+- ~~No MediaVault command reads the capture yet~~ — since Steps 6–13 `mvcommon.read_capture` feeds
+  `check_photos pending`, the fetch's locator (content key, taken second), `map_photos` and the apply
+  engine. Capture v2 (`capture_version: 2`) adds per push `device_tz` / `device_tz_offset_min` and per
+  object `width` / `height` / `duration_s` / `approach_hint`; v1 files are still read.
 
-## 3. What happens next (IMP-C25 plan)
+## 3. What happens next (IMP-C25 plan) — implemented (Steps 9–14)
+
+Done as planned, with one change from the user's R1 ruling (2026-10-03, Step 9b): the "missing" verdict
+needs no phone — an object found in no account is `not-backed-up-yet` when pushed within 7 days before
+(or after) its account's crawl, else `possible-loss`; phones are an opt-in (`--devices`). The real
+library's map / check apply (🚦 R3) and the full sweep (🚦 R4): results pending R2/R3.
 
 1. Finish the crawl for every account (anime/others need the profiles signed in).
 2. **Map** each library object (whole file / chunk / holder / extra) to its inventory item by exact

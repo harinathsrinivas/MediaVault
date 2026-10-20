@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 16.d docs/testing-strategy.md
+STATE: IN PROGRESS — next: 16.e docs/README.md + INVENTORY_AND_CAPTURE.md
 
 # IMP-C25 Step 16 — Documentation (architect) — resumable status
 
@@ -35,8 +35,8 @@ Commit THIS file (force-added: `.candidates/` is gitignored) with every WIP comm
       account, UK dates, backfill, possible-loss report, archived vs confirmed, auto-confirm lines + off switch,
       confirm by hand, can't-find options incl. kill switch, failed list in Excel, outliers, mvmeta_upgrade);
       R2/R3 placeholder at the top of §6d; Last updated bumped. (§6d instead of "§6b": §6b/§6c already existed
-      from IMP-C26/C29.) — WIP SHA: the commit that ticks this line
-- [ ] 16.d docs/testing-strategy.md — fake Google Photos, hermetic redirects, guards, smoke Group 5
+      from IMP-C26/C29.) — c809a50
+- [x] 16.d docs/testing-strategy.md — §3 two new mock boundaries, §4.6 mock_fetch status, NEW §4.11 fake_photos, §4.12 the IMP-C25 autouse guards (+ opt-outs), §4.13 smoke Group 5 helpers + the swallowed-raise rule + disarm probes, §11 fetch round-trip done, §12 C25 test commands — WIP SHA: the commit that ticks this line
 - [ ] 16.e docs/README.md (index) + docs/feature-fetch-datetime/INVENTORY_AND_CAPTURE.md (status update)
 - [ ] 16.f parser replays (offline) + smoke gate + final commit, STATE: COMPLETE
 

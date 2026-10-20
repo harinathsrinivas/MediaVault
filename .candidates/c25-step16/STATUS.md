@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 16.a ARCHITECTURE.md
+STATE: IN PROGRESS — next: 16.b README.md
 
 # IMP-C25 Step 16 — Documentation (architect) — resumable status
 
@@ -17,9 +17,13 @@ uncommitted doc diff belongs to the first unticked sub-task: keep it if coherent
 Commit THIS file (force-added: `.candidates/` is gitignored) with every WIP commit. Pathspec commits only.
 
 ## Sub-tasks (one WIP commit each)
-- [ ] 16.a ARCHITECTURE.md — §5 entry points, §6.3 `gphotos` block, §6.5 capture + mvmeta v2, §7.5 capture, §8
-      rewrite (§8.1 four profiles, §8.3 drift, trigger_download line), new §8.9 read-only RPC, §10 Stage 4, §11,
-      §12a rollback-neutral addendum, §13, §14, §16/§17 strikes (C5/A8/B10), §18, last-updated line
+- [x] 16.a ARCHITECTURE.md — §1, §3 (+ state tree), §4, §5 (new commands, auto-confirm note, mainfetch verbs,
+      fetch-parsing drift), §6.3 `gphotos` block (+ stale extras refs re-verified), §6.5 capture v2 + mvmeta v2 +
+      mvmeta_upgrade, §7.5 capture, §7.7 verify_restore tempdir, §7.8, §8 rewritten (8.1 four profiles + routing,
+      8.3 S4 drift fixed: plain filename / F14 / trigger_download :433, 8.4 locator, 8.5 hygiene + Chrome lifecycle,
+      8.6 manual/resume, 8.7, 8.8 lock, 8.9 read-only RPC, 8.10 identity commands), §9.1b, §9.3, §10 Stage 4, §11,
+      §12, §12a addendum, §13, §14, §15, §16/§17 (C5/A8/B10 struck), §18, last-updated — WIP SHA: the commit that
+      ticks this line
 - [ ] 16.b README.md — fetch bullet, command table, where downloads go, locate, crawler modes, config keys,
       auto-confirm line, state dirs
 - [ ] 16.c docs/OPERATIONS_QA.md — §6b Q&As (PLAN Step 16 list), Last updated

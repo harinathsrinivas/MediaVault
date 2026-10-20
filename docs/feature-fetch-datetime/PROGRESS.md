@@ -90,7 +90,7 @@ The user archives from this folder — check for a running `main.py` before any 
 | 15 | smoke + pins + disarm probes | done | executor-opus (own worktree) | b3e5e96 (WIP f35cc56..fc4be59) | full 3278 · smoke 102 in 12.4 s (orchestrator re-run 13.3 s) · disarm 62/62 (15 guards 55/55 + own tests 7/7) | table .candidates/c25-step15/DISARM.md; real ~/.mediavault + ~/Downloads byte-identical before/after |
 | R2 | live verification pack (user) | pending | user | | | |
 | R3 | real-library apply (user) | pending | user | | | |
-| 16 | docs (architect) | pending | | | | |
+| 16 | docs (architect) | in_progress | | | | |
 | R4 | full-library sweep + outlier/failed lists (user) | pending | user | | | at the very end (OD-7) |
 | 17 | IMP bookkeeping + NEXT pointer question | pending | | | | OD-16 |
 | 18 | final verification + PR | pending | | | | 🚦 Checkpoint 1 |
@@ -115,6 +115,7 @@ A d8dd71f (UI-first) · B 868cd27 (RPC-first) · C 5e7f0f6 (hybrid) — all COMP
 `Step 13c DONE 2026-10-14 03bdd64 (fast-forwarded here). Next: Step 14.`
 `Step 14 DONE 2026-10-19 5b21c3f (fast-forwarded here). Noticed, not changed (Step 15/16 candidates): warm_profiles has no profile pre-check (could create an empty ChromeProfile_Others); the shared close says "this fetch" inside resolve_photos; fetch journals are never pruned. Next: Step 15.`
 `Step 15 DONE 2026-10-20 b3e5e96 (fast-forwarded here; main unmoved since #66). Next: 🚦 R2 live verification pack (user-run or user-authorized) and 🚦 R3 real-library apply; Step 16 (docs) may run meanwhile.`
+`Step 16 — dispatched 2026-10-20 to the architect agent (opus) in worktree C:/Users/harin/PycharmProjects/MediaVault-s16 (branch tmp/c25_step16), in parallel with 🚦 R2; R2/R3 results are added to the docs when they exist.`
 `Step 12 — 3 candidates dispatched 2026-10-05 (executor-fable each); worktrees C:/Users/harin/PycharmProjects/MediaVault-c25-cand/step-12/{A,B,C} on branches feature/imp_c25_fetch_exact_gp_item__cand_{a,b,c} from 8968f26 · A UI-first (no RPC for locating) · B RPC-first · C hybrid arbitration · each: WIP commits on its own branch + .candidates/c25-step-12/<X>/CANDIDATE_STATUS.md + CRITIQUE.md · then judge-v2 → .candidates/c25-step-12/DECISION.md → 🚦 G12 (the user picks; optional live locate per worktree, §M4)`
 `Step 12 DONE 2026-10-12: all three candidates COMPLETE + gate-verified (A 2493/82 · B 2512/82 · C 2502/82); judge-v2 → C; user picked C at 🚦 G12; squash-merged 6553390; candidate history in tags candidates/imp_c25/step-12/{c-chosen,a-rejected,b-rejected}.`
 `Side fix (user request 2026-10-08) DONE: Chrome never shows "Restore pages?" — 537ff7e (code 0d47140, tests 49367a1, d444f12): --hide-crash-restore-bubble on every launch + profiles marked cleanly exited before every launch and after every close; full 2484 · smoke 82 · disarm 37/37. Follow-ups for Step 14/15: warm_profiles leaves Chrome running (already Step 14); Step 11's per-pid process query lacks -ErrorAction Stop (a WMI failure reads as 'process gone'); under heavy load the Step 11 close twice failed to close Chrome (cand C); bounded driver.get page-load timeout; close a launched Chrome when attach fails (DECISIONS §1e).`

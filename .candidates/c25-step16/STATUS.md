@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 16.c docs/OPERATIONS_QA.md
+STATE: IN PROGRESS — next: 16.d docs/testing-strategy.md
 
 # IMP-C25 Step 16 — Documentation (architect) — resumable status
 
@@ -27,8 +27,15 @@ Commit THIS file (force-added: `.candidates/` is gitignored) with every WIP comm
       stack state, command table (fetch/fetch_restore `--manual`, verify_restore tempdir, fetch_cleanup,
       map_photos, check_photos, resolve_photos, mvmeta_upgrade), `mainfetch.py locate`, learned routing, new
       section "Exact Google Photos item" (downloads, crawler modes, backfill, auto-confirm lines, failed list,
-      config keys, state dirs), file layout, status — WIP SHA: the commit that ticks this line
-- [ ] 16.c docs/OPERATIONS_QA.md — §6b Q&As (PLAN Step 16 list), Last updated
+      config keys, state dirs), file layout, status — 249ada0
+- [x] 16.c docs/OPERATIONS_QA.md — §6b updated to per-file routing (refs re-verified), §6c IMP-C25 note + the
+      stale "fetch leaves its Chrome open" fixed, NEW §6d with every Q&A of PLAN Step 16 (Feb-2022 date, shared
+      second, dedupKey check, how fetch finds the item, where downloads go, interruptions, fetch_cleanup, disk
+      refusal, Chrome close / no "Restore pages?", direct download + no stored links, internal calls, force an
+      account, UK dates, backfill, possible-loss report, archived vs confirmed, auto-confirm lines + off switch,
+      confirm by hand, can't-find options incl. kill switch, failed list in Excel, outliers, mvmeta_upgrade);
+      R2/R3 placeholder at the top of §6d; Last updated bumped. (§6d instead of "§6b": §6b/§6c already existed
+      from IMP-C26/C29.) — WIP SHA: the commit that ticks this line
 - [ ] 16.d docs/testing-strategy.md — fake Google Photos, hermetic redirects, guards, smoke Group 5
 - [ ] 16.e docs/README.md (index) + docs/feature-fetch-datetime/INVENTORY_AND_CAPTURE.md (status update)
 - [ ] 16.f parser replays (offline) + smoke gate + final commit, STATE: COMPLETE

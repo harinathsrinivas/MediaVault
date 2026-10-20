@@ -2348,17 +2348,19 @@ class TestC25ExactItem:
     # ---- map_photos dry run over a fresh synthetic inventory (Step 9) ---------
     def test_map_photos_dry_run_maps_and_writes_only_its_run_directory(self, sandbox, make_video, tmp_path,
                                                                        monkeypatch, capsys):
-        info = _seed_single(sandbox, make_video, uploaded=True, status="archived")
-        uploaded = f"SMK.S01E01 [{info['short_id']}].mkv"
-        _c25_inventory({"tv": [uploaded]})
-        adb = _c25_record_adb(monkeypatch)                                # Step 9b: no phone without --devices
+        # Two legacy episodes: e01 is in the (fresh) tv inventory, e02 in no account — the object a phone could tell
+        # about, which Step 9b's map_photos still never asks without --devices.
+        _seed_season_two(sandbox, make_video, uploaded=True)
+        _c25_inventory({"tv": [f"SMK.S01E01 [{_short(EP1_ID)}].mkv"]})
+        adb = _c25_record_adb(monkeypatch)
         library_before = {p: p.read_bytes() for p in (sandbox["lib_series"], sandbox["lib_movies"])}
         before = _c25_tree(tmp_path)
 
         res = main.cmd_map_photos(**main.parse_map_photos_args([]))
 
-        assert res["status"] == "ok" and adb == []
-        assert [(r["manual_id"], r["label"], r["status"]) for r in res["rows"]] == [(info["id"], "whole", "mapped")]
+        assert res["status"] == "ok" and adb == []                       # Step 9b: no phone without --devices
+        assert [(r["manual_id"], r["label"], r["status"]) for r in res["rows"]] == [
+            (EP1_ID, "whole", "mapped"), (EP2_ID, "whole", "possible-loss")]   # no push time: not "recent"
         assert {p: p.read_bytes() for p in library_before} == library_before
         assert mvcommon.read_learned() == [] and mvcommon.read_failed() == []                # recorded nothing
         run = os.path.relpath(res["run_dir"], tmp_path)

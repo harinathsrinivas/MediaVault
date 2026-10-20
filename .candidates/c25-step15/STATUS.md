@@ -1,4 +1,4 @@
-STATE: IN PROGRESS — next: 15.f1 the probe script (scratchpad disarm_15.py: check mode, then the run on an isolated copy)
+STATE: IN PROGRESS — next: 15.f2 DISARM.md (the run is done: 62/62 caught), then 15.g gates
 
 # IMP-C25 Step 15 — smoke coverage, regression pins, mutation probes — resumable status
 
@@ -124,7 +124,7 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
         alone could be absorbed: `_c25_no_adb` → `_c25_record_adb(monkeypatch)` (returns the list; the three
         map_photos smokes assert it empty) · `_C25ReadOnlyAdb` records the verb of EVERY call first. Smoke 102
         passed (14.5 s) — e94f495
-  - [ ] 15.f1 the probe script `<scratchpad>\disarm_15.py` (check mode: every target occurs exactly once; run mode:
+  - [x] 15.f1 the probe script `<scratchpad>\disarm_15.py` (check mode: every target occurs exactly once; run mode:
         `git archive HEAD` → scratch copy, a copy-only adb safety net appended to ITS tests/conftest.py — a probe
         that switches the device check on must never reach the real adb — baseline of every catcher file green,
         each probe: edits → catchers with -x → restore + sha256 check; results.jsonl, resumable) and its run.
@@ -134,7 +134,17 @@ SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRES
         0 problems (every target exactly once, every catcher file / test present). Run command (resumable — re-run the
         same; results.jsonl keeps the finished probes): `python disarm_15.py run C:/Users/harin/PycharmProjects/
         MediaVault-s15 <scratchpad>/disarm_15_copy <scratchpad>/disarm_15_results.jsonl`
+        RUN (2026-10-20, one uninterrupted run on a fresh `git archive` copy of fc4be59 — it completed, exit 0; a
+        coordinator note that it had died at 22/22 was outdated): the probed files byte-equal to the worktree; the
+        unmutated copy + adb safety net 1334 passed (112 s); **62/62 CAUGHT** (G1–G15 55/55 · S 7/7), every
+        mutated file restored byte for byte; the restored copy 1334 passed (122 s). Results:
+        <scratchpad>\disarm_15_results.jsonl + disarm_15_run.log — fc4be59 is the probed code
   - [ ] 15.f2 survivors analysed (a test added only for a guard really uncovered, in a NEW file) · DISARM.md
+        No survivor (no test needed). Precision pass (`<scratchpad>\s15_smoke_confirm.py`: the mutation again, ONLY the
+        named smoke / focused node): the new smokes catch G3b, G3c, G3e, G8a, G11b by themselves; G7a was caught
+        only by test_map_photos (the map smoke's one object was mapped, so no object ever needed a phone) → the map
+        smoke now also holds an episode found in no account (possible-loss, still no adb); re-confirmed on the
+        copy: it catches G7a and still G3b; the copy's smoke 102 green unmutated
   Probe design (re-verified against the current code — every target text occurs exactly once):
     G1 pin rule — block_trusted without the pin · without the version · the engine folds an untrusted block
     G2 verification-before-trigger — Step 12 C P1 (any dedupKey verifies) · P2 (any name verifies) · P8 (Shift+D

@@ -17,9 +17,10 @@ over USB ADB. The phone's Photos app then uploads them to the cloud
 unattended. Once the upload finishes the `replace` command swaps the local
 original for a tiny dummy placeholder file of the same name, recovering all of
 its disk space while keeping Plex/Kodi library entries intact. To watch the
-file again, `fetch` drives Chrome via Selenium to download the chunks back
-from `photos.google.com`, and `restore` merges them, verifies the SHA256s, and
-puts the file back where it was.
+file again, `fetch` drives Chrome via Selenium to find the exact Google Photos
+item of every chunk and download it straight into the title's `restore\` folder,
+and `restore` merges them, verifies the SHA256s, and puts the file back where it
+was.
 
 ## What it does
 
@@ -42,9 +43,22 @@ puts the file back where it was.
   original quality. MediaVault is not involved in this step.
 - `replace` — once `uploaded` is true, swap the original for a tiny dummy
   placeholder of the same name and free the local disk space.
-- `fetch` — Selenium attaches to a logged-in Chrome session, searches Google
-  Photos for the embedded short-id, and triggers the "download original"
-  shortcut for every chunk into `~/Downloads`.
+- `fetch` — Selenium drives a logged-in Chrome profile of the right Google account and
+  finds the **exact** Google Photos item of every chunk (IMP-C25): its stored `photo_id`,
+  then a content-hash lookup (SHA-1 = Google's dedupKey), then the second it was taken,
+  then its exact uploaded name, then title + short id, then your own search term — every
+  candidate proven by its content key or exact name, never by tile position. A located
+  item is downloaded through a freshly minted original-quality link (else Shift+D on its
+  own page). Downloads land in `<title folder>\restore\.mv_incoming\` (or under the
+  `tempdir` location), each file is SHA-256-verified and renamed into `restore\`, anything
+  else is deleted at once. **Nothing lands in `~/Downloads`.** Today's old search-and-click
+  is kept as the last resort. Fetch closes its tabs and the Chrome it launched when no
+  download is running any more.
+- `map_photos` / `check_photos` / `resolve_photos` — back-fill the identity of the
+  already-archived library from a Google Photos inventory, verify any item / season /
+  account in Google Photos without downloading, and fix what could not be found by hand.
+  New pushes are confirmed automatically at the end of your next push. See "Exact Google
+  Photos item" below.
 - `restore` — re-merge the chunks with `mkvmerge --deterministic` (a byte-identical
   merge), SHA256-verify against the library, and move the resulting file back into
   the original folder. For split entries the first restore **blesses** that
@@ -92,8 +106,10 @@ interrupted rollback can be finished afterward via `recover_journal`. See
 - **External binaries**: `mkvmerge` from MKVToolNix; `adb` from the Android
   Platform Tools; `chrome.exe` launched in remote-debugging mode; and
   `chromedriver`, fetched and cached automatically by `webdriver-manager`.
-- **No daemon, no API, no database** — three JSON files on disk plus per-media
-  sidecar files are the entire persistent state.
+- **No daemon, no API, no database** — the four library JSON files plus per-media
+  sidecar files are the persistent state; IMP-C25 adds append-only identity files under
+  `~/.mediavault/gphotos/` and the crawler's inventory in `D:\MediaVault_gp_inventory\`
+  (both private, never in the repo).
 
 ## Requirements / prerequisites
 
@@ -211,11 +227,16 @@ help text and no `--help` flag; this table is the reference.
 | `replace`              | `replace [id]`                                                                                                                      | Swap original with a tiny valid video file placeholder (requires ffmpeg)                                                                               |
 | `replace_group`        | `replace_group [id]`                                                                                                                | Replace a season group                                                                                                                                 |
 | `repair_dummies`       | `repair_dummies [id_prefix]`                                                                                                        | Regenerate any archived-entry dummy on disk to the current 10 KB video spec (idempotent — re-runs are safe; atomic swap)                                            |
-| `fetch`                | `fetch [id] [episodes <range>] [tempdir <path>] [--fetchExtras]`                                                                     | Selenium-download from Google Photos; `tempdir` stages downloads off the media volume; `--fetchExtras` also downloads the title's archived extras (flag-only — never prompts)                            |
-| `fetch_restore`        | `fetch_restore [id] [episodes <range>] [tempdir <path>] [--fetchExtras]`                                                             | Fetch then restore in one command; `tempdir` stages chunks off-volume (reads off the temp volume, writes the merged output back to the media folder); `--fetchExtras` also fetches + restores the extras into their `Specials\`/`Extra\` subfolder                         |
+| `fetch`                | `fetch [id] [episodes <range>] [tempdir <path>] [--fetchExtras] [--manual]`                                                          | Download the exact Google Photos items straight into `<title folder>\restore\` (via `restore\.mv_incoming\`); with `tempdir` into `<tempdir>\<id>\restore\` instead; nothing in `~/Downloads`; `--fetchExtras` also downloads the title's archived extras (flag-only — never prompts); `--manual` opens Chrome at the best place to look for what nothing found and waits up to 30 min per file for your own download (kept only if its SHA-256 matches) |
+| `fetch_restore`        | `fetch_restore [id] [episodes <range>] [tempdir <path>] [--fetchExtras] [--manual]`                                                  | Fetch then restore in one command; with `tempdir` the chunks are downloaded to and read from the temp volume, the merged output goes back to the media folder; `--fetchExtras` also fetches + restores the extras into their `Specials\`/`Extra\` subfolder |
+| `fetch_cleanup`        | `fetch_cleanup [--apply]`                                                                                                           | One-time cleanup of old fetch leftovers: files in `~/Downloads` named like one of your uploads (from fetches before IMP-C25), `.mv_incoming` leftovers, unfinished fetch journals. Dry run lists them; `--apply` deletes exactly that list |
+| `map_photos`           | `map_photos [all\|<id>\|<prefix>] [--account movies\|tv\|anime\|others] [--devices] [--devices-only] [--resolutions <csv>] [--repair split-info\|names] [--accept-probable] [--apply] [--out <dir>]` | Back-fill: match every uploaded object to its item in the inventory crawl (offline); dry run writes only its report folder; `--apply` records the identities; `--devices` = also look on the phones (opt-in) |
+| `check_photos`         | `check_photos <id\|season id\|series:<season id\|show folder>\|id prefix\|account:<a>\|pending\|hinted\|all> [--approaches best\|all] [--account a] [--recheck] [--apply\|--apply-run <run dir\|latest>] [--limit N] [--pace S] [--max-minutes M] [--devices] [--list]` | Verify in Google Photos without downloading; dry run by default; `--apply` records confirmations; `--apply-run latest` applies a reviewed run without Chrome; `pending --list` (offline) lists pushes not yet confirmed; resumable |
+| `resolve_photos`       | `resolve_photos [failed\|<csv>] [--account a] [--id <manual_id>]`                                                                    | Interactive (terminal only): walk the failed list, paste the right item's URL, give a search term, or mark "not uploaded"; asks before changing the library |
+| `mvmeta_upgrade`       | `mvmeta_upgrade [all\|<id>\|<prefix>] [device <alias\|serial>] [--apply]`                                                           | Bring the phones' existing `.mvmeta.json` sidecars to v2 with proven facts only; dry run by default; `--apply` backs every original up first |
 | `restore`              | `restore [id] [tempdir <path>]`                                                                                                     | Re-merge chunks (optionally staged on `tempdir`), verify SHA256, place file back                                                                                                    |
 | `restore_group`        | `restore_group [id] [tempdir <path>]`                                                                                               | Restore a season group, optionally with `tempdir` chunk staging                                                                                                                            |
-| `verify_restore`       | `verify_restore [id]`                                                                                                               | Dry-run hash check of restore/ folder contents                                                                                                         |
+| `verify_restore`       | `verify_restore [id] [tempdir <path>]`                                                                                              | Dry-run hash check of restore/ folder contents (with `tempdir`: of `<tempdir>\<id>\restore\`)                                                          |
 | `check`                | `check [id]`                                                                                                                        | Re-hash file in place and compare to library                                                                                                           |
 | `scan_unprepped`       | `scan_unprepped`                                                                                                                    | Find video files on disk not yet in any library                                                                                                        |
 | `local_status`         | `local_status [limit_size]`                                                                                                         | Show pending uploads with optional bin-packing                                                                                                         |
@@ -245,10 +266,19 @@ help text and no `--help` flag; this table is the reference.
 The Selenium fetcher can also be invoked directly:
 
 ```
-python mainfetch.py fetch <id> [episodes <range>] [--fetchExtras]
+python mainfetch.py fetch <id> [episodes <range>] [tempdir <path>] [--fetchExtras] [--manual]
+python mainfetch.py locate <id> [episodes <range>] [--fetchExtras] [--probe-direct]   # read-only
 ```
 
-`main.py fetch` is a thin wrapper that spawns exactly that command.
+`main.py fetch` is a thin wrapper that spawns exactly the first command and, when it
+ends, folds what the fetch learned (the items' photo ids) into the library — run
+`mainfetch.py fetch` directly and that happens at the next `main.py fetch` or apply.
+`locate` shows, for every object of an id, where it lives in Google Photos and how it was
+found (stage, proof, rpc/ui, timing; the photo id on your terminal only) — it downloads
+nothing and writes nothing. `--probe-direct` also reports whether the item's freshly
+minted download link answers without the browser's cookies (yes/no + content type; the
+link itself is never shown). `mainfetch.py check --run <dir>` exists too, but it is the
+browser half of `main.py check_photos` — not meant to be run by hand.
 
 **Items that live in another Google account (IMP-C26).** Fetch picks the Chrome
 profile — and so the Google account — from the id prefix (`mov-` → movies, `tv-` →
@@ -271,7 +301,77 @@ prints the usual `[Account] Profile for …` line, each further one prints
 `> [Account] Switching to profile '<account>' for N item(s) (fetch_account_overrides)`.
 `--fetchExtras` extras follow their title's id. With no overrides, fetch behaves
 exactly as before; an unknown account prints one warning and that entry is ignored.
+Since IMP-C25 routing is per file: override > the account where `map_photos` /
+`check_photos` actually confirmed the file (its learned `home_account`) > id prefix — so
+once the library is mapped, such items route correctly without an override. An override
+that contradicts a verified account prints one `⚠️ override … — the override wins.` line.
 See `docs/OPERATIONS_QA.md` §6b.
+
+### Exact Google Photos item — identity, backfill and confirmation (IMP-C25)
+
+Google Photos dates an MKV by its own `DateUTC` header (often years before you pushed it), a
+release batch shares one taken second, and text search is not an identity. So every uploaded
+object now carries an identity: its **content key** (SHA-1 of the uploaded bytes — exactly the
+`dedupKey` Google Photos stores), its DateUTC, its exact uploaded name, and — once seen in
+Google Photos — its permanent `photo_id` per Google account. The library keeps it in an optional
+`gphotos` block on each uploaded file/chunk (`ARCHITECTURE.md` §6.3). Download links are never
+stored: a fresh one is minted at every fetch.
+
+**Where fetch downloads go now.** Each title's own `restore\.mv_incoming\` folder (or
+`<tempdir>\<id>\restore\.mv_incoming\` with `tempdir`). A file whose SHA-256 matches is renamed
+into `restore\` (`✅ MOVED: …`); a wrong or half-downloaded file is deleted at once and listed; the
+`.mv_incoming` folder is removed when the title ends. An interrupted fetch is cleaned up at the
+start of the next one (`🧹 Cleaned N leftover file(s) from an interrupted fetch (X.X GB)`); the
+destination volume must hold the title's remaining bytes + 2 GB or the title is refused before
+anything downloads. Chrome runs with `--disable-quic` and `--hide-crash-restore-bubble`, the
+profiles are marked cleanly exited before every launch and after every close (no "Restore pages?"
+bubble), and a Chrome fetch only attached to (already open) stays open with only fetch's own tabs
+closed. Old leftovers in `~/Downloads` from earlier fetches: `python main.py fetch_cleanup`
+(review the list), then `python main.py fetch_cleanup --apply`.
+
+**Backfill the archived library** (one-time, dry run first):
+
+```
+python tools/gp_inventory.py movies --port 9223    # crawl each account, one at a time
+python tools/gp_inventory.py tv --port 9225        # (rpc mode by default; --mode dom = the slow browser crawl)
+python tools/gp_inventory.py anime --port 9224
+python tools/gp_inventory.py all --status          # offline counts
+python main.py map_photos all                      # dry run: report in ~/.mediavault/gphotos/map/<ts>/
+python main.py map_photos all --apply              # record the identities (no other MediaVault command running)
+python main.py check_photos account:tv --approaches best   # verify in Google Photos, no download
+python main.py check_photos account:tv --apply-run latest  # apply that reviewed run (no Chrome)
+```
+
+`map_photos` needs no phone: an object found in no account is "not backed up yet" when it was
+pushed within 7 days before (or after) that account's crawl, else "possible loss" (listed loudly).
+`--devices` adds the read-only phone check.
+
+**New pushes are confirmed automatically.** After every successful push-family command (`push`,
+`push_group`, `prep_push_rep`, `prep_push_rep_season`, and the two `…_enrich` autopilots), MediaVault
+checks the pushes that have had 24 h to back up: it prints
+`🔎 N pushed object(s) await Google Photos confirmation — confirming them now (check_photos pending
+--apply, at most 15 min; to turn this off: "auto_confirm_after_push": false in mvconfig.json)` and
+runs that check (Chrome opens for the accounts it needs). When it cannot run now (only young pushes,
+a fetch holds the lock, no profile, or a web-console job) it prints only
+`🔎 N pushed object(s) await Google Photos confirmation — run: main.py check_photos pending --apply`.
+It never changes the push's own output or exit code. See what is still waiting with
+`python main.py check_photos pending --list` (offline).
+
+**When something cannot be found.** It goes on the failed list —
+`~/.mediavault/gphotos/failed.jsonl` and its Excel view `failed_objects.csv` (fill `decision`,
+`photo_url`, `new_search_term` …, then `map_photos all --resolutions <csv>`), or walk it
+interactively with `python main.py resolve_photos failed`. `python main.py fetch <id> --manual`
+opens Chrome where to look and keeps whatever you download there if its bytes are right.
+
+**Config keys** (gitignored `mvconfig.json`; `mvconfig.example.json` documents them):
+`fetch_account_overrides` (above) and `auto_confirm_after_push` (`false` = off).
+
+**State** (private — never commit): `~/.mediavault/gphotos/` — `learned_<account>.jsonl`,
+`failed.jsonl`, `failed_objects.csv`, `hints.jsonl`, `resolved.jsonl`, `map/<ts>/`, `check/<ts>/`,
+`mvmeta/<ts>/` (sidecar originals); `~/.mediavault/fetch_journal/` (one file per fetch run);
+`D:\MediaVault_gp_inventory\` (the crawl). MediaVault only ever READS Google Photos — its internal
+calls are an allowlist of read-only ones made from the signed-in page (`ARCHITECTURE.md` §8.9).
+More: `docs/OPERATIONS_QA.md` §6b and `docs/feature-fetch-datetime/`.
 
 ### Web operations console (`web`)
 
@@ -744,7 +844,10 @@ trailing episode segment.
 MediaVault/
 ├── main.py                  # Active — main CLI (prep/push/replace/restore/fetch/sort/recover/...)
 ├── mainfetch.py             # Active — Selenium fetch from Google Photos
-├── mvcommon.py              # Active — shared library I/O + hashing constants/helpers (imported by both)
+├── mvcommon.py              # Active — shared library I/O + hashing + the Google Photos identity primitives
+├── gpweb.py                 # Active (IMP-C25) — Google Photos page / RPC parsers (stdlib only)
+├── gprpc.py                 # Active (IMP-C25) — the one read-only Google Photos RPC client
+├── gpcapture.py             # Active (IMP-C25) — identity capture at prep / push (<short_id>.gpcapture.json)
 ├── requirements.txt         # pymediainfo, selenium, undetected-chromedriver (see install note above)
 ├── requirements-dev.txt     # pytest
 ├── ARCHITECTURE.md          # Full engineering reference
@@ -763,7 +866,9 @@ MediaVault/
 ├── tests/                   # pytest suite (rollback, push, replace, restore, rehash, parsing, recover, ...)
 ├── tools/
 │   ├── migrate_lib.py       # One-shot: library.json → three category files
-│   └── migrate_rehash_flag.py  # One-shot (PR #20): stamp re_hashed=false on split entries
+│   ├── migrate_rehash_flag.py  # One-shot (PR #20): stamp re_hashed=false on split entries
+│   ├── gp_inventory.py      # IMP-C25: read-only Google Photos inventory crawler (input of map_photos)
+│   └── warm_profiles.py     # IMP-C17: daily Chrome-profile keep-alive (closes the Chrome it launched)
 └── archive/                 # Historical snapshots — NOT used at runtime
     ├── main/                # Older versions of main.py
     ├── mainfetch/           # Older versions of mainfetch.py
@@ -830,9 +935,12 @@ for the migration record, and `improvements_tierH.md` for the tracked task.
   **smoke suite** — `pytest tests/smoke -q` — that drives every command against
   tiny fixtures (including a `multi_ep_alias` library sweep); run it as the
   pre-PR cross-command gate alongside `pytest -q`. See
-  `docs/testing-strategy.md`. Everything else — notably the live Selenium
-  fetch — is "tested by use"; the legacy snapshots under `archive/` serve as
-  informal regression baselines.
+  `docs/testing-strategy.md`. Since IMP-C25 the fetch, locator, map / check /
+  resolve commands and the RPC client are tested against a fake Google Photos world
+  (`tests/gphotos_fake.py`; full suite 3278, smoke 102 in ~12 s as of 2026-10-20).
+  The live download triggers against real Google Photos are verified at the R2 gate
+  (results pending R2/R3); the legacy snapshots under `archive/` serve as informal
+  regression baselines.
 - The `undetected-chromedriver` package is listed in `requirements.txt` but
   not imported anywhere; `requests` is imported by `main.py` but not listed
   in `requirements.txt`. Both are known issues documented in

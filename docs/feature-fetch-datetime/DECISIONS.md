@@ -528,3 +528,11 @@ No other step of this plan uses candidates.
   sweep), kept because it makes the `inconsistent` verdict and the partial-upload outlier work; original-quality stays
   `unknown` until a storage-saver item is compared. (2) a `--manual` download records proof `sha256` / source `manual`
   (unconfirmed until a check). (4) resolve_photos refuses a pasted item proven to hold other bytes.
+
+## §1g — 🚦 R2 (live verification pack) — user rulings 2026-10-20 (decision cards)
+- **Who runs what**: card answer "You run yours, I do mine (Recommended)" → the orchestrator runs M4 (locate probes),
+  M5 (season check), M6 (direct fetch of SV S02E02), M7 (chunk set + interrupt), M8 (X-Files wrong-account fetch),
+  M9 (fetch_restore + web) and M18 (fetch_cleanup dry run), one at a time, into `D:\MV_fetch`, deleting the test copies
+  afterwards; the user runs M10 (--manual), M11 (new small archive push), M14 (auto-confirm a day later) and M15
+  (resolve_photos) with the commands the orchestrator gives.
+- **M7 size**: card answer "Smallest split item (Recommended)" → the smallest archived split entry with ≥2 chunks.

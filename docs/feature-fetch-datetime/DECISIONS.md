@@ -536,3 +536,7 @@ No other step of this plan uses candidates.
   afterwards; the user runs M10 (--manual), M11 (new small archive push), M14 (auto-confirm a day later) and M15
   (resolve_photos) with the commands the orchestrator gives.
 - **M7 size**: card answer "Smallest split item (Recommended)" → the smallest archived split entry with ≥2 chunks.
+- **🚦 R3 (2026-10-21)**: card answer "Prepare dry runs now (Recommended)" → the orchestrator backs up the library
+  files to `D:\MV_lib_backup\<date>\`, re-crawls the inventories, runs `map_photos all` and `check_photos account:<a>
+  --approaches best` as dry runs and gives the user the reports; nothing is written until the user approves each
+  `--apply` / `--apply-run`. No other MediaVault command may run meanwhile (OD-2).

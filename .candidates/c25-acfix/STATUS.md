@@ -58,7 +58,12 @@ rebase or stash. Never edit PROGRESS.md / PRIORITY.md (the orchestrator does).
       14739, §14 14731-14732 / 14944, §18 14074 / 14634 / 15520 / 14891 / 17446; OPERATIONS_QA 14731 / 14739. Left
       as history on purpose: PLAN.md / DECISIONS.md §1 (the original Step 13b ruling — §1g records the change),
       PROGRESS.md (the orchestrator's), ARCHITECTURE's dated "18294 lines as of 2026-10-20". No test reads these docs;
-      test_check_photos 183 passed — (this commit; its SHA is recorded by acfix.d)
+      test_check_photos 183 passed — 5004c8c
+- [x] acfix.d0 a probe gap found while designing the disarm probes (before running them): "the reminder keeps counting
+      every pending object" was pinned for the web / young / no-profile branches but not the fetch-lock one (its tests
+      hold only old objects, so a reminder counting the due ones would survive) — NEW test_auto_confirm.py::
+      test_a_held_lock_reminder_still_counts_every_pending_object (an old + a young object, lock held -> reminder(2));
+      test_auto_confirm 165 passed — (this commit)
 - [ ] acfix.d gates: disarm probes (isolated scratch copy) · full suite · smoke (sequential) · self-review ·
       STATE: COMPLETE · final commit `fix(imp-c25): auto-confirm checks only objects pushed at least
       AUTO_CONFIRM_MIN_AGE_H ago`

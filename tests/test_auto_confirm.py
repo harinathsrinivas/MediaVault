@@ -1180,3 +1180,14 @@ def test_the_auto_confirm_child_looks_up_only_the_old_objects_never_the_push_tha
     assert out[-1].startswith("🔎 check_photos pending: 2 object(s) — ")     # the check's summary: the 2 old ones
     still = {o["manual_id"] for o in mvcommon.unverified_objects(mvcommon.load_library(), NOW)}
     assert {TV3, MOVIE} <= still                              # the young ones wait for a later push
+
+
+def test_a_held_lock_reminder_still_counts_every_pending_object(ac, capsys):
+    # Only the "confirming them now" line counts the due objects; the reminder's N stays every pending object — here
+    # with an old AND a young one, so a reminder that counted only the due ones would show 1.
+    _save(_leaf(ac.root, TV1, hours_ago=30), _leaf(ac.root, TV2, hours_ago=1))
+    ac.lock.parent.mkdir(parents=True)
+    ac.lock.write_text("4242 1.0\n", encoding="utf-8")         # a running fetch / crawl / warm-up holds it
+
+    assert main.maybe_auto_confirm() == "locked"
+    assert capsys.readouterr().out.splitlines() == [_reminder(2)] and ac.child.calls == []

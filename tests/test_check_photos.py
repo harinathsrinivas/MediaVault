@@ -2293,8 +2293,10 @@ def _aged_season(sandbox, world, ages, now=LATER):
 def test_min_age_h_looks_up_only_the_old_objects_and_records_nothing_for_the_young_ones(cw, sandbox, capsys):
     # The auto-confirm's call `check_photos pending --apply --min-age-h 24` (the user's finding of 2026-10-27: the chunks
     # pushed minutes earlier were looked up). e01 was pushed 30 h ago, e02's capture has no push time (it counts as
-    # old), e03 and e04 were pushed 2 h and 23.9 h ago. Every item IS in Google Photos: any lookup would confirm it.
+    # old), e03 and e04 were pushed 2 h and 23.9 h ago. Every item IS in Google Photos: a lookup would confirm e04 (a
+    # learned record + a block) and find e03 still uploading — a partial upload: `inconsistent`, a failed-list row.
     items = _aged_season(sandbox, cw.world, {1: 30, 2: None, 3: 2, 4: 23.9})
+    items[f"{SEASON}e03"].partial_upload = True
     old, young = [f"{SEASON}e01", f"{SEASON}e02"], [f"{SEASON}e03", f"{SEASON}e04"]
 
     res = main.cmd_check_photos("pending", apply=True, min_age_h=24)

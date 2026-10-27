@@ -63,7 +63,45 @@ rebase or stash. Never edit PROGRESS.md / PRIORITY.md (the orchestrator does).
       every pending object" was pinned for the web / young / no-profile branches but not the fetch-lock one (its tests
       hold only old objects, so a reminder counting the due ones would survive) — NEW test_auto_confirm.py::
       test_a_held_lock_reminder_still_counts_every_pending_object (an old + a young object, lock held -> reminder(2));
-      test_auto_confirm 165 passed — (this commit)
+      test_auto_confirm 165 passed — 3647d30
+- [x] acfix.d-disarm 26/26 caught (scratchpad `disarm_acfix.py`, results `acfix_disarm_results.jsonl`): one
+      uninterrupted run on a fresh `git archive 3647d30` copy; the worktree only read (clean before and after); the
+      probed files byte-equal to the worktree first; every probe an exact one-occurrence edit, its catchers run without
+      -x, every edited file restored and compared byte for byte (26/26 restored). Unmutated copy: test_check_photos +
+      test_auto_confirm + test_c25_regression_pins 390 passed (38.6 s); the restored copy again 390 passed (33.8 s).
+      The coordinator's five named parts -> A1 (the argv), M1 (the age filter), M10 (the resume key), A3 (the due-only
+      line), M1/M13 (nothing recorded for a skipped object — the exclusion from run.json `objects` is that guard).
+      | id | mutation | caught by (failed) |
+      | M1 | `_cp_resolve` ignores --min-age-h | 7 — the core test, only-young, the resume key, every-scope, e2e … |
+      | M2 | no push time = young | 4 — core, boundary[no-push-time], e2e … |
+      | M3 | exactly H h = young (<=) | 1 — boundary[exactly-24h] |
+      | M4 | a future push = old | 1 — boundary[pushed-in-the-future] |
+      | M5 | age in minutes, not hours | 6 — core, only-young … |
+      | M6 | --min-age-h 0 accepted | 5 — bad command line ×4 + the dispatcher's exit 1 |
+      | M7 | --min-age-h parsed, dropped | 10 — the command line ×2, dispatcher, e2e … |
+      | M8 | --apply-run takes --min-age-h | 1 — bad command line[--apply-run] |
+      | M9 | --list takes --min-age-h | 1 — bad command line[--list] |
+      | M10 | resume key ignores min_age_h | 1 — test_min_age_h_is_part_of_the_resume_key |
+      | M11 | run.json without min_age_h | 3 — core, resume key, e2e |
+      | M12 | "continue it with" lacks it | 1 — resume key |
+      | M13 | cmd_check_photos drops it | 4 — core, only-young, resume key, e2e |
+      | M14 | no skip line | 4 — core, only-young, every-scope, e2e |
+      | M15 | young counted before --account | 1 — every-scope |
+      | M16 | all young still starts a run | 2 — test_an_empty_scope_starts_nothing, only-young |
+      | A1 | argv without --min-age-h (pre-fix) | 11 — the argv pin, the parse test, the dispatcher argv ×8, e2e |
+      | A2 | argv with another age (12) | 11 — the same |
+      | A3 | the line counts every pending | 4 — the argv pin's literal line, only-the-old-counted, journal, e2e |
+      | A4 | the line never names newer | 4 — the same |
+      | A5 | ", 0 newer skipped" | 22 — no-younger literal + every `_header(n)` line |
+      | A6 | the line's command lacks --min-age-h | 26 — every header assertion |
+      | A7 | held-lock reminder counts due | 1 — test_a_held_lock_reminder_still_counts_every_pending_object (d0) |
+      | A8 | no-profile reminder counts due | 1 — test_only_the_old_objects_accounts_count_for_the_profiles |
+      | A9 | auto-confirm: no push time = young | 3 — unknown push time, no-younger line, e2e |
+      | R1 | the e2e pin renamed away | 1 — test_c25_regression_pins (the registry) |
+- [x] acfix.d1 a second test gap found while mapping the probes: the core test's `read_failed() == []` proved nothing
+      — its young items were complete in Google Photos, so even unfiltered they would only be confirmed, never booked.
+      Now e03 (2 h) is a partial upload (a fresh push still uploading): unfiltered it would be `inconsistent` -> a
+      failed-list row, so "no failed row" is really tested. test_check_photos -k min_age_h 10 passed — (this commit)
 - [ ] acfix.d gates: disarm probes (isolated scratch copy) · full suite · smoke (sequential) · self-review ·
       STATE: COMPLETE · final commit `fix(imp-c25): auto-confirm checks only objects pushed at least
       AUTO_CONFIRM_MIN_AGE_H ago`

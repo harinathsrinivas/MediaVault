@@ -1,4 +1,4 @@
-STATE: IN PROGRESS
+STATE: COMPLETE
 
 # IMP-C25 follow-up to Step 13b — auto-confirm checks only objects old enough (acfix) — resumable status
 
@@ -64,7 +64,8 @@ rebase or stash. Never edit PROGRESS.md / PRIORITY.md (the orchestrator does).
       hold only old objects, so a reminder counting the due ones would survive) — NEW test_auto_confirm.py::
       test_a_held_lock_reminder_still_counts_every_pending_object (an old + a young object, lock held -> reminder(2));
       test_auto_confirm 165 passed — 3647d30
-- [x] acfix.d-disarm 26/26 caught (scratchpad `disarm_acfix.py`, results `acfix_disarm_results.jsonl`): one
+- [x] acfix.d-disarm (recorded in e92f3a6, probed code 3647d30) 26/26 caught (scratchpad `disarm_acfix.py`, results
+      `acfix_disarm_results.jsonl`): one
       uninterrupted run on a fresh `git archive 3647d30` copy; the worktree only read (clean before and after); the
       probed files byte-equal to the worktree first; every probe an exact one-occurrence edit, its catchers run without
       -x, every edited file restored and compared byte for byte (26/26 restored). Unmutated copy: test_check_photos +
@@ -101,10 +102,48 @@ rebase or stash. Never edit PROGRESS.md / PRIORITY.md (the orchestrator does).
 - [x] acfix.d1 a second test gap found while mapping the probes: the core test's `read_failed() == []` proved nothing
       — its young items were complete in Google Photos, so even unfiltered they would only be confirmed, never booked.
       Now e03 (2 h) is a partial upload (a fresh push still uploading): unfiltered it would be `inconsistent` -> a
-      failed-list row, so "no failed row" is really tested. test_check_photos -k min_age_h 10 passed — (this commit)
-- [ ] acfix.d gates: disarm probes (isolated scratch copy) · full suite · smoke (sequential) · self-review ·
-      STATE: COMPLETE · final commit `fix(imp-c25): auto-confirm checks only objects pushed at least
-      AUTO_CONFIRM_MIN_AGE_H ago`
+      failed-list row, so "no failed row" is really tested. test_check_photos -k min_age_h 10 passed — e92f3a6
+- [x] acfix.d gates, on e92f3a6 (= the final code: the final commit changes only this file):
+      · disarm 26/26 caught (above — run on 3647d30; e92f3a6 differs only in the core test's setup and this file)
+      · precision pass (scratchpad `precision_acfix.py`, a fresh `git archive e92f3a6` copy, 5 tests appended to the
+        COPY only): "nothing for a skipped object", one claim per test — no lookup (no RPC / page trace), no verdict
+        row, no learned record, no block, no failed row (a young partial upload would be `inconsistent`) — all 5 pass
+        unmutated; under M1 (filter off) and under M13 (cmd_check_photos drops --min-age-h) each of the 5 is red; both
+        restored byte for byte; the copy == the worktree again and its real catchers 390 passed
+      · full suite 3309 passed, 1 warning (the pre-existing starlette/httpx deprecation), 477 s = 3278 + 31 new
+        (test_check_photos +25, test_auto_confirm +3, test_c25_regression_pins +3); THEN smoke 102 passed, 1 warning,
+        20 s — one after the other, in the worktree, pytest's default basetemp, no xdist
+      · secrets: `git diff --cached` scanned before acfix.d1 and before this commit (scratchpad `secrets_scan.py`: 9
+        credential patterns + risky file names), and the whole range 1f00913..e92f3a6 retroactively (9 files, 608 added
+        lines) — 0 hits every time
+      · self-review below · STATE: COMPLETE · the final commit `fix(imp-c25): auto-confirm checks only objects pushed
+        at least AUTO_CONFIRM_MIN_AGE_H ago` (this commit — its SHA is in the final report and `git log -1`)
+
+## Self-review (the whole diff 1f00913..HEAD, read in full)
+- (a) Acceptance bullets, one by one: `--min-age-h <hours>` — younger objects (capture `pushed.at` of their own bytes,
+  the record's `pushed_at`, Step 9b's source) never looked up ✓; ONE line `N object(s) pushed less than 24 h ago skipped
+  — checked at a later push` ✓; no verdict row, no failed row, no learned record ✓ (precision 5/5); no push time ->
+  checked ✓; without the option unchanged ✓ (no filter, run.json byte-for-byte today's, an old run.json without the key
+  still resumes under the same key); a bad value -> exit 1 + the usage line ✓. `auto_confirm_argv()` exactly the
+  dispatch's list ✓, pins re-pinned and said so ✓. The line counts only the due objects ✓, `, N newer skipped` ✓, the
+  reminder counts every pending object ✓ (web / young / no-profile / lock all pinned), the comment fixed ✓. Docs ✓.
+- (b) Downstream consumers: mainfetch.cmd_check reads only run.json's `objects` / `approaches` / `recent_days`
+  (mainfetch.py:5650-5653) — the extra `min_age_h` key is ignored; `_cp_runs` accepts it; `--apply-run` keeps its
+  lookup; the web console never calls check_photos; the R2/R3 live pack is affected — see C2 below.
+- (c) Change-gates: rollback untouched (no RollbackJournal / journal file / PONR / resume-range change; the hook still
+  runs only after a push-family command RETURNED successfully — after_push_command unchanged; the journal-op
+  instrumentation test still passes with the new line); ENTRY_TYPE_KEYS untouched (run.json is no library entry; the
+  guard test passes in the full suite); smoke 102 green.
+
+## Consequences surfaced for the orchestrator (not decided here)
+- C1 An unfinished `check_photos pending` run made WITHOUT --min-age-h (e.g. by the pre-fix auto-confirm of
+  2026-10-26, if it stopped at its 15 minutes) is no longer continued by the auto-confirm (another resume key); a
+  manual `python main.py check_photos pending --apply` continues it, `--recheck` starts afresh. A harmless leftover.
+- C2 R2's M14 ("auto-confirm a day later", the user's run): its expected first line is now `🔎 N pushed object(s) await
+  Google Photos confirmation — confirming them now[, M newer skipped] (check_photos pending --apply --min-age-h 24, at
+  most 15 min; …)` with N = the pushes ≥ 24 h old, and the check prints the skip line — update M14's instructions.
+- C3 PROGRESS.md, PRIORITY.md, the tier file and DECISIONS.md were not edited (the orchestrator's); PLAN.md /
+  DECISIONS.md §1 keep the original Step 13b argv as history (§1g records the change).
 
 ## Design decisions (binding — recorded first so a resumed session stays consistent)
 1. **The filter.** `_cp_resolve(library, scope, account, now, min_age_h=None)` drops — after the scope and `--account`
@@ -157,4 +196,7 @@ rebase or stash. Never edit PROGRESS.md / PRIORITY.md (the orchestrator does).
   commit attribution to Claude Opus 5.5 (a usage-limit fallback — no MODEL-FALLBACK banner came with the dispatch), so
   acfix.0 (18f3a33) and acfix.a (805cf2c) carry `Co-Authored-By: Claude Opus 5.5`. The coordinator then resumed the
   work after the limits reset; the attribution flipped to Fable 5.1 and back to Opus 5.5 within minutes. Every commit
-  carries the trailer the harness gives at the moment it is made (the model actually running).
+  carries the trailer the harness gives at the moment it is made (the model actually running): 18f3a33 · 805cf2c ·
+  75c932c · 5004c8c · 3647d30 · e92f3a6 and the final commit — Claude Opus 5.5 (the harness's attribution at each of
+  those moments). The work was interrupted twice by usage limits and resumed by the coordinator; nothing was lost
+  (every sub-task committed; the disarm run and the full suite finished on their own while the session waited).

@@ -11,7 +11,8 @@
 > **Maintenance:** when a question is asked and answered in any Claude session, add it here.
 > See the protocol at the bottom.
 
-**Last updated:** 2026-10-20 (IMP-C25: §6b per-file routing, §6c note, new §6d exact-item fetch)
+**Last updated:** 2026-10-27 (IMP-C25 follow-up: §6d — the auto-confirm looks up only pushes at least 24 h old;
+`check_photos --min-age-h`; new Q&A "Does the auto-confirm look up the files I just pushed?")
 
 ---
 
@@ -1036,24 +1037,39 @@ files). A new push is `unverified` until confirmed; no `status` value was added.
 ### What does "N pushed object(s) await Google Photos confirmation" after a push mean? How do I turn it off?
 
 After a successful push-family command, MediaVault checks your earlier pushes that have had **24 h**
-to back up (`AUTO_CONFIRM_MIN_AGE_H`, `main.py:14697`):
-- `🔎 N pushed object(s) await Google Photos confirmation — confirming them now (check_photos pending
-  --apply, at most 15 min; to turn this off: "auto_confirm_after_push": false in mvconfig.json)` —
-  it runs `check_photos pending --apply --max-minutes 15` (Chrome opens for the accounts it needs);
-  the last line is its summary.
+to back up (`AUTO_CONFIRM_MIN_AGE_H`, `main.py:14731`) — and only those:
+- `🔎 N pushed object(s) await Google Photos confirmation — confirming them now, M newer skipped
+  (check_photos pending --apply --min-age-h 24, at most 15 min; to turn this off: "auto_confirm_after_push":
+  false in mvconfig.json)` — it runs `check_photos pending --apply --min-age-h 24 --max-minutes 15`
+  (Chrome opens for the accounts it needs). N counts the pushes at least 24 h old; `, M newer skipped`
+  (shown only when there are any) the younger ones, which the check prints again as `M object(s) pushed
+  less than 24 h ago skipped — checked at a later push`. The last line is the check's summary.
 - `🔎 N pushed object(s) await Google Photos confirmation — run: main.py check_photos pending --apply`
-  — just a reminder: the pushes are younger than 24 h, a fetch holds the lock, no profile exists for
-  them, or it was a web-console job. Run that command later.
+  — just a reminder (N = every waiting push): the pushes are younger than 24 h, a fetch holds the lock,
+  no profile exists for them, or it was a web-console job. Run that command later.
 - `⚠️  Auto-confirm did not finish (…) — the push itself is done; confirm later with: …` — harmless.
 
 It never changes the push's own output or exit code, and runs only when the push succeeded. Turn it
 off with `"auto_confirm_after_push": false` in `mvconfig.json`. See what is waiting with
 `python main.py check_photos pending --list` (offline).
 
+### Does the auto-confirm look up the files I just pushed?
+
+No — not since 2026-10-27. Google Photos needs hours to a day or more to show a new upload, so a lookup
+right after the push can only end `not-backed-up-yet`. The auto-confirm's check runs with `--min-age-h 24`
+(`auto_confirm_argv`, `main.py:14739`): an object whose push (its capture's push time) is less than 24 h
+old is not looked up and nothing is recorded for it — no verdict, no failed-list row; it stays pending
+and a later push confirms it. An object with no recorded push time counts as old and is checked. Before
+the fix the check looked up EVERY pending object, the push that had just run included: after a
+`prep_push_rep_enrich` of a 9-chunk movie the user saw all 9 fresh chunks go through every stage (hash,
+taken_second, exact_name, title_sid, legacy) and end `not-backed-up-yet` — wasted time and calls (IMP-C25
+follow-up, `docs/feature-fetch-datetime/DECISIONS.md` §1g).
+
 ### How do I confirm new archivals by hand?
 
 `python main.py check_photos pending --list` (offline: what is unverified), then, a day after the
-push, `python main.py check_photos pending --apply`. A confirmed file then shows `confirmed` with
+push, `python main.py check_photos pending --apply` (add `--min-age-h 24` to leave out what was pushed
+less than a day ago, as the auto-confirm does). A confirmed file then shows `confirmed` with
 `verified_by: dedupkey`.
 
 ### Fetch can't find something — what are my options?

@@ -231,7 +231,7 @@ help text and no `--help` flag; this table is the reference.
 | `fetch_restore`        | `fetch_restore [id] [episodes <range>] [tempdir <path>] [--fetchExtras] [--manual]`                                                  | Fetch then restore in one command; with `tempdir` the chunks are downloaded to and read from the temp volume, the merged output goes back to the media folder; `--fetchExtras` also fetches + restores the extras into their `Specials\`/`Extra\` subfolder |
 | `fetch_cleanup`        | `fetch_cleanup [--apply]`                                                                                                           | One-time cleanup of old fetch leftovers: files in `~/Downloads` named like one of your uploads (from fetches before IMP-C25), `.mv_incoming` leftovers, unfinished fetch journals. Dry run lists them; `--apply` deletes exactly that list |
 | `map_photos`           | `map_photos [all\|<id>\|<prefix>] [--account movies\|tv\|anime\|others] [--devices] [--devices-only] [--resolutions <csv>] [--repair split-info\|names] [--accept-probable] [--apply] [--out <dir>]` | Back-fill: match every uploaded object to its item in the inventory crawl (offline); dry run writes only its report folder; `--apply` records the identities; `--devices` = also look on the phones (opt-in) |
-| `check_photos`         | `check_photos <id\|season id\|series:<season id\|show folder>\|id prefix\|account:<a>\|pending\|hinted\|all> [--approaches best\|all] [--account a] [--recheck] [--apply\|--apply-run <run dir\|latest>] [--limit N] [--pace S] [--max-minutes M] [--devices] [--list]` | Verify in Google Photos without downloading; dry run by default; `--apply` records confirmations; `--apply-run latest` applies a reviewed run without Chrome; `pending --list` (offline) lists pushes not yet confirmed; resumable |
+| `check_photos`         | `check_photos <id\|season id\|series:<season id\|show folder>\|id prefix\|account:<a>\|pending\|hinted\|all> [--approaches best\|all] [--account a] [--recheck] [--apply\|--apply-run <run dir\|latest>] [--limit N] [--pace S] [--max-minutes M] [--min-age-h H] [--devices] [--list]` | Verify in Google Photos without downloading; dry run by default; `--apply` records confirmations; `--apply-run latest` applies a reviewed run without Chrome; `pending --list` (offline) lists pushes not yet confirmed; `--min-age-h H` leaves out pushes younger than H hours (one line, nothing recorded); resumable |
 | `resolve_photos`       | `resolve_photos [failed\|<csv>] [--account a] [--id <manual_id>]`                                                                    | Interactive (terminal only): walk the failed list, paste the right item's URL, give a search term, or mark "not uploaded"; asks before changing the library |
 | `mvmeta_upgrade`       | `mvmeta_upgrade [all\|<id>\|<prefix>] [device <alias\|serial>] [--apply]`                                                           | Bring the phones' existing `.mvmeta.json` sidecars to v2 with proven facts only; dry run by default; `--apply` backs every original up first |
 | `restore`              | `restore [id] [tempdir <path>]`                                                                                                     | Re-merge chunks (optionally staged on `tempdir`), verify SHA256, place file back                                                                                                    |
@@ -348,14 +348,16 @@ pushed within 7 days before (or after) that account's crawl, else "possible loss
 
 **New pushes are confirmed automatically.** After every successful push-family command (`push`,
 `push_group`, `prep_push_rep`, `prep_push_rep_season`, and the two `…_enrich` autopilots), MediaVault
-checks the pushes that have had 24 h to back up: it prints
-`🔎 N pushed object(s) await Google Photos confirmation — confirming them now (check_photos pending
---apply, at most 15 min; to turn this off: "auto_confirm_after_push": false in mvconfig.json)` and
-runs that check (Chrome opens for the accounts it needs). When it cannot run now (only young pushes,
+checks the pushes that have had 24 h to back up — and only those: it prints
+`🔎 N pushed object(s) await Google Photos confirmation — confirming them now, M newer skipped
+(check_photos pending --apply --min-age-h 24, at most 15 min; to turn this off: "auto_confirm_after_push":
+false in mvconfig.json)` (N = the pushes at least 24 h old; `, M newer skipped` only when younger ones wait)
+and runs that check (Chrome opens for the accounts it needs). The younger pushes — the one that just ran
+included — are not looked up; a later push confirms them. When it cannot run now (only young pushes,
 a fetch holds the lock, no profile, or a web-console job) it prints only
-`🔎 N pushed object(s) await Google Photos confirmation — run: main.py check_photos pending --apply`.
-It never changes the push's own output or exit code. See what is still waiting with
-`python main.py check_photos pending --list` (offline).
+`🔎 N pushed object(s) await Google Photos confirmation — run: main.py check_photos pending --apply`
+(N = every waiting push). It never changes the push's own output or exit code. See what is still waiting
+with `python main.py check_photos pending --list` (offline).
 
 **When something cannot be found.** It goes on the failed list —
 `~/.mediavault/gphotos/failed.jsonl` and its Excel view `failed_objects.csv` (fill `decision`,

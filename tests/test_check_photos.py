@@ -1956,7 +1956,8 @@ def test_an_interrupted_apply_records_nothing_and_its_rerun_applies_the_whole_ru
 
 
 def test_an_apply_bounded_by_max_minutes_records_what_it_settled_and_the_rerun_the_rest(cw, sandbox, clock):
-    # Step 13b's call: `check_photos pending --apply --max-minutes 15` — a bounded run still applies what it settled.
+    # Step 13b's call (`check_photos pending --apply --min-age-h 24 --max-minutes 15` since the acfix) is bounded — a
+    # bounded run still applies what it settled.
     _demo_season(sandbox, cw.world)
     first = main.cmd_check_photos(SEASON, apply=True, max_minutes=0.02, pace=0.4)
     assert (first["status"], first["applied"]["learned"]) == ("partial", (2, 0))

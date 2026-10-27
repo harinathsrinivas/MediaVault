@@ -45,10 +45,20 @@ rebase or stash. Never edit PROGRESS.md / PRIORITY.md (the orchestrator does).
       dispatcher into the real cmd_check_photos: only the 30 h + no-push-time objects are handed to the browser child,
       never the 6 min / 23.9 h ones)); tests/test_c25_regression_pins.py 42 passed (39 + 3: the re-pin recorded in the
       registry docstring, the 3 new pins registered). Neighbours (+ test_check_photos, test_prep_push_rep_enrich_cli,
-      test_prep_keeps_split_record, test_cli_parsers, test_fetch_child_stream) 553 passed; smoke 102 passed — (this
-      commit; its SHA is recorded by acfix.c)
-- [ ] acfix.c docs: README, ARCHITECTURE, OPERATIONS_QA (+ mvconfig.example.json's comment) — the argv, the lines,
-      the option; the main.py line references this change shifts
+      test_prep_keeps_split_record, test_cli_parsers, test_fetch_child_stream) 553 passed; smoke 102 passed — 75c932c
+- [x] acfix.c docs: README (command table `[--min-age-h H]`; "New pushes are confirmed automatically" — the new
+      line, only ≥ 24 h pushes looked up, reminder N = every waiting push), ARCHITECTURE (§5 table row + note, §8.10
+      check_photos `--min-age-h` paragraph + the auto-confirm's check, §11 the child argv, §14 constants; a new "Last
+      updated" entry), OPERATIONS_QA (§6d: the auto-confirm Q&A rewritten, NEW Q&A "Does the auto-confirm look up the
+      files I just pushed?" (the user's question, verified against main.py), `--min-age-h 24` in "confirm by hand";
+      Last updated bumped), mvconfig.example.json's `_comment_auto_confirm_after_push` (the argv; JSON re-parsed OK),
+      the stale argv in a test_check_photos.py comment. Every `main.py:NNNN` ref this change shifted (+24 … +40) was
+      recomputed from anchors at 1f00913 vs now and checked line by line (16/16 OK): §5 17446 / 18062 / 14074 /
+      14634 / 15520 / 14891 / 14773 / 18225 / 18247 / 17609, §6.5 15520, §8.10 14074 / 14634, §10 18225, §11 13404 /
+      14739, §14 14731-14732 / 14944, §18 14074 / 14634 / 15520 / 14891 / 17446; OPERATIONS_QA 14731 / 14739. Left
+      as history on purpose: PLAN.md / DECISIONS.md §1 (the original Step 13b ruling — §1g records the change),
+      PROGRESS.md (the orchestrator's), ARCHITECTURE's dated "18294 lines as of 2026-10-20". No test reads these docs;
+      test_check_photos 183 passed — (this commit; its SHA is recorded by acfix.d)
 - [ ] acfix.d gates: disarm probes (isolated scratch copy) · full suite · smoke (sequential) · self-review ·
       STATE: COMPLETE · final commit `fix(imp-c25): auto-confirm checks only objects pushed at least
       AUTO_CONFIRM_MIN_AGE_H ago`

@@ -778,6 +778,67 @@ def test_fake_logged_out_modes(fake_photos):
     assert d.execute_script("return window.WIZ_global_data") is None
 
 
+def test_fake_unusual_traffic_mode(fake_photos):
+    """IMP-C25 thfix: session "sorry" sends every Google Photos page to Google's "unusual traffic" page — no Photos
+    page, so no page tokens and no RPC either; back to "ok", Photos opens again."""
+    d = fake_photos.driver("movies")
+    fake_photos.session["movies"] = "sorry"
+    d.get(PHOTOS)
+    assert d.current_url == gphotos_fake.SORRY_URL and "unusual traffic" in _text(d)
+    assert d.execute_script("return window.WIZ_global_data") is None
+    assert _post(d, "EzkLib", ["x", None, None], wiz={"eptZe": "/_/PhotosUi/", "FdrFJe": "1", "cfb2h": "b"})["status"] == 0
+    fake_photos.session["movies"] = "ok"
+    d.get(PHOTOS)
+    assert d.current_url == PHOTOS
+
+
+def test_fake_search_throttle_on_the_web_pages(fake_photos):
+    """IMP-C25 thfix (the R3 evidence): after `after` searches every search box submit — a text or a day search —
+    shows "No results"; item pages keep working; unthrottled, the search finds again."""
+    item = fake_photos.add_item("tv", "Sample.Show.S01E01 [a1b2c3].mkv", taken="2022-02-05T11:49:46Z")
+    fake_photos.throttle("tv", after=1)
+    d = _signed_in(fake_photos)
+    _press(d, "/", "a1b2c3", Keys.ENTER)                                      # search 1: served as usual
+    assert [gpweb.photo_id_from_url(t["href"]) for t in d.execute_script(gpweb.TILES_JS)] == [item.photo_id]
+    for query in ("a1b2c3", item.local.date().isoformat()):                    # 2 and 3: a text and a day search
+        d.get(PHOTOS)
+        _press(d, "/", query, Keys.ENTER)
+        assert d.current_url.startswith(f"{PHOTOS}/search/")
+        assert d.execute_script(gpweb.SEARCH_STATE_JS) == {"results": 0, "timeline": 0, "relevant": 0, "empty": True}
+        assert d.execute_script(gpweb.TILES_JS) == [] and d.find_elements(By.XPATH, BG_DIVS) == []
+    assert fake_photos.throttles["tv"]["served"] == 3
+    d.get(f"{PHOTOS}/photo/{item.photo_id}")                                  # item pages keep working
+    assert gpweb.page_record(d.page_source, item.photo_id)["photo_id"] == item.photo_id
+    fake_photos.unthrottle("tv")
+    d.get(PHOTOS)
+    _press(d, "/", "a1b2c3", Keys.ENTER)
+    assert len(d.execute_script(gpweb.TILES_JS)) == 1
+    with pytest.raises(ValueError):
+        fake_photos.throttle("tv", rpc="slow")
+
+
+@pytest.mark.parametrize("mode", ["zero", "error"])
+def test_fake_search_throttle_over_rpc(fake_photos, mode):
+    """IMP-C25 thfix: after `after` EzkLib text searches every new one answers an empty page (rpc="zero") or an error
+    frame with status THROTTLED (rpc="error", what the live RPC did); the recently-uploaded listing, the timeline,
+    hash look-ups and item info keep working and are not counted as searches."""
+    item = fake_photos.add_item("tv", "Sample.Show.S01E01 [a1b2c3].mkv")
+    d = _signed_in(fake_photos)
+    fake_photos.throttle("tv", after=1, rpc=mode)
+    assert [r["photo_id"] for r in _rpc(d, "EzkLib", ["a1b2c3", None, None])["items"]] == [item.photo_id]
+    if mode == "zero":
+        assert _rpc(d, "EzkLib", ["a1b2c3", None, None])["items"] == []
+    else:
+        with pytest.raises(gpweb.EmptyPayloadError) as e:
+            _rpc(d, "EzkLib", ["a1b2c3", None, None])
+        assert e.value.code == gphotos_fake.THROTTLED
+    assert [r["photo_id"] for r in _rpc(d, "EzkLib", ["", [[4, "ra", 0, 0]], None])["items"]] == [item.photo_id]
+    assert [r["photo_id"] for r in _rpc(d, "lcxiM", [None, None, 500, None, 1, 3])["items"]] == [item.photo_id]
+    assert _rpc(d, "swbisb", [[item.hash_b64], None, 3, 0])["matches"][0]["photo_id"] == item.photo_id
+    assert _rpc(d, "VrseUb", [item.photo_id, None, None, None, None])["photo_id"] == item.photo_id
+    assert fake_photos.throttles["tv"]["served"] == 2                          # only the two text searches counted
+
+
 def test_fake_downloads_follow_the_cdp_redirect_and_chrome_naming(fake_photos, tmp_path):
     item = fake_photos.add_item("movies", "Sample Movie [abc123].chunk.001.mkv")
     d = fake_photos.driver("movies")

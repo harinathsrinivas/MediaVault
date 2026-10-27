@@ -22,11 +22,14 @@ rebase or stash; `git diff --cached` + the secrets scan before every commit. Nev
 DECISIONS.md / PRIORITY.md (the orchestrator's).
 
 ## Sub-tasks (one WIP commit each)
-- [x] thfix.0 this file: the findings, the design decisions, the sub-task list (no code) — its own commit
-      `wip(imp-c25): thfix.0 — …` (the SHA is filled in by the next sub-task's commit)
-- [ ] thfix.a the fake Google Photos (tests/gphotos_fake.py): a per-account search throttle (after N searches every
-      text / day search answers nothing — UI "No results", EzkLib an empty page or an error frame), a Google
-      "unusual traffic" (/sorry/) session state; the fake's own tests
+- [x] thfix.0 this file: the findings, the design decisions, the sub-task list (no code) — 5bab898
+- [x] thfix.a the fake Google Photos (tests/gphotos_fake.py): `throttle(account, after=N, rpc="zero"|"error")` /
+      `unthrottle(account)` — after N searches every search box submit (text or day) shows "No results" and every new
+      EzkLib text search answers an empty page or an error frame (status THROTTLED = 8); the recent-uploads listing,
+      lcxiM, swbisb, item info and item pages keep working and are not counted; session "sorry" -> SORRY_URL (Google's
+      "unusual traffic" page: no Photos page, no tokens, RPC status 0). test_gpweb.py +4 (unusual traffic · throttle
+      on the web pages · throttle over RPC ×2): fake self-tests 36 passed; test_gpweb + test_gprpc + test_locator +
+      test_gp_inventory 523 passed — this commit (`wip(imp-c25): thfix.a — …`)
 - [ ] thfix.b Fix 1.4 — the page classification (D4–D6): PhotosThrottledError, check_session_alive, gprpc's per-request
       look, the legacy zero streak (re-pin TRIGGER_DOWNLOAD_DIGEST), every handler's line + the `throttled` stop reason
       (check, fetch, resolve, locate, crawler EXIT_THROTTLED, warm-up THROTTLED); tests

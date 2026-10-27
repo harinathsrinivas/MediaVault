@@ -24,6 +24,11 @@ Step 13; P-5, P-8, P-9, P-10, P-11, P-15, P-18; OD-5, OD-7, OD-9; the Step 9b ru
   13.i  resumability end to end (errors retried, settled objects never re-checked, --recheck, a complete run followed
         by a fresh one, a killed child's torn line, objects that joined later, the Chrome a killed check left running);
         never a download (every request / arm / harvest path forbidden, RPC and web pages, best and all)
+  13.j  --min-age-h (IMP-C25 acfix — the user's finding of 2026-10-27: the auto-confirm looked up the chunks pushed
+        minutes earlier): only objects pushed at least H hours ago are looked up (the boundary, no push time = old, a
+        push time in the future = young, every scope, after --account); a skipped object gets one line and nothing else
+        (no lookup, no verdict row, no failed row, no learned record; all young -> no run directory); part of the resume
+        key; without it nothing changes
 
 Hermetic: the fake Google Photos world + its batchexecute emulator (tests/gphotos_fake.py); mainfetch's and gprpc's clocks
 are fake (nothing waits); the autouse fixtures of tests/conftest.py redirect every state dir, ~/Downloads, the process
@@ -39,7 +44,7 @@ import subprocess
 import sys
 import textwrap
 import types
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -156,7 +161,7 @@ def test_run_as_a_script_mainfetch_is_one_module_for_gprpc():
 # 13.a — the command line, the dispatcher, `pending --list`
 # ===========================================================================
 _DEFAULTS = {"scope": None, "approaches": None, "account": None, "recheck": False, "apply": False, "apply_run": None,
-             "limit": None, "pace": None, "max_minutes": None, "devices": False, "list_only": False}
+             "limit": None, "pace": None, "max_minutes": None, "min_age_h": None, "devices": False, "list_only": False}
 
 
 @pytest.mark.parametrize("tokens, expected", [
@@ -172,6 +177,9 @@ _DEFAULTS = {"scope": None, "approaches": None, "account": None, "recheck": Fals
      {"scope": r"series:C:\Media\Series\Show (2020)", "max_minutes": 0.5}),
     (["pending", "--list", "--account", "tv"], {"scope": "pending", "list_only": True, "account": "tv"}),
     (["--apply", "hinted"], {"scope": "hinted", "apply": True}),                   # options in any order
+    (["pending", "--apply", "--min-age-h", "24", "--max-minutes", "15"],           # the auto-confirm's own line (acfix)
+     {"scope": "pending", "apply": True, "min_age_h": 24.0, "max_minutes": 15.0}),
+    (["all", "--min-age-h", " 0.5 "], {"scope": "all", "min_age_h": 0.5}),
 ])
 def test_the_command_line(tokens, expected):
     assert main.parse_check_photos_args(tokens) == dict(_DEFAULTS, **expected)
@@ -198,6 +206,16 @@ def test_the_command_line(tokens, expected):
     (["all", "--list"], "--list works with the pending scope only"),
     (["pending", "--list", "--apply"], "pending --list is offline: it takes only --account"),
     (["pending", "--list", "--approaches", "all"], "pending --list is offline: it takes only --account"),
+    (["pending", "--min-age-h"], "--min-age-h needs a value"),                     # --min-age-h: a positive number
+    (["pending", "--min-age-h", "--apply"], "--min-age-h needs a value"),
+    (["pending", "--min-age-h", "0"], "--min-age-h must be above 0 (got 0)"),
+    (["pending", "--min-age-h", "-3"], "--min-age-h must be above 0 (got -3)"),
+    (["pending", "--min-age-h", "a day"], "--min-age-h needs a number (got 'a day')"),
+    (["pending", "--min-age-h", "nan"], "--min-age-h must be above 0"),
+    (["pending", "--min-age-h", "inf"], "--min-age-h must be above 0"),
+    (["pending", "--apply-run", "latest", "--min-age-h", "24"],
+     "--apply-run applies a finished run without searching: it takes no --limit, --pace, --max-minutes, --min-age-h"),
+    (["pending", "--list", "--min-age-h", "24"], "pending --list is offline: it takes only --account"),
 ])
 def test_a_bad_command_line_names_its_problem(tokens, problem):
     with pytest.raises(ValueError) as err:
@@ -245,6 +263,19 @@ def test_the_dispatcher_exits_1_on_a_usage_error_a_failed_or_a_refused_run(capsy
         _dispatch(["all"], status=status)
     assert stop.value.code == 1
     assert _dispatch(["pending", "--list"], status="ok") == [dict(_DEFAULTS, scope="pending", list_only=True)]
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "soon", "inf"])
+def test_a_bad_min_age_exits_1_with_the_usage_line_and_checks_nothing(capsys, value):
+    # IMP-C25 acfix: `--min-age-h <hours>` takes a positive number; anything else is a usage error (exit 1, nothing run)
+    assert "[--min-age-h H]" in main.CHECK_USAGE
+    with pytest.raises(SystemExit) as stop:
+        _dispatch(["pending", "--apply", "--min-age-h", value])
+    assert stop.value.code == 1
+    out = capsys.readouterr().out.splitlines()
+    assert out[0].startswith("❌ check_photos: --min-age-h ") and out[1] == f"   Usage: {main.CHECK_USAGE}"
+    assert _dispatch(["pending", "--apply", "--min-age-h", "24"]) == [dict(_DEFAULTS, scope="pending", apply=True,
+                                                                           min_age_h=24.0)]
 
 
 def _no_chrome(monkeypatch):
@@ -2223,3 +2254,155 @@ def test_a_check_never_requests_a_download(cw, sandbox, monkeypatch, approaches,
                 if a["kind"] in ("shift_d", "open")]
     assert not os.path.isdir(cw.world.default_download_dir) or os.listdir(cw.world.default_download_dir) == []
     assert not os.path.exists(mainfetch.SYSTEM_DOWNLOADS_FOLDER)
+
+
+# ===========================================================================
+# 13.j — --min-age-h (IMP-C25 acfix): only objects pushed at least H hours ago are looked up
+# ===========================================================================
+def _aged_capture(folder, sid, data, name, hours, now):
+    """test_locator._capture of ONE whole-file push (SHA-1 + DateUTC: a new archival) made `hours` before `now` — None:
+    the capture records the push without its time."""
+    _capture(folder, sid, [_obj(data, _up(name, sid))])
+    path = folder / f"{sid}.gpcapture.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    if hours is None:
+        del doc["pushes"][0]["captured_at"]
+    else:
+        doc["pushes"][0]["captured_at"] = (now - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    path.write_text(json.dumps(doc), encoding="utf-8")
+
+
+def _aged_season(sandbox, world, ages, now=LATER):
+    """A season SEASON with one pending whole-file episode per entry of `ages` {n: hours before `now` it was pushed, or
+    None: no push time}; every episode's item IS in Google Photos (tv), so any lookup confirms it -> {episode id: item}."""
+    folder = sandbox["local_root"] / "Series" / "Demo" / "Season 01"
+    folder.mkdir(parents=True, exist_ok=True)
+    lib, items = {SEASON: {"type": "season_map", "folder_path": str(folder), "total_episodes": len(ages),
+                           "children": [f"{SEASON}e0{n}" for n in ages]}}, {}
+    for n, hours in ages.items():
+        mid, name, sid = f"{SEASON}e0{n}", f"Demo.S01E0{n}.mkv", f"ag{n}ag{n}"
+        data = _bytes(mid)
+        items[mid] = world.add_item("tv", _up(name, sid), data=data, taken=TAKEN)
+        _aged_capture(folder, sid, data, name, hours, now)
+        lib[mid] = dict(_whole(folder, name, data, sid), parent_id=SEASON)
+    mvcommon.save_library(lib)
+    return items
+
+
+def test_min_age_h_looks_up_only_the_old_objects_and_records_nothing_for_the_young_ones(cw, sandbox, capsys):
+    # The auto-confirm's call `check_photos pending --apply --min-age-h 24` (the user's finding of 2026-10-27: the chunks
+    # pushed minutes earlier were looked up). e01 was pushed 30 h ago, e02's capture has no push time (it counts as
+    # old), e03 and e04 were pushed 2 h and 23.9 h ago. Every item IS in Google Photos: any lookup would confirm it.
+    items = _aged_season(sandbox, cw.world, {1: 30, 2: None, 3: 2, 4: 23.9})
+    old, young = [f"{SEASON}e01", f"{SEASON}e02"], [f"{SEASON}e03", f"{SEASON}e04"]
+
+    res = main.cmd_check_photos("pending", apply=True, min_age_h=24)
+
+    out = capsys.readouterr().out
+    assert res["status"] == "ok"
+    assert [(r["manual_id"], r["status"]) for r in res["rows"]] == [(old[0], "confirmed"), (old[1], "confirmed")]
+    assert ("  2 object(s) in 2 entr(y/ies) — checked first in: tv 2\n"
+            "  2 object(s) pushed less than 24 h ago skipped — checked at a later push\n") in out
+    doc = main._cp_read_json(os.path.join(res["run_dir"], "run.json"))
+    assert doc["min_age_h"] == 24 and [o["manual_id"] for o in doc["objects"]] == old
+    assert sorted({line["manual_id"] for line in main._cp_read_results(res["run_dir"])}) == old
+    looked = json.dumps([e.get("request") for e in cw.world.rpc_log]) + json.dumps(
+        [d.actions for drivers in cw.drivers.values() for d in drivers])
+    assert not [m for m in young for trace in (items[m].hash_b64, items[m].dedup_key, items[m].filename,
+                                               items[m].photo_id) if trace in looked]   # never looked up: RPC or page
+    assert sorted({r["manual_id"] for r in mvcommon.read_learned()}) == old      # no learned record for a young one
+    assert mvcommon.read_failed() == []                                          # no failed row
+    assert [_entry_block(m) is not None for m in old + young] == [True, True, False, False]
+    assert {o["manual_id"] for o in main._cp_pending_list()["objects"]} == set(young)   # still pending: a later push
+
+
+def test_without_min_age_h_every_pending_object_is_looked_up_as_before(cw, sandbox, capsys):
+    _aged_season(sandbox, cw.world, {1: 30, 2: None, 3: 2, 4: 23.9})
+
+    res = main.cmd_check_photos("pending", apply=True)
+
+    assert [r["status"] for r in res["rows"]] == ["confirmed"] * 4
+    assert "min_age_h" not in main._cp_read_json(os.path.join(res["run_dir"], "run.json"))   # today's run.json
+    assert "skipped — checked at a later push" not in capsys.readouterr().out
+
+
+def test_min_age_h_with_only_young_pushes_starts_nothing_and_writes_nothing(cw, sandbox, tmp_path, capsys):
+    _aged_season(sandbox, cw.world, {1: 0.1, 2: 23.99})
+    before = _tree(tmp_path)
+
+    res = main.cmd_check_photos("pending", apply=True, min_age_h=24)
+
+    assert res == {"status": "ok", "run_dir": None}
+    assert cw.spawned == [] and cw.drivers == {} and cw.world.rpc_log == []     # no child, no Chrome, no lookup
+    assert capsys.readouterr().out.splitlines()[1:] == [
+        "  0 object(s) in 0 entr(y/ies)",
+        "  2 object(s) pushed less than 24 h ago skipped — checked at a later push",
+        "  Nothing to check."]
+    assert _tree(tmp_path) == before                   # no run directory, no record, no failed row: nothing written
+
+
+def test_min_age_h_is_part_of_the_resume_key(cw, sandbox, capsys):
+    # An unfinished plain `pending` run holds the young e02: the auto-confirm's `pending --min-age-h 24` must not continue
+    # it (it would look e02 up) — it starts its own run; each kind of run then continues its own.
+    _aged_season(sandbox, cw.world, {1: 30, 2: 2, 3: 40})
+    plain = main.cmd_check_photos("pending", limit=1)
+    aged = main.cmd_check_photos("pending", min_age_h=24, limit=1)
+    capsys.readouterr()
+    aged_again = main.cmd_check_photos("pending", min_age_h=24)
+    resumed = capsys.readouterr().out
+    plain_again = main.cmd_check_photos("pending")
+
+    assert [r["status"] for r in (plain, aged, aged_again, plain_again)] == ["partial", "partial", "ok", "ok"]
+    assert aged["run_dir"] != plain["run_dir"]
+    assert (aged_again["run_dir"], plain_again["run_dir"]) == (aged["run_dir"], plain["run_dir"])
+    assert (f"↻ Continuing the unfinished run {os.path.basename(aged['run_dir'])} (begun 2026-10-14T00:00:00Z): 1 of 2 "
+            f"object(s) checked already") in resumed
+    doc = main._cp_read_json(os.path.join(aged["run_dir"], "run.json"))
+    assert [o["manual_id"] for o in doc["objects"]] == [f"{SEASON}e01", f"{SEASON}e03"]
+    assert f"{SEASON}e02" not in {line["manual_id"] for line in main._cp_read_results(aged["run_dir"])}
+    assert main._cp_check_command(doc) == "python main.py check_photos pending --min-age-h 24"   # "continue it with"
+    assert main._cp_check_command(main._cp_read_json(os.path.join(plain["run_dir"], "run.json"))) == (
+        "python main.py check_photos pending")
+
+
+@pytest.mark.parametrize("hours, looked_up", [(24.0, True), (24.01, True), (23.99, False), (None, True), (-1.0, False)],
+                         ids=["exactly-24h", "older", "younger", "no-push-time", "pushed-in-the-future"])
+def test_min_age_h_an_object_exactly_that_old_is_looked_up(sandbox, hours, looked_up):
+    # maybe_auto_confirm's own boundary (age_hours >= AUTO_CONFIRM_MIN_AGE_H is due); no push time counts as old (Step
+    # 13's verdict rule); a push time after `now` (a clock change) is young, as maybe_auto_confirm reads it too.
+    folder = sandbox["local_root"] / "Movies" / "Aged (2026)"
+    folder.mkdir(parents=True)
+    data = _bytes("aged")
+    _aged_capture(folder, "ag0ag0", data, "Aged.mkv", hours, NOW)
+    mvcommon.save_library({"mov-en-2026-aged": _whole(folder, "Aged.mkv", data, "ag0ag0")})
+
+    res = main._cp_resolve(mvcommon.load_library(), "pending", None, NOW, min_age_h=24)
+
+    assert (_ids(res), res["young"]) == ((["mov-en-2026-aged"], 0) if looked_up else ([], 1))
+
+
+def test_min_age_h_works_with_every_scope_after_the_account_filter(sandbox):
+    folder = sandbox["local_root"] / "Series" / "Aged"
+    folder.mkdir(parents=True)
+    lib = {}
+    for mid, sid, hours in (("tv-en-2026-aged-s01e01", "ag1ag1", 2), ("tv-en-2026-aged-s01e02", "ag2ag2", 48)):
+        _aged_capture(folder, sid, _bytes(mid), f"{mid}.mkv", hours, NOW)
+        lib[mid] = _whole(folder, f"{mid}.mkv", _bytes(mid), sid)
+    lib["mov-en-2010-legacy"] = _whole(folder, "Legacy.mkv", _bytes("legacy"), "le9acy")   # no capture: no push time
+    mvcommon.save_library(lib)
+    library = mvcommon.load_library()
+
+    everything = main._cp_resolve(library, "all", None, NOW, min_age_h=24)
+    movies = main._cp_resolve(library, "all", "movies", NOW, min_age_h=24)
+    prefix = main._cp_resolve(library, "tv-en-2026-aged", None, NOW, min_age_h=2.5)
+    plain = main._cp_resolve(library, "all", None, NOW)
+
+    assert (_ids(everything), everything["young"]) == (["mov-en-2010-legacy", "tv-en-2026-aged-s01e02"], 1)
+    assert everything["notes"] == ["1 object(s) pushed less than 24 h ago skipped — checked at a later push"]
+    assert main._cp_scope_lines(everything, library) == [
+        "  2 object(s) in 2 entr(y/ies) — checked first in: movies 1 · tv 1",
+        "  1 object(s) pushed less than 24 h ago skipped — checked at a later push"]
+    assert (_ids(movies), movies["young"], movies["notes"]) == (["mov-en-2010-legacy"], 0, [])   # --account first
+    assert _ids(prefix) == ["tv-en-2026-aged-s01e02"]
+    assert prefix["notes"] == ["1 object(s) pushed less than 2.5 h ago skipped — checked at a later push"]
+    assert (len(plain["objects"]), plain["young"], plain["notes"]) == (3, 0, [])   # without it: unchanged

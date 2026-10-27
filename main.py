@@ -12923,10 +12923,10 @@ def _mp_finish(ctx, run_dir):
 CHECK_APPROACHES = ("best", "all")                  # best: stop at the first stage that pins the object · all: every one
 CHECK_USAGE =("check_photos <id | season id | series:<season id|show folder> | id prefix | account:<a> | pending | "
                "hinted | all> [--approaches best|all] [--account movies|tv|anime|others] [--recheck] "
-               "[--apply | --apply-run <run dir|latest>] [--limit N] [--pace S] [--max-minutes M] [--devices] "
-               "[--list]")
+               "[--apply | --apply-run <run dir|latest>] [--limit N] [--pace S] [--max-minutes M] [--min-age-h H] "
+               "[--devices] [--list]")
 _CP_FLAGS = {"--recheck": "recheck", "--apply": "apply", "--devices": "devices", "--list": "list_only"}
-_CP_VALUED = ("--approaches", "--account", "--apply-run", "--limit", "--pace", "--max-minutes")
+_CP_VALUED = ("--approaches", "--account", "--apply-run", "--limit", "--pace", "--max-minutes", "--min-age-h")
 
 
 def _cp_number(option, text, kind, minimum, strict):
@@ -12943,11 +12943,11 @@ def _cp_number(option, text, kind, minimum, strict):
 
 def parse_check_photos_args(tokens):
     """The `check_photos` CLI tokens (after the verb) -> cmd_check_photos keyword arguments (CHECK_USAGE). Raises
-    ValueError naming the problem: no scope or a second one, an unknown option, a missing or invalid value, --apply with
-    --apply-run, an option --apply-run cannot use (it never searches: no --limit / --pace / --max-minutes / --recheck),
-    or --list outside `pending` (it takes only --account)."""
+    ValueError naming the problem: no scope or a second one, an unknown option, a missing or invalid value (--min-age-h:
+    a positive number of hours), --apply with --apply-run, an option --apply-run cannot use (it never searches: no
+    --limit / --pace / --max-minutes / --min-age-h / --recheck), or --list outside `pending` (it takes only --account)."""
     opts = {"scope": None, "approaches": None, "account": None, "recheck": False, "apply": False, "apply_run": None,
-            "limit": None, "pace": None, "max_minutes": None, "devices": False, "list_only": False}
+            "limit": None, "pace": None, "max_minutes": None, "min_age_h": None, "devices": False, "list_only": False}
     tokens, i = list(tokens), 0
     while i < len(tokens):
         token = tokens[i]
@@ -12970,8 +12970,10 @@ def parse_check_photos_args(tokens):
                 opts["limit"] = _cp_number(token, value, int, 1, strict=False)
             elif token == "--pace":
                 opts["pace"] = _cp_number(token, value, float, 0, strict=False)
-            else:
+            elif token == "--max-minutes":
                 opts["max_minutes"] = _cp_number(token, value, float, 0, strict=True)
+            else:
+                opts["min_age_h"] = _cp_number(token, value, float, 0, strict=True)
         elif token in _CP_FLAGS:
             opts[_CP_FLAGS[token]] = True
             i += 1
@@ -12995,14 +12997,15 @@ def parse_check_photos_args(tokens):
     if opts["apply"] and opts["apply_run"] is not None:
         raise ValueError("--apply and --apply-run exclude each other")
     if opts["apply_run"] is not None and (opts["recheck"] or any(opts[k] is not None
-                                                                  for k in ("limit", "pace", "max_minutes"))):
+                                                                  for k in ("limit", "pace", "max_minutes",
+                                                                            "min_age_h"))):
         raise ValueError("--apply-run applies a finished run without searching: it takes no --limit, --pace, "
-                         "--max-minutes or --recheck")
+                         "--max-minutes, --min-age-h or --recheck")
     if opts["list_only"]:
         if scope != "pending":
             raise ValueError("--list works with the pending scope only (check_photos pending --list)")
         if any(opts[k] for k in ("recheck", "apply", "devices")) or any(
-                opts[k] is not None for k in ("approaches", "apply_run", "limit", "pace", "max_minutes")):
+                opts[k] is not None for k in ("approaches", "apply_run", "limit", "pace", "max_minutes", "min_age_h")):
             raise ValueError("pending --list is offline: it takes only --account")
     return opts
 
@@ -13174,7 +13177,16 @@ def _cp_route_reason(route):
     return "learned" if route["home"] and route["home"] != route["default"] else "prefix"
 
 
-def _cp_resolve(library, scope, account, now):
+def _cp_young(pushed_at, now, min_age_h):
+    """--min-age-h: True when an object was pushed less than `min_age_h` hours before `now` — by its capture's push time
+    (a record's `pushed_at`: the evidence Step 9b judges recency by), in mvcommon.unverified_objects' arithmetic, so
+    exactly `min_age_h` old is NOT young (maybe_auto_confirm's boundary). No push time -> False: an unknown push counts
+    as old and is checked (Step 13's verdict rule)."""
+    pushed = _mp_when(pushed_at)
+    return pushed is not None and (now - pushed).total_seconds() / 3600.0 < min_age_h
+
+
+def _cp_resolve(library, scope, account, now, min_age_h=None):
     """The objects of one `check_photos` scope (PLAN Step 13), each with the account it is checked in first -> dict:
       kind       item | season | series | prefix | account | pending | hinted | all
       canonical  the scope as a run records it (series: its show folder, normalized — two seasons of one show are ONE
@@ -13188,6 +13200,9 @@ def _cp_resolve(library, scope, account, now):
                  whole-library pass skips aliases), objects without a SHA-256 left out (no pin, nothing to verify)
       show, seasons   (series) the show folder and its season ids · notes: lines printed with the resolution
       unpinned   objects left out for want of a SHA-256 · gone: hints whose object no longer exists
+      young      `min_age_h` (--min-age-h) given: the objects of the scope (and --account) pushed less than that many
+                 hours before `now` (_cp_young) — left out of `objects`, so they are never looked up and get no verdict
+                 row, no failed row and no learned record; one note line counts them
     ValueError when the scope names nothing in the library."""
     notes, show, seasons, gone = [], None, [], 0
     canonical = scope
@@ -13238,12 +13253,18 @@ def _cp_resolve(library, scope, account, now):
         out = [o for o in out if o["account"] == scope[len("account:"):]]
     if account:
         out = [o for o in out if o["account"] == account]
+    young = 0
+    if min_age_h is not None:
+        kept = [o for o in out if not _cp_young(o["pushed_at"], now, min_age_h)]
+        young, out = len(out) - len(kept), kept
     if unpinned:
         notes.append(f"{unpinned:,} object(s) left out: the library holds no SHA-256 for them (nothing to pin a check to)")
     if gone:
         notes.append(f"{gone:,} hint(s) name an object no longer in the library (re-split or re-mastered?) — skipped")
+    if young:
+        notes.append(f"{young:,} object(s) pushed less than {min_age_h:g} h ago skipped — checked at a later push")
     return {"kind": kind, "canonical": canonical, "objects": out, "show": show, "seasons": seasons, "notes": notes,
-            "unpinned": unpinned, "gone": gone}
+            "unpinned": unpinned, "gone": gone, "young": young}
 
 
 def _cp_scope_lines(resolved, library):
@@ -13331,22 +13352,24 @@ def _cp_matches(doc, scope, account, approaches):
             and (approaches is None or doc.get("approaches") == approaches))
 
 
-def _cp_unfinished(scope, account, approaches):
-    """(run_dir, run.json, progress.json) of the NEWEST run of this scope + --account + approaches when that run is not
-    complete — the one a re-run continues — else None (a complete newest run means: start afresh)."""
+def _cp_unfinished(scope, account, approaches, min_age_h=None):
+    """(run_dir, run.json, progress.json) of the NEWEST run of this scope + --account + approaches + --min-age-h when
+    that run is not complete — the one a re-run continues — else None (a complete newest run means: start afresh). A run
+    made with another --min-age-h, or without one, is another run: its objects were chosen by another age (the
+    auto-confirm's `pending --min-age-h` never continues a plain `pending` run holding young objects)."""
     for run_dir, doc, progress in _cp_runs():
-        if _cp_matches(doc, scope, account, approaches):
+        if _cp_matches(doc, scope, account, approaches) and doc.get("min_age_h") == min_age_h:
             return (run_dir, doc, progress) if (progress or {}).get("state") != "complete" else None
     return None
 
 
-def _cp_new_run(resolved, scope_text, account, approaches, now):
+def _cp_new_run(resolved, scope_text, account, approaches, now, min_age_h=None):
     """Create a run directory <GPHOTOS_STATE_DIR>/check/<UTC yyyymmddThhmmssZ>[-n] and its run.json -> (run_dir, doc).
     run.json (written once, never changed): v, run, created_at, scope (canonical), scope_text (as typed), kind, account
-    (--account or None), approaches, source (`confirm` for pending — P-11's post-backup confirmation — else `check`),
-    show + seasons (series), recent_days (MAP_RECENT_DAYS: Step 9b's window, which the child measures against the time
-    an object's own account was checked before it looks for it elsewhere), objects (the resolved objects, _cp_resolve's
-    shape)."""
+    (--account or None), approaches, min_age_h (--min-age-h, only when given: the younger objects were left out),
+    source (`confirm` for pending — P-11's post-backup confirmation — else `check`), show + seasons (series),
+    recent_days (MAP_RECENT_DAYS: Step 9b's window, which the child measures against the time an object's own account
+    was checked before it looks for it elsewhere), objects (the resolved objects, _cp_resolve's shape)."""
     stamp = now.strftime("%Y%m%dT%H%M%SZ")
     root = _cp_root()
     os.makedirs(root, exist_ok=True)
@@ -13361,6 +13384,7 @@ def _cp_new_run(resolved, scope_text, account, approaches, now):
     run_dir = os.path.join(root, name)
     doc = {"v": CHECK_RUN_VERSION, "run": f"check-{name}", "created_at": _mp_iso(now), "scope": resolved["canonical"],
            "scope_text": scope_text, "kind": resolved["kind"], "account": account, "approaches": approaches,
+           **({"min_age_h": min_age_h} if min_age_h is not None else {}),
            "source": "confirm" if resolved["kind"] == "pending" else "check", "show": resolved["show"],
            "seasons": resolved["seasons"], "recent_days": MAP_RECENT_DAYS, "objects": resolved["objects"]}
     _cp_write_json(os.path.join(run_dir, "run.json"), doc)
@@ -13679,10 +13703,11 @@ def _cp_line(rows, status_counts=None):
 
 
 def _cp_check_command(doc):
-    """The check_photos command that continues a run (its resume key: scope, --account, --approaches)."""
+    """The check_photos command that continues a run (its resume key: scope, --account, --approaches, --min-age-h)."""
     return (f"python main.py check_photos {doc.get('scope_text') or doc.get('scope')}"
             + (f" --account {doc['account']}" if doc.get("account") else "")
-            + (" --approaches all" if doc.get("approaches") == "all" else ""))
+            + (" --approaches all" if doc.get("approaches") == "all" else "")
+            + (f" --min-age-h {doc['min_age_h']:g}" if isinstance(doc.get("min_age_h"), (int, float)) else ""))
 
 
 def _cp_summary_line(doc, rows, status, applied=None, apply_run=False):
@@ -14047,7 +14072,7 @@ def _cp_after_child(run_dir, doc, library, status, progress, apply, devices):
 
 
 def cmd_check_photos(scope, approaches=None, account=None, recheck=False, apply=False, apply_run=None, limit=None,
-                     pace=None, max_minutes=None, devices=False, list_only=False):
+                     pace=None, max_minutes=None, devices=False, list_only=False, min_age_h=None):
     """`check_photos` (PLAN Step 13) — download-free verification of uploaded objects in Google Photos (see the section
     comment above). A DRY RUN by default: it writes only its run directory.
 
@@ -14066,6 +14091,10 @@ def cmd_check_photos(scope, approaches=None, account=None, recheck=False, apply=
                  searching again — its recorded scope must be this one, else refused (no Chrome, no lock)
     limit · max_minutes · pace   bound an invocation (objects checked in their own account · minutes) / the seconds
                  between two objects — a bounded run is partial: the same command continues it
+    min_age_h    look up only the objects pushed at least that many hours ago (their capture's push time; no push
+                 time counts as old): the younger ones get one line and nothing else — no verdict row, no failed row,
+                 no learned record (the auto-confirm passes AUTO_CONFIRM_MIN_AGE_H: never the push that just ran).
+                 Part of the resume key: a run continues only a run made with the same --min-age-h (or none)
     devices      Step 9b's phone opt-in: the read-only device check refines an OLD object found in no account
     list_only    `pending --list`: the pending objects, offline (no Chrome, nothing written)
 
@@ -14085,7 +14114,7 @@ def cmd_check_photos(scope, approaches=None, account=None, recheck=False, apply=
     print(f"=== CHECK PHOTOS ({'APPLY' if apply else 'dry-run'}) — scope: {scope}"
           f"{' · account ' + account if account else ''} · approaches {approaches} — download-free ===")
     try:
-        resolved = _cp_resolve(library, scope, account, now)
+        resolved = _cp_resolve(library, scope, account, now, min_age_h)
     except ValueError as e:
         print(f"❌ check_photos: {e}")
         return {"status": "error", "run_dir": None}
@@ -14094,7 +14123,7 @@ def cmd_check_photos(scope, approaches=None, account=None, recheck=False, apply=
     if not resolved["objects"]:
         print("  Nothing to check.")
         return {"status": "ok", "run_dir": None}
-    found = None if recheck else _cp_unfinished(resolved["canonical"], account, approaches)
+    found = None if recheck else _cp_unfinished(resolved["canonical"], account, approaches, min_age_h)
     if found is not None:
         run_dir, doc, _progress = found
         done = {(r.get("manual_id"), r.get("label"), r.get("sha256")) for r in _cp_read_results(run_dir)
@@ -14107,7 +14136,7 @@ def cmd_check_photos(scope, approaches=None, account=None, recheck=False, apply=
             print(f"  {len(now_keys - ran):,} object(s) of the scope joined since that run began — the next run checks "
                   f"them (or now: --recheck)")
     else:
-        run_dir, doc = _cp_new_run(resolved, scope, account, approaches, now)
+        run_dir, doc = _cp_new_run(resolved, scope, account, approaches, now, min_age_h)
         print(f"  Run: {run_dir}")
     try:
         code, interrupted = _cp_spawn(_cp_child_argv(run_dir, limit, max_minutes, pace))
@@ -18147,8 +18176,8 @@ if __name__ == "__main__":
 
     elif cmd == "check_photos":
         # [IMP-C25 Step 13] check_photos <scope> [--approaches best|all] [--account a] [--recheck]
-        #   [--apply | --apply-run <run dir|latest>] [--limit N] [--pace S] [--max-minutes M] [--devices] [--list]
-        #   — download-free; a DRY RUN unless --apply / --apply-run
+        #   [--apply | --apply-run <run dir|latest>] [--limit N] [--pace S] [--max-minutes M] [--min-age-h H]
+        #   [--devices] [--list] — download-free; a DRY RUN unless --apply / --apply-run
         try:
             _cp_opts = parse_check_photos_args(sys.argv[2:])
         except ValueError as _cp_err:

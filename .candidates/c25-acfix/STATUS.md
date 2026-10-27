@@ -22,10 +22,19 @@ every WIP commit; tick a sub-task only after its tests pass, with its SHA. Paths
 rebase or stash. Never edit PROGRESS.md / PRIORITY.md (the orchestrator does).
 
 ## Sub-tasks (one WIP commit each)
-- [ ] acfix.0 this status file: the plan + the design decisions below (no code)
-- [ ] acfix.a main: `check_photos … --min-age-h <hours>` — parser (positive number; refused with --apply-run / --list),
-      CHECK_USAGE, `_cp_resolve(…, min_age_h)` filter + the one skip line, run.json `min_age_h` + the resume key
-      (`_cp_unfinished`, `_cp_check_command`), `cmd_check_photos(min_age_h=…)`; tests in tests/test_check_photos.py
+- [x] acfix.0 this status file: the plan + the design decisions below (no code) — 18f3a33
+- [x] acfix.a main: `check_photos … --min-age-h <hours>` — parser (positive number; refused with --apply-run / --list),
+      CHECK_USAGE, `_cp_resolve(…, min_age_h)` filter (`_cp_young`) + the one skip line, run.json `min_age_h` + the
+      resume key (`_cp_unfinished`, `_cp_check_command`), `cmd_check_photos(min_age_h=…)`, the dispatcher comment —
+      tests/test_check_photos.py 183 passed (158 + 25: the command line ×2 + bad values ×9 (no value ×2, 0, −3, a word,
+      nan, inf, with --apply-run, with --list), the dispatcher's exit 1 + usage line ×4, the core case (30 h + no push
+      time looked up and confirmed; 2 h + 23.9 h never looked up — no RPC / page trace, no row, no learned record, no
+      failed row, no block, still pending), without the option (all four, run.json unchanged), only young (no child,
+      no Chrome, nothing written), the resume key (a plain and a min-age run never continue each other; "continue it
+      with" names --min-age-h), the boundary ×5 (24 h looked up, 24.01, 23.99 skipped, no push time looked up, a future
+      push skipped), every scope after --account (+ the `:g` note, + unchanged without it)). Neighbours
+      (test_auto_confirm, test_c25_regression_pins, test_map_photos, test_resolve_photos) 406 passed; smoke 102
+      passed — (this commit; its SHA is recorded by acfix.b)
 - [ ] acfix.b main: `auto_confirm_argv()` + `--min-age-h`, maybe_auto_confirm's line (due only, ", N newer
       skipped"), the comments; tests/test_auto_confirm.py (argv pin re-pinned, header, the chain end to end),
       tests/test_c25_regression_pins.py (re-pin recorded, the new pins registered)
@@ -75,4 +84,10 @@ rebase or stash. Never edit PROGRESS.md / PRIORITY.md (the orchestrator does).
 - A6 mvconfig.example.json's `_comment_auto_confirm_after_push` quotes the argv, so it is updated with the docs.
 
 ## Log
-- Baseline on a `git archive 1f00913` scratch copy: (running)
+- Baseline on a `git archive 1f00913` scratch copy (acfix_gate.py, run in the background while the code was written):
+  full 3265 passed + 13 failed, smoke 101 + 1 failed — all 13 in tests/test_fetch_hygiene.py + the fetch smoke, every
+  one an incoming-folder path assertion: the copy's `--basetemp` under the long scratchpad path pushed the title
+  folder past INCOMING_PATH_LIMIT (240), so the fetch took its short-root fallback (`mv_short_root\MV_incoming\…`) —
+  correct code behaviour, an artefact of the path. The 13 re-run on the same copy with pytest's default basetemp: 13
+  passed. Baseline confirmed = full 3278 · smoke 102 (the dispatch's numbers). Rule kept: every gate runs with the
+  default basetemp. Per module at 1f00913: test_check_photos 158 · test_auto_confirm 162 · test_c25_regression_pins 39.

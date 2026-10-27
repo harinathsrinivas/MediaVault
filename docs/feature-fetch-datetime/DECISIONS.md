@@ -547,3 +547,14 @@ No other step of this plan uses candidates.
   automatically also along with this task." → Finding: the gate used the OLDEST pending object's age, then checked ALL
   pending objects (young included). Fix: the auto-confirm child checks only objects pushed ≥ `AUTO_CONFIRM_MIN_AGE_H`
   ago (`check_photos pending --min-age-h N`), and its lines count only those.
+- **2026-10-28 — throttled search (🚦 R3 finding)**: card answer "Fix inside C25 (Recommended)" → thfix: a zero-result
+  search counts as "not found" only when a canary search for an item known to be in that account still finds it;
+  otherwise the run stops `throttled` (resumable; nothing recorded for that object); a throttle / unusual-traffic page
+  is never reported as signed-out; map_photos gives a confirmed photo_id the crawl does not list a `not-listed` verdict
+  (off the failed list). R4 checks by photo_id first (`--approaches best`); searches only for objects without one.
+- **2026-10-28 — map apply (🚦 R3)**: card answer "Apply after the fix (Recommended)" → once thfix lands: the
+  `map_photos all` dry run again, then `--apply` (no other MediaVault command running).
+- **2026-10-28 — scope (user)**: "do not start with all the related improvements for now in this plan. this session is
+  already super long. lets finish this task first. but do all the steps in the original plan in detail and without any
+  limits." → plan-blocking findings are fixed inside C25; other ideas are only registered at Step 17. Every status
+  update shows the whole plan's progress in %.

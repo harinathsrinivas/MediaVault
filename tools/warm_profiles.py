@@ -77,6 +77,8 @@ def _warm_one(key, session=None):
 
     "OK"          — session confirmed alive.
     "LOGGED_OUT"  — navigated, but the session is signed out (re-login needed).
+    "THROTTLED"   — [IMP-C25 thfix] Google showed another page than Google Photos or its sign-in page (e.g. its
+                    "unusual traffic" page): no sign-out, nothing to do — the next warm-up looks again.
     "LAUNCH_FAIL" — Chrome/Selenium failed to launch or attach.
 
     The driver is ALWAYS quit in a finally (the quit itself is guarded — it can
@@ -101,6 +103,8 @@ def _warm_one(key, session=None):
         time.sleep(2)
         mainfetch.check_session_alive(driver, key)
         return "OK"
+    except mainfetch.PhotosThrottledError:   # [IMP-C25 thfix] a SessionExpiredError, but never a sign-out
+        return "THROTTLED"
     except mainfetch.SessionExpiredError:
         return "LOGGED_OUT"
     finally:
@@ -149,6 +153,12 @@ def warm_all(profile_keys=None):
 
     _append_log(results)
 
+    # [IMP-C25 thfix] A throttle is no sign-out: one line, no toast, no failure (the next warm-up looks again).
+    for key, status in results.items():
+        if status == "THROTTLED":
+            print(f"   ⏸️ Profile '{key}': Google showed another page than Google Photos (throttled?) — not a sign-out; "
+                  f"the next warm-up looks again.")
+
     failed = [key for key, status in results.items()
               if status in ("LOGGED_OUT", "LAUNCH_FAIL")]
     if failed:
@@ -161,7 +171,8 @@ def warm_all(profile_keys=None):
         )
         return 1
 
-    print("✅ All profiles healthy.")
+    throttled = any(status == "THROTTLED" for status in results.values())
+    print("✅ No profile is signed out." if throttled else "✅ All profiles healthy.")
     return 0
 
 

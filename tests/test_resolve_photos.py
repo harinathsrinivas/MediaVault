@@ -597,6 +597,23 @@ def test_a_signed_out_profile_is_named_and_nothing_is_recorded(rp, capsys):
     assert mvcommon.read_resolved() == []
 
 
+def test_a_throttle_is_named_never_logged_out_and_nothing_is_recorded(rp, capsys):
+    # IMP-C25 thfix: Google's "unusual traffic" page is no sign-out — the account's objects stop, the object at hand
+    # gets no answer (it is asked again next time), nothing is recorded for it.
+    _object(rp, R1, N1, S1, _bytes("r1"))
+    rp.world.session["tv"] = "sorry"
+    rp.keyboard("k")
+
+    res = main.cmd_resolve_photos()
+
+    out = capsys.readouterr().out
+    assert ("⏸️ Google Photos is throttled in 'tv' (Google showed its 'unusual traffic' page) — its objects stop here "
+            "(nothing was recorded for the one at hand; the answers given so far are kept). Re-run resolve_photos in "
+            "about 30 minutes.") in out
+    assert "logged out" not in out and res["status"] == "ok"
+    assert mvcommon.read_resolved() == [] and mvcommon.read_learned() == []
+
+
 def test_confirmed_and_vanished_objects_are_left_out(rp, capsys):
     data = _bytes("r1")
     sha256 = _object(rp, R1, N1, S1, data)

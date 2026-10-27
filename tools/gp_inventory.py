@@ -45,7 +45,9 @@ Files per account in --out (the formats of the files crawled before 2026-09-28, 
   <account>.tiles.jsonl  dom mode: every id + its tile label at first sighting
   <account>.log          the progress log
 Exit codes: 0 done (or interrupted — progress kept) · 1 usage error or missing Chrome profile · 2 signed out ·
-3 the fetch session lock is held (refused) or was taken over (the crawl yielded).
+3 the fetch session lock is held (refused) or was taken over (the crawl yielded) · 4 Google Photos is throttling the
+profile (IMP-C25 thfix: Google showed another page than Google Photos to a signed-in session — not a sign-out; progress
+kept, re-run later).
 """
 import argparse
 import contextlib
@@ -84,6 +86,7 @@ DETAIL_BATCH = gprpc.MAX_BATCH_KEYS       # ids per EWgK9e request (50)
 CHROME_START_WAIT_S = 6                   # a launched Chrome needs this long before Selenium can attach
 LANDING_WAIT_S = 3                        # let a signed-out redirect happen before the landing check
 EXIT_OK, EXIT_USAGE, EXIT_SIGNED_OUT, EXIT_LOCK = 0, 1, 2, 3
+EXIT_THROTTLED = 4   # [IMP-C25 thfix] mainfetch.PhotosThrottledError — never reported as signed out
 _HINT_KEYS = ("details_text", "tz_text", "time_text", "date_text")  # dom info-panel text an upgrade keeps
 
 
@@ -190,6 +193,9 @@ def front(driver):
 
 def ensure_logged_in(driver):
     if "photos.google.com" not in (driver.current_url or ""):
+        # [IMP-C25 thfix] mainfetch's page classifier first: Google's "unusual traffic" page, or its signed-out page
+        # shown to a session that was signed in, raise its PhotosThrottledError — never a "logged out"
+        mainfetch.check_session_alive(driver)
         raise LoggedOut(f"not on photos.google.com (logged out?) -> {driver.current_url}")
 
 
@@ -297,7 +303,7 @@ def crawl_details(driver, account, tiles_path, items_path, log, max_items=None, 
     for pid in todo:
         try:
             rec = crawl_item(driver, pid)
-        except LoggedOut:
+        except (LoggedOut, mainfetch.SessionExpiredError):   # [IMP-C25 thfix] ensure_logged_in's classifier too
             raise
         except Exception as e:  # one bad item never stops the crawl; it is retried next run
             rec = {"photo_id": pid, "error": f"{type(e).__name__}: {str(e)[:160]}"}
@@ -711,6 +717,9 @@ def crawl(driver, account, out_dir, mode="rpc", phase="all", max_items=None, log
     except LockLost:
         result = "lock lost"
         raise
+    except mainfetch.PhotosThrottledError:   # [IMP-C25 thfix] a SessionExpiredError, but no sign-out
+        result = "throttled"
+        raise
     except (LoggedOut, mainfetch.SessionExpiredError):
         result = "signed out"
         raise
@@ -837,6 +846,10 @@ def _session(a, account, out_dir, log, heartbeat):
         landing_check(driver, account)
         crawl(driver, account, out_dir, a.mode, a.phase, a.max, log, heartbeat)
         return EXIT_OK
+    except mainfetch.PhotosThrottledError as e:   # [IMP-C25 thfix] never reported as signed out
+        log(f"STOPPED: {mainfetch.throttled_head(account, e)} — not a sign-out; progress is kept, re-run in about "
+            f"{mainfetch.THROTTLE_RETRY_MIN} minutes.{mainfetch.throttled_hint(account, e)}")
+        return EXIT_THROTTLED
     except (LoggedOut, mainfetch.SessionExpiredError) as e:
         where = "" if attach else f" (Chrome --user-data-dir={mainfetch.CHROME_PROFILES[account]})"
         log(f"STOPPED: {e} — sign this profile in to photos.google.com{where}, then re-run (progress is kept).")

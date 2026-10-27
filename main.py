@@ -13430,8 +13430,8 @@ def _cp_status(code, interrupted, progress):
     """This command's status from the child's exit code and its progress.json: refused (3: the fetch lock is held —
     nothing ran) · error (1: the child could not read its run, or it failed — its lines say why) · interrupted
     (Ctrl+C) · ok (complete) · partial (a
-    --limit / --max-minutes stop: re-run to continue) · stopped (signed out, Chrome failed, the error breaker, the lock
-    lost …: re-run to continue once fixed)."""
+    --limit / --max-minutes stop: re-run to continue) · stopped (signed out, throttled — IMP-C25 thfix —, Chrome
+    failed, the error breaker, the lock lost …: re-run to continue once fixed)."""
     if code == 3:
         return "refused"
     if code == 1:
@@ -13747,6 +13747,14 @@ def _cp_report_lines(ctx):
                else "re-run the same command to continue (--recheck starts afresh)")
         lines.append(f"State: {ctx['status']} ({progress.get('reason') or 'not finished'}) — {checked:,} of "
                      f"{len(rows):,} object(s) checked; {how}")
+        if progress.get("reason") == "throttled":   # [IMP-C25 thfix] the child's line, kept in report.txt
+            import mainfetch  # THROTTLE_RETRY_MIN — the advice's one source; importing it has no side effects
+            nxt = (f"continue the check with: {_cp_check_command(doc)}" if ctx.get("apply_run")
+                   else "re-run the same command: it continues where it stopped")
+            lines.append(f"  Google Photos was throttled: its search answered nothing even for an item known to be "
+                         f"there, or Google showed another page than Google Photos (never a sign-out, never a 'not "
+                         f"found') — nothing was recorded for the object it stopped at; wait about "
+                         f"{mainfetch.THROTTLE_RETRY_MIN} minutes, then {nxt}.")
     lines.append(f"Verdicts: {_cp_line(rows) or 'none yet'}")
     groups = {}
     for row in rows:
@@ -14100,7 +14108,7 @@ def cmd_check_photos(scope, approaches=None, account=None, recheck=False, apply=
 
     -> {status, run_dir, rows (the verdict rows, CHECK_STATES), outliers, devices, applied (the apply's summary or
     None), progress}. status: ok (a complete run) · partial (--limit / --max-minutes: re-run to continue) · stopped
-    (signed out, Chrome, the error breaker, the lock taken over …: re-run to continue once fixed) · interrupted
+    (signed out, throttled, Chrome, the error breaker, the lock taken over …: re-run to continue once fixed) · interrupted
     (Ctrl+C: nothing applied) · refused (the fetch lock is held: nothing ran) · error (a bad scope, the child could
     not run, a report or the apply failed). main.py's dispatcher exits 1 on CHECK_FAILED_STATUSES. --apply-run ->
     {status ok | error, run_dir, rows, applied, outliers}; --list -> {status ok, objects, routes}."""
@@ -14543,10 +14551,18 @@ def _rp_walk(library, rows, state):
                             if _rp_object(driver, ctx, rec, obj, entry[1], library, n, total, state) == "quit":
                                 outcome = "quit"
                                 break
-                    except mainfetch.SessionExpiredError:
-                        print(f"❌ Profile '{account}' is logged out. Open Chrome with --user-data-dir="
-                              f"{mainfetch.CHROME_PROFILES[account]}, sign in to photos.google.com, then re-run "
-                              f"resolve_photos (answers given so far are kept).")
+                    except mainfetch.SessionExpiredError as e:
+                        # [IMP-C25 thfix] a throttle is never "logged out": like a sign-out, this account's objects
+                        # stop here (the next account's follow); its object at hand got no answer and is asked again
+                        if isinstance(e, mainfetch.PhotosThrottledError):
+                            print(f"⏸️ {mainfetch.throttled_head(account, e)} — its objects stop here (nothing was "
+                                  f"recorded for the one at hand; the answers given so far are kept). Re-run "
+                                  f"resolve_photos in about {mainfetch.THROTTLE_RETRY_MIN} minutes."
+                                  f"{mainfetch.throttled_hint(account, e)}")
+                        else:
+                            print(f"❌ Profile '{account}' is logged out. Open Chrome with --user-data-dir="
+                                  f"{mainfetch.CHROME_PROFILES[account]}, sign in to photos.google.com, then re-run "
+                                  f"resolve_photos (answers given so far are kept).")
                     except KeyboardInterrupt:
                         interrupted = True   # _end_run terminates the Chrome at once, as a fetch's Ctrl+C does
                         raise

@@ -637,7 +637,9 @@ def test_searches_that_never_run_still_trip_the_c6_zero_streak():
 
     assert mainfetch.trigger_download(driver, QUERY) is False
     assert mainfetch.trigger_download(driver, QUERY) is False
-    with pytest.raises(mainfetch.SessionExpiredError, match="3 consecutive"):
+    # [IMP-C25 thfix] the streak is a throttle (every attempt passed the sign-in check), never a sign-out — still a
+    # SessionExpiredError for every handler
+    with pytest.raises(mainfetch.PhotosThrottledError, match="3 searches in a row found nothing"):
         mainfetch.trigger_download(driver, QUERY)
 
 

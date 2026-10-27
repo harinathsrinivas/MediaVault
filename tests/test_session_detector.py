@@ -194,3 +194,95 @@ def test_cmd_fetch_route_prints_remediation_on_logout(monkeypatch, tmp_path, cap
     out = capsys.readouterr().out
     assert "is logged out" in out
     assert f"--user-data-dir={mainfetch.CHROME_PROFILES['movies']}" in out
+
+
+# ---------------------------------------------------------------------------
+# (g) IMP-C25 thfix — a throttle is never a sign-out (the R3 dry runs of 2026-10-27: deep in a signed-in session Google
+#     server-redirected photos.google.com/ to its page for signed-out visitors, and the check said "logged out")
+# ---------------------------------------------------------------------------
+ABOUT = "https://www.google.com/photos/about/"
+
+
+@pytest.mark.parametrize("url, kind", [
+    ("https://photos.google.com/", "photos"), ("https://photos.google.com/u/1/search/x", "photos"),
+    ("https://www.photos.google.com/photo/abc", "photos"),
+    ("https://accounts.google.com/v3/signin/identifier", "signin"), ("https://accounts.google.com/ServiceLogin", "signin"),
+    ("https://www.google.com/photos/about", "about"), (ABOUT, "about"),
+    ("https://www.google.com/intl/en/photos/about/", "about"),
+    ("https://www.google.com/sorry/index", "unusual-traffic"), ("https://google.com/sorry/", "unusual-traffic"),
+    ("https://www.google.com/", "other"), ("https://www.google.com/photos/aboutx", "other"),
+    ("https://example.com/sorry/x", "other"), ("about:blank", "other"), (None, "other"),
+])
+def test_page_kind_reads_only_the_host_and_path(url, kind):
+    assert mainfetch._page_kind(url) == kind
+
+
+def test_the_signed_out_page_at_a_sessions_first_look_is_a_sign_out():
+    # RESEARCH F26 (live): a signed-out profile lands on Google Photos' page for signed-out visitors at once.
+    with pytest.raises(mainfetch.SessionExpiredError) as err:
+        mainfetch.check_session_alive(_FakeDriver(current_url=ABOUT), "movies")
+    assert type(err.value) is mainfetch.SessionExpiredError                  # NOT the throttle
+    assert str(err.value) == "profile 'movies' appears logged out (redirected to www.google.com)"
+
+
+def test_the_signed_out_page_after_signed_in_photos_is_a_throttle_never_a_sign_out():
+    driver = _FakeDriver()
+    assert mainfetch.check_session_alive(driver, "movies") is True          # the session shows signed-in Photos …
+    driver.current_url = ABOUT                                               # … then Google bounces it (R3 movies)
+    with pytest.raises(mainfetch.PhotosThrottledError) as err:
+        mainfetch.check_session_alive(driver, "movies")
+    assert (err.value.page, err.value.why) == ("about", "Google showed its signed-out page to a session that was "
+                                                        "signed in")
+    assert isinstance(err.value, mainfetch.SessionExpiredError)              # every sign-out handler still stops on it
+
+
+def test_a_sign_in_page_is_a_sign_out_even_after_signed_in_photos():
+    driver = _FakeDriver()
+    mainfetch.check_session_alive(driver)
+    driver.current_url = "https://accounts.google.com/ServiceLogin"
+    with pytest.raises(mainfetch.SessionExpiredError) as err:
+        mainfetch.check_session_alive(driver)
+    assert type(err.value) is mainfetch.SessionExpiredError
+
+
+@pytest.mark.parametrize("url, page, why", [
+    ("https://www.google.com/sorry/index", "unusual-traffic", "Google showed its 'unusual traffic' page"),
+    ("https://example.com/foo", "other", "the browser landed on example.com, not on Google Photos"),
+    ("about:blank", "other", "the browser landed on an empty page, not on Google Photos")])
+def test_unusual_traffic_and_other_pages_are_throttles_even_at_the_first_look(url, page, why):
+    with pytest.raises(mainfetch.PhotosThrottledError) as err:
+        mainfetch.check_session_alive(_FakeDriver(current_url=url))
+    assert (err.value.page, err.value.why) == (page, why)
+
+
+def test_the_legacy_zero_streak_is_a_throttle_never_a_sign_out():
+    # Every attempt passed check_session_alive on a Google Photos page: three empty searches are a throttle.
+    driver = _FakeDriver()
+    assert mainfetch.trigger_download(driver, "x") is False
+    assert mainfetch.trigger_download(driver, "x") is False
+    with pytest.raises(mainfetch.PhotosThrottledError) as err:
+        mainfetch.trigger_download(driver, "x")
+    assert (err.value.page, err.value.why) == ("streak", "3 searches in a row found nothing although the profile is "
+                                                         "signed in")
+
+
+@pytest.mark.parametrize("page, hint", [("search", False), ("about", True)])
+def test_cmd_fetch_route_prints_the_throttle_line_never_logged_out(monkeypatch, tmp_path, capsys, page, hint):
+    def _raise_throttled(*_a, **_k):
+        raise mainfetch.PhotosThrottledError("a search for an item known to be there found nothing", page=page)
+
+    monkeypatch.setattr(mainfetch, "resolve_targets",
+                        lambda *a, **k: [{"filename": "x.mkv", "folder_path": str(tmp_path), "hash": "deadbeef"}])
+    monkeypatch.setattr(mainfetch, "fetch_single_entry", _raise_throttled)
+    monkeypatch.setattr(mainfetch, "init_driver", lambda *a, **k: _FakeRouteDriver())
+    monkeypatch.setattr(mainfetch, "fetch_session_lock", lambda *a, **k: contextlib.nullcontext())
+
+    assert mainfetch.cmd_fetch_route("mov-en-2099-testfilm") is None       # the exit stays today's
+
+    out = capsys.readouterr().out
+    assert ("⏸️ Google Photos is throttled in 'movies' (a search for an item known to be there found nothing) — the "
+            "fetch stops here; files already fetched are kept and skipped. Re-run the same fetch in about 30 "
+            "minutes.") in out
+    assert "logged out" not in out and "not found" not in out.lower() and "Batch Processing Complete" not in out
+    assert ("If Chrome on this profile still shows Google Photos' signed-out page after the pause, sign in "
+            f"(--user-data-dir={mainfetch.CHROME_PROFILES['movies']}).") in out if hint else "sign in" not in out

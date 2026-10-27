@@ -1265,6 +1265,54 @@ def test_a_signed_out_profile_stops_the_batch_with_its_remediation(flow, sandbox
     assert flow.world.downloads == [] and flow.legacy == [] and "Batch Processing Complete" not in out
 
 
+def test_a_bounce_to_the_signed_out_page_mid_fetch_stops_it_as_throttled_never_logged_out(flow, sandbox, monkeypatch,
+                                                                                            capsys):
+    # IMP-C25 thfix — the R3 movies run: deep in a signed-in session Google server-redirected photos.google.com/ to its
+    # page for signed-out visitors. Chunk 1 is located (S0a, the session shows signed-in Photos); then the bounce: chunk
+    # 2's search stops the batch as THROTTLED — no "logged out", no "not found", no failed-list row, nothing requested —
+    # and the fetch journal keeps chunk 1 located, so a re-run's resume hints go straight to it.
+    folder = sandbox["local_root"] / "Movies" / "Pair (2018)"
+    folder.mkdir(parents=True)
+    stem, sid = "Pair.2018", "p2p2p2"
+    datas = [_bytes("pair1"), _bytes("pair2")]
+    items = [flow.world.add_item("movies", f"{stem} [{sid}].chunk.00{n}.mkv", data=d, taken=TAKEN)
+             for n, d in enumerate(datas, 1)]
+    mvcommon.save_library({"mov-en-2018-pair": _split(folder, f"{stem}.mkv", sid, datas,
+                                                      [_learned(items[0], account="movies"), None])})
+    real, calls = mainfetch.locate_object, []
+
+    def locate(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            flow.world.session["movies"] = "signed_out"                      # the bounce, before chunk 2
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mainfetch, "locate_object", locate)
+    mainfetch.cmd_fetch_route("mov-en-2018-pair")
+
+    out = capsys.readouterr().out
+    assert ("⏸️ Google Photos is throttled in 'movies' (Google showed its signed-out page to a session that was signed "
+            "in) — the fetch stops here; files already fetched are kept and skipped. Re-run the same fetch in about 30 "
+            "minutes. If Chrome on this profile still shows Google Photos' signed-out page after the pause, sign in "
+            f"(--user-data-dir={mainfetch.CHROME_PROFILES['movies']}).") in out
+    assert "logged out" not in out and "Not fetched" not in out and "Batch Processing Complete" not in out
+    assert flow.world.downloads == [] and flow.legacy == [] and mvcommon.read_failed() == []
+    assert [(o["label"], o["state"], o.get("photo_id")) for o in _journal_objects()] == [
+        ("chunk 1/2", "located", items[0].photo_id), ("chunk 2/2", "pending", None)]
+
+
+def test_googles_unusual_traffic_page_stops_a_fetch_as_throttled(flow, sandbox, capsys):
+    _season(sandbox, flow.world, (1,))
+    flow.world.session["tv"] = "sorry"
+
+    mainfetch.cmd_fetch_route(SEASON)
+
+    out = capsys.readouterr().out
+    assert "⏸️ Google Photos is throttled in 'tv' (Google showed its 'unusual traffic' page) — the fetch stops here" in out
+    assert "logged out" not in out and "sign in" not in out
+    assert flow.world.downloads == [] and flow.legacy == [] and mvcommon.read_failed() == []
+
+
 def test_the_live_wrong_click_case_is_fetched_by_its_exact_name_and_todays_search_never_runs(flow, sandbox, capsys):
     # 2026-10-05: `fetch tv-en-2014-siliconvalley-s02e02` clicked The Expanse (index 0 of the exact name's results)
     # twice; the hash check deleted it and the entry ended INCOMPLETE. A legacy object (no key, no photo_id) is now
@@ -1412,6 +1460,18 @@ def test_locate_on_a_signed_out_profile_prints_the_remediation(flow, sandbox, ca
 
     out = capsys.readouterr().out
     assert "❌ Profile 'tv' is logged out." in out and "Located" not in out
+
+
+def test_locate_on_a_throttled_profile_says_throttled_never_logged_out(flow, sandbox, capsys):
+    _season(sandbox, flow.world, (1,))
+    flow.world.session["tv"] = "sorry"                                       # IMP-C25 thfix
+
+    mainfetch.cmd_locate(SEASON)
+
+    out = capsys.readouterr().out
+    assert ("⏸️ Google Photos is throttled in 'tv' (Google showed its 'unusual traffic' page) — the locate stops here; "
+            "re-run it in about 30 minutes.") in out
+    assert "logged out" not in out and "NOT FOUND" not in out and "Located" not in out
 
 
 @pytest.mark.parametrize("argv, expected", [

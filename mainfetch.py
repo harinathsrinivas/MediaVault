@@ -188,13 +188,78 @@ class SessionExpiredError(Exception):
     pass
 
 
+class PhotosThrottledError(SessionExpiredError):
+    """[IMP-C25 thfix] Google Photos is throttling or refusing this browser session — the profile is NOT signed out: a
+    search for an item known to be there found nothing (locate_object's canary), the legacy search found nothing three
+    times in a row on a signed-in page, or Google showed a page that is neither Google Photos nor its sign-in page
+    (check_session_alive). A SessionExpiredError ON PURPOSE: every handler that ends a session or a batch on a sign-out
+    ends it on a throttle too — never a verdict for the object at hand, never a swallowed error — and the handlers that
+    print tell the two apart (throttled_head / throttled_hint) for the line and the stop reason.
+      why   the short phrase the lines show in parentheses
+      page  what showed it: search (the canary) · streak (the legacy search) · about · unusual-traffic · other"""
+
+    def __init__(self, why, page="search"):
+        super().__init__(why)
+        self.why = why
+        self.page = page
+
+
+# [IMP-C25 thfix] Advice only: how long the throttle lines tell the user to wait. In the R3 dry runs of 2026-10-27 the
+# windows in which every search answered nothing ended after 4-55 min while the runs kept searching; nothing waits
+# or retries by itself.
+THROTTLE_RETRY_MIN = 30
+
+# [IMP-C25 thfix] Where a navigation to Google Photos can end (_page_kind): Google Photos itself; a Google sign-in or
+# verify page (accounts.google.com) — the profile is signed out; Google Photos' landing page for signed-out visitors
+# (google.com …/photos/about) — a signed-out profile lands there at once (RESEARCH F26), but in the R3 dry runs a
+# SIGNED-IN session was server-redirected there in the middle of a search throttle (the movies profile's history,
+# 2026-10-27 13:31:59Z; the profile worked again afterwards), so it reads as signed out only while the session has not
+# shown signed-in Google Photos yet; Google's "unusual traffic" page (google.com/sorry/…); anything else.
+_ABOUT_PATH_RE = re.compile(r"(?:^|/)photos/about(?:/|$)")
+_SIGNED_IN_ATTR = "_mv_photos_seen"   # kept on the driver, like _mv_zero_streak: it showed signed-in Google Photos
+_THROTTLE_WHY = {"about": "Google showed its signed-out page to a session that was signed in",
+                 "unusual-traffic": "Google showed its 'unusual traffic' page"}
+
+
+def _page_kind(url):
+    """photos · signin · about · unusual-traffic · other — what a tab address shows (its host and path only; a host
+    holding photos.google.com counts as Google Photos, as check_session_alive always read it)."""
+    parsed = urllib.parse.urlparse(url if isinstance(url, str) else "")
+    host = (parsed.hostname or "").lower()
+    if "photos.google.com" in host:
+        return "photos"
+    if host == "accounts.google.com":
+        return "signin"
+    if host == "google.com" or host.endswith(".google.com"):
+        path = parsed.path or "/"
+        if _ABOUT_PATH_RE.search(path):
+            return "about"
+        if path.startswith("/sorry"):
+            return "unusual-traffic"
+    return "other"
+
+
+def _note_signed_in(driver):
+    """This browser session has shown signed-in Google Photos (a tab on photos.google.com)."""
+    try:
+        setattr(driver, _SIGNED_IN_ATTR, True)
+    except Exception:  # a stand-in that takes no attribute: it simply stays unmarked
+        pass
+
+
 def check_session_alive(driver, profile_key=None):
     """Side-effect-free login check: inspect driver.current_url (the CALLER must
     have navigated to PHOTOS_URL already — this does NOT call driver.get).
 
-    Returns True if still on photos.google.com (www./locale subpaths tolerated).
-    Raises SessionExpiredError if redirected to accounts.google.com or anywhere
-    that is not a photos.google.com host. If reading current_url raises (a genuine
+    Returns True if still on photos.google.com (www./locale subpaths tolerated) —
+    and notes on the driver that this session has shown signed-in Google Photos.
+    Raises SessionExpiredError if redirected to a Google sign-in page
+    (accounts.google.com), or to Google Photos' page for signed-out visitors
+    while this session has not shown signed-in Photos yet. [IMP-C25 thfix] Raises
+    PhotosThrottledError (a SessionExpiredError: every handler still stops) for
+    that page once the session WAS signed in — Google bounced it there in the
+    middle of a throttle — for Google's "unusual traffic" page and for any other
+    page: none of them is a sign-out. If reading current_url raises (a genuine
     Selenium fault), returns True so the existing retry/handle paths deal with it —
     the detector must not invent a logged-out failure from a browser glitch.
     """
@@ -204,13 +269,31 @@ def check_session_alive(driver, profile_key=None):
         return True
 
     host = (urllib.parse.urlparse(current_url).hostname or "").lower()
-    if host.endswith("photos.google.com"):
+    kind = _page_kind(current_url)
+    if kind == "photos":
+        _note_signed_in(driver)
         return True
-    if host == "accounts.google.com" or "photos.google.com" not in host:
+    if kind == "signin" or (kind == "about" and not getattr(driver, _SIGNED_IN_ATTR, False)):
         raise SessionExpiredError(
             f"profile {profile_key!r} appears logged out (redirected to {host})"
         )
-    return True
+    raise PhotosThrottledError(_THROTTLE_WHY.get(kind) or f"the browser landed on {host or 'an empty page'}, not on "
+                                                          f"Google Photos", page=kind)
+
+
+def throttled_head(account, error):
+    """[IMP-C25 thfix] The shared head of every throttle line: "Google Photos is throttled in '<account>' (<why>)"."""
+    why = getattr(error, "why", None) or str(error)
+    return f"Google Photos is throttled in '{account}' ({why})"
+
+
+def throttled_hint(account, error):
+    """[IMP-C25 thfix] The tail of a throttle line about Google Photos' signed-out page (page "about"): a bounce that
+    is still there after the pause may be a real sign-out after all. '' for every other throttle."""
+    if getattr(error, "page", None) != "about":
+        return ""
+    return (f" If Chrome on this profile still shows Google Photos' signed-out page after the pause, sign in "
+            f"(--user-data-dir={CHROME_PROFILES.get(account, '?')}).")
 
 
 def profile_preflight(account):
@@ -549,14 +632,18 @@ def trigger_download(driver, query, index=0):
 
     # [IMP-C6] backstop: 3 consecutive 0-thumbnail results on the same driver
     # (batch) => the session is logged in but search is dead => fail loudly.
+    # [IMP-C25 thfix] Every attempt passed check_session_alive on a Google Photos
+    # page, so the profile IS signed in: this is a search that answers nothing (a
+    # throttle — the R3 dry runs), never a sign-out — PhotosThrottledError, which
+    # every SessionExpiredError handler still stops on.
     if result:
         setattr(driver, "_mv_zero_streak", 0)
     else:
         streak = getattr(driver, "_mv_zero_streak", 0) + 1
         setattr(driver, "_mv_zero_streak", streak)
         if streak >= 3:
-            raise SessionExpiredError(
-                "3 consecutive 0-thumbnail results — session likely logged out or search is dead"
+            raise PhotosThrottledError(
+                "3 searches in a row found nothing although the profile is signed in", page="streak"
             )
     return result
 
@@ -3609,7 +3696,11 @@ def _run_locator_phase(driver, queue, ctx):
         if sha1:
             wanted.add(sha1)  # one swbisb batch for the entry (≤ gprpc.MAX_BATCH_KEYS)
     print(f"\n   === EXACT ITEM ({len(pending)} files) ===")
-    located = [item for item in pending if _locate_item(driver, item, ctx)]
+    try:
+        located = [item for item in pending if _locate_item(driver, item, ctx)]
+    except PhotosThrottledError:
+        _journal_sync(ctx, queue)  # [IMP-C25 thfix] what was located before the stop: the re-run's resume hints
+        raise
     _journal_sync(ctx, queue)
     for start in range(0, len(located), DIRECT_DOWNLOAD_CONCURRENCY):
         _fetch_window(driver, located[start:start + DIRECT_DOWNLOAD_CONCURRENCY], queue, ctx)
@@ -5222,12 +5313,19 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None,
                     for ex in group_extras:
                         fetch_single_entry(driver, ex, ctx=ctx)
 
-                except SessionExpiredError:
-                    # [IMP-C6] One logged-out detection aborts the whole batch loudly
-                    # (IMP-C26: naming the account group that hit it).
-                    print(f"❌ Profile '{profile}' is logged out. Open Chrome with "
-                          f"--user-data-dir={CHROME_PROFILES[profile]}, sign in to "
-                          f"photos.google.com, then re-run.")
+                except SessionExpiredError as e:
+                    if isinstance(e, PhotosThrottledError):
+                        # [IMP-C25 thfix] A throttle is never a sign-out and never a "not found": nothing more is
+                        # searched or requested; the object it stopped at got no verdict (no failed-list row).
+                        print(f"⏸️ {throttled_head(profile, e)} — the fetch stops here; files already fetched are "
+                              f"kept and skipped. Re-run the same fetch in about {THROTTLE_RETRY_MIN} minutes."
+                              f"{throttled_hint(profile, e)}")
+                    else:
+                        # [IMP-C6] One logged-out detection aborts the whole batch loudly
+                        # (IMP-C26: naming the account group that hit it).
+                        print(f"❌ Profile '{profile}' is logged out. Open Chrome with "
+                              f"--user-data-dir={CHROME_PROFILES[profile]}, sign in to "
+                              f"photos.google.com, then re-run.")
                     stopped = True
                     return
                 except KeyboardInterrupt:
@@ -5449,9 +5547,13 @@ def _locate_sessions(groups, active, ctx, probe_direct, tally):
             for entry, entry_id in list(group_targets) + [(ex, None) for ex in group_extras]:
                 _locate_entry(driver, entry, entry_id, ctx, probe_direct, tally)
             completed = True
-        except SessionExpiredError:
-            print(f"❌ Profile '{profile}' is logged out. Open Chrome with --user-data-dir={CHROME_PROFILES[profile]}, "
-                  f"sign in to photos.google.com, then re-run.")
+        except SessionExpiredError as e:
+            if isinstance(e, PhotosThrottledError):   # [IMP-C25 thfix] never "logged out", never "NOT FOUND"
+                print(f"⏸️ {throttled_head(profile, e)} — the locate stops here; re-run it in about "
+                      f"{THROTTLE_RETRY_MIN} minutes.{throttled_hint(profile, e)}")
+            else:
+                print(f"❌ Profile '{profile}' is logged out. Open Chrome with "
+                      f"--user-data-dir={CHROME_PROFILES[profile]}, sign in to photos.google.com, then re-run.")
             return False
         except KeyboardInterrupt:
             print("\n🛑 Stopped by user.")
@@ -5642,7 +5744,9 @@ def _check_state(lines):
 class _CheckRun:
     """One `check` invocation over one run directory: the run (run.json), what its results already hold (state), the
     bounds (--limit counts the objects checked in their routed account, --max-minutes a deadline, --pace), and why it
-    stopped early (`stop`: limit · max-minutes · interrupted · signed-out · lock-lost · breaker · chrome · port · error)."""
+    stopped early (`stop`: limit · max-minutes · interrupted · signed-out · throttled (IMP-C25 thfix: Google Photos'
+    search answered nothing even for an item known to be there, or Google showed another page — the object at hand
+    got no line) · lock-lost · breaker · chrome · port · error)."""
 
     def __init__(self, run_dir, doc, lines, limit, max_minutes, pace, invocation):
         self.dir, self.doc = run_dir, doc
@@ -5896,8 +6000,9 @@ def _check_record(run, obj, line):
 def _check_one(run, driver, ctx, obj, located, pass_name):
     """Check ONE object in the session's account (pass routed | cross): locate_object over its locator, the result
     appended to results.jsonl and printed, the heartbeat, the pacing and the error breaker. Raises
-    SessionExpiredError (signed out), KeyboardInterrupt and gprpc.RpcRefused (a bug — never swallowed); any other
-    trouble is this object's `error` line."""
+    SessionExpiredError (signed out — or its PhotosThrottledError: then the object gets NO line, IMP-C25 thfix),
+    KeyboardInterrupt and gprpc.RpcRefused (a bug — never swallowed); any other trouble is this object's `error`
+    line."""
     account = ctx.account
     run.tried.add((_check_key(obj), account))
     started, res = time.time(), None
@@ -6183,6 +6288,13 @@ def _check_session(run, ctx, account):
                         break
                     lines.append(_check_one(run, driver, ctx, obj, located.get(_check_key(obj)), pass_name))
                 _check_quality(run, driver, ctx, account, lines, known)
+    except PhotosThrottledError as e:
+        # [IMP-C25 thfix] A throttle is never a sign-out and never a "not found": the object at hand got NO results
+        # line (it stays unchecked — a re-run looks it up again), nothing more is searched in this run.
+        print(f"   ⏸️ {throttled_head(account, e)} — nothing was recorded for the object it was checking; re-run the "
+              f"same command in about {THROTTLE_RETRY_MIN} minutes: it continues where it stopped."
+              f"{throttled_hint(account, e)}")
+        run.stop, run.unavailable[account] = "throttled", "throttled"
     except SessionExpiredError:
         print(f"❌ Profile '{account}' is logged out. Open Chrome with --user-data-dir={CHROME_PROFILES[account]}, sign "
               f"in to photos.google.com, then re-run — the check continues where it stopped.")

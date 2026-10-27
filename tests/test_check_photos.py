@@ -926,6 +926,61 @@ def test_a_signed_out_profile_stops_the_run_with_its_remediation(cw, sandbox, ca
     assert _results(res["run_dir"]) == [] and cw.drivers["tv"][0].quit_called
 
 
+def test_a_bounce_to_the_signed_out_page_mid_run_stops_it_as_throttled_and_a_rerun_continues(cw, sandbox, monkeypatch,
+                                                                                               capsys):
+    # IMP-C25 thfix — the R3 movies run (2026-10-27 13:31:59Z): deep in a signed-in session Google server-redirected
+    # photos.google.com/ to its page for signed-out visitors and the check said "logged out" — the profile was fine.
+    # Now: stop `throttled`, NO results line for the object at hand (it stays unchecked), a re-run continues.
+    _demo_season(sandbox, cw.world, learned=(1,))                   # e01 learned (S0a) · e02, e03 legacy (by name)
+    real, calls = mainfetch.locate_object, []
+
+    def locate(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            cw.world.session["tv"] = "signed_out"                    # the bounce, after e01 was confirmed
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mainfetch, "locate_object", locate)
+    res = main.cmd_check_photos(SEASON)
+
+    out = capsys.readouterr().out
+    assert (res["status"], _progress(res["run_dir"])["reason"]) == ("stopped", "throttled")
+    assert ("   ⏸️ Google Photos is throttled in 'tv' (Google showed its signed-out page to a session that was signed "
+            "in) — nothing was recorded for the object it was checking; re-run the same command in about 30 minutes: "
+            "it continues where it stopped. If Chrome on this profile still shows Google Photos' signed-out page after "
+            f"the pause, sign in (--user-data-dir={mainfetch.CHROME_PROFILES['tv']}).") in out
+    assert "logged out" not in out
+    assert [l["manual_id"] for l in _results(res["run_dir"])] == [f"{SEASON}e01"]       # e02: no line at all
+    assert [r["status"] for r in res["rows"]] == ["confirmed", "unchecked", "unchecked"]
+    report = open(os.path.join(res["run_dir"], "report.txt"), encoding="utf-8").read()
+    assert "State: stopped (throttled) — 1 of 3 object(s) checked" in report
+    assert ("  Google Photos was throttled: its search answered nothing even for an item known to be there, or Google "
+            "showed another page than Google Photos (never a sign-out, never a 'not found') — nothing was recorded for "
+            "the object it stopped at; wait about 30 minutes, then re-run the same command: it continues where it "
+            "stopped.") in report
+    assert cw.drivers["tv"][0].quit_called
+
+    cw.world.session["tv"] = "ok"
+    again = main.cmd_check_photos(SEASON)                            # the same command continues the run …
+
+    assert again["status"] == "ok" and again["run_dir"] == res["run_dir"]
+    assert [l["manual_id"] for l in _results(res["run_dir"])] == [f"{SEASON}e01", f"{SEASON}e02", f"{SEASON}e03"]
+    assert [r["status"] for r in again["rows"]] == ["confirmed"] * 3     # … and looks e02 up again
+
+
+def test_googles_unusual_traffic_page_stops_the_check_as_throttled(cw, sandbox, capsys):
+    _demo_season(sandbox, cw.world)
+    cw.world.session["tv"] = "sorry"                                 # IMP-C25 thfix
+
+    res = main.cmd_check_photos(SEASON, apply=True)
+
+    out = capsys.readouterr().out
+    assert (res["status"], _progress(res["run_dir"])["reason"]) == ("stopped", "throttled")
+    assert "⏸️ Google Photos is throttled in 'tv' (Google showed its 'unusual traffic' page)" in out
+    assert "logged out" not in out and "sign in" not in out
+    assert _results(res["run_dir"]) == [] and mvcommon.read_learned() == [] and mvcommon.read_failed() == []
+
+
 def test_ctrl_c_stops_after_the_current_object_and_still_closes_chrome(cw, sandbox, monkeypatch, capsys):
     _demo_season(sandbox, cw.world)
     real, calls, closed = mainfetch.locate_object, [], []

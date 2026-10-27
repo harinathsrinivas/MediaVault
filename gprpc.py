@@ -33,7 +33,8 @@ Errors
     RpcShapeError   an answer arrived but is not the documented shape (fail closed — never guess).
     RpcServerError  the server answered with an error status instead of a payload (.code);
                     STATUS_NOT_FOUND is the "no such item" answer the helpers turn into None.
-  mainfetch.SessionExpiredError propagates unchanged: the Chrome profile is signed out.
+  mainfetch.SessionExpiredError propagates unchanged: the Chrome profile is signed out — or, as its subclass
+  mainfetch.PhotosThrottledError (IMP-C25 thfix), Google showed the tab another page than Google Photos.
 
 Public API
   call(driver, rpcid, request_data)         one allowlisted RPC -> its typed gpweb parser's result
@@ -231,14 +232,17 @@ def _on_photos(url):
 
 def _photos_url(driver):
     """The tab's current photos.google.com URL — the tab is first sent to the Photos start page when it
-    shows anything else, then mainfetch.check_session_alive runs (SessionExpiredError when signed out).
+    shows anything else — after mainfetch.check_session_alive (SessionExpiredError when signed out; its
+    PhotosThrottledError when Google shows another page). [IMP-C25 thfix] The check runs for EVERY request, not
+    only after a navigation: on Google Photos it notes that this browser session is signed in, so a later bounce to
+    Google Photos' signed-out page reads as a throttle, not as a sign-out (an RPC-only session navigates nowhere).
     A browser fault propagates as raised."""
     url = driver.current_url
     if not _on_photos(url):
         driver.get(_PHOTOS_URL)
-        _mainfetch().check_session_alive(driver)
-        url = driver.current_url
-    return url
+        url = None
+    _mainfetch().check_session_alive(driver)
+    return url if url is not None else driver.current_url
 
 
 def _pace(session):

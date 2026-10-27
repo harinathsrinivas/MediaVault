@@ -537,6 +537,37 @@ def test_a_signed_out_profile_stops_at_the_landing_page(crawler, lock_file, caps
     assert crawler.world.rpc_log == [] and crawler.procs[0].terminated and not lock_file.exists()
 
 
+def test_googles_unusual_traffic_page_stops_the_crawl_as_throttled_never_signed_out(crawler, lock_file, capsys):
+    # IMP-C25 thfix: mainfetch's page classifier — Google's "unusual traffic" page is no sign-out (exit 4, not 2).
+    crawler.world.add_item("anime", "Sample Anime - 01 [a1a1a1].mkv")
+    crawler.world.session["anime"] = "sorry"
+    assert crawler.run("anime") == gp_inventory.EXIT_THROTTLED == 4
+    out = capsys.readouterr().out
+    assert ("STOPPED: Google Photos is throttled in 'anime' (Google showed its 'unusual traffic' page) — not a "
+            "sign-out; progress is kept, re-run in about 30 minutes.") in out
+    assert "logged out" not in out and "sign this profile in" not in out
+    assert not any((crawler.out / f"anime.{kind}.jsonl").exists() for kind in ("tiles", "items", "runs"))
+    assert crawler.world.rpc_log == [] and crawler.procs[0].terminated and not lock_file.exists()
+
+
+def test_a_bounce_to_the_signed_out_page_mid_crawl_is_a_throttle(crawler, lock_file, monkeypatch, capsys):
+    # IMP-C25 thfix: the landing check showed signed-in Google Photos; then Google bounces the session (the R3 dry
+    # runs). The dom crawl's own page check (ensure_logged_in) asks mainfetch's classifier first: throttled, exit 4.
+    crawler.world.add_item("tv", "Sample.Show.S01E01 [a1a1a1].mkv")
+    real = gp_inventory.landing_check
+
+    def landing(driver, account):
+        real(driver, account)
+        crawler.world.session["tv"] = "signed_out"
+
+    monkeypatch.setattr(gp_inventory, "landing_check", landing)
+    assert crawler.run("tv", "--mode", "dom") == gp_inventory.EXIT_THROTTLED
+    out = capsys.readouterr().out
+    assert "STOPPED: Google Photos is throttled in 'tv' (Google showed its signed-out page to a session that was signed in)" \
+           in out and "logged out" not in out
+    assert [r["result"] for r in crawler.state()["runs"]] == ["throttled"]
+
+
 # ---------------------------------------------------------------- the fetch session lock + heartbeat
 
 def test_a_held_lock_refuses_the_crawl_before_anything_starts(crawler, lock_file, capsys):

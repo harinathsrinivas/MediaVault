@@ -17,7 +17,12 @@ Changing anything pinned here is a REVIEWED decision (re-pin it on purpose, in t
                                    browser child · test_check_photos.py: `--min-age-h` never looks a younger object up
                                    nor records anything for it; it is part of the resume key
      web markers (P-13)            test_fetch_child_stream.py: today's frozen transcripts keep their progress counts
-     trigger_download digest       test_fetch_search_wait.py: trigger_download + the search wait it relies on
+     trigger_download digest       test_fetch_search_wait.py: trigger_download + the search wait it relies on (RE-PINNED
+                                   on purpose 2026-10-28, IMP-C25 thfix: its zero streak raises PhotosThrottledError)
+     a throttle is never a         (IMP-C25 thfix — the R3 dry runs of 2026-10-27) test_session_detector.py: the page
+     sign-out                      classification (Google Photos' signed-out page is a sign-out only before the session
+                                   showed signed-in Photos) · test_check_photos.py: a bounce mid-run stops the check
+                                   `throttled`, records nothing for the object at hand, and a re-run continues
      calculate_file_hash           test_gp_capture.py (SHA-256 for 0 / 10 / 196 615 bytes + the same-pass SHA-1) ·
                                    test_mvcommon.py (the progress bar; a missing file -> None)
      ENTRY_TYPE_KEYS literal       test_entry_schema_guard.py (d1)
@@ -80,6 +85,11 @@ EXISTING_PINS = [
     ("test_check_photos.py", "test_min_age_h_is_part_of_the_resume_key"),
     # web markers (P-13): the consumer's counts on today's frozen transcripts
     ("test_fetch_child_stream.py", "test_the_web_progress_counts_of_todays_transcripts_are_unchanged"),
+    # a throttle is never a sign-out (IMP-C25 thfix, 2026-10-28)
+    ("test_session_detector.py", "test_the_signed_out_page_at_a_sessions_first_look_is_a_sign_out"),
+    ("test_session_detector.py", "test_the_signed_out_page_after_signed_in_photos_is_a_throttle_never_a_sign_out"),
+    ("test_session_detector.py", "test_a_sign_in_page_is_a_sign_out_even_after_signed_in_photos"),
+    ("test_check_photos.py", "test_a_bounce_to_the_signed_out_page_mid_run_stops_it_as_throttled_and_a_rerun_continues"),
     # trigger_download source digest
     ("test_fetch_search_wait.py", "test_trigger_download_source_is_pinned"),
     ("test_fetch_search_wait.py", "test_the_search_wait_it_relies_on_is_pinned"),

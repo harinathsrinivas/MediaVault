@@ -259,6 +259,25 @@ def test_a_signed_out_profile_raises_session_expired_and_nothing_is_sent(fake_ph
     assert fake_photos.rpc_log == []
 
 
+def test_an_rpc_only_session_counts_as_signed_in_so_a_later_bounce_is_a_throttle(fake_photos):
+    # IMP-C25 thfix: every request runs mainfetch.check_session_alive — on Google Photos it notes the session as
+    # signed in, so when Google later sends the tab to its signed-out page (the R3 dry runs) the next look reads a
+    # throttle, never a sign-out; an "expired" session (a Google sign-in page) still reads signed out.
+    fake_photos.add_item("tv", "Sample [a1a1a1].mkv")
+    d = _driver(fake_photos)
+    gprpc.call(d, "EzkLib", SEARCH)                                    # RPC only: no page check of its own
+    assert getattr(d, "_mv_photos_seen", False) is True
+    fake_photos.session["tv"] = "signed_out"
+    d.get(gphotos_fake.PHOTOS_URL)                                     # Google bounces the tab
+    with pytest.raises(mainfetch.PhotosThrottledError) as err:
+        gprpc.call(d, "EzkLib", SEARCH)
+    assert err.value.page == "about"
+    fake_photos.session["tv"] = "expired"
+    with pytest.raises(mainfetch.SessionExpiredError) as err:
+        gprpc.call(d, "EzkLib", SEARCH)
+    assert type(err.value) is mainfetch.SessionExpiredError
+
+
 def test_the_photos_url_is_mainfetchs():
     assert gprpc._PHOTOS_URL == mainfetch.PHOTOS_URL and gprpc._PHOTOS_HOST == "photos.google.com"
 

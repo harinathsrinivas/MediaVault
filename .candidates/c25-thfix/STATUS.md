@@ -30,9 +30,25 @@ DECISIONS.md / PRIORITY.md (the orchestrator's).
       "unusual traffic" page: no Photos page, no tokens, RPC status 0). test_gpweb.py +4 (unusual traffic · throttle
       on the web pages · throttle over RPC ×2): fake self-tests 36 passed; test_gpweb + test_gprpc + test_locator +
       test_gp_inventory 523 passed — this commit (`wip(imp-c25): thfix.a — …`)
-- [ ] thfix.b Fix 1.4 — the page classification (D4–D6): PhotosThrottledError, check_session_alive, gprpc's per-request
-      look, the legacy zero streak (re-pin TRIGGER_DOWNLOAD_DIGEST), every handler's line + the `throttled` stop reason
-      (check, fetch, resolve, locate, crawler EXIT_THROTTLED, warm-up THROTTLED); tests
+- [x] thfix.b Fix 1.4 — the page classification (D1, D4–D6). mainfetch: PhotosThrottledError(SessionExpiredError,
+      .why/.page), THROTTLE_RETRY_MIN, _page_kind, check_session_alive (+ the `_mv_photos_seen` mark), throttled_head /
+      throttled_hint; the legacy zero streak -> PhotosThrottledError (TRIGGER_DOWNLOAD_DIGEST re-pinned, registry
+      docstring says so); handlers: cmd_fetch_route (+ the locator phase syncs the journal before re-raising),
+      _locate_sessions, _check_session (stop `throttled`); gprpc._photos_url checks on every request; main: _rp_walk
+      (like a sign-out: that account's objects stop, the next account follows), report.txt line for `throttled`,
+      docstrings; crawler EXIT_THROTTLED = 4 (+ the dom crawl's ensure_logged_in asks the classifier first; crawl_details
+      re-raises SessionExpiredError instead of booking it as an item error); warm-up THROTTLED (no toast, exit 0).
+      Tests +22: test_session_detector +12 (page kinds ×15 params in 1, first-look about = sign-out, about after
+      signed-in = throttle, sign-in page after signed-in = sign-out, unusual traffic / other / blank ×3, the legacy
+      streak, the fetch route line ×2), test_gprpc +1 (an RPC-only session is marked; bounce -> throttle; expired ->
+      sign-out), test_locator +3 (mid-fetch bounce: throttle line, nothing requested, no failed row, chunk 1 journaled
+      located · unusual traffic stops a fetch · locate says throttled), test_check_photos +2 (mid-run bounce: stop
+      `throttled`, no line for e02, report line, re-run continues · unusual traffic with --apply records nothing),
+      test_resolve_photos +1, test_gp_inventory +2 (unusual traffic exit 4 · mid-crawl bounce in the dom crawl ->
+      exit 4, run result "throttled"), test_warm_profiles +1; re-pinned: test_fetch_photos_tab's C6 streak test
+      (PhotosThrottledError, the new message), test_fetch_search_wait's digest; registry +4 pins. Runs: session
+      detector + gprpc + warm-up + search-wait + pins 210 passed · locator + check + resolve + crawler + gpweb 671
+      passed · the other fetch modules 549 + photos-tab 48 passed · smoke 102 passed — this commit
 - [ ] thfix.c Fix 1.1–1.3 — the canary guard in locate_object (D7–D12), the check line / results `zero_check`, main's
       verdicts (unverified: off the failed list, a note + one report line), the fetch's unverified booking, the
       throttled report line; tests (zero + working canary · zero + failing canary · re-run continues · fetch · the
@@ -109,8 +125,10 @@ DECISIONS.md / PRIORITY.md (the orchestrator's).
   like signed-out; the report says why); the throttled object gets NO results line (it stays unchecked; a re-run looks
   it up again); an `--apply` applies only what was settled before. Fetch: the batch stops (the fetch journal is synced
   first, so a re-run's resume hints hold what was already located), exit unchanged (the child returns normally; main
-  ignores the child's code) — the fetch never prints "not found" for it. resolve_photos: the walk stops ("answers kept",
-  the object is asked again next time). Crawler: `EXIT_THROTTLED = 4`. Warm-up: status `THROTTLED` (not LOGGED_OUT).
+  ignores the child's code) — the fetch never prints "not found" for it. resolve_photos: exactly like today's sign-out
+  handling, that account's objects stop (answers kept, the object at hand is asked again next time) and the walk goes
+  on with the next account (a throttle is per account — F-b). Crawler: `EXIT_THROTTLED = 4`. Warm-up: status
+  `THROTTLED` (one line, no toast, not a failure).
 - D7 The canary guard lives in `locate_object` (after the waterfall and the drift check, only when nothing pinned the
   object), so fetch (_locate_item, _another_copy), check_photos (every scope incl. pending / the auto-confirm / the R4
   sweep), resolve_photos' S3u and `mainfetch.py locate` share it. Zero answers = the LISTING stages (taken_second,

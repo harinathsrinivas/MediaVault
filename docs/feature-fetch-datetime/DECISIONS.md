@@ -540,3 +540,10 @@ No other step of this plan uses candidates.
   files to `D:\MV_lib_backup\<date>\`, re-crawls the inventories, runs `map_photos all` and `check_photos account:<a>
   --approaches best` as dry runs and gives the user the reports; nothing is written until the user approves each
   `--apply` / `--apply-run`. No other MediaVault command may run meanwhile (OD-2).
+- **Auto-confirm checks only objects old enough (user, 2026-10-27)** — after a real `prep_push_rep_enrich` (HP Chamber
+  of Secrets) the user saw the auto-confirm check the 9 chunks pushed minutes earlier; verbatim: "check if it is
+  checking the chunks for the older ones properly which are not yet identified instead of checkign current one. which
+  will take few days atleast to appear in google photos in chrome. if it works in line then fine. if not fix it
+  automatically also along with this task." → Finding: the gate used the OLDEST pending object's age, then checked ALL
+  pending objects (young included). Fix: the auto-confirm child checks only objects pushed ≥ `AUTO_CONFIRM_MIN_AGE_H`
+  ago (`check_photos pending --min-age-h N`), and its lines count only those.

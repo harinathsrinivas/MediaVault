@@ -10,7 +10,12 @@ Changing anything pinned here is a REVIEWED decision (re-pin it on purpose, in t
      spawned fetch argv            test_fetch_child_stream.py: argv + env + Popen kwargs; every mainfetch child spawn
                                    gets the child env · test_fetch_routing.py: --manual forwarded only when given; the
                                    web UI never passes it · the other children: test_check_photos.py (the check child)
-                                   and test_auto_confirm.py (the auto-confirm child — exactly its argv)
+                                   and test_auto_confirm.py (the auto-confirm child — exactly its argv; RE-PINNED on
+                                   purpose 2026-10-27, IMP-C25 acfix: `--min-age-h AUTO_CONFIRM_MIN_AGE_H` added)
+     auto-confirm: old objects     (IMP-C25 acfix — the user's finding, DECISIONS.md §1g) test_auto_confirm.py: the
+     only                          auto-confirm's check hands only objects pushed >= AUTO_CONFIRM_MIN_AGE_H ago to the
+                                   browser child · test_check_photos.py: `--min-age-h` never looks a younger object up
+                                   nor records anything for it; it is part of the resume key
      web markers (P-13)            test_fetch_child_stream.py: today's frozen transcripts keep their progress counts
      trigger_download digest       test_fetch_search_wait.py: trigger_download + the search wait it relies on
      calculate_file_hash           test_gp_capture.py (SHA-256 for 0 / 10 / 196 615 bytes + the same-pass SHA-1) ·
@@ -69,6 +74,10 @@ EXISTING_PINS = [
     ("test_fetch_routing.py", "test_the_web_ui_never_passes_manual"),
     ("test_check_photos.py", "test_a_check_creates_its_run_directory_and_hands_it_to_the_child"),
     ("test_auto_confirm.py", "test_an_old_pending_push_runs_the_exact_check_child_through_the_checks_spawner"),
+    # the auto-confirm looks up only objects old enough (IMP-C25 acfix, 2026-10-27)
+    ("test_auto_confirm.py", "test_the_auto_confirm_child_looks_up_only_the_old_objects_never_the_push_that_just_ran"),
+    ("test_check_photos.py", "test_min_age_h_looks_up_only_the_old_objects_and_records_nothing_for_the_young_ones"),
+    ("test_check_photos.py", "test_min_age_h_is_part_of_the_resume_key"),
     # web markers (P-13): the consumer's counts on today's frozen transcripts
     ("test_fetch_child_stream.py", "test_the_web_progress_counts_of_todays_transcripts_are_unchanged"),
     # trigger_download source digest

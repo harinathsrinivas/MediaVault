@@ -14704,10 +14704,12 @@ def cmd_resolve_photos(source="failed", account=None, manual_id=None):
 # docs/feature-fetch-datetime/PLAN.md P-19 / Step 13b — the OD-6 ruling: "when doing other push, can check all
 # unverified one in google photos and note down". A push only reaches the phone; Google Photos backs its objects up
 # hours or days later, so a new archival stays `unverified` (P-11: its capture records the push, no confirmed block).
-# At the end of the NEXT push-family command that succeeded, main.py's CLI dispatcher confirms them: `python main.py
-# check_photos pending --apply --max-minutes 15` runs as a child process, its output streamed (Chrome opens for the
-# accounts it needs; confirmed -> the node through the apply engine, not found -> the failed list; the child's last
-# line is the check's summary line). Turned off by mvconfig.json "auto_confirm_after_push": false.
+# At the end of the NEXT push-family command that succeeded, main.py's CLI dispatcher confirms the ones pushed at least
+# AUTO_CONFIRM_MIN_AGE_H ago: `python main.py check_photos pending --apply --min-age-h 24 --max-minutes 15` runs as a
+# child process, its output streamed (Chrome opens for the accounts it needs; confirmed -> the node through the apply
+# engine, not found -> the failed list; a younger object — the push that just ran included — is not looked up: a later
+# push confirms it; the child's last line is the check's summary line). Turned off by mvconfig.json
+# "auto_confirm_after_push": false.
 #
 # Rollback change-gate (CLAUDE.md; docs/feature-auto-rollback/ROLLBACK_MECHANISM.md §10): nothing here runs inside a
 # cmd_* function. The dispatcher calls after_push_command only once the command's function has RETURNED, so every
@@ -14716,8 +14718,11 @@ def cmd_resolve_photos(source="failed", account=None, manual_id=None):
 # the season resume messaging, and the check it starts never does either. It prints only after the push command's own
 # last line and never raises, so the command's output contract and exit code stay exactly as they were.
 
-# AUTO_CONFIRM_MIN_AGE_H — how long ago the OLDEST pending object must have been pushed before a push opens Chrome to
-# confirm (the check then covers every pending object, young ones included). The PLAN proposed 12 h and asked for a
+# AUTO_CONFIRM_MIN_AGE_H — how long ago a pending object must have been pushed before the auto-confirm looks it up. A
+# push opens Chrome only when at least one pending object is that old, and the check it starts looks up only those
+# (`--min-age-h`): the younger ones — the push that just ran included — are skipped and confirmed at a later push (the
+# user's finding of 2026-10-27, DECISIONS.md §1g: a check of EVERY pending object had looked up the chunks pushed
+# minutes earlier, each through every stage, for nothing). The PLAN proposed 12 h and asked for a
 # measurement: on the R1b mapping of 2026-10-03 (69 captured objects in 14 pushes) Google Photos held 41 % of them 12 h
 # after their push, 84 % after 24 h, 88 % after 36 h and 99 % after 48 h (median 14 h, slowest 49.6 h). 24 h — "next
 # day", the OD-6 ruling's own words — confirms most objects at the first try without making every confirmation wait two
@@ -14732,10 +14737,12 @@ _AC_SCRIPT = os.path.abspath(__file__)   # this main.py, absolute — the child'
 
 
 def auto_confirm_argv():
-    """The auto-confirm child's command line, exactly as PLAN Step 13b fixes it: [sys.executable, <abs main.py>,
-    "check_photos", "pending", "--apply", "--max-minutes", "15"]."""
-    return [sys.executable, _AC_SCRIPT, "check_photos", "pending", "--apply", "--max-minutes",
-            str(AUTO_CONFIRM_MAX_MINUTES)]
+    """The auto-confirm child's command line: [sys.executable, <abs main.py>, "check_photos", "pending", "--apply",
+    "--min-age-h", "24", "--max-minutes", "15"] — PLAN Step 13b's, plus `--min-age-h AUTO_CONFIRM_MIN_AGE_H` (IMP-C25
+    acfix, 2026-10-27): the check looks up only the objects pushed at least that long ago, never the push that just
+    ran."""
+    return [sys.executable, _AC_SCRIPT, "check_photos", "pending", "--apply",
+            "--min-age-h", str(AUTO_CONFIRM_MIN_AGE_H), "--max-minutes", str(AUTO_CONFIRM_MAX_MINUTES)]
 
 
 def _auto_confirm_on():
@@ -14773,10 +14780,12 @@ def maybe_auto_confirm(library=None):
         route to (P-4: override > learned home > id prefix; one missing of several: the check reports those objects and
         confirms the rest) · the fetch lock held (probed exactly as the check takes it: without waiting, a stale lock
         reclaimable) -> the ONE reminder line AUTO_CONFIRM_REMINDER, N = every pending object, and no Chrome;
-      * else one line saying what runs, then `check_photos pending --apply --max-minutes 15` (auto_confirm_argv) as a
+      * else one line saying what runs — N = the due objects only, then ", M newer skipped" for the younger ones (when
+        there are any) —, then `check_photos pending --apply --min-age-h 24 --max-minutes 15` (auto_confirm_argv) as a
         child process through _cp_spawn — the check's own streaming idiom: every line re-printed as it comes, Ctrl+C
-        waits for the child to close its Chrome. Exit 0 (ok / partial) -> the child's last line is the check's summary;
-        a non-zero exit or an interruption -> ONE warning line.
+        waits for the child to close its Chrome. The check looks up only the due objects (--min-age-h), never the push
+        that just ran. Exit 0 (ok / partial) -> the child's last line is the check's summary; a non-zero exit or an
+        interruption -> ONE warning line.
     Any error -> ONE warning line. It never raises — SystemExit (a corrupt library) and Ctrl+C included — so the push
     command's exit code never changes. `library`: the caller's freshly loaded library, else it is loaded here.
     -> what happened: disabled | nothing | web | young | no-profile | locked | ran | failed | error."""
@@ -14807,8 +14816,10 @@ def maybe_auto_confirm(library=None):
         except mvcommon.LockHeldError:
             print(reminder)
             return "locked"
-        print(f"🔎 {len(pending)} pushed object(s) await Google Photos confirmation — confirming them now "
-              f"(check_photos pending --apply, at most {AUTO_CONFIRM_MAX_MINUTES} min; to turn this off: "
+        newer = len(pending) - len(due)
+        print(f"🔎 {len(due)} pushed object(s) await Google Photos confirmation — confirming them now"
+              f"{f', {newer} newer skipped' if newer else ''} (check_photos pending --apply --min-age-h "
+              f"{AUTO_CONFIRM_MIN_AGE_H}, at most {AUTO_CONFIRM_MAX_MINUTES} min; to turn this off: "
               f"\"auto_confirm_after_push\": false in mvconfig.json)", flush=True)
         code, interrupted = _cp_spawn(auto_confirm_argv())
         if interrupted or code != 0:

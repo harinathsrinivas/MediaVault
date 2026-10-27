@@ -18,6 +18,11 @@ datetime/PLAN.md P-11, P-19, Step 13b).
          replace and its point of no return) and of a push rolled back before any upload is identical with and without
          the hook, the hook starts after the last of them, no journal file is on disk when it starts; the web console's
          push actions run in-process and never reach the hook (webui/server.py starts no Python child — unchanged)
+  acfix  IMP-C25 follow-up (the user's finding of 2026-10-27, DECISIONS.md §1g: the check looked up the chunks pushed
+         minutes earlier): the child is `check_photos pending --apply --min-age-h AUTO_CONFIRM_MIN_AGE_H --max-minutes
+         15` (the argv pin, re-pinned on purpose); the line counts only the due objects and names the younger ones apart
+         (", N newer skipped", only when there are any) — the reminder still counts every pending object; end to end, the
+         check the auto-confirm starts hands only the old objects (and those with no push time) to the browser child
 
 THE SIX RETURN CONTRACTS (PLAN Step 13b asks for them here — verified by reading main.py; the function names are
 authoritative). "Succeeded" = returned normally — no exception: RollbackHardFail, SystemExit, KeyboardInterrupt, anything;
@@ -77,14 +82,17 @@ NOW = datetime(2026, 10, 14, 12, 0, 0, tzinfo=timezone.utc)
 TV1, TV2, TV3 = "tv-en-2020-acshow-s01e01", "tv-en-2020-acshow-s01e02", "tv-en-2020-acshow-s01e03"
 MOVIE = "mov-en-2021-acmovie"
 SPORT = "oth-en-2022-acmatch"
-CHILD_ARGV_TAIL = ["check_photos", "pending", "--apply", "--max-minutes", "15"]
+CHILD_ARGV_TAIL = ["check_photos", "pending", "--apply", "--min-age-h", "24", "--max-minutes", "15"]   # acfix re-pin
 SUMMARY = "🔎 check_photos pending: 2 object(s) — confirmed 2 · applied: 2 object(s) updated, 2 newly confirmed"
 
 
-def _header(n):
-    """The auto-confirm's own line before the child runs."""
-    return (f"🔎 {n} pushed object(s) await Google Photos confirmation — confirming them now (check_photos pending "
-            f"--apply, at most 15 min; to turn this off: \"auto_confirm_after_push\": false in mvconfig.json)")
+def _header(n, newer=0):
+    """The auto-confirm's own line before the child runs: n = the DUE objects only; the younger ones are named apart,
+    only when there are any (IMP-C25 acfix)."""
+    skipped = f", {newer} newer skipped" if newer else ""
+    return (f"🔎 {n} pushed object(s) await Google Photos confirmation — confirming them now{skipped} (check_photos "
+            f"pending --apply --min-age-h 24, at most 15 min; to turn this off: \"auto_confirm_after_push\": false in "
+            f"mvconfig.json)")
 
 
 def _reminder(n):
@@ -184,10 +192,15 @@ def test_an_old_pending_push_runs_the_exact_check_child_through_the_checks_spawn
 
     abs_main = os.path.abspath(main.__file__)
     assert os.path.normcase(abs_main) == os.path.normcase(os.path.join(REPO, "main.py"))
-    assert ac.child.calls == [[sys.executable, abs_main, *CHILD_ARGV_TAIL]]      # PLAN Step 13b: exactly this argv
-    assert main.auto_confirm_argv() == ac.child.calls[0]
-    # one line of its own, then the child's streamed output — whose last line is the check's summary
-    assert capsys.readouterr().out.splitlines() == [_header(2), SUMMARY]
+    assert ac.child.calls == [[sys.executable, abs_main, "check_photos", "pending", "--apply", "--min-age-h", "24",
+                               "--max-minutes", "15"]]   # PLAN Step 13b + IMP-C25 acfix (2026-10-27): exactly this argv
+    assert main.auto_confirm_argv() == ac.child.calls[0] == [sys.executable, abs_main, *CHILD_ARGV_TAIL]
+    # one line of its own — the due object counted, the young one (2 h) named apart — then the child's streamed output,
+    # whose last line is the check's summary
+    assert capsys.readouterr().out.splitlines() == [
+        "🔎 1 pushed object(s) await Google Photos confirmation — confirming them now, 1 newer skipped (check_photos "
+        "pending --apply --min-age-h 24, at most 15 min; to turn this off: \"auto_confirm_after_push\": false in "
+        "mvconfig.json)", SUMMARY]
 
 
 def test_the_child_finds_the_fetch_lock_free_and_none_is_left_behind(ac):
@@ -234,11 +247,24 @@ def test_an_unknown_push_time_counts_as_old(ac):
     assert len(ac.child.calls) == 1
 
 
-def test_one_old_object_is_enough_and_the_check_covers_every_pending_one(ac, capsys):
+def test_one_old_object_is_enough_and_only_the_old_ones_are_counted(ac, capsys):
+    # IMP-C25 acfix: one old object starts the check, which looks up only the old ones (--min-age-h) — the line counts
+    # them and names the younger ones apart (until 2026-10-27 it counted, and the check looked up, all three)
     _save(_leaf(ac.root, TV1, hours_ago=50), _leaf(ac.root, TV2, hours_ago=1), _leaf(ac.root, TV3, hours_ago=0.1))
 
     assert main.maybe_auto_confirm() == "ran"
-    assert capsys.readouterr().out.splitlines()[0] == _header(3)
+    assert capsys.readouterr().out.splitlines()[0] == _header(1, newer=2)
+    assert ac.child.calls == [main.auto_confirm_argv()]
+
+
+def test_with_no_younger_object_the_line_names_none(ac, capsys):
+    # an unknown push time counts as old (due) here too; no ", 0 newer skipped"
+    _save(_leaf(ac.root, TV1, hours_ago=30), _leaf(ac.root, TV2, push_time=False))
+
+    assert main.maybe_auto_confirm() == "ran"
+    assert capsys.readouterr().out.splitlines()[0] == (
+        "🔎 2 pushed object(s) await Google Photos confirmation — confirming them now (check_photos pending --apply "
+        "--min-age-h 24, at most 15 min; to turn this off: \"auto_confirm_after_push\": false in mvconfig.json)")
 
 
 def test_nothing_pending_is_silent(ac, capsys):
@@ -780,7 +806,7 @@ def test_the_auto_confirms_own_child_command_line_is_a_valid_check_and_never_rea
 
     _dispatch(main.auto_confirm_argv()[2:], cmd_check_photos=lambda **kw: checks.append(kw) or {"status": "ok"})
 
-    assert [(c["scope"], c["apply"], c["max_minutes"]) for c in checks] == [("pending", True, 15)]
+    assert [(c["scope"], c["apply"], c["min_age_h"], c["max_minutes"]) for c in checks] == [("pending", True, 24, 15)]
     assert events == []                                               # no hook in the child: no recursion
 
 
@@ -1052,8 +1078,9 @@ def test_with_or_without_the_hook_a_real_archive_journals_exactly_the_same_and_t
     assert at_spawn == [[]]                                              # no journal on disk: no journal scope open
     assert mvcommon.load_library()[PINNED] == entry_without and entry_without["status"] == "archived"
     out = capsys.readouterr().out
-    # the archive's own output unchanged, then the hook's: 3 pending — the old object + the new push's two chunks
-    assert out == out_without + "\n".join([_header(3), SUMMARY]) + "\n"
+    # the archive's own output unchanged, then the hook's: the old object is due; the new push's two chunks (pushed at
+    # NOW) are named apart and never looked up (IMP-C25 acfix — until 2026-10-27 this line counted all 3)
+    assert out == out_without + "\n".join([_header(1, newer=2), SUMMARY]) + "\n"
 
 
 def test_a_push_rolled_back_before_any_upload_journals_the_same_and_never_reaches_the_check(
@@ -1114,3 +1141,42 @@ def test_the_web_console_starts_no_main_py_child():
     assert not called & {"Popen", "system", "popen", "spawnv", "spawnl", "execv", "execl",
                          "create_subprocess_exec", "create_subprocess_shell"}, called
     assert not [node for node in ast.walk(tree) if isinstance(node, ast.Attribute) and node.attr == "executable"]
+
+
+# ===========================================================================
+# acfix — the auto-confirm looks up only the objects old enough (IMP-C25 follow-up, 2026-10-27)
+# ===========================================================================
+def test_the_auto_confirm_child_looks_up_only_the_old_objects_never_the_push_that_just_ran(ac, monkeypatch, capsys):
+    # The user's finding (DECISIONS.md §1g): after a prep_push_rep_enrich of a 9-chunk movie, the auto-confirm looked up
+    # the 9 chunks pushed minutes earlier. Here the REAL chain runs in-process: the auto-confirm's own argv through
+    # main.py's dispatcher into the real cmd_check_photos, whose browser child (`mainfetch.py check --run <dir>`) is
+    # played by a recorder of the objects it is handed to look up. TV1 is 30 h old, TV2's push time is unknown (old);
+    # TV3 (6 min) and MOVIE (23.9 h) are younger than AUTO_CONFIRM_MIN_AGE_H.
+    _save(_leaf(ac.root, TV1, hours_ago=30), _leaf(ac.root, TV2, push_time=False), _leaf(ac.root, TV3, hours_ago=0.1),
+          _leaf(ac.root, MOVIE, hours_ago=23.9))
+    handed = []
+
+    def spawn(argv):
+        if os.path.basename(argv[1]) == "main.py":           # the auto-confirm's child: main.py check_photos …
+            try:
+                _dispatch(argv[2:])
+            except SystemExit as stop:
+                return stop.code, False
+            return 0, False
+        run_dir = argv[argv.index("--run") + 1]              # the check's browser child: mainfetch.py check --run <dir>
+        doc = main._cp_read_json(os.path.join(run_dir, "run.json"))
+        handed.append((doc.get("min_age_h"), [o["manual_id"] for o in doc["objects"]]))
+        main._cp_write_json(os.path.join(run_dir, "progress.json"), {"v": 1, "state": "complete", "reason": None})
+        return 0, False
+
+    monkeypatch.setattr(main, "_cp_spawn", spawn)
+
+    assert main.maybe_auto_confirm() == "ran"
+
+    assert handed == [(24, [TV1, TV2])]                       # only these are looked up — never TV3 or MOVIE
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == _header(2, newer=2)
+    assert "  2 object(s) pushed less than 24 h ago skipped — checked at a later push" in out
+    assert out[-1].startswith("🔎 check_photos pending: 2 object(s) — ")     # the check's summary: the 2 old ones
+    still = {o["manual_id"] for o in mvcommon.unverified_objects(mvcommon.load_library(), NOW)}
+    assert {TV3, MOVIE} <= still                              # the young ones wait for a later push

@@ -34,10 +34,19 @@ rebase or stash. Never edit PROGRESS.md / PRIORITY.md (the orchestrator does).
       with" names --min-age-h), the boundary ×5 (24 h looked up, 24.01, 23.99 skipped, no push time looked up, a future
       push skipped), every scope after --account (+ the `:g` note, + unchanged without it)). Neighbours
       (test_auto_confirm, test_c25_regression_pins, test_map_photos, test_resolve_photos) 406 passed; smoke 102
-      passed — (this commit; its SHA is recorded by acfix.b)
-- [ ] acfix.b main: `auto_confirm_argv()` + `--min-age-h`, maybe_auto_confirm's line (due only, ", N newer
-      skipped"), the comments; tests/test_auto_confirm.py (argv pin re-pinned, header, the chain end to end),
-      tests/test_c25_regression_pins.py (re-pin recorded, the new pins registered)
+      passed — 805cf2c
+- [x] acfix.b main: `auto_confirm_argv()` + `--min-age-h`, maybe_auto_confirm's line (due only, ", N newer
+      skipped"), the comments (section comment, AUTO_CONFIRM_MIN_AGE_H — "covers every pending object" is gone —,
+      auto_confirm_argv / maybe_auto_confirm docstrings); tests/test_auto_confirm.py 164 passed (162 + 2; the argv pin
+      re-pinned with a literal argv and a literal line, `_header(n, newer)`, CHILD_ARGV_TAIL, the "covers every pending
+      one" test renamed `…only_the_old_ones_are_counted` (1 counted, 2 newer), the real-archive journal test's line now
+      `_header(1, newer=2)` (its new push's 2 chunks — the finding itself), the child's argv parses with min_age_h 24;
+      NEW: no younger object -> no "newer" part, and the chain end to end (the auto-confirm's argv through the real
+      dispatcher into the real cmd_check_photos: only the 30 h + no-push-time objects are handed to the browser child,
+      never the 6 min / 23.9 h ones)); tests/test_c25_regression_pins.py 42 passed (39 + 3: the re-pin recorded in the
+      registry docstring, the 3 new pins registered). Neighbours (+ test_check_photos, test_prep_push_rep_enrich_cli,
+      test_prep_keeps_split_record, test_cli_parsers, test_fetch_child_stream) 553 passed; smoke 102 passed — (this
+      commit; its SHA is recorded by acfix.c)
 - [ ] acfix.c docs: README, ARCHITECTURE, OPERATIONS_QA (+ mvconfig.example.json's comment) — the argv, the lines,
       the option; the main.py line references this change shifts
 - [ ] acfix.d gates: disarm probes (isolated scratch copy) · full suite · smoke (sequential) · self-review ·
@@ -91,3 +100,8 @@ rebase or stash. Never edit PROGRESS.md / PRIORITY.md (the orchestrator does).
   correct code behaviour, an artefact of the path. The 13 re-run on the same copy with pytest's default basetemp: 13
   passed. Baseline confirmed = full 3278 · smoke 102 (the dispatch's numbers). Rule kept: every gate runs with the
   default basetemp. Per module at 1f00913: test_check_photos 158 · test_auto_confirm 162 · test_c25_regression_pins 39.
+- Model / attribution: dispatched to executor-fable (Fable 5.1). After the first tool call the harness switched the
+  commit attribution to Claude Opus 5.5 (a usage-limit fallback — no MODEL-FALLBACK banner came with the dispatch), so
+  acfix.0 (18f3a33) and acfix.a (805cf2c) carry `Co-Authored-By: Claude Opus 5.5`. The coordinator then resumed the
+  work after the limits reset; the attribution flipped to Fable 5.1 and back to Opus 5.5 within minutes. Every commit
+  carries the trailer the harness gives at the moment it is made (the model actually running).

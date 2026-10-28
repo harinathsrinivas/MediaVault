@@ -561,3 +561,9 @@ No other step of this plan uses candidates.
 - **2026-10-28 — 🚦 R3 check applies**: card answers "Resume now (Recommended)" (the tv check after the low-memory stop)
   and "Apply anime + movies now (Recommended)" → `check_photos account:anime|movies --apply-run <run>` after a fresh
   backup; tv is applied once its run is complete (asked again).
+- **2026-10-28 — 🚦 R4**: card answer "Count R3's sweep as R4 (Recommended)" → the R3 photo_id-first check of every
+  movies/tv/anime object (2,242; applied) is recorded as the R4 full-library sweep; no further Chrome run. Others (35)
+  stay unchecked until its Chrome profile exists (R0 / IMP-D18).
+- **2026-10-28 — map_photos reporting fixes**: card answer "Fix both inside C25 (Recommended)" → mpfix: (1) the dry-run
+  apply preview drops records already on record, exactly like `--apply`; (2) `not-listed` is not used for an item
+  uploaded after the account's crawl began (that is "not crawled yet", not archive/trash).

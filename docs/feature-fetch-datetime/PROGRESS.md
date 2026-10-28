@@ -90,7 +90,7 @@ The user archives from this folder — check for a running `main.py` before any 
 | R2 | live verification pack (user) | in_progress | orchestrator + user | 2535308 | | orchestrator share M4–M9, M18 PASSED 2026-10-20/21; user share M9 web, M10, M11, M14, M15 left |
 | R3 | real-library apply (user) | done | orchestrator (each apply user-approved) | | | 2026-10-28: map apply (1,982 confirmed) · check by photo_id anime 158 / movies 971 / tv 1,080 confirmed, applied · split-info repair 3 · failed list 16 |
 | 16 | docs (architect) | done | architect (opus) | 15a732f (merge 699ad8a) | | R2/R3 result placeholders are filled after R3 |
-| R4 | full-library sweep + outlier/failed lists (user) | pending | user | | | at the very end (OD-7) |
+| R4 | full-library sweep + outlier/failed lists (user) | done | orchestrator | | | user ruling 2026-10-28: the R3 photo_id-first sweep (2,242 objects, applied) counts as R4; failed list 16 |
 | 17 | IMP bookkeeping + NEXT pointer question | pending | | | | OD-16 |
 | 18 | final verification + PR | pending | | | | 🚦 Checkpoint 1 |
 

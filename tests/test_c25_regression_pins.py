@@ -29,6 +29,9 @@ Changing anything pinned here is a REVIEWED decision (re-pin it on purpose, in t
                                    books nothing · test_check_photos.py: a throttled check (and the auto-confirm's
                                    `pending --apply --min-age-h 24`) records nothing it did not settle; a zero answer
                                    nothing could verify is reported, never booked
+     map: confirmed-but-unlisted   (IMP-C25 thfix) test_map_photos.py: a confirmed record whose photo_id a fresh crawl
+     is no loss                    does not list is `not-listed` — off the failed list, todo and LOUD block, the apply
+                                   leaves it; every other verdict unchanged
      calculate_file_hash           test_gp_capture.py (SHA-256 for 0 / 10 / 196 615 bytes + the same-pass SHA-1) ·
                                    test_mvcommon.py (the progress bar; a missing file -> None)
      ENTRY_TYPE_KEYS literal       test_entry_schema_guard.py (d1)
@@ -104,6 +107,10 @@ EXISTING_PINS = [
     ("test_check_photos.py", "test_a_throttled_check_records_nothing_for_the_object_at_hand_and_a_rerun_continues"),
     ("test_check_photos.py", "test_the_auto_confirms_check_under_a_throttle_records_nothing_it_did_not_settle"),
     ("test_check_photos.py", "test_an_unverified_zero_answer_is_reported_but_never_booked"),
+    # map: a confirmed object the crawl does not list is no loss (IMP-C25 thfix, 2026-10-28)
+    ("test_map_photos.py", "test_a_confirmed_object_the_crawl_does_not_list_is_not_listed_never_a_loss"),
+    ("test_map_photos.py", "test_an_apply_leaves_a_not_listed_objects_confirmed_record_as_it_is"),
+    ("test_map_photos.py", "test_not_listed_needs_a_confirmed_record_a_fresh_crawl_and_a_photo_id_it_does_not_list"),
     # trigger_download source digest
     ("test_fetch_search_wait.py", "test_trigger_download_source_is_pinned"),
     ("test_fetch_search_wait.py", "test_the_search_wait_it_relies_on_is_pinned"),

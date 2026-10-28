@@ -74,7 +74,21 @@ DECISIONS.md / PRIORITY.md (the orchestrator's).
       now unverified): 6 check tests + 1 manual-fetch test get `_canary_inventories` (they test what IS booked), the
       resolve not-found S3u line gains its unverified marker; registry +7 pins. Runs: the 22 affected modules 1599
       passed · smoke 102 passed — this commit
-- [ ] thfix.d Fix 2 — map_photos `not-listed` (D13); tests
+- [x] thfix.d Fix 2 — map_photos `not-listed` (D13). main: _mp_index adds each account's `listed` ids (the latest
+      complete enumeration); _mp_unlisted (a trusted block's CONFIRMED record — confirmed + a verified proof + a
+      photo_id — in a FRESH account whose latest enumeration does not list it; the routing account first); _mp_nowhere
+      returns `not-listed` after the freshness gates and before the IMP-C27 detectors (item = the record's facts, proof
+      = its verified_by, the note "in '<a>' per its confirmed record, but the crawl does not list it — maybe archived or
+      in the trash; check it with: python main.py check_photos <id>"); _mp_recency skips it; MAP_STATES gains it after
+      wrong-account; no failed reason / todo row / learned record; not in the LOUD block or inconsistencies.csv; a
+      partial-set sibling counts it present; the summary's "Not listed by the crawl — NOT a loss: …" block + one line
+      per object (no photo id); docstrings (section comment, _mp_index, _mp_nowhere, cmd_map_photos). Tests +7
+      (test_map_photos: the R3 case — verdict, note, item, proof, no partial set, no LOUD block, the block, Verdicts
+      line, off todo / inconsistencies, mapping.csv status + note · --apply leaves the block byte-equal, no learned
+      record, no failed row · today's verdicts kept ×4: unconfirmed, manual proof, stale crawl, photo_id listed (other
+      bytes -> conflict)); registry +3 pins. A slip caught by the run: the edit had dropped the `def` line of the next
+      test (test_with_devices_an_old_object_gets_the_phones_verdict) — restored before the commit. Runs: map + check +
+      apply engine + primitives + pins + resolve 717 passed · smoke 102 passed — this commit
 - [ ] thfix.e docs — README, ARCHITECTURE, docs/OPERATIONS_QA.md (two new Q&As), the pin registry
 - [ ] thfix.f disarm probes on a `git archive` scratch copy (each part reverted alone turns a test red; restored byte
       for byte)

@@ -1,4 +1,4 @@
-STATE: IN PROGRESS
+STATE: COMPLETE
 
 # IMP-C25 follow-up — a throttled Google Photos search is never a "not found"; map: confirmed-but-unlisted is no loss (thfix) — resumable status
 
@@ -201,8 +201,63 @@ DECISIONS.md / PRIORITY.md (the orchestrator's).
   | M8 | the summary's not-listed block | test_map_photos::test_a_confirmed_object_the_crawl_does_not_list_is_not_listed_never_a_loss |
   | M9 | MAP_STATES counts not-listed | test_map_photos::test_a_confirmed_object_the_crawl_does_not_list_is_not_listed_never_a_loss |
   | M10 | the routing account's record first | test_map_photos::test_mp_unlisted_needs_that_accounts_crawl_fresh_and_names_the_routed_account_first |
-- [ ] thfix.g gates (full, then smoke), secrets scan, self-review, STATE: COMPLETE, the final commit
-      `fix(imp-c25): a throttled Google Photos search is never a "not found"; map: confirmed-but-unlisted is not a loss`
+      — e3f9ff8
+- [x] thfix.g gates, on e3f9ff8 (= the final code: the final commit changes only this file):
+      · full suite 3409 passed, 1 warning (the pre-existing starlette/httpx deprecation), 277 s = the baseline 3309
+        + 100 new (test_session_detector +24, test_locator +25, test_c25_regression_pins +22, test_map_photos +10,
+        test_check_photos +7, test_gpweb +4, test_gp_inventory +3, test_resolve_photos +3, test_gprpc +1,
+        test_warm_profiles +1; per-module counts at cd0ef94 vs HEAD from `--collect-only`); the known load flake did
+        not fire. THEN smoke 102 passed, 1 warning, 14 s — one after the other, in the worktree, pytest's default
+        basetemp, no xdist (not installed).
+      · secrets: the staged diff scanned before every WIP commit (scratchpad `secrets_scan.py`: 9 credential
+        patterns + P-15 private data — real photo ids, e-mail addresses, Google URLs with a query — + risky file
+        names), and the whole range cd0ef94..e3f9ff8 (23 files, 2,362 added lines) — 0 hits every time.
+      · self-review below · STATE: COMPLETE · the final commit `fix(imp-c25): a throttled Google Photos search is never
+        a "not found"; map: confirmed-but-unlisted is not a loss` (this commit — its SHA is in the final report and
+        `git log -1`)
+
+## Self-review (the whole diff cd0ef94..e3f9ff8, code read in full)
+(a) The dispatch's acceptance bullets, one by one:
+- Fix 1.1 — met. A zero answer of a LISTING stage stands only when a canary found via the same transport lists its
+  item (`_zero_check`); sources in the dispatch's order: an item a text query found earlier this run -> the account's
+  crawl inventory (MediaVault-tagged chunk names first; A10: the latest complete enumeration) -> the library's
+  confirmed records (uploaded name). Canary zero (confirmed by a second item when there is one) -> PhotosThrottledError:
+  no verdict, no not-found row, no failed row, no learned record, nothing applied for that object (check: no results
+  line; fetch: no row, the batch stops; resolve: no answer logged; locate: stops); stop reason `throttled` in the
+  check (resumable — the re-run re-looks the object); one line per command with the ~30 min advice.
+- Fix 1.2 — met. At most one canary per zero-answer object (a second only on the way to a stop, A2); a listing search
+  or a passed canary on that transport is reused for CANARY_REUSE_S = 10 s (code comment, ARCHITECTURE §8.4 / §14);
+  never for found objects or S0a / S0b (C19).
+- Fix 1.3 — met. No canary -> recorded as today + `zero_check: "unverified"` (results field, printed marker, report
+  note and `Unverified: N object(s) …` line). Policy decided and documented: never on the failed list (check reason
+  None; the fetch books no not-found / s4-skipped row).
+- Fix 1.4 — met, with ONE surfaced deviation (A1): only a sign-in page (accounts.google.com) — and Google Photos'
+  signed-out landing page at a session's very first look — says "logged out"; that same page after signed-in Photos,
+  Google's "unusual traffic" page and any other page read `throttled`; the legacy zero streak too.
+- Fix 1.5 — met. CHECK_* pacing unchanged; the evidence (F-c) supports no spacing; documented (ARCHITECTURE §8.4,
+  OPERATIONS_QA).
+- Fix 2 — met. `not-listed` (after the freshness gates; confirmed record + verified proof + photo id not in the fresh
+  account's latest enumeration): off the failed list and resolutions_todo.csv, out of the LOUD block, its own block in
+  summary.txt, status + note in mapping.csv, nothing applied; MAP_STATES, report text, docs, pins.
+- Docs — met: README, ARCHITECTURE, OPERATIONS_QA (what the user sees, what is recorded, how to resume; the stop
+  reason; not-listed); the two Q&As (one title aligned with the line's real words). DECISIONS / PROGRESS / PLAN /
+  PRIORITY untouched.
+- Tests hermetic (the fake world only); disarm 63/63 on an isolated scratch copy, restored byte for byte.
+(b) Downstream consumers: locate_object's result gains `zero_check` (every reader uses .get; the contract text in the
+  docstring and ARCHITECTURE §8.4 updated); results.jsonl gains `zero_check` (main's _cp_rows reads it — runs from
+  before have none and read as verified: A11, documented); progress reason `throttled` -> status `stopped` (exit 1) ->
+  the auto-confirm's existing warning line (tested); the crawler's exit 4 / run result `throttled` and the warm-up's
+  THROTTLED are read by nothing but the log and `--status` (grep); map's `not-listed` is excluded by the apply, the
+  todo and the failed list by construction (tested). The web console parses none of these (grep: no consumer). For the
+  plan: the R3 quarantined runs must not be applied (A11); the R4 sweep now stops on a throttle and resumes on a
+  re-run.
+(c) Change-gates: rollback untouched (no RollbackJournal / recover_journal / PONR / .mediavault_txn change — the extra
+  `_journal_sync` on the throttle path is the fetch's own crash-cleanup journal, the same call the normal path makes);
+  ENTRY_TYPE_KEYS untouched (no library entry type or field: `zero_check` lives in run files, `not-listed` is a map run
+  status); smoke 102 passed after the full suite.
+Observations, not fixed (out of scope): tools/gp_inventory.ensure_logged_in tests "photos.google.com" as a SUBSTRING
+  of the URL, so a sign-in URL whose continue= parameter names photos.google.com passes it (pre-existing; untouched);
+  a few added lines are 121-123 characters (the codebase has 180+ such lines; no linter is configured).
 
 ## Findings (evidence read 2026-10-28; counts and times only)
 - F-a The false "logged out" (movies run 20261027T122740Z, stop 13:32:12Z). RPC was off for the whole session from its
@@ -329,6 +384,16 @@ DECISIONS.md / PRIORITY.md (the orchestrator's).
 - A9 Residual: a zero cached during a flaky throttle phase whose canary passed (the per-run listing cache reuses a
   query's answer) and an isolated flaky zero amid working searches (deathnote06) can still be recorded not-found — a
   later check or the R4 sweep re-looks them; no canary scheme can see them.
+- A10 The dispatch's "the account's fresh crawl inventory" is read as its LATEST COMPLETE enumeration, whatever its
+  age (map's 24 h freshness limit is not applied): a canary only needs an item known to be in the account, and an
+  item deleted since then is caught by the confirmation canary (D10). Residual: if BOTH canary items picked were
+  deleted after that crawl, the run stops with a false "throttled" — the line says re-run in 30 min, and a re-crawl
+  refreshes the pool. An account with a single canary item at all (one tiny inventory, or one confirmed record) stops
+  on that item's deletion in every run in which no search has found anything before (source 1 would be a second
+  item).
+- A11 Pre-fix runs: check runs started before this change carry no `zero_check`; their zero answers (the R3 dry runs'
+  quarantined runs included) may be throttle zeros and read as verified. Documented (OPERATIONS_QA, ARCHITECTURE §8.10):
+  never continue or `--apply-run` them — check the scope afresh with `--recheck`.
 
 ## Log
 - Model / attribution: dispatched to executor-fable (Fable 5.1), no MODEL-FALLBACK banner. The harness switched the
@@ -346,3 +411,24 @@ DECISIONS.md / PRIORITY.md (the orchestrator's).
   tests/test_resolve_photos.py is thfix.e in progress, written in this same session with its context intact (the docs,
   the forward ref verification, the resolve line's wording, the per-command pins). KEPT: coherent, and its tests pass
   (test_resolve_photos + test_c25_regression_pins 134 passed · smoke 102 passed).
+
+## thfix — [status: done]
+- Executor: executor-fable
+- Model: fable
+- Mode: single-executor (worktree `MediaVault-thfix`, branch `tmp/c25_thfix`, base cd0ef94; WIP commit per sub-task)
+- Files changed: mainfetch.py, main.py, gprpc.py, tools/gp_inventory.py, tools/warm_profiles.py, README.md,
+  ARCHITECTURE.md, docs/OPERATIONS_QA.md, tests/gphotos_fake.py, tests/test_session_detector.py, tests/test_gprpc.py,
+  tests/test_gpweb.py, tests/test_locator.py, tests/test_check_photos.py, tests/test_resolve_photos.py,
+  tests/test_gp_inventory.py, tests/test_warm_profiles.py, tests/test_map_photos.py, tests/test_fetch_photos_tab.py,
+  tests/test_fetch_search_wait.py, tests/test_fetch_manual.py, tests/test_c25_regression_pins.py, this file.
+- Outcome: a Google Photos search that answers nothing is a "not found" only while a canary (an item known to be in
+  that account) shows the search works; a canary that finds nothing as well stops the run as `throttled` — nothing
+  recorded for the object at hand, one ⏸️ line with the 30-minute advice per command (fetch, locate, check_photos
+  incl. the auto-confirm, resolve_photos, the crawler: exit 4, the warm-up: THROTTLED). No canary -> `unverified`,
+  never booked. A throttle is never "logged out" again: the page classifier reads Google Photos' signed-out page as a
+  sign-out only before the session showed signed-in Photos (the R3 false "logged out" was a server redirect there mid-
+  throttle). map_photos: a confirmed object a fresh crawl does not list is `not-listed`, never a possible loss.
+- Key decisions: D1–D13 and A1–A11 above (A1 the one deviation from the dispatch's literal wording; A10 / A11 new in
+  thfix.g).
+- Verification: full suite 3409 passed (277 s) then smoke 102 passed (14 s), sequential, no xdist; disarm 63/63 red on
+  an isolated scratch copy, restored byte for byte; secrets 0 hits over cd0ef94..e3f9ff8.

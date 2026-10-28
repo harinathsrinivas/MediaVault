@@ -98,6 +98,13 @@ The user archives from this folder — check for a running `main.py` before any 
 A d8dd71f (UI-first) · B 868cd27 (RPC-first) · C 5e7f0f6 (hybrid) — all COMPLETE and gate-verified by the orchestrator (re-runs A 2493/82 · B 2512/82 · C 2502/82); judge-v2 recommended C; user picked C at 🚦 G12 2026-10-12; tags candidates/imp_c25/step-12/{c-chosen,a-rejected,b-rejected}.
 
 ## Operations log (crawls, dry-runs, applies — redacted counts only)
+- 2026-10-28 🚦 R3 MAP APPLY (user ruling "Apply after the fix"; thfix merged c6d9990, orchestrator re-run full 3409 ·
+  smoke 102; nothing else running): backup `D:\MV_lib_backup\20261028_1549\` (hashes match) · re-crawl movies 1,019
+  (7 new) · tv 1,122 · anime 158 · `map_photos all` dry run → `--apply`: mapped 2,176 · wrong-account 31 · not-listed 1
+  (Pirates BP chunk 6 — not a loss) · inconsistent 4 · not-backed-up-yet 15 (10 movies pushed 2026-10-27) ·
+  possible-loss 15 (13 Friends + 2 legacy last chunks) · stale-inventory 35 (others) → library: 2,207 objects updated
+  (1,982 newly confirmed), 0 conflicts, 0 orphans; learned records 2,225; failed list 19 rows. Run dir
+  `~/.mediavault/gphotos/map/20261028T074958Z`. Next: `check_photos account:<a> --approaches best --recheck` dry runs.
 - 2026-10-28 R3 prep, check dry runs INVALID (throttle): Google Photos search answered 0 for items that are there
   after ~25–30 objects (anime not-found 133 of 158, movies 370 of 509, tv hundreds); the movies run stopped as "logged
   out" — FALSE (a crawl minutes later: 1,012 ids, 0 errors); S0a photo_id look-ups kept working (movies 108). The tv
@@ -133,7 +140,7 @@ A d8dd71f (UI-first) · B 868cd27 (RPC-first) · C 5e7f0f6 (hybrid) — all COMP
 `Step 12 DONE 2026-10-12: all three candidates COMPLETE + gate-verified (A 2493/82 · B 2512/82 · C 2502/82); judge-v2 → C; user picked C at 🚦 G12; squash-merged 6553390; candidate history in tags candidates/imp_c25/step-12/{c-chosen,a-rejected,b-rejected}.`
 `Side fix (user request 2026-10-08) DONE: Chrome never shows "Restore pages?" — 537ff7e (code 0d47140, tests 49367a1, d444f12): --hide-crash-restore-bubble on every launch + profiles marked cleanly exited before every launch and after every close; full 2484 · smoke 82 · disarm 37/37. Follow-ups for Step 14/15: warm_profiles leaves Chrome running (already Step 14); Step 11's per-pid process query lacks -ErrorAction Stop (a WMI failure reads as 'process gone'); under heavy load the Step 11 close twice failed to close Chrome (cand C); bounded driver.get page-load timeout; close a launched Chrome when attach fails (DECISIONS §1e).`
 `acfix (auto-confirm checked the push that just ran — user finding 2026-10-26) DONE 2026-10-28 cd0ef94 (WIP 18f3a33..e92f3a6; full 3309 · smoke 102 · disarm 26/26; orchestrator re-run 3309 / 102 green); fast-forwarded here.`
-`thfix — dispatched 2026-10-28 to executor-fable · worktree C:/Users/harin/PycharmProjects/MediaVault-thfix (tmp/c25_thfix from cd0ef94) · status .candidates/c25-thfix/STATUS.md.`
+`thfix DONE 2026-10-28 4f1f4fe (WIP 5bab898..e3f9ff8; full 3409 · smoke 102 · disarm 63/63; orchestrator re-run 3409 / 102 green); merged here c6d9990. A11: the pre-fix R3 check runs stay quarantined — re-check with --recheck.`
 `Noticed, not changed (register at Step 17, not started — scope rule): a fetch lock whose holder pid is dead blocks a crawl for up to stale_after (1 h) (a fetch reclaims after 30 s); chromedriver start crash 0xC0000142 under low memory.`
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes
 alone; re-run it before treating a red full suite as a regression.

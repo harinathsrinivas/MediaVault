@@ -36,7 +36,7 @@ import mvcommon
 from test_check_photos import (ONE, _Beat, _only_read_only_rpcids_ever, _single, clock, cw)  # noqa: F401
 from test_gphotos_primitives import (ANIME, EP_SPLIT, EP_WHOLE, MOVIE, PID, T, _csv_rows, _edit, _edited_csv,  # noqa: F401
                                      _failed, _h, lib)
-from test_locator import TAKEN, _bytes, _capture, _obj, _up, _whole
+from test_locator import TAKEN, _bytes, _canary_inventories, _capture, _confirmed_elsewhere, _obj, _up, _whole
 from test_map_photos import _main_guard
 
 REAL_STDIN_IS_TTY = main._rp_stdin_is_tty   # captured before any fixture replaces it
@@ -389,10 +389,47 @@ def test_a_search_term_is_kept_and_tried_by_s3u_at_once(rp, capsys, listed):
         assert "      ✔ your term found it — proof filename; recorded (and kept as its search term)" in out
         assert (learned[1]["photo_id"], learned[1]["source"], learned[1]["approach"]["tried"]) == (
             item.photo_id, "check", "s3u_user_query")
-    else:
-        assert "      🔍 your term found no verified item (user_query not-found(0))" in out and len(learned) == 1
+    else:   # [IMP-C25 thfix] no item to test the search with in this world: the zero answer is unverified
+        assert ("      🔍 your term found no verified item (user_query not-found(0); unverified: no item known to be "
+                "in 'tv' could show that its search was answering)") in out and len(learned) == 1
     queries = [e["request"][0] for e in rp.world.rpc_log if e["rpcid"] == "EzkLib"]
     assert queries == ["demo fourth season opener"]                                    # S3u alone, nothing else
+
+
+def test_a_search_terms_zero_answer_is_verified_by_a_confirmed_record_in_the_library(rp, capsys):
+    # IMP-C25 thfix: resolve_photos hands the guard its library — another object's CONFIRMED record in 'tv' is the
+    # canary there (no crawl inventory), so the term's zero answer stands: no "unverified" marker.
+    data = _bytes("r1-legacy")
+    rp.world.add_item("tv", _up(N1, S1), data=data, taken=TAKEN)
+    _object(rp, R1, N1, S1, data)
+    _confirmed_elsewhere(rp.world, rp.folder)
+    rp.world.script_search("tv", "demo fourth season opener", [])
+    rp.keyboard("s", "demo fourth season opener", "n")
+
+    main.cmd_resolve_photos()
+
+    out = capsys.readouterr().out
+    assert ("      🔍 your term found no verified item (user_query not-found(0)) — kept as its search term: every fetch "
+            "tries it (S3u)") in out
+
+
+def test_a_search_term_under_a_throttle_is_kept_but_no_answer_is_recorded(rp, capsys):
+    # IMP-C25 thfix: S3u's zero answer meets a canary that finds nothing either -> that account's objects stop; the
+    # user's term is kept (the object's search_override) but no answer is logged: the object is asked again next time.
+    _canary_inventories(rp.world, ("tv",))
+    _object(rp, R1, N1, S1, _bytes("r1-legacy"))
+    rp.world.throttle("tv", after=0)
+    rp.keyboard("s", "demo fourth season opener")
+
+    res = main.cmd_resolve_photos()
+
+    out = capsys.readouterr().out
+    assert ("⏸️ Google Photos is throttled in 'tv' (a search for an item known to be there found nothing) — its "
+            "objects stop here (no verdict for the one at hand: it comes back next time; the answers given so far "
+            "are kept). Re-run resolve_photos in about 30 minutes.") in out
+    assert "your term found no verified item" not in out and "logged out" not in out and res["status"] == "ok"
+    assert mvcommon.read_resolved() == []                                              # asked again next time
+    assert [r["search_override"] for r in mvcommon.read_learned("tv")] == ["demo fourth season opener"]
 
 
 def test_not_uploaded_goes_to_the_imp_c27_list(rp, capsys):
@@ -595,6 +632,23 @@ def test_a_signed_out_profile_is_named_and_nothing_is_recorded(rp, capsys):
     out = capsys.readouterr().out
     assert "❌ Profile 'tv' is logged out." in out and res["status"] == "ok"
     assert mvcommon.read_resolved() == []
+
+
+def test_a_throttle_is_named_never_logged_out_and_nothing_is_recorded(rp, capsys):
+    # IMP-C25 thfix: Google's "unusual traffic" page is no sign-out — the account's objects stop, the object at hand
+    # gets no answer (it is asked again next time), nothing is recorded for it.
+    _object(rp, R1, N1, S1, _bytes("r1"))
+    rp.world.session["tv"] = "sorry"
+    rp.keyboard("k")
+
+    res = main.cmd_resolve_photos()
+
+    out = capsys.readouterr().out
+    assert ("⏸️ Google Photos is throttled in 'tv' (Google showed its 'unusual traffic' page) — its objects stop here "
+            "(no verdict for the one at hand: it comes back next time; the answers given so far are kept). Re-run "
+            "resolve_photos in about 30 minutes.") in out
+    assert "logged out" not in out and res["status"] == "ok"
+    assert mvcommon.read_resolved() == [] and mvcommon.read_learned() == []
 
 
 def test_confirmed_and_vanished_objects_are_left_out(rp, capsys):

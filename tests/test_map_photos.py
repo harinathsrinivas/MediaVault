@@ -1113,6 +1113,130 @@ def test_without_devices_no_phone_is_asked_and_objects_in_no_account_are_possibl
                     (M_WHOLE, "whole"): "possible-loss", (M_SPLIT, "chunk 3/3"): "possible-loss (partial set)"}
 
 
+UNLISTED_KEY = (M_SPLIT, "chunk 3/3")
+UNLISTED_PID = "AF1QipFAKEunlisted00000000001"
+
+
+def _confirmed_unlisted(world, **record):
+    """[IMP-C25 thfix — the R3 case of 2026-10-27: a movie's chunk 6/6, confirmed by its dedupKey on 2026-10-16, that the
+    2026-10-27 crawl did not list (archived?)] M_SPLIT's chunk 3/3 holds a trusted block with a CONFIRMED movies record
+    whose photo_id the movies crawl does not list; every other object is in its account's inventory. `record` overrides
+    the record's fields. -> the block as saved."""
+    chunk = world.library[M_SPLIT]["split_info"]["chunks"][2]
+    sha1 = hashlib.sha1(b"chunk three's own bytes").hexdigest()
+    rec = {"photo_id": UNLISTED_PID, "taken_ms": _ms("2024-03-09T06:03:02Z"), "upload_ms": 1_760_600_000_000,
+           "dedup_key": _key(b"chunk three's own bytes"), "gp_filename": chunk["filename"],
+           "verified_at": "2026-10-16T00:00:00Z", "verified_by": "dedupkey", "source": "confirm", "confirmed": True}
+    rec.update(record)
+    chunk["gphotos"] = mvcommon.new_gphotos_block(chunk["hash"], sha1=sha1, uploaded_name=chunk["filename"],
+                                                  accounts={"movies": {k: v for k, v in rec.items() if v is not None}},
+                                                  home_account="movies")
+    world.save().upload_all(skip={UNLISTED_KEY})
+    world.save()
+    return chunk["gphotos"]
+
+
+def test_a_confirmed_object_the_crawl_does_not_list_is_not_listed_never_a_loss(world, tmp_path, capsys):
+    _confirmed_unlisted(world)
+
+    res = world.run(out=tmp_path / "run", capsys=capsys)
+
+    rows = by_key(res)
+    three = rows[UNLISTED_KEY]
+    assert (three["status"], three["account"], three["reason"], three["partial_set"]) == (
+        "not-listed", "movies", None, False)
+    assert three["note"] == (f"in 'movies' per its confirmed record, but the crawl does not list it — maybe archived or "
+                             f"in the trash; check it with: python main.py check_photos {M_SPLIT}")
+    assert three["item"]["photo_id"] == UNLISTED_PID and three["proof"] == "dedupkey"
+    assert not rows[(M_SPLIT, "chunk 1/3")]["partial_set"]                     # the set is complete: no partial set
+    out = res["stdout"]
+    assert "NOT IN GOOGLE PHOTOS — POSSIBLE LOSS" not in out and "possible-loss" not in out
+    assert ("Not listed by the crawl — NOT a loss: 1 object(s) whose confirmed record names an item its account's "
+            "latest crawl does not list (archived, in the trash?) — nothing is recorded for them; check one with: "
+            "python main.py check_photos <id>") in out
+    assert f"    not-listed           {M_SPLIT} · chunk 3/3 — in 'movies' per its confirmed record (proof dedupkey)" in out
+    assert UNLISTED_PID not in out                                              # P-15: no photo id printed
+    assert "not-listed 1" in [line for line in out.splitlines() if line.startswith("Verdicts: ")][0]
+    assert UNLISTED_KEY not in {(r["manual_id"], r["object"]) for r in
+                                _read_csv(os.path.join(res["run_dir"], "resolutions_todo.csv"))}
+    assert UNLISTED_KEY not in {(r["manual_id"], r["object"]) for r in
+                                _read_csv(os.path.join(res["run_dir"], "inconsistencies.csv"))}
+    mapping = {(r["manual_id"], r["object"]): r for r in _read_csv(os.path.join(res["run_dir"], "mapping.csv"))}
+    assert (mapping[UNLISTED_KEY]["status"], mapping[UNLISTED_KEY]["note"]) == ("not-listed", three["note"])
+    assert UNLISTED_KEY not in {(r["manual_id"], r["label"]) for r in res["todo"]}
+
+
+def test_an_apply_leaves_a_not_listed_objects_confirmed_record_as_it_is(world, tmp_path, capsys):
+    block = _confirmed_unlisted(world)
+
+    res = world.run("--apply", out=tmp_path / "run", capsys=capsys)
+
+    assert by_key(res)[UNLISTED_KEY]["status"] == "not-listed"
+    assert mvcommon.load_library()[M_SPLIT]["split_info"]["chunks"][2]["gphotos"] == block   # untouched
+    assert not [r for r in mvcommon.read_learned() if r["label"] == "chunk 3/3" and r["manual_id"] == M_SPLIT]
+    assert not [r for r in mvcommon.read_failed() if (r["manual_id"], r["label"]) == UNLISTED_KEY]
+
+
+@pytest.mark.parametrize("case, status", [("unconfirmed", "possible-loss"), ("manual-proof", "possible-loss"),
+                                          ("confirmed-manual", "possible-loss"), ("stale-crawl", "stale-inventory"),
+                                          ("listed", "conflict"), ("listed-renamed", "possible-loss")])
+def test_not_listed_needs_a_confirmed_record_a_fresh_crawl_and_a_photo_id_it_does_not_list(world, tmp_path, case,
+                                                                                          status):
+    # Every other verdict keeps today's behaviour: an unconfirmed record, a manual proof (also under a `confirmed` flag
+    # no verified proof backs), a stale crawl of the confirmed account (every "in no account" verdict waits), or a
+    # photo_id the crawl DOES list — under the chunk's name with other bytes, or under another name.
+    record = {"unconfirmed": {"confirmed": None, "upload_ms": None},
+              "manual-proof": {"verified_by": "manual", "source": "manual", "confirmed": None},
+              "confirmed-manual": {"verified_by": "manual", "source": "manual"}}.get(case, {})
+    _confirmed_unlisted(world, **record)
+    if case == "stale-crawl":
+        world.inv.enumerated["movies"] = NOW - timedelta(hours=30)
+        world.save()
+    if case in ("listed", "listed-renamed"):   # the crawl lists the photo_id, holding other bytes
+        name = world.names[UNLISTED_KEY] if case == "listed" else "Another.Upload [ffffff].mkv"
+        rec = world.inv.add("movies", name)
+        rec["photo_id"] = UNLISTED_PID
+        world.save()
+
+    row = by_key(world.run(out=tmp_path / "run"))[UNLISTED_KEY]
+
+    assert row["status"] == status
+
+
+def test_a_not_listed_object_pushed_again_after_the_crawl_began_stays_not_listed(world, tmp_path):
+    # _mp_recency never turns a not-listed row into not-backed-up-yet: its CONFIRMED record says where it is, whatever
+    # a later push did (here a filename-proof record, and a capture of the chunk newer than the crawl's start).
+    _confirmed_unlisted(world, verified_by="filename")
+    chunk = world.library[M_SPLIT]["split_info"]["chunks"][2]
+    pushed = (ENUMERATED + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")      # a capture's '…Z' form
+    world.capture(M_SPLIT, chunk["hash"], hashlib.sha1(b"chunk three's own bytes").hexdigest(), pushed,
+                  chunk["filename"], role="chunk", index=3)
+
+    row = by_key(world.run(out=tmp_path / "run"))[UNLISTED_KEY]
+
+    assert (row["status"], row["proof"], row["account"], row["pushed_at"]) == ("not-listed", "filename", "movies",
+                                                                               pushed)
+
+
+def test_mp_unlisted_needs_that_accounts_crawl_fresh_and_names_the_routed_account_first():
+    # _mp_unlisted on its own (today _mp_nowhere's freshness gate runs first, but the helper does not rely on it): a
+    # stale crawl of the record's account never backs a not-listed; with confirmed records unlisted in two accounts,
+    # the account the object is routed to is the one named.
+    def record(pid):
+        return {"photo_id": pid, "confirmed": True, "verified_by": "dedupkey"}
+
+    obj = {"block": {"accounts": {"movies": record("AF1QipFAKEunlistedmovies00001"),
+                                  "tv": record("AF1QipFAKEunlistedtvtvtv00001")}}}
+    index = {a: {"listed": frozenset()} for a in mvcommon.GP_ACCOUNTS}
+    fresh = {a: {"fresh": True} for a in mvcommon.GP_ACCOUNTS}
+    assert main._mp_unlisted({"routing": "tv"}, obj, fresh, index)[0] == "tv"
+    assert main._mp_unlisted({"routing": "movies"}, obj, fresh, index)[0] == "movies"
+    fresh["tv"]["fresh"] = False
+    assert main._mp_unlisted({"routing": "tv"}, obj, fresh, index)[0] == "movies"
+    fresh["movies"]["fresh"] = False
+    assert main._mp_unlisted({"routing": "tv"}, obj, fresh, index) is None
+
+
 def test_with_devices_an_old_object_gets_the_phones_verdict(world, tmp_path, capsys):
     """--devices (opt-in): Step 8's verdicts refine the OLD objects — on a phone -> awaiting-backup, only the sidecar
     left -> missing-after-backup, on no phone of a complete check -> missing-everywhere."""

@@ -11,8 +11,12 @@
 > **Maintenance:** when a question is asked and answered in any Claude session, add it here.
 > See the protocol at the bottom.
 
-**Last updated:** 2026-10-27 (IMP-C25 follow-up: §6d — the auto-confirm looks up only pushes at least 24 h old;
-`check_photos --min-age-h`; new Q&A "Does the auto-confirm look up the files I just pushed?")
+**Last updated:** 2026-10-28 (IMP-C25 follow-up "thfix": §6d — new Q&As "`map_photos` says possible loss, but
+fetch finds the file — why?" and "Why did a big `check_photos` run stop with "Google Photos is throttled"?"; §6c —
+the legacy search's three-zeros stop is no longer reported as "logged out")
+
+*Earlier — 2026-10-27 (IMP-C25 follow-up: §6d — the auto-confirm looks up only pushes at least 24 h old;
+`check_photos --min-age-h`; new Q&A "Does the auto-confirm look up the files I just pushed?")*
 
 ---
 
@@ -661,7 +665,7 @@ token against TMDB and compare the real title to the folder name — that is wha
 
 ### An episode lives in another Google account — how do I fetch it?
 
-Fetch routes **each file** to a Google account (`mainfetch._object_account`, `mainfetch.py:4997`):
+Fetch routes **each file** to a Google account (`mainfetch._object_account`, `mainfetch.py:5290`):
 1. your `mvconfig.json` `fetch_account_overrides` entry, if one matches (always wins);
 2. else the account where `map_photos` / `check_photos` / an earlier fetch actually verified that
    file (its learned `home_account` — IMP-C25);
@@ -683,20 +687,20 @@ such items without an override.
 ```
 
 - Keys are **exact manual ids or id prefixes**; values are `movies` / `tv` / `anime` / `others`.
-  The **longest matching key wins**, so an exact id beats a prefix (`mainfetch.py:4973`).
+  The **longest matching key wins**, so an exact id beats a prefix (`mainfetch.py:5266`).
 - Prefixes are plain string prefixes (`…-s02e1` also matches `…-s02e10`–`s02e19`). Use a season
   prefix **only if every episode of that season lives in that account** — otherwise list the exact
   ids. A season fetch with a prefix that is too broad would send the other episodes to the wrong
   account.
 - An unknown account (e.g. `"series"`) prints **one** `⚠️  mvconfig.json: fetch_account_overrides
   entry …` warning and that entry is ignored; a blank key is refused the same way — it would match
-  every id (`mainfetch.py:4939`). Every fetch run re-reads `mvconfig.json` (`main.py fetch` spawns a
+  every id (`mainfetch.py:5232`). Every fetch run re-reads `mvconfig.json` (`main.py fetch` spawns a
   fresh `mainfetch.py` process, `main.py:10397`), so an edit applies to the next fetch.
 - Then fetch as usual: `python main.py fetch tv-en-1994-xfiles-s02e03 tempdir D:\MV_fetch` — the
   `[Account] Profile for …` line should now say `'movies'`.
 
 **A season whose episodes span accounts is fetched in one run** — one Chrome session per account,
-one after another, under the same fetch lock (`mainfetch.py:5142`). The season's own account goes
+one after another, under the same fetch lock (`mainfetch.py:5435`). The season's own account goes
 first with the usual `[Account] Profile for …` line; each further account prints
 `> [Account] Switching to profile '<account>' for N item(s) (<reason>)` — the reason is
 `fetch_account_overrides`, `learned account`, or both. A split entry whose chunks live in two
@@ -750,8 +754,12 @@ one of:
      ❌ Not a Google Photos page: the search went to webview https://gemini.google.com/glic — this is not a 'Not found'.
 ```
 Neither is a `Not found`, and neither clicks anything; the attempt is retried once. Three searches
-in a row that come back empty or never run stop a batch with the *"… is logged out"* message
-(`mainfetch.py:371`). In that case the session is fine and the `❌` lines above it are the reason.
+in a row that come back empty or never run stop a batch. Until 2026-10-28 that read *"… is logged
+out"*; since IMP-C25 thfix it reads `⏸️ Google Photos is throttled in '<account>' (3 searches in a row
+found nothing although the profile is signed in) — the fetch stops here; files already fetched are kept
+and skipped. Re-run the same fetch in about 30 minutes.` (`mainfetch.py:645`). The session is fine:
+the `❌` lines above it are the reason, or Google Photos is throttling its search (§6d, "Why did a big
+`check_photos` run stop …").
 
 **3. ATTEMPT 1 of a whole file misses. This is expected.** For an unsplit file, `ATTEMPT 1` searches
 the plain library `filename` (`mainfetch.py:489`). But `push` uploaded it as
@@ -890,7 +898,7 @@ paste real keys or photo ids into the repo (P-15).
 ### How does fetch find the exact item now?
 
 Per file, in its routed account (§6b), read-only, stopping at the first stage that proves it
-(`mainfetch.locate_object`, `mainfetch.py:3218`; the order is the file's last verified approach
+(`mainfetch.locate_object`, `mainfetch.py:3479`; the order is the file's last verified approach
 first):
 
 | Stage | How |
@@ -912,7 +920,7 @@ To see it without downloading anything: `python mainfetch.py locate <id>` (§ "l
 ### Where does a fetch put its downloads now? What happens to half-downloaded or wrong files?
 
 Straight into the title's own restore folder, through a disposable sub-folder
-(`mainfetch._prepare_downloads`, `mainfetch.py:1010`):
+(`mainfetch._prepare_downloads`, `mainfetch.py:1097`):
 - without `tempdir`: `<title folder>\restore\.mv_incoming\` → verified files renamed into
   `<title folder>\restore\`;
 - with `tempdir D:\X`: `D:\X\<id>\restore\.mv_incoming\` → `D:\X\<id>\restore\` (the same place
@@ -966,7 +974,7 @@ A Chrome that was **already open** (fetch only attached to it) stays open: only 
 are closed. Chrome 154 ignores `--disable-session-crashed-bubble` and marks the profile "Crashed" even
 after a clean close, so every launch also passes `--hide-crash-restore-bubble`, and the profile is
 marked cleanly exited before every launch and after every close (`mark_profile_clean_exit`,
-`mainfetch.py:1313`). Downloads ride TCP (`--disable-quic`, §6c).
+`mainfetch.py:1400`). Downloads ride TCP (`--disable-quic`, §6c).
 
 ### What is the "direct download", and why does MediaVault never store download links?
 
@@ -980,7 +988,7 @@ serves a web page, or brings other bytes, fetch falls back to Shift+D, then the 
 
 ### Which Google Photos internal calls does MediaVault make — and can it change anything in my account?
 
-It can't. Only seven read-only calls are allowlisted (`gprpc.ALLOWED_RPCIDS`, `gprpc.py:60`): the
+It can't. Only seven read-only calls are allowlisted (`gprpc.ALLOWED_RPCIDS`, `gprpc.py:61`): the
 timeline by date, search, content-hash lookup, item info (two), batch info, and the download link.
 Anything else is refused before the browser is touched; trash, albums, sharing, date / description
 edits and zip jobs are never called. Each call is made by the signed-in Google Photos tab itself, so
@@ -1025,7 +1033,81 @@ phone simply has not uploaded it yet; anything older, or with no push record, is
 Remember the local copy of an archived file is a dummy, so treat each possible-loss row seriously:
 add `--devices` (phones attached) to see whether it is still on a phone (`awaiting-backup`), was freed
 from one (`missing-after-backup`) or is nowhere (`missing-everywhere`), then decide per case (IMP-C27).
-"partial chunk sets" means the rest of that file's chunks ARE in Google Photos.
+"partial chunk sets" means the rest of that file's chunks ARE in Google Photos. Since 2026-10-28 two
+kinds of rows stay out of this block: `map_photos`' `not-listed` (next question), and `check_photos`
+verdicts whose searches could not be shown to work (`unverified`, never booked — see "Why did a big
+`check_photos` run stop …" below).
+
+### `map_photos` says possible loss, but fetch finds the file — why?
+
+`map_photos` judges from the crawl alone: it reads each account's latest complete enumeration
+(`tools/gp_inventory.py`) and never opens Google Photos. A fetch and `check_photos` look an item up
+by the photo id the library already holds for it first (stage S0a, `mainfetch.locate_object`) — that
+works for an item the enumeration leaves out. The R3 dry runs of 2026-10-27 hit exactly that: a
+chunk confirmed by its dedupKey on 2026-10-16 was missing from the next crawl's enumeration, so
+`map_photos` called it `possible-loss`, while the fetch found it by its photo id. Why an item drops out
+of the enumeration is not always known — one known case: the dom crawl (the fallback when RPC does not
+answer) cannot see archived items.
+
+Since 2026-10-28 (IMP-C25 thfix) such a file — its library block holds a CONFIRMED record (a photo id
+with a verified proof) in an account whose crawl is fresh but does not list that photo id — is
+`not-listed`, **not a loss**:
+- `summary.txt`: its own block `Not listed by the crawl — NOT a loss: N object(s) whose confirmed record
+  names an item its account's latest crawl does not list (archived, in the trash?) — nothing is recorded
+  for them; check one with: python main.py check_photos <id>`, then one line per file
+  (`not-listed <id> · <label> — in '<account>' per its confirmed record (proof <proof>)`);
+- `mapping.csv`: status `not-listed`, note `in '<account>' per its confirmed record, but the crawl does not
+  list it — maybe archived or in the trash; check it with: python main.py check_photos <id>`;
+- it is not in the LOUD block, not on the failed list or in `resolutions_todo.csv`, and `--apply` records
+  nothing for it (its confirmed record stays as it is).
+
+Run the `check_photos <id>` it names: `confirmed` means the item is still there. A `possible-loss` file
+that has NO confirmed record but that a fetch finds anyway was missed by the crawl: re-crawl that account
+(`python tools/gp_inventory.py <account> --port …`) and map again.
+
+### Why did a big `check_photos` run stop with "Google Photos is throttled"?
+
+After a few dozen searches Google Photos can stop answering its search for a while — per account, in
+waves. In the R3 dry runs of 2026-10-27 (`check_photos` over whole accounts) the searches worked for
+about 2–6 minutes (~30–65 searches), then EVERY search answered nothing for 4–55 minutes although the
+items were there (over RPC the answers turned into errors; on the web pages the search box showed
+"No results"), then worked again for a few minutes. Look-ups by photo id kept working. Before the fix
+every file checked in such a window ended `not-found` (most of them `possible-loss`), and once Google
+bounced the signed-in movies profile to its signed-out page, which was reported as *"… is logged out"*.
+
+Since 2026-10-28 (IMP-C25 thfix) a search that answers nothing counts as "not found" only while the
+search demonstrably works. When nothing pinned a file and a search answered nothing, MediaVault searches
+for an item known to be in that account — one a search found earlier in the run, else one from the
+account's crawl inventory, else one the library has confirmed there (`mainfetch._zero_check`). It is
+listed → the "not found" stands. It is not (a second known item, when there is one, confirms it) → the
+run stops:
+```
+   ⏸️ Google Photos is throttled in 'tv' (a search for an item known to be there found nothing) — nothing was recorded for the object it was checking; re-run the same command in about 30 minutes: it continues where it stopped.
+```
+- **What is recorded:** nothing for the file it was checking (no results line, no verdict, no failed-list
+  row, no learned record). Everything checked before the stop is kept — and applied, with `--apply`.
+  `report.txt` says `State: stopped (throttled) — …` and `Google Photos was throttled: …`; the command
+  exits 1 (after a push, the auto-confirm then prints `⚠️  Auto-confirm did not finish (check_photos
+  exited with code 1) — the push itself is done; confirm later with: main.py check_photos pending --apply`).
+- **What to do:** wait about 30 minutes, then re-run the same command: it resumes the run and looks the
+  stopped file up again. Slowing down does not avoid it — in R3 the throttle came back after ~30 searches
+  even at ~6 searches a minute.
+- **The other reasons in the parentheses:** `Google showed its signed-out page to a session that was
+  signed in` (if Chrome still shows that page after the pause, sign in — the line names the profile
+  folder), `Google showed its 'unusual traffic' page`, `the browser landed on <host>, not on Google
+  Photos`, and — in a fetch's legacy search — `3 searches in a row found nothing although the profile is
+  signed in`. A real sign-in page still says *"Profile '<account>' is logged out"*.
+- **Elsewhere:** the same `⏸️` line ends a fetch (`— the fetch stops here; files already fetched are kept
+  and skipped. …`), `mainfetch.py locate`, `resolve_photos` (only that account; the file at hand comes
+  back next time), the crawler (exit code 4) and the profile warm-up (`THROTTLED`: no toast, not a
+  failure).
+- **`unverified`:** with no item to test the search with (nothing found by a search yet, no crawl
+  inventory, no confirmed record in that account), a "not found" is kept but marked
+  `(unverified: no item known to be in this account could show that its search was answering)` and never
+  put on the failed list; `report.txt` counts them under `Unverified: N object(s) of the above — …`.
+  A later run that has such an item checks them again.
+- **Runs from before 2026-10-28** have no such guard: their "not found" answers may be throttle zeros.
+  Don't continue or `--apply-run` such a run; check that scope afresh with `--recheck`.
 
 ### What do `archived` and `confirmed` mean?
 
@@ -1037,7 +1119,7 @@ files). A new push is `unverified` until confirmed; no `status` value was added.
 ### What does "N pushed object(s) await Google Photos confirmation" after a push mean? How do I turn it off?
 
 After a successful push-family command, MediaVault checks your earlier pushes that have had **24 h**
-to back up (`AUTO_CONFIRM_MIN_AGE_H`, `main.py:14731`) — and only those:
+to back up (`AUTO_CONFIRM_MIN_AGE_H`, `main.py:14813`) — and only those:
 - `🔎 N pushed object(s) await Google Photos confirmation — confirming them now, M newer skipped
   (check_photos pending --apply --min-age-h 24, at most 15 min; to turn this off: "auto_confirm_after_push":
   false in mvconfig.json)` — it runs `check_photos pending --apply --min-age-h 24 --max-minutes 15`
@@ -1057,7 +1139,7 @@ off with `"auto_confirm_after_push": false` in `mvconfig.json`. See what is wait
 
 No — not since 2026-10-27. Google Photos needs hours to a day or more to show a new upload, so a lookup
 right after the push can only end `not-backed-up-yet`. The auto-confirm's check runs with `--min-age-h 24`
-(`auto_confirm_argv`, `main.py:14739`): an object whose push (its capture's push time) is less than 24 h
+(`auto_confirm_argv`, `main.py:14821`): an object whose push (its capture's push time) is less than 24 h
 old is not looked up and nothing is recorded for it — no verdict, no failed-list row; it stays pending
 and a later push confirms it. An object with no recorded push time counts as old and is checked. Before
 the fix the check looked up EVERY pending object, the push that had just run included: after a

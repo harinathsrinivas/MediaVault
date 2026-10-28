@@ -12,7 +12,11 @@ WORLD — FakePhotos(root)  (the `fake_photos` fixture in tests/conftest.py buil
   driver(account) -> FakeDriver     one Chrome session on that account's profile
   search(account, query)            the UI / EzkLib search semantics (below)
   accounts: movies renders UK English, tv / anime / others US English (PLAN P4; anime observed US).
-  knobs:  session[account] = "ok" | "expired" (→ accounts.google.com) | "signed_out" (→ the about page)
+  knobs:  session[account] = "ok" | "expired" (→ accounts.google.com) | "signed_out" (→ the about page) | "sorry"
+          (→ Google's "unusual traffic" page — IMP-C25 thfix) · throttle(account, after=N, rpc="zero" | "error") /
+          unthrottle(account) (IMP-C25 thfix, the R3 evidence of 2026-10-27: after N searches every further text or
+          day search of the account answers nothing — the search box shows "No results", EzkLib an empty page or,
+          rpc="error", an error frame; timelines, hash look-ups and item pages keep working)
           wiz_token_missing[account] · download_mode "instant" | "manual" (finish_downloads()) | "delayed"
           shift_d_requires_click (Shift+D ignored on a directly loaded /photo/ page) · render_requires_focus
           (grids render only after Page.bringToFront + focus emulation — RESEARCH F14) · direct_mode "ok" |
@@ -99,7 +103,9 @@ DOWNLOAD_HOST = "video-downloads.fake.invalid"
 THUMB_HOST = "lh3.fake.invalid"
 SIGNIN_URL = "https://accounts.google.com/v3/signin/identifier?continue=https%3A%2F%2Fphotos.google.com%2F"
 ABOUT_URL = "https://www.google.com/photos/about/"
+SORRY_URL = "https://www.google.com/sorry/index"  # Google's "unusual traffic" page (its real query string left out)
 NOT_FOUND = 5  # error-frame status for an unknown / deleted id (UNVERIFIED against the real service)
+THROTTLED = 8  # error-frame status of a throttled EzkLib search, rpc="error" (UNVERIFIED: the live code was not logged)
 
 NNBSP = "\N{NARROW NO-BREAK SPACE}"  # before AM/PM in US labels and panels (RESEARCH F12)
 EN_DASH = "\N{EN DASH}"               # the UK label separator
@@ -303,6 +309,7 @@ class FakePhotos:
         self.escape_slashes_in_pages = False
         self.swbisb_compact = False   # swbisb records in the live compact layout (compact_array)
         self.ewgk9e_live = False      # EWgK9e rows in the live layout (batch_info_row(live=True))
+        self.throttles = {}           # account -> {"after", "rpc", "served"} (throttle(); IMP-C25 thfix)
         self.rpc_log = []
         self.downloads = []
         self.minted = {}
@@ -366,6 +373,28 @@ class FakePhotos:
     def script_search(self, account, query, photo_ids):
         """Make `query` return exactly these items in this order (the UI and EzkLib alike)."""
         self.accounts[account].scripted[_norm(query)] = list(photo_ids)
+
+    # ------------------------------------------------------------------ the search throttle (IMP-C25 thfix)
+    def throttle(self, account, after=0, rpc="zero"):
+        """From now on the account answers its first `after` searches as usual, then every further one with
+        nothing — the R3 dry runs of 2026-10-27: a search box submit (a text or a day search) shows "No results",
+        an EzkLib text search (its first page) answers an empty page (rpc="zero") or an error frame with status
+        THROTTLED (rpc="error": what the live RPC did). The recently-uploaded listing, timelines (lcxiM), hash
+        look-ups, item info and item pages keep working."""
+        if rpc not in ("zero", "error"):
+            raise ValueError(f"rpc must be 'zero' or 'error', not {rpc!r}")
+        self.throttles[account] = {"after": after, "rpc": rpc, "served": 0}
+
+    def unthrottle(self, account):
+        self.throttles.pop(account, None)
+
+    def _throttled_search(self, account):
+        """Count one search served for `account`; True when it is throttled (beyond the throttle's `after`)."""
+        t = self.throttles.get(account)
+        if t is None:
+            return False
+        t["served"] += 1
+        return t["served"] > t["after"]
 
     # ------------------------------------------------------------------ RPC failure injection
     def fail_next_rpc(self, kind, count=1, rpcid=None):
@@ -499,6 +528,10 @@ class FakePhotos:
         query, filters, page_id = (req + [None] * 3)[:3]
         if filters == [[4, "ra", 0, 0]]:
             items = sorted(self._live(acc.name), key=lambda it: (-it.upload_ms, it.seq))
+        elif page_id is None and self._throttled_search(acc.name):   # a new text search, throttled (IMP-C25 thfix)
+            if self.throttles[acc.name]["rpc"] == "error":
+                return None, THROTTLED
+            items = []
         else:
             items = self.search(acc.name, query if isinstance(query, str) else "")
         start = self._offset(page_id, "EzkLib") or 0
@@ -712,7 +745,8 @@ class FakeDriver:
     def title(self):
         self._check_alive()
         return {"signin": "Sign in - Google Accounts", "about": "Google Photos: Edit, Organize, Search",
-                "item": "Photo - Google Photos", "blank": ""}.get(self.page["kind"], "Google Photos")
+                "sorry": SORRY_URL, "item": "Photo - Google Photos", "blank": ""}.get(self.page["kind"],
+                                                                                     "Google Photos")
 
     def get(self, url):
         self._check_alive()
@@ -730,7 +764,7 @@ class FakeDriver:
         self._page_serial += 1
         self.search_focused, self.search_buffer, self.scroll_offset = False, "", 0
 
-    def _navigate(self, url, push=True, opened_directly=True):
+    def _navigate(self, url, push=True, opened_directly=True, throttled=False):
         parsed = urllib.parse.urlparse(url)
         host = (parsed.hostname or "").lower()
         if url.startswith("about:"):
@@ -744,11 +778,13 @@ class FakeDriver:
             return self._set_page(SIGNIN_URL, {"kind": "signin"}, push)
         if state == "signed_out":
             return self._set_page(ABOUT_URL, {"kind": "about"}, push)
+        if state == "sorry":
+            return self._set_page(SORRY_URL, {"kind": "sorry"}, push)
         path = parsed.path or "/"
         photo = re.search(r"/photo/([^/?#]+)", path)
         search = re.search(r"/search/([^/?#]+)", path)
-        context = ({"kind": "search", "query": _query_from_token(search.group(1)), "token": search.group(1)}
-                   if search else {"kind": "home"})
+        context = ({"kind": "search", "query": _query_from_token(search.group(1)), "token": search.group(1),
+                    "throttled": throttled} if search else {"kind": "home"})
         if photo:
             return self._open_item(photo.group(1), context, url, opened_directly, push)
         if search:
@@ -778,6 +814,8 @@ class FakeDriver:
         if self.world.render_requires_focus and not (self.fronted and self.focus_emulated):
             return []
         if self.page["kind"] == "search":
+            if self.page.get("throttled"):
+                return []  # a throttled search shows nothing (IMP-C25 thfix)
             return self.world.search(self.account, self.page["query"])
         if self.page["kind"] == "home":
             return self.world.timeline(self.account)
@@ -820,6 +858,9 @@ class FakeDriver:
             return "Sign in\nto continue to Google Photos\nEmail or phone\nForgot email?\nNext"
         if kind == "about":
             return "Google Photos\nThe home for your memories\nGo to Google Photos"
+        if kind == "sorry":
+            return ("About this page\nOur systems have detected unusual traffic from your computer network. This page "
+                    "checks to see if it's really you sending the requests, and not a robot.")
         if kind == "html":
             return re.sub(r"<[^>]+>", "", self.page["html"])
         if kind in ("home", "search", "photos_other"):
@@ -1137,7 +1178,8 @@ class FakeDriver:
     def _submit_search(self):
         query = self.search_buffer
         self.actions.append({"kind": "search", "query": query})
-        self._navigate(f"{PHOTOS_URL}/search/{_search_token(query)}")
+        self._navigate(f"{PHOTOS_URL}/search/{_search_token(query)}",
+                       throttled=self.world._throttled_search(self.account))
 
     def _escape(self):
         if self.search_focused:

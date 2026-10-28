@@ -188,13 +188,78 @@ class SessionExpiredError(Exception):
     pass
 
 
+class PhotosThrottledError(SessionExpiredError):
+    """[IMP-C25 thfix] Google Photos is throttling or refusing this browser session — the profile is NOT signed out: a
+    search for an item known to be there found nothing (locate_object's canary), the legacy search found nothing three
+    times in a row on a signed-in page, or Google showed a page that is neither Google Photos nor its sign-in page
+    (check_session_alive). A SessionExpiredError ON PURPOSE: every handler that ends a session or a batch on a sign-out
+    ends it on a throttle too — never a verdict for the object at hand, never a swallowed error — and the handlers that
+    print tell the two apart (throttled_head / throttled_hint) for the line and the stop reason.
+      why   the short phrase the lines show in parentheses
+      page  what showed it: search (the canary) · streak (the legacy search) · about · unusual-traffic · other"""
+
+    def __init__(self, why, page="search"):
+        super().__init__(why)
+        self.why = why
+        self.page = page
+
+
+# [IMP-C25 thfix] Advice only: how long the throttle lines tell the user to wait. In the R3 dry runs of 2026-10-27 the
+# windows in which every search answered nothing ended after 4-55 min while the runs kept searching; nothing waits
+# or retries by itself.
+THROTTLE_RETRY_MIN = 30
+
+# [IMP-C25 thfix] Where a navigation to Google Photos can end (_page_kind): Google Photos itself; a Google sign-in or
+# verify page (accounts.google.com) — the profile is signed out; Google Photos' landing page for signed-out visitors
+# (google.com …/photos/about) — a signed-out profile lands there at once (RESEARCH F26), but in the R3 dry runs a
+# SIGNED-IN session was server-redirected there in the middle of a search throttle (the movies profile's history,
+# 2026-10-27 13:31:59Z; the profile worked again afterwards), so it reads as signed out only while the session has not
+# shown signed-in Google Photos yet; Google's "unusual traffic" page (google.com/sorry/…); anything else.
+_ABOUT_PATH_RE = re.compile(r"(?:^|/)photos/about(?:/|$)")
+_SIGNED_IN_ATTR = "_mv_photos_seen"   # kept on the driver, like _mv_zero_streak: it showed signed-in Google Photos
+_THROTTLE_WHY = {"about": "Google showed its signed-out page to a session that was signed in",
+                 "unusual-traffic": "Google showed its 'unusual traffic' page"}
+
+
+def _page_kind(url):
+    """photos · signin · about · unusual-traffic · other — what a tab address shows (its host and path only; a host
+    holding photos.google.com counts as Google Photos, as check_session_alive always read it)."""
+    parsed = urllib.parse.urlparse(url if isinstance(url, str) else "")
+    host = (parsed.hostname or "").lower()
+    if "photos.google.com" in host:
+        return "photos"
+    if host == "accounts.google.com":
+        return "signin"
+    if host == "google.com" or host.endswith(".google.com"):
+        path = parsed.path or "/"
+        if _ABOUT_PATH_RE.search(path):
+            return "about"
+        if path.startswith("/sorry"):
+            return "unusual-traffic"
+    return "other"
+
+
+def _note_signed_in(driver):
+    """This browser session has shown signed-in Google Photos (a tab on photos.google.com)."""
+    try:
+        setattr(driver, _SIGNED_IN_ATTR, True)
+    except Exception:  # a stand-in that takes no attribute: it simply stays unmarked
+        pass
+
+
 def check_session_alive(driver, profile_key=None):
     """Side-effect-free login check: inspect driver.current_url (the CALLER must
     have navigated to PHOTOS_URL already — this does NOT call driver.get).
 
-    Returns True if still on photos.google.com (www./locale subpaths tolerated).
-    Raises SessionExpiredError if redirected to accounts.google.com or anywhere
-    that is not a photos.google.com host. If reading current_url raises (a genuine
+    Returns True if still on photos.google.com (www./locale subpaths tolerated) —
+    and notes on the driver that this session has shown signed-in Google Photos.
+    Raises SessionExpiredError if redirected to a Google sign-in page
+    (accounts.google.com), or to Google Photos' page for signed-out visitors
+    while this session has not shown signed-in Photos yet. [IMP-C25 thfix] Raises
+    PhotosThrottledError (a SessionExpiredError: every handler still stops) for
+    that page once the session WAS signed in — Google bounced it there in the
+    middle of a throttle — for Google's "unusual traffic" page and for any other
+    page: none of them is a sign-out. If reading current_url raises (a genuine
     Selenium fault), returns True so the existing retry/handle paths deal with it —
     the detector must not invent a logged-out failure from a browser glitch.
     """
@@ -204,13 +269,31 @@ def check_session_alive(driver, profile_key=None):
         return True
 
     host = (urllib.parse.urlparse(current_url).hostname or "").lower()
-    if host.endswith("photos.google.com"):
+    kind = _page_kind(current_url)
+    if kind == "photos":
+        _note_signed_in(driver)
         return True
-    if host == "accounts.google.com" or "photos.google.com" not in host:
+    if kind == "signin" or (kind == "about" and not getattr(driver, _SIGNED_IN_ATTR, False)):
         raise SessionExpiredError(
             f"profile {profile_key!r} appears logged out (redirected to {host})"
         )
-    return True
+    raise PhotosThrottledError(_THROTTLE_WHY.get(kind) or f"the browser landed on {host or 'an empty page'}, not on "
+                                                          f"Google Photos", page=kind)
+
+
+def throttled_head(account, error):
+    """[IMP-C25 thfix] The shared head of every throttle line: "Google Photos is throttled in '<account>' (<why>)"."""
+    why = getattr(error, "why", None) or str(error)
+    return f"Google Photos is throttled in '{account}' ({why})"
+
+
+def throttled_hint(account, error):
+    """[IMP-C25 thfix] The tail of a throttle line about Google Photos' signed-out page (page "about"): a bounce that
+    is still there after the pause may be a real sign-out after all. '' for every other throttle."""
+    if getattr(error, "page", None) != "about":
+        return ""
+    return (f" If Chrome on this profile still shows Google Photos' signed-out page after the pause, sign in "
+            f"(--user-data-dir={CHROME_PROFILES.get(account, '?')}).")
 
 
 def profile_preflight(account):
@@ -549,14 +632,18 @@ def trigger_download(driver, query, index=0):
 
     # [IMP-C6] backstop: 3 consecutive 0-thumbnail results on the same driver
     # (batch) => the session is logged in but search is dead => fail loudly.
+    # [IMP-C25 thfix] Every attempt passed check_session_alive on a Google Photos
+    # page, so the profile IS signed in: this is a search that answers nothing (a
+    # throttle — the R3 dry runs), never a sign-out — PhotosThrottledError, which
+    # every SessionExpiredError handler still stops on.
     if result:
         setattr(driver, "_mv_zero_streak", 0)
     else:
         streak = getattr(driver, "_mv_zero_streak", 0) + 1
         setattr(driver, "_mv_zero_streak", streak)
         if streak >= 3:
-            raise SessionExpiredError(
-                "3 consecutive 0-thumbnail results — session likely logged out or search is dead"
+            raise PhotosThrottledError(
+                "3 searches in a row found nothing although the profile is signed in", page="streak"
             )
     return result
 
@@ -2217,6 +2304,10 @@ class FetchContext:
     locator    the locator's per-run state (_LocatorRun: the record cache both the
                RPC and the web-page paths feed, the listings, the drift verdict);
                created on first use (_locator_run)
+    library    [IMP-C25 thfix] the throttle guard's last canary source: the library
+               the run holds (check_photos, resolve_photos), or the function that
+               reads it when the guard first needs it (the fetch, locate: load_library);
+               None: no such source (_library_canaries)
     """
 
     def __init__(self, manual=False, run_id=None):
@@ -2237,6 +2328,7 @@ class FetchContext:
         self.chrome = None
         self.hinted = False  # the incoming-mode "Chrome ignored the folder?" hint was printed
         self.locator = None  # [IMP-C25 Step 12] _LocatorRun, created on first use
+        self.library = None  # [IMP-C25 thfix] the run's library, or its reader (the guard's last canary source)
 
     def start_session(self, account):
         """A Chrome session for `account` is up: the run now fetches in it."""
@@ -2497,6 +2589,14 @@ DIRECT_PAGE_LOAD_S = 15.0        # the page-load bound for opening a minted link
                                  # may never "load" (a live probe hung ~5 min on Selenium's 300 s default)
 SELENIUM_PAGE_LOAD_S = 300.0     # Selenium's / W3C's default page-load timeout, restored when it cannot be read
 DRIFT_CHECK_TRIES = 3            # inconclusive page cross-checks per run before RPC is used unchecked
+# [IMP-C25 thfix] The throttle guard (_zero_check): a search answering nothing is a "not found" only while the search
+# demonstrably works. In the R3 dry runs of 2026-10-27 Google Photos' search answered nothing for whole tens of minutes
+# (per account, in waves) while the items were there — every object then read "not found".
+CANARY_REUSE_S = 10.0            # a search on that transport which listed an item — or a passed canary — this recently
+                                 # proves it answers: no new canary for a zero answer (the cost bound; R3: 2-20 s/object)
+CANARY_TRIES = 2                 # a canary that finds nothing is confirmed by one more (another item) before a stop
+_LISTING_APPROACHES = ("taken_second", "exact_name", "title_sid", "user_query", "legacy")   # S1 S2 S3 S3u S4-preview
+_MV_TAG_RE = re.compile(r"\[[0-9a-f]{6}\]")   # a MediaVault short_id tag (generate_short_id: 6 hex) — a canary rank
 
 # (approach — the P-1 vocabulary, stage — a learned record's approach.tried (mvcommon.GP_STAGES), label)
 _LOCATE_STAGES = (("photo_id", "s0_photo_id", "S0a"), ("hash", "s0_hash", "S0b"),
@@ -2528,7 +2628,14 @@ class _LocatorRun:
       told      the one-time notes already printed
       stats     {account: counters} — each account session's summary line (_locator_session_line)
       hints     {account: {sha256: hint}} — [IMP-C25 Step 14] what earlier runs know that the library does not hold
-                yet (_resume_hints), read once per run and account"""
+                yet (_resume_hints), read once per run and account
+      [IMP-C25 thfix — the throttle guard, _zero_check]
+      search_ok    {(account, transport): time.time() of the latest search on it that listed an item, or of a passed
+                   canary} — transport rpc (EzkLib) | ui (the search box)
+      canaries     {account: [{photo_id, query}]} — items a TEXT query pinned in this run, newest first (source 1)
+      canary_pool  {account: [{photo_id, query, dedup_key, rank}]} — the crawl inventory's items, else the library's
+                   confirmed records (sources 2 and 3), read once per run and account
+      canary_bad   {(account, photo_id)} — canaries that found nothing in this run: never picked again"""
 
     def __init__(self):
         self.records, self.listings, self.gone, self.wanted = {}, {}, set(), {}
@@ -2537,6 +2644,7 @@ class _LocatorRun:
         self.told = set()
         self.stats = {}
         self.hints = {}
+        self.search_ok, self.canaries, self.canary_pool, self.canary_bad = {}, {}, {}, set()
 
 
 def _locator_run(ctx):
@@ -2815,6 +2923,8 @@ def _text_ids(driver, query, path, ctx, account, st, cap=LOCATE_MAX_CANDIDATES):
             hit = {"ids": [pid for pid, _label in tiles], "labels": dict(tiles), "complete": complete}
         st["searches"] += 1
         run.listings[(account, path, query)] = hit
+        if hit["ids"]:
+            run.search_ok[(account, path)] = time.time()   # [IMP-C25 thfix] this transport's search answers
     return hit["ids"], hit["complete"]
 
 
@@ -3139,7 +3249,7 @@ def _locate_result(found, per, per_via, stale, s4_skip, per_pick=None):
     res = {"found": False, "photo_id": None, "record": None, "proof": None, "name_normalized": False, "stage": None,
            "approach": None, "via": None, "outcome": None, "n": 0, "rule": None, "alternates": [], "query": None,
            "per_approach": per, "per_approach_via": per_via, "per_approach_pick": dict(per_pick or {}),
-           "stale": list(dict.fromkeys(stale)), "s4_skip": bool(s4_skip)}
+           "stale": list(dict.fromkeys(stale)), "s4_skip": bool(s4_skip), "zero_check": None}
     if found is not None:
         approach, stage, out = found
         pick = out["pick"]
@@ -3215,6 +3325,157 @@ def _arbitrate(driver, res, loc, ctx, account, st, approaches, stages=None):
     return _waterfall(driver, loc, ctx, account, st, approaches, stages)
 
 
+# ------------------------------------------------------------------ the throttle guard (IMP-C25 thfix)
+def _canary_rank(name):
+    """How good a file name is as a canary query, best first: a MediaVault-tagged chunk name (an exact chunk name finds
+    exactly one item — RESEARCH F18 / F25), a tagged FLAC holder, a tagged whole file, any other name."""
+    if _MV_TAG_RE.search(name):
+        if gpweb.chunk_index(name) is not None:
+            return 0
+        return 1 if name.lower().endswith(".holder.mkv") else 2
+    return 3
+
+
+def _canary(photo_id, query, dedup_key=None):
+    return {"photo_id": photo_id, "query": query, "dedup_key": gpweb.normalize_dedup_key(dedup_key),
+            "rank": _canary_rank(query)}
+
+
+def _inventory_canaries(account):
+    """Canary source 2: the items the account's latest COMPLETE crawl enumeration listed (tools/gp_inventory's own
+    offline reader — no Chrome, nothing written), with a readable record that is not archived, partial or errored;
+    query = the item's exact file name. [] without a complete enumeration or when the files cannot be read."""
+    try:
+        from tools import gp_inventory  # the crawler's offline reader (lazy, as _check_lock: it imports Selenium)
+        state = gp_inventory.inventory_state(account, mvcommon.GP_INVENTORY_DIR)
+    except Exception:  # the guard never stops a run on its own trouble: no canary from here
+        return []
+    latest = state.get("latest_complete")
+    out = []
+    for pid in (latest or {}).get("ids") or ():
+        rec = state["items"].get(pid)
+        name = rec.get("filename") if isinstance(rec, dict) else None
+        if (isinstance(name, str) and name.strip() and gpweb.MEDIA_KEY_RE.match(pid) and not rec.get("error")
+                and rec.get("archived") is not True and rec.get("partial_upload") is not True):
+            out.append(_canary(pid, name, rec.get("dedup_key")))
+    return out
+
+
+def _library_canaries(ctx, account):
+    """Canary source 3: the library's objects with a CONFIRMED record in the account (a photo_id with a trusted proof);
+    query = the object's exact uploaded name. The run's library is ctx.library — a dict, or the function that reads it
+    (called once, only now; a failing read gives no canary) — and nothing else: the guard never reads a library the
+    caller did not name (no ctx.library: no source 3)."""
+    library = getattr(ctx, "library", None)
+    if callable(library):
+        try:
+            library = library()
+        except (Exception, SystemExit):
+            library = None
+        ctx.library = library
+    if not isinstance(library, dict):
+        return []
+    out = []
+    for obj in mvcommon.iter_uploaded_objects(library):
+        rec = mvcommon.account_record(obj["block"], account) if obj["block"] else None
+        pid = (rec or {}).get("photo_id")
+        if (rec and rec.get("confirmed") is True and isinstance(pid, str) and gpweb.MEDIA_KEY_RE.match(pid)
+                and isinstance(obj["uploaded_name"], str) and obj["uploaded_name"].strip()):
+            out.append(_canary(pid, obj["uploaded_name"], rec.get("dedup_key")))
+    return out
+
+
+def _canary_pool(ctx, account):
+    """Canary sources 2 and 3 for the account, read once per run, best rank first (then the photo id): the crawl
+    inventory — only when it gives none, the library's confirmed records (the dispatch's order)."""
+    run = _locator_run(ctx)
+    if account not in run.canary_pool:
+        pool = _inventory_canaries(account) or _library_canaries(ctx, account)
+        seen, unique = set(), []
+        for c in sorted(pool, key=lambda c: (c["rank"], c["photo_id"])):
+            if c["photo_id"] not in seen:
+                seen.add(c["photo_id"])
+                unique.append(c)
+        run.canary_pool[account] = unique
+    return run.canary_pool[account]
+
+
+def _pick_canary(ctx, account, loc, res):
+    """The next canary for an object whose search answered nothing: an item a text query pinned in this run (newest
+    first), else the canary pool — never one that failed in this run, never the object itself (its photo ids, the
+    candidates its stages saw, its uploaded name, its content key). None when there is none."""
+    run = _locator_run(ctx)
+    own = {p for p in [loc.get("photo_id")] + list(loc.get("alternates") or []) + list(res.get("candidates") or [])
+           if p}
+    own_name = gpweb.normalize_name(loc.get("uploaded_name"))
+    own_key = _content_key(loc)
+    for canary in list(run.canaries.get(account, ())) + list(_canary_pool(ctx, account)):
+        if ((account, canary["photo_id"]) in run.canary_bad or canary["photo_id"] in own
+                or (own_name and gpweb.normalize_name(canary["query"]) == own_name)
+                or (own_key and canary.get("dedup_key") == own_key)):
+            continue
+        return canary
+    return None
+
+
+def _canary_lists(driver, transport, canary, st):
+    """One canary search on `transport` (rpc: EzkLib · ui: the search box), UNCACHED: True when it lists the canary's
+    own item. No answer at all — an error frame (how the R3 throttle answered over RPC), a page that never showed its
+    results — is False: the search cannot be shown to work. A sign-out or a throttle page raises as everywhere."""
+    st["searches"] += 1
+    try:
+        if transport == "rpc":
+            ids = [r["photo_id"] for r in gprpc.search(driver, canary["query"], max_pages=LOCATE_SEARCH_PAGES)["items"]]
+        else:
+            ids = [pid for pid, _label in _ui_tiles(driver, canary["query"], LOCATE_MAX_CANDIDATES)[0]]
+    except (SessionExpiredError, KeyboardInterrupt, gprpc.RpcRefused):
+        raise
+    except Exception:
+        return False
+    return canary["photo_id"] in ids
+
+
+def _zero_check(driver, res, loc, ctx, account, st):
+    """[IMP-C25 thfix] The throttle guard for an object NOTHING pinned. A search answering nothing (a LISTING stage —
+    S1, S2, S3, S3u or the S4 preview — with outcome not-found) is a "not found" only while the search demonstrably
+    works (the R3 dry runs of 2026-10-27: it answered nothing for tens of minutes while the items were there):
+      * no listing stage answered nothing -> None (nothing rests on a zero answer: S0a / S0b never ask for a canary);
+      * the transport the zero answers came by — `ui` when any came by the web pages (RPC failed inside this object,
+        the run goes on there), else `rpc` (on the pages when RPC is not usable now) — listed an item, or passed a
+        canary, within CANARY_REUSE_S -> "recent";
+      * else a CANARY: an uncached search for an item known to be in the account (_pick_canary) on that transport;
+        it lists its item -> "canary". It does not -> the item is never used again and ONE more canary (another item)
+        decides: a single deleted, archived or unsearchable canary item can never stop a run. Both fail (or one fails
+        and there is no other) -> PhotosThrottledError: the caller records NOTHING for the object (no not-found, no
+        failed-list row, no learned record) and stops;
+      * no canary at all (no item found by a text query yet, no crawl inventory, no confirmed record in the account)
+        -> "unverified": the zero answer is recorded as before, marked so (check_photos and the fetch keep such an
+        object off the failed list — nothing could show the search was answering)."""
+    zeros = [a for a, v in res["per_approach"].items() if a in _LISTING_APPROACHES and v["outcome"] == "not-found"]
+    if not zeros:
+        return None
+    transport = "ui" if "ui" in {res["per_approach_via"].get(a) for a in zeros} else "rpc"
+    if transport == "rpc" and not _rpc_ok(driver, ctx):
+        transport = "ui"
+    run = _locator_run(ctx)
+    proven = run.search_ok.get((account, transport))
+    if proven is not None and time.time() - proven < CANARY_REUSE_S:
+        return "recent"
+    failed = 0
+    while failed < CANARY_TRIES:
+        canary = _pick_canary(ctx, account, loc, res)
+        if canary is None:
+            break
+        if _canary_lists(driver, transport, canary, st):
+            run.search_ok[(account, transport)] = time.time()
+            return "canary"
+        run.canary_bad.add((account, canary["photo_id"]))
+        failed += 1
+    if not failed:
+        return "unverified"
+    raise PhotosThrottledError("a search for an item known to be there found nothing", page="search")
+
+
 def locate_object(driver, locator, ctx, approaches="best", exclude=(), stages=None):
     """[IMP-C25 Step 12 — candidate C, hybrid arbitration] Find ONE uploaded object's Google Photos item in the
     session's account — READ-ONLY: it navigates the session's Photos tab, types searches and asks read-only RPCs
@@ -3250,8 +3511,12 @@ def locate_object(driver, locator, ctx, approaches="best", exclude=(), stages=No
     plus outcome / n (the pinning stage's), rule ("newest-set" when a name matched several uploads with
     different bytes), alternates (other items holding the same bytes or name), query (the text query that listed
     the item — the Shift+D click path searches it), stale (learned photo_ids RPC AND the item page call gone),
-    s4_skip (OD-5: every candidate today's attempts could click is proven another item).
-    Raises SessionExpiredError (signed out) — a stage error is an outcome, not an exception."""
+    s4_skip (OD-5: every candidate today's attempts could click is proven another item), zero_check ([IMP-C25 thfix]
+    for an object nothing pinned whose search answered nothing: recent · canary · unverified — _zero_check; None
+    otherwise).
+    Raises SessionExpiredError (signed out) — a stage error is an outcome, not an exception — and its
+    PhotosThrottledError ([IMP-C25 thfix]: the search answered nothing even for an item known to be there, or Google
+    showed another page): then nothing may be recorded for the object."""
     started = time.time()
     loc = locator if isinstance(locator, dict) else {}
     account = getattr(ctx, "account", None) or loc.get("account")
@@ -3264,6 +3529,13 @@ def locate_object(driver, locator, ctx, approaches="best", exclude=(), stages=No
         res = _waterfall(driver, loc, ctx, account, st, approaches, stages)
         if res["found"]:
             res = _arbitrate(driver, res, loc, ctx, account, st, approaches, stages)
+        if res["found"] and res["query"]:   # [IMP-C25 thfix] a text query pinned it: the account's first canary source
+            found = _locator_run(ctx).canaries.setdefault(account, [])
+            found[:] = [_canary(res["photo_id"], res["query"], (res["record"] or {}).get("dedup_key"))] + [
+                c for c in found if c["photo_id"] != res["photo_id"]]
+        elif not res["found"]:
+            res["candidates"] = list(st["seen"])
+            res["zero_check"] = _zero_check(driver, res, loc, ctx, account, st)   # raises PhotosThrottledError
         calls = gprpc.stats(driver)["calls"] - before
     res.update(candidates_seen=len(st["seen"]), candidates=list(st["seen"]), pages_opened=st["pages"],
                searches=st["searches"], rpc_calls=calls, elapsed=round(time.time() - started, 3))
@@ -3609,7 +3881,11 @@ def _run_locator_phase(driver, queue, ctx):
         if sha1:
             wanted.add(sha1)  # one swbisb batch for the entry (≤ gprpc.MAX_BATCH_KEYS)
     print(f"\n   === EXACT ITEM ({len(pending)} files) ===")
-    located = [item for item in pending if _locate_item(driver, item, ctx)]
+    try:
+        located = [item for item in pending if _locate_item(driver, item, ctx)]
+    except PhotosThrottledError:
+        _journal_sync(ctx, queue)  # [IMP-C25 thfix] what was located before the stop: the re-run's resume hints
+        raise
     _journal_sync(ctx, queue)
     for start in range(0, len(located), DIRECT_DOWNLOAD_CONCURRENCY):
         _fetch_window(driver, located[start:start + DIRECT_DOWNLOAD_CONCURRENCY], queue, ctx)
@@ -3808,6 +4084,14 @@ def _locate_item(driver, item, ctx):
         return True
     if res["s4_skip"]:
         item["status"] = "failed"
+        if (res.get("zero_check") == "unverified"
+                and (res["per_approach"].get(_LEGACY_STAGE[0]) or {}).get("outcome") == "not-found"):
+            # [IMP-C25 thfix] the skip rests on searches that answered nothing while no item known to be in the account
+            # could show that they answer at all: no failed-list row (a claim the user acts on)
+            print(f"   > ⏭️ {name}: nothing found ({_tried_text(res)}) — today's search is skipped (OD-5); not added "
+                  f"to the failed list (unverified: no item known to be in '{ctx.account}' could show that its search "
+                  f"was answering).")
+            return False
         listed = "; added to the failed list" if _record_failed(
             item, ctx, "s4-skipped", _tried(res), res["candidates"][:LOCATE_MAX_CANDIDATES], _expected_local(loc)) else ""
         print(f"   > ⏭️ {name}: every candidate is another item ({_tried_text(res)}) — today's search is skipped "
@@ -4287,7 +4571,9 @@ def _record_unfetched(queue, ctx):
                     partial upload: IMP-C27), not "the search picked another item";
       wrong-item    today's attempts fetched another item for it (`_wrong`, booked by _note_losses);
       otherwise     no stage pinned it: ambiguous (a stage saw candidates it could not tell apart) · wrong-item (every
-                    candidate proven another item) · not-found.
+                    candidate proven another item) · not-found — [IMP-C25 thfix] NO row for a not-found whose zero
+                    answers are unverified (locate_object's zero_check: no item known to be in the account could
+                    show the search was answering); it still ends 'failed' for this run.
     What today's attempts fetched instead is folded into the row as legacy wrong-item(n), replacing the OD-5
     preview's verdict (what the attempts fetched is the stronger fact). A LOCATED object that simply ends unfetched
     gets no row (its item is known — a re-run fetches it); an object already 'failed' (lost twice, OD-5's skip) has
@@ -4315,6 +4601,13 @@ def _record_unfetched(queue, ctx):
             outcomes = [v["outcome"] for v in res["per_approach"].values()]
             reason = next((o for o in ("ambiguous", "wrong-item") if o in outcomes), "not-found")
         item["status"] = "failed"
+        if reason == "not-found" and res.get("zero_check") == "unverified":
+            # [IMP-C25 thfix] its searches answered nothing and no item known to be in the account could show that
+            # they were answering at all: no failed-list row (a claim the user acts on) — a later run books it
+            print(f"     ❌ Not fetched: {item['filename']} — no stage found its exact item (not-found, unverified: no "
+                  f"item known to be in '{ctx.account}' could show that its search was answering — not added to the "
+                  f"failed list).")
+            continue
         requested = [r["photo_id"] for r in (first, res) if r["found"]]
         candidates = list(dict.fromkeys(requested + first["candidates"] + res["candidates"]))
         listed = "; added to the failed list" if _record_failed(
@@ -5167,6 +5460,7 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None,
     # objects live in: a single group (exactly today's session) unless
     # fetch_account_overrides or learned accounts move objects.
     ctx = FetchContext(manual=manual)  # [IMP-C25 Step 10] the run's shared state, handed to every entry
+    ctx.library = load_library  # [IMP-C25 thfix] read only if the throttle guard needs its last canary source
     groups = _account_groups(manual_id, active_profile, targets, target_ids, extra_entries, ctx)
 
     # [IMP-C17] Single-flight: only one interactive fetch batch may drive the
@@ -5222,12 +5516,19 @@ def cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None,
                     for ex in group_extras:
                         fetch_single_entry(driver, ex, ctx=ctx)
 
-                except SessionExpiredError:
-                    # [IMP-C6] One logged-out detection aborts the whole batch loudly
-                    # (IMP-C26: naming the account group that hit it).
-                    print(f"❌ Profile '{profile}' is logged out. Open Chrome with "
-                          f"--user-data-dir={CHROME_PROFILES[profile]}, sign in to "
-                          f"photos.google.com, then re-run.")
+                except SessionExpiredError as e:
+                    if isinstance(e, PhotosThrottledError):
+                        # [IMP-C25 thfix] A throttle is never a sign-out and never a "not found": nothing more is
+                        # searched or requested; the object it stopped at got no verdict (no failed-list row).
+                        print(f"⏸️ {throttled_head(profile, e)} — the fetch stops here; files already fetched are "
+                              f"kept and skipped. Re-run the same fetch in about {THROTTLE_RETRY_MIN} minutes."
+                              f"{throttled_hint(profile, e)}")
+                    else:
+                        # [IMP-C6] One logged-out detection aborts the whole batch loudly
+                        # (IMP-C26: naming the account group that hit it).
+                        print(f"❌ Profile '{profile}' is logged out. Open Chrome with "
+                              f"--user-data-dir={CHROME_PROFILES[profile]}, sign in to "
+                              f"photos.google.com, then re-run.")
                     stopped = True
                     return
                 except KeyboardInterrupt:
@@ -5356,6 +5657,8 @@ def _locate_lines(item, res):
         lines.append(f"   {label} · NOT FOUND · {cost}")
     tail = " — a fetch would skip today's search (OD-5)" if res["s4_skip"] else ""
     lines.append(f"     tried: {_tried_text(res)}{tail}")
+    if res.get("zero_check") == "unverified":   # [IMP-C25 thfix]
+        lines.append("     unverified: no item known to be in this account could show that its search was answering")
     if res["stale"]:
         lines.append(f"     stale (RPC and its page: gone): {', '.join(res['stale'])}")
     return lines
@@ -5410,6 +5713,7 @@ def cmd_locate(manual_id, ep_range=None, fetch_extras=False, probe_direct=False)
         print("❌ No valid targets found.")
         return
     ctx = FetchContext(run_id=f"locate-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{os.getpid()}")
+    ctx.library = load_library  # [IMP-C25 thfix] read only if the throttle guard needs its last canary source
     groups = _account_groups(manual_id, active, targets, target_ids, extras, ctx)
     tally = {"objects": 0, "found": 0}
     try:
@@ -5449,9 +5753,13 @@ def _locate_sessions(groups, active, ctx, probe_direct, tally):
             for entry, entry_id in list(group_targets) + [(ex, None) for ex in group_extras]:
                 _locate_entry(driver, entry, entry_id, ctx, probe_direct, tally)
             completed = True
-        except SessionExpiredError:
-            print(f"❌ Profile '{profile}' is logged out. Open Chrome with --user-data-dir={CHROME_PROFILES[profile]}, "
-                  f"sign in to photos.google.com, then re-run.")
+        except SessionExpiredError as e:
+            if isinstance(e, PhotosThrottledError):   # [IMP-C25 thfix] never "logged out", never "NOT FOUND"
+                print(f"⏸️ {throttled_head(profile, e)} — the locate stops here; re-run it in about "
+                      f"{THROTTLE_RETRY_MIN} minutes.{throttled_hint(profile, e)}")
+            else:
+                print(f"❌ Profile '{profile}' is logged out. Open Chrome with "
+                      f"--user-data-dir={CHROME_PROFILES[profile]}, sign in to photos.google.com, then re-run.")
             return False
         except KeyboardInterrupt:
             print("\n🛑 Stopped by user.")
@@ -5642,7 +5950,9 @@ def _check_state(lines):
 class _CheckRun:
     """One `check` invocation over one run directory: the run (run.json), what its results already hold (state), the
     bounds (--limit counts the objects checked in their routed account, --max-minutes a deadline, --pace), and why it
-    stopped early (`stop`: limit · max-minutes · interrupted · signed-out · lock-lost · breaker · chrome · port · error)."""
+    stopped early (`stop`: limit · max-minutes · interrupted · signed-out · throttled (IMP-C25 thfix: Google Photos'
+    search answered nothing even for an item known to be there, or Google showed another page — the object at hand
+    got no line) · lock-lost · breaker · chrome · port · error)."""
 
     def __init__(self, run_dir, doc, lines, limit, max_minutes, pace, invocation):
         self.dir, self.doc = run_dir, doc
@@ -5800,7 +6110,8 @@ def _check_line(run, obj, loc, account, pass_name, res, error=None):
     stage (stage, approach, via, proof, name_normalized, rule — newest-set: several same-name uploads), its item
     (photo_id, record, alternates), every stage's verdict (per_approach exactly {outcome, n} + per_approach_via /
     per_approach_pick), candidates, stale photo_ids, s4_skip, the object's content_key flag, date_utc and
-    expected_taken_local (the failed list's), hint, cost. Never a URL (P-20). None values are left out."""
+    expected_taken_local (the failed list's), hint, cost, zero_check ([IMP-C25 thfix] how a search that answered
+    nothing was shown to work: recent · canary · unverified). Never a URL (P-20). None values are left out."""
     line = {"v": 1, "kind": "check", "at": _utc_now(), "inv": run.invocation, "pass": pass_name, "account": account,
             "manual_id": obj["manual_id"], "label": obj["label"], "sha256": obj["sha256"]}
     if res is None:
@@ -5826,7 +6137,7 @@ def _check_line(run, obj, loc, account, pass_name, res, error=None):
                 date_utc=loc.get("date_utc"), expected_taken_local=_expected_local(loc),
                 hint=True if obj.get("hint") else None,
                 cost={"elapsed": res["elapsed"], "pages": res["pages_opened"], "searches": res["searches"],
-                      "rpc": res["rpc_calls"]})
+                      "rpc": res["rpc_calls"]}, zero_check=res.get("zero_check"))
     return {k: v for k, v in line.items() if v is not None}
 
 
@@ -5836,7 +6147,9 @@ def _check_text(line):
         return f"not checked ({line.get('error', 'error')})"
     tried = " · ".join(f"{a} {v['outcome']}({v['n']})" for a, v in (line.get("per_approach") or {}).items())
     if not line.get("found"):
-        return f"{line['outcome']} — tried: {tried or 'nothing to search by'}"
+        unverified = (" (unverified: no item known to be in this account could show that its search was answering)"
+                      if line.get("zero_check") == "unverified" else "")   # [IMP-C25 thfix]
+        return f"{line['outcome']} — tried: {tried or 'nothing to search by'}{unverified}"
     how = " (normalized name)" if line.get("name_normalized") else ""
     more = f" · the newest of {len(line.get('alternates') or []) + 1} same-name uploads" \
         if line.get("rule") == "newest-set" else ""
@@ -5896,8 +6209,9 @@ def _check_record(run, obj, line):
 def _check_one(run, driver, ctx, obj, located, pass_name):
     """Check ONE object in the session's account (pass routed | cross): locate_object over its locator, the result
     appended to results.jsonl and printed, the heartbeat, the pacing and the error breaker. Raises
-    SessionExpiredError (signed out), KeyboardInterrupt and gprpc.RpcRefused (a bug — never swallowed); any other
-    trouble is this object's `error` line."""
+    SessionExpiredError (signed out — or its PhotosThrottledError: then the object gets NO line, IMP-C25 thfix),
+    KeyboardInterrupt and gprpc.RpcRefused (a bug — never swallowed); any other trouble is this object's `error`
+    line."""
     account = ctx.account
     run.tried.add((_check_key(obj), account))
     started, res = time.time(), None
@@ -6183,6 +6497,13 @@ def _check_session(run, ctx, account):
                         break
                     lines.append(_check_one(run, driver, ctx, obj, located.get(_check_key(obj)), pass_name))
                 _check_quality(run, driver, ctx, account, lines, known)
+    except PhotosThrottledError as e:
+        # [IMP-C25 thfix] A throttle is never a sign-out and never a "not found": the object at hand got NO results
+        # line (it stays unchecked — a re-run looks it up again), nothing more is searched in this run.
+        print(f"   ⏸️ {throttled_head(account, e)} — nothing was recorded for the object it was checking; re-run the "
+              f"same command in about {THROTTLE_RETRY_MIN} minutes: it continues where it stopped."
+              f"{throttled_hint(account, e)}")
+        run.stop, run.unavailable[account] = "throttled", "throttled"
     except SessionExpiredError:
         print(f"❌ Profile '{account}' is logged out. Open Chrome with --user-data-dir={CHROME_PROFILES[account]}, sign "
               f"in to photos.google.com, then re-run — the check continues where it stopped.")
@@ -6265,7 +6586,7 @@ def _check_run(run, progress_path, invocations):
     try:
         _startup_cleanup(ctx)
         ctx.journal = FetchJournal(ctx.run_id)
-        run.library = load_library()
+        run.library = ctx.library = load_library()   # [IMP-C25 thfix] ctx: the throttle guard's last canary source
         _check_sessions(run, ctx)
     except KeyboardInterrupt:  # between two sessions (a session handles its own)
         print("\n🛑 Stopped by user — re-run the same command to continue.")

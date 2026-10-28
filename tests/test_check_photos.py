@@ -53,8 +53,9 @@ import main
 import mainfetch
 import mvcommon
 from test_fetch_harvester import _Clock
-from test_locator import (EP, SHOW, SID, TAKEN, _assert_read_only_rpc, _bytes, _capture, _ctx, _folder, _learned,
-                          _locators, _obj, _sha256, _tree, _up, _whole)
+from test_locator import (CANARY_NAME, EP, SHOW, SID, TAKEN, _assert_read_only_rpc, _bytes, _canary_inventories,
+                          _canary_searches, _capture, _confirmed_elsewhere, _ctx, _folder, _learned, _locators, _obj,
+                          _sha256, _tree, _up, _whole)
 from test_map_photos import _main_guard
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -926,6 +927,61 @@ def test_a_signed_out_profile_stops_the_run_with_its_remediation(cw, sandbox, ca
     assert _results(res["run_dir"]) == [] and cw.drivers["tv"][0].quit_called
 
 
+def test_a_bounce_to_the_signed_out_page_mid_run_stops_it_as_throttled_and_a_rerun_continues(cw, sandbox, monkeypatch,
+                                                                                               capsys):
+    # IMP-C25 thfix — the R3 movies run (2026-10-27 13:31:59Z): deep in a signed-in session Google server-redirected
+    # photos.google.com/ to its page for signed-out visitors and the check said "logged out" — the profile was fine.
+    # Now: stop `throttled`, NO results line for the object at hand (it stays unchecked), a re-run continues.
+    _demo_season(sandbox, cw.world, learned=(1,))                   # e01 learned (S0a) · e02, e03 legacy (by name)
+    real, calls = mainfetch.locate_object, []
+
+    def locate(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 2:
+            cw.world.session["tv"] = "signed_out"                    # the bounce, after e01 was confirmed
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(mainfetch, "locate_object", locate)
+    res = main.cmd_check_photos(SEASON)
+
+    out = capsys.readouterr().out
+    assert (res["status"], _progress(res["run_dir"])["reason"]) == ("stopped", "throttled")
+    assert ("   ⏸️ Google Photos is throttled in 'tv' (Google showed its signed-out page to a session that was signed "
+            "in) — nothing was recorded for the object it was checking; re-run the same command in about 30 minutes: "
+            "it continues where it stopped. If Chrome on this profile still shows Google Photos' signed-out page after "
+            f"the pause, sign in (--user-data-dir={mainfetch.CHROME_PROFILES['tv']}).") in out
+    assert "logged out" not in out
+    assert [l["manual_id"] for l in _results(res["run_dir"])] == [f"{SEASON}e01"]       # e02: no line at all
+    assert [r["status"] for r in res["rows"]] == ["confirmed", "unchecked", "unchecked"]
+    report = open(os.path.join(res["run_dir"], "report.txt"), encoding="utf-8").read()
+    assert "State: stopped (throttled) — 1 of 3 object(s) checked" in report
+    assert ("  Google Photos was throttled: its search answered nothing even for an item known to be there, or Google "
+            "showed another page than Google Photos (never a sign-out, never a 'not found') — nothing was recorded for "
+            "the object it stopped at; wait about 30 minutes, then re-run the same command: it continues where it "
+            "stopped.") in report
+    assert cw.drivers["tv"][0].quit_called
+
+    cw.world.session["tv"] = "ok"
+    again = main.cmd_check_photos(SEASON)                            # the same command continues the run …
+
+    assert again["status"] == "ok" and again["run_dir"] == res["run_dir"]
+    assert [l["manual_id"] for l in _results(res["run_dir"])] == [f"{SEASON}e01", f"{SEASON}e02", f"{SEASON}e03"]
+    assert [r["status"] for r in again["rows"]] == ["confirmed"] * 3     # … and looks e02 up again
+
+
+def test_googles_unusual_traffic_page_stops_the_check_as_throttled(cw, sandbox, capsys):
+    _demo_season(sandbox, cw.world)
+    cw.world.session["tv"] = "sorry"                                 # IMP-C25 thfix
+
+    res = main.cmd_check_photos(SEASON, apply=True)
+
+    out = capsys.readouterr().out
+    assert (res["status"], _progress(res["run_dir"])["reason"]) == ("stopped", "throttled")
+    assert "⏸️ Google Photos is throttled in 'tv' (Google showed its 'unusual traffic' page)" in out
+    assert "logged out" not in out and "sign in" not in out
+    assert _results(res["run_dir"]) == [] and mvcommon.read_learned() == [] and mvcommon.read_failed() == []
+
+
 def test_ctrl_c_stops_after_the_current_object_and_still_closes_chrome(cw, sandbox, monkeypatch, capsys):
     _demo_season(sandbox, cw.world)
     real, calls, closed = mainfetch.locate_object, [], []
@@ -1527,6 +1583,7 @@ def test_outlier_a_stored_photo_id_that_is_gone(cw, sandbox):
 
 def test_the_report_states_verdicts_per_account_category_and_approach(cw, sandbox, monkeypatch, capsys):
     _set_now(monkeypatch, NOW)                                        # the pending push below is 14 h old
+    _canary_inventories(cw.world)                                     # every account's search can be shown to work
     items = _season_of(sandbox, cw.world, {1: "learned", 2: "legacy", 3: "missing", 4: "pending"})
     cw.world.items("tv")[-1].deleted = True                           # e04's push has not reached Google Photos yet
 
@@ -1575,6 +1632,7 @@ def test_a_name_held_by_other_bytes_is_not_backed_up_yet_while_recent_and_a_loss
     # Step 9b (map's rule too): a recent push whose name is held by OTHER bytes — an older upload — is just not backed up
     # yet; two weeks later its own bytes are in no account: a possible loss, its failed-list reason wrong-item.
     data = _bytes("new cut")
+    _canary_inventories(cw.world)                                     # every account's search can be shown to work
     cw.world.add_item("tv", _up("One.mkv", "on1on1"), data=_bytes("old cut"), taken=TAKEN)
     _single(sandbox, data=data, capture=_obj(data, _up("One.mkv", "on1on1")))
     _set_now(monkeypatch, NOW)
@@ -1588,6 +1646,7 @@ def test_a_name_held_by_other_bytes_is_not_backed_up_yet_while_recent_and_a_loss
 
 
 def test_devices_refine_what_google_photos_does_not_show(cw, sandbox, monkeypatch, capsys):
+    _canary_inventories(cw.world)                                     # every account's search can be shown to work
     _season_of(sandbox, cw.world, {1: "missing", 2: "missing", 3: "missing"})
     phone = {"alias": "series", "serial": "FAKESER0002", "status": "ok", "detail": None, "root": "/sdcard/Media/",
              "stat_errors": 0, "files": [
@@ -1609,6 +1668,7 @@ def test_devices_refine_what_google_photos_does_not_show(cw, sandbox, monkeypatc
 
 
 def test_a_split_whose_last_chunk_is_in_no_account_is_a_partial_set(cw, sandbox):
+    _canary_inventories(cw.world)                                     # every account's search can be shown to work
     folder = sandbox["local_root"] / "Movies" / "Split"
     folder.mkdir(parents=True)
     datas = [_bytes(f"chunk {n}") for n in (1, 2, 3)]
@@ -1710,6 +1770,7 @@ def _found_record(account, mid):
 
 
 def test_apply_records_what_the_check_proved_and_the_engine_confirms_it(cw, sandbox, capsys):
+    _canary_inventories(cw.world)                                     # every account's search can be shown to work
     items = _season_of(sandbox, cw.world, {1: "learned", 2: "mapped", 3: "legacy", 4: "missing"})
 
     res = main.cmd_check_photos(SEASON, apply=True)
@@ -1766,6 +1827,7 @@ def test_apply_records_what_the_check_proved_and_the_engine_confirms_it(cw, sand
 
 
 def test_a_reviewed_dry_run_is_applied_by_apply_run_without_a_browser_and_only_once(cw, sandbox, capsys):
+    _canary_inventories(cw.world)                                     # every account's search can be shown to work
     _season_of(sandbox, cw.world, {1: "learned", 2: "missing"})
     dry = main.cmd_check_photos(SEASON)
     assert mvcommon.read_learned() == [] and mvcommon.read_failed() == []          # a dry run records nothing
@@ -2409,3 +2471,104 @@ def test_min_age_h_works_with_every_scope_after_the_account_filter(sandbox):
     assert _ids(prefix) == ["tv-en-2026-aged-s01e02"]
     assert prefix["notes"] == ["1 object(s) pushed less than 2.5 h ago skipped — checked at a later push"]
     assert (len(plain["objects"]), plain["young"], plain["notes"]) == (3, 0, [])   # without it: unchanged
+
+
+# ===========================================================================
+# 13.k — IMP-C25 thfix: the throttle guard in a check (the R3 dry runs of 2026-10-27: Google Photos' search answered
+#        nothing for tens of minutes; every object read "not found" and an --apply would have booked them all)
+# ===========================================================================
+def test_a_zero_answer_stands_after_a_canary_and_is_then_booked(cw, sandbox):
+    _canary_inventories(cw.world)
+    _season_of(sandbox, cw.world, {1: "missing"})
+
+    res = main.cmd_check_photos(SEASON, apply=True)
+
+    assert [(l["pass"], l["account"], l["outcome"], l["zero_check"]) for l in _results(res["run_dir"])] == [
+        ("routed", "tv", "not-found", "canary"), ("cross", "movies", "not-found", "canary"),
+        ("cross", "anime", "not-found", "canary"), ("cross", "others", "not-found", "canary")]
+    assert sorted(e["account"] for e in _canary_searches(cw.world)) == sorted(mvcommon.GP_ACCOUNTS)  # one per account
+    [row] = res["rows"]
+    assert (row["status"], row["reason"], row["unverified"]) == ("possible-loss", "not-found", False)
+    assert [(r["manual_id"], r["reason"]) for r in mvcommon.read_failed()] == [(f"{SEASON}e01", "not-found")]
+
+
+def test_a_throttled_check_records_nothing_for_the_object_at_hand_and_a_rerun_continues(cw, sandbox, capsys):
+    _canary_inventories(cw.world)
+    _season_of(sandbox, cw.world, {1: "learned", 2: "missing", 3: "missing"})
+    cw.world.throttle("tv", after=0)                                  # every search of the tv account answers nothing
+
+    res = main.cmd_check_photos(SEASON, apply=True)
+
+    out = capsys.readouterr().out
+    assert (res["status"], _progress(res["run_dir"])["reason"]) == ("stopped", "throttled")
+    assert ("   ⏸️ Google Photos is throttled in 'tv' (a search for an item known to be there found nothing) — nothing "
+            "was recorded for the object it was checking; re-run the same command in about 30 minutes: it continues "
+            "where it stopped.") in out
+    assert "logged out" not in out and "possible-loss" not in out
+    assert [l["manual_id"] for l in _results(res["run_dir"])] == [f"{SEASON}e01"]     # e02: no line at all
+    assert [r["status"] for r in res["rows"]] == ["confirmed", "unchecked", "unchecked"]
+    assert mvcommon.read_failed() == []                                               # no failed-list row …
+    assert {r["manual_id"] for r in mvcommon.read_learned()} == {f"{SEASON}e01"}     # … only e01's confirmation
+
+    cw.world.unthrottle("tv")
+    again = main.cmd_check_photos(SEASON, apply=True)                 # the same command continues the run
+
+    assert again["status"] == "ok" and again["run_dir"] == res["run_dir"]
+    assert [r["status"] for r in again["rows"]] == ["confirmed", "possible-loss", "possible-loss"]
+    assert sorted(r["manual_id"] for r in mvcommon.read_failed()) == [f"{SEASON}e02", f"{SEASON}e03"]
+
+
+def test_the_auto_confirms_check_under_a_throttle_records_nothing_it_did_not_settle(cw, sandbox, capsys):
+    # The auto-confirm runs `check_photos pending --apply --min-age-h 24` (main.auto_confirm_argv): under a throttle it
+    # applies only what it settled before the stop — never a failed-list row for an object it could not check.
+    _canary_inventories(cw.world)
+    items = _season_of(sandbox, cw.world, {1: "pending", 2: "pending", 3: "pending"})
+    for n in (2, 3):
+        items[f"{SEASON}e0{n}"].deleted = True                        # their pushes are in no account
+    cw.world.throttle("tv", after=0)
+
+    res = main.cmd_check_photos("pending", apply=True, min_age_h=main.AUTO_CONFIRM_MIN_AGE_H, max_minutes=15)
+
+    assert (res["status"], _progress(res["run_dir"])["reason"]) == ("stopped", "throttled")
+    assert [r["status"] for r in res["rows"]] == ["confirmed", "unchecked", "unchecked"]
+    assert [l["manual_id"] for l in _results(res["run_dir"])] == [f"{SEASON}e01"]
+    assert mvcommon.read_failed() == [] and {r["manual_id"] for r in mvcommon.read_learned()} == {f"{SEASON}e01"}
+    assert "(a search for an item known to be there found nothing)" in capsys.readouterr().out
+
+
+def test_without_a_crawl_inventory_the_check_hands_the_guard_its_library(cw, sandbox):
+    # No crawl inventory anywhere: the check passes its library to the guard (ctx.library), so another object's
+    # CONFIRMED record in 'tv' is the canary there and e01's zero answer in 'tv' stands. The other accounts have no item
+    # to test with: their looks stay unverified — and so does the not-in-Google-Photos verdict (never booked).
+    _season_of(sandbox, cw.world, {1: "missing"})
+    _confirmed_elsewhere(cw.world, sandbox["local_root"] / "Series" / "Canary")
+
+    res = main.cmd_check_photos(SEASON, apply=True)
+
+    assert [(l["pass"], l["account"], l["outcome"], l.get("zero_check")) for l in _results(res["run_dir"])] == [
+        ("routed", "tv", "not-found", "canary"), ("cross", "movies", "not-found", "unverified"),
+        ("cross", "anime", "not-found", "unverified"), ("cross", "others", "not-found", "unverified")]
+    [row] = res["rows"]
+    assert (row["status"], row["reason"], row["unverified"]) == ("possible-loss", None, True)
+    assert mvcommon.read_failed() == []
+
+
+def test_an_unverified_zero_answer_is_reported_but_never_booked(cw, sandbox, capsys):
+    # No crawl inventory, nothing found by a search, no confirmed record: nothing can show the search answers.
+    _season_of(sandbox, cw.world, {1: "missing"})
+
+    res = main.cmd_check_photos(SEASON, apply=True)
+
+    out = capsys.readouterr().out
+    assert {l["zero_check"] for l in _results(res["run_dir"])} == {"unverified"}
+    [row] = res["rows"]
+    assert (row["status"], row["reason"], row["unverified"]) == ("possible-loss", None, True)
+    assert "unverified: its search answered nothing" in row["note"]
+    assert mvcommon.read_failed() == [] and mvcommon.read_learned() == []
+    assert (f"   🔎 {SEASON}e01 · whole — not-found — tried: exact_name not-found(0) · title_sid not-found(0) "
+            "(unverified: no item known to be in this account could show that its search was answering)") in out
+    assert ("Unverified: 1 object(s) of the above — their searches answered nothing and no item known to be in the "
+            "account (none found by a search yet, no crawl inventory, no confirmed record) could show that the search "
+            "was answering: nothing is booked for them (no failed-list row); a later run that has such an item checks "
+            "them again") in out
+    assert "Failed list (P-18)" not in out

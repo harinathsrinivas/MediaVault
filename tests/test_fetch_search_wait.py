@@ -300,14 +300,16 @@ def test_the_page_scripts_click_nothing_and_the_wait_is_bounded():
 # ---------------------------------------------------------------------------
 # digest pins — re-pinned on purpose by IMP-C25 Step 10 h (IMP-C35); a change to the legacy S4 path is a decision.
 # The search-wait pin was re-pinned on purpose once more for the "Most relevant to your search" strip (live check
-# 2026-10-05); trigger_download itself is unchanged.
+# 2026-10-05). trigger_download was re-pinned on purpose by IMP-C25 thfix (2026-10-28, the user's "Fix inside C25"):
+# its IMP-C6 zero streak raises PhotosThrottledError — every attempt passed check_session_alive on a Google Photos
+# page, so three empty searches are a throttle, never the sign-out it used to report; nothing else changed.
 # ---------------------------------------------------------------------------
 def _digest(*parts):
     text = "\n".join(p if isinstance(p, str) else inspect.getsource(p) for p in parts).replace("\r\n", "\n")
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-TRIGGER_DOWNLOAD_DIGEST = "49578db2312de37da50de0554c4051f9b7bdb30a21e5340f5bff01e1b95e62af"
+TRIGGER_DOWNLOAD_DIGEST = "43702178cb8f7f50ea7f55489067b52f53374848ebf2dd2aa0914f0674d124e1"
 SEARCH_WAIT_DIGEST = "3894100f93b2fb574f2eb91ea85fe75a5f1b5d6d7e4884130fd36dfd60f91936"
 
 

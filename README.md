@@ -172,7 +172,10 @@ calls `check_session_alive` to verify the session. A `fetch_session_lock` (at
 with a concurrently running fetch. A logged-out or unreachable profile prints a
 console message, appends a line to `~/.mediavault/logs/warm_profiles.log`, fires
 a Windows desktop toast notification, and exits non-zero. Re-login to that profile
-and re-run.
+and re-run. A profile that Google shows another page than Google Photos (e.g. its
+"unusual traffic" page) is logged as `THROTTLED`, not as logged out:
+`⏸️ Profile '<key>': Google showed another page than Google Photos (throttled?) — not a
+sign-out; the next warm-up looks again.` — no toast, and the warm-up still exits 0.
 
 **Scheduled daily warm-up (optional but recommended):**
 
@@ -344,7 +347,11 @@ python main.py check_photos account:tv --apply-run latest  # apply that reviewed
 
 `map_photos` needs no phone: an object found in no account is "not backed up yet" when it was
 pushed within 7 days before (or after) that account's crawl, else "possible loss" (listed loudly).
-`--devices` adds the read-only phone check.
+`--devices` adds the read-only phone check. One exception: an object whose library record was
+already CONFIRMED in an account that the fresh crawl does not list (archived? in the trash?) is
+`not-listed`, NOT a loss — its own short block `Not listed by the crawl — NOT a loss: …` in
+summary.txt, nothing recorded, not on the failed list or `resolutions_todo.csv`; look at one with
+`python main.py check_photos <id>`.
 
 **New pushes are confirmed automatically.** After every successful push-family command (`push`,
 `push_group`, `prep_push_rep`, `prep_push_rep_season`, and the two `…_enrich` autopilots), MediaVault
@@ -364,6 +371,18 @@ with `python main.py check_photos pending --list` (offline).
 `photo_url`, `new_search_term` …, then `map_photos all --resolutions <csv>`), or walk it
 interactively with `python main.py resolve_photos failed`. `python main.py fetch <id> --manual`
 opens Chrome where to look and keeps whatever you download there if its bytes are right.
+
+**When Google Photos throttles its search.** After many searches in a row Google Photos may answer
+every search with nothing for a while (tens of minutes, per account), or show Chrome another page.
+MediaVault does not take that for a "not found" or a sign-out: when a search finds nothing, it
+searches for an item known to be in that account (one a search found earlier in the run, else one
+from the account's crawl inventory, else one the library has confirmed there); if that finds
+nothing too (a second known item, when there is one, confirms it), it stops with one line —
+`⏸️ Google Photos is throttled in '<account>' (<why>) — … re-run … in about 30 minutes` — and
+records NOTHING for the object it was looking at (no "not found", no failed-list row). Wait about
+30 minutes and re-run the same command: `check_photos` continues where it stopped (its run ends
+`State: stopped (throttled)`), a fetch skips the files it already fetched. With no item to test the
+search with, a "not found" is kept but marked `unverified` and never put on the failed list.
 
 **Config keys** (gitignored `mvconfig.json`; `mvconfig.example.json` documents them):
 `fetch_account_overrides` (above) and `auto_confirm_after_push` (`false` = off).

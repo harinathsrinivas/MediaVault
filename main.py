@@ -11054,7 +11054,9 @@ def classify_device_objects(library, inventory, objects=None):
 #      names), a partial / non-original upload, and an object in NO account. That verdict is library <-> Google
 #      Photos only (Step 9b, DECISIONS §1e — no phone needed): by its capture push time against the crawl start of
 #      the account it is routed to, `not-backed-up-yet` (pushed after the crawl began, or in the MAP_RECENT_DAYS
-#      before it: not a problem yet) or `possible-loss` (pushed earlier, or push time unknown — no capture). A push
+#      before it: not a problem yet) or `possible-loss` (pushed earlier, or push time unknown — no capture) — unless
+#      [IMP-C25 thfix] its library block holds a CONFIRMED record in a freshly crawled account whose latest
+#      enumeration does not list that photo_id: `not-listed` (archived? in the trash? — no loss; nothing recorded). A push
 #      newer than the crawl can only be proven by its bytes (dedupKey); a name match is no evidence for it. Only
 #      with --devices does the read-only device check (Step 8) refine an OLD object — awaiting-backup /
 #      missing-after-backup / missing-everywhere — and annotate a recent one; a phone that was not listed only
@@ -11230,7 +11232,9 @@ def _mp_index(states):
     normalized name they were cut from (`stems`: the IMP-C27 (a) split_info-lost detector). Items absent from
     the latest complete enumeration (possibly deleted) never match — they are kept by normalized name under
     `deleted` (reported: an item that was there and is gone). A record without a file name or with a crawl error is
-    left out: its id counts in the freshness `gaps`, which withhold every "in no account" verdict."""
+    left out: its id counts in the freshness `gaps`, which withhold every "in no account" verdict. [IMP-C25 thfix]
+    `listed`: the ids the latest COMPLETE enumeration listed (None without one) — what a confirmed record is checked
+    against (_mp_unlisted)."""
     index = {}
     for account, state in states.items():
         gone = set(state["possibly_deleted"])
@@ -11255,8 +11259,9 @@ def _mp_index(states):
                 if kind != "whole":                    # a chunk or a holder: indexed by the name it was cut from
                     cut = name.lower().rfind(".chunk." if kind == "chunk" else ".holder.")
                     stems.setdefault((kind, gpweb.normalize_name(name[:cut])), []).append(item)
+        latest = state.get("latest_complete")
         index[account] = {"exact": exact, "normalized": normalized, "tags": tags, "dedup": dedup, "deleted": deleted,
-                          "stems": stems}
+                          "stems": stems, "listed": frozenset(latest["ids"]) if latest else None}
     return index
 
 
@@ -11599,7 +11604,8 @@ def _mp_settle_by_content(row, key, decisions, fresh):
 
 def _mp_nowhere(row, obj, fresh, index, library):
     """An object found in no account by name or bytes: withheld while any crawled inventory is not fresh or not fully
-    detailed, or the account it is routed to was never crawled (it could be there); else, in order, the
+    detailed, or the account it is routed to was never crawled (it could be there); else, in order, [IMP-C25 thfix]
+    `not-listed` when its confirmed record names an item a fresh crawl does not list (_mp_unlisted), the
     `[short_id]`-tag probable (never for a content-keyed object: those items hold other bytes), the IMP-C27 (a)
     split_info lost and (b) old untagged name of a whole file; else not-found (_mp_recency gives its verdict), with
     any possibly-deleted same-named item as evidence."""
@@ -11613,6 +11619,15 @@ def _mp_nowhere(row, obj, fresh, index, library):
     if not fresh[row["routing"]]["crawled"]:
         return _mp_stale(row, row["routing"], "not in any crawled account, and the account it is routed to was "
                                               "never crawled")
+    unlisted = _mp_unlisted(row, obj, fresh, index)
+    if unlisted is not None:   # [IMP-C25 thfix] its CONFIRMED record says where it is: no loss, whatever the crawl lists
+        account, record = unlisted
+        item = {"account": account, "photo_id": record["photo_id"], "filename": record.get("gp_filename")}
+        item.update((k, record.get(k)) for k in ("taken_ms", "tz_offset_ms", "upload_ms", "dedup_key", "width",
+                                                 "height", "original_quality", "partial_upload"))
+        row.update(status="not-listed", account=account, proof=record.get("verified_by"), item=item)
+        return _mp_note(row, f"in '{account}' per its confirmed record, but the crawl does not list it — maybe "
+                             f"archived or in the trash; check it with: python main.py check_photos {row['manual_id']}")
     if not row["uploaded_name"]:
         row.update(status="inconsistent", issue="no-uploaded-name")
         return _mp_note(row, "the library holds no name it was uploaded under (no short_id)")
@@ -11657,6 +11672,26 @@ def _mp_nowhere(row, obj, fresh, index, library):
         row["deleted"] = gone
         _mp_note(row, "an item with this name was in Google Photos before and is absent from the latest "
                       "enumeration (deleted?)")
+
+
+def _mp_unlisted(row, obj, fresh, index):
+    """[IMP-C25 thfix — the R3 case of 2026-10-27: a chunk confirmed by its dedupKey on 2026-10-16 that the next crawl
+    did not list (archived?) read `possible-loss`] (account, record) when the object's TRUSTED block holds a CONFIRMED
+    record (a photo_id with a verified proof — mvcommon.apply_learned sets `confirmed` only then) in an account whose
+    inventory is FRESH and whose latest complete enumeration does NOT list that photo_id; the account it is routed to
+    first, then GP_ACCOUNTS order. None otherwise."""
+    accounts = (obj.get("block") or {}).get("accounts")
+    if not isinstance(accounts, dict):
+        return None
+    for account in dict.fromkeys([row["routing"]] + list(mvcommon.GP_ACCOUNTS)):
+        record = accounts.get(account)
+        listed = (index.get(account) or {}).get("listed")
+        if (isinstance(record, dict) and record.get("confirmed") is True
+                and record.get("verified_by") in mvcommon._VERIFIED_PROOFS
+                and isinstance(record.get("photo_id"), str) and gpweb.MEDIA_KEY_RE.match(record["photo_id"])
+                and (fresh.get(account) or {}).get("fresh") and listed is not None and record["photo_id"] not in listed):
+            return account, record
+    return None
 
 
 def _mp_untagged_name(obj):
@@ -11876,8 +11911,8 @@ def _mp_recency(rows, fresh):
         if status == "not-found":
             row.update(status="not-backed-up-yet" if row["recent"] else "possible-loss", account=row["routing"])
             continue
-        if status == "stale-inventory" or when is None or row["proof"] == "dedupkey":
-            continue
+        if status in ("stale-inventory", "not-listed") or when is None or row["proof"] == "dedupkey":
+            continue          # [IMP-C25 thfix] not-listed: its confirmed record — no push time can make it "not yet"
         evidence = _mp_evidence_as_of(row, fresh)
         if evidence is not None and when > evidence:
             _mp_not_yet(row, f"pushed {_mp_iso(when)}, after the crawl that shows its name began ({_mp_iso(evidence)}) "
@@ -12252,9 +12287,11 @@ def _mp_write_jsonl(path, records):
             fh.write(json.dumps(record, ensure_ascii=False, sort_keys=False) + "\n")
 
 
-MAP_STATES = ("mapped", "mapped-normalized", "wrong-account", "probable", "ambiguous", "conflict", "inconsistent",
-              "not-backed-up-yet", "possible-loss", "awaiting-backup", "missing-after-backup", "missing-everywhere",
-              "stale-inventory")   # every row's final status, in report order
+MAP_STATES = ("mapped", "mapped-normalized", "wrong-account", "not-listed", "probable", "ambiguous", "conflict",
+              "inconsistent", "not-backed-up-yet", "possible-loss", "awaiting-backup", "missing-after-backup",
+              "missing-everywhere", "stale-inventory")   # every row's final status, in report order
+# [IMP-C25 thfix] not-listed: its CONFIRMED record names an item its account's fresh crawl does not list (archived? in
+# the trash?) — no loss: no failed reason, no resolutions_todo.csv row, no learned record, not in the LOUD block.
 _MP_LOSS = ("possible-loss", "missing-after-backup", "missing-everywhere", "awaiting-backup")   # the LOUD block
 _MP_LOSS_TEXT = {
     "possible-loss": f"in no account, pushed over {MAP_RECENT_DAYS} days before its account's crawl began or with no "
@@ -12459,6 +12496,13 @@ def _mp_report(ctx):
                      f"account's crawl began or in the {MAP_RECENT_DAYS} days before it — a later crawl should list "
                      f"them")
         lines.extend(_mp_nowhere_line(row) for row in recent)
+    unlisted = [r for r in rows if r["status"] == "not-listed"]
+    if unlisted:   # [IMP-C25 thfix] confirmed before, not listed now: NOT a loss — nothing is recorded for them
+        lines.append(f"Not listed by the crawl — NOT a loss: {len(unlisted):,} object(s) whose confirmed record names "
+                     f"an item its account's latest crawl does not list (archived, in the trash?) — nothing is "
+                     f"recorded for them; check one with: python main.py check_photos <id>")
+        lines.extend(f"    not-listed           {r['manual_id']} · {r['label']} — in '{r['account']}' per its "
+                     f"confirmed record (proof {r['proof']})" for r in unlisted)
     told = [r for r in rows if r["user_decision"] == "not_uploaded"]
     if told:
         lines.append(f"⚠️⚠️⚠️  YOU SAY NOT UPLOADED (IMP-C27): {len(told):,} object(s) — an archived entry keeps only "
@@ -12693,7 +12737,9 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
                       is appended twice. Refused (nothing recorded) when the resolutions file cannot be read.
     out               the run directory (default <GPHOTOS_STATE_DIR>/map/<UTC timestamp>), created first
 
-    Row status (mapping.jsonl): mapped · mapped-normalized · wrong-account (these three are applied) · probable ·
+    Row status (mapping.jsonl): mapped · mapped-normalized · wrong-account (these three are applied) · not-listed
+    ([IMP-C25 thfix] its confirmed record names an item its account's fresh crawl does not list: no loss — nothing is
+    recorded, it is on no list) · probable ·
     ambiguous · conflict · inconsistent (issue: split-info-lost | untagged-name | partial-upload |
     not-original-quality | no-uploaded-name) · not-backed-up-yet (recent: not on the todo or failed list) ·
     possible-loss · with devices also awaiting-backup · missing-after-backup · missing-everywhere ·
@@ -13430,8 +13476,8 @@ def _cp_status(code, interrupted, progress):
     """This command's status from the child's exit code and its progress.json: refused (3: the fetch lock is held —
     nothing ran) · error (1: the child could not read its run, or it failed — its lines say why) · interrupted
     (Ctrl+C) · ok (complete) · partial (a
-    --limit / --max-minutes stop: re-run to continue) · stopped (signed out, Chrome failed, the error breaker, the lock
-    lost …: re-run to continue once fixed)."""
+    --limit / --max-minutes stop: re-run to continue) · stopped (signed out, throttled — IMP-C25 thfix —, Chrome
+    failed, the error breaker, the lock lost …: re-run to continue once fixed)."""
     if code == 3:
         return "refused"
     if code == 1:
@@ -13548,6 +13594,12 @@ def _cp_rows(doc, lines, library, complete):
                 status, decisive = "ambiguous", there
             else:
                 status = "possible-loss"
+        # [IMP-C25 thfix] a "not in Google Photos" verdict resting on a look whose search answered nothing while no item
+        # known to be in that account could show the search was answering (mainfetch._zero_check): unverified
+        looks = [l for l in [routed] + list(cross.values())
+                 if l is not None and l.get("outcome") in ("not-found", "wrong-item")]
+        unverified = status in ("possible-loss", "not-backed-up-yet") and any(
+            l.get("zero_check") == "unverified" for l in looks)
         row = {"manual_id": obj["manual_id"], "label": obj["label"], "sha256": obj["sha256"], "kind": obj["kind"],
                "category": obj["category"], "uploaded_name": obj["uploaded_name"], "routed": obj["account"],
                "home": obj.get("home") or obj["account"], "route": obj.get("route"), "pushed_at": obj.get("pushed_at"),
@@ -13556,7 +13608,10 @@ def _cp_rows(doc, lines, library, complete):
                "routed_line": routed, "cross": cross, "decisive": decisive, "quality": q,
                "mismatch": bool(found is not None and found["account"] != (obj.get("home") or obj["account"])),
                "recent": recent, "error": error, "library_position": positions.get(obj["manual_id"]),
-               "partial_set": False, "device": None, "note": None, "reason": None}
+               "partial_set": False, "device": None, "note": None, "reason": None, "unverified": unverified}
+        if unverified:
+            _mp_note(row, "unverified: its search answered nothing and no item known to be in the account could show "
+                          "that the search was answering — not booked")
         if status == "possible-loss":
             same_name = (routed.get("content_key") and
                          ((routed.get("per_approach") or {}).get("exact_name") or {}).get("outcome") == "wrong-item")
@@ -13607,6 +13662,8 @@ def _cp_settle(library, rows, devices):
             reason = "wrong-item"          # its stages proved every candidate another item (the fetch's reason chain)
         if row["status"] in _MP_LOST and row["partial_set"]:
             reason = "partial-set"
+        if row.get("unverified"):
+            reason = None                  # [IMP-C25 thfix] nothing could show its search was answering: never booked
         row["reason"] = reason
     return summary
 
@@ -13747,6 +13804,14 @@ def _cp_report_lines(ctx):
                else "re-run the same command to continue (--recheck starts afresh)")
         lines.append(f"State: {ctx['status']} ({progress.get('reason') or 'not finished'}) — {checked:,} of "
                      f"{len(rows):,} object(s) checked; {how}")
+        if progress.get("reason") == "throttled":   # [IMP-C25 thfix] the child's line, kept in report.txt
+            import mainfetch  # THROTTLE_RETRY_MIN — the advice's one source; importing it has no side effects
+            nxt = (f"continue the check with: {_cp_check_command(doc)}" if ctx.get("apply_run")
+                   else "re-run the same command: it continues where it stopped")
+            lines.append(f"  Google Photos was throttled: its search answered nothing even for an item known to be "
+                         f"there, or Google showed another page than Google Photos (never a sign-out, never a 'not "
+                         f"found') — nothing was recorded for the object it stopped at; wait about "
+                         f"{mainfetch.THROTTLE_RETRY_MIN} minutes, then {nxt}.")
     lines.append(f"Verdicts: {_cp_line(rows) or 'none yet'}")
     groups = {}
     for row in rows:
@@ -13786,6 +13851,12 @@ def _cp_report_lines(ctx):
         lines.append(f"Not backed up yet (pushed in the last {MAP_RECENT_DAYS} days — not a problem yet): "
                      f"{len(recent):,} object(s)")
         lines.extend(_mp_nowhere_line(row) for row in recent)
+    unverified = [r for r in rows if r.get("unverified")]
+    if unverified:   # [IMP-C25 thfix] mainfetch._zero_check found no item to test the search with
+        lines.append(f"Unverified: {len(unverified):,} object(s) of the above — their searches answered nothing and no "
+                     f"item known to be in the account (none found by a search yet, no crawl inventory, no confirmed "
+                     f"record) could show that the search was answering: nothing is booked for them (no failed-list row); "
+                     f"a later run that has such an item checks them again")
     if ctx["devices"] is not None:
         lines.extend(_mp_device_lines(ctx["devices"]))
     bad = [r for r in rows if r["status"] == "inconsistent"]
@@ -14100,7 +14171,7 @@ def cmd_check_photos(scope, approaches=None, account=None, recheck=False, apply=
 
     -> {status, run_dir, rows (the verdict rows, CHECK_STATES), outliers, devices, applied (the apply's summary or
     None), progress}. status: ok (a complete run) · partial (--limit / --max-minutes: re-run to continue) · stopped
-    (signed out, Chrome, the error breaker, the lock taken over …: re-run to continue once fixed) · interrupted
+    (signed out, throttled, Chrome, the error breaker, the lock taken over …: re-run to continue once fixed) · interrupted
     (Ctrl+C: nothing applied) · refused (the fetch lock is held: nothing ran) · error (a bad scope, the child could
     not run, a report or the apply failed). main.py's dispatcher exits 1 on CHECK_FAILED_STATUSES. --apply-run ->
     {status ok | error, run_dir, rows, applied, outliers}; --list -> {status ok, objects, routes}."""
@@ -14427,8 +14498,10 @@ def _rp_search(driver, ctx, rec, obj, loc, term, state):
         print(f"      ✔ your term found it — proof {res['proof']}; recorded (and kept as its search term)")
     else:
         tried = mainfetch._tried_text(res) if res else "the search did not run"
-        print(f"      🔍 your term found no verified item ({tried}) — kept as its search term: every fetch tries it "
-              f"(S3u)")
+        unverified = (f"; unverified: no item known to be in '{rec['account']}' could show that its search was "
+                      f"answering" if res and res.get("zero_check") == "unverified" else "")   # [IMP-C25 thfix]
+        print(f"      🔍 your term found no verified item ({tried}{unverified}) — kept as its search term: every fetch "
+              f"tries it (S3u)")
     return True
 
 
@@ -14497,6 +14570,7 @@ def _rp_walk(library, rows, state):
     import mainfetch
     from tools import gp_inventory  # LockLost — the crawler's heartbeat (mainfetch._check_lock)
     ctx = mainfetch.FetchContext(run_id=f"resolve-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{os.getpid()}")
+    ctx.library = library   # [IMP-C25 thfix] the throttle guard's last canary source
     by_account = {}
     for rec, obj in rows:
         by_account.setdefault(rec["account"], []).append((rec, obj))
@@ -14543,10 +14617,18 @@ def _rp_walk(library, rows, state):
                             if _rp_object(driver, ctx, rec, obj, entry[1], library, n, total, state) == "quit":
                                 outcome = "quit"
                                 break
-                    except mainfetch.SessionExpiredError:
-                        print(f"❌ Profile '{account}' is logged out. Open Chrome with --user-data-dir="
-                              f"{mainfetch.CHROME_PROFILES[account]}, sign in to photos.google.com, then re-run "
-                              f"resolve_photos (answers given so far are kept).")
+                    except mainfetch.SessionExpiredError as e:
+                        # [IMP-C25 thfix] a throttle is never "logged out": like a sign-out, this account's objects
+                        # stop here (the next account's follow); its object at hand got no answer and is asked again
+                        if isinstance(e, mainfetch.PhotosThrottledError):
+                            print(f"⏸️ {mainfetch.throttled_head(account, e)} — its objects stop here (no verdict for "
+                                  f"the one at hand: it comes back next time; the answers given so far are kept). "
+                                  f"Re-run resolve_photos in about {mainfetch.THROTTLE_RETRY_MIN} minutes."
+                                  f"{mainfetch.throttled_hint(account, e)}")
+                        else:
+                            print(f"❌ Profile '{account}' is logged out. Open Chrome with --user-data-dir="
+                                  f"{mainfetch.CHROME_PROFILES[account]}, sign in to photos.google.com, then re-run "
+                                  f"resolve_photos (answers given so far are kept).")
                     except KeyboardInterrupt:
                         interrupted = True   # _end_run terminates the Chrome at once, as a fetch's Ctrl+C does
                         raise

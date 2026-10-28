@@ -36,7 +36,7 @@ import mvcommon
 from test_check_photos import (ONE, _Beat, _only_read_only_rpcids_ever, _single, clock, cw)  # noqa: F401
 from test_gphotos_primitives import (ANIME, EP_SPLIT, EP_WHOLE, MOVIE, PID, T, _csv_rows, _edit, _edited_csv,  # noqa: F401
                                      _failed, _h, lib)
-from test_locator import TAKEN, _bytes, _canary_inventories, _capture, _obj, _up, _whole
+from test_locator import TAKEN, _bytes, _canary_inventories, _capture, _confirmed_elsewhere, _obj, _up, _whole
 from test_map_photos import _main_guard
 
 REAL_STDIN_IS_TTY = main._rp_stdin_is_tty   # captured before any fixture replaces it
@@ -394,6 +394,23 @@ def test_a_search_term_is_kept_and_tried_by_s3u_at_once(rp, capsys, listed):
                 "in 'tv' could show that its search was answering)") in out and len(learned) == 1
     queries = [e["request"][0] for e in rp.world.rpc_log if e["rpcid"] == "EzkLib"]
     assert queries == ["demo fourth season opener"]                                    # S3u alone, nothing else
+
+
+def test_a_search_terms_zero_answer_is_verified_by_a_confirmed_record_in_the_library(rp, capsys):
+    # IMP-C25 thfix: resolve_photos hands the guard its library — another object's CONFIRMED record in 'tv' is the
+    # canary there (no crawl inventory), so the term's zero answer stands: no "unverified" marker.
+    data = _bytes("r1-legacy")
+    rp.world.add_item("tv", _up(N1, S1), data=data, taken=TAKEN)
+    _object(rp, R1, N1, S1, data)
+    _confirmed_elsewhere(rp.world, rp.folder)
+    rp.world.script_search("tv", "demo fourth season opener", [])
+    rp.keyboard("s", "demo fourth season opener", "n")
+
+    main.cmd_resolve_photos()
+
+    out = capsys.readouterr().out
+    assert ("      🔍 your term found no verified item (user_query not-found(0)) — kept as its search term: every fetch "
+            "tries it (S3u)") in out
 
 
 def test_a_search_term_under_a_throttle_is_kept_but_no_answer_is_recorded(rp, capsys):

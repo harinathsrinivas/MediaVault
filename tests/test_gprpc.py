@@ -265,6 +265,7 @@ def test_an_rpc_only_session_counts_as_signed_in_so_a_later_bounce_is_a_throttle
     # throttle, never a sign-out; an "expired" session (a Google sign-in page) still reads signed out.
     fake_photos.add_item("tv", "Sample [a1a1a1].mkv")
     d = _driver(fake_photos)
+    d.get(gphotos_fake.PHOTOS_URL)                       # on Google Photos already, as init_driver leaves the tab
     gprpc.call(d, "EzkLib", SEARCH)                                    # RPC only: no page check of its own
     assert getattr(d, "_mv_photos_seen", False) is True
     fake_photos.session["tv"] = "signed_out"

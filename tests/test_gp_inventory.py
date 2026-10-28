@@ -568,6 +568,29 @@ def test_a_bounce_to_the_signed_out_page_mid_crawl_is_a_throttle(crawler, lock_f
     assert [r["result"] for r in crawler.state()["runs"]] == ["throttled"]
 
 
+def test_a_bounce_while_the_dom_crawl_reads_item_pages_stops_it_never_an_item_error(crawler, lock_file, monkeypatch,
+                                                                                     capsys):
+    # IMP-C25 thfix: the bounce comes while the dom crawl opens item pages (its details phase). crawl_item's page check
+    # raises the throttle, and it must stop the crawl (exit 4) — never be booked as that item's error while the crawl
+    # goes on to the next item page.
+    crawler.world.add_item("tv", "Sample.Show.S01E01 [a1a1a1].mkv")
+    crawler.world.add_item("tv", "Sample.Show.S01E02 [a1a1a1].mkv")
+    real = gp_inventory.enumerate_tiles
+
+    def enumerate_then_bounce(*args, **kwargs):
+        result = real(*args, **kwargs)
+        crawler.world.session["tv"] = "signed_out"
+        return result
+
+    monkeypatch.setattr(gp_inventory, "enumerate_tiles", enumerate_then_bounce)
+    assert crawler.run("tv", "--mode", "dom") == gp_inventory.EXIT_THROTTLED
+    out = capsys.readouterr().out
+    assert ("STOPPED: Google Photos is throttled in 'tv' (Google showed its signed-out page to a session that was "
+            "signed in)") in out and "logged out" not in out
+    assert [r["result"] for r in crawler.state()["runs"]] == ["throttled"]
+    assert crawler.lines("tv", "items") == []                          # no item booked as an error
+
+
 # ---------------------------------------------------------------- the fetch session lock + heartbeat
 
 def test_a_held_lock_refuses_the_crawl_before_anything_starts(crawler, lock_file, capsys):

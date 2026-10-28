@@ -195,6 +195,21 @@ def _canary_searches(world, name=CANARY_NAME):
     return [e for e in world.rpc_log if e["rpcid"] == "EzkLib" and (e["request"] or [None])[0] == name]
 
 
+def _confirmed_elsewhere(world, folder, account="tv", mid="tv-en-2019-canaryshow"):
+    """[IMP-C25 thfix] Another library object, outside every test's scope, whose trusted block holds a CONFIRMED record
+    of an item that IS in `account` (taken 2020-01-01: no test object's taken second, day or query lists it) — the
+    throttle guard's canary source 3, used only when no crawl inventory gives one. Added to the saved library.
+    -> the item."""
+    data, name, sid = _bytes(f"{mid} in {account}"), "Canary.Show.mkv", "ca0e02"
+    item = world.add_item(account, _up(name, sid), data=data, taken="2020-01-01T00:00:00Z")
+    block = _learned(item, account=account)
+    block["accounts"][account]["confirmed"] = True
+    library = mvcommon.load_library()
+    library[mid] = _whole(folder, name, data, sid, block=block)
+    mvcommon.save_library(library)
+    return item
+
+
 def _drift(world, rpcid):
     """Silent RPC drift: the answers of `rpcid` move the item's timezone offset and upload time (both still
     integers, so the typed parsers accept them) — only the drift detector can tell."""
@@ -2195,6 +2210,29 @@ def test_a_canary_that_finds_nothing_as_well_is_a_throttle_never_a_not_found(fak
         assert len(_canary_searches(fake_photos)) == 1
 
 
+def test_a_canary_search_that_gets_no_answer_at_all_is_a_failed_canary(fake_photos, tmp_path, monkeypatch):
+    # The stages' RPC searches got empty pages; the canary's own search then meets an error frame (R3: the throttle's
+    # RPC answers turned into errors). No answer at all cannot show that the search works: a failed canary — the only
+    # one here — so the run stops; never a passed canary that would let the zero answer stand as a "not found".
+    [canary] = _canary_inventories(fake_photos, ("tv",))["tv"]
+    ctx = _ctx()
+    loc = _missing(tmp_path, ctx)
+    fake_photos.throttle("tv", after=0, rpc="zero")
+    real = gprpc.search
+
+    def search(driver, query, **kwargs):
+        if query == CANARY_NAME:
+            raise gprpc.RpcServerError("EzkLib", gphotos_fake.THROTTLED)
+        return real(driver, query, **kwargs)
+
+    monkeypatch.setattr(gprpc, "search", search)
+
+    with pytest.raises(mainfetch.PhotosThrottledError):
+        mainfetch.locate_object(fake_photos.driver("tv"), loc, ctx)
+
+    assert ctx.locator.canary_bad == {("tv", canary.photo_id)}
+
+
 def test_with_no_item_to_test_the_search_with_a_zero_answer_is_unverified(fake_photos, tmp_path, monkeypatch):
     # Nothing pinned by a text query yet, no crawl inventory, no library named: nothing can show that the search
     # answers. The zero answer is recorded as before, marked "unverified" — and the guard never reads a library itself.
@@ -2422,12 +2460,16 @@ def test_an_od5_skip_resting_on_zero_answers_is_booked_only_when_they_are_verifi
                                                                "could show that its search was answering).") in out
 
 
-@pytest.mark.parametrize("canaries", [True, False], ids=["verified", "unverified"])
+@pytest.mark.parametrize("canaries", ["inventory", "library", None], ids=["verified", "library", "unverified"])
 def test_a_not_found_is_booked_by_the_fetch_only_when_its_zero_answers_are_verified(flow, sandbox, capsys, canaries):
-    if canaries:
+    # "library": no crawl inventory, but the fetch hands the guard its library reader — another object's CONFIRMED
+    # record in 'tv' is the canary, so the zero answer is verified and booked.
+    if canaries == "inventory":
         _canary_inventories(flow.world, ("tv",))
-    _, items = _season(sandbox, flow.world, (1,), block=None)
+    folder, items = _season(sandbox, flow.world, (1,), block=None)
     items[f"{SEASON}e01"].deleted = True                                         # in no account
+    if canaries == "library":
+        _confirmed_elsewhere(flow.world, folder)
 
     mainfetch.cmd_fetch_route(SEASON)
 
@@ -2440,3 +2482,20 @@ def test_a_not_found_is_booked_by_the_fetch_only_when_its_zero_answers_are_verif
         assert mvcommon.read_failed() == []
         assert ("❌ Not fetched: Demo.S01E01.mkv — no stage found its exact item (not-found, unverified: no item known "
                 "to be in 'tv' could show that its search was answering — not added to the failed list).") in out
+
+
+@pytest.mark.parametrize("library", [False, True], ids=["unverified", "library"])
+def test_locate_marks_an_unverified_zero_answer_and_hands_the_guard_its_library(flow, sandbox, capsys, library):
+    # `mainfetch.py locate`: with no item to test the search with, its NOT FOUND says the zero answer is unverified;
+    # with another object's CONFIRMED record in the library (the locate's reader), that record is the canary.
+    folder, items = _season(sandbox, flow.world, (1,), block=None)
+    items[f"{SEASON}e01"].deleted = True                                         # in no account
+    if library:
+        _confirmed_elsewhere(flow.world, folder)
+
+    mainfetch.cmd_locate(SEASON)
+
+    out = capsys.readouterr().out
+    assert "· NOT FOUND ·" in out
+    marked = "     unverified: no item known to be in this account could show that its search was answering" in out
+    assert marked is not library

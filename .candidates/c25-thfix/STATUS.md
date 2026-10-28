@@ -29,7 +29,7 @@ DECISIONS.md / PRIORITY.md (the orchestrator's).
       lcxiM, swbisb, item info and item pages keep working and are not counted; session "sorry" -> SORRY_URL (Google's
       "unusual traffic" page: no Photos page, no tokens, RPC status 0). test_gpweb.py +4 (unusual traffic · throttle
       on the web pages · throttle over RPC ×2): fake self-tests 36 passed; test_gpweb + test_gprpc + test_locator +
-      test_gp_inventory 523 passed — this commit (`wip(imp-c25): thfix.a — …`)
+      test_gp_inventory 523 passed — dc44644
 - [x] thfix.b Fix 1.4 — the page classification (D1, D4–D6). mainfetch: PhotosThrottledError(SessionExpiredError,
       .why/.page), THROTTLE_RETRY_MIN, _page_kind, check_session_alive (+ the `_mv_photos_seen` mark), throttled_head /
       throttled_hint; the legacy zero streak -> PhotosThrottledError (TRIGGER_DOWNLOAD_DIGEST re-pinned, registry
@@ -48,7 +48,7 @@ DECISIONS.md / PRIORITY.md (the orchestrator's).
       exit 4, run result "throttled"), test_warm_profiles +1; re-pinned: test_fetch_photos_tab's C6 streak test
       (PhotosThrottledError, the new message), test_fetch_search_wait's digest; registry +4 pins. Runs: session
       detector + gprpc + warm-up + search-wait + pins 210 passed · locator + check + resolve + crawler + gpweb 671
-      passed · the other fetch modules 549 + photos-tab 48 passed · smoke 102 passed — this commit
+      passed · the other fetch modules 549 + photos-tab 48 passed · smoke 102 passed — b395285
 - [x] thfix.c Fix 1.1–1.3 — the canary guard (D7–D12). mainfetch: CANARY_REUSE_S = 10, CANARY_TRIES = 2,
       _LISTING_APPROACHES, _MV_TAG_RE; _LocatorRun.search_ok / canaries / canary_pool / canary_bad; _text_ids notes a
       fresh search that listed an item; _canary_rank / _canary / _inventory_canaries (latest COMPLETE enumeration, not
@@ -73,7 +73,7 @@ DECISIONS.md / PRIORITY.md (the orchestrator's).
       kept, no answer); adapted on purpose (their worlds had no item to test the search with, so their zero answers are
       now unverified): 6 check tests + 1 manual-fetch test get `_canary_inventories` (they test what IS booked), the
       resolve not-found S3u line gains its unverified marker; registry +7 pins. Runs: the 22 affected modules 1599
-      passed · smoke 102 passed — this commit
+      passed · smoke 102 passed — 766182f
 - [x] thfix.d Fix 2 — map_photos `not-listed` (D13). main: _mp_index adds each account's `listed` ids (the latest
       complete enumeration); _mp_unlisted (a trusted block's CONFIRMED record — confirmed + a verified proof + a
       photo_id — in a FRESH account whose latest enumeration does not list it; the routing account first); _mp_nowhere
@@ -88,7 +88,7 @@ DECISIONS.md / PRIORITY.md (the orchestrator's).
       record, no failed row · today's verdicts kept ×4: unconfirmed, manual proof, stale crawl, photo_id listed (other
       bytes -> conflict)); registry +3 pins. A slip caught by the run: the edit had dropped the `def` line of the next
       test (test_with_devices_an_old_object_gets_the_phones_verdict) — restored before the commit. Runs: map + check +
-      apply engine + primitives + pins + resolve 717 passed · smoke 102 passed — this commit
+      apply engine + primitives + pins + resolve 717 passed · smoke 102 passed — d08a075
 - [x] thfix.e docs — every claim checked against the code. README: the warm-up's THROTTLED; map's `not-listed`; a new
       paragraph "When Google Photos throttles its search" (what the user sees, what is recorded, how to resume).
       ARCHITECTURE: §8.3 the zero-streak backstop; §8.4 the throttle-guard bullet + `zero_check` in the result contract;
@@ -109,9 +109,98 @@ DECISIONS.md / PRIORITY.md (the orchestrator's).
       by design, and its test says so) -> "no verdict for the one at hand: it comes back next time" (main.py, the same
       4 lines; 2 test assertions). Pin registry: +5 per-command throttle-line pins (fetch, locate, resolve, crawler,
       warm-up) + its docstring. Runs: test_resolve_photos + test_c25_regression_pins 134 passed · smoke 102 passed —
-      this commit
-- [ ] thfix.f disarm probes on a `git archive` scratch copy (each part reverted alone turns a test red; restored byte
-      for byte)
+      bcaef77
+- [x] thfix.f disarm probes — on an isolated scratch copy (`git archive HEAD` + the uncommitted test files; every
+      tracked file's SHA-256 equal to the worktree's before and after), never the worktree. Each probe reverts ONE part
+      of the fix (one exact, unique text replacement), runs the tests that must catch it, then restores the file byte
+      for byte (SHA-256 checked). Baseline on the scratch copy: the 12 probed modules 928 passed. FINAL PASS: 63/63
+      red, 63/63 restored (mainfetch 39 · main 17 · gp_inventory 4 · warm_profiles 2 · gprpc 1). The first round found
+      13 survivors — parts no test could see — and each got a test (then red in the final pass):
+        · B6  gprpc checks EVERY request: the test's driver began on about:blank, so gprpc's own navigation marked the
+              session anyway -> test_gprpc's RPC-only test now starts on Google Photos, as init_driver leaves the tab;
+        · B17 the dom crawl's details phase re-raises a throttle -> test_gp_inventory +1 (a bounce while item pages
+              are read: exit 4, run `throttled`, no item booked as an error);
+        · C21 a canary with no answer at all (an error frame) fails -> test_locator +1 (the stages' RPC got empty
+              pages, the canary's own search an error frame: the run stops);
+        · C30–C33 the wiring — locate's `unverified` line; check / fetch / locate / resolve handing the guard their
+              library (canary source 3) -> test_locator: the fetch-booking test gains a "library" case, +1 locate test
+              ×2 (unverified · library); test_check_photos +1 (no inventory: 'tv' verified by the library's confirmed
+              record, the other accounts unverified -> the verdict stays unverified, never booked); test_resolve_photos
+              +1 (the S3u zero verified by a confirmed record: no marker). Helper `_confirmed_elsewhere` (test_locator);
+        · M3 / M5 not-listed needs a verified proof / an unlisted photo id -> two cases (a `confirmed` flag over a
+              manual proof; the photo id listed under ANOTHER name — the old "listed" case never reached
+              _mp_unlisted: a same-name item is a conflict first);
+        · M4 / M10 a fresh crawl of THAT account / the routed account first -> a unit test of _mp_unlisted (today
+              _mp_nowhere's all-accounts freshness gate runs first, so the helper's own check is invisible end to end);
+        · M7 _mp_recency leaves not-listed alone (redundant for a dedupkey proof) -> +1 (a filename-proof record and a
+              capture newer than the crawl: stays not-listed).
+      Registry +3 pins (the error-frame canary, the check's library wiring, map's recency). No production code changed
+      in this sub-task. The table (part reverted -> the test that turned red):
+  | id | part reverted | the test that turned red |
+  |---|---|---|
+  | B1 | about page after signed-in Photos = throttle | test_session_detector::test_the_signed_out_page_after_signed_in_photos_is_a_throttle_never_a_sign_out |
+  | B2 | about page at a session's first look = sign-out | test_session_detector::test_the_signed_out_page_at_a_sessions_first_look_is_a_sign_out |
+  | B3 | unusual-traffic / other pages = throttle (not the old 'logged out') | test_session_detector::test_unusual_traffic_and_other_pages_are_throttles_even_at_the_first_look |
+  | B4 | _page_kind tells Google's 'unusual traffic' page | test_session_detector::test_page_kind_reads_only_the_host_and_path |
+  | B5 | a Google Photos page marks the session signed in | test_session_detector::test_the_signed_out_page_after_signed_in_photos_is_a_throttle_never_a_sign_out |
+  | B6 | gprpc checks the session on EVERY request (an RPC-only session is marked) | test_gprpc::test_an_rpc_only_session_counts_as_signed_in_so_a_later_bounce_is_a_throttle |
+  | B7 | the legacy zero streak raises PhotosThrottledError | test_session_detector::test_the_legacy_zero_streak_is_a_throttle_never_a_sign_out |
+  | B8 | the fetch prints the throttle line, never 'logged out' | test_session_detector::test_cmd_fetch_route_prints_the_throttle_line_never_logged_out |
+  | B9 | the locator phase syncs the journal before a throttle stops the fetch | test_locator::test_a_bounce_to_the_signed_out_page_mid_fetch_stops_it_as_throttled_never_logged_out |
+  | B10 | locate prints the throttle line | test_locator::test_locate_on_a_throttled_profile_says_throttled_never_logged_out |
+  | B11 | the check child stops `throttled` (not `signed-out`) | test_check_photos::test_a_bounce_to_the_signed_out_page_mid_run_stops_it_as_throttled_and_a_rerun_continues |
+  | B12 | report.txt says why a throttled check stopped | test_check_photos::test_a_bounce_to_the_signed_out_page_mid_run_stops_it_as_throttled_and_a_rerun_continues |
+  | B13 | resolve_photos prints the throttle line | test_resolve_photos::test_a_throttle_is_named_never_logged_out_and_nothing_is_recorded |
+  | B14 | the crawler exits 4 with the throttle line (never 'signed out') | test_gp_inventory::test_googles_unusual_traffic_page_stops_the_crawl_as_throttled_never_signed_out |
+  | B15 | the crawl's run log ends `throttled` | test_gp_inventory::test_a_bounce_to_the_signed_out_page_mid_crawl_is_a_throttle |
+  | B16 | the dom crawl's landing check asks the classifier first | test_gp_inventory::test_a_bounce_to_the_signed_out_page_mid_crawl_is_a_throttle |
+  | B17 | the dom crawl's details phase re-raises a throttle (never an item error) | test_gp_inventory::test_a_bounce_while_the_dom_crawl_reads_item_pages_stops_it_never_an_item_error |
+  | B18 | the warm-up reports THROTTLED, not LOGGED_OUT | test_warm_profiles::test_a_throttled_profile_is_not_reported_logged_out |
+  | B19 | a THROTTLED profile is no failure (no toast, exit 0) | test_warm_profiles::test_a_throttled_profile_is_not_reported_logged_out |
+  | C1 | locate_object runs the guard when nothing pinned the object | test_locator::test_a_canary_that_finds_nothing_as_well_is_a_throttle_never_a_not_found |
+  | C2 | failed canaries raise PhotosThrottledError (never a 'not found') | test_locator::test_a_canary_that_finds_nothing_as_well_is_a_throttle_never_a_not_found |
+  | C3 | a failed canary is confirmed by another item (CANARY_TRIES = 2) | test_locator::test_a_failed_canary_is_confirmed_by_another_item_before_anything_stops |
+  | C4 | a recent proof spares the canary (CANARY_REUSE_S) | test_locator::test_a_search_that_listed_an_item_moments_ago_proves_the_transport_and_its_query_is_the_next_canary |
+  | C5 | the proof expires after CANARY_REUSE_S | test_locator::test_the_proof_lasts_canary_reuse_s_then_a_canary_runs |
+  | C6 | a fresh search that listed an item proves its transport | test_locator::test_a_search_that_listed_an_item_moments_ago_proves_the_transport_and_its_query_is_the_next_canary |
+  | C7 | a text query's find is the first canary source | test_locator::test_a_search_that_listed_an_item_moments_ago_proves_the_transport_and_its_query_is_the_next_canary |
+  | C8 | inventory canaries: not archived / partial / errored | test_locator::test_the_canary_pool_reads_the_latest_complete_crawl_and_puts_the_best_names_first |
+  | C9 | inventory canaries: only the latest COMPLETE enumeration | test_locator::test_the_canary_pool_reads_the_latest_complete_crawl_and_puts_the_best_names_first |
+  | C10 | canary rank: MediaVault-tagged chunk names first | test_locator::test_the_canary_pool_reads_the_latest_complete_crawl_and_puts_the_best_names_first |
+  | C11 | library canaries: CONFIRMED records only | test_locator::test_the_last_canary_source_is_the_named_librarys_confirmed_records |
+  | C12 | the library is the LAST source (only when the inventory gives none) | test_locator::test_the_last_canary_source_is_the_named_librarys_confirmed_records |
+  | C13 | the guard never reads a library nobody named | test_locator::test_with_no_item_to_test_the_search_with_a_zero_answer_is_unverified |
+  | C14 | the canary is never the object itself (its photo ids / candidates) | test_locator::test_the_canary_is_never_the_object_itself_nor_one_that_failed |
+  | C15 | the canary is never the object itself (its name) | test_locator::test_the_canary_is_never_the_object_itself_nor_one_that_failed |
+  | C16 | the canary is never the object itself (its content key) | test_locator::test_the_canary_is_never_the_object_itself_nor_one_that_failed |
+  | C17 | a canary that failed is never picked again | test_locator::test_the_canary_is_never_the_object_itself_nor_one_that_failed |
+  | C18 | zeros by both transports take the web-page canary | test_locator::test_zero_answers_by_both_transports_take_the_web_page_canary |
+  | C19 | S0a / S0b never ask for a canary | test_locator::test_photo_id_and_hash_look_ups_never_ask_for_a_canary |
+  | C20 | a canary passes only when ITS item is listed | test_locator::test_a_canary_that_finds_nothing_as_well_is_a_throttle_never_a_not_found |
+  | C21 | a canary with no answer at all (an error frame) is a failed canary | test_locator::test_a_canary_search_that_gets_no_answer_at_all_is_a_failed_canary |
+  | C22 | the fetch books no not-found row for an unverified zero | test_locator::test_a_not_found_is_booked_by_the_fetch_only_when_its_zero_answers_are_verified |
+  | C23 | the fetch books no s4-skipped row for an unverified zero | test_locator::test_an_od5_skip_resting_on_zero_answers_is_booked_only_when_they_are_verified |
+  | C24 | check: a results line carries zero_check | test_check_photos::test_an_unverified_zero_answer_is_reported_but_never_booked |
+  | C25 | check: the printed line marks an unverified zero | test_check_photos::test_an_unverified_zero_answer_is_reported_but_never_booked |
+  | C26 | check verdicts: unverified flag | test_check_photos::test_an_unverified_zero_answer_is_reported_but_never_booked |
+  | C27 | check: an unverified verdict gets no failed-list reason | test_check_photos::test_an_unverified_zero_answer_is_reported_but_never_booked |
+  | C28 | check report: the Unverified line | test_check_photos::test_an_unverified_zero_answer_is_reported_but_never_booked |
+  | C29 | resolve: an unverified S3u zero says so | test_resolve_photos::test_a_search_term_is_kept_and_tried_by_s3u_at_once |
+  | C30 | locate: an unverified zero says so | test_locator::test_locate_marks_an_unverified_zero_answer_and_hands_the_guard_its_library |
+  | C31 | check passes its library to the guard (ctx.library) | test_check_photos::test_without_a_crawl_inventory_the_check_hands_the_guard_its_library |
+  | C32 | the fetch passes its library reader to the guard | test_locator::test_a_not_found_is_booked_by_the_fetch_only_when_its_zero_answers_are_verified |
+  | C32b | locate passes its library reader to the guard | test_locator::test_locate_marks_an_unverified_zero_answer_and_hands_the_guard_its_library |
+  | C33 | resolve passes its library to the guard | test_resolve_photos::test_a_search_terms_zero_answer_is_verified_by_a_confirmed_record_in_the_library |
+  | M1 | _mp_nowhere returns not-listed | test_map_photos::test_a_confirmed_object_the_crawl_does_not_list_is_not_listed_never_a_loss |
+  | M2 | not-listed needs a CONFIRMED record | test_map_photos::test_not_listed_needs_a_confirmed_record_a_fresh_crawl_and_a_photo_id_it_does_not_list |
+  | M3 | not-listed needs a verified proof | test_map_photos::test_not_listed_needs_a_confirmed_record_a_fresh_crawl_and_a_photo_id_it_does_not_list |
+  | M4 | not-listed needs a FRESH crawl of that account | test_map_photos::test_mp_unlisted_needs_that_accounts_crawl_fresh_and_names_the_routed_account_first |
+  | M5 | not-listed needs the crawl NOT to list the photo id | test_map_photos::test_not_listed_needs_a_confirmed_record_a_fresh_crawl_and_a_photo_id_it_does_not_list |
+  | M6 | the index carries each account's listed ids | test_map_photos::test_a_confirmed_object_the_crawl_does_not_list_is_not_listed_never_a_loss |
+  | M7 | _mp_recency leaves a not-listed row alone | test_map_photos::test_a_not_listed_object_pushed_again_after_the_crawl_began_stays_not_listed |
+  | M8 | the summary's not-listed block | test_map_photos::test_a_confirmed_object_the_crawl_does_not_list_is_not_listed_never_a_loss |
+  | M9 | MAP_STATES counts not-listed | test_map_photos::test_a_confirmed_object_the_crawl_does_not_list_is_not_listed_never_a_loss |
+  | M10 | the routing account's record first | test_map_photos::test_mp_unlisted_needs_that_accounts_crawl_fresh_and_names_the_routed_account_first |
 - [ ] thfix.g gates (full, then smoke), secrets scan, self-review, STATE: COMPLETE, the final commit
       `fix(imp-c25): a throttled Google Photos search is never a "not found"; map: confirmed-but-unlisted is not a loss`
 

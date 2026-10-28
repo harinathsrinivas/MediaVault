@@ -54,8 +54,8 @@ import mainfetch
 import mvcommon
 from test_fetch_harvester import _Clock
 from test_locator import (CANARY_NAME, EP, SHOW, SID, TAKEN, _assert_read_only_rpc, _bytes, _canary_inventories,
-                          _canary_searches, _capture, _ctx, _folder, _learned, _locators, _obj, _sha256, _tree, _up,
-                          _whole)
+                          _canary_searches, _capture, _confirmed_elsewhere, _ctx, _folder, _learned, _locators, _obj,
+                          _sha256, _tree, _up, _whole)
 from test_map_photos import _main_guard
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -2534,6 +2534,23 @@ def test_the_auto_confirms_check_under_a_throttle_records_nothing_it_did_not_set
     assert [l["manual_id"] for l in _results(res["run_dir"])] == [f"{SEASON}e01"]
     assert mvcommon.read_failed() == [] and {r["manual_id"] for r in mvcommon.read_learned()} == {f"{SEASON}e01"}
     assert "(a search for an item known to be there found nothing)" in capsys.readouterr().out
+
+
+def test_without_a_crawl_inventory_the_check_hands_the_guard_its_library(cw, sandbox):
+    # No crawl inventory anywhere: the check passes its library to the guard (ctx.library), so another object's
+    # CONFIRMED record in 'tv' is the canary there and e01's zero answer in 'tv' stands. The other accounts have no item
+    # to test with: their looks stay unverified — and so does the not-in-Google-Photos verdict (never booked).
+    _season_of(sandbox, cw.world, {1: "missing"})
+    _confirmed_elsewhere(cw.world, sandbox["local_root"] / "Series" / "Canary")
+
+    res = main.cmd_check_photos(SEASON, apply=True)
+
+    assert [(l["pass"], l["account"], l["outcome"], l.get("zero_check")) for l in _results(res["run_dir"])] == [
+        ("routed", "tv", "not-found", "canary"), ("cross", "movies", "not-found", "unverified"),
+        ("cross", "anime", "not-found", "unverified"), ("cross", "others", "not-found", "unverified")]
+    [row] = res["rows"]
+    assert (row["status"], row["reason"], row["unverified"]) == ("possible-loss", None, True)
+    assert mvcommon.read_failed() == []
 
 
 def test_an_unverified_zero_answer_is_reported_but_never_booked(cw, sandbox, capsys):

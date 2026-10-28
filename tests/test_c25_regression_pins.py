@@ -111,6 +111,8 @@ EXISTING_PINS = [
     ("test_locator.py", "test_a_canary_that_finds_nothing_as_well_is_a_throttle_never_a_not_found"),
     ("test_locator.py", "test_a_failed_canary_is_confirmed_by_another_item_before_anything_stops"),
     ("test_locator.py", "test_a_throttled_search_stops_the_fetch_and_books_nothing"),
+    ("test_locator.py", "test_a_canary_search_that_gets_no_answer_at_all_is_a_failed_canary"),
+    ("test_check_photos.py", "test_without_a_crawl_inventory_the_check_hands_the_guard_its_library"),
     ("test_check_photos.py", "test_a_throttled_check_records_nothing_for_the_object_at_hand_and_a_rerun_continues"),
     ("test_check_photos.py", "test_the_auto_confirms_check_under_a_throttle_records_nothing_it_did_not_settle"),
     ("test_check_photos.py", "test_an_unverified_zero_answer_is_reported_but_never_booked"),
@@ -118,6 +120,7 @@ EXISTING_PINS = [
     ("test_map_photos.py", "test_a_confirmed_object_the_crawl_does_not_list_is_not_listed_never_a_loss"),
     ("test_map_photos.py", "test_an_apply_leaves_a_not_listed_objects_confirmed_record_as_it_is"),
     ("test_map_photos.py", "test_not_listed_needs_a_confirmed_record_a_fresh_crawl_and_a_photo_id_it_does_not_list"),
+    ("test_map_photos.py", "test_a_not_listed_object_pushed_again_after_the_crawl_began_stays_not_listed"),
     # trigger_download source digest
     ("test_fetch_search_wait.py", "test_trigger_download_source_is_pinned"),
     ("test_fetch_search_wait.py", "test_the_search_wait_it_relies_on_is_pinned"),

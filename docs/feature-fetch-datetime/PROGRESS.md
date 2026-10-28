@@ -98,6 +98,15 @@ The user archives from this folder — check for a running `main.py` before any 
 A d8dd71f (UI-first) · B 868cd27 (RPC-first) · C 5e7f0f6 (hybrid) — all COMPLETE and gate-verified by the orchestrator (re-runs A 2493/82 · B 2512/82 · C 2502/82); judge-v2 recommended C; user picked C at 🚦 G12 2026-10-12; tags candidates/imp_c25/step-12/{c-chosen,a-rejected,b-rejected}.
 
 ## Operations log (crawls, dry-runs, applies — redacted counts only)
+- 2026-10-28 🚦 R3 CHECK (photo_id first, thfix code): dry runs `check_photos account:<a> --approaches best --recheck` —
+  anime run 20261028T075326Z: confirmed 158 of 158 (RPC errors 0) · movies run 20261028T075852Z: confirmed 971 (incl.
+  31 X-Files in movies) · not-backed-up-yet 14 · possible-loss 3 (2 legacy last chunks + Fanaa — in Google Photos under an
+  untagged name, map: inconsistent/untagged-name; search canary passed, so a real "not findable by name") · Pirates BP
+  chunk 6 confirmed (s0_hash, dedupkey) · tv run 20261028T081724Z: stopped `throttled` after 168 (the 13 Friends
+  episodes, no photo_id, needed ~65 searches) — the guard recorded nothing false; resumed 17:17 (killed by Claude Code's
+  low-memory reaper at 268) and again on the user's go (card "Resume now"). User card "Apply anime + movies now" →
+  backup `D:\MV_lib_backup\20261028_2250\` → `--apply-run` anime: 158 updated · movies: 971 updated (1 newly
+  confirmed), 0 conflicts, failed list 19 rows (unchanged set).
 - 2026-10-28 🚦 R3 MAP APPLY (user ruling "Apply after the fix"; thfix merged c6d9990, orchestrator re-run full 3409 ·
   smoke 102; nothing else running): backup `D:\MV_lib_backup\20261028_1549\` (hashes match) · re-crawl movies 1,019
   (7 new) · tv 1,122 · anime 158 · `map_photos all` dry run → `--apply`: mapped 2,176 · wrong-account 31 · not-listed 1

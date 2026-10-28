@@ -558,3 +558,6 @@ No other step of this plan uses candidates.
   already super long. lets finish this task first. but do all the steps in the original plan in detail and without any
   limits." → plan-blocking findings are fixed inside C25; other ideas are only registered at Step 17. Every status
   update shows the whole plan's progress in %.
+- **2026-10-28 — 🚦 R3 check applies**: card answers "Resume now (Recommended)" (the tv check after the low-memory stop)
+  and "Apply anime + movies now (Recommended)" → `check_photos account:anime|movies --apply-run <run>` after a fresh
+  backup; tv is applied once its run is complete (asked again).

@@ -49,10 +49,31 @@ DECISIONS.md / PRIORITY.md (the orchestrator's).
       (PhotosThrottledError, the new message), test_fetch_search_wait's digest; registry +4 pins. Runs: session
       detector + gprpc + warm-up + search-wait + pins 210 passed · locator + check + resolve + crawler + gpweb 671
       passed · the other fetch modules 549 + photos-tab 48 passed · smoke 102 passed — this commit
-- [ ] thfix.c Fix 1.1–1.3 — the canary guard in locate_object (D7–D12), the check line / results `zero_check`, main's
-      verdicts (unverified: off the failed list, a note + one report line), the fetch's unverified booking, the
-      throttled report line; tests (zero + working canary · zero + failing canary · re-run continues · fetch · the
-      auto-confirm · resolve S3u · no canary source)
+- [x] thfix.c Fix 1.1–1.3 — the canary guard (D7–D12). mainfetch: CANARY_REUSE_S = 10, CANARY_TRIES = 2,
+      _LISTING_APPROACHES, _MV_TAG_RE; _LocatorRun.search_ok / canaries / canary_pool / canary_bad; _text_ids notes a
+      fresh search that listed an item; _canary_rank / _canary / _inventory_canaries (latest COMPLETE enumeration, not
+      archived / partial / errored) / _library_canaries (ONLY ctx.library — a dict, or the reader the fetch / locate
+      pass; the guard never reads a library nobody named: a bare load_library() read the REAL library in a sandbox-less
+      test and was removed) / _canary_pool / _pick_canary (never the object itself, never a failed one) /
+      _canary_lists (uncached; no answer = False) / _zero_check; locate_object records text-query finds (source 1) and
+      runs the guard when nothing pinned the object (res["zero_check"]); the fetch: _record_unfetched books no
+      not-found row and _locate_item no s4-skipped row when the zero answers are unverified (status still failed, one
+      line); `locate` prints "unverified"; the check line carries zero_check, its printed text marks unverified;
+      FetchContext.library (+ _check_run / _rp_walk / cmd_fetch_route / cmd_locate set it). main: _cp_rows
+      `unverified` (+ note), _cp_settle reason None for it, the report's "Unverified: N object(s) …" line, _rp_search's
+      unverified marker. Tests +25: test_locator 12C.f +19 (canary stands ×2 · canary fails = throttle ×2 (empty pages;
+      error frames -> the pages + a page canary) · unverified + never reads a library · recent proof + source-1 query as
+      the next canary · the window expires · a failed canary confirmed by another, never asked again · _pick_canary
+      exclusions · the pool's order / exclusions / read once · the library source (confirmed only, read once, none
+      without ctx.library, not read when the inventory gives one) · both transports -> page canary · S0a / S0b never ask
+      · the fetch stops and books nothing · the OD-5 skip booked only when verified ×2 · the not-found booked only when
+      verified ×2), test_check_photos 13.k +4 (canary then booked, routed + 3 cross looks · throttled check: no line, no
+      failed row, no learned record, re-run continues and books · the auto-confirm's `pending --apply --min-age-h 24`
+      under a throttle · unverified: reported, never booked), test_resolve_photos +1 (S3u under a throttle: the term
+      kept, no answer); adapted on purpose (their worlds had no item to test the search with, so their zero answers are
+      now unverified): 6 check tests + 1 manual-fetch test get `_canary_inventories` (they test what IS booked), the
+      resolve not-found S3u line gains its unverified marker; registry +7 pins. Runs: the 22 affected modules 1599
+      passed · smoke 102 passed — this commit
 - [ ] thfix.d Fix 2 — map_photos `not-listed` (D13); tests
 - [ ] thfix.e docs — README, ARCHITECTURE, docs/OPERATIONS_QA.md (two new Q&As), the pin registry
 - [ ] thfix.f disarm probes on a `git archive` scratch copy (each part reverted alone turns a test red; restored byte
@@ -185,3 +206,10 @@ DECISIONS.md / PRIORITY.md (the orchestrator's).
 - Model / attribution: dispatched to executor-fable (Fable 5.1), no MODEL-FALLBACK banner. The harness switched the
   commit attribution between Claude Fable 5.1 and Claude Opus 5.5 during the session; every commit carries the trailer
   the harness gives at the moment it is made.
+- 2026-10-28, after b395285 (coordinator: limits reset, "apply the in-step checkpoint rule"): the uncommitted diff in
+  main.py + mainfetch.py (+229/−10) is thfix.c's code in progress, written in this same session with its context
+  intact — the canary guard (_zero_check and its sources), the zero_check field, main's unverified verdicts, the fetch's
+  unverified booking. KEPT (coherent; its tests were being adapted when the limit hit). One correction made before the
+  checkpoint and kept: the guard never reads a library the caller did not name (a bare `load_library()` fallback read
+  the REAL library in a test without the sandbox — removed; ctx.library is a dict or the reader function the fetch /
+  locate pass).

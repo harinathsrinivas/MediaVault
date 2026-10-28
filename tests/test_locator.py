@@ -161,6 +161,40 @@ def _tree(root):
     return sorted(str(p.relative_to(root)) for p in root.rglob("*"))
 
 
+CANARY_NAME = "Canary.Item [ca0e01].chunk.001.mkv"   # a MediaVault-tagged chunk name: the guard's best canary rank
+
+
+def _canary_inventories(world, accounts=mvcommon.GP_ACCOUNTS, names=(CANARY_NAME,)):
+    """[IMP-C25 thfix] Each account's COMPLETE crawl enumeration — tools/gp_inventory's own files in
+    mvcommon.GP_INVENTORY_DIR (conftest: under tmp_path) — listing the items the fake world holds under `names`: the
+    throttle guard's canary source 2. Without one (and nothing a text query pinned yet in that account) a search that
+    answered nothing stays `unverified`. The canary items are taken 2020-01-01, so no taken second, day or query of the
+    tests' objects lists them. -> {account: [the canary items, in `names` order]}."""
+    folder = mvcommon.GP_INVENTORY_DIR
+    os.makedirs(folder, exist_ok=True)
+    out = {}
+    for account in accounts:
+        items = [world.add_item(account, name, taken="2020-01-01T00:00:00Z") for name in names]
+        recs = [{"photo_id": it.photo_id, "filename": it.filename, "width": it.width, "height": it.height,
+                 "taken_ms": it.taken_ms, "dedup_key": it.dedup_key, "tz_offset_ms": it.tz_offset_ms,
+                 "upload_ms": it.upload_ms, "account": account, "crawled_at": "2026-09-30T00:00:00+00:00",
+                 "source": "rpc"} for it in items]
+        lines = ([{"run": "canary", "event": "start", "at": "2026-09-30T00:00:00+00:00", "account": account,
+                   "mode": "rpc", "phase": "all"}] + [{"photo_id": it.photo_id, "seen_run": "canary"} for it in items]
+                 + [{"run": "canary", "event": "enumerated", "at": "2026-09-30T00:01:00+00:00", "mode": "rpc",
+                     "ids": len(items)}])
+        for kind, rows in (("items", recs), ("runs", lines)):
+            with open(os.path.join(folder, f"{account}.{kind}.jsonl"), "w", encoding="utf-8") as fh:
+                fh.writelines(json.dumps(row) + "\n" for row in rows)
+        out[account] = items
+    return out
+
+
+def _canary_searches(world, name=CANARY_NAME):
+    """The EzkLib requests MediaVault sent for `name` (the canary query over RPC)."""
+    return [e for e in world.rpc_log if e["rpcid"] == "EzkLib" and (e["request"] or [None])[0] == name]
+
+
 def _drift(world, rpcid):
     """Silent RPC drift: the answers of `rpcid` move the item's timezone offset and upload time (both still
     integers, so the typed parsers accept them) — only the drift detector can tell."""
@@ -2085,3 +2119,324 @@ def test_locate_stopping_early_closes_its_chrome_as_the_last_session(flow, sandb
     assert "stays open" in out and "the next account needs its debug port" not in out
     assert ("❌ Profile 'tv' is logged out." if stop == "signed-out" else "🛑 Stopped by user.") in out
     assert "Located" not in out
+
+
+# ===========================================================================
+# 12C.f — IMP-C25 thfix: the throttle guard (_zero_check). In the R3 dry runs of 2026-10-27 Google Photos' search
+# answered nothing for tens of minutes while the items were there, and every object read "not found". A zero answer is
+# a "not found" only while the search demonstrably works: a search on that transport listed an item moments ago, or a
+# CANARY — an item known to be in the account — is listed by the same search; else nothing is recorded and the caller
+# stops (PhotosThrottledError). No item to test with: "unverified".
+# ===========================================================================
+def _missing(tmp_path, ctx, name=SHOW, sid=SID, capture=False):
+    """A whole-file object that NO account holds -> its locator (legacy: found by name only; capture: its push capture,
+    SHA-1 + DateUTC, as a new archival has)."""
+    folder = _folder(tmp_path)
+    data = _bytes(f"missing {name}")
+    if capture:
+        _capture(folder, sid, [_obj(data, _up(name, sid))])
+    [loc] = _locators(_whole(folder, name, data, sid), EP, ctx, tmp_path)
+    return loc
+
+
+def _write_inventory(account, records, listed):
+    """tools/gp_inventory's files for `account`: items.jsonl = `records`, runs.jsonl = one complete enumeration that
+    listed the ids `listed`."""
+    folder = mvcommon.GP_INVENTORY_DIR
+    os.makedirs(folder, exist_ok=True)
+    lines = ([{"run": "r1", "event": "start", "at": "2026-09-30T00:00:00+00:00", "account": account, "mode": "rpc",
+               "phase": "all"}] + [{"photo_id": pid, "seen_run": "r1"} for pid in listed]
+             + [{"run": "r1", "event": "enumerated", "at": "2026-09-30T00:01:00+00:00", "mode": "rpc",
+                 "ids": len(listed)}])
+    for kind, rows in (("items", records), ("runs", lines)):
+        with open(os.path.join(folder, f"{account}.{kind}.jsonl"), "w", encoding="utf-8") as fh:
+            fh.writelines(json.dumps(row) + "\n" for row in rows)
+
+
+@pytest.mark.parametrize("capture", [False, True], ids=["legacy-name-only", "new-push-capture"])
+def test_a_zero_answer_stands_when_a_canary_lists_an_item_known_to_be_there(fake_photos, tmp_path, capture):
+    # The object is in no account: every listing stage answers nothing (with a capture: S1's timeline too). An item of the
+    # account's crawl inventory IS listed by the same search -> the zero answer stands: "canary". ONE canary search.
+    [canary] = _canary_inventories(fake_photos, ("tv",))["tv"]
+    ctx = _ctx()
+    loc = _missing(tmp_path, ctx, capture=capture)
+
+    res = mainfetch.locate_object(fake_photos.driver("tv"), loc, ctx)
+
+    assert not res["found"] and res["zero_check"] == "canary"
+    zeros = [a for a, v in res["per_approach"].items() if v["outcome"] == "not-found" and a != "hash"]
+    assert ("taken_second" in zeros) is capture and "exact_name" in zeros
+    assert all(res["per_approach_via"][a] == "rpc" for a in zeros)            # the canary asks the same transport …
+    assert len(_canary_searches(fake_photos)) == 1                             # … once
+    assert ctx.locator.search_ok[("tv", "rpc")] == mainfetch.time.time()       # the transport is proven now
+    assert canary.photo_id not in res["candidates"]                            # the canary is no candidate
+
+
+@pytest.mark.parametrize("mode", ["zero", "error"])
+def test_a_canary_that_finds_nothing_as_well_is_a_throttle_never_a_not_found(fake_photos, tmp_path, mode):
+    # The R3 dry runs: the search answered nothing (over RPC: error frames, then the web pages showed "No results")
+    # while the items were there. The canary — an item known to be there — finds nothing either: PhotosThrottledError.
+    [canary] = _canary_inventories(fake_photos, ("tv",))["tv"]
+    ctx = _ctx()
+    loc = _missing(tmp_path, ctx)
+    fake_photos.throttle("tv", after=0, rpc=mode)
+    d = fake_photos.driver("tv")
+
+    with pytest.raises(mainfetch.PhotosThrottledError) as err:
+        mainfetch.locate_object(d, loc, ctx)
+
+    assert (err.value.page, err.value.why) == ("search", "a search for an item known to be there found nothing")
+    assert isinstance(err.value, mainfetch.SessionExpiredError)                # every sign-out handler stops on it
+    assert ctx.locator.canary_bad == {("tv", canary.photo_id)}                 # never picked again in this run
+    if mode == "error":   # RPC answered error frames: the stages ran on the web pages, and so did the canary
+        assert [a["query"] for a in d.actions if a["kind"] == "search"][-1] == CANARY_NAME
+        assert _canary_searches(fake_photos) == []
+    else:
+        assert len(_canary_searches(fake_photos)) == 1
+
+
+def test_with_no_item_to_test_the_search_with_a_zero_answer_is_unverified(fake_photos, tmp_path, monkeypatch):
+    # Nothing pinned by a text query yet, no crawl inventory, no library named: nothing can show that the search
+    # answers. The zero answer is recorded as before, marked "unverified" — and the guard never reads a library itself.
+    monkeypatch.setattr(mainfetch, "load_library", lambda: pytest.fail("the guard read a library nobody named"))
+    ctx = _ctx()
+    loc = _missing(tmp_path, ctx)
+
+    res = mainfetch.locate_object(fake_photos.driver("tv"), loc, ctx)
+
+    assert not res["found"] and res["zero_check"] == "unverified"
+    assert _canary_searches(fake_photos) == [] and ctx.locator.canary_pool == {"tv": []}
+
+
+def test_a_search_that_listed_an_item_moments_ago_proves_the_transport_and_its_query_is_the_next_canary(
+        fake_photos, tmp_path, monkeypatch):
+    other = fake_photos.add_item("tv", _up("Other.Show.S01E01.mkv", "0f0f0f"), taken=TAKEN)
+    ctx = _ctx()
+    [found_loc] = _locators(_whole(_folder(tmp_path, "Other"), "Other.Show.S01E01.mkv", other.data, "0f0f0f"),
+                            "tv-en-2015-othershow-s01e01", ctx, tmp_path)
+    loc = _missing(tmp_path, ctx)
+    d = fake_photos.driver("tv")
+
+    first = mainfetch.locate_object(d, found_loc, ctx)
+    assert first["found"] and first["stage"] == "s2_exact_name" and first["zero_check"] is None   # found: no canary
+    assert [(c["photo_id"], c["query"]) for c in ctx.locator.canaries["tv"]] == [(other.photo_id, other.filename)]
+    stage_search = len(_canary_searches(fake_photos, other.filename))          # the S2 search that pinned it
+
+    res = mainfetch.locate_object(d, loc, ctx)                                  # seconds later, same transport
+    assert res["zero_check"] == "recent" and len(_canary_searches(fake_photos, other.filename)) == stage_search
+
+    monkeypatch.setattr(mainfetch, "CANARY_REUSE_S", 0)                         # no listing is fresh enough now
+    again = mainfetch.locate_object(d, loc, ctx)
+    assert again["zero_check"] == "canary"
+    assert len(_canary_searches(fake_photos, other.filename)) == stage_search + 1   # its query: the canary
+
+
+def test_the_proof_lasts_canary_reuse_s_then_a_canary_runs(fake_photos, tmp_path, clock):
+    other = fake_photos.add_item("tv", _up("Other.Show.S01E01.mkv", "0f0f0f"), taken=TAKEN)
+    ctx = _ctx()
+    [found_loc] = _locators(_whole(_folder(tmp_path, "Other"), "Other.Show.S01E01.mkv", other.data, "0f0f0f"),
+                            "tv-en-2015-othershow-s01e01", ctx, tmp_path)
+    d = fake_photos.driver("tv")
+    assert mainfetch.locate_object(d, found_loc, ctx)["found"]
+    stage_search = len(_canary_searches(fake_photos, other.filename))
+
+    clock.sleep(mainfetch.CANARY_REUSE_S)                                       # the proof has expired
+    res = mainfetch.locate_object(d, _missing(tmp_path, ctx), ctx)
+
+    assert res["zero_check"] == "canary"
+    assert len(_canary_searches(fake_photos, other.filename)) == stage_search + 1
+
+
+def test_a_failed_canary_is_confirmed_by_another_item_before_anything_stops(fake_photos, tmp_path, monkeypatch):
+    # One deleted, archived or unsearchable canary item must never stop a run (it would stop every re-run too): the
+    # second item answers -> no throttle; the first is never asked again in this run.
+    names = ("A.Canary [ca0e01].chunk.001.mkv", "B.Canary [ca0e02].chunk.001.mkv")
+    first, second = _canary_inventories(fake_photos, ("tv",), names=names)["tv"]
+    first.deleted = True                                                        # gone since the crawl
+    monkeypatch.setattr(mainfetch, "CANARY_REUSE_S", 0)
+    ctx = _ctx()
+    d = fake_photos.driver("tv")
+
+    res = mainfetch.locate_object(d, _missing(tmp_path, ctx), ctx)
+
+    assert res["zero_check"] == "canary" and ctx.locator.canary_bad == {("tv", first.photo_id)}
+    assert [len(_canary_searches(fake_photos, n)) for n in names] == [1, 1]
+    later = mainfetch.locate_object(d, _missing(tmp_path, ctx, name="Another.Show.S01E01.mkv", sid="0a0a0a"), ctx)
+    assert later["zero_check"] == "canary"
+    assert [len(_canary_searches(fake_photos, n)) for n in names] == [1, 2]    # the failed one is never asked again
+
+
+def test_the_canary_is_never_the_object_itself_nor_one_that_failed():
+    key = gpweb.dedup_key(_sha1(_bytes("own")))
+    ids = [f"AF1QipFAKEcanary{n:09d}" for n in range(1, 8)]
+    ctx = _ctx()
+    run = mainfetch._locator_run(ctx)
+    run.canary_pool["tv"] = [mainfetch._canary(ids[0], "Own.Name [a1b2c3].mkv"),          # its own uploaded name
+                             mainfetch._canary(ids[1], "X [ca0e01].chunk.001.mkv"),       # its stored photo_id
+                             mainfetch._canary(ids[2], "Y [ca0e01].chunk.002.mkv"),       # one of its alternates
+                             mainfetch._canary(ids[3], "Z [ca0e01].chunk.003.mkv"),       # a candidate its stages saw
+                             mainfetch._canary(ids[4], "W [ca0e01].chunk.004.mkv", key),  # its own bytes
+                             mainfetch._canary(ids[5], "V [ca0e01].chunk.005.mkv"),       # failed before
+                             mainfetch._canary(ids[6], "U [ca0e01].chunk.006.mkv")]
+    run.canary_bad.add(("tv", ids[5]))
+    loc = {"photo_id": ids[1], "alternates": [ids[2]], "uploaded_name": "own.name  [A1B2C3].mkv", "dedup_key": key}
+
+    assert mainfetch._pick_canary(ctx, "tv", loc, {"candidates": [ids[3]]})["photo_id"] == ids[6]
+    run.canary_bad.add(("tv", ids[6]))
+    assert mainfetch._pick_canary(ctx, "tv", loc, {"candidates": [ids[3]]}) is None
+
+
+def test_the_canary_pool_reads_the_latest_complete_crawl_and_puts_the_best_names_first(fake_photos):
+    def rec(n, name, **facts):
+        return dict({"photo_id": f"AF1QipFAKEinv{n:012d}", "filename": name, "dedup_key": None, "source": "rpc"},
+                    **facts)
+
+    records = [rec(1, "IMG_0001.jpg"), rec(2, "Whole.Movie [ca0e01].mkv"), rec(3, "Film [ca0e02].holder.mkv"),
+               rec(4, "Film [ca0e02].chunk.002.mkv"), rec(5, "Archived [ca0e03].chunk.001.mkv", archived=True),
+               rec(6, "Partial [ca0e04].chunk.001.mkv", partial_upload=True),
+               rec(7, "Errored [ca0e05].chunk.001.mkv", error="incomplete: batch info"),
+               rec(8, "Unlisted [ca0e06].chunk.001.mkv"), rec(9, "")]
+    _write_inventory("tv", records, [r["photo_id"] for r in records if r["photo_id"] != rec(8, "")["photo_id"]])
+    ctx = _ctx()
+
+    pool = mainfetch._canary_pool(ctx, "tv")
+
+    assert [(c["photo_id"][-1], c["rank"]) for c in pool] == [("4", 0), ("3", 1), ("2", 2), ("1", 3)]
+    assert [c["query"] for c in pool] == ["Film [ca0e02].chunk.002.mkv", "Film [ca0e02].holder.mkv",
+                                          "Whole.Movie [ca0e01].mkv", "IMG_0001.jpg"]
+    os.remove(os.path.join(mvcommon.GP_INVENTORY_DIR, "tv.items.jsonl"))
+    assert mainfetch._canary_pool(ctx, "tv") is pool                            # read once per run and account
+    _write_inventory("anime", records[:2], [])                                  # an enumeration that listed nothing …
+    os.remove(os.path.join(mvcommon.GP_INVENTORY_DIR, "anime.runs.jsonl"))      # … and no complete one at all
+    assert mainfetch._inventory_canaries("anime") == [] and mainfetch._inventory_canaries("movies") == []
+
+
+def test_the_last_canary_source_is_the_named_librarys_confirmed_records(fake_photos, tmp_path):
+    folder = _folder(tmp_path)
+
+    def entry(tag, record=None, account="tv"):
+        data = _bytes(tag)
+        block = mvcommon.new_gphotos_block(_sha256(data), accounts={account: record}) if record else None
+        return _whole(folder, f"{tag}.mkv", data, tag[:6], block=block)
+
+    confirmed = {"photo_id": "AF1QipFAKEconfirmed000001", "upload_ms": 1, "verified_by": "dedupkey", "source": "check",
+                 "confirmed": True}
+    unconfirmed = {"photo_id": "AF1QipFAKEunconfirmed0001", "verified_by": "filename", "source": "map"}
+    library = {"tv-en-2020-aaaaaa": entry("aaaaaa", confirmed), "tv-en-2020-bbbbbb": entry("bbbbbb", unconfirmed),
+               "tv-en-2020-cccccc": entry("cccccc", dict(confirmed, photo_id="AF1QipFAKEotheraccount01"), "movies"),
+               "tv-en-2020-dddddd": entry("dddddd")}
+    reads = []
+    ctx = _ctx()
+    ctx.library = lambda: reads.append(1) or library                            # the fetch's lazy reader
+
+    assert [(c["photo_id"], c["query"]) for c in mainfetch._canary_pool(ctx, "tv")] == [
+        ("AF1QipFAKEconfirmed000001", "aaaaaa [aaaaaa].mkv")]
+    assert mainfetch._library_canaries(ctx, "movies")[0]["photo_id"] == "AF1QipFAKEotheraccount01"
+    assert reads == [1] and ctx.library is library                              # read once, then kept
+    ctx.library = None
+    assert mainfetch._library_canaries(ctx, "tv") == []                         # no library named: no source 3
+    _canary_inventories(fake_photos, ("anime",))
+    lazy = _ctx("anime")
+    lazy.library = lambda: pytest.fail("the inventory gave canaries: the library is not read")
+    assert [c["query"] for c in mainfetch._canary_pool(lazy, "anime")] == [CANARY_NAME]
+
+
+def test_zero_answers_by_both_transports_take_the_web_page_canary(fake_photos, tmp_path, monkeypatch):
+    # RPC answered S2 (nothing), then failed for S3, which ran on the web pages (nothing): the run goes on there, so the
+    # canary asks the web pages too.
+    _canary_inventories(fake_photos, ("tv",))
+    ctx = _ctx()
+    loc = _missing(tmp_path, ctx)
+    real, calls = gprpc.search, []
+
+    def search(driver, query, max_pages=3):
+        calls.append(query)
+        if len(calls) == 2:
+            raise gprpc.RpcServerError("EzkLib", 13)
+        return real(driver, query, max_pages)
+
+    monkeypatch.setattr(gprpc, "search", search)
+    d = fake_photos.driver("tv")
+
+    res = mainfetch.locate_object(d, loc, ctx)
+
+    assert (res["per_approach_via"]["exact_name"], res["per_approach_via"]["title_sid"]) == ("rpc", "ui")
+    assert res["zero_check"] == "canary" and CANARY_NAME not in calls                 # not over RPC …
+    assert [a["query"] for a in d.actions if a["kind"] == "search"][-1] == CANARY_NAME  # … on the web pages
+
+
+def test_photo_id_and_hash_look_ups_never_ask_for_a_canary(fake_photos, tmp_path):
+    _canary_inventories(fake_photos, ("tv",))
+    data = _bytes("gone")
+    gone = fake_photos.add_item("tv", _up(SHOW, SID), data=data, taken=TAKEN)
+    ctx = _ctx()
+    [loc] = _locators(_whole(_folder(tmp_path), SHOW, data, SID, block=_learned(gone)), EP, ctx, tmp_path)
+    gone.deleted = True                                                          # its photo_id and its bytes: gone
+
+    res = mainfetch.locate_object(fake_photos.driver("tv"), loc, ctx, stages=("photo_id", "hash"))
+
+    assert set(res["per_approach"]) == {"photo_id", "hash"} and not res["found"]
+    assert res["zero_check"] is None and _canary_searches(fake_photos) == []
+
+
+def test_a_throttled_search_stops_the_fetch_and_books_nothing(flow, sandbox, capsys):
+    # The fetch's locator (Step 12): its zero answer meets a canary that finds nothing -> the throttle line, today's
+    # search never runs, nothing is requested, no failed-list row, no learned record — never "not found".
+    _canary_inventories(flow.world, ("tv",))
+    _season(sandbox, flow.world, (1,), block=None)                               # a legacy episode: found by search
+    flow.world.throttle("tv", after=0)
+
+    mainfetch.cmd_fetch_route(SEASON)
+
+    out = capsys.readouterr().out
+    assert ("⏸️ Google Photos is throttled in 'tv' (a search for an item known to be there found nothing) — the fetch "
+            "stops here; files already fetched are kept and skipped. Re-run the same fetch in about 30 minutes.") in out
+    assert "logged out" not in out and "Not fetched" not in out and "not located" not in out
+    assert flow.legacy == [] and flow.world.downloads == []
+    assert mvcommon.read_failed() == [] and mvcommon.read_learned() == []
+
+
+@pytest.mark.parametrize("canaries", [True, False], ids=["verified", "unverified"])
+def test_an_od5_skip_resting_on_zero_answers_is_booked_only_when_they_are_verified(flow, sandbox, capsys, canaries):
+    # A content-keyed new push in no account: every stage answers nothing, the preview of today's queries too — OD-5
+    # skips today's search. That skip is booked (s4-skipped) only when its zero answers were shown to be real.
+    if canaries:
+        _canary_inventories(flow.world, ("tv",))
+    folder = sandbox["local_root"] / "Series" / "Demo" / "Season 01"
+    folder.mkdir(parents=True)
+    data = _bytes("pushed, never backed up")
+    _capture(folder, SID, [_obj(data, _up(SHOW, SID))])
+    mvcommon.save_library({EP: _whole(folder, SHOW, data, SID)})
+
+    mainfetch.cmd_fetch_route(EP)
+
+    out = capsys.readouterr().out
+    assert flow.legacy == [] and flow.world.downloads == []                     # today's search is skipped either way
+    if canaries:
+        [row] = mvcommon.read_failed()
+        assert row["reason"] == "s4-skipped"
+    else:
+        assert mvcommon.read_failed() == []
+        assert (f"   > ⏭️ {SHOW}: nothing found (") in out and ("— today's search is skipped (OD-5); not added to the "
+                                                               "failed list (unverified: no item known to be in 'tv' "
+                                                               "could show that its search was answering).") in out
+
+
+@pytest.mark.parametrize("canaries", [True, False], ids=["verified", "unverified"])
+def test_a_not_found_is_booked_by_the_fetch_only_when_its_zero_answers_are_verified(flow, sandbox, capsys, canaries):
+    if canaries:
+        _canary_inventories(flow.world, ("tv",))
+    _, items = _season(sandbox, flow.world, (1,), block=None)
+    items[f"{SEASON}e01"].deleted = True                                         # in no account
+
+    mainfetch.cmd_fetch_route(SEASON)
+
+    out = capsys.readouterr().out
+    assert flow.legacy                                                           # today's search ran either way
+    if canaries:
+        [row] = mvcommon.read_failed()
+        assert (row["reason"], row["manual_id"]) == ("not-found", f"{SEASON}e01")
+    else:
+        assert mvcommon.read_failed() == []
+        assert ("❌ Not fetched: Demo.S01E01.mkv — no stage found its exact item (not-found, unverified: no item known "
+                "to be in 'tv' could show that its search was answering — not added to the failed list).") in out

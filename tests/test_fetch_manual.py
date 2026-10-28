@@ -31,8 +31,8 @@ import gpweb
 import main
 import mainfetch
 import mvcommon
-from test_locator import (SEASON, TAKEN, WEB_MARKERS, _bytes, _capture, _journal_objects, _obj, _one_episode,  # noqa: F401
-                          _only_read_only_rpcids_ever, _split, _up, _whole, clock, flow)
+from test_locator import (SEASON, TAKEN, WEB_MARKERS, _bytes, _canary_inventories, _capture, _journal_objects,  # noqa: F401
+                          _obj, _one_episode, _only_read_only_rpcids_ever, _split, _up, _whole, clock, flow)
 from test_map_photos import _main_guard
 
 EP = "tv-en-2015-demo-s04e01"
@@ -207,6 +207,7 @@ def test_everything_fetched_prints_no_block(flow, sandbox, capsys):
 # 14.c — --manual
 # ===========================================================================
 def test_manual_keeps_the_users_download_once_its_sha256_matches(flow, sandbox, capsys, monkeypatch, clock):
+    _canary_inventories(flow.world, ("tv",))   # [IMP-C25 thfix] its zero answers are verified: the not-found is booked
     folder, hidden = _hidden(flow, sandbox)
     opened = _when_opened(monkeypatch, clock, (420, _user_downloads(flow, hidden)))
     rounds = _harvests(monkeypatch, clock)

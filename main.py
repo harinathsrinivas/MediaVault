@@ -13548,6 +13548,12 @@ def _cp_rows(doc, lines, library, complete):
                 status, decisive = "ambiguous", there
             else:
                 status = "possible-loss"
+        # [IMP-C25 thfix] a "not in Google Photos" verdict resting on a look whose search answered nothing while no item
+        # known to be in that account could show the search was answering (mainfetch._zero_check): unverified
+        looks = [l for l in [routed] + list(cross.values())
+                 if l is not None and l.get("outcome") in ("not-found", "wrong-item")]
+        unverified = status in ("possible-loss", "not-backed-up-yet") and any(
+            l.get("zero_check") == "unverified" for l in looks)
         row = {"manual_id": obj["manual_id"], "label": obj["label"], "sha256": obj["sha256"], "kind": obj["kind"],
                "category": obj["category"], "uploaded_name": obj["uploaded_name"], "routed": obj["account"],
                "home": obj.get("home") or obj["account"], "route": obj.get("route"), "pushed_at": obj.get("pushed_at"),
@@ -13556,7 +13562,10 @@ def _cp_rows(doc, lines, library, complete):
                "routed_line": routed, "cross": cross, "decisive": decisive, "quality": q,
                "mismatch": bool(found is not None and found["account"] != (obj.get("home") or obj["account"])),
                "recent": recent, "error": error, "library_position": positions.get(obj["manual_id"]),
-               "partial_set": False, "device": None, "note": None, "reason": None}
+               "partial_set": False, "device": None, "note": None, "reason": None, "unverified": unverified}
+        if unverified:
+            _mp_note(row, "unverified: its search answered nothing and no item known to be in the account could show "
+                          "that the search was answering — not booked")
         if status == "possible-loss":
             same_name = (routed.get("content_key") and
                          ((routed.get("per_approach") or {}).get("exact_name") or {}).get("outcome") == "wrong-item")
@@ -13607,6 +13616,8 @@ def _cp_settle(library, rows, devices):
             reason = "wrong-item"          # its stages proved every candidate another item (the fetch's reason chain)
         if row["status"] in _MP_LOST and row["partial_set"]:
             reason = "partial-set"
+        if row.get("unverified"):
+            reason = None                  # [IMP-C25 thfix] nothing could show its search was answering: never booked
         row["reason"] = reason
     return summary
 
@@ -13794,6 +13805,12 @@ def _cp_report_lines(ctx):
         lines.append(f"Not backed up yet (pushed in the last {MAP_RECENT_DAYS} days — not a problem yet): "
                      f"{len(recent):,} object(s)")
         lines.extend(_mp_nowhere_line(row) for row in recent)
+    unverified = [r for r in rows if r.get("unverified")]
+    if unverified:   # [IMP-C25 thfix] mainfetch._zero_check found no item to test the search with
+        lines.append(f"Unverified: {len(unverified):,} object(s) of the above — their searches answered nothing and no "
+                     f"item known to be in the account (none found by a search yet, no crawl inventory, no confirmed "
+                     f"record) could show that the search was answering: nothing is booked for them (no failed-list row); "
+                     f"a later run that has such an item checks them again")
     if ctx["devices"] is not None:
         lines.extend(_mp_device_lines(ctx["devices"]))
     bad = [r for r in rows if r["status"] == "inconsistent"]
@@ -14435,8 +14452,10 @@ def _rp_search(driver, ctx, rec, obj, loc, term, state):
         print(f"      ✔ your term found it — proof {res['proof']}; recorded (and kept as its search term)")
     else:
         tried = mainfetch._tried_text(res) if res else "the search did not run"
-        print(f"      🔍 your term found no verified item ({tried}) — kept as its search term: every fetch tries it "
-              f"(S3u)")
+        unverified = (f"; unverified: no item known to be in '{rec['account']}' could show that its search was "
+                      f"answering" if res and res.get("zero_check") == "unverified" else "")   # [IMP-C25 thfix]
+        print(f"      🔍 your term found no verified item ({tried}{unverified}) — kept as its search term: every fetch "
+              f"tries it (S3u)")
     return True
 
 
@@ -14505,6 +14524,7 @@ def _rp_walk(library, rows, state):
     import mainfetch
     from tools import gp_inventory  # LockLost — the crawler's heartbeat (mainfetch._check_lock)
     ctx = mainfetch.FetchContext(run_id=f"resolve-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{os.getpid()}")
+    ctx.library = library   # [IMP-C25 thfix] the throttle guard's last canary source
     by_account = {}
     for rec, obj in rows:
         by_account.setdefault(rec["account"], []).append((rec, obj))

@@ -23,6 +23,12 @@ Changing anything pinned here is a REVIEWED decision (re-pin it on purpose, in t
      sign-out                      classification (Google Photos' signed-out page is a sign-out only before the session
                                    showed signed-in Photos) · test_check_photos.py: a bounce mid-run stops the check
                                    `throttled`, records nothing for the object at hand, and a re-run continues
+     a throttled search is never   (IMP-C25 thfix) test_locator.py: a zero answer stands only when a canary lists an
+     a "not found"                 item known to be there; a canary that finds nothing as well is PhotosThrottledError;
+                                   one failed canary is confirmed by another before anything stops; the fetch stops and
+                                   books nothing · test_check_photos.py: a throttled check (and the auto-confirm's
+                                   `pending --apply --min-age-h 24`) records nothing it did not settle; a zero answer
+                                   nothing could verify is reported, never booked
      calculate_file_hash           test_gp_capture.py (SHA-256 for 0 / 10 / 196 615 bytes + the same-pass SHA-1) ·
                                    test_mvcommon.py (the progress bar; a missing file -> None)
      ENTRY_TYPE_KEYS literal       test_entry_schema_guard.py (d1)
@@ -90,6 +96,14 @@ EXISTING_PINS = [
     ("test_session_detector.py", "test_the_signed_out_page_after_signed_in_photos_is_a_throttle_never_a_sign_out"),
     ("test_session_detector.py", "test_a_sign_in_page_is_a_sign_out_even_after_signed_in_photos"),
     ("test_check_photos.py", "test_a_bounce_to_the_signed_out_page_mid_run_stops_it_as_throttled_and_a_rerun_continues"),
+    # a throttled search is never a "not found" (IMP-C25 thfix, 2026-10-28)
+    ("test_locator.py", "test_a_zero_answer_stands_when_a_canary_lists_an_item_known_to_be_there"),
+    ("test_locator.py", "test_a_canary_that_finds_nothing_as_well_is_a_throttle_never_a_not_found"),
+    ("test_locator.py", "test_a_failed_canary_is_confirmed_by_another_item_before_anything_stops"),
+    ("test_locator.py", "test_a_throttled_search_stops_the_fetch_and_books_nothing"),
+    ("test_check_photos.py", "test_a_throttled_check_records_nothing_for_the_object_at_hand_and_a_rerun_continues"),
+    ("test_check_photos.py", "test_the_auto_confirms_check_under_a_throttle_records_nothing_it_did_not_settle"),
+    ("test_check_photos.py", "test_an_unverified_zero_answer_is_reported_but_never_booked"),
     # trigger_download source digest
     ("test_fetch_search_wait.py", "test_trigger_download_source_is_pinned"),
     ("test_fetch_search_wait.py", "test_the_search_wait_it_relies_on_is_pinned"),

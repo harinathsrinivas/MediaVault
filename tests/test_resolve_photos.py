@@ -408,8 +408,8 @@ def test_a_search_term_under_a_throttle_is_kept_but_no_answer_is_recorded(rp, ca
 
     out = capsys.readouterr().out
     assert ("⏸️ Google Photos is throttled in 'tv' (a search for an item known to be there found nothing) — its "
-            "objects stop here (nothing was recorded for the one at hand; the answers given so far are kept). Re-run "
-            "resolve_photos in about 30 minutes.") in out
+            "objects stop here (no verdict for the one at hand: it comes back next time; the answers given so far "
+            "are kept). Re-run resolve_photos in about 30 minutes.") in out
     assert "your term found no verified item" not in out and "logged out" not in out and res["status"] == "ok"
     assert mvcommon.read_resolved() == []                                              # asked again next time
     assert [r["search_override"] for r in mvcommon.read_learned("tv")] == ["demo fourth season opener"]
@@ -628,8 +628,8 @@ def test_a_throttle_is_named_never_logged_out_and_nothing_is_recorded(rp, capsys
 
     out = capsys.readouterr().out
     assert ("⏸️ Google Photos is throttled in 'tv' (Google showed its 'unusual traffic' page) — its objects stop here "
-            "(nothing was recorded for the one at hand; the answers given so far are kept). Re-run resolve_photos in "
-            "about 30 minutes.") in out
+            "(no verdict for the one at hand: it comes back next time; the answers given so far are kept). Re-run "
+            "resolve_photos in about 30 minutes.") in out
     assert "logged out" not in out and res["status"] == "ok"
     assert mvcommon.read_resolved() == [] and mvcommon.read_learned() == []
 

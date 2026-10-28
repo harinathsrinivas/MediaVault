@@ -89,7 +89,27 @@ DECISIONS.md / PRIORITY.md (the orchestrator's).
       bytes -> conflict)); registry +3 pins. A slip caught by the run: the edit had dropped the `def` line of the next
       test (test_with_devices_an_old_object_gets_the_phones_verdict) — restored before the commit. Runs: map + check +
       apply engine + primitives + pins + resolve 717 passed · smoke 102 passed — this commit
-- [ ] thfix.e docs — README, ARCHITECTURE, docs/OPERATIONS_QA.md (two new Q&As), the pin registry
+- [x] thfix.e docs — every claim checked against the code. README: the warm-up's THROTTLED; map's `not-listed`; a new
+      paragraph "When Google Photos throttles its search" (what the user sees, what is recorded, how to resume).
+      ARCHITECTURE: §8.3 the zero-streak backstop; §8.4 the throttle-guard bullet + `zero_check` in the result contract;
+      §8.7; §8.8 rewritten (the classifier, the session-history rule, PhotosThrottledError, the per-command line
+      table); §8.10 map step 4 `not-listed`, "A throttled check", resolve; §9.1b warm-up; §9.3 crawler exit 4; §12; §13
+      the fake's throttle + coverage; §14 THROTTLE_RETRY_MIN / CANARY_REUSE_S / CANARY_TRIES; Last updated.
+      OPERATIONS_QA: §6c the three-zeros stop is no longer "logged out"; §6d the possible-loss pointer and two new Q&As —
+      "`map_photos` says possible loss, but fetch finds the file — why?" and "Why did a big `check_photos` run stop with
+      "Google Photos is throttled"?" (the dispatch's title "…'search is throttled'" aligned with the words the line
+      really prints, so searching the message finds it); Last updated. Line refs: every ref the code shift moved was
+      re-pointed and then verified forward (refs_verify: 313 paired refs; the only mismatches are the known historical
+      refs and 2 heading-attribution false positives). The verification caught what refs.py had missed: two bare §14
+      refs it had read as main.py (`:2496` / `:5536` -> mainfetch `:2588` / `:5844`), the 2-digit gprpc refs it never
+      read (`:60` -> `:61`, `:62-67` -> `:63-68`), and the §11 / §18 "name (N)" tables (17 numbers). Refs that were
+      already off at the base (OPERATIONS_QA's point-in-time refs in §3 / §5 / §6c, ARCHITECTURE `:413` and
+      `:391-392`) are left as they are. Code, one line: resolve_photos' throttle line said "nothing was recorded for the
+      one at hand", but a search term the user just typed IS recorded (its search_override is written before S3u runs —
+      by design, and its test says so) -> "no verdict for the one at hand: it comes back next time" (main.py, the same
+      4 lines; 2 test assertions). Pin registry: +5 per-command throttle-line pins (fetch, locate, resolve, crawler,
+      warm-up) + its docstring. Runs: test_resolve_photos + test_c25_regression_pins 134 passed · smoke 102 passed —
+      this commit
 - [ ] thfix.f disarm probes on a `git archive` scratch copy (each part reverted alone turns a test red; restored byte
       for byte)
 - [ ] thfix.g gates (full, then smoke), secrets scan, self-review, STATE: COMPLETE, the final commit
@@ -134,15 +154,20 @@ DECISIONS.md / PRIORITY.md (the orchestrator's).
 - D2 Advice only: `THROTTLE_RETRY_MIN = 30` ("re-run … in about 30 minutes"; the evidence's zero windows ended after
   4–55 min while searching went on). No adaptive scheme, no retry loop.
 - D3 Pacing unchanged (F-c).
-- D4 The throttle line (user-facing; `{why}` from the exception):
+- D4 The throttle line (user-facing; `{why}` from the exception). [Amended as built — thfix.b, and the resolve tail in
+  thfix.e: every line starts with ⏸️ (a pause, not a failure); these are the exact texts the code prints:]
   · check:   `   ⏸️ Google Photos is throttled in '<account>' ({why}) — nothing was recorded for the object it was
              checking; re-run the same command in about 30 minutes: it continues where it stopped.`
-  · fetch:   `❌ Google Photos is throttled in '<account>' ({why}) — the fetch stops here; files already fetched are kept
+  · fetch:   `⏸️ Google Photos is throttled in '<account>' ({why}) — the fetch stops here; files already fetched are kept
              and skipped. Re-run the same fetch in about 30 minutes.`
-  · resolve: `❌ Google Photos is throttled in '<account>' ({why}) — stopping; the answers given so far are kept. Re-run
-             resolve_photos in about 30 minutes.`
-  · locate / crawler / warm-up: the same phrase with their own tail. The about-page variant (D5) adds: `(if that
-    Chrome still shows Google Photos' signed-out page after the pause, sign in: --user-data-dir=…)`.
+  · resolve: `⏸️ Google Photos is throttled in '<account>' ({why}) — its objects stop here (no verdict for the one at
+             hand: it comes back next time; the answers given so far are kept). Re-run resolve_photos in about 30
+             minutes.`
+  · locate:  `⏸️ … — the locate stops here; re-run it in about 30 minutes.` · crawler: `STOPPED: Google Photos is
+    throttled in '<account>' ({why}) — not a sign-out; progress is kept, re-run in about 30 minutes.` · warm-up:
+    `   ⏸️ Profile '<key>': Google showed another page than Google Photos (throttled?) — not a sign-out; the next
+    warm-up looks again.` The about-page variant (D5) appends (throttled_hint): ` If Chrome on this profile still
+    shows Google Photos' signed-out page after the pause, sign in (--user-data-dir=…).`
   `{why}` phrases: canary — "a search for an item known to be there found nothing"; unusual traffic — "Google showed
   its 'unusual traffic' page"; about page — "Google showed its signed-out page to a session that was signed in"; other
   page — "the browser landed on <host>, not on Google Photos"; the legacy streak — "3 searches in a row found nothing
@@ -178,7 +203,7 @@ DECISIONS.md / PRIORITY.md (the orchestrator's).
   newest first); else (2) the account's crawl inventory — the latest complete enumeration, not archived / partial /
   errored, MediaVault-tagged chunk names first (F18: an exact chunk name finds exactly one), then tagged holders,
   tagged whole names, other names; query = the exact file name; else (3) library objects with a CONFIRMED record in
-  that account (query = the uploaded name; ctx.library, else a guarded load). Never the object itself (its photo ids,
+  that account (query = the uploaded name; ctx.library ONLY — amended in thfix.c: no fallback read, see Log). Never the object itself (its photo ids,
   its uploaded name, its content key). A canary passes only when ITS photo_id is listed (uncached: the transport is
   asked directly).
 - D10 A failed canary is CONFIRMED by one second canary (another item) before anything stops; a failed canary item is
@@ -227,3 +252,8 @@ DECISIONS.md / PRIORITY.md (the orchestrator's).
   checkpoint and kept: the guard never reads a library the caller did not name (a bare `load_library()` fallback read
   the REAL library in a test without the sandbox — removed; ctx.library is a dict or the reader function the fetch /
   locate pass).
+- 2026-10-28, after d08a075 (coordinator: limits reset, "apply the in-step checkpoint rule"): the uncommitted diff in
+  ARCHITECTURE.md, README.md, docs/OPERATIONS_QA.md, main.py, tests/test_c25_regression_pins.py and
+  tests/test_resolve_photos.py is thfix.e in progress, written in this same session with its context intact (the docs,
+  the forward ref verification, the resolve line's wording, the per-command pins). KEPT: coherent, and its tests pass
+  (test_resolve_photos + test_c25_regression_pins 134 passed · smoke 102 passed).

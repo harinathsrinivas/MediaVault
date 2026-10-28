@@ -14621,9 +14621,9 @@ def _rp_walk(library, rows, state):
                         # [IMP-C25 thfix] a throttle is never "logged out": like a sign-out, this account's objects
                         # stop here (the next account's follow); its object at hand got no answer and is asked again
                         if isinstance(e, mainfetch.PhotosThrottledError):
-                            print(f"⏸️ {mainfetch.throttled_head(account, e)} — its objects stop here (nothing was "
-                                  f"recorded for the one at hand; the answers given so far are kept). Re-run "
-                                  f"resolve_photos in about {mainfetch.THROTTLE_RETRY_MIN} minutes."
+                            print(f"⏸️ {mainfetch.throttled_head(account, e)} — its objects stop here (no verdict for "
+                                  f"the one at hand: it comes back next time; the answers given so far are kept). "
+                                  f"Re-run resolve_photos in about {mainfetch.THROTTLE_RETRY_MIN} minutes."
                                   f"{mainfetch.throttled_hint(account, e)}")
                         else:
                             print(f"❌ Profile '{account}' is logged out. Open Chrome with --user-data-dir="

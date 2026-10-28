@@ -22,7 +22,9 @@ Changing anything pinned here is a REVIEWED decision (re-pin it on purpose, in t
      a throttle is never a         (IMP-C25 thfix — the R3 dry runs of 2026-10-27) test_session_detector.py: the page
      sign-out                      classification (Google Photos' signed-out page is a sign-out only before the session
                                    showed signed-in Photos) · test_check_photos.py: a bounce mid-run stops the check
-                                   `throttled`, records nothing for the object at hand, and a re-run continues
+                                   `throttled`, records nothing for the object at hand, and a re-run continues ·
+                                   every other command's throttle line: the fetch (test_session_detector.py), locate
+                                   (test_locator.py), resolve_photos, the crawler (exit 4) and the warm-up (THROTTLED)
      a throttled search is never   (IMP-C25 thfix) test_locator.py: a zero answer stands only when a canary lists an
      a "not found"                 item known to be there; a canary that finds nothing as well is PhotosThrottledError;
                                    one failed canary is confirmed by another before anything stops; the fetch stops and
@@ -99,6 +101,11 @@ EXISTING_PINS = [
     ("test_session_detector.py", "test_the_signed_out_page_after_signed_in_photos_is_a_throttle_never_a_sign_out"),
     ("test_session_detector.py", "test_a_sign_in_page_is_a_sign_out_even_after_signed_in_photos"),
     ("test_check_photos.py", "test_a_bounce_to_the_signed_out_page_mid_run_stops_it_as_throttled_and_a_rerun_continues"),
+    ("test_session_detector.py", "test_cmd_fetch_route_prints_the_throttle_line_never_logged_out"),
+    ("test_locator.py", "test_locate_on_a_throttled_profile_says_throttled_never_logged_out"),
+    ("test_resolve_photos.py", "test_a_throttle_is_named_never_logged_out_and_nothing_is_recorded"),
+    ("test_gp_inventory.py", "test_googles_unusual_traffic_page_stops_the_crawl_as_throttled_never_signed_out"),
+    ("test_warm_profiles.py", "test_a_throttled_profile_is_not_reported_logged_out"),
     # a throttled search is never a "not found" (IMP-C25 thfix, 2026-10-28)
     ("test_locator.py", "test_a_zero_answer_stands_when_a_canary_lists_an_item_known_to_be_there"),
     ("test_locator.py", "test_a_canary_that_finds_nothing_as_well_is_a_throttle_never_a_not_found"),

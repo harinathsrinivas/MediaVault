@@ -16,7 +16,7 @@
   authoritative)
 
 ## At a glance
-- **Progress (2026-10-28): ≈ 85% — 25 of 31 tracked items done · 3 in progress · 3 to go.** Items = the plan's
+- **Progress (2026-10-28, R3 done): ≈ 88% — 26 of 31 tracked items done · R0, R2 partly done · R4, 17, 18 to go.** Items = the plan's
   steps 0, 1, H, 2, 2b, 3–12, 9b, 13, 13b, 13c, 14–18 and the gates G0, RH, R0, R1, R2, R3, R4 (G12 sits in Step 12).
 - **Done:** Steps 0–16 incl. 9b, 13b, 13c, H (#61) and every Step 1 re-sync so far · G0 · RH · R1 (2026-10-03) ·
   G12 (candidate C) · follow-ups: restore bubble 537ff7e · auto-confirm checks only old-enough objects cd0ef94.
@@ -88,7 +88,7 @@ The user archives from this folder — check for a running `main.py` before any 
 | 14 | --manual + resolve_photos + resume | done | executor-fable (fable, no fallback; own worktree) | 5b21c3f (WIP 41501c4..b1d31d1) | full 3219 · smoke 82 (orchestrator re-run) · disarm 39/39 · one read-only live probe (quality flags) | follow-ups a–d done; quality flags from the timeline record (+1 call/object, DECISIONS); A5 (user-opened tab's download dir) for R2 §M10 |
 | 15 | smoke + pins + disarm probes | done | executor-opus (own worktree) | b3e5e96 (WIP f35cc56..fc4be59) | full 3278 · smoke 102 in 12.4 s (orchestrator re-run 13.3 s) · disarm 62/62 (15 guards 55/55 + own tests 7/7) | table .candidates/c25-step15/DISARM.md; real ~/.mediavault + ~/Downloads byte-identical before/after |
 | R2 | live verification pack (user) | in_progress | orchestrator + user | 2535308 | | orchestrator share M4–M9, M18 PASSED 2026-10-20/21; user share M9 web, M10, M11, M14, M15 left |
-| R3 | real-library apply (user) | in_progress | orchestrator (each apply user-approved) | | | 2026-10-27/28 backup + re-crawl + map dry run; check dry runs throttled → thfix; then map apply |
+| R3 | real-library apply (user) | done | orchestrator (each apply user-approved) | | | 2026-10-28: map apply (1,982 confirmed) · check by photo_id anime 158 / movies 971 / tv 1,080 confirmed, applied · split-info repair 3 · failed list 16 |
 | 16 | docs (architect) | done | architect (opus) | 15a732f (merge 699ad8a) | | R2/R3 result placeholders are filled after R3 |
 | R4 | full-library sweep + outlier/failed lists (user) | pending | user | | | at the very end (OD-7) |
 | 17 | IMP bookkeeping + NEXT pointer question | pending | | | | OD-16 |
@@ -98,6 +98,16 @@ The user archives from this folder — check for a running `main.py` before any 
 A d8dd71f (UI-first) · B 868cd27 (RPC-first) · C 5e7f0f6 (hybrid) — all COMPLETE and gate-verified by the orchestrator (re-runs A 2493/82 · B 2512/82 · C 2502/82); judge-v2 recommended C; user picked C at 🚦 G12 2026-10-12; tags candidates/imp_c25/step-12/{c-chosen,a-rejected,b-rejected}.
 
 ## Operations log (crawls, dry-runs, applies — redacted counts only)
+- 2026-10-28 🚦 R3 COMPLETE. tv check run 20261028T081724Z finished (resumed on the user's go): confirmed 1,080 ·
+  ambiguous 4 · possible-loss 12 (11 Friends + The Wire S02E12) — RPC errors 0. User cards "Apply tv now" + "Dry run,
+  then apply" (split-info). After the user's own archive (Manjummel Boys) finished: backup
+  `D:\MV_lib_backup\20261028_2322\` → tv `--apply-run`: 1,080 updated, 0 conflicts → `map_photos all --repair
+  split-info` dry run (exactly 3 proven repairs: The Wire S02E12, BSG S01E11, Dark S01E10, 2 chunks each; its "2,207
+  would change" preview line is an over-report — a read-only simulation of the apply path showed 0 new facts, 0
+  changes) → `--apply`: repaired 3, 6 chunks newly confirmed, learned 6 new (2,225 already on record), inconsistent
+  4 → 1 (Fanaa, untagged name), failed_objects.csv 16 rows (13 Friends + 2 legacy last chunks + Fanaa).
+  `check_photos hinted`: no hints recorded (0) — nothing to run. Library now: every movies/tv/anime object confirmed
+  except those 16 and the 18 not backed up yet; others (35) wait for its Chrome profile (R0 / IMP-D18).
 - 2026-10-28 🚦 R3 CHECK (photo_id first, thfix code): dry runs `check_photos account:<a> --approaches best --recheck` —
   anime run 20261028T075326Z: confirmed 158 of 158 (RPC errors 0) · movies run 20261028T075852Z: confirmed 971 (incl.
   31 X-Files in movies) · not-backed-up-yet 14 · possible-loss 3 (2 legacy last chunks + Fanaa — in Google Photos under an
@@ -150,7 +160,7 @@ A d8dd71f (UI-first) · B 868cd27 (RPC-first) · C 5e7f0f6 (hybrid) — all COMP
 `Side fix (user request 2026-10-08) DONE: Chrome never shows "Restore pages?" — 537ff7e (code 0d47140, tests 49367a1, d444f12): --hide-crash-restore-bubble on every launch + profiles marked cleanly exited before every launch and after every close; full 2484 · smoke 82 · disarm 37/37. Follow-ups for Step 14/15: warm_profiles leaves Chrome running (already Step 14); Step 11's per-pid process query lacks -ErrorAction Stop (a WMI failure reads as 'process gone'); under heavy load the Step 11 close twice failed to close Chrome (cand C); bounded driver.get page-load timeout; close a launched Chrome when attach fails (DECISIONS §1e).`
 `acfix (auto-confirm checked the push that just ran — user finding 2026-10-26) DONE 2026-10-28 cd0ef94 (WIP 18f3a33..e92f3a6; full 3309 · smoke 102 · disarm 26/26; orchestrator re-run 3309 / 102 green); fast-forwarded here.`
 `thfix DONE 2026-10-28 4f1f4fe (WIP 5bab898..e3f9ff8; full 3409 · smoke 102 · disarm 63/63; orchestrator re-run 3409 / 102 green); merged here c6d9990. A11: the pre-fix R3 check runs stay quarantined — re-check with --recheck.`
-`Noticed, not changed (register at Step 17, not started — scope rule): a fetch lock whose holder pid is dead blocks a crawl for up to stale_after (1 h) (a fetch reclaims after 30 s); chromedriver start crash 0xC0000142 under low memory.`
+`Noticed, not changed (register at Step 17, not started — scope rule): a fetch lock whose holder pid is dead blocks a crawl for up to stale_after (1 h) (a fetch reclaims after 30 s); chromedriver start crash 0xC0000142 under low memory; map_photos' dry-run apply preview over-counts ("2,207 would change") because it does not drop records already on record like --apply does; `not-listed` also fires for an item uploaded after the crawl (Aavesham chunk 1/2) — its text suggests archive/trash.`
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes
 alone; re-run it before treating a red full suite as a regression.
 Template — when a step is running (Execution protocol "In-step checkpoints"):

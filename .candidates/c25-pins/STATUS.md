@@ -66,10 +66,14 @@ regression: STOP and report it — never change product code here.
       docstring's 14.g line. Runs: tests/test_fetch_manual.py 39 passed (31 + 8) — b7453d7
 - [x] pins.c the registry: tests/test_c25_regression_pins.py EXISTING_PINS + its docstring entry — the 16 tests
       (11 test_resolve_photos.py, 5 test_fetch_manual.py) after the mpfix group, and the docstring entry "the Step 14
-      guards no test caught". Runs: tests/test_c25_regression_pins.py 95 passed (79 + 16) — this commit (its SHA is
-      recorded with pins.d)
-- [ ] pins.d disarm table — each landed pin's behaviour disarmed alone on a fresh `git archive HEAD` copy: its pin
-      turns red; every file restored byte for byte (SHA-256 checked)
+      guards no test caught". Runs: tests/test_c25_regression_pins.py 95 passed (79 + 16) — ae03816
+- [x] pins.d disarm table — each landed pin's behaviour disarmed alone on a fresh `git archive HEAD` copy: its pin
+      turns red; every file restored byte for byte (SHA-256 checked). On `copy_pins` = HEAD ae03816 (368 files
+      byte-equal, before and after): control BEFORE — the three pin modules 220 passed; 17 probes (the pins.0 edits)
+      + 1 registry probe, each run against its landed pin(s) only, every one RED on an EXPECTED pin (`results_pins.jsonl`,
+      `pins_run.log`); control AFTER 220 passed. Every parameter of a parametrized pin is a detector (c18 3/3, d13 2/2,
+      f26 2/2). No code changed in this sub-task. The table (behaviour · probe · pin · red?) is below — this commit
+      (its SHA is recorded with pins.e)
 - [ ] pins.e docs — ARCHITECTURE.md item 7a names IMP-C44 (one short mention); any doc claim a landed pin proved wrong
 - [ ] pins.f gates (full suite, then smoke), the secrets scan, the self-review, STATE: COMPLETE, the final commit
       `test(imp-c25): land the Step 14.g guard pins — behaviours no test caught (incl. the port check before a second
@@ -153,6 +157,28 @@ regression: STOP and report it — never change product code here.
   same copy — 3443 passed (263 s, `results_full.jsonl`, `full_f09.log`): SURVIVED; the copy HEAD byte for byte after.
 - RESULT: no existing test catches any of the 17 today (Step 15's pins and smoke, thfix's / mpfix's / acfix's tests
   included) — all 17 are still unpinned, so all 17 get a pin (16 tests); none is skipped.
+
+## pins.d — the disarm table: each behaviour, disarmed alone, turns its pin red
+| behaviour | probe (the edit) | pin (module :: test [items]) | red? |
+|---|---|---|---|
+| open_best_start's item-page check | c17 `if _shows_item(…):` → `if True:` | test_fetch_manual :: test_a_deleted_items_page_is_not_a_best_start_the_next_choice_is | RED 1/1 |
+| --manual stops on a session stop | c18 the `except SessionExpiredError: raise` arm removed | test_fetch_manual :: test_manual_stops_on_a_signed_out_or_throttled_session_instead_of_waiting_for_a_download [signed-out · throttled · signed-out-page-after-signed-in-photos] | RED 3/3 |
+| resume hint: the library's photo_id first | d09 the `not loc.get("photo_id")` condition dropped | test_fetch_manual :: test_the_sidecar_identity_never_replaces_the_librarys_own_photo_id | RED 1/1 |
+| resume hint: no repeated library ids | d10 `p not in have` dropped | test_fetch_manual :: test_the_librarys_own_ids_are_not_repeated_as_alternates | RED 1/1 |
+| the unreadable-sidecar tolerance | d13 `except (OSError, ValueError)` → `except KeyError` | test_fetch_manual :: test_an_unreadable_learned_sidecar_never_stops_a_fetch [unreadable · undecodable] | RED 2/2 |
+| the port check before a second account | f09 `if sessions and not _debug_port_free():` → `if False:` | test_resolve_photos :: test_the_next_accounts_chrome_is_never_launched_while_the_debug_port_is_held | RED 1/1 |
+| the profile pre-flight | f10 `problem = profile_preflight(account)` → `None` | test_resolve_photos :: test_a_missing_chrome_profile_is_skipped_with_its_line_and_never_launched | RED 1/1 |
+| the lock heartbeat | f14 `state["heartbeat"].beat()` → `pass` | test_resolve_photos :: test_the_lock_heartbeat_is_beaten_at_every_question + test_a_lock_taken_over_mid_walk_… | RED 2/2 |
+| --id exclusion | f15 `_rp_id_matches` → `return True` | test_resolve_photos :: test_id_leaves_the_other_objects_out | RED 1/1 |
+| the CSV account override | f16 `rec["account"] = row["account"]` → `pass` | test_resolve_photos :: test_a_csv_rows_account_wins_over_the_failed_lists | RED 1/1 |
+| `_end_run` | f17 `_end_run(ctx, interrupted)` → `pass` | test_resolve_photos :: test_the_run_starts_with_…_ends_through_the_shared_end + test_ctrl_c_ends_the_run_as_interrupted_through_the_shared_end | RED 2/2 |
+| the start-up cleanup | f19 `_startup_cleanup(ctx)` → `pass` | test_resolve_photos :: test_the_run_starts_with_the_fetch_cleanup_and_a_journal_and_ends_through_the_shared_end | RED 1/1 |
+| the C27 list excluding confirmed objects | f22 `… and obj["cloud_state"] != "confirmed"` dropped | test_resolve_photos :: test_the_c27_list_leaves_out_an_object_that_is_confirmed_by_now | RED 1/1 |
+| the lock-lost stop | f25 `except gp_inventory.LockLost` → `except KeyError` | test_resolve_photos :: test_a_lock_taken_over_mid_walk_stops_it_keeps_every_answer_and_applies_nothing | RED 1/1 |
+| a signed-out / throttled account not stopping the walk | f26 `outcome = "quit"` in the SessionExpiredError arm | test_resolve_photos :: test_a_signed_out_or_throttled_account_does_not_stop_the_walk_of_the_next_one [signed-out · throttled] | RED 2/2 |
+| the run journal | f27 `ctx.journal = FetchJournal(…)` → `pass` | test_resolve_photos :: test_the_run_starts_with_the_fetch_cleanup_and_a_journal_and_ends_through_the_shared_end | RED 1/1 |
+| a URL pasted straight at the question | f34 `or gpweb.photo_id_from_url(answer)` dropped | test_resolve_photos :: test_a_photo_url_pasted_straight_at_the_question_is_the_paste_answer | RED 1/1 |
+| (the registry, pins.c) | reg: the port-check pin renamed away | test_c25_regression_pins :: test_the_pin_still_exists [that entry] | RED 1/80 |
 
 ## Design decisions (binding — recorded first so a resumed session stays consistent)
 - D1 Placement: the pins go into the modules they belong to — tests/test_resolve_photos.py (11 tests for the 12 walk

@@ -1,12 +1,12 @@
-STATE: IN PROGRESS
+STATE: COMPLETE
 
 # IMP-C25 follow-up — map_photos reporting: the dry-run preview counts what --apply changes; an item uploaded after the crawl is not "not-listed" (mpfix) — resumable status
 
 - User decision 2026-10-28 (card): "Fix both inside C25 (Recommended)" (DECISIONS.md, 2026-10-28 "map_photos reporting
   fixes"). Two fixes, map_photos' reporting only: (1) the dry run's apply preview over-counts (after the R3 apply the
   `--repair split-info` dry run printed `library (dry-run): 2,207 object(s) would change (0 newly confirmed)`; the
-  apply then changed only the 6 chunks of the 3 repaired entries); (2) `not-listed` fired for an item uploaded after
-  the account's crawl began (Aavesham chunk 1/2) and its text suggests archive / trash.
+  apply then recorded 6 new facts — the 6 chunks of the 3 repaired entries, newly confirmed); (2) `not-listed` fired
+  for an item uploaded after the account's crawl began (Aavesham chunk 1/2) and its text suggests archive / trash.
 - Worktree `C:\Users\harin\PycharmProjects\MediaVault-mpfix` · branch `tmp/c25_mpfix` · base 12dd2cf. The main folder,
   the real library, C:\Media, D:\, Chrome and Google are never touched. No live runs; nothing real read.
 - Python: `C:\Users\harin\PycharmProjects\MediaVault\.venv\Scripts\python.exe -m pytest …`, run from the worktree.
@@ -103,10 +103,69 @@ behaviour must stay identical ((appended, known) counts and append order).
       code), `_mp_patch_split_info` (the writer's own patch step, reused: within one run a plan of its own rows always
       patches, so a direct write would behave the same), ctx `index` (plumbing), and the floor `upload_ms // 1000`
       (a no-op: the crawl start is kept to whole seconds). The writer's extraction is covered by its existing tests
-      (`test_the_split_info_writer_*`, `test_repair_split_info_*`) — this commit (its SHA is recorded with mpfix.e)
-- [ ] mpfix.e gates: full suite, then smoke; the secrets scan over the whole range; the self-review; STATE: COMPLETE;
-      the final commit `fix(imp-c25): map_photos — the dry-run preview counts what --apply changes; an item uploaded
-      after the crawl is not "not-listed"`.
+      (`test_the_split_info_writer_*`, `test_repair_split_info_*`) — a12a1eb
+- [x] mpfix.e gates, the secrets scan, the self-review, STATE: COMPLETE, the final commit:
+      · self-review (below): its whitespace-only scan of the whole diff found ONE unintended change — the mpfix.a edit of
+        `_mp_apply_lines` had dropped the space in the untouched line `flags = ([f"--account …` (an edit anchor's
+        trailing space was lost); restored byte for byte to the base's text — bc6f634 (no behaviour change; scan
+        after: 0 whitespace-only changes). Also: README's new code span `Uploaded after the crawl began — NOT a loss:
+        …` re-wrapped onto one line (no test reads the docs) — in the final commit.
+      · full suite on a12a1eb: 3443 passed, 1 warning (the pre-existing starlette/httpx deprecation), 266 s; then — the
+        gates on the FINAL code — full suite on bc6f634: 3443 passed, 1 warning, 282 s = the baseline 3409 + 34 new
+        (test_map_photos +19: 11 preview items, 8 uploaded-after-crawl items; test_c25_regression_pins +15); the known
+        load flake did not fire. THEN smoke 102 passed, 1 warning, 13.7 s — one after the other, in the worktree,
+        pytest's default basetemp, no xdist. The final commit changes only this file and README.md (docs no test
+        reads).
+      · secrets: the staged diff scanned before every commit (scratchpad `thfix/secrets_scan.py`: 9 credential patterns
+        + P-15 private data — real photo ids, e-mail addresses, Google URLs with a query — + risky file names), and the
+        whole range 12dd2cf..bc6f634 (7 files, 790 added lines) — 0 hits every time.
+      · the final commit `fix(imp-c25): map_photos — the dry-run preview counts what --apply changes; an item uploaded
+        after the crawl is not "not-listed"` (this commit — its SHA is in the final report and `git log -1`)
+
+## Self-review (the whole diff 12dd2cf..bc6f634, code read in full)
+(a) The dispatch's acceptance bullets, one by one:
+- Fix 1 "the preview must give the same answer as the apply" — met. "Drop the run's records already on record (the
+  same fingerprint rule)" — `_mp_new_records`, the one function `_mp_append_new` appends by. "Keep the resolution
+  records and names facts exactly as the apply treats them" — `_mp_run_records`, the one source both take them from
+  (and the apply's `not fatal` condition). "Mind the order of operations … decide how the preview represents the
+  repair's own effect … never larger than what the apply would change" — D4: the repair simulated on a copy with the
+  writer's patch step and the apply's matcher, its chunks on their own line, every record about the repaired objects
+  out of the engine line; N counts only chunks that will change (a lower bound — equal in the normal case). "Remove
+  any other way the preview's count can drift" — F-c: the run that records nothing (D3), the repair's interplay
+  (D4), the resolution condition (D2). Tests: a second dry run after an apply previews 0 · a new fact previews
+  exactly its change (== the apply's changed list, field for field) · resolutions and names preview their change,
+  then 0 · the repair line (after the map apply; alone in a scope) · + the never-larger guards (only chunks that
+  map; a record about a repaired whole file / chunk) · + the run that records nothing.
+- Fix 2 — met (D6 / D7): upload_ms decides, else the capture's push time, never verified_at (A2); a distinct verdict
+  `uploaded-after-crawl` (A3) — not a loss, off the failed list, todo and the LOUD block, nothing recorded by the
+  apply (block byte-equal), no archive / trash in its texts (asserted on the whole summary), not-listed's texts
+  unchanged (thfix's tests untouched, green). Tests: upload_ms at the crawl start / 1 ms before · the push time after /
+  at the crawl start / 1 s before · verified_at after the crawl start proves nothing · the apply changes nothing.
+- Docs — met: README (map_photos), ARCHITECTURE §8.10 (+ §13, Last updated), OPERATIONS_QA §6d (a new Q&A on the
+  preview; the possible-loss and not-listed Q&As) — every claim checked against the code, the R3 numbers against
+  PROGRESS.md (one over-strong phrase, "changed only the 6 chunks", corrected to what PROGRESS records); 33 shifted
+  main.py refs re-pointed and verified; the pin registry +15 (docstring entries extended / added).
+- Protocol — STATUS resumable and kept per sub-task; one WIP commit per sub-task (+ the self-review's one-line
+  restore); pathspec commits only; the secrets scan before every commit; disarm 18/18 on an isolated copy restored
+  byte for byte; gates sequential on the final code.
+(b) Downstream consumers: `cmd_map_photos`' result `preview` keeps the engine report's keys and gains `repair`
+  {entries, chunks} only with --repair split-info and a proven plan — read by `_mp_apply_lines` and the tests only
+  (grep: no other reader; the web console has no map_photos consumer). `mapping.jsonl` / `mapping.csv` gain the status
+  `uploaded-after-crawl` — written only, no code reads map runs back (grep). `MAP_STATES` — `_mp_report` only.
+  `_mp_append_new` — check_photos' `_cp_apply` keeps its (appended, known) counts and append order (unit test;
+  test_check_photos green). `_mp_engine_line` unchanged (shared with resolve_photos). `_mp_write_split_info` — the
+  same guards, extracted (its 3 writer tests + the repair tests green). For the plan: R3 / R4 are done; the next real
+  map dry run prints the new lines; nothing stored changes shape (no library field, no sidecar format), so nothing
+  to migrate.
+(c) Change-gates: rollback untouched — no line of the diff touches RollbackJournal / recover_journal /
+  RollbackHardFail / a PONR / the journal format (grep of the diff: 0), map_photos still never opens a journal
+  (test_apply_never_opens_a_rollback_journal green); ENTRY_TYPE_KEYS untouched — no library entry type or field (the
+  new status lives in map run files; `preview.repair` is a run result key), the guard test green in the full suite;
+  smoke 102 after the full suite. mvcommon.py / mainfetch.py / the apply engine: unchanged.
+Observations, not fixed (out of scope): a fact's `verified_at` in a block stays at the first time it was recorded,
+  since a re-seen fact is never re-appended (pre-existing, by `_mp_append_new`'s design — the preview now agrees with
+  it); the repair line is a lower bound when old sidecar records or a resolution name a repaired chunk (D4 — the
+  apply's count can then only be larger).
 
 ## Findings (code read 2026-11-03; synthetic data only; line refs = main.py at the base 12dd2cf)
 - F-a The over-count. `_mp_preview` (main.py:12664) gave the engine `existing + records`, where `records` are this
@@ -203,3 +262,24 @@ behaviour must stay identical ((appended, known) counts and append order).
 - 2026-11-03: resumed by the coordinator after a usage limit (no commit, clean tree, no STATUS.md); the reading of
   2026-10-28/29 (main.py map section, mvcommon reduce/apply, the map tests, docs) was intact in this session's
   context — this file records it before any code.
+- 2026-11-03, during mpfix.d (coordinator: limits back, session restarted): `git status` clean at 782d4f6, nothing
+  uncommitted; the scratch copy re-verified (366 tracked files SHA-256-equal, nothing extra) before any probe ran.
+
+## mpfix — [status: done]
+- Executor: executor-fable
+- Model: fable
+- Mode: single-executor (worktree `MediaVault-mpfix`, branch `tmp/c25_mpfix`, base 12dd2cf; WIP commit per sub-task)
+- Files changed: main.py, tests/test_map_photos.py, tests/test_c25_regression_pins.py, README.md, ARCHITECTURE.md,
+  docs/OPERATIONS_QA.md, this file.
+- Outcome: map_photos' dry-run `Apply preview` now gives the apply's answer — only the records not on record yet are
+  added to the sidecar (a re-dated duplicate changes nothing: after an apply it previews 0), records / hints / names
+  come from the apply's own source, the whole sidecar is previewed even when the run records nothing, and with
+  `--repair split-info` the repaired entries' chunks are previewed on their own line (`  + N chunk(s) of M repaired
+  entr(y/ies) map after the repair — …`) with every record about the repaired objects left out of the engine line, so
+  neither count exceeds what the apply changes. A confirmed item that reached Google Photos at or after its account's
+  crawl began is `uploaded-after-crawl` (not crawled yet: no loss, off every list, nothing recorded, no archive /
+  trash wording) instead of `not-listed`.
+- Key decisions: D1–D7 and A1–A5 above (A2 / A3 deviate from the dispatch's literal suggestions, within its "decide").
+- Verification: full suite 3443 passed (282 s) then smoke 102 passed (13.7 s) on bc6f634, sequential, no xdist;
+  disarm 18/18 red on an isolated copy (round 1 17/18; the survivor got a test), restored byte for byte; secrets 0
+  hits over 12dd2cf..bc6f634.

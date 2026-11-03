@@ -353,8 +353,8 @@ already CONFIRMED in an account that the fresh crawl does not list (archived? in
 summary.txt, nothing recorded, not on the failed list or `resolutions_todo.csv`; look at one with
 `python main.py check_photos <id>`. When that confirmed item reached Google Photos at or after the
 crawl began (its upload time — or, for a record without one, its push time), the crawl simply could
-not list it yet: `uploaded-after-crawl`, also NOT a loss and recorded nowhere (its block: `Uploaded
-after the crawl began — NOT a loss: …`); the next crawl lists it.
+not list it yet: `uploaded-after-crawl`, also NOT a loss and recorded nowhere (its block:
+`Uploaded after the crawl began — NOT a loss: …`); the next crawl lists it.
 
 A dry run's `Apply preview (dry run — nothing written):` lines show what `--apply` would change,
 counted as the apply counts: a fact already on record is not new, whatever its time, so a dry run

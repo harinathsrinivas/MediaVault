@@ -16,7 +16,7 @@
   authoritative)
 
 ## At a glance
-- **Progress (2026-10-28, R3 done): ≈ 88% — 26 of 31 tracked items done · R0, R2 partly done · R4, 17, 18 to go.** Items = the plan's
+- **Progress (2026-11-03): ≈ 93% — 28 of 31 tracked items done (R4 = the R3 sweep, Step 17 done) · R0, R2 partly done · Step 18 to go (after mpfix + the Step 14.g pins land).** Items = the plan's
   steps 0, 1, H, 2, 2b, 3–12, 9b, 13, 13b, 13c, 14–18 and the gates G0, RH, R0, R1, R2, R3, R4 (G12 sits in Step 12).
 - **Done:** Steps 0–16 incl. 9b, 13b, 13c, H (#61) and every Step 1 re-sync so far · G0 · RH · R1 (2026-10-03) ·
   G12 (candidate C) · follow-ups: restore bubble 537ff7e · auto-confirm checks only old-enough objects cd0ef94.
@@ -91,7 +91,7 @@ The user archives from this folder — check for a running `main.py` before any 
 | R3 | real-library apply (user) | done | orchestrator (each apply user-approved) | | | 2026-10-28: map apply (1,982 confirmed) · check by photo_id anime 158 / movies 971 / tv 1,080 confirmed, applied · split-info repair 3 · failed list 16 |
 | 16 | docs (architect) | done | architect (opus) | 15a732f (merge 699ad8a) | | R2/R3 result placeholders are filled after R3 |
 | R4 | full-library sweep + outlier/failed lists (user) | done | orchestrator | | | user ruling 2026-10-28: the R3 photo_id-first sweep (2,242 objects, applied) counts as R4; failed list 16 |
-| 17 | IMP bookkeeping + NEXT pointer question | pending | | | | OD-16 |
+| 17 | IMP bookkeeping + NEXT pointer question | done | executor-opus (own worktree) | 102846c (WIP dc6e597..a4266ee) | smoke 102 (orchestrator re-run 102) | C25 done (PR pending) · C27 in_progress, 16 open · C5/A8/B10/C34-C36 done · C39-C44 registered (pending) · single NEXT → IMP-C24 (OD-16) · 3-file check 154/154 |
 | 18 | final verification + PR | pending | | | | 🚦 Checkpoint 1 |
 
 ## Multi-candidate tracking (Step 12)
@@ -161,6 +161,8 @@ A d8dd71f (UI-first) · B 868cd27 (RPC-first) · C 5e7f0f6 (hybrid) — all COMP
 `acfix (auto-confirm checked the push that just ran — user finding 2026-10-26) DONE 2026-10-28 cd0ef94 (WIP 18f3a33..e92f3a6; full 3309 · smoke 102 · disarm 26/26; orchestrator re-run 3309 / 102 green); fast-forwarded here.`
 `thfix DONE 2026-10-28 4f1f4fe (WIP 5bab898..e3f9ff8; full 3409 · smoke 102 · disarm 63/63; orchestrator re-run 3409 / 102 green); merged here c6d9990. A11: the pre-fix R3 check runs stay quarantined — re-check with --recheck.`
 `Noticed, not changed (register at Step 17, not started — scope rule): a fetch lock whose holder pid is dead blocks a crawl for up to stale_after (1 h) (a fetch reclaims after 30 s); chromedriver start crash 0xC0000142 under low memory; map_photos' dry-run apply preview over-counts ("2,207 would change") because it does not drop records already on record like --apply does; `not-listed` also fires for an item uploaded after the crawl (Aavesham chunk 1/2) — its text suggests archive/trash.`
+`Step 17 DONE 2026-11-03 102846c (fast-forwarded here; smoke 102). mpfix — dispatched 2026-10-28 to executor-fable, worktree C:/Users/harin/PycharmProjects/MediaVault-mpfix (tmp/c25_mpfix from 12dd2cf), resumed after the weekly limit; .0–.c committed.`
+`Step 14.g pins (found by a side session, parked in gitignored .candidates/c25-step14g-pins/: 16 guard tests for 17 Step 14 behaviours no test caught, incl. the port check before a second account) — the owning session lands them inside C25 before Step 18 (pinland), adapted to the current code.`
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes
 alone; re-run it before treating a red full suite as a regression.
 Template — when a step is running (Execution protocol "In-step checkpoints"):

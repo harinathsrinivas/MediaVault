@@ -1,4 +1,4 @@
-STATE: IN PROGRESS
+STATE: COMPLETE
 
 # IMP-C25 Step 17 — IMP bookkeeping on implementation — resumable status
 
@@ -38,9 +38,58 @@ diff before every commit (no real `AF1Qip…` ids, no e-mail addresses, no token
       C27 stays ("crit","decision") with the R3 open list; B4 / C26 / C32 notes updated; C39 med · C40–C43 low · C44
       med ("todo"); edges +13 (C25→G2 / X1 / C7 / D9; C17→C39, C25→C39–C44, C17→C42, C34→C44). Appendix C:
       TASKS 154 · EDGES 101 · badTasks 0 · badEdges 0 (baseline 148 · 88 · 0 · 0); the whole <script> block parses
-      (node `new Function`); 0 duplicate ids, 0 duplicate edges; footer "154 tasks".
-- [ ] 17.e gates — three-file consistency check, smoke, secrets scan, self-review, STATE: COMPLETE, final commit
+      (node `new Function`); 0 duplicate ids, 0 duplicate edges; footer "154 tasks". — a4266ee
+- [x] 17.e gates — three-file consistency check, smoke, secrets scan, self-review, STATE: COMPLETE, final commit
       `docs(imp-c25): Step 17 — IMP bookkeeping (C25 done/PR pending, C27 open list, follow-ups registered, NEXT → IMP-C24)`
+      (this commit — it changes only this file; its SHA is in the final report and `git log -1`):
+      · three-file check (scratchpad `s17_consistency.py`: every tier heading's first Status line ↔ the graph's TASKS
+        ↔ PRIORITY.md's codes + DONE list): tier entries 154 = graph nodes 154 · edges 101 · DONE header 53 = DONE list
+        53. Every Step 17 code agrees in all three files (A8 / B10 / C5 / C25 / C26 / C34–C36 done; C27 in_progress ↔
+        crit / decision; C39–C44 pending ↔ todo; C37 / C38 unchanged). The only 6 findings are the baseline's
+        pre-existing ones, none touched by this step (D7).
+      · smoke: `python -m pytest tests/smoke -q -p no:cacheprovider` → 102 passed, 1 warning (the pre-existing
+        Starlette / httpx deprecation) in 14.33 s, run once from this worktree.
+      · privacy: scratchpad `s17_secrets_scan.py` (real photo ids, e-mail addresses, GitHub / API / Slack tokens,
+        auth headers, key=value secrets, Google URLs with a query, dedupKey-shaped values except the published
+        S02E03 example) over the staged diff before every commit and over the whole range 5002fe8..HEAD: 365 added
+        lines, 0 hits; `git grep -nE "AF1Qip[A-Za-z0-9_-]{8,}"` over the changed paths: none.
+
+## Self-review (the whole range 5002fe8..HEAD, read in full)
+- (a) PLAN Step 17 + the dispatch, item by item: C25 → `done (feature/imp_c25_fetch_exact_gp_item, PR pending)` with
+  what shipped (Steps 0–16 incl. 9b / 13b / 13c, H; restore-bubble, acfix, thfix, mpfix "in progress at the time of
+  writing; merged before the PR") and the R1–R4 counts (R1 from PLAN §M3 — the operations log holds only its start
+  line; R2–R4 from the operations log / DECISIONS) ✓ · C26 done, #61 ✓ · C27 in_progress, the 16-row open list, what is
+  resolved, how it closes (resolve_photos / §M15, or the user accepts) ✓ · C5 / A8 / B10 done; the B4 note; the C24
+  interplay line; synergy lines E5 / G2 / S7 / X1 / X5 / C7 / D9 ✓ · C34–C36 done, verified in PROGRESS, the commits
+  and the code; C37 / C38 kept ✓ · follow-ups registered as C39–C44, each verified against the code, the dropped ones
+  listed with why ✓ · OD-16: one 👉 pointer (IMP-C24), U7 a plain Band 0 entry, Last updated bumped ✓ · the graph:
+  statuses, 6 nodes, 13 edges, Next → IMP-C24; Appendix C 154 / 101 / 0 / 0 ✓ · three-file consistency ✓.
+- (b) Downstream: Step 18 lifts the C25 entry's "What shipped" / "Real-library results" into the PR body; mpfix edits
+  main.py / tests / README / ARCHITECTURE / OPERATIONS_QA only, so merging it next to this branch cannot conflict
+  here; PROGRESS.md (row 17, ▶ NEXT ACTION), PLAN.md and DECISIONS.md were not touched (the orchestrator's).
+- (c) Change-gates: no code, no tests (the range touches 11 docs files only) — rollback, ENTRY_TYPE_KEYS and every
+  pinned contract are untouched by construction; smoke green.
+
+## Surfaced for the orchestrator (not decided here)
+- S1 The 16 unlanded Step 14.g guard pins (`.candidates/c25-step14g-pins/`, main folder, untracked; 17 Step 14
+  behaviours no test pins, among them the port check before a second account in resolve_photos). Landing them is test
+  work, outside this docs-only step; the user's memory says it is the C25 owner's call. Decide before Step 18: land
+  them inside C25 (re-baseline first: full 3409+ / smoke 102), or register them as a follow-up IMP.
+- S2 IMP-C44 comes from PLAN "Suggested next tasks" #10 ("Register as a new IMP after C25"), not from a STATUS note —
+  drop it if it is not wanted yet.
+- S3 Pre-existing three-file gaps, unrelated to C25 (D7): D24 has no graph node; D2 has a node but no tier heading;
+  D17 sits off the done ring ("high","done"); D4 (partial) is in the DONE list while its tier status is in_progress;
+  U6 is done but not in the DONE list.
+- S4 ARCHITECTURE.md's suggestions list (item 7a, "Resumable direct transfer (suggested after IMP-C25)") could now
+  name IMP-C44 — not touched (outside this step's files).
+
+## Step 17 — [status: done]
+- Executor: executor-opus · Model: opus (claude-opus-5-5; every commit's trailer `Co-Authored-By: Claude Opus 5.5`)
+- Mode: single-executor in its own worktree (MediaVault-s17, branch tmp/c25_step17, base 5002fe8), pathspec WIP
+  commits per sub-task (the dispatch's instruction); one usage-limit restart, resumed by the checkpoint rule (Log).
+- Files changed: improvements/improvements_tier{A,B,C,D,E,G,S,X}.md, improvements/PRIORITY.md,
+  docs/priority-graph/priority-graph.html, this file.
+- Commits: 17.0 dc6e597 · 17.a e114c58 · 17.b 6829142 · 17.c ce52ff2 · 17.c2 e03c95f · 17.d a4266ee · final (this).
 
 ## Follow-up verification (each "noticed, not changed" item checked against the code at 5002fe8)
 Registered (still open):

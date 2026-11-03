@@ -14,6 +14,11 @@ Step 14 + "Follow-ups carried into Step 14" b; OD-14 ruling; P-5, P-10, P-18; th
         uploaded (the IMP-C27 list), skip, quit, end of input; every answer written at once; the final dry-run summary
         and "Apply these N changes to the library? [y/N]"; quit mid-way then resume; Ctrl+C; the command line; the
         check report's ambiguous line (follow-up b)
+  14.g  the walk's guards no Step 14 test pinned (the disarm sweep of 2026-10-28; landed by IMP-C25 pins,
+        .candidates/c25-pins/STATUS.md): the fetch lock's heartbeat at every question and a lock taken over mid-walk;
+        the debug-port check before a second account's Chrome; the profile pre-flight; the fetch's start-up cleanup,
+        run journal and shared end; a signed-out or throttled account stopping only its own objects; --id; a CSV
+        row's account; the IMP-C27 list without confirmed objects; a photo URL pasted straight at the question
 
 Hermetic: the fake Google Photos world (tests/gphotos_fake.py); mainfetch's and gprpc's clocks are fake; every state
 dir, ~/Downloads and the process table are redirected (tests/conftest.py); the keyboard is a scripted stdin. Synthetic
@@ -767,3 +772,222 @@ def test_the_check_report_points_ambiguous_objects_at_resolve_photos(cw, sandbox
     assert ("Ambiguous: 1 object(s) — candidates that cannot be told apart (an apply puts them on the failed list: "
             "pick the right item with python main.py resolve_photos failed)") in out
     assert "map_photos --resolutions" not in out
+
+
+# ===========================================================================
+# 14.g — the walk's guards no Step 14 test pinned (the disarm sweep of 2026-10-28: removed one at a time, none of
+# them turned a test red; .candidates/c25-pins/STATUS.md)
+# ===========================================================================
+def _movies_object(rp):
+    """A second failed object, owned by the movies account (the walk visits movies before tv) -> its id."""
+    movies_id = "mov-en-2019-film"
+    folder = rp.folder.parent.parent.parent / "Movies" / "Film (2019)"
+    folder.mkdir(parents=True)
+    library = mvcommon.load_library()
+    library[movies_id] = _whole(folder, "Film.2019.mkv", _bytes("film"), "f1f1f1")
+    mvcommon.save_library(library)
+    mvcommon.append_failed({"account": "movies", "manual_id": movies_id, "label": "whole",
+                            "sha256": library[movies_id]["hash"], "reason": "not-found"})
+    return movies_id
+
+
+def test_the_lock_heartbeat_is_beaten_at_every_question(rp):
+    # The fetch lock's stale-reclaim lets another command take a lock nobody refreshed for an hour: a walk whose user
+    # takes longer than that must keep its lock — one beat per question, a question asked again included.
+    _object(rp, R1, N1, S1, _bytes("r1"))
+    _object(rp, R2, N2, S2, _bytes("r2"))
+    rp.keyboard("k", "x", "n")                         # "x" is no answer: R2's question is asked again
+
+    main.cmd_resolve_photos()
+
+    assert rp.beat.beats == 3
+
+
+def test_a_lock_taken_over_mid_walk_stops_it_keeps_every_answer_and_applies_nothing(rp, sandbox, capsys):
+    # Another MediaVault command took the fetch lock over (the heartbeat raises LockLost): the walk stops at once,
+    # the answers already written stay, and no apply is offered — the other command now owns the lock.
+    data = _bytes("r1-bytes")
+    item = rp.world.add_item("tv", _up(N1, S1), data=data, taken=TAKEN)
+    _object(rp, R1, N1, S1, data, capture=True)
+    _object(rp, R2, N2, S2, _bytes("r2"))
+    rp.beat.lose_after = 1                             # R1's question beats fine; at R2's the lock is gone
+    rp.keyboard("p", _url(item), "n")                  # R1: a verified paste — a learned record an apply would fold
+    before = _library_bytes(sandbox)
+
+    res = main.cmd_resolve_photos()
+
+    out = capsys.readouterr().out
+    assert res["walk"] == "lock-lost" and res["applied"] is None
+    assert ("❌ the fetch session lock was taken over by another MediaVault command — stopping; the answers given "
+            "so far are kept.") in out
+    assert f"🧭 [2/2] {R2}" in out and "Apply these" not in out and _library_bytes(sandbox) == before
+    assert [a["manual_id"] for a in mvcommon.read_resolved()] == [R1]               # the paste survived …
+    assert [r["photo_id"] for r in mvcommon.read_learned("tv")] == [item.photo_id]  # … with its learned record
+
+
+def test_the_next_accounts_chrome_is_never_launched_while_the_debug_port_is_held(rp, capsys, monkeypatch):
+    # The previous account's Chrome did not close: a second Chrome could not bind port 9222 and Selenium would attach
+    # to the FIRST one — every paste would be verified against the wrong Google account. The first account's Chrome
+    # needs no check (nothing of this run holds the port yet).
+    _movies_object(rp)
+    _object(rp, R1, N1, S1, _bytes("r1"))
+    asked = []
+    monkeypatch.setattr(mainfetch, "_debug_port_free", lambda *a, **k: asked.append("port") or False)
+    rp.keyboard("k")
+
+    res = main.cmd_resolve_photos()
+
+    out = capsys.readouterr().out
+    assert list(rp.drivers) == ["movies"] and res["walk"] == "port" and asked == ["port"]
+    assert ("❌ Cannot switch to profile 'tv': Chrome's debug port 9222 is still in use (the previous account's "
+            "Chrome did not close) — close it, then re-run resolve_photos.") in out
+    assert "=== 'tv'" not in out and f"🧭 [2/2] {R1}" not in out and mvcommon.read_resolved() == []
+
+
+def test_a_missing_chrome_profile_is_skipped_with_its_line_and_never_launched(rp, capsys, monkeypatch, tmp_path):
+    # Pointed at a missing --user-data-dir, Chrome would create an EMPTY profile there and land signed out (OD-10):
+    # that account's objects are skipped with the remediation line, and the walk goes on with the next account.
+    _movies_object(rp)
+    _object(rp, R1, N1, S1, _bytes("r1"))
+    missing = tmp_path / "no-such-profile"
+    monkeypatch.setitem(mainfetch.CHROME_PROFILES, "movies", str(missing))
+    rp.keyboard("k")
+
+    res = main.cmd_resolve_photos()
+
+    out = capsys.readouterr().out
+    assert list(rp.drivers) == ["tv"] and res["walk"] == "done"
+    assert f"⏭️  1 object(s) of 'movies' skipped: the Chrome profile for 'movies' does not exist: {missing}" in out
+    assert f"🧭 [2/2] {R1}" in out
+
+
+def test_the_run_starts_with_the_fetch_cleanup_and_a_journal_and_ends_through_the_shared_end(rp, monkeypatch):
+    # P-12, the fetch's own rules: an interrupted earlier fetch is cleaned up ONCE, before the first Chrome (its Chrome
+    # may still hold port 9222 or a profile); while the walk runs, the run's journal names each session's Chrome —
+    # what a crash leaves for the next start-up cleanup; the shared end closes it as a finished run.
+    _movies_object(rp)
+    _object(rp, R1, N1, S1, _bytes("r1"))
+    events, journals = [], []
+    real_cleanup, real_end, real_init = mainfetch._startup_cleanup, mainfetch._end_run, mainfetch.init_driver
+    monkeypatch.setattr(mainfetch, "_startup_cleanup", lambda ctx: events.append("cleanup") or real_cleanup(ctx))
+    monkeypatch.setattr(mainfetch, "init_driver", lambda key: events.append(f"launch {key}") or real_init(key))
+    monkeypatch.setattr(mainfetch, "_end_run", lambda ctx, interrupted=False: events.append(("end", interrupted))
+                        or real_end(ctx, interrupted))
+
+    def keyboard(prompt):                              # each question: what a crash right now would leave behind
+        journals.append([(doc["state"], [s["account"] for s in doc["sessions"]])
+                         for _path, doc in mainfetch.read_fetch_journals()])
+        return "k"
+
+    monkeypatch.setattr("builtins.input", keyboard)
+
+    main.cmd_resolve_photos()
+
+    assert events == ["cleanup", "launch movies", "launch tv", ("end", False)]
+    assert journals == [[("running", ["movies"])], [("running", ["movies", "tv"])]]
+    [(_path, doc)] = mainfetch.read_fetch_journals()
+    assert doc["run_id"].startswith("resolve-") and (doc["state"], doc["interrupted"]) == ("clean", False)
+    assert [(s["account"], s["user_data_dir"]) for s in doc["sessions"]] == [
+        (account, mainfetch.CHROME_PROFILES[account]) for account in ("movies", "tv")]
+
+
+def test_ctrl_c_ends_the_run_as_interrupted_through_the_shared_end(rp, monkeypatch):
+    # _end_run(interrupted=True) is what terminates the Chrome an interrupted run launched (P-12 — Step 11's pins).
+    _object(rp, R1, N1, S1, _bytes("r1"))
+    ended = []
+    real_end = mainfetch._end_run
+    monkeypatch.setattr(mainfetch, "_end_run", lambda ctx, interrupted=False: ended.append(interrupted)
+                        or real_end(ctx, interrupted))
+
+    def ctrl_c(prompt):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("builtins.input", ctrl_c)
+
+    res = main.cmd_resolve_photos()
+
+    assert res["status"] == "interrupted" and ended == [True]
+    [(_path, doc)] = mainfetch.read_fetch_journals()
+    assert doc["interrupted"] is True
+
+
+@pytest.mark.parametrize("session, line", [
+    ("expired", "❌ Profile 'movies' is logged out. Open Chrome with --user-data-dir="),
+    ("sorry", "⏸️ Google Photos is throttled in 'movies' (Google showed its 'unusual traffic' page) — its "
+              "objects stop here (no verdict for the one at hand: it comes back next time; the answers given so far "
+              "are kept)."),
+], ids=["signed-out", "throttled"])
+def test_a_signed_out_or_throttled_account_does_not_stop_the_walk_of_the_next_one(rp, capsys, session, line):
+    # IMP-C25 thfix: a sign-in page is a sign-out, Google's "unusual traffic" page a throttle — either way only THAT
+    # account's objects stop (the one at hand gets no answer, it comes back next time); the next account is walked.
+    movies_id = _movies_object(rp)
+    _object(rp, R1, N1, S1, _bytes("r1"))
+    rp.world.session["movies"] = session
+    rp.keyboard("n")
+
+    main.cmd_resolve_photos()
+
+    out = capsys.readouterr().out
+    assert line in out and f"🧭 [1/2] {movies_id}" in out
+    assert list(rp.drivers) == ["movies", "tv"]                                    # tv's Chrome was still launched
+    assert [a["manual_id"] for a in mvcommon.read_resolved()] == [R1]              # and its object answered
+    if session == "sorry":
+        assert "logged out" not in out                                             # a throttle is no sign-out
+
+
+def test_id_leaves_the_other_objects_out(rp, capsys):
+    _object(rp, R1, N1, S1, _bytes("r1"))
+    _object(rp, R2, N2, S2, _bytes("r2"))
+    rp.keyboard("k")
+
+    main.cmd_resolve_photos(manual_id=R2)
+
+    out = capsys.readouterr().out
+    assert f"=== RESOLVE PHOTOS — the failed list · id {R2} — 1 object(s) to resolve ===" in out
+    assert f"🧭 [1/1] {R2}" in out and R1 not in out
+
+
+def test_a_csv_rows_account_wins_over_the_failed_lists(rp, tmp_path):
+    # The user may have moved the object to another account in the CSV: its row decides where it is looked for.
+    _object(rp, R1, N1, S1, _bytes("r1"))                                          # the failed list says: tv
+    mvcommon.export_failed_csv(mvcommon.load_library())
+    rows = [dict(r, account="anime") for r in _csv_rows(mvcommon.failed_csv_path()) if r["manual_id"] == R1]
+    rp.keyboard("k")
+
+    main.cmd_resolve_photos(source=_edited_csv(tmp_path, rows))
+
+    assert list(rp.drivers) == ["anime"]
+
+
+def test_the_c27_list_leaves_out_an_object_that_is_confirmed_by_now(rp, capsys):
+    # "Not uploaded" was the user's word at the time; an object confirmed in Google Photos since is no possible cloud
+    # loss — listing it would be a false alarm. One still unconfirmed stays listed.
+    hashes = {R1: _object(rp, R1, N1, S1, _bytes("r1"), failed=None),
+              R2: _object(rp, R2, N2, S2, _bytes("r2"), failed=None)}
+    for mid, sha256 in hashes.items():
+        mvcommon.append_resolved({"account": "tv", "manual_id": mid, "label": "whole", "sha256": sha256,
+                                  "answer": "not_uploaded"})
+    library = mvcommon.load_library()
+    library[R1]["gphotos"] = mvcommon.new_gphotos_block(hashes[R1], accounts={"tv": {
+        "photo_id": "AF1QipFAKEconfirmed000001", "upload_ms": 1, "verified_by": "dedupkey", "confirmed": True}})
+    mvcommon.save_library(library)
+
+    main.cmd_resolve_photos()
+
+    out = capsys.readouterr().out
+    assert "⚠️⚠️⚠️  YOU SAY NOT UPLOADED (IMP-C27): 1 object(s)" in out
+    assert f"    {R2} · whole — in 'tv'" in out and f"    {R1} · whole" not in out
+
+
+def test_a_photo_url_pasted_straight_at_the_question_is_the_paste_answer(rp, capsys):
+    data = _bytes("r1-bytes")
+    item = rp.world.add_item("tv", _up(N1, S1), data=data, taken=TAKEN)
+    _object(rp, R1, N1, S1, data, capture=True)
+    rp.keyboard(_url(item), "n")                       # the link itself — then "n" to the apply question
+
+    main.cmd_resolve_photos()
+
+    out = capsys.readouterr().out
+    assert "      ✔ verified — proof dedupkey; recorded: a fetch now goes straight to it" in out
+    assert "? answer p, s, n, k or q" not in out and "photo URL (Enter" not in out
+    assert [r["photo_id"] for r in mvcommon.read_learned("tv")] == [item.photo_id]

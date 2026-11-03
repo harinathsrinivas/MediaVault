@@ -41,6 +41,17 @@ Changing anything pinned here is a REVIEWED decision (re-pin it on purpose, in t
                                    its apply changes it, the whole sidecar even when the run records nothing,
                                    resolutions and names as the apply takes them; --repair split-info's chunks on their
                                    own line, never more than the apply changes
+     the Step 14 guards no test    (IMP-C25 — the Step 14.g disarm sweep of 2026-10-28, landed 2026-11-04)
+     caught                        test_resolve_photos.py: the fetch lock's heartbeat at every question and a lock
+                                   taken over mid-walk (answers kept, no apply); the debug-port check before a second
+                                   account's Chrome (without it every paste is verified in the FIRST account's Chrome);
+                                   the profile pre-flight; the fetch's start-up cleanup, run journal and shared end; a
+                                   signed-out or throttled account stopping only its own objects; --id; a CSV row's
+                                   account; the IMP-C27 list without confirmed objects; a photo URL pasted at the
+                                   question · test_fetch_manual.py: a deleted item's page is no best start; --manual
+                                   stops on a sign-out or a throttle, never a 30-minute wait; an unreadable learned
+                                   sidecar never stops a fetch; a resume hint never replaces the library's own
+                                   photo_id nor repeats its ids
      calculate_file_hash           test_gp_capture.py (SHA-256 for 0 / 10 / 196 615 bytes + the same-pass SHA-1) ·
                                    test_mvcommon.py (the progress bar; a missing file -> None)
      ENTRY_TYPE_KEYS literal       test_entry_schema_guard.py (d1)
@@ -145,6 +156,25 @@ EXISTING_PINS = [
     ("test_map_photos.py", "test_the_repair_line_counts_only_the_chunks_that_will_map"),
     ("test_map_photos.py", "test_a_record_about_a_repaired_object_is_never_previewed_as_a_change_or_an_orphan"),
     ("test_map_photos.py", "test_a_run_that_records_nothing_still_previews_what_its_apply_folds"),
+    # the Step 14 guards no test caught (IMP-C25 — the Step 14.g disarm sweep of 2026-10-28, landed 2026-11-04)
+    ("test_resolve_photos.py", "test_the_lock_heartbeat_is_beaten_at_every_question"),
+    ("test_resolve_photos.py", "test_a_lock_taken_over_mid_walk_stops_it_keeps_every_answer_and_applies_nothing"),
+    ("test_resolve_photos.py", "test_the_next_accounts_chrome_is_never_launched_while_the_debug_port_is_held"),
+    ("test_resolve_photos.py", "test_a_missing_chrome_profile_is_skipped_with_its_line_and_never_launched"),
+    ("test_resolve_photos.py",
+     "test_the_run_starts_with_the_fetch_cleanup_and_a_journal_and_ends_through_the_shared_end"),
+    ("test_resolve_photos.py", "test_ctrl_c_ends_the_run_as_interrupted_through_the_shared_end"),
+    ("test_resolve_photos.py", "test_a_signed_out_or_throttled_account_does_not_stop_the_walk_of_the_next_one"),
+    ("test_resolve_photos.py", "test_id_leaves_the_other_objects_out"),
+    ("test_resolve_photos.py", "test_a_csv_rows_account_wins_over_the_failed_lists"),
+    ("test_resolve_photos.py", "test_the_c27_list_leaves_out_an_object_that_is_confirmed_by_now"),
+    ("test_resolve_photos.py", "test_a_photo_url_pasted_straight_at_the_question_is_the_paste_answer"),
+    ("test_fetch_manual.py", "test_a_deleted_items_page_is_not_a_best_start_the_next_choice_is"),
+    ("test_fetch_manual.py",
+     "test_manual_stops_on_a_signed_out_or_throttled_session_instead_of_waiting_for_a_download"),
+    ("test_fetch_manual.py", "test_an_unreadable_learned_sidecar_never_stops_a_fetch"),
+    ("test_fetch_manual.py", "test_the_sidecar_identity_never_replaces_the_librarys_own_photo_id"),
+    ("test_fetch_manual.py", "test_the_librarys_own_ids_are_not_repeated_as_alternates"),
     # trigger_download source digest
     ("test_fetch_search_wait.py", "test_trigger_download_source_is_pinned"),
     ("test_fetch_search_wait.py", "test_the_search_wait_it_relies_on_is_pinned"),

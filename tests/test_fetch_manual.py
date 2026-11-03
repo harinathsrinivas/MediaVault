@@ -16,6 +16,11 @@ PLAN.md Step 14 + "Follow-ups carried into Step 14" a; P-5, P-12, P-13, P-18; th
         first by S0a, still verified (a manual match is never downloaded by the stages — --manual opens it); dead ids
         never; no hint, the same locator; the helpers resolve_photos shares: locate_object(stages=), verify_item,
         object_locators.
+  14.g  the guards no Step 14 test pinned (the disarm sweep of 2026-10-28; landed by IMP-C25 pins,
+        .candidates/c25-pins/STATUS.md): an item page is a best start only once it shows the item (a deleted one
+        falls to the next choice); --manual stops on a sign-out or a throttle (IMP-C25 thfix) instead of waiting 30
+        minutes; an unreadable learned sidecar never stops a fetch; a resume hint never replaces the library's own
+        photo_id and never repeats the library's ids.
 
 Hermetic: the fake Google Photos world (tests/gphotos_fake.py) through test_locator's `flow` harness; mainfetch's and
 gprpc's clocks are fake, so a 30-minute wait takes no time and the user's own download is a clock event; every state dir,
@@ -679,3 +684,109 @@ def test_object_locators_is_what_check_photos_builds(flow, sandbox):
     assert list(shared) == list(check) == [key]
     item, loc, record = shared[key]
     assert loc == check[key][1] and loc["uploaded_name"] == _up(NAME, SID) and record is None
+
+
+# ===========================================================================
+# 14.g — the guards no Step 14 test pinned (the disarm sweep of 2026-10-28: removed one at a time, none of them
+# turned a test red; .candidates/c25-pins/STATUS.md)
+# ===========================================================================
+P_LIB, P_SIDE, P_ALT, P_NEW = ("AF1QipFAKEhintLIB000001", "AF1QipFAKEhintSIDE00002", "AF1QipFAKEhintALT00003",
+                               "AF1QipFAKEhintNEW00004")
+
+
+def test_a_deleted_items_page_is_not_a_best_start_the_next_choice_is(flow, sandbox):
+    # An item page counts as opened only once it SHOWS the item: a deleted one ("This photo is no longer available")
+    # falls to the next choice — here the search for its day.
+    data = _bytes("best-start")
+    gone = flow.world.add_item("tv", _up(NAME, SID), data=data, taken=TAKEN, deleted=True)
+    live = flow.world.add_item("tv", _up("Other.mkv", "o1o1o1"), data=_bytes("other"), taken=TAKEN)
+    loc, ctx = _locator(sandbox, data, content_key=True)
+    driver = flow.world.driver("tv")
+
+    what, opened, _record = mainfetch.open_best_start(driver, dict(loc, photo_id=live.photo_id), ctx)
+    assert (what, opened) == ("the item its library record names (no stage could verify it)", live.photo_id)
+
+    what, opened, record = mainfetch.open_best_start(driver, dict(loc, photo_id=gone.photo_id), ctx)
+    assert (what, opened, record) == ("the search for its day (2022-02-05)", None, None)
+
+
+@pytest.mark.parametrize("session, line", [
+    ("expired", "❌ Profile 'tv' is logged out. Open Chrome with --user-data-dir="),
+    ("sorry", "⏸️ Google Photos is throttled in 'tv' (Google showed its 'unusual traffic' page) — the fetch "
+              "stops here; files already fetched are kept and skipped. Re-run the same fetch in about 30 minutes."),
+    ("signed_out", "⏸️ Google Photos is throttled in 'tv' (Google showed its signed-out page to a session that was "
+                   "signed in) — the fetch stops here;"),
+], ids=["signed-out", "throttled", "signed-out-page-after-signed-in-photos"])
+def test_manual_stops_on_a_signed_out_or_throttled_session_instead_of_waiting_for_a_download(flow, sandbox, capsys,
+                                                                                          monkeypatch, session, line):
+    # The session stops just as --manual opens the best start — after the stages ran on it, so it HAS shown signed-in
+    # Google Photos: a sign-in page is a sign-out; Google's "unusual traffic" page, and Google Photos' signed-out page
+    # after signed-in Photos, are throttles (IMP-C25 thfix). Either way the fetch stops with its line — never a
+    # 30-minute wait for a download nobody can make in that Chrome.
+    _hidden(flow, sandbox)
+    real_round = mainfetch._manual_round
+
+    def round_after_the_session_stopped(*args, **kwargs):
+        flow.world.session["tv"] = session
+        return real_round(*args, **kwargs)
+
+    monkeypatch.setattr(mainfetch, "_manual_round", round_after_the_session_stopped)
+
+    mainfetch.cmd_fetch_route(EP, manual=True)
+
+    out = capsys.readouterr().out
+    assert "   === MANUAL (1 file(s))" in out and line in out
+    assert "waiting       up to" not in out and "Batch Processing Complete" not in out
+
+
+@pytest.mark.parametrize("error", [OSError("the disk went away"),
+                                   UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")],
+                         ids=["unreadable", "undecodable"])
+def test_an_unreadable_learned_sidecar_never_stops_a_fetch(monkeypatch, capsys, error):
+    # _locate_item asks for the resume hints outside its own try: an error here would end the fetch's batch.
+    def unreadable(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(mvcommon, "read_learned", unreadable)
+    ctx = mainfetch.FetchContext()
+    ctx.start_session("tv")
+    loc = {"sha256": "a" * 64, "account": "tv", "photo_id": None, "alternates": []}
+
+    hinted, added = mainfetch._with_resume_hints(loc, ctx)
+
+    assert added == 0 and hinted is loc                                     # the same locator: today's run
+    assert (f"   > ⚠️ The learned sidecar could not be read for resuming ({type(error).__name__}) — the search "
+            f"starts from the library's own facts.") in capsys.readouterr().out
+
+
+def test_the_sidecar_identity_never_replaces_the_librarys_own_photo_id():
+    # The sidecar's identity becomes the photo_id only when the library holds none (the not-merged-yet pin above); next
+    # to the library's own photo_id it is an S0a alternate after it.
+    sha256 = "c" * 64
+    mvcommon.append_learned("tv", {"manual_id": EP, "label": "whole", "sha256": sha256, "photo_id": P_SIDE,
+                                   "proof": "filename", "source": "check"})
+    ctx = mainfetch.FetchContext()
+    ctx.start_session("tv")
+    loc = {"sha256": sha256, "account": "tv", "photo_id": P_LIB, "alternates": []}
+
+    hinted, added = mainfetch._with_resume_hints(loc, ctx)
+
+    assert (hinted["photo_id"], hinted["alternates"], added) == (P_LIB, [P_SIDE], 1)
+    assert loc == {"sha256": sha256, "account": "tv", "photo_id": P_LIB, "alternates": []}   # never changed
+
+
+def test_the_librarys_own_ids_are_not_repeated_as_alternates():
+    sha256 = "d" * 64
+    os.makedirs(mainfetch.FETCH_JOURNAL_DIR, exist_ok=True)
+    for n, photo_id in ((1, P_LIB), (2, P_ALT), (3, P_NEW)):     # older runs located: its id, its alternate, a new one
+        run_id = f"fetch-2026010{n}T000000Z-{n}"
+        mainfetch._write_json_atomic(os.path.join(mainfetch.FETCH_JOURNAL_DIR, f"{run_id}.json"), {
+            "v": 1, "run_id": run_id, "state": "recovered", "entries": [{"account": "tv", "objects": [
+                {"label": "whole", "sha256": sha256, "state": "located", "photo_id": photo_id}]}]})
+    ctx = mainfetch.FetchContext()
+    ctx.start_session("tv")
+    loc = {"sha256": sha256, "account": "tv", "photo_id": P_LIB, "alternates": [P_ALT]}
+
+    hinted, added = mainfetch._with_resume_hints(loc, ctx)
+
+    assert (hinted["photo_id"], hinted["alternates"], added) == (P_LIB, [P_ALT, P_NEW], 1)

@@ -3897,9 +3897,9 @@ work would slot in cleanly:
    4 Pixel 1 XLs) remains open — see IMP-E7 and the end-goal roadmap.
 7. ~~**Better fallback search**~~ — **DONE** (IMP-C5, absorbed by IMP-C25): the exact-item waterfall
    (§8.4) runs before today's two attempts.
-7a. **Resumable direct transfer** (suggested after IMP-C25): if `locate --probe-direct` shows the minted
-   original-download link answers without browser cookies, the byte transfer could move from Chrome to
-   Python with HTTP Range resume (links stay memory-only, P-20).
+7a. **Resumable direct transfer** (suggested after IMP-C25; tracked as IMP-C44): if `locate --probe-direct`
+   shows the minted original-download link answers without browser cookies, the byte transfer could move from
+   Chrome to Python with HTTP Range resume (links stay memory-only, P-20).
 8. **Progress tracking for long batches**: write a `progress.json`
    per-batch so a Ctrl-C in `cmd_prep_push_rep_season` can resume from
    the last completed episode rather than re-evaluating every child.

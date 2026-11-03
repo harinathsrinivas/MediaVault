@@ -28,8 +28,11 @@ diff before every commit (no real `AF1Qip…` ids, no e-mail addresses, no token
       access) — the spike establishes it.
 - [x] 17.c PRIORITY.md — Last updated, the single 👉 NEXT pointer (IMP-C24; U7 a plain Band 0 entry), Band 0 C27 row
       (+ the C32 note), Band 1 (C25 / C34–C36 done; C39–C43 rows), Band 2 / 4 / 5 prose, DONE list (46 → 53) —
-      (this commit; SHA in 17.d's line). Pointer check: the only live 👉 is the IMP-C24 section (+ two references to
-      it); the other matches are the Last-updated history and the maintenance protocol.
+      ce52ff2. Pointer check: the only live 👉 is the IMP-C24 section (+ two references to it); the other matches
+      are the Last-updated history and the maintenance protocol.
+- [x] 17.c2 (added after the restart) fold the two OPEN observations of `.candidates/c25-step14g-pins/README.md`
+      into IMP-C42 / IMP-C43 (tier C + PRIORITY.md rows + Last updated); the unlanded pins are surfaced, not
+      registered — (this commit; SHA in 17.d's line). The kept graph diff stays uncommitted for 17.d (pathspec).
 - [ ] 17.d priority-graph.html — statuses + notes, 6 new nodes, edges, header Next → IMP-C24, footer; Appendix C
       node validation
 - [ ] 17.e gates — three-file consistency check, smoke, secrets scan, self-review, STATE: COMPLETE, final commit
@@ -92,8 +95,9 @@ C34 / C35 / C36 → done: Step 10 items g `dd410ed`, h `e673b10` + `77984d3`, i 
 the bounded poll (C35).
 
 ## Design decisions (binding — recorded first so a resumed session stays consistent)
-- D1 New codes: C39 lock (3 facets) · C40 chromedriver low-memory start · C41 crawler login check · C42 warm-up
-  pre-flight · C43 housekeeping batch (journals + wording) · C44 resumable direct transfer. All `pending`, tier C
+- D1 New codes: C39 lock (3 facets) · C40 chromedriver low-memory start · C41 crawler login check · C42 the warm-up's
+  failure handling (pre-flight + toast wording; + the 14.g README's page-load timeout, 17.c2) · C43 session papercuts
+  batch (journals + wording; + the 14.g README's resolve_photos exit 0, 17.c2) · C44 resumable direct transfer. All `pending`, tier C
   (robustness; C34's lineage for C44). Next free numbers verified: tier C ends at C38; origin/main has nothing newer.
 - D2 Bands / priorities: C39 🟡 medium, Band 1 (observed live once; no data loss; a > 1 h fetch reclaimed mid-run is
   inferred from the code, not observed) · C40 / C41 / C42 / C43 ⚪ low, Band 1 (cheap; like C38) · C44 🟡 medium,
@@ -112,6 +116,23 @@ the bounded poll (C35).
 - D8 DONE list: additive 46 → 53 (+ C25, C5, A8, B10, C34, C35, C36); the existing entries are not re-audited.
 
 ## Log
+- 2026-11-03, resumed after a usage-limit restart (coordinator: "apply your in-step checkpoint rule"). The tree held
+  ONE uncommitted diff: docs/priority-graph/priority-graph.html (+2/−2) = 17.d in progress, written in this same
+  session with its context intact — the header's Next line (→ IMP-C24), the footer's 2026-11-03 prefix and its task
+  count 148 → 154. KEPT (coherent: exactly those three edits; one footer, closed by "· 154 tasks</div>"). 17.d continues
+  from there (TASKS / EDGES not edited yet).
+- 2026-11-03, after the restart: the refreshed user memory names `.candidates/c25-step14g-pins/README.md` (MAIN
+  folder, untracked — a side session's Step 14.g sweep of 2026-10-28). Its "Observations recorded but NOT changed",
+  checked against the code at 5002fe8: (1) `resolve_photos` exits 0 when its walk stops on a busy port or a lost lock
+  — OPEN (`_rp_walk` → "port" / "lock-lost", `cmd_resolve_photos` keeps status "ok", RESOLVE_FAILED_STATUSES =
+  refused / error / interrupted, main.py:14255 / 14757–14771 / 18292) → folded into IMP-C43 (now "fetch-session
+  papercuts"); (2) a Selenium timeout in `warm_profiles._warm_one` aborts the whole warm-up — OPEN (`_warm_one`
+  catches only PhotosThrottledError / SessionExpiredError; `warm_all` and `main` catch nothing else; page loads are
+  bounded at 60 s since Step 14.a) → folded into IMP-C42 (now "the warm-up's failure handling"); (3) a `--manual`
+  success stays on the failed / resolve lists until check_photos confirms it — BY DESIGN (DECISIONS §1f, Step 14
+  choice (2); Step 14 A4), not registered. Its 16 written-but-unlanded guard pins (17 behaviours Step 14's disarm
+  never pinned) are NOT registered and NOT landed here (tests; outside this docs-only step; the memory says landing
+  them is the C25 owner's call) → surfaced to the orchestrator as a decision before Step 18 (sub-task 17.c2).
 - 2026-11-03 dispatched (executor-opus, Opus 5.5). Read-in: CLAUDE.md (global + project); PLAN Step 17 + Appendix
   A/C + Suggested next; DECISIONS (all); PROGRESS (all); .candidates/c25-{acfix,thfix,step13,step13b,step13c,step14,
   step15,step16}/STATUS.md; the mpfix worktree's STATUS (read only); root STATUS.md Steps 2–11 (main folder, read

@@ -510,7 +510,7 @@
     - `check_photos account:<a> --approaches best --recheck` (photo_id first), then `--apply-run`: anime 158 of 158, movies 971 (the 31 X-Files episodes included), tv 1,080 confirmed; 0 conflicts.
     - `map_photos all --repair split-info --apply`: 3 entries rebuilt, their 6 chunks confirmed. Failed list: 16 rows (IMP-C27).
   - 🚦 R4 (ruling 2026-10-28 "Count R3's sweep as R4"): the R3 photo_id-first check of all 2,242 movies/tv/anime objects is the full-library sweep. Every object is confirmed except the 16 failed-list rows (IMP-C27) and 18 not backed up yet. Others (35 objects) stay unchecked until its Chrome profile exists (R0 / IMP-D18).
-- Follow-ups registered at Step 17 (register only — the user's scope rule of 2026-10-28): IMP-C39 (fetch session lock), IMP-C40 (chromedriver low-memory start), IMP-C41 (crawler login check), IMP-C42 (warm-up profile pre-flight), IMP-C43 (fetch-session housekeeping), IMP-C44 (resumable direct transfer).
+- Follow-ups registered at Step 17 (register only — the user's scope rule of 2026-10-28): IMP-C39 (fetch session lock), IMP-C40 (chromedriver low-memory start), IMP-C41 (crawler login check), IMP-C42 (the warm-up's failure handling), IMP-C43 (fetch-session papercuts), IMP-C44 (resumable direct transfer).
 - Status: done (feature/imp_c25_fetch_exact_gp_item, PR pending)
 
 ---
@@ -1012,33 +1012,35 @@
 
 ---
 
-## IMP-C42: the profile warm-up runs no profile pre-flight — warming `others` creates an empty `ChromeProfile_Others` that then reads as "logged out"
+## IMP-C42: the profile warm-up's failure handling — it runs no profile pre-flight (warming `others` creates an empty `ChromeProfile_Others` that then reads as "logged out"), and one page-load timeout ends the whole run
 
 - Category: bug (operability)
-- Priority: low (Band 1 — no data loss; a false alarm, and a pre-flight that is defeated)
-- Files: `tools/warm_profiles.py` — `warm_all` (every `mainfetch.CHROME_PROFILES` key by default) and `_warm_one` → `mainfetch.init_driver`; `mainfetch.profile_preflight` (IMP-C25, OD-10). The scheduled task is `tools/mediavault_warm_profiles.xml`. Found during IMP-C25 Step 14 (its "observations, not changed").
+- Priority: low (Band 1 — no data loss; false alarms, a defeated pre-flight, profiles left unwarmed)
+- Files: `tools/warm_profiles.py` — `warm_all` (every `mainfetch.CHROME_PROFILES` key by default) and `_warm_one` → `mainfetch.init_driver`; `mainfetch.profile_preflight` (IMP-C25, OD-10). The scheduled task is `tools/mediavault_warm_profiles.xml`. Found during IMP-C25 Step 14 (its "observations, not changed") and in a side session's Step 14.g sweep (`.candidates/c25-step14g-pins/README.md` in the main folder, untracked).
 - Current behavior:
   - Every other Chrome-driving command (fetch, check_photos, resolve_photos, locate, the crawler) runs `profile_preflight` first and refuses a missing profile folder with a "create it, then sign in" line. The warm-up does not.
   - `CHROME_PROFILES` includes `others`, whose profile `C:\Media\Utils\ChromeProfile_Others` does not exist yet (IMP-C25 🚦 R0 / IMP-D18). Warming it makes Chrome create an EMPTY profile there, which lands signed out: `LOGGED_OUT` and the "account needs attention" toast. From then on the folder exists, so every later pre-flight passes it and the command launches a signed-out profile.
+  - `_warm_one` catches only `PhotosThrottledError` and `SessionExpiredError`. Since IMP-C25 Step 14 every session's page loads are bounded (60 s), so a slow `driver.get` raises Selenium's timeout instead of hanging. Nothing in `warm_all` or `main` catches it: the run ends with a traceback, the remaining profiles are not warmed, and neither the status log line nor the toast is written.
   - The toast also says "<profiles> logged out — re-login required" for a `LAUNCH_FAIL` profile.
-- Proposed change: run `mainfetch.profile_preflight(key)` before each launch; report a missing profile as its own status (one line, no launch, no toast — a prerequisite, not a sign-out); let the toast name each profile's real status.
+- Proposed change: run `mainfetch.profile_preflight(key)` before each launch, and report a missing profile as its own status (one line, no launch, no toast — a prerequisite, not a sign-out). Count any other error of one profile as that profile's failure — logged, and the next profile still warmed. Let the toast name each profile's real status.
 - Effort estimate: small · Risk: low — the warm-up only skips what it cannot warm.
-- If skipped: each warm-up run launches an empty Others profile and raises a false "logged out" alarm, and the pre-flight's clear "create it" message never shows for that profile again.
+- If skipped: each warm-up run launches an empty Others profile and raises a false "logged out" alarm, and the pre-flight's clear "create it" message never shows for that profile again. One slow page ends the whole warm-up without a log line.
 - Status: pending
 
 ---
 
-## IMP-C43: fetch-session housekeeping — fetch journals are never pruned, and the shared Chrome close says "this fetch" in every command
+## IMP-C43: fetch-session papercuts — fetch journals are never pruned, the shared Chrome close says "this fetch" in every command, and `resolve_photos` exits 0 when its walk stops on a busy port or a lost lock
 
 - Category: code quality (housekeeping)
-- Priority: low (Band 1 — two papercuts in IMP-C25 Step 11's session plumbing)
-- Files: `mainfetch.py` — `FetchJournal` / `read_fetch_journals` (`~/.mediavault/fetch_journal/<run_id>.json`), `_startup_cleanup`, `fetch_cleanup_plan`, `_resume_hints`; `_close_session` (its result lines). Found during IMP-C25 Step 14 (its "observations, not changed").
+- Priority: low (Band 1 — three papercuts in IMP-C25's session plumbing)
+- Files: `mainfetch.py` — `FetchJournal` / `read_fetch_journals` (`~/.mediavault/fetch_journal/<run_id>.json`), `_startup_cleanup`, `fetch_cleanup_plan`, `_resume_hints`; `_close_session` (its result lines). `main.py` — `cmd_resolve_photos` / `_rp_walk`, `RESOLVE_FAILED_STATUSES`. Found during IMP-C25 Step 14 (its "observations, not changed") and in a side session's Step 14.g sweep (`.candidates/c25-step14g-pins/README.md` in the main folder, untracked).
 - Current behavior:
   - Every fetch, `check_photos` run and `resolve_photos` run writes a journal file, and no code ever deletes one — not even a `clean` journal (the run finished with nothing left behind). Every run reads them all: the start-up cleanup, `fetch_cleanup`'s plan, and `_resume_hints` (once per run and account). The files are small, but the folder only grows.
   - `_close_session` is shared by fetch, `locate`, `check_photos`, `resolve_photos` and the warm-up, and its lines say "this fetch" in all of them (e.g. `🧹 Closed N tab(s) this fetch opened …`, `⚠️ The Chrome this fetch started (…) did not close …`).
-- Proposed change: prune journals that are `clean` or `recovered` and older than a few days (never a `running` or `pending` one); let `_close_session` name the command it closes for.
-- Effort estimate: small · Risk: low — housekeeping and wording; the cleanup rules for unfinished journals stay as they are.
-- If skipped: the journal folder grows by one file per run and every run reads it all; the close lines keep naming a fetch in a check, a resolve or a warm-up.
+  - `_rp_walk` stops the walk when debug port 9222 is still busy before the next account (`port`), or when another command took the fetch lock over (`lock-lost`). `cmd_resolve_photos` still returns status `ok`, so `python main.py resolve_photos` exits 0 although objects were left unasked; only `refused`, `error` and `interrupted` exit 1. The printed line says why it stopped. After `port` the apply is still offered; after `lock-lost` it is not.
+- Proposed change: prune journals that are `clean` or `recovered` and older than a few days (never a `running` or `pending` one); let `_close_session` name the command it closes for; give a walk that ends on `port` or `lock-lost` its own non-ok status, so the command exits 1.
+- Effort estimate: small · Risk: low — housekeeping, wording and one exit code; the cleanup rules for unfinished journals stay as they are.
+- If skipped: the journal folder grows by one file per run and every run reads it all; the close lines keep naming a fetch in a check, a resolve or a warm-up; a script cannot tell a `resolve_photos` walk that stopped half-way from a finished one.
 - Status: pending
 
 ---

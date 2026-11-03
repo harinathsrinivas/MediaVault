@@ -567,3 +567,6 @@ No other step of this plan uses candidates.
 - **2026-10-28 — map_photos reporting fixes**: card answer "Fix both inside C25 (Recommended)" → mpfix: (1) the dry-run
   apply preview drops records already on record, exactly like `--apply`; (2) `not-listed` is not used for an item
   uploaded after the account's crawl began (that is "not crawled yet", not archive/trash).
+- **2026-10-28 — OD-16 (Step 17 NEXT pointer)**: card answer "IMP-C24 (Recommended)" → after C25, PRIORITY.md keeps a
+  single 👉 NEXT pointer: IMP-C24 (concurrent library writes silently lose updates — no lock); IMP-U7 stays a Band 0
+  entry without the pointer. Applied in Step 17's commit.

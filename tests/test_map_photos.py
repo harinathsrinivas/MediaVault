@@ -2238,19 +2238,23 @@ def test_the_repair_line_counts_only_the_chunks_that_will_map(world, tmp_path):
     assert _changes(applied["engine"]) == [(T_WIRE, "chunk 1/2", "create")]
 
 
-def test_a_record_about_the_repaired_whole_file_is_never_previewed_as_a_change(world, tmp_path):
-    """The repair turns the whole file into its chunks (P-3: a split leaf has no whole-file object), so the apply finds
-    a record about the whole file an orphan — here a check's verdict that was appended but never folded."""
-    _split_lost(world)
-    mvcommon.append_learned("tv", {"manual_id": T_WIRE, "label": "whole", "sha256": _h(T_WIRE), "source": "check",
+@pytest.mark.parametrize("about", ["whole", "chunk"])
+def test_a_record_about_a_repaired_object_is_never_previewed_as_a_change_or_an_orphan(world, tmp_path, about):
+    """The repair turns the whole file into its chunks (P-3: a split leaf has no whole-file object): the apply finds a
+    record about the whole file an orphan, and folds one about a chunk (e.g. from when the entry was split before)
+    into that chunk's new node — so the engine's preview counts neither (here a check's verdict, never folded)."""
+    chunks = _split_lost(world)
+    label, sha256 = ("whole", _h(T_WIRE)) if about == "whole" else ("chunk 1/2", chunks[1][1])
+    mvcommon.append_learned("tv", {"manual_id": T_WIRE, "label": label, "sha256": sha256, "source": "check",
                                    "approach": {"tried": "s2_exact_name", "outcome": "not-found", "n": 0}})
 
     preview = world.run(T_WIRE, "--repair", "split-info", out=tmp_path / "dry")["preview"]
     applied = world.run(T_WIRE, "--apply", "--repair", "split-info", out=tmp_path / "apply")["applied"]
 
     assert (preview["changed"], preview["orphans"], preview["repair"]["chunks"]) == ([], [], 2)
-    assert len(applied["engine"]["changed"]) == 2
-    assert [(o["manual_id"], o["reason"]) for o in applied["engine"]["orphans"]] == [(T_WIRE, "no-object")]
+    assert _changes(applied["engine"]) == [(T_WIRE, "chunk 1/2", "create"), (T_WIRE, "chunk 2/2", "create")]
+    orphans = [(o["manual_id"], o["reason"]) for o in applied["engine"]["orphans"]]
+    assert orphans == ([(T_WIRE, "no-object")] if about == "whole" else [])
 
 
 def test_a_run_that_records_nothing_still_previews_what_its_apply_folds(world, tmp_path, capsys):

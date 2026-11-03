@@ -143,7 +143,7 @@ EXISTING_PINS = [
     ("test_map_photos.py", "test_the_split_info_repair_is_previewed_on_its_own_line_and_the_apply_changes_just_that"),
     ("test_map_photos.py", "test_a_split_info_repair_is_previewed_when_nothing_else_would_change"),
     ("test_map_photos.py", "test_the_repair_line_counts_only_the_chunks_that_will_map"),
-    ("test_map_photos.py", "test_a_record_about_the_repaired_whole_file_is_never_previewed_as_a_change"),
+    ("test_map_photos.py", "test_a_record_about_a_repaired_object_is_never_previewed_as_a_change_or_an_orphan"),
     ("test_map_photos.py", "test_a_run_that_records_nothing_still_previews_what_its_apply_folds"),
     # trigger_download source digest
     ("test_fetch_search_wait.py", "test_trigger_download_source_is_pinned"),

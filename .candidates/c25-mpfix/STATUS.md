@@ -63,10 +63,47 @@ behaviour must stay identical ((appended, known) counts and append order).
       README none; every re-pointed line checked to hold its named def / constant; thfix's `refs_verify.py` forward
       check: 339 paired refs, 0 mismatches, the 2 new refs (and the re-aligned check_photos line) anchored right. Left
       as they are (point-in-time): ARCHITECTURE's "(18294 lines as of 2026-10-20)" notes. Only this file cites base
-      line numbers elsewhere (its Findings: main.py at 12dd2cf). Runs: pins + map 241 passed — this commit (its SHA is
-      recorded with mpfix.d)
-- [ ] mpfix.d disarm probes on an isolated `git archive` scratch copy: each part reverted on its own turns a test red;
-      every file restored byte for byte (SHA-256 checked).
+      line numbers elsewhere (its Findings: main.py at 12dd2cf). Runs: pins + map 241 passed — 782d4f6
+- [x] mpfix.d disarm probes — on an isolated scratch copy (`git archive HEAD` at 782d4f6 + the 2 test files changed in
+      this sub-task; all 366 tracked files SHA-256-equal to the worktree's before and after), never the worktree. Each
+      probe reverts ONE part of the fix (one exact text replacement that occurs once; the file must still compile),
+      runs the tests that must catch it, requires an EXPECTED test among the failures, then restores main.py byte for
+      byte (SHA-256 checked). Copy baseline: map + pins + check 431 passed (round 1) / 432 (final). Scripts:
+      scratchpad `mpfix/disarm.py` (results `mpfix/disarm/disarm_results.jsonl`). Round 1: 17/18 red — 1 survivor:
+        · A7 the engine line leaves out old records about a repaired entry's CHUNKS too (not only its whole file's):
+              no test had such a record -> the test of a record about a repaired object is now parametrized
+              (`whole`: the apply orphans it · `chunk`: the apply folds it into the chunk's new node; the preview shows
+              neither as a change nor as an orphan) and renamed
+              test_a_record_about_a_repaired_object_is_never_previewed_as_a_change_or_an_orphan (registry pin
+              re-pointed).
+      FINAL PASS: 18/18 red, 18/18 restored; the copy identical to the worktree and green after (432 passed). No
+      production code changed in this sub-task. The table (part reverted -> the test that turned red):
+  | id | part reverted | the test that turned red |
+  |---|---|---|
+  | A1 | the preview adds only the records not on record yet (`existing + records` restored) | test_a_dry_run_after_an_apply_previews_no_change_and_the_next_apply_makes_none (+ the names, resolutions and repair-line tests) |
+  | A2 | the preview runs the engine over the sidecar also when the run records nothing (the old early `return None`) | test_a_run_that_records_nothing_still_previews_what_its_apply_folds |
+  | A3 | a pending repair keeps the preview although the engine has nothing to apply | test_a_split_info_repair_is_previewed_when_nothing_else_would_change |
+  | A4 | the preview simulates the repair (`_mp_repair_preview`) | test_the_split_info_repair_is_previewed_on_its_own_line_and_the_apply_changes_just_that (+ 2) |
+  | A5 | the repair line counts only the chunks whose verdict records something | test_the_repair_line_counts_only_the_chunks_that_will_map |
+  | A6 | the engine's count leaves out the records about the repaired objects | test_a_record_about_a_repaired_object_is_never_previewed_as_a_change_or_an_orphan[whole] / [chunk] |
+  | A7 | … their chunks' records too | test_a_record_about_a_repaired_object_is_never_previewed_as_a_change_or_an_orphan[chunk] |
+  | A8 | the repair line is printed | test_the_split_info_repair_is_previewed_on_its_own_line_and_the_apply_changes_just_that |
+  | A9 | a record repeated within the run counts once (`_mp_new_records`) | test_a_fact_on_record_is_not_new_whatever_its_time_and_a_repeat_counts_once |
+  | B1 | `_mp_nowhere` asks `_mp_after_crawl` | test_an_item_uploaded_after_the_crawl_began_is_not_crawled_yet_never_not_listed · test_an_apply_leaves_an_uploaded_after_crawl_objects_record_as_it_is |
+  | B2 | upload_ms AT the crawl start counts as after it (`>=`) | test_the_items_upload_time_at_the_crawl_start_is_after_it_and_a_moment_before_is_not[at-the-crawl-start] |
+  | B3 | upload_ms decides when known (an earlier upload is never overruled by a later push) | test_a_not_listed_object_pushed_again_after_the_crawl_began_stays_not_listed (thfix's pin) |
+  | B4 | without upload_ms the capture's push time decides | test_without_the_upload_time_the_capture_push_time_decides[after-the-crawl-start] / [at-it] |
+  | B5 | a push AT the crawl start counts as after it (`>=`) | test_without_the_upload_time_the_capture_push_time_decides[at-it] |
+  | B6 | verified_at is never evidence (the dispatch's literal fallback re-added) | test_a_confirmation_after_the_crawl_began_proves_no_late_upload |
+  | B7 | `_mp_recency` leaves an uploaded-after-crawl row alone | test_without_the_upload_time_the_capture_push_time_decides[after-the-crawl-start] |
+  | B8 | MAP_STATES counts uploaded-after-crawl (the Verdicts line) | test_an_item_uploaded_after_the_crawl_began_is_not_crawled_yet_never_not_listed |
+  | B9 | the summary's uploaded-after-crawl block | test_an_item_uploaded_after_the_crawl_began_is_not_crawled_yet_never_not_listed |
+      Not probed, on purpose — they have no behaviour of their own, so reverting them changes no output:
+      `_mp_run_records` / `_mp_proven_plans` (one source for the apply and the preview: a revert inlines identical
+      code), `_mp_patch_split_info` (the writer's own patch step, reused: within one run a plan of its own rows always
+      patches, so a direct write would behave the same), ctx `index` (plumbing), and the floor `upload_ms // 1000`
+      (a no-op: the crawl start is kept to whole seconds). The writer's extraction is covered by its existing tests
+      (`test_the_split_info_writer_*`, `test_repair_split_info_*`) — this commit (its SHA is recorded with mpfix.e)
 - [ ] mpfix.e gates: full suite, then smoke; the secrets scan over the whole range; the self-review; STATE: COMPLETE;
       the final commit `fix(imp-c25): map_photos — the dry-run preview counts what --apply changes; an item uploaded
       after the crawl is not "not-listed"`.

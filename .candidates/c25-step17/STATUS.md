@@ -24,10 +24,12 @@ diff before every commit (no real `AF1Qip…` ids, no e-mail addresses, no token
 - [x] 17.a tier C — C25 done (what shipped, R1–R4 counts), C26 status, C27 in_progress + open list, C5 / C34 / C35 /
       C36 done, C24 interplay line, C7 synergy, C32 repair note, new C39–C44 — e114c58
 - [x] 17.b tiers A / B / D / E / G / S / X — A8 + B10 done, the B4 note, synergy lines E5 / G2 / S7 / X1 / X5 / D9 —
-      (this commit; SHA in 17.c's line). G2: the line does not claim gphotosdl's `/id/` takes the web photo_id (not
-      verifiable without web access) — the spike establishes it.
-- [ ] 17.c PRIORITY.md — Last updated, the single 👉 NEXT pointer (IMP-C24; U7 a plain Band 0 entry), Band 0 C27 row
-      (+ the C32 note), Band 1 (C25 / C34–C36 done; C39–C43 rows), Band 2 / 4 / 5 prose, DONE list
+      6829142. G2: the line does not claim gphotosdl's `/id/` takes the web photo_id (not verifiable without web
+      access) — the spike establishes it.
+- [x] 17.c PRIORITY.md — Last updated, the single 👉 NEXT pointer (IMP-C24; U7 a plain Band 0 entry), Band 0 C27 row
+      (+ the C32 note), Band 1 (C25 / C34–C36 done; C39–C43 rows), Band 2 / 4 / 5 prose, DONE list (46 → 53) —
+      (this commit; SHA in 17.d's line). Pointer check: the only live 👉 is the IMP-C24 section (+ two references to
+      it); the other matches are the Last-updated history and the maintenance protocol.
 - [ ] 17.d priority-graph.html — statuses + notes, 6 new nodes, edges, header Next → IMP-C24, footer; Appendix C
       node validation
 - [ ] 17.e gates — three-file consistency check, smoke, secrets scan, self-review, STATE: COMPLETE, final commit

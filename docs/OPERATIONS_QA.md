@@ -11,9 +11,12 @@
 > **Maintenance:** when a question is asked and answered in any Claude session, add it here.
 > See the protocol at the bottom.
 
-**Last updated:** 2026-10-28 (IMP-C25 follow-up "thfix": §6d — new Q&As "`map_photos` says possible loss, but
-fetch finds the file — why?" and "Why did a big `check_photos` run stop with "Google Photos is throttled"?"; §6c —
-the legacy search's three-zeros stop is no longer reported as "logged out")
+**Last updated:** 2026-11-03 (IMP-C25 follow-up "mpfix": §6d — new Q&A "The map dry run says "N object(s) would
+change" — will `--apply` really change that many?"; the possible-loss and not-listed Q&As gain `uploaded-after-crawl`)
+
+*Earlier — 2026-10-28 (IMP-C25 follow-up "thfix": §6d — new Q&As "`map_photos` says possible loss, but fetch finds
+the file — why?" and "Why did a big `check_photos` run stop with "Google Photos is throttled"?"; §6c — the legacy
+search's three-zeros stop is no longer reported as "logged out")*
 
 *Earlier — 2026-10-27 (IMP-C25 follow-up: §6d — the auto-confirm looks up only pushes at least 24 h old;
 `check_photos --min-age-h`; new Q&A "Does the auto-confirm look up the files I just pushed?")*
@@ -1023,6 +1026,24 @@ hint, parsed tolerantly (US and UK forms, missing current year). Nothing to chan
 5. Verify: `python main.py check_photos account:<a> --approaches best` (dry run), read its
    `report.txt`, then `python main.py check_photos account:<a> --apply-run latest` (no new searches).
 
+### The map dry run says "N object(s) would change" — will `--apply` really change that many?
+
+Yes — since 2026-11-03 (IMP-C25 mpfix) the dry run's `Apply preview` counts what `--apply` would change, the way the
+apply counts. Before, it counted again every fact already on record (the dry run had re-dated it): right after the R3
+apply of 2026-10-28 a `map_photos all --repair split-info` dry run said `library (dry-run): 2,207 object(s) would
+change (0 newly confirmed)`, and the apply then recorded 6 new facts — the 6 chunks of the 3 entries it repaired,
+newly confirmed. Now:
+- a fact already on record is not new, whatever its time — a dry run right after an apply previews
+  `0 object(s) would change` until a crawl or the library brings something new;
+- like the apply, the preview covers the whole learned sidecar — also a fact appended earlier and never applied, even
+  when the run itself records nothing;
+- with `--repair split-info` the apply writes the proven split_info first, then maps those entries' chunks in the
+  same run; a dry run cannot write, so they get their own line under the library line:
+  ```
+    + 6 chunk(s) of 3 repaired entr(y/ies) map after the repair — --apply writes their split_info first, then records them (not in the count above)
+  ```
+  Neither line counts more than the apply changes.
+
 ### How do I read the possible-loss report?
 
 `map_photos` / `check_photos` print a loud block `⚠️⚠️⚠️  NOT IN GOOGLE PHOTOS — POSSIBLE LOSS
@@ -1033,10 +1054,10 @@ phone simply has not uploaded it yet; anything older, or with no push record, is
 Remember the local copy of an archived file is a dummy, so treat each possible-loss row seriously:
 add `--devices` (phones attached) to see whether it is still on a phone (`awaiting-backup`), was freed
 from one (`missing-after-backup`) or is nowhere (`missing-everywhere`), then decide per case (IMP-C27).
-"partial chunk sets" means the rest of that file's chunks ARE in Google Photos. Since 2026-10-28 two
-kinds of rows stay out of this block: `map_photos`' `not-listed` (next question), and `check_photos`
-verdicts whose searches could not be shown to work (`unverified`, never booked — see "Why did a big
-`check_photos` run stop …" below).
+"partial chunk sets" means the rest of that file's chunks ARE in Google Photos. These rows stay out of
+this block: `map_photos`' `not-listed` (since 2026-10-28) and `uploaded-after-crawl` (since 2026-11-03;
+both: next question), and `check_photos` verdicts whose searches could not be shown to work (`unverified`,
+never booked — see "Why did a big `check_photos` run stop …" below).
 
 ### `map_photos` says possible loss, but fetch finds the file — why?
 
@@ -1064,6 +1085,22 @@ with a verified proof) in an account whose crawl is fresh but does not list that
 Run the `check_photos <id>` it names: `confirmed` means the item is still there. A `possible-loss` file
 that has NO confirmed record but that a fetch finds anyway was missed by the crawl: re-crawl that account
 (`python tools/gp_inventory.py <account> --port …`) and map again.
+
+An item that reached Google Photos only after the crawl began cannot be in that crawl at all — in R3 (2026-10-28)
+Aavesham chunk 1/2 was pushed in the evening, backed up after the next morning's crawl began and confirmed by a
+check minutes later, and the next dry run called it `not-listed` "(archived, in the trash?)". Since 2026-11-03
+(IMP-C25 mpfix) such a file is `uploaded-after-crawl` instead: its confirmed record's upload time — or, for a record
+without one, its capture's push time — is at or after its account's crawl start (the `as of` time on that account's
+`fresh` line in summary.txt). A confirmation after the crawl began proves nothing by itself: an item archived before
+the crawl and confirmed by its photo id after it stays `not-listed`.
+- `summary.txt`: its own block `Uploaded after the crawl began — NOT a loss: N object(s) whose confirmed record names
+  an item that reached Google Photos after its account's latest crawl began — the next crawl lists them; nothing is
+  recorded for them`, then one line per file (`uploaded-after-crawl <id> · <label> — in '<account>' per its
+  confirmed record (uploaded <t>, the crawl began <t>)`);
+- `mapping.csv`: status `uploaded-after-crawl`, note `in '<account>' per its confirmed record — uploaded after this
+  crawl began (uploaded <t>, the crawl began <t>); the next crawl lists it`;
+- like `not-listed`: not in the LOUD block, not on the failed list or in `resolutions_todo.csv`, nothing recorded.
+  Nothing to do — the next crawl lists it.
 
 ### Why did a big `check_photos` run stop with "Google Photos is throttled"?
 
@@ -1119,7 +1156,7 @@ files). A new push is `unverified` until confirmed; no `status` value was added.
 ### What does "N pushed object(s) await Google Photos confirmation" after a push mean? How do I turn it off?
 
 After a successful push-family command, MediaVault checks your earlier pushes that have had **24 h**
-to back up (`AUTO_CONFIRM_MIN_AGE_H`, `main.py:14813`) — and only those:
+to back up (`AUTO_CONFIRM_MIN_AGE_H`, `main.py:14931`) — and only those:
 - `🔎 N pushed object(s) await Google Photos confirmation — confirming them now, M newer skipped
   (check_photos pending --apply --min-age-h 24, at most 15 min; to turn this off: "auto_confirm_after_push":
   false in mvconfig.json)` — it runs `check_photos pending --apply --min-age-h 24 --max-minutes 15`
@@ -1139,7 +1176,7 @@ off with `"auto_confirm_after_push": false` in `mvconfig.json`. See what is wait
 
 No — not since 2026-10-27. Google Photos needs hours to a day or more to show a new upload, so a lookup
 right after the push can only end `not-backed-up-yet`. The auto-confirm's check runs with `--min-age-h 24`
-(`auto_confirm_argv`, `main.py:14821`): an object whose push (its capture's push time) is less than 24 h
+(`auto_confirm_argv`, `main.py:14939`): an object whose push (its capture's push time) is less than 24 h
 old is not looked up and nothing is recorded for it — no verdict, no failed-list row; it stays pending
 and a later push confirms it. An object with no recorded push time counts as old and is checked. Before
 the fix the check looked up EVERY pending object, the push that had just run included: after a

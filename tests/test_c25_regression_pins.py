@@ -33,7 +33,14 @@ Changing anything pinned here is a REVIEWED decision (re-pin it on purpose, in t
                                    nothing could verify is reported, never booked
      map: confirmed-but-unlisted   (IMP-C25 thfix) test_map_photos.py: a confirmed record whose photo_id a fresh crawl
      is no loss                    does not list is `not-listed` — off the failed list, todo and LOUD block, the apply
-                                   leaves it; every other verdict unchanged
+                                   leaves it; every other verdict unchanged · (IMP-C25 mpfix) its item uploaded at or
+                                   after the crawl began is `uploaded-after-crawl` instead — upload_ms decides, else
+                                   the capture's push time, never verified_at; no archive / trash wording
+     map: the dry-run preview      (IMP-C25 mpfix — the R3 map runs of 2026-10-28) test_map_photos.py: the preview
+     counts what --apply changes   counts only the records not on record yet (after an apply: 0), a new fact exactly as
+                                   its apply changes it, the whole sidecar even when the run records nothing,
+                                   resolutions and names as the apply takes them; --repair split-info's chunks on their
+                                   own line, never more than the apply changes
      calculate_file_hash           test_gp_capture.py (SHA-256 for 0 / 10 / 196 615 bytes + the same-pass SHA-1) ·
                                    test_mvcommon.py (the progress bar; a missing file -> None)
      ENTRY_TYPE_KEYS literal       test_entry_schema_guard.py (d1)
@@ -121,6 +128,23 @@ EXISTING_PINS = [
     ("test_map_photos.py", "test_an_apply_leaves_a_not_listed_objects_confirmed_record_as_it_is"),
     ("test_map_photos.py", "test_not_listed_needs_a_confirmed_record_a_fresh_crawl_and_a_photo_id_it_does_not_list"),
     ("test_map_photos.py", "test_a_not_listed_object_pushed_again_after_the_crawl_began_stays_not_listed"),
+    # map: an item uploaded after the crawl began is not crawled yet, never not-listed (IMP-C25 mpfix, 2026-10-28)
+    ("test_map_photos.py", "test_an_item_uploaded_after_the_crawl_began_is_not_crawled_yet_never_not_listed"),
+    ("test_map_photos.py", "test_the_items_upload_time_at_the_crawl_start_is_after_it_and_a_moment_before_is_not"),
+    ("test_map_photos.py", "test_without_the_upload_time_the_capture_push_time_decides"),
+    ("test_map_photos.py", "test_a_confirmation_after_the_crawl_began_proves_no_late_upload"),
+    ("test_map_photos.py", "test_an_apply_leaves_an_uploaded_after_crawl_objects_record_as_it_is"),
+    # map: the dry-run preview counts what --apply changes (IMP-C25 mpfix, 2026-10-28)
+    ("test_map_photos.py", "test_a_fact_on_record_is_not_new_whatever_its_time_and_a_repeat_counts_once"),
+    ("test_map_photos.py", "test_a_dry_run_after_an_apply_previews_no_change_and_the_next_apply_makes_none"),
+    ("test_map_photos.py", "test_a_new_fact_previews_exactly_the_change_its_apply_makes"),
+    ("test_map_photos.py", "test_a_names_repair_previews_its_change_then_none_once_applied"),
+    ("test_map_photos.py", "test_resolutions_preview_their_change_then_none_once_applied"),
+    ("test_map_photos.py", "test_the_split_info_repair_is_previewed_on_its_own_line_and_the_apply_changes_just_that"),
+    ("test_map_photos.py", "test_a_split_info_repair_is_previewed_when_nothing_else_would_change"),
+    ("test_map_photos.py", "test_the_repair_line_counts_only_the_chunks_that_will_map"),
+    ("test_map_photos.py", "test_a_record_about_a_repaired_object_is_never_previewed_as_a_change_or_an_orphan"),
+    ("test_map_photos.py", "test_a_run_that_records_nothing_still_previews_what_its_apply_folds"),
     # trigger_download source digest
     ("test_fetch_search_wait.py", "test_trigger_download_source_is_pinned"),
     ("test_fetch_search_wait.py", "test_the_search_wait_it_relies_on_is_pinned"),

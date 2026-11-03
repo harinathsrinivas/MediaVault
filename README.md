@@ -351,7 +351,17 @@ pushed within 7 days before (or after) that account's crawl, else "possible loss
 already CONFIRMED in an account that the fresh crawl does not list (archived? in the trash?) is
 `not-listed`, NOT a loss — its own short block `Not listed by the crawl — NOT a loss: …` in
 summary.txt, nothing recorded, not on the failed list or `resolutions_todo.csv`; look at one with
-`python main.py check_photos <id>`.
+`python main.py check_photos <id>`. When that confirmed item reached Google Photos at or after the
+crawl began (its upload time — or, for a record without one, its push time), the crawl simply could
+not list it yet: `uploaded-after-crawl`, also NOT a loss and recorded nowhere (its block:
+`Uploaded after the crawl began — NOT a loss: …`); the next crawl lists it.
+
+A dry run's `Apply preview (dry run — nothing written):` lines show what `--apply` would change,
+counted as the apply counts: a fact already on record is not new, whatever its time, so a dry run
+right after an apply previews `0 object(s) would change` (until a crawl or the library brings
+something new). With `--repair split-info` the apply writes the proven split_info first and then
+maps those entries' chunks, so they come on their own line:
+`+ N chunk(s) of M repaired entr(y/ies) map after the repair — …`.
 
 **New pushes are confirmed automatically.** After every successful push-family command (`push`,
 `push_group`, `prep_push_rep`, `prep_push_rep_season`, and the two `…_enrich` autopilots), MediaVault

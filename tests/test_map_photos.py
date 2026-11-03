@@ -21,6 +21,11 @@ Pinned here, per sub-task:
        mapping.csv (the R1 reader's sheet: wrong-account list, near-matches, duplicates); an unwritable report file.
   9.8  --resolutions and the hints store.   9.9  --apply (sidecar, engine, failed list, CSV rule, idempotence).
   9.10 --devices-only.   Plus: all four prefixes end to end, the CLI dispatcher branch.
+  mpfix (IMP-C25 follow-up, 2026-10-28) the dry run's apply preview counts what --apply changes: a fact already on
+       record is not new, whatever its time; a run that records nothing still previews the sidecar; the split-info
+       repair's chunks on their own line — never counted twice, never more than the apply changes. And a confirmed
+       item uploaded at or after its account's crawl began is `uploaded-after-crawl` (not crawled yet), never
+       not-listed: its upload_ms decides, else the capture's push time — never verified_at.
 Disarm probes (on an isolated scratch copy): PROGRESS.md row 9.
 SYNTHETIC data only: photo ids contain FAKE, devices are FAKE serials; the library lives in the `sandbox`, the
 inventory and the Google Photos state in the conftest redirects (tmp_path) — never D:\\ or ~/.mediavault.
@@ -920,9 +925,10 @@ def test_a_whole_file_uploaded_twice_with_the_same_bytes_maps_once(world, tmp_pa
 T_WIRE = "tv-en-2003-mpwire-s02e12"        # the library says one whole file; Google Photos holds its 2 chunks
 
 
-def _split_lost(world, sidecars=(1, 2), seconds=(SEC_A, SEC_A), holder=False, numbers=(1, 2)):
+def _split_lost(world, sidecars=(1, 2), seconds=(SEC_A, SEC_A), holder=False, numbers=(1, 2), flags=None):
     """T_WIRE: a whole tv episode whose chunks (and maybe a FLAC holder) are in the tv account; the push's local
-    checksums/<chunk>.sha256 sidecars for the chunk numbers in `sidecars` -> {number: (chunk name, sha256)}."""
+    checksums/<chunk>.sha256 sidecars for the chunk numbers in `sidecars`; `flags` {number: item facts} (e.g. a
+    partial upload) -> {number: (chunk name, sha256)}."""
     folder = world.folder("Series", "MP Wire", "Season 02")
     world.library[T_WIRE] = leaf(T_WIRE, folder, "MP.Wire.S02E12.mkv")
     world.save().upload_all(skip={T_WIRE})
@@ -930,7 +936,7 @@ def _split_lost(world, sidecars=(1, 2), seconds=(SEC_A, SEC_A), holder=False, nu
     chunks = {}
     for n, taken in zip(numbers, seconds):
         name = f"{stem}.chunk.{n:03d}.mkv"
-        world.inv.add("tv", name, taken=taken)
+        world.inv.add("tv", name, taken=taken, **(flags or {}).get(n, {}))
         chunks[n] = (name, _h(f"wire chunk {n}"))
     if holder:
         world.inv.add("tv", f"{stem}.holder.mkv", taken=SEC_A)
@@ -1235,6 +1241,91 @@ def test_mp_unlisted_needs_that_accounts_crawl_fresh_and_names_the_routed_accoun
     assert main._mp_unlisted({"routing": "tv"}, obj, fresh, index)[0] == "movies"
     fresh["movies"]["fresh"] = False
     assert main._mp_unlisted({"routing": "tv"}, obj, fresh, index) is None
+
+
+START_MS = int(ENUMERATED.timestamp()) * 1000          # the movies crawl began 2026-10-01T11:00:00Z
+
+
+def test_an_item_uploaded_after_the_crawl_began_is_not_crawled_yet_never_not_listed(world, tmp_path, capsys):
+    """[IMP-C25 mpfix — the R3 case of 2026-10-28: Aavesham chunk 1/2, pushed the evening before, reached Google Photos
+    after the next morning's crawl began; a check confirmed it minutes later and the next map dry run called it
+    `not-listed … (archived, in the trash?)`] Its confirmed record's item was uploaded after the crawl began: the crawl
+    could not list it yet — no loss, nothing recorded, no archive / trash wording."""
+    _confirmed_unlisted(world, upload_ms=START_MS + 10 * 60_000, verified_at="2026-10-01T11:15:00Z")
+
+    res = world.run(out=tmp_path / "run", capsys=capsys)
+
+    rows = by_key(res)
+    three = rows[UNLISTED_KEY]
+    assert (three["status"], three["account"], three["reason"], three["partial_set"], three["proof"]) == (
+        "uploaded-after-crawl", "movies", None, False, "dedupkey")
+    assert three["note"] == ("in 'movies' per its confirmed record — uploaded after this crawl began (uploaded "
+                             "2026-10-01T11:10:00Z, the crawl began 2026-10-01T11:00:00Z); the next crawl lists it")
+    assert three["item"]["photo_id"] == UNLISTED_PID
+    assert not rows[(M_SPLIT, "chunk 1/3")]["partial_set"]                     # the set is complete: no partial set
+    out = res["stdout"]
+    assert ("Uploaded after the crawl began — NOT a loss: 1 object(s) whose confirmed record names an item that "
+            "reached Google Photos after its account's latest crawl began — the next crawl lists them; nothing is "
+            "recorded for them") in out
+    assert (f"    uploaded-after-crawl {M_SPLIT} · chunk 3/3 — in 'movies' per its confirmed record (uploaded "
+            f"2026-10-01T11:10:00Z, the crawl began 2026-10-01T11:00:00Z)") in out
+    assert "archived" not in out and "trash" not in out and "Not listed by the crawl" not in out
+    assert "NOT IN GOOGLE PHOTOS — POSSIBLE LOSS" not in out and UNLISTED_PID not in out
+    assert "uploaded-after-crawl 1" in [line for line in out.splitlines() if line.startswith("Verdicts: ")][0]
+    for name in ("resolutions_todo.csv", "inconsistencies.csv"):
+        listed = _read_csv(os.path.join(res["run_dir"], name))
+        assert UNLISTED_KEY not in {(r["manual_id"], r["object"]) for r in listed}
+    mapping = {(r["manual_id"], r["object"]): r for r in _read_csv(os.path.join(res["run_dir"], "mapping.csv"))}
+    assert (mapping[UNLISTED_KEY]["status"], mapping[UNLISTED_KEY]["note"]) == ("uploaded-after-crawl", three["note"])
+    assert UNLISTED_KEY not in {(r["manual_id"], r["label"]) for r in res["todo"]}
+
+
+@pytest.mark.parametrize("upload_ms, status", [(START_MS, "uploaded-after-crawl"), (START_MS - 1, "not-listed")],
+                         ids=["at-the-crawl-start", "1-ms-before-it"])
+def test_the_items_upload_time_at_the_crawl_start_is_after_it_and_a_moment_before_is_not(world, tmp_path, upload_ms,
+                                                                                       status):
+    _confirmed_unlisted(world, upload_ms=upload_ms)
+
+    assert by_key(world.run(out=tmp_path / "run"))[UNLISTED_KEY]["status"] == status
+
+
+@pytest.mark.parametrize("pushed, status", [("2026-10-01T11:30:00Z", "uploaded-after-crawl"),
+                                            ("2026-10-01T11:00:00Z", "uploaded-after-crawl"),
+                                            ("2026-10-01T10:59:59Z", "not-listed")],
+                         ids=["after-the-crawl-start", "at-it", "1-s-before-it"])
+def test_without_the_upload_time_the_capture_push_time_decides(world, tmp_path, pushed, status):
+    # A confirmed record without upload_ms (an older block — the engine confirms none without it) falls back on the
+    # capture's push time. A filename-proof record: _mp_recency would make it not-backed-up-yet — it must leave it.
+    _confirmed_unlisted(world, upload_ms=None, verified_by="filename")
+    chunk = world.library[M_SPLIT]["split_info"]["chunks"][2]
+    world.capture(M_SPLIT, chunk["hash"], hashlib.sha1(b"chunk three's own bytes").hexdigest(), pushed,
+                  chunk["filename"], role="chunk", index=3)
+
+    row = by_key(world.run(out=tmp_path / "run"))[UNLISTED_KEY]
+
+    assert (row["status"], row["pushed_at"]) == (status, pushed)
+    if status == "uploaded-after-crawl":
+        assert row["note"].endswith(f"(pushed {pushed}, the crawl began 2026-10-01T11:00:00Z); the next crawl lists it")
+
+
+def test_a_confirmation_after_the_crawl_began_proves_no_late_upload(world, tmp_path):
+    # Confirmed after the crawl began, but nothing says WHEN the item reached Google Photos (no upload_ms, no capture):
+    # an item archived before the crawl and confirmed by its photo id after it looks just like this — it stays
+    # not-listed (verified_at is never evidence of a late upload).
+    _confirmed_unlisted(world, upload_ms=None, verified_at="2026-10-01T11:30:00Z")
+
+    assert by_key(world.run(out=tmp_path / "run"))[UNLISTED_KEY]["status"] == "not-listed"
+
+
+def test_an_apply_leaves_an_uploaded_after_crawl_objects_record_as_it_is(world, tmp_path):
+    block = _confirmed_unlisted(world, upload_ms=START_MS + 60_000)
+
+    res = world.run("--apply", out=tmp_path / "run")
+
+    assert by_key(res)[UNLISTED_KEY]["status"] == "uploaded-after-crawl"
+    assert mvcommon.load_library()[M_SPLIT]["split_info"]["chunks"][2]["gphotos"] == block      # untouched
+    assert not [r for r in mvcommon.read_learned() if (r["manual_id"], r["label"]) == UNLISTED_KEY]
+    assert not [r for r in mvcommon.read_failed() if (r["manual_id"], r["label"]) == UNLISTED_KEY]
 
 
 def test_with_devices_an_old_object_gets_the_phones_verdict(world, tmp_path, capsys):
@@ -2010,6 +2101,178 @@ def test_apply_never_opens_a_rollback_journal(world, tmp_path, monkeypatch):
     res = world.run("--apply", "--repair", "split-info,names", out=tmp_path / "run")
     assert res["applied"]["engine"]["status"] == "saved"
     assert not [p for p in tmp_path.rglob("*") if p.name == main.TXN_JOURNAL_NAME]
+
+
+# ---------------------------------------------------------------------------- [IMP-C25 mpfix] the dry run's preview
+# counts what --apply changes. The world's clock is pinned, so two runs stamp their records alike; a REAL later run
+# re-dates every record it builds — _later() moves the clock on to show what the preview must not count.
+
+LATER = NOW + timedelta(hours=1)            # a later run on the same, still fresh, crawl
+
+
+def _later(world):
+    world.monkeypatch.setattr(mvcommon, "_now_utc", lambda: LATER)
+
+
+def _changes(report):
+    return [(c["manual_id"], c["label"], c["action"]) for c in report["changed"]]
+
+
+def test_a_fact_on_record_is_not_new_whatever_its_time_and_a_repeat_counts_once():
+    old = {"v": 1, "at": "2026-10-01T10:00:00Z", "account": "tv", "manual_id": T_EP1, "label": "whole",
+           "sha256": _h(T_EP1), "photo_id": "AF1QipFAKEmpfix00000000000001", "proof": "filename", "source": "map"}
+    redated, stronger = dict(old, at="2026-10-28T08:00:00Z"), dict(old, at="2026-10-28T08:00:00Z", proof="dedupkey")
+    assert main._mp_new_records([redated, stronger, dict(stronger, at="2026-10-28T09:00:00Z")], [old]) == [stronger]
+    appended = []
+    assert main._mp_append_new([redated, stronger, stronger], [old], appended.append) == (1, 2)
+    assert appended == [stronger]
+
+
+def test_a_dry_run_after_an_apply_previews_no_change_and_the_next_apply_makes_none(world, tmp_path, capsys):
+    """[IMP-C25 mpfix — R3, 2026-10-28: right after `map_photos all --apply` a dry run said `2,207 object(s) would
+    change (0 newly confirmed)`; the apply then appended no new record and changed none of them] A later run re-dates
+    every record it builds; --apply appends only the facts not on record yet (same facts, whatever their time) and the
+    preview counts exactly those."""
+    world.save().upload_all().save()
+    first = world.run("--apply", out=tmp_path / "apply")["applied"]
+    assert (first["learned"], len(first["engine"]["changed"]), first["engine"]["confirmed"]) == ((12, 0), 12, 12)
+    _later(world)
+    capsys.readouterr()
+
+    res = world.run(out=tmp_path / "dry", capsys=capsys)
+
+    preview = res["preview"]
+    assert (preview["status"], preview["changed"], preview["confirmed"], preview["conflicts"], preview["orphans"]) == (
+        "dry-run", [], 0, [], [])
+    assert ("  library (dry-run): 0 object(s) would change (0 newly confirmed) · conflict(s) not applied 0 · "
+            "orphan(s) 0") in res["stdout"]
+    again = world.run("--apply", out=tmp_path / "again")["applied"]
+    assert (again["learned"], again["engine"]["status"], again["engine"]["changed"]) == ((0, 12), "up-to-date", [])
+
+
+def test_a_new_fact_previews_exactly_the_change_its_apply_makes(world, tmp_path):
+    world.save().upload_all(skip={M_WHOLE}).save()
+    world.run("--apply", out=tmp_path / "first")                                 # M_WHOLE: in no account yet
+    world.inv.add("movies", world.names[(M_WHOLE, "whole")])                       # a later crawl lists its item
+    world.inv.write()                                    # (not world.save(): that would rewrite the applied library)
+    _later(world)
+
+    preview = world.run(out=tmp_path / "dry")["preview"]
+    applied = world.run("--apply", out=tmp_path / "apply")["applied"]
+
+    assert (_changes(preview), preview["confirmed"]) == ([(M_WHOLE, "whole", "create")], 1)
+    assert preview["changed"] == applied["engine"]["changed"]                    # field for field
+    assert applied["learned"] == (1, 11)
+
+
+def test_a_names_repair_previews_its_change_then_none_once_applied(world, tmp_path):
+    world.save().upload_all(skip={M_WHOLE})
+    world.inv.add("movies", world.library[M_WHOLE]["filename"])                   # its old untagged upload name
+    world.save()
+
+    preview = world.run("--repair", "names", out=tmp_path / "dry")["preview"]
+    applied = world.run("--apply", "--repair", "names", out=tmp_path / "apply")["applied"]
+
+    assert preview["changed"] == applied["engine"]["changed"]
+    whole = next(c for c in preview["changed"] if c["manual_id"] == M_WHOLE)
+    assert whole["fields"]["uploaded_name"] == [None, world.library[M_WHOLE]["filename"]]
+    _later(world)
+    later = world.run("--repair", "names", out=tmp_path / "later")["preview"]
+    assert (later["changed"], later["confirmed"]) == ([], 0)
+
+
+def test_resolutions_preview_their_change_then_none_once_applied(mixed, tmp_path):
+    path, _url = _filled(mixed, tmp_path)
+
+    preview = mixed.run("--resolutions", str(path), out=tmp_path / "dry")["preview"]
+    applied = mixed.run("--resolutions", str(path), "--apply", out=tmp_path / "apply")["applied"]
+
+    assert preview["changed"] == applied["engine"]["changed"]
+    assert {(M_WHOLE, "whole"), (T_EP2, "whole")} <= {(c["manual_id"], c["label"]) for c in preview["changed"]}
+    _later(mixed)                                         # the same decisions again: their records are re-dated
+    later = mixed.run("--resolutions", str(path), out=tmp_path / "later")["preview"]
+    assert (later["changed"], later["confirmed"]) == ([], 0)
+
+
+def test_the_split_info_repair_is_previewed_on_its_own_line_and_the_apply_changes_just_that(world, tmp_path,
+                                                                                            capsys):
+    """[IMP-C25 mpfix — R3: the `--repair split-info` dry run after the map apply] The apply writes the proven
+    split_info FIRST and maps the repaired entry's chunks in the same run; a dry run cannot write, so its preview
+    counts those chunks on their own line — and the engine's line, everything else, is 0 after the map apply."""
+    _split_lost(world)
+    world.run("--apply", out=tmp_path / "map")                                   # the map apply, without the repair
+    _later(world)
+    capsys.readouterr()
+
+    res = world.run("--repair", "split-info", out=tmp_path / "dry", capsys=capsys)
+
+    assert (res["preview"]["changed"], res["preview"]["repair"]) == ([], {"entries": 1, "chunks": 2})
+    assert ("  library (dry-run): 0 object(s) would change (0 newly confirmed) · conflict(s) not applied 0 · "
+            "orphan(s) 0\n  + 2 chunk(s) of 1 repaired entr(y/ies) map after the repair — --apply writes their "
+            "split_info first, then records them (not in the count above)\nNext: python main.py map_photos all "
+            "--repair split-info --apply") in res["stdout"]
+    applied = world.run("--apply", "--repair", "split-info", out=tmp_path / "apply")["applied"]
+    assert _changes(applied["engine"]) == [(T_WIRE, "chunk 1/2", "create"), (T_WIRE, "chunk 2/2", "create")]
+    assert (applied["engine"]["confirmed"], applied["learned"]) == (2, (2, 12))
+
+
+def test_a_split_info_repair_is_previewed_when_nothing_else_would_change(world, tmp_path, capsys):
+    _split_lost(world)
+
+    res = world.run(T_WIRE, "--repair", "split-info", out=tmp_path / "dry", capsys=capsys)
+
+    preview = res["preview"]
+    assert (preview["status"], preview["changed"], preview["repair"]) == (
+        "nothing-to-apply", [], {"entries": 1, "chunks": 2})
+    assert "  library (nothing-to-apply): 0 object(s) would change (0 newly confirmed)" in res["stdout"]
+    assert f"Next: python main.py map_photos {T_WIRE} --repair split-info --apply" in res["stdout"]
+
+
+def test_the_repair_line_counts_only_the_chunks_that_will_map(world, tmp_path):
+    _split_lost(world, flags={2: {"partial_upload": True}})        # chunk 2's copy is partial: it is never applied
+
+    preview = world.run(T_WIRE, "--repair", "split-info", out=tmp_path / "dry")["preview"]
+    applied = world.run(T_WIRE, "--apply", "--repair", "split-info", out=tmp_path / "apply")["applied"]
+
+    assert preview["repair"] == {"entries": 1, "chunks": 1}
+    assert _changes(applied["engine"]) == [(T_WIRE, "chunk 1/2", "create")]
+
+
+@pytest.mark.parametrize("about", ["whole", "chunk"])
+def test_a_record_about_a_repaired_object_is_never_previewed_as_a_change_or_an_orphan(world, tmp_path, about):
+    """The repair turns the whole file into its chunks (P-3: a split leaf has no whole-file object): the apply finds a
+    record about the whole file an orphan, and folds one about a chunk (e.g. from when the entry was split before)
+    into that chunk's new node — so the engine's preview counts neither (here a check's verdict, never folded)."""
+    chunks = _split_lost(world)
+    label, sha256 = ("whole", _h(T_WIRE)) if about == "whole" else ("chunk 1/2", chunks[1][1])
+    mvcommon.append_learned("tv", {"manual_id": T_WIRE, "label": label, "sha256": sha256, "source": "check",
+                                   "approach": {"tried": "s2_exact_name", "outcome": "not-found", "n": 0}})
+
+    preview = world.run(T_WIRE, "--repair", "split-info", out=tmp_path / "dry")["preview"]
+    applied = world.run(T_WIRE, "--apply", "--repair", "split-info", out=tmp_path / "apply")["applied"]
+
+    assert (preview["changed"], preview["orphans"], preview["repair"]["chunks"]) == ([], [], 2)
+    assert _changes(applied["engine"]) == [(T_WIRE, "chunk 1/2", "create"), (T_WIRE, "chunk 2/2", "create")]
+    orphans = [(o["manual_id"], o["reason"]) for o in applied["engine"]["orphans"]]
+    assert orphans == ([(T_WIRE, "no-object")] if about == "whole" else [])
+
+
+def test_a_run_that_records_nothing_still_previews_what_its_apply_folds(world, tmp_path, capsys):
+    """The apply runs the engine over the WHOLE learned sidecar, also when its own run records nothing — so a fact
+    appended earlier and never folded is previewed too (before: no preview at all)."""
+    world.save().upload_all(skip={T_EP1}).save()                          # T_EP1: in no account, nothing to record
+    item = next(r for r in world.inv.items["movies"] if r["filename"] == world.names[(M_WHOLE, "whole")])
+    mvcommon.append_learned("movies", {
+        "manual_id": M_WHOLE, "label": "whole", "sha256": _h(M_WHOLE), "photo_id": item["photo_id"],
+        "upload_ms": item["upload_ms"], "dedup_key": item["dedup_key"], "gp_filename": item["filename"],
+        "proof": "filename", "source": "check"})
+
+    res = world.run(T_EP1, out=tmp_path / "dry", capsys=capsys)
+
+    assert (_changes(res["preview"]), res["preview"]["confirmed"]) == ([(M_WHOLE, "whole", "create")], 1)
+    assert f"Next: python main.py map_photos {T_EP1} --apply" in res["stdout"]
+    applied = world.run(T_EP1, "--apply", out=tmp_path / "apply")["applied"]
+    assert applied["engine"]["changed"] == res["preview"]["changed"]
 
 
 # ============================================================================ 9.10 --devices-only

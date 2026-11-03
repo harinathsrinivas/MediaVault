@@ -38,12 +38,17 @@ behaviour must stay identical ((appended, known) counts and append order).
       counts only chunks that will map (a partial-upload chunk: 1 of 2) · an unfolded record about the repaired whole
       file is not counted (the apply orphans it) · a run that records nothing still previews the sidecar's pending change
       · `_mp_new_records` / `_mp_append_new` unit. Runs: map + check + apply engine + resolve + pins + primitives 744
-      passed · smoke 102 passed — this commit (its SHA is recorded with mpfix.b)
-- [ ] mpfix.b Fix 2 — `uploaded-after-crawl` (D6–D7): main `_mp_after_crawl`, `_mp_nowhere`, `_mp_recency`, MAP_STATES,
-      the summary block, docstrings / section comment. Tests: the R3 Aavesham case (verdict, note, block, no
-      archive / trash text, off todo / inconsistencies / failed list / LOUD block, mapping.csv) · upload_ms at the crawl
-      start vs 1 ms before · no upload_ms: the push time at the crawl start vs 1 s before (a filename-proof record:
-      `_mp_recency` must leave it) · verified_at after the crawl start proves nothing · --apply changes nothing for it.
+      passed · smoke 102 passed — 22fbd4c
+- [x] mpfix.b Fix 2 — `uploaded-after-crawl` (D6–D7): main `_mp_after_crawl` (the evidence text, used by the verdict
+      and the summary line alike), `_mp_nowhere`, `_mp_recency` (leaves it alone), MAP_STATES (after not-listed), the
+      summary block, docstrings / section comment / cmd_map_photos' status list. Tests +8 (test_map_photos): the R3
+      Aavesham case (verdict, note, the block and its line, no archive / trash text, off todo / inconsistencies / LOUD
+      block, the Verdicts line, mapping.csv) · upload_ms at the crawl start vs 1 ms before · no upload_ms: the push
+      time after / at the crawl start vs 1 s before (a filename-proof record: `_mp_recency` must leave it) · a
+      confirmation after the crawl began (verified_at) proves nothing · --apply leaves its block byte-equal, no learned
+      record, no failed row. All 6 added lines over 120 characters reflowed (none left). Runs: map + check + apply
+      engine + resolve + pins + primitives 752 passed · smoke 102 passed — this commit (its SHA is recorded with
+      mpfix.c)
 - [ ] mpfix.c registry pins (tests/test_c25_regression_pins.py) + docs: README (map_photos), ARCHITECTURE §8.10 (+ Last
       updated, every line ref this change shifts), docs/OPERATIONS_QA.md §6d (the not-listed Q&A, the preview) — every
       claim checked against the code.

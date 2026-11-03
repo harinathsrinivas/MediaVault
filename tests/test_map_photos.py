@@ -23,7 +23,9 @@ Pinned here, per sub-task:
   9.10 --devices-only.   Plus: all four prefixes end to end, the CLI dispatcher branch.
   mpfix (IMP-C25 follow-up, 2026-10-28) the dry run's apply preview counts what --apply changes: a fact already on
        record is not new, whatever its time; a run that records nothing still previews the sidecar; the split-info
-       repair's chunks on their own line — never counted twice, never more than the apply changes.
+       repair's chunks on their own line — never counted twice, never more than the apply changes. And a confirmed
+       item uploaded at or after its account's crawl began is `uploaded-after-crawl` (not crawled yet), never
+       not-listed: its upload_ms decides, else the capture's push time — never verified_at.
 Disarm probes (on an isolated scratch copy): PROGRESS.md row 9.
 SYNTHETIC data only: photo ids contain FAKE, devices are FAKE serials; the library lives in the `sandbox`, the
 inventory and the Google Photos state in the conftest redirects (tmp_path) — never D:\\ or ~/.mediavault.
@@ -1239,6 +1241,91 @@ def test_mp_unlisted_needs_that_accounts_crawl_fresh_and_names_the_routed_accoun
     assert main._mp_unlisted({"routing": "tv"}, obj, fresh, index)[0] == "movies"
     fresh["movies"]["fresh"] = False
     assert main._mp_unlisted({"routing": "tv"}, obj, fresh, index) is None
+
+
+START_MS = int(ENUMERATED.timestamp()) * 1000          # the movies crawl began 2026-10-01T11:00:00Z
+
+
+def test_an_item_uploaded_after_the_crawl_began_is_not_crawled_yet_never_not_listed(world, tmp_path, capsys):
+    """[IMP-C25 mpfix — the R3 case of 2026-10-28: Aavesham chunk 1/2, pushed the evening before, reached Google Photos
+    after the next morning's crawl began; a check confirmed it minutes later and the next map dry run called it
+    `not-listed … (archived, in the trash?)`] Its confirmed record's item was uploaded after the crawl began: the crawl
+    could not list it yet — no loss, nothing recorded, no archive / trash wording."""
+    _confirmed_unlisted(world, upload_ms=START_MS + 10 * 60_000, verified_at="2026-10-01T11:15:00Z")
+
+    res = world.run(out=tmp_path / "run", capsys=capsys)
+
+    rows = by_key(res)
+    three = rows[UNLISTED_KEY]
+    assert (three["status"], three["account"], three["reason"], three["partial_set"], three["proof"]) == (
+        "uploaded-after-crawl", "movies", None, False, "dedupkey")
+    assert three["note"] == ("in 'movies' per its confirmed record — uploaded after this crawl began (uploaded "
+                             "2026-10-01T11:10:00Z, the crawl began 2026-10-01T11:00:00Z); the next crawl lists it")
+    assert three["item"]["photo_id"] == UNLISTED_PID
+    assert not rows[(M_SPLIT, "chunk 1/3")]["partial_set"]                     # the set is complete: no partial set
+    out = res["stdout"]
+    assert ("Uploaded after the crawl began — NOT a loss: 1 object(s) whose confirmed record names an item that "
+            "reached Google Photos after its account's latest crawl began — the next crawl lists them; nothing is "
+            "recorded for them") in out
+    assert (f"    uploaded-after-crawl {M_SPLIT} · chunk 3/3 — in 'movies' per its confirmed record (uploaded "
+            f"2026-10-01T11:10:00Z, the crawl began 2026-10-01T11:00:00Z)") in out
+    assert "archived" not in out and "trash" not in out and "Not listed by the crawl" not in out
+    assert "NOT IN GOOGLE PHOTOS — POSSIBLE LOSS" not in out and UNLISTED_PID not in out
+    assert "uploaded-after-crawl 1" in [line for line in out.splitlines() if line.startswith("Verdicts: ")][0]
+    for name in ("resolutions_todo.csv", "inconsistencies.csv"):
+        listed = _read_csv(os.path.join(res["run_dir"], name))
+        assert UNLISTED_KEY not in {(r["manual_id"], r["object"]) for r in listed}
+    mapping = {(r["manual_id"], r["object"]): r for r in _read_csv(os.path.join(res["run_dir"], "mapping.csv"))}
+    assert (mapping[UNLISTED_KEY]["status"], mapping[UNLISTED_KEY]["note"]) == ("uploaded-after-crawl", three["note"])
+    assert UNLISTED_KEY not in {(r["manual_id"], r["label"]) for r in res["todo"]}
+
+
+@pytest.mark.parametrize("upload_ms, status", [(START_MS, "uploaded-after-crawl"), (START_MS - 1, "not-listed")],
+                         ids=["at-the-crawl-start", "1-ms-before-it"])
+def test_the_items_upload_time_at_the_crawl_start_is_after_it_and_a_moment_before_is_not(world, tmp_path, upload_ms,
+                                                                                       status):
+    _confirmed_unlisted(world, upload_ms=upload_ms)
+
+    assert by_key(world.run(out=tmp_path / "run"))[UNLISTED_KEY]["status"] == status
+
+
+@pytest.mark.parametrize("pushed, status", [("2026-10-01T11:30:00Z", "uploaded-after-crawl"),
+                                            ("2026-10-01T11:00:00Z", "uploaded-after-crawl"),
+                                            ("2026-10-01T10:59:59Z", "not-listed")],
+                         ids=["after-the-crawl-start", "at-it", "1-s-before-it"])
+def test_without_the_upload_time_the_capture_push_time_decides(world, tmp_path, pushed, status):
+    # A confirmed record without upload_ms (an older block — the engine confirms none without it) falls back on the
+    # capture's push time. A filename-proof record: _mp_recency would make it not-backed-up-yet — it must leave it.
+    _confirmed_unlisted(world, upload_ms=None, verified_by="filename")
+    chunk = world.library[M_SPLIT]["split_info"]["chunks"][2]
+    world.capture(M_SPLIT, chunk["hash"], hashlib.sha1(b"chunk three's own bytes").hexdigest(), pushed,
+                  chunk["filename"], role="chunk", index=3)
+
+    row = by_key(world.run(out=tmp_path / "run"))[UNLISTED_KEY]
+
+    assert (row["status"], row["pushed_at"]) == (status, pushed)
+    if status == "uploaded-after-crawl":
+        assert row["note"].endswith(f"(pushed {pushed}, the crawl began 2026-10-01T11:00:00Z); the next crawl lists it")
+
+
+def test_a_confirmation_after_the_crawl_began_proves_no_late_upload(world, tmp_path):
+    # Confirmed after the crawl began, but nothing says WHEN the item reached Google Photos (no upload_ms, no capture):
+    # an item archived before the crawl and confirmed by its photo id after it looks just like this — it stays
+    # not-listed (verified_at is never evidence of a late upload).
+    _confirmed_unlisted(world, upload_ms=None, verified_at="2026-10-01T11:30:00Z")
+
+    assert by_key(world.run(out=tmp_path / "run"))[UNLISTED_KEY]["status"] == "not-listed"
+
+
+def test_an_apply_leaves_an_uploaded_after_crawl_objects_record_as_it_is(world, tmp_path):
+    block = _confirmed_unlisted(world, upload_ms=START_MS + 60_000)
+
+    res = world.run("--apply", out=tmp_path / "run")
+
+    assert by_key(res)[UNLISTED_KEY]["status"] == "uploaded-after-crawl"
+    assert mvcommon.load_library()[M_SPLIT]["split_info"]["chunks"][2]["gphotos"] == block      # untouched
+    assert not [r for r in mvcommon.read_learned() if (r["manual_id"], r["label"]) == UNLISTED_KEY]
+    assert not [r for r in mvcommon.read_failed() if (r["manual_id"], r["label"]) == UNLISTED_KEY]
 
 
 def test_with_devices_an_old_object_gets_the_phones_verdict(world, tmp_path, capsys):

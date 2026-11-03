@@ -11056,11 +11056,12 @@ def classify_device_objects(library, inventory, objects=None):
 #      the account it is routed to, `not-backed-up-yet` (pushed after the crawl began, or in the MAP_RECENT_DAYS
 #      before it: not a problem yet) or `possible-loss` (pushed earlier, or push time unknown — no capture) — unless
 #      [IMP-C25 thfix] its library block holds a CONFIRMED record in a freshly crawled account whose latest
-#      enumeration does not list that photo_id: `not-listed` (archived? in the trash? — no loss; nothing recorded). A push
-#      newer than the crawl can only be proven by its bytes (dedupKey); a name match is no evidence for it. Only
-#      with --devices does the read-only device check (Step 8) refine an OLD object — awaiting-backup /
-#      missing-after-backup / missing-everywhere — and annotate a recent one; a phone that was not listed only
-#      annotates (it never blocks or downgrades a verdict).
+#      enumeration does not list that photo_id: `not-listed` (archived? in the trash? — no loss; nothing recorded), or —
+#      [IMP-C25 mpfix] that item reached Google Photos at or after the crawl began — `uploaded-after-crawl` (not crawled
+#      yet: no loss either; nothing recorded). A push newer than the crawl can only be proven by its bytes (dedupKey); a
+#      name match is no evidence for it. Only with --devices does the read-only device check (Step 8) refine an OLD
+#      object — awaiting-backup / missing-after-backup / missing-everywhere — and annotate a recent one; a phone that
+#      was not listed only annotates (it never blocks or downgrades a verdict).
 # Outputs, --resolutions, --apply, --devices and --devices-only: see cmd_map_photos. Nothing here prints a P-13
 # web-progress marker; no photo id, dedupKey or URL is printed (they live in the run directory's files only — P-15).
 
@@ -11605,7 +11606,8 @@ def _mp_settle_by_content(row, key, decisions, fresh):
 def _mp_nowhere(row, obj, fresh, index, library):
     """An object found in no account by name or bytes: withheld while any crawled inventory is not fresh or not fully
     detailed, or the account it is routed to was never crawled (it could be there); else, in order, [IMP-C25 thfix]
-    `not-listed` when its confirmed record names an item a fresh crawl does not list (_mp_unlisted), the
+    `not-listed` when its confirmed record names an item a fresh crawl does not list (_mp_unlisted) — [IMP-C25 mpfix]
+    `uploaded-after-crawl` when that item reached Google Photos at or after the crawl began (_mp_after_crawl) —, the
     `[short_id]`-tag probable (never for a content-keyed object: those items hold other bytes), the IMP-C27 (a)
     split_info lost and (b) old untagged name of a whole file; else not-found (_mp_recency gives its verdict), with
     any possibly-deleted same-named item as evidence."""
@@ -11626,6 +11628,11 @@ def _mp_nowhere(row, obj, fresh, index, library):
         item.update((k, record.get(k)) for k in ("taken_ms", "tz_offset_ms", "upload_ms", "dedup_key", "width",
                                                  "height", "original_quality", "partial_upload"))
         row.update(status="not-listed", account=account, proof=record.get("verified_by"), item=item)
+        late = _mp_after_crawl(row, fresh[account])
+        if late is not None:   # [IMP-C25 mpfix] it reached Google Photos after the crawl began: not crawled yet
+            row["status"] = "uploaded-after-crawl"
+            return _mp_note(row, f"in '{account}' per its confirmed record — uploaded after this crawl began ({late}); "
+                                 f"the next crawl lists it")
         return _mp_note(row, f"in '{account}' per its confirmed record, but the crawl does not list it — maybe "
                              f"archived or in the trash; check it with: python main.py check_photos {row['manual_id']}")
     if not row["uploaded_name"]:
@@ -11691,6 +11698,33 @@ def _mp_unlisted(row, obj, fresh, index):
                 and isinstance(record.get("photo_id"), str) and gpweb.MEDIA_KEY_RE.match(record["photo_id"])
                 and (fresh.get(account) or {}).get("fresh") and listed is not None and record["photo_id"] not in listed):
             return account, record
+    return None
+
+
+def _mp_after_crawl(row, info):
+    """[IMP-C25 mpfix — the R3 case of 2026-10-28: a chunk pushed the evening before, confirmed by a check minutes after
+    the next morning's crawl began, read `not-listed`] The evidence that the item of a row's confirmed record reached
+    Google Photos at or after its account's crawl began (to the second: the crawl start is kept to the second) — so the
+    crawl could not list it yet — as 'uploaded <time>, the crawl began <time>', else None. info = that account's
+    freshness. The item's own upload time (`upload_ms`, which every confirmed record carries: mvcommon.apply_learned
+    confirms none without it) decides whenever it is known: an item uploaded before the crawl began stays not-listed,
+    even when the same bytes were pushed again after it. Without it, the capture's push time (`pushed_at`) at or after
+    the crawl start (a push reaches Google Photos only after it was made). Never `verified_at`: it says the item was
+    there when verified, not when it arrived."""
+    as_of = _mp_when(info.get("as_of"))
+    if as_of is None:
+        return None
+    upload = (row["item"] or {}).get("upload_ms")
+    if isinstance(upload, int) and not isinstance(upload, bool):
+        try:
+            when = datetime.fromtimestamp(upload // 1000, timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            when = None
+        if when is not None:
+            return f"uploaded {_mp_iso(when)}, the crawl began {_mp_iso(as_of)}" if when >= as_of else None
+    pushed = _mp_when(row["pushed_at"])
+    if pushed is not None and pushed >= as_of:
+        return f"pushed {_mp_iso(pushed)}, the crawl began {_mp_iso(as_of)}"
     return None
 
 
@@ -11920,8 +11954,9 @@ def _mp_recency(rows, fresh):
         if status == "not-found":
             row.update(status="not-backed-up-yet" if row["recent"] else "possible-loss", account=row["routing"])
             continue
-        if status in ("stale-inventory", "not-listed") or when is None or row["proof"] == "dedupkey":
-            continue          # [IMP-C25 thfix] not-listed: its confirmed record — no push time can make it "not yet"
+        if (status in ("stale-inventory", "not-listed", "uploaded-after-crawl") or when is None
+                or row["proof"] == "dedupkey"):
+            continue          # [IMP-C25 thfix / mpfix] its confirmed record — no push time can make it "not yet"
         evidence = _mp_evidence_as_of(row, fresh)
         if evidence is not None and when > evidence:
             _mp_not_yet(row, f"pushed {_mp_iso(when)}, after the crawl that shows its name began ({_mp_iso(evidence)}) "
@@ -12296,11 +12331,14 @@ def _mp_write_jsonl(path, records):
             fh.write(json.dumps(record, ensure_ascii=False, sort_keys=False) + "\n")
 
 
-MAP_STATES = ("mapped", "mapped-normalized", "wrong-account", "not-listed", "probable", "ambiguous", "conflict",
-              "inconsistent", "not-backed-up-yet", "possible-loss", "awaiting-backup", "missing-after-backup",
-              "missing-everywhere", "stale-inventory")   # every row's final status, in report order
+MAP_STATES = ("mapped", "mapped-normalized", "wrong-account", "not-listed", "uploaded-after-crawl", "probable",
+              "ambiguous", "conflict", "inconsistent", "not-backed-up-yet", "possible-loss", "awaiting-backup",
+              "missing-after-backup", "missing-everywhere",
+              "stale-inventory")   # every row's final status, in report order
 # [IMP-C25 thfix] not-listed: its CONFIRMED record names an item its account's fresh crawl does not list (archived? in
 # the trash?) — no loss: no failed reason, no resolutions_todo.csv row, no learned record, not in the LOUD block.
+# [IMP-C25 mpfix] uploaded-after-crawl: that item reached Google Photos at or after the crawl began (not crawled yet) —
+# no loss either, handled like not-listed.
 _MP_LOSS = ("possible-loss", "missing-after-backup", "missing-everywhere", "awaiting-backup")   # the LOUD block
 _MP_LOSS_TEXT = {
     "possible-loss": f"in no account, pushed over {MAP_RECENT_DAYS} days before its account's crawl began or with no "
@@ -12517,6 +12555,13 @@ def _mp_report(ctx):
                      f"recorded for them; check one with: python main.py check_photos <id>")
         lines.extend(f"    not-listed           {r['manual_id']} · {r['label']} — in '{r['account']}' per its "
                      f"confirmed record (proof {r['proof']})" for r in unlisted)
+    late = [r for r in rows if r["status"] == "uploaded-after-crawl"]
+    if late:   # [IMP-C25 mpfix] it reached Google Photos after the crawl began: not crawled yet — never archive / trash
+        lines.append(f"Uploaded after the crawl began — NOT a loss: {len(late):,} object(s) whose confirmed record "
+                     f"names an item that reached Google Photos after its account's latest crawl began — the next "
+                     f"crawl lists them; nothing is recorded for them")
+        lines.extend(f"    uploaded-after-crawl {r['manual_id']} · {r['label']} — in '{r['account']}' per its "
+                     f"confirmed record ({_mp_after_crawl(r, fresh[r['account']])})" for r in late)
     told = [r for r in rows if r["user_decision"] == "not_uploaded"]
     if told:
         lines.append(f"⚠️⚠️⚠️  YOU SAY NOT UPLOADED (IMP-C27): {len(told):,} object(s) — an archived entry keeps only "
@@ -12807,7 +12852,8 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
 
     Row status (mapping.jsonl): mapped · mapped-normalized · wrong-account (these three are applied) · not-listed
     ([IMP-C25 thfix] its confirmed record names an item its account's fresh crawl does not list: no loss — nothing is
-    recorded, it is on no list) · probable ·
+    recorded, it is on no list) · uploaded-after-crawl ([IMP-C25 mpfix] the same, but that item reached Google Photos
+    at or after the crawl began: not crawled yet) · probable ·
     ambiguous · conflict · inconsistent (issue: split-info-lost | untagged-name | partial-upload |
     not-original-quality | no-uploaded-name) · not-backed-up-yet (recent: not on the todo or failed list) ·
     possible-loss · with devices also awaiting-backup · missing-after-backup · missing-everywhere ·

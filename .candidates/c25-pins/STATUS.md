@@ -1,4 +1,4 @@
-STATE: IN PROGRESS
+STATE: COMPLETE
 
 # IMP-C25 — land the Step 14.g guard pins: the Step 14 behaviours no test caught (pins) — resumable status
 
@@ -80,10 +80,20 @@ regression: STOP and report it — never change product code here.
       next account goes on") and the §8.8 line table ("the next account goes on (as after a sign-out)"); README
       (resolve_photos / --manual, "When Google Photos throttles its search"); OPERATIONS_QA §6c ("resolve_photos (only
       that account; the file at hand comes back next time)", "A real sign-in page still says … logged out") and the
-      "Fetch can't find something" options — this commit (its SHA is recorded with pins.f)
-- [ ] pins.f gates (full suite, then smoke), the secrets scan, the self-review, STATE: COMPLETE, the final commit
+      "Fetch can't find something" options — dcb102c
+- [x] pins.f gates (full suite, then smoke), the secrets scan, the self-review, STATE: COMPLETE, the final commit
       `test(imp-c25): land the Step 14.g guard pins — behaviours no test caught (incl. the port check before a second
-      account)`
+      account)`:
+      · gates on dcb102c (= the final code: the final commit changes only this file), one after the other, in the
+        worktree, pytest's default basetemp, no xdist (`-p no:cacheprovider` only, so no .pytest_cache is left — it is
+        not gitignored): full suite 3479 passed, 1 warning (the pre-existing starlette/httpx deprecation), 249 s = the
+        baseline 3443 + 36 new items (test_resolve_photos +12, test_fetch_manual +8, test_c25_regression_pins +16);
+        the known load flake did not fire. THEN smoke 102 passed, 1 warning, 12.9 s. The tree clean after both.
+      · secrets: the staged diff scanned before every commit (scratchpad `thfix/secrets_scan.py`: credential
+        patterns + P-15 private data — real photo ids, e-mail addresses, Google URLs with a query — + risky file
+        names) and the whole range 64a54f1..dcb102c (5 files, 604 added lines) — 0 hits every time.
+      · self-review above · STATE: COMPLETE · the final commit (this commit — its SHA is in the final report and
+        `git log -1`)
 
 ## Log
 - 2026-11-03 dispatched (executor-fable; the environment reports Fable 5.1, no MODEL-FALLBACK banner; the harness's
@@ -164,6 +174,35 @@ regression: STOP and report it — never change product code here.
 - RESULT: no existing test catches any of the 17 today (Step 15's pins and smoke, thfix's / mpfix's / acfix's tests
   included) — all 17 are still unpinned, so all 17 get a pin (16 tests); none is skipped.
 
+## Self-review (the whole range 64a54f1..HEAD, read in full: 5 files, 604 lines added, 3 removed)
+(a) The dispatch, item by item:
+- Overlap check — met: Step 15's DISARM.md and the thfix / mpfix tables read (none of their probes edits the 17
+  sites); then every behaviour DISARMED on an isolated `git archive HEAD` copy against every existing test that enters
+  its function — twice (run 1, and the coordinator's re-run on a fresh copy), plus the port check against the whole
+  suite: none caught. Landed 17 (16 tests), skipped 0 — so no "existing test that catches it" to name.
+- Land — met: each pin adapted to today's code in the module it belongs to (D1), on the repo's own harnesses (the fake
+  Google Photos world, conftest's autouse guards, `rp` / `flow`); hermetic — no Chrome, Google, real library or adb
+  (the stand-in drivers, the tmp-path state; a CHROME_PROFILES path under tmp_path for the pre-flight). The signed-out
+  pins assert thfix's semantics (D4); the papercut IMP-C43 will change is deliberately not pinned (D5).
+- Prove each pin — met: 17/17 + the registry probe RED on an isolated copy, each on an expected pin, every edited file
+  restored byte for byte (SHA-256), the copy green before and after (220 / 220) and HEAD byte for byte after.
+- Registry — met: EXISTING_PINS + its docstring entry; the renamed-pin probe proves the registration bites.
+- Doc — met: ARCHITECTURE 7a names IMP-C44 (one mention); the doc claims about the 17 checked, none proved wrong.
+  PROGRESS.md / PLAN.md / DECISIONS.md / PRIORITY.md untouched.
+- Protocol — STATUS resumable, committed first and with every sub-task; one WIP commit per sub-task, pathspec only,
+  the secrets scan before each (0 hits each time; the whole range: 0); gates sequential (below).
+- Regression stop rule — not triggered: every adapted pin passed on today's code at its first run (20/20).
+(b) Downstream consumers: tests only, no product behaviour changes, so no command, file format or web consumer is
+  affected. Step 18 (the PR) gets 16 more registered pins. IMP-C43 (port / lock-lost exit status) can land without
+  re-pinning: the pins assert the walk's outcome and its effects, never the status, and after `lock-lost` the apply
+  stays unoffered in C43's own proposal. IMP-C39 (the lock primitive) does not change the walk's beat per question.
+  IMP-C42 is the warm-up's pre-flight, not resolve_photos'.
+(c) Change-gates: rollback untouched (no product file in the range; no RollbackJournal / recover_journal /
+  RollbackHardFail / PONR / txn name in the diff — grep: none); ENTRY_TYPE_KEYS untouched (no entry type or shared
+  field — the tests build library entries with the existing helpers' shapes); smoke after the full suite (below).
+- My own slip (Log 2026-11-04): a `__pycache__` written into the read-only source folder — found, removed, the source
+  verified as it was.
+
 ## pins.d — the disarm table: each behaviour, disarmed alone, turns its pin red
 | behaviour | probe (the edit) | pin (module :: test [items]) | red? |
 |---|---|---|---|
@@ -228,9 +267,29 @@ regression: STOP and report it — never change product code here.
 
 ## Assumptions (surfaced — the dispatch does not fix these)
 - A1 A test that only reads source is no pin of a behaviour (none reads these 9 functions anyway).
-- A2 The candidate-set reduction (D2) is sound for edits inside function bodies; run 2's f09 whole-suite cross-check
-  tests it on the probe that matters most.
+- A2 The candidate-set reduction (D2) is sound for edits inside function bodies; the f09 whole-suite cross-check tested
+  it on the probe that matters most — the whole suite (3443) passed, as the reduction predicted.
 - A3 The c18 about-page case relies on the stages having shown signed-in Photos on that driver (gprpc checks — and
   marks — the session on every request, thfix B6); the pin passing in the fake world confirms it there.
 - A4 Git: the base contract's single-executor mode runs no git, but the dispatch assigns pathspec WIP commits in this
   worktree (the thfix / mpfix / Step 17 pattern) — followed, commit by commit, with the secrets scan first.
+
+## pins — [status: done]
+- Executor: executor-fable
+- Model: fable (the environment reports Fable 5.1; no MODEL-FALLBACK banner; the harness's commit-attribution notice
+  alternated between Claude Fable 5.1 and Claude Opus 5.5 — each commit carries the one current when it was made)
+- Mode: single-executor in its own worktree (MediaVault-pins, branch tmp/c25_pins, base 64a54f1), pathspec WIP commits
+  per sub-task (the dispatch's instruction); one usage-limit restart, resumed by the checkpoint rule (Log).
+- Files changed: tests/test_resolve_photos.py, tests/test_fetch_manual.py, tests/test_c25_regression_pins.py,
+  ARCHITECTURE.md, this file. No product code, no conftest / fixture.
+- Commits: pins.0 eda4a69 + 4ac105c · pins.a 9813e04 · pins.b b7453d7 · pins.c ae03816 · pins.d ceeb4f5 · pins.e dcb102c
+  · final (this).
+- Outcome: none of the 17 Step 14 behaviours the 14.g sweep found unpinned is caught by any test today — disarmed alone
+  on an isolated copy against every existing test entering its function, twice, the port check against the whole suite
+  too. All 17 now have a pin (16 tests, 20 items) adapted to today's code — the signed-out pins to thfix's sign-out /
+  throttle semantics — in tests/test_resolve_photos.py and tests/test_fetch_manual.py, registered in the C25 registry;
+  each behaviour disarmed alone turns its own pin red (17/17, + the registry probe). ARCHITECTURE 17.7a names IMP-C44.
+- Key decisions: D1–D9 and A1–A4 above (D4 the signed-out semantics, D5 the exit status left to IMP-C43).
+- Verification: full suite 3479 passed (249 s) then smoke 102 passed (12.9 s) on dcb102c, sequential, no xdist;
+  overlap 17/17 survived ×2 + f09 whole-suite 3443 passed; pin disarm 18/18 red, restored byte for byte, the copy
+  green before and after (220 / 220); secrets 0 hits over 64a54f1..dcb102c.

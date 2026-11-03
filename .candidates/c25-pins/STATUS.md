@@ -37,8 +37,23 @@ regression: STOP and report it — never change product code here.
       on the copy); every file restored byte for byte. RESULT: 17/17 SURVIVED in run 1 and again in run 2 (a fresh
       copy, the coordinator's re-run); f09 against the whole suite: 3443 passed — no existing test catches any of the
       17, so all 17 land and none is skipped (section "pins.0" below). Design decisions D1–D9, assumptions A1–A4. No
-      code — this commit (its SHA is recorded with pins.a)
-- [ ] pins.a the resolve_photos pins -> tests/test_resolve_photos.py (a "14.g" section reusing the `rp` harness)
+      code — 4ac105c
+- [x] pins.a the resolve_photos pins -> tests/test_resolve_photos.py (a "14.g" section reusing the `rp` harness): 11
+      tests (12 items) for 12 behaviours — `_movies_object` (a movies-account failed object: the walk visits movies
+      first) · f14 test_the_lock_heartbeat_is_beaten_at_every_question (3 beats: k, a re-asked x, n) · f25
+      test_a_lock_taken_over_mid_walk_stops_it_keeps_every_answer_and_applies_nothing (`lock-lost`, the line, a
+      verified paste kept, no apply question, library byte-equal) · f09
+      test_the_next_accounts_chrome_is_never_launched_while_the_debug_port_is_held (port asked once, before tv; only
+      movies launched; `port`; the line) · f10 test_a_missing_chrome_profile_is_skipped_with_its_line_and_never_launched
+      (movies' profile missing: skipped with the remediation line, tv walked) · f19 + f27 + f17
+      test_the_run_starts_with_the_fetch_cleanup_and_a_journal_and_ends_through_the_shared_end (cleanup, launch movies,
+      launch tv, end(False); the journal on disk `running` at every question naming each session, `clean` at the end)
+      · f17 test_ctrl_c_ends_the_run_as_interrupted_through_the_shared_end (`_end_run(interrupted=True)` once; journal
+      interrupted) · f26 test_a_signed_out_or_throttled_account_does_not_stop_the_walk_of_the_next_one [signed-out |
+      throttled] · f15 test_id_leaves_the_other_objects_out · f16 test_a_csv_rows_account_wins_over_the_failed_lists ·
+      f22 test_the_c27_list_leaves_out_an_object_that_is_confirmed_by_now (the unconfirmed one stays listed) · f34
+      test_a_photo_url_pasted_straight_at_the_question_is_the_paste_answer. + the module docstring's 14.g line. Runs:
+      tests/test_resolve_photos.py 86 passed (74 + 12) — this commit (its SHA is recorded with pins.b)
 - [ ] pins.b the fetch-side pins -> tests/test_fetch_manual.py (a "14.g" section reusing `flow` / `_hidden` / `_locator`)
 - [ ] pins.c the registry: tests/test_c25_regression_pins.py EXISTING_PINS + its docstring entry
 - [ ] pins.d disarm table — each landed pin's behaviour disarmed alone on a fresh `git archive HEAD` copy: its pin

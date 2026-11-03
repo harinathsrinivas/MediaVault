@@ -16,7 +16,7 @@
   authoritative)
 
 ## At a glance
-- **Progress (2026-11-03): ≈ 93% — 28 of 31 tracked items done (R4 = the R3 sweep, Step 17 done) · R0, R2 partly done · Step 18 to go (after mpfix + the Step 14.g pins land).** Items = the plan's
+- **Progress (2026-11-03): ≈ 93% — 28 of 31 tracked items done (R4 = the R3 sweep, Step 17 done) · R0, R2 partly done · Step 18 to go (mpfix + the Step 14.g pins landed).** Items = the plan's
   steps 0, 1, H, 2, 2b, 3–12, 9b, 13, 13b, 13c, 14–18 and the gates G0, RH, R0, R1, R2, R3, R4 (G12 sits in Step 12).
 - **Done:** Steps 0–16 incl. 9b, 13b, 13c, H (#61) and every Step 1 re-sync so far · G0 · RH · R1 (2026-10-03) ·
   G12 (candidate C) · follow-ups: restore bubble 537ff7e · auto-confirm checks only old-enough objects cd0ef94.
@@ -161,7 +161,7 @@ A d8dd71f (UI-first) · B 868cd27 (RPC-first) · C 5e7f0f6 (hybrid) — all COMP
 `acfix (auto-confirm checked the push that just ran — user finding 2026-10-26) DONE 2026-10-28 cd0ef94 (WIP 18f3a33..e92f3a6; full 3309 · smoke 102 · disarm 26/26; orchestrator re-run 3309 / 102 green); fast-forwarded here.`
 `thfix DONE 2026-10-28 4f1f4fe (WIP 5bab898..e3f9ff8; full 3409 · smoke 102 · disarm 63/63; orchestrator re-run 3409 / 102 green); merged here c6d9990. A11: the pre-fix R3 check runs stay quarantined — re-check with --recheck.`
 `Noticed, not changed (register at Step 17, not started — scope rule): a fetch lock whose holder pid is dead blocks a crawl for up to stale_after (1 h) (a fetch reclaims after 30 s); chromedriver start crash 0xC0000142 under low memory; map_photos' dry-run apply preview over-counts ("2,207 would change") because it does not drop records already on record like --apply does; `not-listed` also fires for an item uploaded after the crawl (Aavesham chunk 1/2) — its text suggests archive/trash.`
-`Step 17 DONE 2026-11-03 102846c (fast-forwarded here; smoke 102). mpfix DONE 2026-11-03 4afd413 (WIP 4b3d187..bc6f634; full 3443 · smoke 102 · disarm 18/18; orchestrator re-run 3443 / 102 green; Aavesham assumption verified: chunk 1 uploaded 08:06:36Z after the 07:48:18Z crawl start) — merged here 64a54f1. pinland dispatched 2026-11-03 to executor-fable, worktree C:/Users/harin/PycharmProjects/MediaVault-pins (tmp/c25_pins from 64a54f1).`
+`Step 17 DONE 2026-11-03 102846c (fast-forwarded here; smoke 102). mpfix DONE 2026-11-03 4afd413 (WIP 4b3d187..bc6f634; full 3443 · smoke 102 · disarm 18/18; orchestrator re-run 3443 / 102 green; Aavesham assumption verified: chunk 1 uploaded 08:06:36Z after the 07:48:18Z crawl start) — merged here 64a54f1. pinland DONE 2026-11-04 1e251bf (17 of 17 behaviours were still unpinned — all landed, 16 tests / 36 items in tests/test_resolve_photos.py + tests/test_fetch_manual.py, registered; disarm 18/18; full 3479 · smoke 102; orchestrator re-run 3479 / 102 green; no product code changed) — merged here c64764e. Step 16's R2/R3 placeholders filled (ARCHITECTURE §8.10 Live results, README). Next: Step 18.`
 `Step 14.g pins (found by a side session, parked in gitignored .candidates/c25-step14g-pins/: 16 guard tests for 17 Step 14 behaviours no test caught, incl. the port check before a second account) — the owning session lands them inside C25 before Step 18 (pinland), adapted to the current code.`
 Known load-dependent flake: tests/test_gpweb.py::test_fake_delayed_download_completes_in_the_background — passes
 alone; re-run it before treating a red full suite as a regression.

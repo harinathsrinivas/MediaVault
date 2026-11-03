@@ -968,9 +968,9 @@ for the migration record, and `improvements_tierH.md` for the tracked task.
   pre-PR cross-command gate alongside `pytest -q`. See
   `docs/testing-strategy.md`. Since IMP-C25 the fetch, locator, map / check /
   resolve commands and the RPC client are tested against a fake Google Photos world
-  (`tests/gphotos_fake.py`; full suite 3278, smoke 102 in ~12 s as of 2026-10-20).
+  (`tests/gphotos_fake.py`; full suite 3479, smoke 102 in ~13 s as of 2026-11-04).
   The live download triggers against real Google Photos are verified at the R2 gate
-  (results pending R2/R3); the legacy snapshots under `archive/` serve as informal
+  (passed 2026-10-20/21; ARCHITECTURE §8.10 Live results); the legacy snapshots under `archive/` serve as informal
   regression baselines.
 - The `undetected-chromedriver` package is listed in `requirements.txt` but
   not imported anywhere; `requests` is imported by `main.py` but not listed

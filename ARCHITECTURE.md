@@ -2996,9 +2996,26 @@ absent / unchecked` (`unchecked` when a phone was not listed — never "missing"
 phone (`DEVICE_CHECK_EXTRA_SERIALS`, listed as `movies#2`) is scanned too; push routing (`DEVICE_ALIASES`)
 is unchanged.
 
-**Live results (R2 / R3): results pending R2/R3** — redacted counts per command (locate, direct download,
-chunk set + interrupt, wrong-account fetch, fetch_restore + web, `--manual`, `fetch_cleanup`, the real-library
-map / check apply) will be added here after the gates.
+**Live results (R2 / R3 / R4, redacted counts):**
+- **R2, the orchestrator's share (2026-10-20/21, all passed; every Chrome closed, no `~/Downloads`, `.mv_incoming`
+  or `.crdownload` leftovers):** `fetch_cleanup` found 0 · `locate` pinned 6 of 6 objects (whole episodes by exact
+  name, a 2-chunk set, an X-Files episode that lives in the movies account, an anime episode by title + short id) ·
+  `check_photos` on one season confirmed 10 of 10 · a direct download landed in `.mv_incoming` and was moved, the
+  only library change being the object's `gphotos` block · a chunk-set fetch killed after its first verified chunk:
+  the re-run printed `🧹 Cleaned 1 leftover file(s)` and skipped the verified chunk · the X-Files episode's
+  `home_account` was learned as movies · `fetch_restore` → `check` PASS → `replace` on one episode. The user's share
+  (the web console's progress ring, `--manual`, a new archival plus the next push's auto-confirm, `resolve_photos`)
+  is recorded in `docs/feature-fetch-datetime/PROGRESS.md` when run.
+- **R3, the real library (2026-10-28):** re-crawl movies 1,019 · tv 1,122 · anime 158 items · `map_photos all
+  --apply`: 2,207 objects updated, 1,982 newly confirmed, 0 conflicts · `check_photos account:<a>` by photo_id:
+  anime 158 of 158, movies 971, tv 1,080 confirmed (all applied) · `--repair split-info` rebuilt 3 lost split
+  records · failed list 16 (IMP-C27: 13 episodes in no account, 2 legacy last chunks, 1 upload under an untagged
+  name). The first check dry runs — made before the map apply, so every object had to be searched — met Google
+  Photos' search throttle after ~25–30 objects; the throttle guard above (a canary re-search, stop `throttled`,
+  never a "not found" or "logged out") came from that run, and the later photo_id-first runs needed searches only for
+  the ~20 objects without one.
+- **R4:** the R3 photo_id-first check of every movies/tv/anime object counts as the full-library sweep (user ruling
+  2026-10-28); `others` waits for its Chrome profile (IMP-D18).
 
 ---
 
@@ -3557,7 +3574,7 @@ dual-binding patch hazard, and Windows gotchas are documented in
 [`docs/testing-strategy.md`](docs/testing-strategy.md). There is still no CI
 config — the suite runs locally via `pytest -q` (and `pytest tests/smoke -q`).
 Code paths outside the listed areas (Selenium against real Google Photos — the download triggers, the CDP
-download redirect and the Chrome close are verified live at 🚦 R2 (results pending R2/R3) — and MediaInfo
+download redirect and the Chrome close are verified live at 🚦 R2 (passed 2026-10-20/21 — §8.10 Live results) — and MediaInfo
 parsing) remain "tested by use"; the legacy snapshots under `archive/`
 serve as informal regression baselines.
 
@@ -3735,7 +3752,7 @@ environment variables MediaVault sets for its own children (`PYTHONIOENCODING=ut
   (never claimed); fetch journals under `~/.mediavault/fetch_journal/` are never pruned; `warm_profiles` runs
   no profile pre-flight; the shared close line says "this fetch" also inside `resolve_photos`; a fetch holds
   the lock without a heartbeat, so one running > 1 h can be reclaimed as stale; the live download triggers
-  and the CDP redirect are verified only at 🚦 R2 (results pending R2/R3).
+  and the CDP redirect are verified only live, at 🚦 R2 (passed 2026-10-20/21; §8.10 Live results).
 - **`get_tech_specs` swallows all parse exceptions** to a single
   `{"error": "Could not parse file"}`, which then gets stored into
   `entry["tech_spec"]` as a 1-key dict. Downstream code (e.g.,

@@ -16,7 +16,7 @@
   authoritative)
 
 ## At a glance
-- **Progress (2026-11-03): ≈ 93% — 28 of 31 tracked items done (R4 = the R3 sweep, Step 17 done) · R0, R2 partly done · Step 18 to go (mpfix + the Step 14.g pins landed).** Items = the plan's
+- **Progress (2026-11-04): ≈ 97% — 29 of 31 tracked items done; PR #67 open → 🚦 Checkpoint 1 (the user's merge approval) · left: R2's user share (M9 web, M10, M11/M14, M15) and R0's others profile · then 🚦 Checkpoint 2 (archive).** Items = the plan's
   steps 0, 1, H, 2, 2b, 3–12, 9b, 13, 13b, 13c, 14–18 and the gates G0, RH, R0, R1, R2, R3, R4 (G12 sits in Step 12).
 - **Done:** Steps 0–16 incl. 9b, 13b, 13c, H (#61) and every Step 1 re-sync so far · G0 · RH · R1 (2026-10-03) ·
   G12 (candidate C) · follow-ups: restore bubble 537ff7e · auto-confirm checks only old-enough objects cd0ef94.
@@ -29,18 +29,13 @@
   step is fixed inside C25, everything else is only registered (Step 17). Every status update shows this % line.
 
 ## ▶ NEXT ACTION
-1. **thfix** — dispatched 2026-10-28 to executor-fable · worktree C:/Users/harin/PycharmProjects/MediaVault-thfix
-   (branch tmp/c25_thfix from cd0ef94) · status `.candidates/c25-thfix/STATUS.md`: a throttled Google Photos search
-   is never a "not found" (canary re-search → stop `throttled`, resumable; a throttle is never "signed out") +
-   map_photos `not-listed` for a confirmed photo_id the crawl does not list. On `FIX COMPLETE`: re-run full + smoke
-   in the worktree, fast-forward here (no `main.py` running), journal.
-2. 🚦 R3 (ruling 2026-10-28 "Apply after the fix"): `map_photos all` dry run again → `--apply` (nothing else running)
-   → `check_photos account:<a> --approaches best` per account (photo_id first) → reports → each `--apply-run latest`
-   on the user's go.
-3. The user's R2 share (M9 web, M10, M11, M14 — expect the new auto-confirm line —, M15) · fill Step 16's R2/R3
-   result placeholders.
-4. 🚦 R4 (photo_id first) → Step 17 → Step 1 re-sync → Step 18 PR → 🚦 Checkpoint 1.
-The user archives from this folder — check for a running `main.py` before any fast-forward/merge here.
+🚦 **Checkpoint 1 — PR #67** (https://github.com/harinathsrinivas/MediaVault/pull/67, head 55df082, full 3479 · smoke 102):
+merging into `main` is the user's call — never `gh pr merge` without their explicit go. Before approving, the user's R2
+share: M9 web (Fetch & Restore progress ring) · M10 `fetch <id> --manual` · M11/M14 a new archival + the next push's
+auto-confirm line · M15 `resolve_photos failed --account movies`. After the merge, 🚦 Checkpoint 2 on approval:
+annotated tag `archive/feature/imp_c25_fetch_exact_gp_item`, push it, delete the branch (local + remote), remove the
+C25 worktrees (acfix, thfix, mpfix, s16, s17, pins, c26 leftover).
+The user archives from this folder — check for a running `main.py` before any merge here.
 
 ## Resume protocol
 1. Open a session in the main folder `C:\Users\harin\PycharmProjects\MediaVault` (branch
@@ -92,7 +87,7 @@ The user archives from this folder — check for a running `main.py` before any 
 | 16 | docs (architect) | done | architect (opus) | 15a732f (merge 699ad8a) | | R2/R3 result placeholders are filled after R3 |
 | R4 | full-library sweep + outlier/failed lists (user) | done | orchestrator | | | user ruling 2026-10-28: the R3 photo_id-first sweep (2,242 objects, applied) counts as R4; failed list 16 |
 | 17 | IMP bookkeeping + NEXT pointer question | done | executor-opus (own worktree) | 102846c (WIP dc6e597..a4266ee) | smoke 102 (orchestrator re-run 102) | C25 done (PR pending) · C27 in_progress, 16 open · C5/A8/B10/C34-C36 done · C39-C44 registered (pending) · single NEXT → IMP-C24 (OD-16) · 3-file check 154/154 |
-| 18 | final verification + PR | in_progress | orchestrator (checklist) + git-agent (push/PR) | 1859d84 | full 3479 · smoke 102 (LAST) on 1859d84 | checklist 2026-11-04: main unmoved since #66 (no Step 1 needed) · privacy grep: synthetic photo ids only, the published example key only where documented · 0 of 21 global .env credential values in the push diff · 78 files, plan scope · .gitignore gained .env / *.env / *credentials* / *secret* (1859d84) · PR → 🚦 Checkpoint 1 |
+| 18 | final verification + PR | done — PR #67 open | orchestrator (checklist) + git-agent (push/PR) | 1859d84 | full 3479 · smoke 102 (LAST) on 1859d84 | checklist 2026-11-04: main unmoved since #66 (no Step 1 needed) · privacy grep: synthetic photo ids only, the published example key only where documented · 0 of 21 global .env credential values in the push diff · 78 files, plan scope · .gitignore gained .env / *.env / *credentials* / *secret* (1859d84) · PR #67 opened 2026-11-04 (head 55df082) → 🚦 Checkpoint 1 |
 
 ## Multi-candidate tracking (Step 12)
 A d8dd71f (UI-first) · B 868cd27 (RPC-first) · C 5e7f0f6 (hybrid) — all COMPLETE and gate-verified by the orchestrator (re-runs A 2493/82 · B 2512/82 · C 2502/82); judge-v2 recommended C; user picked C at 🚦 G12 2026-10-12; tags candidates/imp_c25/step-12/{c-chosen,a-rejected,b-rejected}.

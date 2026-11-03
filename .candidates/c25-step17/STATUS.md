@@ -32,9 +32,13 @@ diff before every commit (no real `AF1Qip…` ids, no e-mail addresses, no token
       are the Last-updated history and the maintenance protocol.
 - [x] 17.c2 (added after the restart) fold the two OPEN observations of `.candidates/c25-step14g-pins/README.md`
       into IMP-C42 / IMP-C43 (tier C + PRIORITY.md rows + Last updated); the unlanded pins are surfaced, not
-      registered — (this commit; SHA in 17.d's line). The kept graph diff stays uncommitted for 17.d (pathspec).
-- [ ] 17.d priority-graph.html — statuses + notes, 6 new nodes, edges, header Next → IMP-C24, footer; Appendix C
-      node validation
+      registered — e03c95f. The kept graph diff stayed uncommitted for 17.d (pathspec).
+- [x] 17.d priority-graph.html — statuses + notes, 6 new nodes, edges, header Next → IMP-C24, footer; Appendix C
+      node validation — (this commit; SHA in 17.e's line). A8 / B10 / C5 / C25 / C34 / C35 / C36 → ("done","done");
+      C27 stays ("crit","decision") with the R3 open list; B4 / C26 / C32 notes updated; C39 med · C40–C43 low · C44
+      med ("todo"); edges +13 (C25→G2 / X1 / C7 / D9; C17→C39, C25→C39–C44, C17→C42, C34→C44). Appendix C:
+      TASKS 154 · EDGES 101 · badTasks 0 · badEdges 0 (baseline 148 · 88 · 0 · 0); the whole <script> block parses
+      (node `new Function`); 0 duplicate ids, 0 duplicate edges; footer "154 tasks".
 - [ ] 17.e gates — three-file consistency check, smoke, secrets scan, self-review, STATE: COMPLETE, final commit
       `docs(imp-c25): Step 17 — IMP bookkeeping (C25 done/PR pending, C27 open list, follow-ups registered, NEXT → IMP-C24)`
 

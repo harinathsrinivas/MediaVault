@@ -12457,7 +12457,7 @@ def _mp_apply_lines(ctx):
             lines.append(f"  + {repair['chunks']:,} chunk(s) of {repair['entries']:,} repaired entr(y/ies) map after "
                          f"the repair — --apply writes their split_info first, then records them (not in the count "
                          f"above)")
-        flags =([f"--account {ctx['account']}"] if ctx["account"] else []) + [f"--repair {r}" for r in ctx["repairs"]]
+        flags = ([f"--account {ctx['account']}"] if ctx["account"] else []) + [f"--repair {r}" for r in ctx["repairs"]]
         flags += ["--accept-probable"] if ctx["accept_probable"] else []
         flags += ["--devices"] if ctx["use_devices"] else []
         resolution = ctx["resolution"]        # previewed above: the apply must import the same decisions

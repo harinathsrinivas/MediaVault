@@ -63,9 +63,11 @@ regression: STOP and report it — never change product code here.
       test_an_unreadable_learned_sidecar_never_stops_a_fetch [unreadable OSError | undecodable UnicodeDecodeError] · d09
       test_the_sidecar_identity_never_replaces_the_librarys_own_photo_id · d10
       test_the_librarys_own_ids_are_not_repeated_as_alternates. Synthetic ids `AF1QipFAKEhint…`. + the module
-      docstring's 14.g line. Runs: tests/test_fetch_manual.py 39 passed (31 + 8) — this commit (its SHA is recorded with
-      pins.c)
-- [ ] pins.c the registry: tests/test_c25_regression_pins.py EXISTING_PINS + its docstring entry
+      docstring's 14.g line. Runs: tests/test_fetch_manual.py 39 passed (31 + 8) — b7453d7
+- [x] pins.c the registry: tests/test_c25_regression_pins.py EXISTING_PINS + its docstring entry — the 16 tests
+      (11 test_resolve_photos.py, 5 test_fetch_manual.py) after the mpfix group, and the docstring entry "the Step 14
+      guards no test caught". Runs: tests/test_c25_regression_pins.py 95 passed (79 + 16) — this commit (its SHA is
+      recorded with pins.d)
 - [ ] pins.d disarm table — each landed pin's behaviour disarmed alone on a fresh `git archive HEAD` copy: its pin
       turns red; every file restored byte for byte (SHA-256 checked)
 - [ ] pins.e docs — ARCHITECTURE.md item 7a names IMP-C44 (one short mention); any doc claim a landed pin proved wrong

@@ -47,18 +47,31 @@ behaviour must stay identical ((appended, known) counts and append order).
       time after / at the crawl start vs 1 s before (a filename-proof record: `_mp_recency` must leave it) · a
       confirmation after the crawl began (verified_at) proves nothing · --apply leaves its block byte-equal, no learned
       record, no failed row. All 6 added lines over 120 characters reflowed (none left). Runs: map + check + apply
-      engine + resolve + pins + primitives 752 passed · smoke 102 passed — this commit (its SHA is recorded with
-      mpfix.c)
-- [ ] mpfix.c registry pins (tests/test_c25_regression_pins.py) + docs: README (map_photos), ARCHITECTURE §8.10 (+ Last
-      updated, every line ref this change shifts), docs/OPERATIONS_QA.md §6d (the not-listed Q&A, the preview) — every
-      claim checked against the code.
+      engine + resolve + pins + primitives 752 passed · smoke 102 passed — a265d8c
+- [x] mpfix.c registry pins + docs, every claim checked against the code (and the R3 numbers against PROGRESS.md).
+      Pins: tests/test_c25_regression_pins.py +15 (the 5 uploaded-after-crawl tests, the 10 preview tests) + its
+      docstring (the not-listed entry gains uploaded-after-crawl; a new entry "map: the dry-run preview counts what
+      --apply changes"). README (map_photos): the uploaded-after-crawl exception + a paragraph on the apply preview and
+      its repair line. ARCHITECTURE §8.10: step 4 "And `uploaded-after-crawl`" (`_mp_after_crawl` `main.py:11704`) + a
+      paragraph "The dry run's apply preview" (`_mp_preview` `main.py:12772`); §13 test row; Last updated (thfix's
+      note -> Earlier). OPERATIONS_QA §6d: new Q&A "The map dry run says "N object(s) would change" — will `--apply`
+      really change that many?"; the possible-loss Q&A names uploaded-after-crawl; the not-listed Q&A gains the
+      Aavesham paragraph (what the user sees, why verified_at proves nothing); Last updated. Line refs: the main.py refs
+      this change shifted (+1 at the map constants, +7 at `_mp_unlisted`, +113 at cmd_map_photos, +118 after the map
+      section) re-pointed with scratchpad `mpfix/refs_main.py` (difflib line map base -> tree; `main.py:N`, `:N` after
+      it, the "`name` (N)" lists): ARCHITECTURE 31 refs (§5, §6.5, §8.10, §10 Stage 4, §11, §14, §18), OPERATIONS_QA 2,
+      README none; every re-pointed line checked to hold its named def / constant; thfix's `refs_verify.py` forward
+      check: 339 paired refs, 0 mismatches, the 2 new refs (and the re-aligned check_photos line) anchored right. Left
+      as they are (point-in-time): ARCHITECTURE's "(18294 lines as of 2026-10-20)" notes. Only this file cites base
+      line numbers elsewhere (its Findings: main.py at 12dd2cf). Runs: pins + map 241 passed — this commit (its SHA is
+      recorded with mpfix.d)
 - [ ] mpfix.d disarm probes on an isolated `git archive` scratch copy: each part reverted on its own turns a test red;
       every file restored byte for byte (SHA-256 checked).
 - [ ] mpfix.e gates: full suite, then smoke; the secrets scan over the whole range; the self-review; STATE: COMPLETE;
       the final commit `fix(imp-c25): map_photos — the dry-run preview counts what --apply changes; an item uploaded
       after the crawl is not "not-listed"`.
 
-## Findings (code read 2026-11-03; synthetic data only)
+## Findings (code read 2026-11-03; synthetic data only; line refs = main.py at the base 12dd2cf)
 - F-a The over-count. `_mp_preview` (main.py:12664) gave the engine `existing + records`, where `records` are this
   run's records stamped `at` = now (`_mp_record` -> `_normalize_learned(fill=True)`); the apply appends only the records
   whose `_mp_fingerprint` (every key but v / at) is not on record (`_mp_append_new`, main.py:12605) and then runs the

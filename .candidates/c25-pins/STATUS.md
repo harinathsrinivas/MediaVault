@@ -53,8 +53,18 @@ regression: STOP and report it — never change product code here.
       throttled] · f15 test_id_leaves_the_other_objects_out · f16 test_a_csv_rows_account_wins_over_the_failed_lists ·
       f22 test_the_c27_list_leaves_out_an_object_that_is_confirmed_by_now (the unconfirmed one stays listed) · f34
       test_a_photo_url_pasted_straight_at_the_question_is_the_paste_answer. + the module docstring's 14.g line. Runs:
-      tests/test_resolve_photos.py 86 passed (74 + 12) — this commit (its SHA is recorded with pins.b)
-- [ ] pins.b the fetch-side pins -> tests/test_fetch_manual.py (a "14.g" section reusing `flow` / `_hidden` / `_locator`)
+      tests/test_resolve_photos.py 86 passed (74 + 12) — 9813e04
+- [x] pins.b the fetch-side pins -> tests/test_fetch_manual.py (a "14.g" section reusing `flow` / `_hidden` / `_locator`):
+      5 tests (8 items) — c17 test_a_deleted_items_page_is_not_a_best_start_the_next_choice_is (a live item's page
+      opens; a deleted one's does not: the day search) · c18
+      test_manual_stops_on_a_signed_out_or_throttled_session_instead_of_waiting_for_a_download [signed-out | throttled
+      | signed-out-page-after-signed-in-photos] (the session switched as the --manual round starts: the real classifier
+      decides; the right line, no 30-minute wait, no "Batch Processing Complete") · d13
+      test_an_unreadable_learned_sidecar_never_stops_a_fetch [unreadable OSError | undecodable UnicodeDecodeError] · d09
+      test_the_sidecar_identity_never_replaces_the_librarys_own_photo_id · d10
+      test_the_librarys_own_ids_are_not_repeated_as_alternates. Synthetic ids `AF1QipFAKEhint…`. + the module
+      docstring's 14.g line. Runs: tests/test_fetch_manual.py 39 passed (31 + 8) — this commit (its SHA is recorded with
+      pins.c)
 - [ ] pins.c the registry: tests/test_c25_regression_pins.py EXISTING_PINS + its docstring entry
 - [ ] pins.d disarm table — each landed pin's behaviour disarmed alone on a fresh `git archive HEAD` copy: its pin
       turns red; every file restored byte for byte (SHA-256 checked)

@@ -72,9 +72,15 @@ regression: STOP and report it — never change product code here.
       byte-equal, before and after): control BEFORE — the three pin modules 220 passed; 17 probes (the pins.0 edits)
       + 1 registry probe, each run against its landed pin(s) only, every one RED on an EXPECTED pin (`results_pins.jsonl`,
       `pins_run.log`); control AFTER 220 passed. Every parameter of a parametrized pin is a detector (c18 3/3, d13 2/2,
-      f26 2/2). No code changed in this sub-task. The table (behaviour · probe · pin · red?) is below — this commit
-      (its SHA is recorded with pins.e)
-- [ ] pins.e docs — ARCHITECTURE.md item 7a names IMP-C44 (one short mention); any doc claim a landed pin proved wrong
+      f26 2/2). No code changed in this sub-task. The table (behaviour · probe · pin · red?) is below — ceeb4f5
+- [x] pins.e docs — ARCHITECTURE.md item 7a names IMP-C44 (one short mention); any doc claim a landed pin proved wrong:
+      §17 item 7a "(suggested after IMP-C25; tracked as IMP-C44)" (its three lines re-wrapped; IMP-C44 = tier C's
+      "resumable direct transfer", registered at Step 17). Doc claims checked against the pins — none proved wrong, so
+      nothing else changed: ARCHITECTURE §8.10 resolve_photos ("a throttle stops that account's objects … and the
+      next account goes on") and the §8.8 line table ("the next account goes on (as after a sign-out)"); README
+      (resolve_photos / --manual, "When Google Photos throttles its search"); OPERATIONS_QA §6c ("resolve_photos (only
+      that account; the file at hand comes back next time)", "A real sign-in page still says … logged out") and the
+      "Fetch can't find something" options — this commit (its SHA is recorded with pins.f)
 - [ ] pins.f gates (full suite, then smoke), the secrets scan, the self-review, STATE: COMPLETE, the final commit
       `test(imp-c25): land the Step 14.g guard pins — behaviours no test caught (incl. the port check before a second
       account)`

@@ -92,7 +92,7 @@ The user archives from this folder — check for a running `main.py` before any 
 | 16 | docs (architect) | done | architect (opus) | 15a732f (merge 699ad8a) | | R2/R3 result placeholders are filled after R3 |
 | R4 | full-library sweep + outlier/failed lists (user) | done | orchestrator | | | user ruling 2026-10-28: the R3 photo_id-first sweep (2,242 objects, applied) counts as R4; failed list 16 |
 | 17 | IMP bookkeeping + NEXT pointer question | done | executor-opus (own worktree) | 102846c (WIP dc6e597..a4266ee) | smoke 102 (orchestrator re-run 102) | C25 done (PR pending) · C27 in_progress, 16 open · C5/A8/B10/C34-C36 done · C39-C44 registered (pending) · single NEXT → IMP-C24 (OD-16) · 3-file check 154/154 |
-| 18 | final verification + PR | pending | | | | 🚦 Checkpoint 1 |
+| 18 | final verification + PR | in_progress | orchestrator (checklist) + git-agent (push/PR) | 1859d84 | full 3479 · smoke 102 (LAST) on 1859d84 | checklist 2026-11-04: main unmoved since #66 (no Step 1 needed) · privacy grep: synthetic photo ids only, the published example key only where documented · 0 of 21 global .env credential values in the push diff · 78 files, plan scope · .gitignore gained .env / *.env / *credentials* / *secret* (1859d84) · PR → 🚦 Checkpoint 1 |
 
 ## Multi-candidate tracking (Step 12)
 A d8dd71f (UI-first) · B 868cd27 (RPC-first) · C 5e7f0f6 (hybrid) — all COMPLETE and gate-verified by the orchestrator (re-runs A 2493/82 · B 2512/82 · C 2502/82); judge-v2 recommended C; user picked C at 🚦 G12 2026-10-12; tags candidates/imp_c25/step-12/{c-chosen,a-rejected,b-rejected}.

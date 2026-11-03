@@ -11764,14 +11764,34 @@ def _mp_split_plan(row, obj, chunks, holders, library):
     return plan
 
 
+def _mp_patch_split_info(library, plans):
+    """Write each plan's split_info into its whole-file node of `library` (in memory) — only while the node still IS
+    that whole file (the same hash, not split) -> (repaired [{manual_id, label, chunks}], skipped [{manual_id, label,
+    why}]). [IMP-C25 mpfix] The one patch step of --repair split-info: _mp_write_split_info patches a fresh load with
+    it, a dry run's preview a copy (_mp_repair_preview)."""
+    repaired, skipped = [], []
+    for plan in plans:
+        node = mvcommon.slot_owner(library, plan["slot"])
+        split = node.get("split_info") if isinstance(node, dict) else None
+        where = {"manual_id": plan["manual_id"], "label": plan["label"]}
+        if node is None or node.get("hash") != plan["sha256"]:
+            skipped.append(dict(where, why="the object changed since it was mapped — re-run map_photos"))
+        elif isinstance(split, dict) and split.get("is_split"):
+            skipped.append(dict(where, why="it is split already"))
+        else:
+            node["split_info"] = copy.deepcopy(plan["split_info"])
+            repaired.append(dict(where, chunks=plan["split_info"]["total_chunks"]))
+    return repaired, skipped
+
+
 def _mp_write_split_info(plans):
     """--repair split-info --apply (PLAN Step 9 (5a)): write each PROVABLE plan's split_info into its whole-file node
     — guarded exactly like the apply engine (OD-2: a fresh load, the library fingerprint re-checked right before the
     ONE save, reload + re-patch up to GPHOTOS_APPLY_ATTEMPTS times) and only while the node still IS that whole file
-    (the same hash, not split). Nothing else of the node changes (its `re_hashed` and `hash` stay: the first restore
-    blesses or verifies the merge — bless_or_verify_merged_hash). No rollback journal (the gphotos-engine rule).
-    Never raises (one warning line). -> {status: nothing-to-apply | saved | up-to-date | aborted | error, repaired,
-    skipped: [{manual_id, label, why}], attempts, warning}."""
+    (the same hash, not split: _mp_patch_split_info). Nothing else of the node changes (its `re_hashed` and `hash`
+    stay: the first restore blesses or verifies the merge — bless_or_verify_merged_hash). No rollback journal (the
+    gphotos-engine rule). Never raises (one warning line). -> {status: nothing-to-apply | saved | up-to-date | aborted
+    | error, repaired, skipped: [{manual_id, label, why}], attempts, warning}."""
     report = {"status": None, "repaired": [], "skipped": [], "attempts": 0, "warning": None}
     plans = [p for p in plans if p.get("provable") and p.get("split_info")]
     if not plans:
@@ -11783,18 +11803,7 @@ def _mp_write_split_info(plans):
             report["attempts"] = attempt
             before = _library_fingerprint()
             library = load_library()
-            repaired, skipped = [], []
-            for plan in plans:
-                node = mvcommon.slot_owner(library, plan["slot"])
-                split = node.get("split_info") if isinstance(node, dict) else None
-                where = {"manual_id": plan["manual_id"], "label": plan["label"]}
-                if node is None or node.get("hash") != plan["sha256"]:
-                    skipped.append(dict(where, why="the object changed since it was mapped — re-run map_photos"))
-                elif isinstance(split, dict) and split.get("is_split"):
-                    skipped.append(dict(where, why="it is split already"))
-                else:
-                    node["split_info"] = copy.deepcopy(plan["split_info"])
-                    repaired.append(dict(where, chunks=plan["split_info"]["total_chunks"]))
+            repaired, skipped = _mp_patch_split_info(library, plans)
             if repaired and _library_fingerprint() != before:
                 continue  # another process wrote the library after our load: reload + re-patch
             if repaired:
@@ -12405,7 +12414,12 @@ def _mp_apply_lines(ctx):
         lines.append("Apply preview (dry run — nothing written):")
         lines.append(preview["warning"] if preview.get("status") == "error" and "changed" not in preview
                      else _mp_engine_line(preview, "would change"))
-        flags = ([f"--account {ctx['account']}"] if ctx["account"] else []) + [f"--repair {r}" for r in ctx["repairs"]]
+        repair = preview.get("repair")
+        if repair is not None:          # [IMP-C25 mpfix] --apply writes the split_info first, then maps the chunks
+            lines.append(f"  + {repair['chunks']:,} chunk(s) of {repair['entries']:,} repaired entr(y/ies) map after "
+                         f"the repair — --apply writes their split_info first, then records them (not in the count "
+                         f"above)")
+        flags =([f"--account {ctx['account']}"] if ctx["account"] else []) + [f"--repair {r}" for r in ctx["repairs"]]
         flags += ["--accept-probable"] if ctx["accept_probable"] else []
         flags += ["--devices"] if ctx["use_devices"] else []
         resolution = ctx["resolution"]        # previewed above: the apply must import the same decisions
@@ -12602,18 +12616,26 @@ def _mp_fingerprint(record, drop=("v", "at")):
     return json.dumps({k: v for k, v in record.items() if k not in drop}, sort_keys=True, ensure_ascii=False)
 
 
-def _mp_append_new(records, existing, append):
-    """Append the records not on record yet (same facts, whatever their time) -> (appended, already recorded)."""
-    seen = {_mp_fingerprint(r) for r in existing}
-    added = known = 0
+def _mp_new_records(records, existing):
+    """[IMP-C25 mpfix] The records not on record yet — same facts, whatever their time (_mp_fingerprint: every key but
+    v / at): those neither in `existing` nor earlier in `records`, in order. The one rule --apply appends by
+    (_mp_append_new) and a dry run's preview counts by (_mp_preview)."""
+    seen, new = {_mp_fingerprint(r) for r in existing}, []
     for record in records:
-        if _mp_fingerprint(record) in seen:
-            known += 1
-            continue
+        key = _mp_fingerprint(record)
+        if key not in seen:
+            seen.add(key)
+            new.append(record)
+    return new
+
+
+def _mp_append_new(records, existing, append):
+    """Append the records not on record yet (_mp_new_records) -> (appended, already recorded)."""
+    records = list(records)
+    new = _mp_new_records(records, existing)
+    for record in new:
         append(record)
-        seen.add(_mp_fingerprint(record))
-        added += 1
-    return added, known
+    return len(new), len(records) - len(new)
 
 
 def _mp_append_failed(records):
@@ -12661,21 +12683,74 @@ def _mp_refresh_failed_csv(resolution):
                            f"Excel); the next apply refreshes it."}
 
 
-def _mp_preview(ctx, repairs, accept_probable):
-    """A dry run's preview of --apply: the apply engine's dry-run report over the learned sidecar plus this run's
-    records and name facts — nothing is written. None when there is nothing to apply."""
-    records = _mp_learned(ctx["rows"], repairs, accept_probable)
-    if ctx["resolution"]:
+def _mp_run_records(ctx, repairs, accept_probable):
+    """[IMP-C25 mpfix] What an --apply of this pass records -> (learned records, hints, names facts): the rows' learned
+    records (_mp_learned) + the user's resolution records and hints when the file was read, and the --repair names
+    facts. --apply (_mp_apply) and its dry-run preview (_mp_preview) take them from here: the same answer."""
+    records, hints = _mp_learned(ctx["rows"], repairs, accept_probable), []
+    if ctx["resolution"] and not ctx["resolution"]["fatal"]:
         records += ctx["resolution"]["learned"]
+        hints = ctx["resolution"]["hints"]
     names = _mp_names_facts(ctx["rows"]) if "names" in repairs else []
-    if not records and not names:
-        return None
+    return records, hints, names
+
+
+def _mp_proven_plans(rows):
+    """The PROVEN --repair split-info plans of a pass's rows — what --apply writes first (_mp_write_split_info) and a
+    dry run's preview simulates (_mp_repair_preview)."""
+    return [r["repair"] for r in rows if (r["repair"] or {}).get("kind") == "split-info" and r["repair"]["provable"]]
+
+
+def _mp_repair_preview(ctx, plans, repairs, accept_probable):
+    """[IMP-C25 mpfix] --repair split-info in a dry run: what the repair adds to --apply. The apply writes the PROVEN
+    split_info first and then maps again, so a repaired entry's chunks map in that same run; a dry run cannot write, so
+    the same patch (_mp_patch_split_info) goes into a copy of the repaired entries and those entries are mapped again
+    with this pass's inventory index and freshness (_mp_match, the apply's matcher: nothing is read again, no phone).
+    -> {entries: the entries repaired, chunks: their chunks whose verdict records something (_mp_learned takes it) — a
+    node the repair creates, so each one changes —, objects: the (manual_id, sha256) of what the repair removes (the
+    whole files: their records are orphans after it) or creates (their chunks) — the engine's preview leaves their
+    records to this count}."""
+    library = dict(ctx["library"])                      # only the repaired entries are copied: nothing is written
+    for manual_id in {plan["manual_id"] for plan in plans}:
+        library[manual_id] = copy.deepcopy(library[manual_id])
+    repaired = {(r["manual_id"], r["label"]) for r in _mp_patch_split_info(library, plans)[0]}
+    plans = [p for p in plans if (p["manual_id"], p["label"]) in repaired]
+    chunks = {(p["manual_id"], c["hash"]) for p in plans for c in p["split_info"]["chunks"]}
+    ids = sorted({p["manual_id"] for p in plans})
+    objects, routes = _mp_objects(library, ids, ctx["account"])
+    rows = _mp_match(objects, routes, ctx["index"], ctx["fresh"], library)
+    mapped = [r for r in rows if (r["manual_id"], r["sha256"]) in chunks and _mp_learned([r], repairs, accept_probable)]
+    return {"entries": len(ids), "chunks": len(mapped),
+            "objects": chunks | {(p["manual_id"], p["sha256"]) for p in plans}}
+
+
+def _mp_preview(ctx, repairs, accept_probable):
+    """A dry run's preview of --apply — [IMP-C25 mpfix] the answer the apply gives: the apply engine's dry-run report
+    over the learned sidecar plus ONLY this pass's records not on record yet (_mp_new_records: a fact already on
+    record, re-dated by this run, changes nothing) and its names facts, taken as the apply takes them (_mp_run_records)
+    — also when this pass itself records nothing (the apply folds the whole sidecar). --repair split-info: the apply
+    writes the proven split_info first and maps the repaired entries' chunks in the same run — counted apart as
+    `repair` {entries, chunks} (_mp_repair_preview), every record about the repaired objects left out of the engine's
+    count: neither count is larger than what the apply changes. Nothing is written. None when the engine has nothing
+    to apply and no repair is pending."""
+    records, _hints, names = _mp_run_records(ctx, repairs, accept_probable)
+    plans = _mp_proven_plans(ctx["rows"]) if "split-info" in repairs else []
     try:
         existing = mvcommon.read_learned()
     except OSError as e:
         return {"status": "error",
                 "warning": f"⚠️  no apply preview: the learned sidecar is unreadable ({_gp_line(e)})"}
-    return gphotos_apply(existing + records, capture=True, dry_run=True, names=names)
+    learned = existing + _mp_new_records(records, existing)
+    repair = _mp_repair_preview(ctx, plans, repairs, accept_probable) if plans else None
+    if repair is not None:              # what the repair removes or creates changes only after it: counted apart
+        gone = repair.pop("objects")
+        learned = [r for r in learned if (_gp_resolve(ctx["library"], r["manual_id"])[0], r["sha256"]) not in gone]
+    report = gphotos_apply(learned, capture=True, dry_run=True, names=names)
+    if repair is None and report["status"] == "nothing-to-apply":
+        return None
+    if repair is not None:
+        report["repair"] = repair
+    return report
 
 
 def _mp_apply(ctx, repairs, accept_probable, recompute):
@@ -12688,16 +12763,10 @@ def _mp_apply(ctx, repairs, accept_probable, recompute):
     summary = {"split_info": None, "learned": (0, 0), "hints": (0, 0), "failed": (0, 0), "engine": None,
                "failed_csv": None, "error": None}
     if "split-info" in repairs:
-        plans = [r["repair"] for r in ctx["rows"] if (r["repair"] or {}).get("kind") == "split-info"
-                 and r["repair"]["provable"]]
-        summary["split_info"] = _mp_write_split_info(plans)
+        summary["split_info"] = _mp_write_split_info(_mp_proven_plans(ctx["rows"]))
         if summary["split_info"]["repaired"]:
             ctx = recompute()
-    records = _mp_learned(ctx["rows"], repairs, accept_probable)
-    hints = []
-    if ctx["resolution"] and not ctx["resolution"]["fatal"]:
-        records += ctx["resolution"]["learned"]
-        hints = ctx["resolution"]["hints"]
+    records, hints, names = _mp_run_records(ctx, repairs, accept_probable)
     try:
         summary["learned"] = _mp_append_new(records, mvcommon.read_learned(),
                                             lambda r: mvcommon.append_learned(r["account"], r))
@@ -12708,7 +12777,6 @@ def _mp_apply(ctx, repairs, accept_probable, recompute):
         summary["error"] = (f"❌ map_photos --apply stopped: {_gp_line(e)} — the library was not changed; re-run "
                             f"--apply (records already appended are not appended twice)")
         return summary, ctx
-    names = _mp_names_facts(ctx["rows"]) if "names" in repairs else []
     summary["engine"] = gphotos_apply(learned, capture=True, dry_run=False, names=names)
     summary["failed_csv"] = _mp_refresh_failed_csv(ctx["resolution"])
     return summary, ctx
@@ -12751,7 +12819,9 @@ def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=No
 
     -> {status: ok | error, run_dir, rows, fresh, devices, unmatched, todo (the failed-list records of the
     unresolved rows), applied (the --apply summary: split_info, learned / hints / failed (new, already on record),
-    engine (gphotos_apply's report), failed_csv, error), preview (a dry run's engine report)}."""
+    engine (gphotos_apply's report), failed_csv, error), preview (a dry run's engine report: what --apply would change,
+    counted like the apply counts — [IMP-C25 mpfix] with --repair split-info also `repair` {entries, chunks}: the
+    chunks that map after the repair, apart)}."""
     now = mvcommon._now_utc()
     library = load_library()
     if scope in (None, "", "all"):
@@ -12827,12 +12897,14 @@ def _mp_library_positions(library):
 
 def _mp_compute(library, scope, ids, account, resolutions, now, cache, devices=False):
     """One complete, offline mapping pass over a loaded library -> ctx: scope, account, library, objects, rows
-    (verdicts, reasons, user decisions), fresh, devices (the device check's summary: devices=True only — the one
-    step that may run adb, read-only), use_devices, unmatched, resolution, todo, notes, run."""
+    (verdicts, reasons, user decisions), fresh, index (the inventory index — a dry run's repair preview maps again
+    with it), devices (the device check's summary: devices=True only — the one step that may run adb, read-only),
+    use_devices, unmatched, resolution, todo, notes, run."""
     objects, routes = _mp_objects(library, ids, account)
     states = _mp_inventory_states()
     fresh = _mp_freshness(states, objects, routes, now)
-    rows = _mp_match(objects, routes, _mp_index(states), fresh, library)
+    index = _mp_index(states)
+    rows = _mp_match(objects, routes, index, fresh, library)
     positions = _mp_library_positions(library)
     for row in rows:
         row["library_position"] = positions.get(row["manual_id"])
@@ -12847,7 +12919,7 @@ def _mp_compute(library, scope, ids, account, resolutions, now, cache, devices=F
         row["user_decision"] = (resolution["decisions"].get(key) if resolution else None) or decided.get(key)
     run = "map-" + now.strftime("%Y%m%dT%H%M%SZ")
     return {"scope": scope, "account": account, "library": library, "objects": objects, "rows": rows,
-            "fresh": fresh, "devices": summary, "use_devices": devices, "unmatched": unmatched,
+            "fresh": fresh, "index": index, "devices": summary, "use_devices": devices, "unmatched": unmatched,
             "resolution": resolution, "todo": _mp_todo(rows, run), "notes": [hint_problem], "run": run}
 
 

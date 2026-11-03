@@ -24,20 +24,21 @@ DECISIONS.md / PRIORITY.md (the orchestrator's). check_photos' apply (`_cp_apply
 behaviour must stay identical ((appended, known) counts and append order).
 
 ## Sub-tasks (one WIP commit each)
-- [x] mpfix.0 this file: the findings, the design decisions, the sub-task list (no code) — this commit (its SHA is
-      recorded with mpfix.a)
-- [ ] mpfix.a Fix 1 — the preview counts what --apply changes (D1–D5): main `_mp_new_records` (`_mp_append_new` uses
+- [x] mpfix.0 this file: the findings, the design decisions, the sub-task list (no code) — 4b3d187
+- [x] mpfix.a Fix 1 — the preview counts what --apply changes (D1–D5): main `_mp_new_records` (`_mp_append_new` uses
       it — map's and check_photos' applies unchanged), `_mp_run_records` (what an apply records: records, hints, names —
       `_mp_apply` and the preview), `_mp_proven_plans`, `_mp_patch_split_info` (extracted from `_mp_write_split_info`
       unchanged), ctx `index`, `_mp_repair_preview`, `_mp_preview` (the dedup; the whole-sidecar engine even when the run
-      records nothing; the repaired objects left to the repair line), `_mp_apply_lines` (the repair line); docstrings.
-      Tests (test_map_photos): a dry run after an apply previews 0 (the clock moved: the records are re-dated) and the
-      next apply changes nothing · a new fact previews exactly the change its apply makes (field for field) ·
-      resolutions and `--repair names` preview their change, then 0 after their apply · the repair line (whole library
-      after an apply: 0 + 2 chunks = the apply's 2; a scope with nothing else: still previewed) · the repair line counts
-      only chunks that would map (a partial-upload chunk is not counted) · an unfolded record about the repaired whole
-      file is not counted (the apply orphans it) · a run that records nothing still previews the sidecar's pending
-      change · `_mp_new_records` unit.
+      records nothing; the repaired objects left to the repair line), `_mp_apply_lines` (the repair line); docstrings
+      (+ cmd_map_photos' `preview` contract). Tests +10 (test_map_photos; `_split_lost` gains `flags`): a dry run after
+      an apply previews 0 (the clock moved: the records are re-dated) and the next apply changes nothing · a new fact
+      previews exactly the change its apply makes (field for field) · `--repair names` and resolutions preview their
+      change, then 0 after their apply · the repair line (after the map apply: 0 + 2 chunks = the apply's 2, the exact
+      three lines; a scope with nothing else: still previewed, `nothing-to-apply` + the line + `Next:`) · the repair line
+      counts only chunks that will map (a partial-upload chunk: 1 of 2) · an unfolded record about the repaired whole
+      file is not counted (the apply orphans it) · a run that records nothing still previews the sidecar's pending change
+      · `_mp_new_records` / `_mp_append_new` unit. Runs: map + check + apply engine + resolve + pins + primitives 744
+      passed · smoke 102 passed — this commit (its SHA is recorded with mpfix.b)
 - [ ] mpfix.b Fix 2 — `uploaded-after-crawl` (D6–D7): main `_mp_after_crawl`, `_mp_nowhere`, `_mp_recency`, MAP_STATES,
       the summary block, docstrings / section comment. Tests: the R3 Aavesham case (verdict, note, block, no
       archive / trash text, off todo / inconsistencies / failed list / LOUD block, mapping.csv) · upload_ms at the crawl

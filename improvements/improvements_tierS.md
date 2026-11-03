@@ -134,6 +134,12 @@
 - Effort estimate: large
 - Risk: medium-high — replaces/refactors the fetch engine; the hash-routing integrity layer and two-profile routing are the invariants every candidate must prove before cutover (run old+new in parallel on a test set first).
 - If skipped: the end-goal flow inherits mainfetch's fragility at 10× the invocation rate; statistically, the first silent Google UI change lands within months and takes the whole couch experience down with it.
+- Synergy (IMP-C25, done): part of option (b) landed with IMP-C25.
+  - Objects are addressed by `photo_id` and fetched by a minted direct download; text search is now a fallback stage (P-8), and IMP-C5 is absorbed.
+  - Every account gets its own Chrome session, routed per object (P-4).
+  - A sign-out (IMP-C6 / C17) and Google's throttling (thfix) are told apart.
+  - Downloads go straight into the entry's own `restore\.mv_incoming\` through CDP `Browser.setDownloadBehavior` instead of into `~/Downloads` (P-12). Completion is still found by watching that folder.
+  - Left for this task: the IMP-G2 verdict, CDP download events instead of the folder watch, and daemon-schedulable lanes.
 - Status: pending
 
 ## IMP-S8: T3 proxy-streaming spike (play originals straight through a local proxy)

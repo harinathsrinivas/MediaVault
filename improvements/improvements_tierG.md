@@ -45,6 +45,7 @@
 - Effort estimate: medium (spike) → large (full replacement if chosen)
 - Risk: medium — the spike itself is read-only/sandboxed (use a copied Chrome profile so the live session cookies aren't risked); a full replacement swaps the fetch engine and must preserve the hash-routing contract and the two-profile routing exactly.
 - If skipped: mainfetch remains one Google UI redesign away from total fetch outage, with selectors only one person maintains; every Photos frontend experiment Google runs is a potential 90-minute debugging night.
+- Synergy (IMP-C25, done): photo-id addressing now exists. Every confirmed object stores its permanent web `photo_id` per account (`gphotos.accounts[<account>].photo_id`), so the spike can start from a known item for each test object, with no search at all. Whether gphotosdl's `/id/<photoID>` takes this web id or the Library API's media-item id is for the spike to establish. IMP-C25's own direct download already fetches originals by `photo_id` inside the automation Chrome: a fresh original-download URL is minted per fetch, never stored, and the SHA-256 is verified after the download (P-20). The comparison is therefore gphotosdl vs that path.
 - Status: pending
 
 ---

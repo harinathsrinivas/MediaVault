@@ -10,7 +10,24 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import main      # repo root ensured on sys.path above
+import mainfetch  # fetch: its Chrome profile map is snapshotted below (_hermetic_chrome_profiles)
 import mvcommon  # authoritative home of LIBRARY_* + load_library/save_library
+
+# The real Chrome profile folders, as mainfetch declares them (C:\Media\Utils\ChromeProfile*) — read once, before any
+# test can patch the map.
+_REAL_CHROME_PROFILES = dict(mainfetch.CHROME_PROFILES)
+# The real <drive>:\MV_incoming locator (IMP-C25 Step 11) — the autouse fixture below redirects it; a test that checks
+# the real path arithmetic (it creates nothing) asks for the `real_short_incoming_root` fixture.
+_REAL_SHORT_INCOMING_ROOT = mainfetch._short_incoming_root
+# The real mark_profile_clean_exit (IMP-C25, 2026-10-08): it reads and rewrites a Chrome profile's Preferences. The
+# autouse fixture _hermetic_chrome_profiles replaces it for every test; its own tests ask for the
+# `real_mark_profile_clean_exit` fixture (tmp_path profiles only).
+_REAL_MARK_PROFILE_CLEAN_EXIT = mainfetch.mark_profile_clean_exit
+# The real auto-confirm after a push (IMP-C25 Step 13b: the dispatcher's hook main.after_push_command and the
+# confirmation main.maybe_auto_confirm) — read once, before the autouse guard _hermetic_auto_confirm replaces them; the
+# auto-confirm's own tests put them back through the `real_auto_confirm` fixture.
+_REAL_AFTER_PUSH_COMMAND = main.after_push_command
+_REAL_MAYBE_AUTO_CONFIRM = main.maybe_auto_confirm
 
 FAKE_ORIGINAL_BYTES = b"ORIGINAL-MASTER-BYTES"
 FAKE_DUMMY_BYTES    = b"DUMMY"
@@ -38,6 +55,185 @@ def _hermetic_mvconfig(monkeypatch):
     config sets its own: monkeypatch.setattr(mvcommon, "_CONFIG_CACHE", {...}).
     Tests that patch a getter (e.g. mvcommon.tmdb_api_key) are unaffected."""
     monkeypatch.setattr(mvcommon, "_CONFIG_CACHE", {})
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_gphotos_state(tmp_path, monkeypatch):
+    """IMP-C25 (PLAN Step 3g) — AUTOUSE, every test: redirect the Google Photos identity state into tmp_path.
+
+    mvcommon.GPHOTOS_STATE_DIR (the learned sidecars learned_<account>.jsonl, the failed list failed.jsonl
+    and failed_objects.csv — normally ~/.mediavault/gphotos) and mvcommon.GP_INVENTORY_DIR (the crawler's
+    private inventory — normally D:\\MediaVault_gp_inventory) point under this test's tmp_path, so NO test
+    can read or write the real ones — not even one that forgets a fixture (PLAN P-17). mvcommon derives every
+    state path from these two names at CALL time, and every other module must read them module-qualified
+    (mvcommon.GPHOTOS_STATE_DIR — the binding hazard), so patching mvcommon alone is complete. Nothing is
+    created here: the dirs appear only when code writes state.
+
+    Hard guards: both redirects must resolve under tmp_path and must not be the real locations. Later IMP-C25
+    steps extend THIS fixture (Step 11: mainfetch.FETCH_JOURNAL_DIR; Step 13b: the auto-confirm guard).
+
+    IMP-C25 Step 11 (download hygiene) adds, for mainfetch — read module-qualified everywhere, so patching mainfetch
+    alone is complete: FETCH_JOURNAL_DIR -> tmp_path/mv_state/fetch_journal (the fetch journal; real:
+    ~/.mediavault/fetch_journal), SYSTEM_DOWNLOADS_FOLDER -> tmp_path/mv_downloads (NOT created: a test that harvests
+    or cleans a Downloads folder sets its own; nothing can read or delete in the real ~/Downloads),
+    _short_incoming_root -> a tmp folder (the long-path fallback would otherwise create <drive>:\\MV_incoming on a
+    real drive root), and PROCESS_TABLE -> _InertProcessTable (no real process is ever queried or terminated)."""
+    real_state = os.path.normcase(os.path.join(os.path.expanduser("~"), ".mediavault"))
+    real_inventory = os.path.normcase(r"D:\MediaVault_gp_inventory")
+    tmp = tmp_path.resolve()
+    for attr, path in (("GPHOTOS_STATE_DIR", tmp_path / "mv_state" / "gphotos"),
+                       ("GP_INVENTORY_DIR", tmp_path / "mv_gp_inventory")):
+        assert tmp in path.resolve().parents, f"Safety check failed: {attr} redirect escaped tmp_path: {path}"
+        monkeypatch.setattr(mvcommon, attr, str(path))
+        live = os.path.normcase(os.path.abspath(getattr(mvcommon, attr)))
+        assert not live.startswith(real_state) and not live.startswith(real_inventory), \
+            f"Safety check failed: {attr} still points at the real state: {live}"
+    journal_dir = tmp_path / "mv_state" / "fetch_journal"
+    assert tmp in journal_dir.resolve().parents, f"Safety check failed: FETCH_JOURNAL_DIR escaped tmp_path: {journal_dir}"
+    monkeypatch.setattr(mainfetch, "FETCH_JOURNAL_DIR", str(journal_dir))
+    assert not os.path.normcase(os.path.abspath(mainfetch.FETCH_JOURNAL_DIR)).startswith(real_state), \
+        f"Safety check failed: FETCH_JOURNAL_DIR still points at the real state: {mainfetch.FETCH_JOURNAL_DIR}"
+    downloads = tmp_path / "mv_downloads"
+    short_root = tmp_path / "mv_short_root" / mainfetch.SHORT_INCOMING_ROOT
+    real_downloads = os.path.normcase(os.path.join(os.path.expanduser("~"), "Downloads"))
+    for what, path in (("SYSTEM_DOWNLOADS_FOLDER", downloads), ("_short_incoming_root", short_root)):
+        assert tmp in path.resolve().parents, f"Safety check failed: {what} redirect escaped tmp_path: {path}"
+        assert not os.path.normcase(os.path.abspath(path)).startswith(real_downloads), \
+            f"Safety check failed: {what} points at the real Downloads: {path}"
+    monkeypatch.setattr(mainfetch, "SYSTEM_DOWNLOADS_FOLDER", str(downloads))
+    monkeypatch.setattr(mainfetch, "_short_incoming_root", lambda dest: str(short_root))
+    monkeypatch.setattr(mainfetch, "PROCESS_TABLE", _InertProcessTable())
+    yield
+
+
+class _InertProcessTable:
+    """IMP-C25 Step 11 — the autouse stand-in for mainfetch.PROCESS_TABLE: it can tell nothing about any process (so
+    no real pid is ever judged alive, ours or a fetch's) and refuses to terminate one. A test of the start-up or the
+    interruption cleanup installs its own fake process table."""
+
+    def query(self, pid):
+        return None, None
+
+    def listener(self, port):
+        return None
+
+    def chrome_command_lines(self):
+        return None
+
+    def terminate(self, pid):
+        raise AssertionError(f"a test tried to terminate a real process (pid {pid})")
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_check_child(monkeypatch):
+    """IMP-C25 Step 13 — AUTOUSE, every test: no test spawns the real `python mainfetch.py check` child.
+
+    `main.cmd_check_photos` runs its browser half in a CHILD PROCESS (main._cp_spawn). A child sees none of a test's
+    monkeypatches: it would read the REAL libraries and ~/.mediavault and launch a REAL Chrome. So every test starts
+    with main._cp_spawn refusing; a test that drives check_photos end to end installs its own runner (tests/
+    test_check_photos.py runs mainfetch.cmd_check in-process against the fake Google Photos world)."""
+    def refuse(argv, *args, **kwargs):
+        raise AssertionError(f"a test tried to spawn the real check_photos child ({' '.join(map(str, argv[2:4]))}) — "
+                             f"install an in-process runner: monkeypatch.setattr(main, '_cp_spawn', …)")
+
+    monkeypatch.setattr(main, "_cp_spawn", refuse)
+
+
+class _InertAutoConfirm:
+    """IMP-C25 Step 13b — the autouse stand-in for the auto-confirm after a push (main.after_push_command — the CLI
+    dispatcher's hook — and main.maybe_auto_confirm): it records each call's arguments in `.calls` and does nothing else
+    — no library read, no line, no lock, no child."""
+
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_auto_confirm(monkeypatch):
+    """IMP-C25 Step 13b — AUTOUSE, every test: the auto-confirm after a push is OFF.
+
+    Once a push-family command succeeds, main.py's CLI dispatcher runs the auto-confirm (PLAN P-19: main.after_push_command
+    -> main.maybe_auto_confirm): it reads the library's pending objects, probes the REAL fetch lock (~/.mediavault/locks)
+    and starts a `check_photos` child that launches a REAL Chrome. Every test that drives the dispatcher
+    (tests/test_prep_push_rep_enrich_cli.py, tests/test_prep_keeps_split_record.py, Step 15's push-family smoke runs)
+    must see the push command exactly as before, so both entry points are inert recorders here
+    (`main.after_push_command.calls` lets a test prove the dispatcher reached the hook — and with what). The dispatcher's harnesses exec its code in a copy of main's
+    namespace taken at call time, so they see these stand-ins too. Its own tests opt back in with `real_auto_confirm`;
+    main._cp_spawn stays refused (_hermetic_check_child) even then, so the real child can never start without a runner
+    the test installs."""
+    monkeypatch.setattr(main, "after_push_command", _InertAutoConfirm())
+    monkeypatch.setattr(main, "maybe_auto_confirm", _InertAutoConfirm())
+
+
+@pytest.fixture()
+def real_auto_confirm(tmp_path, monkeypatch):
+    """IMP-C25 Step 13b — the REAL auto-confirm, for its own tests (tests/test_auto_confirm.py): undoes
+    _hermetic_auto_confirm for this test (main.after_push_command and main.maybe_auto_confirm are the real ones again),
+    and moves the fetch lock the auto-confirm probes (mvcommon.MV_LOCK_DIR + mvcommon.FETCH_SESSION_LOCK — read at call
+    time) under this test's tmp_path. Hard guard: never the real ~/.mediavault/locks. main._cp_spawn is still refused:
+    install a runner before anything can start the child. Yields the lock file's path (absent = the lock is free)."""
+    lock = tmp_path / "mv_state" / "locks" / "fetch_session.lock"
+    assert tmp_path.resolve() in lock.resolve().parents, f"Safety check failed: the fetch lock escaped tmp_path: {lock}"
+    real_state = os.path.normcase(os.path.join(os.path.expanduser("~"), ".mediavault"))
+    assert not os.path.normcase(os.path.abspath(lock)).startswith(real_state), \
+        f"Safety check failed: the fetch lock points at the real state: {lock}"
+    monkeypatch.setattr(mvcommon, "MV_LOCK_DIR", str(lock.parent))
+    monkeypatch.setattr(mvcommon, "FETCH_SESSION_LOCK", str(lock))
+    monkeypatch.setattr(main, "after_push_command", _REAL_AFTER_PUSH_COMMAND)
+    monkeypatch.setattr(main, "maybe_auto_confirm", _REAL_MAYBE_AUTO_CONFIRM)
+    yield lock
+
+
+@pytest.fixture()
+def real_short_incoming_root():
+    """IMP-C25 Step 11 — mainfetch's REAL <drive>:\\MV_incoming locator (pure path arithmetic; it creates nothing),
+    for the one test that pins it. Every test otherwise sees the autouse tmp redirect above."""
+    return _REAL_SHORT_INCOMING_ROOT
+
+
+@pytest.fixture()
+def real_mark_profile_clean_exit(tmp_path):
+    """IMP-C25 (2026-10-08) — mainfetch's REAL mark_profile_clean_exit, for its own tests. Every other test sees the
+    inert stand-in of _hermetic_chrome_profiles. Hard guard: it only ever runs on a profile folder under this test's
+    tmp_path — never on a real Chrome profile (C:\\Media\\Utils\\ChromeProfile*)."""
+    root = os.path.normcase(str(tmp_path.resolve())) + os.sep
+
+    def mark(user_data_dir, *args, **kwargs):
+        assert os.path.normcase(os.path.abspath(str(user_data_dir))).startswith(root), \
+            f"Safety check failed: mark_profile_clean_exit outside tmp_path: {user_data_dir}"
+        return _REAL_MARK_PROFILE_CLEAN_EXIT(user_data_dir, *args, **kwargs)
+
+    return mark
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_chrome_profiles(monkeypatch):
+    """IMP-C25 (PLAN Step 10a) — AUTOUSE, every test: the fetch never depends on this machine's real profile folders.
+
+    cmd_fetch_route pre-flights each account's Chrome profile folder (mainfetch.profile_preflight, OD-10) before it
+    launches Chrome. Whether C:\\Media\\Utils\\ChromeProfile* exist on the machine running the suite must not decide a
+    test, so for an account whose CHROME_PROFILES path is still the real one the pre-flight answers "present" (tests
+    never launch Chrome — init_driver is always stubbed). A test that points CHROME_PROFILES at its own folder (under
+    tmp_path) gets the real check, as the crawler's and the fetch's pre-flight tests do; an unknown account is always
+    checked for real. Patches the module attribute every caller reads (mainfetch.profile_preflight).
+
+    IMP-C25 (2026-10-08) — and no test reads or rewrites a real profile's Preferences: mainfetch.mark_profile_clean_exit
+    (called before every Chrome launch and after every close, with whatever profile folder the code under test holds —
+    often the real C:\\Media\\Utils\\ChromeProfile* path) is an inert stand-in for every test. A test of a call site
+    installs its own recorder; the helper's own tests use `real_mark_profile_clean_exit` on tmp_path profiles."""
+    real_check = mainfetch.profile_preflight
+
+    def preflight(account):
+        if account in _REAL_CHROME_PROFILES and mainfetch.CHROME_PROFILES.get(account) == _REAL_CHROME_PROFILES[account]:
+            return None
+        return real_check(account)
+
+    monkeypatch.setattr(mainfetch, "profile_preflight", preflight)
+    monkeypatch.setattr(mainfetch, "mark_profile_clean_exit", lambda *args, **kwargs: None)
 
 
 @pytest.fixture()
@@ -578,6 +774,42 @@ def mock_fetch(mock_device, tmp_path, monkeypatch):
 
     monkeypatch.setattr(mainfetch, "trigger_download", _fake_trigger)
     yield restore_dir
+
+
+@pytest.fixture()
+def fake_photos(tmp_path):
+    """IMP-C25 — the fake Google Photos world (tests/gphotos_fake.py; PLAN Step 2j).
+
+    A deterministic in-memory model of the Google Photos web app for the four accounts (movies renders
+    UK English, tv / anime / others US English), driven through the real Selenium surface MediaVault
+    uses: `fake_photos.driver(account)` returns a driver that selenium's own ActionChains / WebDriverWait
+    and the shared gpweb scripts work against, including the batchexecute emulator (the Step 2b
+    page-context RPC call). Items: `fake_photos.add_item(account, filename, data=..., taken=...)`.
+    Every knob, log and the emulator contract are documented in the module docstring.
+
+    Isolation / hard guards:
+      - no network, no browser, no adb — nothing leaves the process;
+      - every file the fake writes (downloads) must lie under this test's tmp_path: the fake raises
+        AssertionError otherwise, so a CDP download redirect aimed at a real folder fails loudly;
+      - the default download folder is tmp_path/fake_photos/Downloads — never the real ~/Downloads;
+      - delayed-download timers are cancelled at teardown.
+
+    Binding note: this fixture patches NOTHING. A test that drives production code wires the fake in
+    itself (e.g. monkeypatch mainfetch.init_driver to return fake_photos.driver(profile)) and, for the
+    legacy trigger_download, stubs mainfetch's sleeps to keep the run fast.
+
+    Yields: gphotos_fake.FakePhotos.
+    """
+    import gphotos_fake  # lazy: only tests that use the fake import it (and selenium)
+
+    downloads = tmp_path / "fake_photos" / "Downloads"
+    world = gphotos_fake.FakePhotos(tmp_path, downloads_dir=downloads)
+    real_downloads = os.path.abspath(os.path.join(os.path.expanduser("~"), "Downloads"))
+    assert os.path.abspath(world.default_download_dir) != real_downloads, "the fake must never use ~/Downloads"
+    assert tmp_path.resolve() in downloads.resolve().parents, f"fake downloads escaped tmp_path: {downloads}"
+    assert "C:\\Media" not in str(downloads.resolve()), f"fake downloads must never touch C:\\Media: {downloads}"
+    yield world
+    world.close()
 
 
 @pytest.fixture()

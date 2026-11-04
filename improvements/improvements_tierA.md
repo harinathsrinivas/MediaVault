@@ -167,7 +167,8 @@
 - Effort estimate: small
 - Risk: low — deletions of provably-uncalled code; grep + test suite confirm.
 - If skipped: harmless today, but `build_download_queue` silently drifts from the inline queue builder it duplicates (it already lacks no logic-difference guarantees) — a future fetch fix applied to only one of the two wastes a debugging session.
-- Status: pending
+- Shipped by IMP-C25 Step 10 (`0690546`): all three are deleted; the one queue builder is `mainfetch.build_fetch_queue`.
+- Status: done (absorbed by IMP-C25 Step 10, `feature/imp_c25_fetch_exact_gp_item`, PR pending)
 
 ---
 

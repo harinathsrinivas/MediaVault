@@ -3,15 +3,13 @@
 On Chrome 154, chromedriver attaches to the Gemini side panel's webview, so the launch mode
 (--port: a fresh Chrome on about:blank) would otherwise crawl inside Gemini. The attach mode
 (--attach) already opened its own tab so the user's tabs are left alone; the launch mode now
-does the same. Merge note: IMP-C25 rewrites main() into _session(); keep this rule there and
-point this test at it.
+does the same. IMP-C25 moved the session into _session(); this test drives it there.
 
-Hermetic: no Chrome is launched (subprocess.Popen and webdriver.Chrome are stand-ins), the
-crawl phases are stubbed, the profile folder and the output live under tmp_path.
+Hermetic: no Chrome is launched (launch_chrome and connect are stand-ins), the landing check
+and the crawl are stubbed, the output lives under tmp_path.
 """
 import importlib.util
 import os
-import sys
 import types
 
 import pytest
@@ -46,32 +44,29 @@ class _FakeDriver:
         self.events.append(("close", self.current_window_handle))
 
 
-@pytest.mark.parametrize("mode, port", [("--port", "9300"), ("--attach", "9222")])
-def test_the_crawl_runs_in_its_own_tab_never_the_gemini_webview(tmp_path, monkeypatch, mode, port):
+@pytest.mark.parametrize("attach, port", [(None, 9300), (9222, None)])
+def test_the_crawl_runs_in_its_own_tab_never_the_gemini_webview(tmp_path, monkeypatch, attach, port):
     events = []
     driver = _FakeDriver(events)
-    profile = tmp_path / "profile"
-    profile.mkdir()
-    monkeypatch.setitem(gp_inventory.CHROME_PROFILES, "tv", str(profile))
-    monkeypatch.setattr(gp_inventory.subprocess, "Popen", lambda *a, **k: events.append(("launch",))
+    monkeypatch.setattr(gp_inventory, "launch_chrome", lambda *a, **k: events.append(("launch",))
                         or types.SimpleNamespace(terminate=lambda: events.append(("terminate",))))
     monkeypatch.setattr(gp_inventory.time, "sleep", lambda *_a, **_k: None)
-    monkeypatch.setattr(gp_inventory.webdriver, "Chrome", lambda options=None: driver)
-    monkeypatch.setattr(gp_inventory, "enumerate_tiles",
-                        lambda drv, *a, **k: events.append(("enumerate", drv.current_window_handle)))
-    monkeypatch.setattr(gp_inventory, "crawl_details",
-                        lambda drv, *a, **k: events.append(("details", drv.current_window_handle)))
-    monkeypatch.setattr(sys, "argv", ["gp_inventory.py", "tv", mode, port, "--out", str(tmp_path / "out")])
+    monkeypatch.setattr(gp_inventory, "connect", lambda _port: driver)
+    monkeypatch.setattr(gp_inventory, "landing_check",
+                        lambda drv, *a, **k: events.append(("landing", drv.current_window_handle)))
+    monkeypatch.setattr(gp_inventory, "crawl",
+                        lambda drv, *a, **k: events.append(("crawl", drv.current_window_handle)))
+    a = types.SimpleNamespace(attach=attach, port=port, mode="rpc", phase="all", max=None)
 
-    gp_inventory.main()
+    assert gp_inventory._session(a, "tv", str(tmp_path / "out"), lambda _msg: None, None) == gp_inventory.EXIT_OK
 
     work = [e for e in events if e[0] in ("Page.bringToFront", "Emulation.setFocusEmulationEnabled",
-                                          "enumerate", "details")]
+                                          "landing", "crawl")]
     assert [e[0] for e in work] == ["Page.bringToFront", "Emulation.setFocusEmulationEnabled",
-                                    "enumerate", "details"]
+                                    "landing", "crawl"]
     assert all(e[1] == "OWN-TAB" for e in work), events
     assert events.index(("new_window", "tab")) < events.index(work[0])
-    if mode == "--attach":
+    if attach is not None:
         assert ("launch",) not in events and ("close", "OWN-TAB") in events   # closes only its own tab
     else:
         assert ("launch",) in events and ("terminate",) in events             # closes the Chrome it launched

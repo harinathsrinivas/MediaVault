@@ -655,7 +655,9 @@ def test_a_whole_file_push_drops_a_stale_split_record(
     assert {n: p.read_bytes() for n, p in _device_videos(mock_device).items()} == {tagged: master_bytes}
     (sidecar,) = list(mock_device.rglob("*.mvmeta.json"))
     mvmeta = json.loads(sidecar.read_text(encoding="utf-8"))
-    assert (mvmeta["is_split"], mvmeta["chunks"]) == (False, [{"filename": tagged, "hash": sha256}])
+    (chunk,) = mvmeta["chunks"]
+    assert (mvmeta["is_split"], chunk["filename"], chunk["hash"]) == (False, tagged, sha256)
+    assert chunk.get("uploaded_name", tagged) == tagged      # IMP-C25 mvmeta v2 adds identity fields
     assert "uploaded the file whole" in capsys.readouterr().out
 
     assert main.cmd_replace(MOVIE) is True

@@ -1,0 +1,193 @@
+STATE: COMPLETE
+
+# IMP-C25 Step 17 — IMP bookkeeping on implementation — resumable status
+
+- Plan: docs/feature-fetch-datetime/PLAN.md Step 17 (+ Appendix A/C, "Suggested next tasks after IMP-C25") ·
+  DECISIONS.md (all rulings; 2026-10-28: scope rule, R4 = the R3 sweep, mpfix, OD-16 → IMP-C24) · PROGRESS.md (step
+  table, operations log, In-progress sub-state "Noticed, not changed (register at Step 17)").
+- Worktree `C:\Users\harin\PycharmProjects\MediaVault-s17` · branch `tmp/c25_step17` · base 5002fe8. Docs only — no
+  code, no tests. The main folder and the running mpfix worktree are never touched (mpfix read only).
+- Python: `C:\Users\harin\PycharmProjects\MediaVault\.venv\Scripts\python.exe`. Gate: `pytest tests/smoke -q` once at
+  the end (low memory: nothing else in parallel).
+- Files this step may change: improvements/improvements_tier{A,B,C,D,E,G,S,X}.md, improvements/PRIORITY.md,
+  docs/priority-graph/priority-graph.html, this file. Never PROGRESS.md / PLAN.md / DECISIONS.md (the orchestrator's).
+
+## Resume rule
+Read this file, then `git log --oneline -8` (WIP commits `wip(imp-c25): step17.<x> — …`) and `git status`. An
+uncommitted diff belongs to the first unticked sub-task: keep it when coherent, else `git checkout -- <its files>`
+(record that here). Commit THIS file (force-added: `.candidates/` is gitignored) with every WIP commit; tick a sub-task
+only with its SHA. Pathspec commits only (never -A, amend, rebase or stash); scratchpad secrets scan of the staged
+diff before every commit (no real `AF1Qip…` ids, no e-mail addresses, no tokens).
+
+## Sub-tasks (one WIP commit each)
+- [x] 17.0 this file: inputs read, every follow-up verified against the code, the registration plan, decisions — dc6e597
+- [x] 17.a tier C — C25 done (what shipped, R1–R4 counts), C26 status, C27 in_progress + open list, C5 / C34 / C35 /
+      C36 done, C24 interplay line, C7 synergy, C32 repair note, new C39–C44 — e114c58
+- [x] 17.b tiers A / B / D / E / G / S / X — A8 + B10 done, the B4 note, synergy lines E5 / G2 / S7 / X1 / X5 / D9 —
+      6829142. G2: the line does not claim gphotosdl's `/id/` takes the web photo_id (not verifiable without web
+      access) — the spike establishes it.
+- [x] 17.c PRIORITY.md — Last updated, the single 👉 NEXT pointer (IMP-C24; U7 a plain Band 0 entry), Band 0 C27 row
+      (+ the C32 note), Band 1 (C25 / C34–C36 done; C39–C43 rows), Band 2 / 4 / 5 prose, DONE list (46 → 53) —
+      ce52ff2. Pointer check: the only live 👉 is the IMP-C24 section (+ two references to it); the other matches
+      are the Last-updated history and the maintenance protocol.
+- [x] 17.c2 (added after the restart) fold the two OPEN observations of `.candidates/c25-step14g-pins/README.md`
+      into IMP-C42 / IMP-C43 (tier C + PRIORITY.md rows + Last updated); the unlanded pins are surfaced, not
+      registered — e03c95f. The kept graph diff stayed uncommitted for 17.d (pathspec).
+- [x] 17.d priority-graph.html — statuses + notes, 6 new nodes, edges, header Next → IMP-C24, footer; Appendix C
+      node validation — (this commit; SHA in 17.e's line). A8 / B10 / C5 / C25 / C34 / C35 / C36 → ("done","done");
+      C27 stays ("crit","decision") with the R3 open list; B4 / C26 / C32 notes updated; C39 med · C40–C43 low · C44
+      med ("todo"); edges +13 (C25→G2 / X1 / C7 / D9; C17→C39, C25→C39–C44, C17→C42, C34→C44). Appendix C:
+      TASKS 154 · EDGES 101 · badTasks 0 · badEdges 0 (baseline 148 · 88 · 0 · 0); the whole <script> block parses
+      (node `new Function`); 0 duplicate ids, 0 duplicate edges; footer "154 tasks". — a4266ee
+- [x] 17.e gates — three-file consistency check, smoke, secrets scan, self-review, STATE: COMPLETE, final commit
+      `docs(imp-c25): Step 17 — IMP bookkeeping (C25 done/PR pending, C27 open list, follow-ups registered, NEXT → IMP-C24)`
+      (this commit — it changes only this file; its SHA is in the final report and `git log -1`):
+      · three-file check (scratchpad `s17_consistency.py`: every tier heading's first Status line ↔ the graph's TASKS
+        ↔ PRIORITY.md's codes + DONE list): tier entries 154 = graph nodes 154 · edges 101 · DONE header 53 = DONE list
+        53. Every Step 17 code agrees in all three files (A8 / B10 / C5 / C25 / C26 / C34–C36 done; C27 in_progress ↔
+        crit / decision; C39–C44 pending ↔ todo; C37 / C38 unchanged). The only 6 findings are the baseline's
+        pre-existing ones, none touched by this step (D7).
+      · smoke: `python -m pytest tests/smoke -q -p no:cacheprovider` → 102 passed, 1 warning (the pre-existing
+        Starlette / httpx deprecation) in 14.33 s, run once from this worktree.
+      · privacy: scratchpad `s17_secrets_scan.py` (real photo ids, e-mail addresses, GitHub / API / Slack tokens,
+        auth headers, key=value secrets, Google URLs with a query, dedupKey-shaped values except the published
+        S02E03 example) over the staged diff before every commit and over the whole range 5002fe8..HEAD: 365 added
+        lines, 0 hits; `git grep -nE "AF1Qip[A-Za-z0-9_-]{8,}"` over the changed paths: none.
+
+## Self-review (the whole range 5002fe8..HEAD, read in full)
+- (a) PLAN Step 17 + the dispatch, item by item: C25 → `done (feature/imp_c25_fetch_exact_gp_item, PR pending)` with
+  what shipped (Steps 0–16 incl. 9b / 13b / 13c, H; restore-bubble, acfix, thfix, mpfix "in progress at the time of
+  writing; merged before the PR") and the R1–R4 counts (R1 from PLAN §M3 — the operations log holds only its start
+  line; R2–R4 from the operations log / DECISIONS) ✓ · C26 done, #61 ✓ · C27 in_progress, the 16-row open list, what is
+  resolved, how it closes (resolve_photos / §M15, or the user accepts) ✓ · C5 / A8 / B10 done; the B4 note; the C24
+  interplay line; synergy lines E5 / G2 / S7 / X1 / X5 / C7 / D9 ✓ · C34–C36 done, verified in PROGRESS, the commits
+  and the code; C37 / C38 kept ✓ · follow-ups registered as C39–C44, each verified against the code, the dropped ones
+  listed with why ✓ · OD-16: one 👉 pointer (IMP-C24), U7 a plain Band 0 entry, Last updated bumped ✓ · the graph:
+  statuses, 6 nodes, 13 edges, Next → IMP-C24; Appendix C 154 / 101 / 0 / 0 ✓ · three-file consistency ✓.
+- (b) Downstream: Step 18 lifts the C25 entry's "What shipped" / "Real-library results" into the PR body; mpfix edits
+  main.py / tests / README / ARCHITECTURE / OPERATIONS_QA only, so merging it next to this branch cannot conflict
+  here; PROGRESS.md (row 17, ▶ NEXT ACTION), PLAN.md and DECISIONS.md were not touched (the orchestrator's).
+- (c) Change-gates: no code, no tests (the range touches 11 docs files only) — rollback, ENTRY_TYPE_KEYS and every
+  pinned contract are untouched by construction; smoke green.
+
+## Surfaced for the orchestrator (not decided here)
+- S1 The 16 unlanded Step 14.g guard pins (`.candidates/c25-step14g-pins/`, main folder, untracked; 17 Step 14
+  behaviours no test pins, among them the port check before a second account in resolve_photos). Landing them is test
+  work, outside this docs-only step; the user's memory says it is the C25 owner's call. Decide before Step 18: land
+  them inside C25 (re-baseline first: full 3409+ / smoke 102), or register them as a follow-up IMP.
+- S2 IMP-C44 comes from PLAN "Suggested next tasks" #10 ("Register as a new IMP after C25"), not from a STATUS note —
+  drop it if it is not wanted yet.
+- S3 Pre-existing three-file gaps, unrelated to C25 (D7): D24 has no graph node; D2 has a node but no tier heading;
+  D17 sits off the done ring ("high","done"); D4 (partial) is in the DONE list while its tier status is in_progress;
+  U6 is done but not in the DONE list.
+- S4 ARCHITECTURE.md's suggestions list (item 7a, "Resumable direct transfer (suggested after IMP-C25)") could now
+  name IMP-C44 — not touched (outside this step's files).
+
+## Step 17 — [status: done]
+- Executor: executor-opus · Model: opus (claude-opus-5-5; every commit's trailer `Co-Authored-By: Claude Opus 5.5`)
+- Mode: single-executor in its own worktree (MediaVault-s17, branch tmp/c25_step17, base 5002fe8), pathspec WIP
+  commits per sub-task (the dispatch's instruction); one usage-limit restart, resumed by the checkpoint rule (Log).
+- Files changed: improvements/improvements_tier{A,B,C,D,E,G,S,X}.md, improvements/PRIORITY.md,
+  docs/priority-graph/priority-graph.html, this file.
+- Commits: 17.0 dc6e597 · 17.a e114c58 · 17.b 6829142 · 17.c ce52ff2 · 17.c2 e03c95f · 17.d a4266ee · final (this).
+
+## Follow-up verification (each "noticed, not changed" item checked against the code at 5002fe8)
+Registered (still open):
+- (a) fetch session lock, dead holder — `mvcommon.fetch_session_lock` (mvcommon.py:478) judges a held lock only by
+  the file's mtime (`stale_after=3600`); it stores the holder pid but never checks it. Non-blocking acquirers refuse
+  for up to 1 h after the holder died: the crawler (`tools/gp_inventory.py` crawl_lock, `REFUSED … EXIT_LOCK`),
+  check_photos' child (`mainfetch._check_lock`, incl. the auto-confirm gate `maybe_auto_confirm` and the R4 sweep),
+  `mainfetch.py locate`, resolve_photos, `fetch_cleanup --apply`, the warm-up. A fetch (`blocking=True`,
+  mainfetch.py:5473) reclaims after `timeout=30` s. Seen live: R3 prep (PROGRESS ops log, a killed run's lock removed
+  by hand). Two more limits of the same primitive, recorded NOT changed by Step 7 (root STATUS.md Step 7 (11)) and
+  still open: (i) a fetch never refreshes the lock (only the crawler / check / resolve heartbeat through
+  `gp_inventory.Heartbeat`), so a fetch running > 1 h can be reclaimed as stale mid-run; (ii) the release removes the
+  lock file unconditionally (a command that yielded to a takeover deletes the new holder's lock). → IMP-C39.
+- (b) chromedriver start crash 0xC0000142 under low memory (thfix F-b; stopped a check run) — `init_driver`
+  (mainfetch.py:142–148) prints `❌ Selenium Connection Error` and returns None, no retry; the check sets
+  `run.stop = "chrome"` (resumable, mainfetch.py:6473–6476); a fetch returns at once (mainfetch.py:5504). → IMP-C40.
+- (c) the crawler's login check — `tools/gp_inventory.ensure_logged_in` (gp_inventory.py:194–199) tests
+  `"photos.google.com" not in driver.current_url`, a substring of the WHOLE URL, so a sign-in URL whose continue=
+  names photos.google.com passes (mainfetch's `_page_kind` reads the host). Dom crawl only (enumerate + item pages);
+  the rpc crawl checks every request through gprpc. `_mark_enumerated` keeps an empty listing from counting as
+  complete when ids are known. → IMP-C41.
+- (d1) warm_profiles runs no profile pre-flight (Step 14 observation) — `warm_all` / `_warm_one`
+  (tools/warm_profiles.py:94, 130) launch every `CHROME_PROFILES` key, `others` included, without
+  `mainfetch.profile_preflight`: pointed at the missing `ChromeProfile_Others`, Chrome creates an EMPTY profile that
+  lands signed out (LOGGED_OUT + the toast), and from then on the pre-flight of every fetch / check / crawl passes
+  that empty folder. → IMP-C42.
+- (d2) fetch journals are never pruned (Step 14) — no code deletes `~/.mediavault/fetch_journal/<run_id>.json`
+  (`read_fetch_journals`, mainfetch.py:1431, read by `_startup_cleanup`, `fetch_cleanup_plan` and `_resume_hints`
+  every run); (d3) the shared Chrome close says "this fetch" (Step 14) — `_close_session` (mainfetch.py:2080–2090) is
+  shared by fetch, locate, check_photos, resolve_photos and the warm-up. Both low, both Step 11 session plumbing →
+  one batch IMP-C43 (the C14 / C15 batch precedent).
+- PLAN "Suggested next tasks after IMP-C25" #10 says "Register as a new IMP after C25": resumable direct transfer
+  (HTTP Range resume in Python instead of Chrome's download manager). Its precondition — `mainfetch.py locate <id>
+  --probe-direct` showing the minted URL answers without browser cookies — was never recorded (R2 §M6 log has no
+  probe line). → IMP-C44, first step = the read-only probe.
+Dropped (fixed by a later step, or not a defect — named in the report):
+- map_photos' dry-run preview over-count + `not-listed` for an item uploaded after the crawl began → mpfix (user
+  ruling 2026-10-28 "Fix both inside C25"; in progress in MediaVault-mpfix, merged before the PR).
+- restore-bubble side-fix follow-ups (per-pid query lacks -ErrorAction Stop; the Step 11 close under load; bounded
+  driver.get; close a launched Chrome when attach fails; warm-up leaves Chrome on 9222 — also Step 11 known limit
+  (ii)) → all done in Step 14.a (`_ProcessTable.query -ErrorAction Stop`, `_terminate_session_chrome`,
+  `bound_page_loads`, `_end_launched_chrome`, warm-up `_close_session` + port guard — read in the code).
+- Step 13 live finding (quality flags read nothing live) → Step 14.b (`_jspb_field`, timeline pass); original
+  quality stays unknown by decision (DECISIONS §1f (10)).
+- Step 14: live VrseUb carried no payload[7] → pLFTfd fallback as built; R2 §M6 direct download passed.
+- acfix C1–C3 (a harmless leftover run key; M14 wording — docs updated in acfix; bookkeeping); thfix's 121–123-char
+  lines (no linter configured); Step 15's docs contract (done in Step 16.d).
+- Accepted design limits, not defects: Step 6 (12) (Windows reader vs os.replace — IMP-C24's class), Step 10 known
+  limits (i)–(iii), thfix A1 / A9 / A10 residuals.
+C37 / C38 keep their status: `_season_resume_cmd` unchanged; tests/test_rehash.py::test_disk_preflight_stops_before_
+parts_dir_created still has no device fixture; test_session_detector's logout test still stubs only resolve_targets.
+C34 / C35 / C36 → done: Step 10 items g `dd410ed`, h `e673b10` + `77984d3`, i `e333c3d` (feature 0690546); code:
+`_retry_lost_downloads` / reason `download-lost`, `_await_search_results` + `_drop_timeline`, `_mainfetch_child_env`
+(PYTHONUNBUFFERED=1). C5 / A8 / B10 → done: S2 / S3 / S3u verified stages; the three A8 stubs gone; IMP-B10 hash-once
+(`ctx.hashed`). B4 stays pending: trigger_download keeps its 1.5 s / 2 s / 1 s sleeps; only the 3 s search wait became
+the bounded poll (C35).
+
+## Design decisions (binding — recorded first so a resumed session stays consistent)
+- D1 New codes: C39 lock (3 facets) · C40 chromedriver low-memory start · C41 crawler login check · C42 the warm-up's
+  failure handling (pre-flight + toast wording; + the 14.g README's page-load timeout, 17.c2) · C43 session papercuts
+  batch (journals + wording; + the 14.g README's resolve_photos exit 0, 17.c2) · C44 resumable direct transfer. All `pending`, tier C
+  (robustness; C34's lineage for C44). Next free numbers verified: tier C ends at C38; origin/main has nothing newer.
+- D2 Bands / priorities: C39 🟡 medium, Band 1 (observed live once; no data loss; a > 1 h fetch reclaimed mid-run is
+  inferred from the code, not observed) · C40 / C41 / C42 / C43 ⚪ low, Band 1 (cheap; like C38) · C44 🟡 medium,
+  Band 4 "Feels-instant spikes" next to G2 → S7 (a spike gated on a read-only probe).
+- D3 OD-16: one 👉 pointer = IMP-C24 (its section already exists). The competing "Headline NEXT: 👉 IMP-U7" line
+  becomes the plain order after the pointer; the Band 0 intro loses "highest urgency" / "outranks everything else" (a
+  second pointer in other words); the Band 0 table order stays ("U7 stays a Band 0 entry").
+- D4 C27: tier `in_progress` (open list + how it closes); graph stays ("crit","decision") — per-case user decisions.
+- D5 C25 / C5 / A8 / B10 / C34 / C35 / C36: graph ("done","done") (the done ring, as every done node but D17).
+- D6 Graph edges: origins of the new nodes (C17→C39, C25→C39, C25→C40, C25→C41, C17→C42, C25→C42, C25→C43,
+  C25→C44, C34→C44) + the synergy edges the tier lines name and the graph lacks (C25→G2, C25→X1, C25→C7, C25→D9;
+  C25→E5 / S7 / X5 exist).
+- D7 Pre-existing gaps unrelated to C25 (baseline check): D24 has no graph node (PRIORITY Band 5 names it), D2 has a
+  node but no tier heading, D17 sits off the done ring, D4 (partial) is in the DONE list, U6 is done but not in it —
+  reported, not fixed (surgical).
+- D8 DONE list: additive 46 → 53 (+ C25, C5, A8, B10, C34, C35, C36); the existing entries are not re-audited.
+
+## Log
+- 2026-11-03, resumed after a usage-limit restart (coordinator: "apply your in-step checkpoint rule"). The tree held
+  ONE uncommitted diff: docs/priority-graph/priority-graph.html (+2/−2) = 17.d in progress, written in this same
+  session with its context intact — the header's Next line (→ IMP-C24), the footer's 2026-11-03 prefix and its task
+  count 148 → 154. KEPT (coherent: exactly those three edits; one footer, closed by "· 154 tasks</div>"). 17.d continues
+  from there (TASKS / EDGES not edited yet).
+- 2026-11-03, after the restart: the refreshed user memory names `.candidates/c25-step14g-pins/README.md` (MAIN
+  folder, untracked — a side session's Step 14.g sweep of 2026-10-28). Its "Observations recorded but NOT changed",
+  checked against the code at 5002fe8: (1) `resolve_photos` exits 0 when its walk stops on a busy port or a lost lock
+  — OPEN (`_rp_walk` → "port" / "lock-lost", `cmd_resolve_photos` keeps status "ok", RESOLVE_FAILED_STATUSES =
+  refused / error / interrupted, main.py:14255 / 14757–14771 / 18292) → folded into IMP-C43 (now "fetch-session
+  papercuts"); (2) a Selenium timeout in `warm_profiles._warm_one` aborts the whole warm-up — OPEN (`_warm_one`
+  catches only PhotosThrottledError / SessionExpiredError; `warm_all` and `main` catch nothing else; page loads are
+  bounded at 60 s since Step 14.a) → folded into IMP-C42 (now "the warm-up's failure handling"); (3) a `--manual`
+  success stays on the failed / resolve lists until check_photos confirms it — BY DESIGN (DECISIONS §1f, Step 14
+  choice (2); Step 14 A4), not registered. Its 16 written-but-unlanded guard pins (17 behaviours Step 14's disarm
+  never pinned) are NOT registered and NOT landed here (tests; outside this docs-only step; the memory says landing
+  them is the C25 owner's call) → surfaced to the orchestrator as a decision before Step 18 (sub-task 17.c2).
+- 2026-11-03 dispatched (executor-opus, Opus 5.5). Read-in: CLAUDE.md (global + project); PLAN Step 17 + Appendix
+  A/C + Suggested next; DECISIONS (all); PROGRESS (all); .candidates/c25-{acfix,thfix,step13,step13b,step13c,step14,
+  step15,step16}/STATUS.md; the mpfix worktree's STATUS (read only); root STATUS.md Steps 2–11 (main folder, read
+  only); tier C (C5, C7, C24–C38), A8, B4, B10, D9, E5, G2, S7, X1, X5; PRIORITY.md; priority-graph.html; the code
+  sites above. Baseline graph (Appendix C): TASKS 148 · EDGES 88 · badTasks 0 · badEdges 0.

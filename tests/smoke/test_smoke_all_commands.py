@@ -48,13 +48,25 @@ Anti-patterns avoided (docs/testing-strategy.md §8): never touch real C:\\Media
 library_*.json; never assert absolute device paths (rglob("*.mkv") + .name, never a
 bracketed "[id]" glob); stdout via capsys.
 """
+import contextlib
+import functools
 import hashlib
+import io
 import json
 import os
+import shlex
+import shutil
+import sys
+import tempfile
+import types
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
+import gprpc
+import gpweb
 import main
+import mainfetch
 import mvcommon
 from conftest import _ffmpeg_available, _mkvmerge_available  # skip-gate helpers
 
@@ -971,7 +983,7 @@ class TestEachCommand:
             return _types.SimpleNamespace(profile=profile_key, window_handles=[],
                                           quit=lambda: None)
 
-        def _fake_fetch(driver, entry, temp_dir=None, entry_id=None):
+        def _fake_fetch(driver, entry, temp_dir=None, entry_id=None, ctx=None):  # ctx: IMP-C25 Step 10
             fetched.append((driver.profile, entry_id))
 
         monkeypatch.setattr(mainfetch, "init_driver", _fake_init_driver)
@@ -2031,3 +2043,672 @@ class TestPrepPushRepEnrich:
         assert mvcommon.load_library() == {}, "nothing may be prepped on a refusal"
         assert os.path.isfile(path) and os.path.getsize(path) > main.DUMMY_MAX_BYTES, \
             "the source file must be untouched (not dummied)"
+
+
+# ===========================================================================
+# Group 5 — IMP-C25: the EXACT Google Photos item (docs/feature-fetch-datetime/PLAN.md Step 15)
+#
+# SMOKE SCOPE ONLY, like every group above: each new command / hook runs end to end, produces its top-level
+# effect, and keeps the one safety property its step promised — "writes nothing" for the dry runs, "nothing
+# launched" for the refusals, "no auto-confirm child" for the push family, "the incoming folder is gone" for a
+# fetch. The behaviour matrices live in the focused modules (test_gp_capture, test_gphotos_apply, test_map_photos,
+# test_check_photos, test_fetch_hygiene, test_locator, test_fetch_manual, test_resolve_photos, test_mvmeta_upgrade,
+# test_auto_confirm); the cross-command pins in tests/test_c25_regression_pins.py.
+#
+# HERMETIC by the autouse guards of tests/conftest.py (every Google Photos state dir, the fetch journal, the
+# redirected ~/Downloads, the inert process table, the Chrome profiles, the refused check_photos child, the inert
+# auto-confirm). The fake Google Photos world is tests/gphotos_fake.py (the `fake_photos` fixture); this group's
+# few helpers are self-contained on purpose — a refactor of a focused module's private helper must never break the
+# pre-PR gate. Synthetic ids only (every photo id carries "FAKE").
+# ===========================================================================
+
+C25_MOVIE_ID = "mov-en-2024-smkcapture"
+C25_PHOTO_ID = "AF1QipFAKEsmokeMergeItem01"
+
+
+def _c25_tree(root):
+    """{relative path: (size, mtime_ns)} of every file and folder under `root` — "writes nothing" = unchanged."""
+    out = {}
+    for dirpath, dirs, files in os.walk(root):
+        for name in dirs:
+            out[os.path.relpath(os.path.join(dirpath, name), root)] = None
+        for name in files:
+            st = os.stat(os.path.join(dirpath, name))
+            out[os.path.relpath(os.path.join(dirpath, name), root)] = (st.st_size, st.st_mtime_ns)
+    return out
+
+
+def _c25_no_chrome(*_a, **_k):
+    raise AssertionError("this command must not launch Chrome (nor take the fetch lock a Chrome session needs)")
+
+
+def _c25_prep_push(sandbox, make_video):
+    """prep + push ONE movie (mock_device): the push-time capture records it -> one `unverified` object (P-11).
+    -> (its library entry, its bytes)."""
+    _empty_libs(sandbox)
+    path, _sha256 = make_video(sandbox["media_dir"] / "SmokeCapture.mkv")
+    with open(path, "rb") as fh:
+        data = fh.read()
+    assert main.cmd_prep(C25_MOVIE_ID, path) is True
+    assert main.cmd_push(C25_MOVIE_ID) is True
+    return mvcommon.load_library()[C25_MOVIE_ID], data
+
+
+def _c25_record_adb(monkeypatch):
+    """main.subprocess.run -> a recorder that refuses every command. -> the list of argvs it was asked to run. The
+    LIST is the pin, not the raise: device_inventory swallows errors (a phone that cannot be listed is reported, never
+    raised), so a refused `adb devices` would otherwise go unnoticed."""
+    asked = []
+
+    def refuse(argv, *_a, **_k):
+        asked.append(list(argv))
+        raise AssertionError("no adb command may run here (map_photos / check_photos touch a phone only with --devices)")
+
+    monkeypatch.setattr(main.subprocess, "run", refuse)
+    return asked
+
+
+def _c25_bytes(tag):
+    return f"FAKE-SMOKE-BYTES:{tag}:".encode() * 40
+
+
+class _C25Clock:
+    """mainfetch's `time` and gprpc's pacing clock in one: sleep() only advances it — nothing ever waits."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def time(self):
+        return self.now
+
+    def sleep(self, seconds=0):
+        self.now += seconds
+
+
+class _C25Disk:
+    free, total, used = 10 ** 15, 2 * 10 ** 15, 10 ** 15     # P-12's disk pre-flight always passes
+
+
+def _c25_wire(monkeypatch, world):
+    """Run mainfetch IN-PROCESS on the fake Google Photos world: one fake clock for mainfetch + gprpc (nothing waits),
+    one fake driver per account session (never a Chrome), no lock file (the real one lives in ~/.mediavault), no
+    debug-port probe, no pacing jitter, plenty of disk; main's check_photos child = the REAL `mainfetch.py check`
+    command line run in-process (the conftest guard refuses a real child); today's legacy trigger_download (S4) a
+    recorder. -> namespace(spawned = the check command lines, legacy = the S4 queries)."""
+    clock = _C25Clock()
+    monkeypatch.setattr(mainfetch, "time", clock)
+    monkeypatch.setattr(gprpc, "_monotonic", clock.time)
+    monkeypatch.setattr(gprpc, "_sleep", clock.sleep)
+    monkeypatch.setattr(gprpc, "_uniform", lambda low, high: low)
+    monkeypatch.setattr(mainfetch, "init_driver", lambda profile_key="movies": world.driver(profile_key))
+    monkeypatch.setattr(mainfetch, "fetch_session_lock", lambda *a, **k: contextlib.nullcontext())
+    monkeypatch.setattr(mainfetch, "_check_lock",
+                        lambda: contextlib.nullcontext(types.SimpleNamespace(beat=lambda: None)))
+    monkeypatch.setattr(mainfetch, "_debug_port_free", lambda *a, **k: True)
+    monkeypatch.setattr(mainfetch, "_check_jitter", lambda low, high: 0)
+    monkeypatch.setattr(mainfetch.shutil, "disk_usage", lambda path: _C25Disk())
+    spawned, legacy = [], []
+    monkeypatch.setattr(mainfetch, "trigger_download",
+                        lambda driver, query, index=0: legacy.append((query, index)) or False)
+
+    def spawn(argv):
+        spawned.append(list(argv))
+        return mainfetch.cmd_check(**mainfetch.parse_check_args(argv[1:])), False
+
+    monkeypatch.setattr(main, "_cp_spawn", spawn)
+    return types.SimpleNamespace(spawned=spawned, legacy=legacy)
+
+
+def _c25_season(sandbox, world, episodes=(EP1_ID, EP2_ID)):
+    """SEASON_ID with archived whole-file episodes whose items live in the fake world's tv account under their
+    uploaded names; EP1_ID carries a TRUSTED `gphotos` block naming its item (content key + photo_id — the fast
+    path / S0a), any other episode is legacy (nothing learned — S2 by exact name). -> ({id: item}, season folder)."""
+    folder = sandbox["local_root"] / "Series" / "SMK" / "Season 01"
+    folder.mkdir(parents=True, exist_ok=True)
+    library = {SEASON_ID: {"type": "season_map", "folder_path": str(folder), "total_episodes": len(episodes),
+                           "children": list(episodes)}}
+    items = {}
+    for ep_id in episodes:
+        data, sid = _c25_bytes(ep_id), _short(ep_id)
+        name = f"SMK.S01E{ep_id[-2:]}.mkv"
+        stem, ext = os.path.splitext(name)
+        item = world.add_item("tv", f"{stem} [{sid}]{ext}", data=data, taken="2022-02-05T11:49:46Z")
+        entry = {"filename": name, "short_id": sid, "folder_path": str(folder),
+                 "hash": hashlib.sha256(data).hexdigest(), "search_term": f"{stem} [{sid}]{ext}",
+                 "status": "archived", "uploaded": True, "tech_spec": {"size_bytes": len(data)},
+                 "parent_id": SEASON_ID}
+        if ep_id == EP1_ID:
+            entry["gphotos"] = mvcommon.new_gphotos_block(
+                entry["hash"], sha1=hashlib.sha1(data).hexdigest(), accounts={"tv": {
+                    "photo_id": item.photo_id, "taken_ms": item.taken_ms, "tz_offset_ms": item.tz_offset_ms,
+                    "upload_ms": item.upload_ms, "dedup_key": item.dedup_key, "verified_by": "dedupkey",
+                    "verified_at": "2026-10-01T00:00:00Z", "source": "map"}})
+        library[ep_id] = entry
+        items[ep_id] = item
+    _write_all_libs(sandbox, library)
+    return items, folder
+
+
+class _C25ReadOnlyAdb:
+    """`adb` for ONE phone whose Media root is a real folder (here mock_device's tree): `devices`, `shell find`,
+    `shell stat` and `pull` — the read side mvmeta_upgrade's dry run needs. Any other command (push, shell mv, rm …)
+    FAILS the smoke: a dry run may never write to a phone. Installed as main.subprocess.run. .verbs records the verb of
+    EVERY call before anything is answered or refused (the device code swallows errors, so the record is the pin)."""
+
+    ROOT = "/sdcard/Media/"
+
+    def __init__(self, serial, root):
+        self.serial, self.root, self.verbs = serial, root, []
+
+    @staticmethod
+    def _answer(stdout=b"", code=0):
+        return types.SimpleNamespace(returncode=code, stdout=stdout, stderr=b"")
+
+    def _file(self, remote):
+        assert remote.startswith(self.ROOT), f"not a Media path: {remote!r}"
+        return self.root / remote[len(self.ROOT):]
+
+    def run(self, argv, *args, **kwargs):
+        argv = list(argv)
+        words = shlex.split(" ".join(argv[4:])) if argv[3:4] == ["shell"] else []   # the device shell's splitting
+        self.verbs.append("devices" if argv == ["adb", "devices"] else (words[0] if words else argv[3]))
+        if argv == ["adb", "devices"]:
+            return self._answer(f"List of devices attached\r\n{self.serial}\tdevice\r\n\r\n".encode())
+        assert argv[:3] == ["adb", "-s", self.serial], f"a phone command must name its phone: {argv!r}"
+        if argv[3] == "pull":
+            remote, local = argv[4:]
+            shutil.copyfile(self._file(remote), local)
+            return self._answer(b"1 file pulled, 0 skipped.\r\n")
+        assert argv[3] == "shell", f"a dry run must never write to a phone: {argv!r}"
+        if words[0] == "find" and words[2:] == ["-type", "f"]:
+            files = sorted(p.relative_to(self.root).as_posix() for p in self.root.rglob("*") if p.is_file())
+            return self._answer("".join(f"{words[1]}{rel}\r\n" for rel in files).encode("utf-8")
+                                if words[1] == self.ROOT else b"")
+        if words[0] == "stat" and words[1:3] == ["-c", "%s %Y %n"]:
+            lines = [f"{self._file(p).stat().st_size} {int(self._file(p).stat().st_mtime)} {p}\r\n" for p in words[3:]]
+            return self._answer("".join(lines).encode("utf-8"))
+        raise AssertionError(f"a dry run must never write to a phone: {argv!r}")
+
+
+def _c25_inventory(names_by_account):
+    """The crawler's own files (tools/gp_inventory.py's format) in the conftest-redirected GP_INVENTORY_DIR: one
+    detailed item per uploaded name — a name, or (name, the item's dedupKey) — and a COMPLETE enumeration that began
+    an hour ago (fresh — PLAN Step 9 (1)). -> {account: [the item records]}."""
+    started = datetime.now(timezone.utc).replace(microsecond=0) - timedelta(hours=1)
+    os.makedirs(mvcommon.GP_INVENTORY_DIR, exist_ok=True)
+    written = {}
+    for account, names in names_by_account.items():
+        records = []
+        for n, name in enumerate(names, 1):
+            name, key = name if isinstance(name, tuple) else (name, None)
+            key = key or gpweb.dedup_key(hashlib.sha1(_c25_bytes(f"{account}/{name}")).hexdigest())
+            records.append({"photo_id": f"AF1QipFAKEsmokeMap{n:04d}{account}", "filename": name, "width": 1920,
+                            "height": 1080, "taken_ms": 1644061786000, "tz_offset_ms": 28800000,
+                            "upload_ms": 1644148186000, "dedup_key": key,
+                            "account": account, "crawled_at": (started + timedelta(minutes=3)).isoformat(),
+                            "source": "rpc"})
+        written[account] = records
+        runs = [{"run": "run001", "event": "start", "at": started.isoformat(), "account": account, "mode": "rpc",
+                 "phase": "all"}]
+        runs += [{"photo_id": r["photo_id"], "seen_run": "run001"} for r in records]
+        runs += [{"run": "run001", "event": "enumerated", "at": (started + timedelta(minutes=2)).isoformat(),
+                  "mode": "rpc", "ids": len(records)},
+                 {"run": "run001", "event": "end", "at": (started + timedelta(minutes=5)).isoformat(),
+                  "result": "ok", "detailed": len(records), "upgraded": 0, "errors": 0, "mode": "rpc",
+                  "new": len(records)}]
+        for kind, lines in (("items", records), ("runs", runs)):
+            with open(os.path.join(mvcommon.GP_INVENTORY_DIR, f"{account}.{kind}.jsonl"), "w",
+                      encoding="utf-8") as fh:
+                fh.writelines(json.dumps(line) + "\n" for line in lines)
+    return written
+
+
+class TestC25ExactItem:
+    """One smoke per new IMP-C25 command / hook (PLAN Step 15's list)."""
+
+    # ---- prep / push capture (Step 5; P-11) -----------------------------------
+    def test_prep_and_push_capture_the_facts_and_never_confirm(self, sandbox, make_video, stub_tech_specs,
+                                                               mock_device, capsys):
+        entry, data = _c25_prep_push(sandbox, make_video)
+
+        with open(main.gpcapture.capture_path(entry["folder_path"], entry["short_id"]), encoding="utf-8") as fh:
+            doc = json.load(fh)
+        assert doc["manual_id"] == C25_MOVIE_ID
+        assert doc["prep"]["source"]["sha256"] == entry["hash"] == hashlib.sha256(data).hexdigest()
+        [push] = doc["pushes"]
+        [obj] = push["objects"]
+        assert push["complete"] is True and obj["role"] == "whole"
+        assert (obj["sha256"], obj["sha1"]) == (entry["hash"], hashlib.sha1(data).hexdigest())   # the content key
+        assert obj["uploaded_name"] == entry["search_term"]          # "<name> [<short_id>].mkv", as pushed
+        assert "gphotos" not in entry                                  # prep / push never write identity (P-11)
+        [o] = mvcommon.iter_uploaded_objects(mvcommon.load_library(), C25_MOVIE_ID)
+        assert o["cloud_state"] == "unverified"                        # a capture alone never confirms
+
+    # ---- check_photos pending --list (Step 13; offline) -----------------------
+    def test_check_photos_pending_list_is_offline(self, sandbox, make_video, stub_tech_specs, mock_device,
+                                                  tmp_path, monkeypatch, capsys):
+        entry, _data = _c25_prep_push(sandbox, make_video)
+        capsys.readouterr()
+        monkeypatch.setattr(mainfetch, "init_driver", _c25_no_chrome)
+        before = _c25_tree(tmp_path)
+
+        res = main.cmd_check_photos(**main.parse_check_photos_args(["pending", "--list"]))
+
+        out = capsys.readouterr().out
+        assert res["status"] == "ok"
+        assert [(o["manual_id"], o["label"]) for o in res["objects"]] == [(C25_MOVIE_ID, "whole")]
+        assert f"{C25_MOVIE_ID} · whole — {entry['search_term']} · pushed" in out and "account movies" in out
+        assert _c25_tree(tmp_path) == before         # offline: nothing opened (no child, no Chrome), nothing written
+
+    # ---- fetch + the post-fetch merge of a seeded learned sidecar (Steps 6 / 10) ----
+    def test_fetch_merges_a_seeded_learned_sidecar_into_the_library(self, sandbox, make_video, mock_device,
+                                                                     capsys):
+        info = _seed_single(sandbox, make_video, uploaded=True, status="archived")
+        mvcommon.append_learned("tv", {
+            "manual_id": info["id"], "label": "whole", "sha256": info["hash"], "photo_id": C25_PHOTO_ID,
+            "taken_ms": 1644061786000, "tz_offset_ms": 28800000, "upload_ms": 1644100000000,
+            "gp_filename": f"SMK.S01E01 [{info['short_id']}].mkv", "proof": "filename", "source": "check"})
+
+        main.cmd_dispatch_fetch(info["id"])    # mock_device's neutralized child, then the merge
+
+        out = capsys.readouterr().out
+        merged = "> Google Photos identity: 1 object(s) updated in the library"
+        assert merged in out and out.index("ENTRY COMPLETE.") < out.index(merged)   # after the child's output
+        block = mvcommon.load_library()[info["id"]]["gphotos"]
+        assert block["sha256"] == info["hash"]                         # P-2: pinned to the object's own bytes
+        record = block["accounts"]["tv"]
+        assert (record["photo_id"], record["verified_by"], record["confirmed"]) == (C25_PHOTO_ID, "filename", True)
+
+        main.cmd_dispatch_fetch(info["id"])    # idempotent: the folded sidecar changes nothing the second time
+        assert "Google Photos identity" not in capsys.readouterr().out
+
+    # ---- check_photos --approaches best on the fake Google Photos (Step 13; download-free) ----
+    def test_check_photos_best_on_the_fake_world_writes_only_its_run(self, sandbox, fake_photos, tmp_path,
+                                                                     monkeypatch, capsys):
+        items, _folder = _c25_season(sandbox, fake_photos)
+        world = _c25_wire(monkeypatch, fake_photos)
+        library_before = {p: p.read_bytes() for p in (sandbox["lib_series"], sandbox["lib_movies"])}
+        before = _c25_tree(tmp_path)
+
+        res = main.cmd_check_photos(**main.parse_check_photos_args([SEASON_ID, "--approaches", "best"]))
+
+        lines = [l for l in main._cp_read_results(res["run_dir"]) if l.get("kind") == "check"]
+        assert res["status"] == "ok" and len(world.spawned) == 1         # main's child, run in-process
+        assert [(l["manual_id"], l["outcome"], l["proof"]) for l in lines] == [
+            (EP1_ID, "exactly-one", "dedupkey"), (EP2_ID, "exactly-one", "filename")]
+        assert [l["photo_id"] for l in lines] == [items[EP1_ID].photo_id, items[EP2_ID].photo_id]
+        assert fake_photos.downloads == [] and "pLFTfd" not in fake_photos.rpc_ids_sent()   # download-free
+        assert set(fake_photos.rpc_ids_sent()) <= gprpc.ALLOWED_RPCIDS                      # read-only (P-9)
+        assert {p: p.read_bytes() for p in library_before} == library_before                 # library untouched
+        assert mvcommon.read_learned() == [] and mvcommon.read_failed() == []                # a dry run records nothing
+        written = [p for p in _c25_tree(tmp_path) if p not in before]
+        state = os.path.relpath(os.path.dirname(mvcommon.GPHOTOS_STATE_DIR), tmp_path)       # tmp/mv_state
+        assert written and all(p.startswith(state) for p in written), written                # run dir + journal only
+
+    # ---- map_photos dry run over a fresh synthetic inventory (Step 9) ---------
+    def test_map_photos_dry_run_maps_and_writes_only_its_run_directory(self, sandbox, make_video, tmp_path,
+                                                                       monkeypatch, capsys):
+        # Two legacy episodes: e01 is in the (fresh) tv inventory, e02 in no account — the object a phone could tell
+        # about, which Step 9b's map_photos still never asks without --devices.
+        _seed_season_two(sandbox, make_video, uploaded=True)
+        _c25_inventory({"tv": [f"SMK.S01E01 [{_short(EP1_ID)}].mkv"]})
+        adb = _c25_record_adb(monkeypatch)
+        library_before = {p: p.read_bytes() for p in (sandbox["lib_series"], sandbox["lib_movies"])}
+        before = _c25_tree(tmp_path)
+
+        res = main.cmd_map_photos(**main.parse_map_photos_args([]))
+
+        assert res["status"] == "ok" and adb == []                       # Step 9b: no phone without --devices
+        assert [(r["manual_id"], r["label"], r["status"]) for r in res["rows"]] == [
+            (EP1_ID, "whole", "mapped"), (EP2_ID, "whole", "possible-loss")]   # no push time: not "recent"
+        assert {p: p.read_bytes() for p in library_before} == library_before
+        assert mvcommon.read_learned() == [] and mvcommon.read_failed() == []                # recorded nothing
+        run = os.path.relpath(res["run_dir"], tmp_path)
+        written = [p for p in _c25_tree(tmp_path) if p not in before]
+        assert written and all(p == run or p.startswith(run + os.sep) or run.startswith(p + os.sep)
+                               for p in written), written                                     # its run dir only
+        assert {"summary.txt", "mapping.jsonl", "mapping.csv"} <= set(os.listdir(res["run_dir"]))
+
+    # ---- a fetch on the fake Google Photos: destination-direct (Steps 10–12, P-12 / P-20) ----
+    def test_a_fetch_leaves_no_incoming_folder_and_never_touches_downloads(self, sandbox, fake_photos, monkeypatch,
+                                                                           capsys):
+        items, folder = _c25_season(sandbox, fake_photos, episodes=(EP1_ID,))
+        world = _c25_wire(monkeypatch, fake_photos)
+        downloads = mainfetch.SYSTEM_DOWNLOADS_FOLDER                     # the conftest redirect (tmp_path)
+        os.makedirs(downloads)
+        for name, data in ((items[EP1_ID].filename, b"a same-named older file"), ("holiday.jpg", b"not ours")):
+            with open(os.path.join(downloads, name), "wb") as fh:
+                fh.write(data)
+        downloads_before = _c25_tree(downloads)
+
+        mainfetch.cmd_fetch_route(EP1_ID)
+
+        out = capsys.readouterr().out
+        restore = folder / main.RESTORE_DIR_NAME
+        incoming = restore / ".mv_incoming"
+        [download] = fake_photos.downloads
+        assert (download["via"], world.legacy) == ("direct", [])                           # P-20; S4 never ran
+        assert os.path.normcase(os.path.dirname(download["path"])) == os.path.normcase(str(incoming))  # Chrome -> it
+        assert (restore / "SMK.S01E01.mkv").read_bytes() == items[EP1_ID].data              # verified, in place
+        assert not incoming.exists()                                                        # P-12 (2): removed
+        assert sorted(os.listdir(restore)) == ["SMK.S01E01.mkv"]                            # nothing left behind
+        assert _c25_tree(downloads) == downloads_before                                     # ~/Downloads untouched
+        assert "✅ MOVED: SMK.S01E01.mkv" in out and "ENTRY COMPLETE." in out
+        [journal] = os.listdir(mainfetch.FETCH_JOURNAL_DIR)
+        with open(os.path.join(mainfetch.FETCH_JOURNAL_DIR, journal), encoding="utf-8") as fh:
+            doc = json.load(fh)
+        assert doc["state"] == "clean"
+        assert [(e["mode"], e["cleaned"]) for e in doc["entries"]] == [("incoming", True)]
+
+    # ---- mvmeta_upgrade dry run on the mock device (Step 13c) -----------------
+    def test_mvmeta_upgrade_dry_run_on_the_mock_device_writes_nothing(self, sandbox, make_video, stub_tech_specs,
+                                                                      mock_device, tmp_path, monkeypatch, capsys):
+        _empty_libs(sandbox)
+        path, _sha256 = make_video(sandbox["media_dir"] / "SmokeMeta.mkv")
+        assert main.cmd_prep(C25_MOVIE_ID, path) is True
+        with monkeypatch.context() as m:          # a sidecar as cmd_push wrote it before IMP-C25 Step 5 (version 1)
+            m.setattr(main, "MVMETA_SCHEMA_VERSION", 1)
+            m.setattr(main.gpcapture, "mvmeta_identity", lambda *a, **k: {})
+            assert main.cmd_push(C25_MOVIE_ID) is True
+        phone = mock_device / "sdcard" / "Media"
+        [sidecar] = [p for p in phone.rglob("*.json") if p.name.endswith(main.MVMETA_SUFFIX)]   # never a "[id]" glob
+        assert json.loads(sidecar.read_text(encoding="utf-8"))["version"] == 1
+        adb = _C25ReadOnlyAdb("FAKESMOKE01", phone)
+        monkeypatch.setattr(main, "DEVICE_ALIASES", {"movies": adb.serial})
+        monkeypatch.setattr(main, "DEVICE_CHECK_EXTRA_SERIALS", {})
+        monkeypatch.setattr(main.subprocess, "run", adb.run)
+        systmp = tmp_path / "systmp"
+        systmp.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(systmp))       # the dry run's pull folder: under tmp_path
+        capsys.readouterr()
+        before = _c25_tree(tmp_path)
+
+        res = main.cmd_mvmeta_upgrade(**main.parse_mvmeta_upgrade_args([]))
+
+        assert res["status"] == "ok"
+        assert [(r["label"], r["status"]) for r in res["rows"]] == [(C25_MOVIE_ID, "upgrade")]  # v1 -> v2 proposed
+        assert "pull" in adb.verbs and set(adb.verbs) <= {"devices", "find", "stat", "pull"}   # read side only
+        assert _c25_tree(tmp_path) == before      # nothing written anywhere: phone, library, state, temp folder
+
+    # ---- resolve_photos refuses without a terminal (Step 14; OD-14) ----------
+    def test_resolve_photos_refuses_without_a_terminal(self, sandbox, make_video, tmp_path, monkeypatch, capsys):
+        info = _seed_single(sandbox, make_video, uploaded=True, status="archived")
+        mvcommon.append_failed({"account": "tv", "manual_id": info["id"], "label": "whole", "sha256": info["hash"],
+                                "uploaded_name": f"SMK.S01E01 [{info['short_id']}].mkv", "reason": "not-found"})
+        monkeypatch.setattr(sys, "stdin", io.StringIO("p\n"))     # a pipe: explicitly NOT a terminal (even under -s)
+        monkeypatch.setattr(mainfetch, "init_driver", _c25_no_chrome)
+        monkeypatch.setattr(mainfetch, "_check_lock", _c25_no_chrome)   # nor the (real) fetch lock
+        before = _c25_tree(tmp_path)
+
+        res = main.cmd_resolve_photos(**main.parse_resolve_photos_args([]))
+
+        assert res["status"] == "refused" and res["answered"] == 0
+        assert "❌ resolve_photos is interactive: run it in a terminal" in capsys.readouterr().out
+        assert _c25_tree(tmp_path) == before      # nothing launched, nothing recorded (no answer log, no sidecar)
+
+    # ---- fetch_cleanup dry run (Step 11 g) -------------------------------------
+    def test_fetch_cleanup_dry_run_lists_the_leftovers_and_writes_nothing(self, sandbox, make_video, tmp_path,
+                                                                          monkeypatch, capsys):
+        info = _seed_single(sandbox, make_video, uploaded=True, status="archived")
+        uploaded = f"SMK.S01E01 [{info['short_id']}].mkv"
+        # The scan scope stays in tmp_path: ~/Downloads, the fetch journals and <drive>:\MV_incoming are the conftest
+        # redirects; the fetch lock it looks at is pointed here too (a real fetch must not change the smoke's answer).
+        monkeypatch.setattr(mvcommon, "FETCH_SESSION_LOCK", str(tmp_path / "no_fetch_running.lock"))
+        downloads = mainfetch.SYSTEM_DOWNLOADS_FOLDER
+        os.makedirs(downloads)
+        for name in (uploaded, uploaded + ".crdownload", "holiday.jpg"):
+            with open(os.path.join(downloads, name), "wb") as fh:
+                fh.write(b"a leftover")
+        incoming = info["folder"] / main.RESTORE_DIR_NAME / mainfetch.INCOMING_DIR_NAME
+        incoming.mkdir(parents=True)
+        (incoming / mainfetch.INCOMING_MARKER).write_bytes(b"")
+        (incoming / "Unconfirmed 1234.crdownload").write_bytes(b"half a download")
+        before = _c25_tree(tmp_path)
+
+        plan = main.cmd_fetch_cleanup()
+
+        assert {(f["where"], os.path.basename(f["path"])) for f in plan["files"]} == {
+            ("downloads", uploaded), ("downloads", uploaded + ".crdownload"),       # the expected-name family
+            ("incoming", "Unconfirmed 1234.crdownload")}                            # holiday.jpg is never listed
+        root = os.path.normcase(str(tmp_path.resolve()))
+        assert all(os.path.normcase(os.path.realpath(p)).startswith(root)
+                   for p in [f["path"] for f in plan["files"]] + plan["folders"] + plan["skipped"])
+        assert _c25_tree(tmp_path) == before      # a dry run deletes, creates and writes nothing
+
+
+@functools.lru_cache(maxsize=1)
+def _c25_dispatcher():
+    """main.py's CLI dispatcher — its `if __name__ == "__main__":` block, which is the TAIL of main.py — compiled
+    alone with main.py's own line numbers (parsing the whole 18k-line file would cost the gate ~3 s)."""
+    with open(main.__file__, encoding="utf-8") as fh:
+        lines = fh.read().split("\n")
+    start = lines.index('if __name__ == "__main__":')
+    return compile("\n" * start + "\n".join(lines[start:]), main.__file__, "exec")
+
+
+class _C25Argv:
+    """`sys` for the dispatcher: the test's argv; everything else is the real module (pytest's argv is untouched)."""
+
+    def __init__(self, argv):
+        self.argv = ["main.py", *argv]
+
+    def __getattr__(self, name):
+        return getattr(sys, name)
+
+
+def _c25_main(argv):
+    """`python main.py <argv>` without a process: the dispatcher run in a copy of main's namespace taken NOW — the
+    conftest guards and this test's patches included (returning normally is what makes a real run exit 0)."""
+    exec(_c25_dispatcher(), dict(main.__dict__, __name__="__main__", sys=_C25Argv(argv)))
+
+
+def _c25_push_family_case(verb, sandbox, make_video, monkeypatch, mock_tmdb):
+    """Set up ONE push-family run -> (argv, the hook's expected arguments, a check of the run's end state)."""
+    lib = mvcommon.load_library
+    if verb == "push":
+        _seed_single(sandbox, make_video)
+        return (["push", EP1_ID], ("push", True, EP1_ID), lambda: lib()[EP1_ID]["uploaded"] is True)
+    if verb == "push_group":
+        _seed_season_two(sandbox, make_video)
+        return (["push_group", SEASON_ID], ("push_group", None, SEASON_ID, None),
+                lambda: lib()[EP1_ID]["uploaded"] is True and lib()[EP2_ID]["uploaded"] is True)
+    _empty_libs(sandbox)
+    _forbid_input(monkeypatch)
+    folder = sandbox["media_dir"]
+    if verb == "prep_push_rep":
+        path, _h = make_video(folder / "Auto.mkv")
+        return (["prep_push_rep", "mov-en-2024-auto", path], ("prep_push_rep", None, "mov-en-2024-auto"),
+                lambda: lib()["mov-en-2024-auto"]["status"] == "archived")
+    if verb == "prep_push_rep_season":
+        make_video(folder / "SMK.S01E01.mkv", marker=b"e1")
+        make_video(folder / "SMK.S01E02.mkv", marker=b"e2")
+        return (["prep_push_rep_season", SEASON_ID, str(folder), "episodes", "1-1"],
+                ("prep_push_rep_season", None, SEASON_ID, "1-1"),
+                lambda: lib()[EP1_ID]["status"] == "archived" and lib()[EP2_ID]["status"] == "local_ready")
+    if verb == "prep_push_rep_enrich":
+        _serve_tmdb_details(monkeypatch, mock_tmdb, {f"/movie/{ENRICH_TMDB_ID}": _ENRICH_MOVIE_DETAILS})
+        path, _h = make_video(folder / "AutoEnrich.mkv")
+        return (["prep_push_rep_enrich", ENRICH_MOVIE_ID, path, "-tmdbid", str(ENRICH_TMDB_ID), "--yes"],
+                ("prep_push_rep_enrich", True, ENRICH_MOVIE_ID),
+                lambda: lib()[ENRICH_MOVIE_ID]["status"] == "archived")
+    assert verb == "prep_push_rep_season_enrich"
+    _serve_tmdb_details(monkeypatch, mock_tmdb, {f"/tv/{ENRICH_TMDB_ID}": _ENRICH_SHOW_DETAILS})
+    season_dir = sandbox["local_root"] / "Series" / "SMK.S01.2020"
+    season_dir.mkdir(parents=True, exist_ok=True)
+    make_video(season_dir / "SMK.S01E01.mkv", marker=b"e1")
+    return (["prep_push_rep_season_enrich", SEASON_ID, str(season_dir), "-tmdbid", str(ENRICH_TMDB_ID), "--yes"],
+            ("prep_push_rep_season_enrich", True, SEASON_ID, None), lambda: lib()[EP1_ID]["status"] == "archived")
+
+
+class TestC25PushFamilyHook:
+    """PLAN P-19 / Step 13b under the conftest guard: every push-family command, run through main.py's REAL CLI
+    dispatcher, reaches the auto-confirm hook exactly once, after the command and with its result — and no
+    auto-confirm child (nor any other child process) is ever spawned: the guard keeps the smoke Chrome-free."""
+
+    @pytest.mark.parametrize("verb", ["push", "push_group", "prep_push_rep", "prep_push_rep_season",
+                                      "prep_push_rep_enrich", "prep_push_rep_season_enrich"])
+    def test_a_push_family_run_reaches_the_hook_and_spawns_no_child(self, verb, sandbox, make_video, stub_tech_specs,
+                                                                   mock_device, fake_dummy, mock_tmdb, monkeypatch,
+                                                                   capsys):
+        argv, hook_args, done = _c25_push_family_case(verb, sandbox, make_video, monkeypatch, mock_tmdb)
+        spawned = []
+
+        def refuse(cmd, *a, **k):
+            spawned.append(list(cmd))
+            raise AssertionError("a push-family run spawned a child process (the auto-confirm check?)")
+
+        monkeypatch.setattr(main, "_cp_spawn", refuse)
+        monkeypatch.setattr(main.subprocess, "Popen", refuse)
+
+        _c25_main(argv)
+
+        assert done(), capsys.readouterr().out                      # the command ran to its end state
+        assert main.after_push_command.calls == [(hook_args, {})]   # the dispatcher reached the hook, once
+        assert main.maybe_auto_confirm.calls == [] and spawned == []   # ... and nothing was started
+
+
+class TestC25AliasSweep:
+    """Group 2's anti-PR#21 sweep over IMP-C25's NEW whole-library passes (PLAN Step 15: iterators / apply / check):
+    over the `sandbox_alias` library a multi_ep_alias is never an object of its own — iterators skip it, an alias id
+    resolves (one hop) to its primary — the alias entry keeps its exact 3-key shape, and nothing raises."""
+
+    @staticmethod
+    def _pushed(sandbox_alias):
+        """Push the primary THROUGH THE ALIAS id (mock_device): uploaded, with its push capture. -> (its uploaded
+        name, its bytes, the alias entry as seeded)."""
+        alias_before = dict(mvcommon.load_library()[sandbox_alias["alias_id"]])
+        assert main.cmd_push(sandbox_alias["alias_id"]) is True
+        uploaded = mvcommon.load_library()[sandbox_alias["primary_id"]]["search_term"]
+        return uploaded, sandbox_alias["orig_path"].read_bytes(), alias_before
+
+    def test_the_new_iterators_skip_the_alias(self, sandbox_alias, mock_device, tmp_path, monkeypatch, capsys):
+        primary, alias = sandbox_alias["primary_id"], sandbox_alias["alias_id"]
+        uploaded, data, alias_before = self._pushed(sandbox_alias)
+        mvcommon.append_failed({"account": "tv", "manual_id": primary, "label": "whole",
+                                "sha256": hashlib.sha256(data).hexdigest(), "uploaded_name": uploaded,
+                                "reason": "not-found"})
+        library = mvcommon.load_library()
+
+        assert list(mvcommon.iter_entry_objects(alias, library[alias])) == []
+        assert [(o["manual_id"], o["label"]) for o in mvcommon.iter_uploaded_objects(library)] == [(primary, "whole")]
+        assert [o["manual_id"] for o in mvcommon.unverified_objects(library, mvcommon._now_utc())] == [primary]
+        assert [obj["manual_id"] for _rec, obj in mvcommon.failed_objects(library)["rows"]] == [primary]
+        res = main.cmd_check_photos("pending", list_only=True)
+        assert [(o["manual_id"], o["label"]) for o in res["objects"]] == [(primary, "whole")]
+        monkeypatch.setattr(mvcommon, "FETCH_SESSION_LOCK", str(tmp_path / "no_fetch_running.lock"))
+        assert main.cmd_fetch_cleanup()["files"] == []            # its expected-name family walks the alias library
+        assert mvcommon.load_library()[alias] == alias_before
+
+    def test_check_photos_resolves_an_alias_scope_to_its_primary(self, sandbox_alias, mock_device, fake_photos,
+                                                                 monkeypatch, capsys):
+        primary = sandbox_alias["primary_id"]
+        uploaded, data, alias_before = self._pushed(sandbox_alias)
+        item = fake_photos.add_item("tv", uploaded, data=data, taken="2009-01-16T02:00:00Z")
+        _c25_wire(monkeypatch, fake_photos)
+
+        res = main.cmd_check_photos(sandbox_alias["alias_id"])
+
+        lines = [l for l in main._cp_read_results(res["run_dir"]) if l.get("kind") == "check"]
+        assert res["status"] == "ok"
+        assert [(l["manual_id"], l["outcome"], l["photo_id"]) for l in lines] == [(primary, "exactly-one",
+                                                                                   item.photo_id)]
+        assert mvcommon.load_library()[sandbox_alias["alias_id"]] == alias_before
+
+    def test_map_photos_and_the_apply_engine_resolve_the_alias(self, sandbox_alias, monkeypatch, capsys):
+        # The bulk of the real library: a LEGACY object (archived before IMP-C25 — no capture, no content key),
+        # mapped by its exact uploaded name.
+        primary, alias = sandbox_alias["primary_id"], sandbox_alias["alias_id"]
+        library = mvcommon.load_library()
+        alias_before = dict(library[alias])
+        library[primary].update(status="archived", uploaded=True)
+        mvcommon.save_library(library)
+        uploaded, sha256 = library[primary]["search_term"], library[primary]["hash"]
+        [item] = _c25_inventory({"tv": [uploaded]})["tv"]
+        adb = _c25_record_adb(monkeypatch)
+
+        res = main.cmd_map_photos(alias)                               # a dry run over an alias scope
+
+        assert [(r["manual_id"], r["label"], r["status"]) for r in res["rows"]] == [(primary, "whole", "mapped")]
+        assert adb == []
+        mvcommon.append_learned("tv", {                                 # a record naming the ALIAS id …
+            "manual_id": alias, "label": "whole", "sha256": sha256, "photo_id": item["photo_id"],
+            "taken_ms": item["taken_ms"], "tz_offset_ms": item["tz_offset_ms"], "upload_ms": item["upload_ms"],
+            "dedup_key": item["dedup_key"], "gp_filename": uploaded, "proof": "filename", "source": "check"})
+        report = main.merge_learned_gphotos()
+        assert report["status"] == "saved" and [c["manual_id"] for c in report["changed"]] == [primary]
+        library = mvcommon.load_library()
+        assert library[primary]["gphotos"]["accounts"]["tv"]["confirmed"] is True   # … lands on the primary
+        assert library[alias] == alias_before                                      # the alias: untouched
+
+    def test_mvmeta_upgrade_resolves_an_alias_scope_to_its_primary(self, sandbox_alias, mock_device, tmp_path,
+                                                                   monkeypatch, capsys):
+        self._pushed(sandbox_alias)
+        adb = _C25ReadOnlyAdb("FAKESMOKE02", mock_device / "sdcard" / "Media")
+        monkeypatch.setattr(main, "DEVICE_ALIASES", {"series": adb.serial})
+        monkeypatch.setattr(main, "DEVICE_CHECK_EXTRA_SERIALS", {})
+        monkeypatch.setattr(main.subprocess, "run", adb.run)
+        systmp = tmp_path / "systmp"
+        systmp.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(systmp))
+
+        res = main.cmd_mvmeta_upgrade(scope=sandbox_alias["alias_id"])
+
+        assert res["status"] == "ok"
+        assert [r["label"] for r in res["rows"]] == [sandbox_alias["primary_id"]]   # the primary's own sidecar
+        assert os.listdir(systmp) == []
+
+
+# One object per category prefix (PLAN P-17: all four prefixes): id -> (folder under LOCAL_ROOT, file, its account,
+# the library file holding it).
+C25_FOUR = {
+    "mov-en-2024-smkfour": (("Movies", "Four Movie (2024)"), "Four.Movie.2024.mkv", "movies", "lib_movies"),
+    "tv-en-2020-smkfour-s01e01": (("Series", "Four Show", "Season 01"), "Four.Show.S01E01.mkv", "tv", "lib_series"),
+    "ani-ja-2020-smkfour01": (("Anime", "Four Anime"), "Four Anime - 01.mkv", "anime", "lib_anime"),
+    "oth-football-2026-smkfour-s01e01": (("Sports", "Football", "Four Cup"), "FourCup.e01.mkv", "others",
+                                         "lib_others"),
+}
+
+
+class TestC25FourPrefixes:
+    """PLAN P-17 across the new identity layer: mov- / tv- / ani- / oth- each go prep → push (capture) → pending →
+    mapped by their own bytes → confirmed through the apply engine, each block in its own library file."""
+
+    def test_every_prefix_goes_from_push_to_confirmed(self, sandbox, make_video, stub_tech_specs, mock_device,
+                                                      monkeypatch, capsys):
+        _empty_libs(sandbox)
+        sandbox["lib_others"].write_text("{}", encoding="utf-8")
+        keys = {}
+        for mid, (parts, name, _account, _lib) in C25_FOUR.items():
+            folder = sandbox["local_root"].joinpath(*parts)
+            folder.mkdir(parents=True, exist_ok=True)
+            path, _sha256 = make_video(folder / name, marker=mid.encode())
+            assert main.cmd_prep(mid, path) is True and main.cmd_push(mid) is True
+            with open(path, "rb") as fh:
+                keys[mid] = gpweb.dedup_key(hashlib.sha1(fh.read()).hexdigest())
+        library = mvcommon.load_library()
+        uploaded = {mid: library[mid]["search_term"] for mid in C25_FOUR}
+
+        pending = main.cmd_check_photos("pending", list_only=True)           # offline: every push awaits backup
+        assert {o["manual_id"]: pending["routes"][(o["manual_id"], "whole")]["routing"]
+                for o in pending["objects"]} == {mid: spec[2] for mid, spec in C25_FOUR.items()}
+
+        items = _c25_inventory({spec[2]: [(uploaded[mid], keys[mid])] for mid, spec in C25_FOUR.items()})
+        adb = _c25_record_adb(monkeypatch)
+        mapping = main.cmd_map_photos()                                      # dry run: proven by their own bytes
+        assert {r["manual_id"]: (r["status"], r.get("proof")) for r in mapping["rows"]} == {
+            mid: ("mapped", "dedupkey") for mid in C25_FOUR}
+        assert adb == []                                                     # and no phone was asked
+
+        for mid, (_parts, _name, account, _lib) in C25_FOUR.items():
+            [item] = items[account]
+            mvcommon.append_learned(account, {
+                "manual_id": mid, "label": "whole", "sha256": library[mid]["hash"], "photo_id": item["photo_id"],
+                "taken_ms": item["taken_ms"], "tz_offset_ms": item["tz_offset_ms"], "upload_ms": item["upload_ms"],
+                "dedup_key": keys[mid], "gp_filename": uploaded[mid], "proof": "dedupkey", "source": "check"})
+        report = main.merge_learned_gphotos()
+
+        assert (report["status"], len(report["changed"]), report["confirmed"]) == ("saved", 4, 4)
+        for mid, (_parts, _name, account, lib_file) in C25_FOUR.items():
+            stored = json.loads(sandbox[lib_file].read_text(encoding="utf-8"))[mid]["gphotos"]   # ITS library file
+            assert stored["accounts"][account]["confirmed"] is True and stored["sha256"] == library[mid]["hash"]
+        assert main.cmd_check_photos("pending", list_only=True)["objects"] == []   # confirmed: nothing pending

@@ -117,6 +117,7 @@
 - Effort estimate: large (Selenium integration, robust matching, careful deletion)
 - Risk: high — this command DELETES the phone copy, which between upload and any future Google mishap is one of only two copies of the bytes. The Photos-presence check must match by exact UID-tagged filename (not fuzzy search), require per-chunk confirmation, and never run implicitly. Dry-run default + `--apply` + per-chunk logging are mandatory; consider requiring `cloud_confirmed` to be N days old before the daemon may invoke it.
 - If skipped: phones keep filling; batch throughput stays capped at ~1 phone-load per manual cleanup session; the daemon's autonomous upload pipeline (Tier S) hard-blocks on a human with a file manager.
+- Synergy (IMP-C25, done): the safe per-object "seen in the cloud" signal now exists, so step 1 needs no new Selenium search. It is `gphotos.accounts[<account>].confirmed` with its `verified_by`, set by `check_photos` / `map_photos --apply` and by the auto-confirm after the next push. Only a `dedupkey` or `sha256` proof means "these exact bytes are in the cloud"; a legacy object's `filename` proof is not enough to delete a phone copy. `python main.py map_photos all --devices-only` already lists which uploaded objects are still on a phone. Step 4's `cloud_confirmed` fields would duplicate `confirmed` / `verified_at` — reuse those.
 - Status: pending
 
 ---

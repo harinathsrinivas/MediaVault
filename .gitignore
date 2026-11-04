@@ -81,3 +81,9 @@ dummy_size_test_mp4/
 
 # Interruption-recovery session file — never commit
 SESSION_STATE.md
+
+# Secrets — the global rule's required patterns (~/.claude/CLAUDE.md §5); none matches a tracked file
+.env
+*.env
+*credentials*
+*secret*

@@ -68,6 +68,7 @@ and *byte-preserves* a small-video / huge-attachment MKV. See X3 for the full de
 - Effort estimate: large
 - Risk: high **(change-gate adjacent)** — extends the push upload loop, the `split_info` schema, and fetch-side routing; O-1 resume + journal scoping must hold PER REPLICA (a backup-lane failure must leave the primary's progress resumable). Plan against the change-gate checklist. Doubles (or triples) upload time + phone-storage churn — pairs with IMP-E5 phone cleanup and IMP-E7 parallel lanes.
 - If skipped: the vault stays one CSAM-AI false positive away from losing a third of the library with no recovery path. Scenario: an innocuous anime frame trips the classifier, the anime account is disabled overnight, and all 140 anime titles (dummies locally, sole copy in that account) are gone permanently.
+- Synergy (IMP-C25, done): the identity block is already keyed by account. `gphotos.accounts[<account>]` holds one verified copy per account (P-1), so a replica in a backup account is one more key, not a schema change. Fetch routing already goes per object (mvconfig override > `home_account` > id prefix, P-4), and a batch already runs one Chrome session per account. `python main.py check_photos account:<a>` verifies an account's copies without downloading anything.
 - Status: pending
 
 ## IMP-X2: Backup topology design + account-loss runbook (incl. the sharing decision)
@@ -140,6 +141,7 @@ and *byte-preserves* a small-video / huge-attachment MKV. See X3 for the full de
 - Effort estimate: medium
 - Risk: low — read-only health probing (one search per account per cycle); main cost is keeping the Selenium session-check cheap and not itself tripping rate limits.
 - If skipped: bans are found late (at next fetch), shrinking the recovery window — and if two accounts drift toward bans simultaneously, the late discovery could catch both before any re-home happens.
+- Synergy (IMP-C25, done): every account now has ready-made sentinels — any confirmed object's stored `photo_id`. A read-only item-info call (`gprpc`, stage S0a) or `python main.py check_photos <id>` finds it without a search. IMP-C25's thfix also tells a sign-out (a Google sign-in page) from a throttle, and its search canary (a search for an item known to be in the account) is this sentinel idea applied to search.
 - Status: pending
 
 ---

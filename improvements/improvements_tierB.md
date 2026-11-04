@@ -89,6 +89,7 @@
 - Effort estimate: small
 - Risk: medium — Google Photos' DOM is undocumented and shifts; a wrong wait-condition selector makes triggers FAIL (worse than slow). Keep the C2 one-retry wrapper and the max-timeout fallback identical. Consider doing this as part of the Tier S fetch-hardening spike (gphotos-cdp event patterns) instead of standalone.
 - If skipped: pure latency cost (~7.5 s/chunk); fetches still work. Matters more once the daemon fetches automatically and latency = couch wait time.
+- Note: partially addressed by IMP-C25 (done, PR pending). Its locator stages poll conditions instead of sleeping, and an object with a known `photo_id` is downloaded directly or by Shift+D on its own item page, so `trigger_download` now runs only as the legacy last-resort stage (S4) — or for every object when the kill switch `mainfetch.EXACT_LOCATOR_ENABLED` is off. Inside `trigger_download`, IMP-C35 replaced the fixed 3 s wait for search results with a bounded poll (`_await_search_results`, at most `SEARCH_RESULTS_WAIT_S` = 10 s). The other sleeps remain: 1.5 s after the page load, 2 s for the player, 1 s after Shift+D.
 - Status: pending
 
 ---
@@ -200,4 +201,5 @@
 - Effort estimate: small
 - Risk: low — set-lifetime change; the matched/done bookkeeping is per-queue-item and unaffected. (Size pre-filter must remain a HINT only — hash stays the identity authority.)
 - If skipped: attempt-2 fetches in a messy Downloads folder stay needlessly slow; with the daemon auto-fetching, the cost recurs nightly.
-- Status: pending
+- Shipped by IMP-C25 Step 10 (`0690546`): the harvester hashes every file at most once per fetch run. A file met before (same path, size and mtime) reuses its hash from `ctx.hashed`, across attempts and rounds. Since IMP-C25 Step 11, downloads also land in the entry's own `restore\.mv_incoming\` folder instead of `~/Downloads`, so stray files there are no longer read at all (except in the `~/Downloads` fallback mode, P-12).
+- Status: done (absorbed by IMP-C25 Step 10, `feature/imp_c25_fetch_exact_gp_item`, PR pending)

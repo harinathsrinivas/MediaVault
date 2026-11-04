@@ -116,6 +116,30 @@ def test_one_profile_logged_out(monkeypatch, _common_stubs):
 
 
 # ---------------------------------------------------------------------------
+# (b2) IMP-C25 thfix — Google's "unusual traffic" page is NO sign-out: THROTTLED, no toast, exit 0
+# ---------------------------------------------------------------------------
+def test_a_throttled_profile_is_not_reported_logged_out(monkeypatch, _common_stubs, capsys):
+    log_file = _common_stubs
+    throttled_key = list(mainfetch.CHROME_PROFILES.keys())[1]
+
+    def _make_driver(key):
+        if key == throttled_key:
+            return _FakeDriver("https://www.google.com/sorry/index")
+        return _FakeDriver("https://photos.google.com/")
+
+    monkeypatch.setattr(mainfetch, "init_driver", _make_driver)
+    toast_calls = []
+    monkeypatch.setattr(warm_profiles, "send_toast", lambda *a, **k: toast_calls.append((a, k)))
+
+    assert warm_profiles.warm_all() == 0
+    assert toast_calls == []                                   # nothing to re-login
+    assert f"{throttled_key}=THROTTLED" in log_file.read_text(encoding="utf-8")
+    out = capsys.readouterr().out
+    assert f"⏸️ Profile '{throttled_key}': Google showed another page than Google Photos (throttled?) — not a sign-out" \
+           in out and "logged out" not in out and "✅ No profile is signed out." in out
+
+
+# ---------------------------------------------------------------------------
 # (c) init_driver returns None → returns 1, LAUNCH_FAIL recorded, toast called
 # ---------------------------------------------------------------------------
 def test_launch_fail(monkeypatch, _common_stubs):

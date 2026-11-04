@@ -28,8 +28,14 @@ prep -> split -> push (PC -> Phone) -> phone auto-uploads to Google Photos
                                       integrity metadata
 
 When the user wants to watch:
-fetch (Google Photos -> Downloads via Selenium) -> restore (merge + verify -> back in place)
+fetch (Google Photos -> <folder>\restore\ via Selenium, exact item) -> restore (merge + verify -> back in place)
 ```
+
+Since IMP-C25 the fetch finds the **exact** Google Photos item of every uploaded object (its stored
+`photo_id`, its content key = SHA-1 = Google's `dedupKey`, the second it was taken, then names), and
+downloads it straight into the entry's `restore\` folder. Nothing lands in `~/Downloads` any more. The
+identity of every object is captured at prep/push and later confirmed in Google Photos (`map_photos`,
+`check_photos`, the auto-confirm after the next push). See §8 and §6.3 ("Optional `gphotos` block").
 
 - **User**: solo owner-operator (the developer).
 - **Target platform**: Windows 10/11 only (hardcoded paths like
@@ -95,9 +101,20 @@ ignored when reasoning about current behavior.
 ```
 C:\Users\harin\PycharmProjects\MediaVault\
 |
-|-- main.py                          ACTIVE — local pipeline + ADB push + restore (3081 lines as of 2026-06-12)
-|-- mainfetch.py                     ACTIVE — Selenium fetch from Google Photos (491 lines)
-|-- mvcommon.py                      ACTIVE — shared library I/O + hashing constants/helpers imported by both entry points (168 lines)
+|-- main.py                          ACTIVE — local pipeline + ADB push + restore + the Google Photos identity commands
+|                                    (18294 lines as of 2026-10-20)
+|-- mainfetch.py                     ACTIVE — Selenium fetch from Google Photos: exact-item locator, download hygiene,
+|                                    `locate`, the `check` engine (6313 lines as of 2026-10-20)
+|-- mvcommon.py                      ACTIVE — shared library I/O + hashing constants/helpers imported by both entry points;
+|                                    since IMP-C25 also the Google Photos identity primitives (gphotos block, learned
+|                                    sidecar, failed list, hints, resolve log) (2510 lines as of 2026-10-20)
+|-- gpweb.py                         ACTIVE (IMP-C25) — stdlib-only Google Photos parsers: item-page record, batchexecute
+|                                    envelope, one typed parser per allowlisted rpcid, locale-tolerant panel/tile text,
+|                                    name normalization, query builders, shared page scripts
+|-- gprpc.py                         ACTIVE (IMP-C25) — the ONE read-only Google Photos RPC client (allowlist, page-context
+|                                    calls, pacing, retries, circuit breaker, redacted download links) — §8.9
+|-- gpcapture.py                     ACTIVE (IMP-C25) — post-commit identity capture at prep/push (`<short_id>.gpcapture.json`,
+|                                    capture v2) + the mvmeta v2 key vocabulary — §6.5
 |-- requirements.txt                 ACTIVE — pymediainfo / undetected-chromedriver / selenium (requests + webdriver-manager still missing — §16)
 |-- requirements-dev.txt             ACTIVE — pytest
 |-- ARCHITECTURE.md                  this document
@@ -113,7 +130,10 @@ C:\Users\harin\PycharmProjects\MediaVault\
 |
 |-- tools/
 |   |-- migrate_lib.py               AUX (one-shot) — splits legacy library.json into the 3 category files
-|   `-- migrate_rehash_flag.py       AUX (one-shot, PR #20) — stamps re_hashed=false onto pre-existing split entries
+|   |-- migrate_rehash_flag.py       AUX (one-shot, PR #20) — stamps re_hashed=false onto pre-existing split entries
+|   |-- gp_inventory.py              AUX (IMP-C25) — read-only Google Photos inventory crawler, one account at a time
+|   |                                (rpc mode default, dom fallback) → D:\MediaVault_gp_inventory\ — §9.3
+|   `-- warm_profiles.py             AUX (IMP-C17) — daily Chrome-profile keep-alive; closes the Chrome it launched — §9.1b
 |
 |-- archive/                         git-tracked history; NOT used at runtime
 |   |-- main/
@@ -178,6 +198,29 @@ C:\Media\
     |-- ChromeProfile_TV\            Selenium-attached Chrome user data dir for TV (series account)
     |-- ChromeProfile_Anime\         Selenium-attached Chrome user data dir for anime
     |-- ChromeProfile_Others\        Selenium-attached Chrome user data dir for the Others/sports account (IMP-D18)
+                                     — a prerequisite the user creates and signs in; fetch/check/crawl refuse to
+                                     launch Chrome on a missing profile folder (`mainfetch.profile_preflight`)
+```
+
+IMP-C25 state that lives outside the repo (private: photo ids, account data — never committed, P-15):
+
+```
+~\.mediavault\
+|-- locks\fetch_session.lock         single-flight lock (fetch, check, crawl, warm-up, resolve, locate)
+|-- fetch_journal\<run_id>.json      one per fetch run: launched Chrome pid + profile, incoming folders,
+|                                    per-object states, pending deletes (never a URL) — §8.5
+`-- gphotos\
+    |-- learned_<account>.jsonl      append-only learned records (P-10) — folded into the library by the apply engine
+    |-- failed.jsonl                 append-only failed list (P-18)
+    |-- failed_objects.csv           its regenerated Excel view (UTF-8 BOM, CRLF; editable decision columns)
+    |-- hints.jsonl                  manual resolutions from map_photos --resolutions (check_photos hinted)
+    |-- resolved.jsonl               resolve_photos' answer log (resume + the "not uploaded" list)
+    |-- map\<UTC ts>\                one map_photos run: summary.txt, mapping.jsonl/.csv, inconsistencies.csv,
+    |                                resolutions_todo.csv, unmatched_<account>.csv, devices.csv
+    |-- check\<UTC ts>\              one check_photos run: run.json, results.jsonl, progress.json, report.txt,
+    |                                outliers.csv, applied.json
+    `-- mvmeta\<UTC ts>\             mvmeta_upgrade --apply: originals\NNNN.mvmeta.json + backup.jsonl + report.txt
+D:\MediaVault_gp_inventory\          crawler output: <account>.tiles.jsonl / .items.jsonl / .runs.jsonl / .log
 ```
 
 > The current `main.py` and `mainfetch.py` read/write
@@ -195,7 +238,9 @@ C:\Media\
 | File | Status | Purpose |
 |---|---|---|
 | `main.py` | **ACTIVE** | Single CLI entry for prep/split/push/replace/restore/scan/sort/local_status and dispatching fetch |
-| `mainfetch.py` | **ACTIVE** | Selenium-driven Google Photos download + hash-matched routing into per-entry `restore/` folder |
+| `mainfetch.py` | **ACTIVE** | Selenium-driven Google Photos download: exact-item locator (IMP-C25), downloads straight into the per-entry `restore\.mv_incoming\`, SHA-256-verified rename into `restore\`; also the read-only `locate` diagnostic and the `check` child of `check_photos` |
+| `gpweb.py` / `gprpc.py` / `gpcapture.py` | **ACTIVE** (IMP-C25) | Google Photos parsers / the read-only RPC client / prep-push identity capture |
+| `tools/gp_inventory.py` | **AUX** (IMP-C25) | Read-only per-account Google Photos inventory crawler (input of `map_photos`) |
 | `tools/migrate_lib.py` | **AUX (one-shot)** | Migrates legacy `library.json` into the three category files; safe to re-run, idempotent |
 | `requirements.txt` | **ACTIVE** | Lists `pymediainfo`, `undetected-chromedriver`, `selenium` (the active codebase also imports `requests` and `webdriver-manager` which are missing from this file) |
 | `archive/main/*.py` | LEGACY | Six historical snapshots of `main.py` (e.g. `main_old.py`, `main_perfect.py`, `main_newww.py`). `main_clean.py` is byte-identical to the active `main.py`. |
@@ -218,7 +263,7 @@ manual `sys.argv` walking (no `argparse`/`click`).
 
 ### `python main.py <subcommand> ...`
 
-All subcommands and their argument shapes (see `main.py:1397` onward).
+All subcommands and their argument shapes (the CLI dispatcher starts at `main.py:17646`).
 Brackets denote optional args; `[id]` is the manual library ID like
 `mov-en-2024-inception` or `tv-en-2016-strangerthings-s01e03`.
 
@@ -230,7 +275,7 @@ Brackets denote optional args; `[id]` is the manual library ID like
 | `prep_push_rep_season` | `prep_push_rep_season [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | `cmd_prep_push_rep_season` — sequential pipeline for a season; with `--extras` it also pushes AND dummies the season's registered extras after the episode loop |
 | `prep_push_rep_enrich` | `prep_push_rep_enrich [id] [filepath] [SIZE_MB/SIZE_GB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>] [-tmdbid <id>] [--yes\|--no-rename] [--nfo] [--no-web]` | `cmd_prep_push_rep_enrich` (IMP-D22) — calls `cmd_prep_push_rep` **unmodified**, then TMDB-enriches the just-archived movie; `-tmdbid` presets the id via `cmd_set_tmdb` (no title search), no id ⇒ the same resolve waterfall `enrich_metadata` uses; `-tvdbid` is REFUSED before anything runs (§6.3a); the `{tmdb-…}` folder rename is confirmation-gated (`--yes` = auto-confirm, `--no-rename` = auto-decline, non-interactive ⇒ do not rename) |
 | `prep_push_rep_season_enrich` | `prep_push_rep_season_enrich [id] [folder] [SIZE_MB/SIZE_GB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>] [-tmdbid <id>] [--yes\|--no-rename] [--nfo] [--no-web]` | `cmd_prep_push_rep_season_enrich` (IMP-D22) — same, over `cmd_prep_push_rep_season` **unmodified**; enrich runs only once every id THIS RUN targeted (range-scoped when `episodes` is given) reads `status == "archived"`, and is scoped by the season's OWN `base_id`, so `-tmdbid` is the primary per-season mechanism (§6.3a) |
-| `fetch_restore` | `fetch_restore [id] [OPT: episodes <range>] [tempdir <path>] [--fetchExtras]` | `cmd_fetch_restore` — dispatch fetch then restore; `tempdir` stages downloads off-volume (fetch) and reads chunks off-volume (restore); `--fetchExtras` also fetches the title's cloud-resident extras (flag-only, no prompt) |
+| `fetch_restore` | `fetch_restore [id] [OPT: episodes <range>] [tempdir <path>] [--fetchExtras] [--manual]` | `cmd_fetch_restore` (`main.py:10461`) — dispatch fetch then restore; with `tempdir` the downloads land in `<tempdir>\<safe-id>\restore\` (fetch) and restore reads chunks from there; `--fetchExtras` also fetches the title's cloud-resident extras (flag-only, no prompt); `--manual` is forwarded to the fetch only when given (IMP-C25) |
 | `set_search` | `set_search [id] [term]` | `cmd_set_search` |
 | `set_poster` | `set_poster [id] [url]` | `cmd_set_poster` |
 | `set_fanart` | `set_fanart [id] [url]` | `cmd_set_fanart` |
@@ -238,17 +283,22 @@ Brackets denote optional args; `[id]` is the manual library ID like
 | `scan_unprepped` | `scan_unprepped` | `cmd_scan_unprepped` — find video files on disk not in any library |
 | `check` | `check [id]` | `cmd_check` — re-hash file and compare to library entry |
 | `local_status` | `local_status [limit_size]` | `cmd_local_status` — show pending uploads + greedy bin-packing into `limit_size` |
-| `push` | `push [id] [SIZE_MB/SIZE_GB/COUNT val] [chunks 1-4] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | `cmd_push` (`rehash` = eager canonical re-hash; `tempdir` redirects `_parts/` off-volume); `--extras` also runs the extras **upload** phase — on an already-archived main it pushes ONLY the extras (`main.py:9147`) |
+| `push` | `push [id] [SIZE_MB/SIZE_GB/COUNT val] [chunks 1-4] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | `cmd_push` (`rehash` = eager canonical re-hash; `tempdir` redirects `_parts/` off-volume); `--extras` also runs the extras **upload** phase — on an already-archived main it pushes ONLY the extras (`main.py:18262`) |
 | `push_group` | `push_group [id] [SIZE_..] [episodes 1-3] [device <id_or_name>] [rehash] [tempdir <path>] [--extras "<f1>;<f2>"] [--extras-size <v>]` | `cmd_push_group`; `--extras` uploads the season's registered extras after the episode loop |
 | `replace` | `replace [id]` | `cmd_replace` — swap original with a tiny valid video placeholder generated by ffmpeg (`make_video_dummy`); an unknown id now prints `❌ Error: '<id>' not found in library.` before returning `False` (IMP-C14) |
 | `replace_group` | `replace_group [id]` | `cmd_replace_group` |
 | `repair_dummies` | `repair_dummies [optional: id_prefix]` | `cmd_repair_dummies` — walk all `status=="archived"` entries and upgrade legacy text-blob dummies to valid video dummies |
-| `verify_restore` | `verify_restore [id]` | `cmd_verify_restore` — dry-run hash check of files in `restore/` |
+| `verify_restore` | `verify_restore [id] [tempdir <path>]` | `cmd_verify_restore` (`main.py:8233`) — dry-run hash check of files in `restore/`; `tempdir` checks `<tempdir>\<safe-id>\restore\` (the same `_parts_base` rule as `restore`); no id prints its usage (IMP-C25 Step 11 h) |
 | `restore` | `restore [id] [tempdir <path>]` | `cmd_restore` — re-merge chunks + verify + move into place; `tempdir` reads chunks/holder from `<tempdir>/<safe-id>/restore` while the merged output stays on the media volume |
 | `restore_group` | `restore_group [id]` | `cmd_restore_group` |
 | `sort` | `sort` | `cmd_sort` — re-order JSONs by lang -> year -> size |
 | `web` | `web [--port N] [--host H] [--no-browser]` | `cmd_web` — launch the local FastAPI operations console (Disk Reclaim view) at `http://127.0.0.1:8765`; lazy-imports fastapi/uvicorn so importing `main` never hard-requires them (IMP-E12) |
-| `fetch` | `fetch [id] [OPT: episodes <range>] [--fetchExtras]` | `cmd_dispatch_fetch` — spawns `python mainfetch.py fetch ...`, forwarding `--fetchExtras` verbatim to the child |
+| `fetch` | `fetch [id] [OPT: episodes <range>] [tempdir <path>] [--fetchExtras] [--manual]` | `cmd_dispatch_fetch` (`main.py:10397`) — spawns `python mainfetch.py fetch ...` (UTF-8 + unbuffered child env, `_mainfetch_child_env`), forwarding `--fetchExtras`, `tempdir` and `--manual` (only when given); after the child exits it folds the learned sidecar into the library (`merge_learned_gphotos`, `main.py:10347`) |
+| `fetch_cleanup` | `fetch_cleanup [--apply]` | `cmd_fetch_cleanup` (`main.py:10510`, rules in `mainfetch.fetch_cleanup_plan` / `fetch_cleanup_apply`) — one-time cleanup of fetch leftovers: files in `~/Downloads` named like a library object's upload (from fetches before IMP-C25), files in marked `.mv_incoming` folders, unfinished fetch journals. Dry run lists them and writes nothing; `--apply` deletes exactly that list under the fetch lock, each file re-checked first |
+| `map_photos` | `map_photos [all\|<id>\|<prefix>] [--account movies\|tv\|anime\|others] [--devices] [--devices-only] [--resolutions <csv>] [--repair split-info\|names] [--accept-probable] [--apply] [--out <dir>]` | `cmd_map_photos` (`main.py:12830`) — backfill: maps every uploaded object to its item in the crawler's inventory (offline; no Chrome), dry run by default (run dir only); `--apply` records learned facts and runs the apply engine. Phones only with `--devices` (§8.10) |
+| `check_photos` | `check_photos <id \| season id \| series:<season id\|show folder> \| id prefix \| account:<a> \| pending \| hinted \| all> [--approaches best\|all] [--account a] [--recheck] [--apply \| --apply-run <run dir\|latest>] [--limit N] [--pace S] [--max-minutes M] [--min-age-h H] [--devices] [--list]` | `cmd_check_photos` (`main.py:14263`) — download-free verification in Google Photos (spawns `python mainfetch.py check --run <dir>`); dry run by default; `pending --list` is offline; `--apply-run` applies a reviewed run without Chrome; `--min-age-h H` looks up only objects pushed at least H hours ago (the auto-confirm passes 24) (§8.10) |
+| `resolve_photos` | `resolve_photos [failed\|<csv>] [--account a] [--id <manual_id>]` | `cmd_resolve_photos` (`main.py:14834`) — interactive (terminal only) walk of the failed list: paste the right item's URL, give a search term, or mark "not uploaded"; library changes only after a final `Apply these N changes to the library? [y/N]` (§8.10) |
+| `mvmeta_upgrade` | `mvmeta_upgrade [all\|<id>\|<prefix>] [device <alias\|serial>] [--apply]` | `cmd_mvmeta_upgrade` (`main.py:15720`) — brings the phones' existing `.mvmeta.json` sidecars to v2 with proven facts only; dry run by default; `--apply` keeps every original locally first (§6.5) |
 | `recover` | `recover [id\|folder]` / `recover --scan` | `cmd_recover` — finish an interrupted rollback (calls `recover_journal`); `--scan` lists leftover journals read-only |
 | `set_tmdb` | `set_tmdb [id] [tmdb_id]` | `cmd_set_tmdb` — sets the OPTIONAL additive leaf field `metadata.tmdb_id`; zero-byte (no rehash); alias-safe |
 | `rename_folder` | `rename_folder [old_id_or_path] "<new_name>"` | `cmd_rename_folder` — crash-safe cascading folder rename: renames the on-disk dir + atomically rewrites `folder_path` for every descendant (season_map + leaves; `multi_ep_alias` skipped); uses the existing `RollbackJournal` (journal in parent dir; `os.rename` = PONR) — additive, does NOT change the rollback contract (journal format/PONR/`RollbackHardFail` unchanged); hash-safe (moves a dir + rewrites JSON; no rehash; `uid`/`.sha256` sidecars move with the folder); works on archived dummies (cross-ref §12a) |
@@ -259,15 +309,34 @@ Brackets denote optional args; `[id]` is the manual library ID like
 | `refresh_online` | `refresh_online [id_or_prefix] [--force] [--library X]` | `cmd_refresh_online` (IMP-E16) — bulk OMDb ratings fetch for entries that have a `tmdb_id`; writes gitignored `mvonline.json` keyed by `tmdb_id`; requires `omdb.api_key` in `mvconfig.json`; `--force` re-fetches even if cached |
 | `fetch_trivia` | `fetch_trivia [id_or_prefix] [--force] [--library X]` | `cmd_fetch_trivia` (IMP-E16) — EXA web-search → GROQ-distilled `[source]`-tagged trivia facts; writes gitignored `mvextra.json`; requires `exa.api_key` + `groq.api_key` in `mvconfig.json`; `--force` re-fetches even if cached |
 
+> **Auto-confirm after a push (IMP-C25 Step 13b, P-19).** The six push-family branches of the CLI
+> dispatcher (`push` incl. its extras-only path, `push_group`, `prep_push_rep`, `prep_push_rep_season`,
+> `prep_push_rep_enrich`, `prep_push_rep_season_enrich`) keep their command's return value and then call
+> `after_push_command(<verb>, result, <id>[, ep_range])` (`main.py:15091`). It runs only when the command
+> RETURNED successfully — `False`, any exception (`RollbackHardFail`, `SystemExit`, Ctrl+C) or a usage error
+> gets nothing; for the three commands that return `None` on success and on handled failures
+> (`push_group`, `prep_push_rep`, `prep_push_rep_season`) success is read from the end state in the saved
+> library (entry archived / every target archived / every target uploaded). Then `maybe_auto_confirm()`
+> (`main.py:14973`): config `auto_confirm_after_push: false` → silent; nothing pending → silent; a web job
+> (`MEDIAVAULT_WEB_JOB` set), only pushes younger than `AUTO_CONFIRM_MIN_AGE_H = 24` h, no Chrome profile for
+> any due account, or the fetch lock held → the one reminder line
+> `🔎 N pushed object(s) await Google Photos confirmation — run: main.py check_photos pending --apply` (N = every
+> pending object); otherwise one header line — N = the due objects only, `, M newer skipped` for the younger ones —
+> and the child `python main.py check_photos pending --apply --min-age-h 24 --max-minutes 15` (streamed), which looks
+> up only the due objects: never the push that just ran (IMP-C25 follow-up, 2026-10-27 — until then the child checked
+> every pending object). A failing child or any error → one `⚠️  Auto-confirm did not finish (…)` line. It never
+> raises, so the push's own output and exit code never change. No `cmd_*` body is touched (rollback-neutral,
+> §12a).
+
 > **`episodes` keyword is a required literal trigger.** For `fetch`,
 > `fetch_restore`, and `prep_push_rep_season`, the word `episodes` must
 > appear as its own argument immediately before the range value.  
 > ✅ `fetch tv-TheBoys episodes 1-3` → `epr = "1-3"`  
 > ❌ `fetch tv-TheBoys 1-3` → `epr` stays `None`, range silently ignored  
-> Parsing: `fetch`/`fetch_restore` use a fixed positional check
-> (`sys.argv[3] == "episodes"`, `main.py:1606,1619`); `prep_push_rep_season`
-> uses a token-scanner loop (`main.py:1464-1479`) so the keyword can appear
-> anywhere after the folder path.
+> Parsing: `fetch`/`fetch_restore` scan their tokens for `episodes <range>` and
+> `tempdir <path>` in any position after the id (`main.py:18425` / `:18447`);
+> `prep_push_rep_season` uses a token-scanner loop (`main.py:17809`) so the keyword
+> can appear anywhere after the folder path.
 
 > **The `episodes <range>` filter is season-aware (IMP-C18).** All five
 > range-filter sites — `mainfetch.resolve_targets`, `cmd_push_group`,
@@ -291,7 +360,7 @@ Brackets denote optional args; `[id]` is the manual library ID like
 > banner — printing a `⚠️ … 0 items` summary instead. The run continues:
 > no error, no non-zero exit (an empty range is informative, not a
 > failure). `cmd_restore_group` now returns its int restored-count so the
-> auto-pilot can make this call (`main.py:2910`).
+> auto-pilot can make this call (`main.py:10503`).
 
 > **CLI parsing seams (IMP-C14).** `push_group`'s argv parsing is now an
 > extracted pure function `main.parse_push_group_args(args)` →
@@ -312,18 +381,18 @@ Brackets denote optional args; `[id]` is the manual library ID like
 > nested `extras` block on the TITLE entry (§6.3).
 > - **`--extras` / `-extras "<f1>;<f2>"`** — semicolon-separated **and** repeatable
 >   (`--extras A --extras B`); both forms are additive and flatten into one ordered
->   list (`parse_extras_tokens`, `main.py:4748`). Each command's own argv walker
+>   list (`parse_extras_tokens`, `main.py:7051`). Each command's own argv walker
 >   forwards only the extras tokens to that parser, so the pre-existing tokens
 >   (`SIZE_*`, `episodes`, `device`, `rehash`, `tempdir`) parse unchanged.
 > - **Register vs upload.** `prep` / `prep_season` *register* the folders — a
 >   recursive `VIDEO_EXTENSIONS` scan + SHA256 + MediaInfo, merged idempotently per
->   group (`_extras_scan_merge_and_save`, `main.py:3823`) — and never upload. On
+>   group (`_extras_scan_merge_and_save`, `main.py:5583`) — and never upload. On
 >   `push` / `push_group` the flag is purely the opt-in switch for the extras
 >   **upload** phase over the extras **already registered** on that title; those two
 >   do NOT re-scan the given paths, so register first with `prep --extras` — or use
 >   `add_extras`, which scans, pushes and dummies in one shot. The two autopilots
 >   `prep_push_rep` / `prep_push_rep_season` are one-shot: they FORWARD `--extras`
->   into their prep leg (`cmd_prep` / `cmd_prep_season`, `main.py:6668` / `:6719`), so
+>   into their prep leg (`cmd_prep` / `cmd_prep_season`, `main.py:9253` / `:9318`), so
 >   the same run registers, uploads AND dummies — no separate `prep --extras` needed
 >   on a fresh title. Their prep leg keeps `cmd_prep`'s cloud-bearing early-skip, so
 >   on an already-pushed/archived title nothing is registered (`add_extras` is the
@@ -331,7 +400,7 @@ Brackets denote optional args; `[id]` is the manual library ID like
 > - **`--extras-size` / `-extras-size`** — independent extras chunking: `none`
 >   (whole-file), a size with unit (`9900mb`, `8gb`), or the triplet
 >   `SIZE_MB|SIZE_GB|COUNT <val>`. Omitted ⇒ **inherit the command's main split**;
->   no main split either ⇒ whole-file (`push_title_extras`, `main.py:4261`).
+>   no main split either ⇒ whole-file (`push_title_extras`, `main.py:6341`).
 > - **`--fetchExtras`** (aliases `--fetch-extras`, `--extras`, `--extra`) on `fetch` /
 >   `fetch_restore` is a boolean flag with **NO prompt anywhere**; absent ⇒ no extras
 >   are queried and the spawned argv is byte-for-byte the pre-IMP-D19 one. An
@@ -344,25 +413,36 @@ Brackets denote optional args; `[id]` is the manual library ID like
 >   unconditionally (no flag) — `replace_title_extras` is a silent no-op when the
 >   title carries no extras or none are pending.
 
-### `python mainfetch.py fetch <id> [episodes <range>]`
+### `python mainfetch.py fetch <id> [episodes <range>] [tempdir <path>] [--fetchExtras] [--manual]`
 
-Single entry: `cmd_fetch_route(manual_id, ep_range)` at `mainfetch.py:455`.
-Profile selection is now data-driven via `profile_for_id(manual_id)` (IMP-C16).
+`mainfetch.cli(argv)` (`mainfetch.py:6610`) is the script's entry; it dispatches three verbs:
 
-Note the argv parsing (extracted as `mainfetch.parse_fetch_args(argv)`)
-requires `fetch` as `argv[1]` and the ID at `argv[2]`; episodes go at
-positions 3-4. The guard is now `len(argv) < 3 or argv[1] != "fetch"` →
-prints `Usage: fetch [id] [episodes] [range]` and `sys.exit(1)`, so a bare
-`python mainfetch.py fetch` (no id) prints usage and exits cleanly instead
-of raising `IndexError` on `argv[2]` as it did previously.
-`main.py:cmd_dispatch_fetch` (line 1350) constructs exactly that argv shape.
+| Verb | Parser | Runs |
+|---|---|---|
+| `fetch <id> [episodes <range>] [tempdir <path>] [--fetchExtras] [--manual]` | `parse_fetch_args` (`:5573`, the pinned 4-tuple `(mid, epr, fetch_extras, temp_dir)`) + `parse_fetch_options` (`:5609`, `{"manual": bool}`) | `cmd_fetch_route` (`:5435`) |
+| `locate <id> [episodes <range>] [--fetchExtras] [--probe-direct]` | `parse_locate_args` (`:5620`) | `cmd_locate` (`:5695`) — READ-ONLY diagnostic (§8.4) |
+| `check --run <run dir> [--limit N] [--max-minutes M] [--pace S]` | `parse_check_args` (`:5851`) | `cmd_check` (`:6548`) — the browser half of `main.py check_photos`; not meant to be run by hand |
+
+Run as a script, the module registers itself as `mainfetch` in `sys.modules` (`:6634`) so the lazy
+`import mainfetch` inside `gprpc` / `tools.gp_inventory` never loads a second copy (whose
+`SessionExpiredError` the script would not catch).
+
+Profile selection is data-driven via `profile_for_id(manual_id)` (IMP-C16; IMP-C26 overrides first) and,
+since IMP-C25, per OBJECT (§8.1).
+
+The fetch argv parsing (`mainfetch.parse_fetch_args(argv)`) requires `fetch` as `argv[1]` and the ID at
+`argv[2]`; `episodes <range>`, `tempdir <path>` and the flags may follow in any order. The guard
+`len(argv) < 3 or argv[1] != "fetch"` prints
+`Usage: fetch [id] [episodes] [range] [tempdir <path>] [--fetchExtras] [--manual]` and `sys.exit(1)`.
+`main.py:cmd_dispatch_fetch` (`main.py:10397`) constructs exactly that argv shape (`--manual` only when the
+user gave it — the web UI never does).
 
 `parse_fetch_args` also accepts the IMP-D19 boolean `--fetchExtras` (aliases
-`--fetch-extras`/`--extras`/`--extra`) anywhere after the id, returning
-`(mid, epr, fetch_extras)`. When set, `cmd_fetch_route` ALSO queues the title's
+`--fetch-extras`/`--extras`/`--extra`) anywhere after the id. When set, `cmd_fetch_route` ALSO queues the title's
 cloud-resident extras: `resolve_title_extras` → `build_extras_entries`
-(`mainfetch.py:530`) flattens each `uploaded=True` extras item into a synthetic
-leaf-shaped entry whose `folder_path` is the extra's OWN on-disk folder, so the
+(`mainfetch.py:5135`) flattens each `uploaded=True` extras item into a synthetic
+leaf-shaped entry whose `folder_path` is the extra's OWN on-disk folder (since IMP-C25 it also forwards the
+item's `gphotos` block, `manual_id` = the title id, `group_rel`, `sub_rel`, label and `tech_spec`), so the
 unchanged `fetch_single_entry` stages it into
 `<title folder_path>/<group_rel>/restore/` — exactly where the extras restore reads
 from. `mainfetch` stays flag-driven and non-interactive.
@@ -765,8 +845,9 @@ Two notable observations from the live data:
 
 There are **three entry types** per library: leaf entries, season-map
 parents, and multi-episode aliases. OPTIONAL *nested blocks* (`metadata`,
-`tech_spec`, `split_info`, and the IMP-D19 `extras` block documented at the end of
-this section) add no entry type and appear in no `required` set.
+`tech_spec`, `split_info`, the IMP-D19 `extras` block and the IMP-C25 `gphotos`
+identity block, both documented at the end of this section) add no entry type and
+appear in no `required` set.
 
 #### Leaf entry (one per file)
 
@@ -874,7 +955,7 @@ read a season_map's optional `extras` block *before* that type skip — the bloc
 the one thing a virtual entry can own on disk (see below).
 
 > **`ENTRY_TYPE_KEYS` is the authoritative source of truth for entry-type
-> key shapes.** `main.py` (top-level config block, ~`main.py:114`) defines a
+> key shapes.** `main.py` (top-level config block, `main.py:235`; its comment `main.py:130-234`) defines a
 > registry mapping each type — `leaf` / `season_map` / `multi_ep_alias` — to its
 > minimal `required` key set and a `physical` flag (`True` only for `leaf`, the
 > one type that owns a file via `folder_path` + `filename`). Only `leaf` is
@@ -895,8 +976,8 @@ same push → dummy → fetch → restore lifecycle as main content. It nests on
 **TITLE** entry: the `season_map` for a series/anime/others title, the movie **leaf**
 for a movie. It adds **no new entry type**, is in no `required` set, and round-trips
 through `save_library`/`load_library` untouched. Authoritative spec: the
-`ENTRY_TYPE_KEYS` comment (`main.py:114-165`) plus the in-code `EXTRAS DATA LAYER`
-section (`main.py:3616`); the locked shape is decision A2 in
+`ENTRY_TYPE_KEYS` comment (`main.py:130-234`) plus the in-code `EXTRAS DATA LAYER`
+section (`main.py:5243`); the locked shape is decision A2 in
 `docs/feature-extras/DECISIONS.md`.
 
 ```jsonc
@@ -930,7 +1011,7 @@ section (`main.py:3616`); the locked shape is decision A2 in
 
 - **Identity and paths.** An item's on-disk (and restore) path is
   `<title folder_path>/<group_rel>/<sub_rel>`, composed by `_extras_item_paths`
-  (`main.py:3650`) — the single seam every consumer uses, so nothing derives that path
+  (`main.py:5276`) — the single seam every consumer uses, so nothing derives that path
   independently. Both keys are stored forward-slashed (`_extras_rel_posix`) and are
   **relative**, so extras are rename-safe: `rename_folder` rewrites only `folder_path`
   and needs no extras change (covered by `tests/test_extras.py`). The converse is a real
@@ -943,10 +1024,10 @@ section (`main.py:3616`); the locked shape is decision A2 in
   wrapper keeps an arbitrary folder name from ever colliding with a reserved key. Each
   group is scanned recursively for `VIDEO_EXTENSIONS`, skipping `_parts` /
   `checksums` / `restore` / `.git` / `.idea` / `__pycache__` (`scan_extras_folders`,
-  `main.py:3698`). A folder that is not under the title folder falls back to its
+  `main.py:5324`). A folder that is not under the title folder falls back to its
   basename as `group_rel`.
 - **Additive / idempotent de-dup** is per group by normalized `sub_rel`
-  (`merge_extras_into_title`, `main.py:3771`): a new `sub_rel` is appended, an
+  (`merge_extras_into_title`, `main.py:5460`): a new `sub_rel` is appended, an
   unchanged one (same hash) is a no-op, and a **changed-byte** one is refreshed and
   reset to the unblessed state (`uploaded=false`, `status="local_ready"`, stale
   `split_info`/`re_hashed` dropped). So adding `Specials` now and `Trailers` later
@@ -961,8 +1042,8 @@ section (`main.py:3616`); the locked shape is decision A2 in
   `archived` (dummied) → `restored_local` (fetched back); `uploaded` flips true at push
   and STAYS true, so a `restored_local` extra can be re-dummied later. Every item is
   pushed / dummied / restored individually through the same primitives main content
-  uses (`push_one_extra` `main.py:4094`, `replace_one_extra` `main.py:5205`,
-  `restore_one_extra` `main.py:6188`), with per-title drivers
+  uses (`push_one_extra` `main.py:6050`, `replace_one_extra` `main.py:7508`,
+  `restore_one_extra` `main.py:8732`), with per-title drivers
   (`push_title_extras` / `replace_title_extras` / `restore_title_extras`) that never
   raise and are silent no-ops for an extras-less title. One bad extra never blocks the
   rest.
@@ -982,6 +1063,72 @@ section (`main.py:3616`); the locked shape is decision A2 in
   `extras` + `folder_path`, present on both title shapes), so it is safe on every entry
   type and yields nothing for a `multi_ep_alias`. `/api/items` (the media-type card
   grid) does not surface extras as separate cards.
+
+#### Optional `gphotos` block on each uploaded object (IMP-C25)
+
+`gphotos` is the **Google Photos identity of ONE uploaded object** (PLAN P-1). It nests on each
+object a push actually uploads: the unsplit leaf itself, each `split_info.chunks[i]`, each FLAC holder
+`split_info.carried_out_tracks[i]`, an unsplit extras item, and each `split_info.chunks[i]` of a split
+extras item. Never on a split entry itself (P-3 — its chunks and holders were uploaded, not the whole
+file); a `season_map` holds blocks only inside its `extras`; a `multi_ep_alias` holds none. Like `extras`
+it adds no entry type, is in no `required` set and changes no `physical` flag; the whole-library read
+commands ignore it (pinned by `tests/test_entry_schema_guard.py` section (d), which runs every reader
+with and without blocks and requires identical output). Authoritative spec: the `ENTRY_TYPE_KEYS`
+comment (`main.py:171-220`) and mvcommon's "GOOGLE PHOTOS IDENTITY" section (`new_gphotos_block`,
+`block_trusted`, `iter_uploaded_objects`; key tuples `mvcommon._BLOCK_KEYS` / `_ACCOUNT_KEYS`).
+
+```jsonc
+"gphotos": {
+  "v": 1,
+  "sha256": "<hex64>",                  // PIN: must equal the owning object's CURRENT hash (P-2)
+  "sha1": "<hex40>", "dedup_key": "<27 chars>",   // the content key Google Photos dedups on
+  "size_bytes": 0, "width": 0, "height": 0, "duration_s": 0.0,
+  "date_utc": "YYYY-MM-DDTHH:MM:SSZ",   // the file's Matroska DateUTC = the time Google Photos shows
+  "uploaded_name": "<exact name pushed to the phone>",
+  "pushed": {"at": "…Z", "device_id": "<serial>", "device_tz": "<tz>", "device_tz_offset_min": 0},
+  "accounts": {                          // keyed by account: movies | tv | anime | others
+    "<account>": {
+      "photo_id": "<id>", "taken_ms": 0, "tz_offset_ms": 0, "upload_ms": 0, "dedup_key": "…",
+      "gp_filename": "…", "width": 0, "height": 0,
+      "verified_at": "…Z", "verified_by": "dedupkey|sha256|filename|manual",
+      "source": "map|check|fetch|confirm|manual",
+      "approach": {"best": "photo_id", "ok": [...], "failed": [...], "at": "…Z", "via": "rpc|ui"},
+      "alternates": ["<other photo_id with the same name or bytes>"],
+      "original_quality": true, "partial_upload": false,
+      "confirmed": true                  // seen there with upload_ms AND a verified identity
+    }
+  },
+  "home_account": "<account>",           // stored only when an account holds a verified / user-vouched copy
+  "search_override": {"query": "<the user's own search text>", "at": "…Z"}
+}
+```
+
+- **Only known facts are written** (never `null`); times are UTC `…Z` strings, or epoch ms in
+  `taken_ms` / `upload_ms`.
+- **Pin rule (P-2).** A block is trusted only while `gphotos.sha256` equals the owning object's current
+  hash (leaf `hash` / chunk `hash` / `holder_hash` / extras item `hash`). An untrusted block (an extras
+  item re-mastered after its push) is ignored by every reader and replaced by the apply engine. A re-split
+  replaces `split_info` wholesale, so the old chunks' blocks go with it; their learned records become
+  orphans (reported, never applied).
+- **One writer (P-10).** Only the apply engine `main.gphotos_apply(records, capture=True, dry_run=True,
+  names=None)` (`main.py:10240`) writes blocks: one short load → patch → save, guarded by a fingerprint
+  (size, `mtime_ns`, SHA-256 of all four library files) taken before the load and re-checked right before
+  the save; a change → reload and re-patch, at most `GPHOTOS_APPLY_ATTEMPTS = 3` tries, then
+  `⚠️  Google Photos identity not applied: library changed by another process — re-run when idle.`. No lock,
+  no rollback journal (OD-2 ruling: direct overwrite is fine when no other process writes). Everything else
+  (mainfetch, the check child, the crawler) is library-read-only and appends to the learned sidecar.
+- **Proof ladder (P-5).** `dedupkey` (the item's dedupKey equals our SHA-1 — content proof, no download) >
+  `sha256` (the downloaded bytes matched) > `filename` (exact or P-6-normalized uploaded name) > `manual`
+  (the user's word; never confirms by itself). A legacy object (archived before IMP-C25 — its local copy is a
+  dummy) can only reach `filename`; new pushes reach `dedupkey`. A mapped cloud dedupKey is never turned into
+  the block's own content key.
+- **`confirmed`** is set only from sources `map | check | fetch | confirm` with a verified proof; never from
+  the push-time capture alone (P-11). `archived` keeps meaning "pushed + replaced"; `confirmed` means "seen
+  in Google Photos with that identity". No `status` value was added.
+- **Never a download URL** (P-20): only the permanent `photo_id`; a fresh link is minted at every fetch.
+- `map_photos --repair split-info` (IMP-C27 (a)) is the one other IMP-C25 writer: it can put a lost
+  `split_info` (`{is_split, total_chunks, chunks: [{filename, hash}]}`, without `method`/`val`) back onto a
+  leaf or extras item, through its own fingerprint-guarded writer.
 
 ### 6.3a TMDB enrichment conventions (Phase 5 — IMP-E3 / IMP-D17)
 
@@ -1564,14 +1711,62 @@ The write is **best-effort**: a failure logs a WARNING (`⚠️ mvmeta sidecar
 write failed (chunks are safe): ...`) and returns `False` but never raises and
 never flips a successful push to a failure — the chunks are the source of
 truth, the sidecar is disaster-recovery redundancy for rebuilding the library
-from the remote. It is written for new pushes only; the ~412 existing archived
-remotes are not back-filled.
+from the remote.
+
+**mvmeta v2 (IMP-C25 Step 5, `MVMETA_SCHEMA_VERSION = 2`, `main.py:5767`).** Every v1 key is unchanged;
+each chunk additionally carries, when known, `sha1` / `dedup_key` / `date_utc` / `uploaded_name`
+(`gpcapture.MVMETA_KEYS`), taken from the pre-upload snapshot and completed from the entry's capture file.
+The lookup is read-only and wrapped so it can never raise at the (pre-commit) write site.
+
+**`mvmeta_upgrade` — v2 for the existing sidecars (Step 13c, OD-4 + G0 q2 "Yes, with --apply only").**
+`python main.py mvmeta_upgrade [all|<id>|<prefix>] [device <alias|serial>] [--apply]` (`main.py:15720`).
+- Lists the phones read-only (`device_inventory`, Step 8) and finds each uploaded entry's / extras item's
+  sidecar by name (`classify_device_objects`). FLAC holders are in no sidecar and are left out.
+- Adds per chunk only **proven** facts, pinned to that chunk's own SHA-256: `sha1` + `dedup_key` only from a
+  capture, the trusted block's own content key, or an account record verified by `dedupkey` / `sha256` (never
+  a `filename` or `manual` proof); `date_utc` (the file's DateUTC, else a confirmed record's taken second);
+  `uploaded_name` (block, else capture; never derived); `gphotos_account` (the confirmed copy's account).
+  Keys are appended after the chunk's own keys (`MVMETA_UPGRADE_KEYS`); a v1 sidecar that gains a key
+  becomes version 2; nothing else changes.
+- A sidecar is rewritten only when it is exactly its owner's (manual_id, short_id, current chunk hashes),
+  in the writer's exact bytes (the new bytes minus the added keys must encode to the original bytes), in a
+  known version, and no present value disagrees. Anything else is listed "left as it is".
+- Dry run (default) pulls into a temporary folder that is removed again and writes nothing anywhere.
+  `--apply`, one sidecar at a time: keep the original locally
+  (`~/.mediavault/gphotos/mvmeta/<UTC ts>/originals/NNNN.mvmeta.json` + `backup.jsonl`, fsynced) → push
+  `<sidecar>.tmp` carrying the original mtime → `adb shell mv` over the sidecar → pull back and compare
+  byte for byte → `stat` that the mtime was kept. The first failure stops the run; a re-run continues.
+- Phones: without `device`, every device-check phone is read but only the push phones (`DEVICE_ALIASES`)
+  are rewritten; the check-only extra movies phone (`DEVICE_CHECK_EXTRA_SERIALS`, alias `movies#2`) is
+  rewritten only when named with `device`. Its adb commands pass its OWN allowlist (`_mu_argv_ok`: `pull`;
+  with `--apply` also `push` to `<sidecar>.tmp` and `shell mv`), always with `-s <serial>`; the device
+  check's read-only `_dev_argv_readonly` is not widened. The library is only read.
+- Kill switch `MVMETA_UPGRADE_APPLY_ENABLED = True`; `False` makes `--apply` print one line containing
+  `device rewrites disabled (OD-4 clarification)`.
+
+**Identity capture `<short_id>.gpcapture.json` (IMP-C25, `gpcapture.py`, capture v2).** After a
+**successful** `prep` / `push` (post-commit — after `journal.commit()`, never journalled, never raises) and
+after an extras scan / extras push, MediaVault writes `<folder>/<short_id>.gpcapture.json` beside the `uid`
+and `.sha256` sidecars (extras: `<title>/<group_rel>/<dir of sub_rel>/<item short_id>.gpcapture.json`).
+Shape: `{capture_version: 2, manual_id, short_id, prep: {uploaded_name, source: {sha256, sha1, dedup_key,
+date_utc, …}, tech}, pushes: [{captured_at, device_id, device_tz, device_tz_offset_min, remote_dir,
+chunk_range, complete, objects: [{role whole|chunk|holder, index, uploaded_name, size_bytes, sha256, sha1,
+dedup_key, date_utc, width, height, duration_s, approach_hint}]}]}`.
+- `sha1` comes from the SAME read pass as the SHA-256 (`mvcommon.calculate_file_hash` → `cached_sha1`);
+  `dedup_key` = unpadded urlsafe base64 of it = the dedupKey Google Photos will give the upload.
+- `date_utc` and `duration_s` are read from the Matroska header in pure Python (no subprocess).
+- The device timezone comes from ONE post-commit call `adb_base + ["shell", "getprop persist.sys.timezone;
+  date +%z"]` (`main._device_facts`, `main.py:5861`); any problem → `{}` and the push stays successful.
+- `approach_hint` = `hash` (SHA-1 known) > `taken_second` (DateUTC known) > `exact_name`.
+- `mvcommon.read_capture` reads v1 and v2 alike. The capture is the push-time record only: its objects stay
+  `unverified` (listed by `check_photos pending --list`) until confirmed in Google Photos; it never writes
+  the library (P-11).
 
 ---
 
 ## 7. main.py Deep Dive
 
-File: `C:\Users\harin\PycharmProjects\MediaVault\main.py` (3081 lines as of 2026-06-12).
+File: `C:\Users\harin\PycharmProjects\MediaVault\main.py` (18294 lines as of 2026-10-20; 3081 on 2026-06-12).
 
 > **Line-number caveat:** inline `main.py:NNN` references in this document are
 > point-in-time. The §12a PONR table was re-verified 2026-06-12; older sections
@@ -1844,6 +2039,15 @@ High-level sequence inside one `cmd_push` call:
      write the sidecar logs a WARNING but does NOT change the `True`
      return — the chunks are the source of truth.
    - Partial uploads return success but leave state untouched.
+   - **Identity capture (IMP-C25 Step 5).** After the push's last journal operation (post-commit, in both
+     capture branches, `main.py:6972` / `:6988`) the push records its objects in the entry's
+     `<short_id>.gpcapture.json` (`gpcapture.capture_after_push`) plus the device timezone (one
+     `_device_facts` call). Wrapped: a capture problem can never fail or roll back a committed push.
+     `push_one_extra` does the same per extras item; `push_title_extras` asks the device at most once per
+     title, after the first extra uploaded. The OD-3 journal-op instrumentation test proves every
+     `RollbackJournal` record is identical with and without the capture layer.
+   - **Auto-confirm** of older unverified pushes runs only after the whole command returned, at the CLI
+     dispatcher (`after_push_command`, §5) — never inside `cmd_push`.
 
 ADB device selection is now an opt-in CLI flag (`device <id_or_name>`)
 that resolves to an `adb -s <serial>` prefix on every subprocess call.
@@ -1982,9 +2186,10 @@ archived video.
 
 ### 7.7 Restore flow
 
-#### `cmd_verify_restore(manual_id)` (lines 838-892) — DRY RUN
+#### `cmd_verify_restore(manual_id, temp_dir=None)` (`main.py:8233`) — DRY RUN
 
-Re-reads each file in `<folder>/restore/` and compares SHA256 against
+Re-reads each file in `<folder>/restore/` (with `temp_dir`: `<temp_dir>/<safe-id>/restore`, through the
+same `_parts_base` as `cmd_restore` — IMP-C25 Step 11 h) and compares SHA256 against
 either:
 - For split: each chunk's hash in `entry["split_info"]["chunks"]`.
 - For single: the entry's `hash`.
@@ -2027,7 +2232,9 @@ For split entries:
    corruption/tool-drift alarm and return BEFORE the PONR (chunks kept) without
    touching `hash`. This replaces the old blind overwrite (the default mkvmerge
    merge was non-deterministic, so the old hash was never verifiable).
-5. Delete each chunk file. Remove the now-empty `restore/` folder.
+5. Delete each chunk file. Remove the now-empty `restore/` folder. (A leftover `restore\.mv_incoming\`
+   from an interrupted fetch only makes this empty-folder cleanup skip; `fetch_cleanup` or the next fetch
+   removes it. `cmd_restore` / `restore_one_extra` were deliberately not changed by IMP-C25 — change-gate.)
 6. Set `status = "restored_local"`.
 
 For single-file entries:
@@ -2109,14 +2316,19 @@ restores nothing. The function now RETURNS its int restored-count so
   optional `episodes A-B` filter (resolved via the shared
   `mvcommon.episode_num_from_id`, IMP-C18); stops the whole batch on any
   push failure to "prevent mess".
-- `cmd_dispatch_fetch(manual_id, episode_range)` (1350-1364) — shells
-  out: `subprocess.run(["python", "mainfetch.py", "fetch", id, "episodes", range])`.
-- `cmd_fetch_restore(manual_id, episode_range)` (`main.py:2879`) —
+- `cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False, temp_dir=None, manual=False)`
+  (`main.py:10397`) — spawns `["python", "mainfetch.py", "fetch", id, ("episodes", range), ("--fetchExtras"),
+  ("tempdir", path), ("--manual")]` through `subprocess.Popen` with `_mainfetch_child_env()` (UTF-8 +
+  `PYTHONUNBUFFERED=1`, IMP-C36), re-printing every line as it arrives, then `merge_learned_gphotos()`
+  folds the learned sidecar into the library (one `   > Google Photos identity: N object(s) updated in the
+  library[, M newly confirmed in Google Photos][, K conflict(s) not applied].` line when something changed;
+  silent otherwise; skipped after a Ctrl+C — the records wait in the sidecar).
+- `cmd_fetch_restore(manual_id, episode_range=None, fetch_extras=False, temp_dir=None, manual=False)` (`main.py:10461`) —
   dispatch fetch, then call `cmd_restore_group`/`cmd_restore` depending
   on entry type. **0-match guard (IMP-C18):** for a season_map run with
   an `episode_range`, if `cmd_restore_group` returns 0 it suppresses the
   green `✅✅✅ FETCH & RESTORE COMPLETE.` banner and prints a
-  `⚠️ … 0 items (range … selected nothing)` summary instead (`main.py:2910`).
+  `⚠️ … 0 items (range … selected nothing)` summary instead (`main.py:10503`).
   Single-item / no-range runs keep the original banner; exit code is
   unchanged (the function returns `None` throughout).
 
@@ -2124,39 +2336,64 @@ restores nothing. The function now RETURNS its int restored-count so
 
 ## 8. mainfetch.py Deep Dive
 
-File: `C:\Users\harin\PycharmProjects\MediaVault\mainfetch.py` (491 lines).
+File: `C:\Users\harin\PycharmProjects\MediaVault\mainfetch.py` (6313 lines as of 2026-10-20 — IMP-C25
+rewrote the fetch selection, added download hygiene, the read-only `locate` diagnostic and the `check`
+engine). Section map (grep the banner comments): configuration + `init_driver` (`:41-180`), session and tab
+handling (`:184-515`), `trigger_download` = today's legacy attempt, S4 (`:516`), download hygiene P-12
+(`:668-2257`), `FetchContext` + `build_fetch_queue` (`:2259-2548`), the exact-item locator (`:2551-4154`),
+the harvester + lost-download retry + failed-list booking (`:4183-4643`), `--manual` + identification block
+(`:4644-4883`), `_fetch_items` / `fetch_single_entry` (`:4886-5006`), target resolution + account routing
+(`:5008-5393`), `cmd_fetch_route` (`:5435`), CLI parsers, `locate` (`:5617-5838`), `check` (`:5840-6609`),
+`cli` (`:6610`).
 
-### 8.1 Configuration (lines 25-48)
-
-Same library paths as `main.py`. Adds:
+### 8.1 Configuration, accounts and per-object routing
 
 ```python
-CHROME_PROFILES = {
+CHROME_PROFILES = {                       # mainfetch.py:41
     "movies": r"C:\Media\Utils\ChromeProfile",
     "tv":     r"C:\Media\Utils\ChromeProfile_TV",
     "anime":  r"C:\Media\Utils\ChromeProfile_Anime",
+    "others": r"C:\Media\Utils\ChromeProfile_Others",
 }
-CHROME_PROFILE_NAME       = "Default"
-SYSTEM_DOWNLOADS_FOLDER   = os.path.join(os.path.expanduser("~"), "Downloads")
-```
-
-Three separate Chrome user-data directories exist because the user has three
-distinct Google accounts: movies, TV series, and anime. Routing is decided
-in `cmd_fetch_route` via a data-driven map (IMP-C16; IMP-A5 will source
-this from `mvconfig.json`):
-
-```python
-ID_PREFIX_PROFILE = [("ani", "anime"), ("tv", "tv"), ("mov", "movies")]
+ID_PREFIX_PROFILE = [("ani", "anime"), ("tv", "tv"), ("mov", "movies"), ("oth", "others")]   # :49
 DEFAULT_PROFILE = "movies"
-
-def profile_for_id(manual_id):
-    for prefix, key in ID_PREFIX_PROFILE:
-        if manual_id.startswith(prefix):
-            return key
-    return DEFAULT_PROFILE
+CHROME_PROFILE_NAME = "Default"
+SYSTEM_DOWNLOADS_FOLDER = os.path.join(os.path.expanduser("~"), "Downloads")   # fallback mode only
+EXACT_LOCATOR_ENABLED = True              # :59 — the P-14 kill switch (see §8.4)
 ```
 
-### 8.2 Selenium + Chrome attach-mode setup (`init_driver`, lines 51-111)
+Four Chrome user-data directories exist because the user has four Google accounts (movies, TV series,
+anime, others/sports). `ChromeProfile_Others` is a user prerequisite (IMP-D18 / OD-10): until it exists,
+`profile_preflight("others")` (`:299`) returns a one-line remediation and fetch / check / crawl refuse to
+launch Chrome on it (Chrome would silently create an empty, signed-out profile).
+
+**Routing — per OBJECT (IMP-C26 Step H + IMP-C25 P-4).** `_object_account(owner_id, block)` (`:5290`)
+answers, for every uploaded object, `(account, "override" | "learned" | "prefix")`:
+
+1. the `mvconfig.json` `fetch_account_overrides` match for the owning id — the user's escape hatch, the
+   longest matching key wins, so an exact id beats a prefix (`_account_overrides` `:5232` validates it once
+   per config object; a bad entry gives one stderr warning and is ignored);
+2. the account its **trusted** `gphotos` block learned (`mvcommon.home_account`) when that differs from the
+   prefix default;
+3. the id prefix (`_prefix_profile` — today's routing).
+
+`profile_for_id(manual_id)` (`:5283`) = override, else prefix (the entry-level answer used for the first
+`[Account]` line). `_account_groups` (`:5345`) splits a batch into one group per account: the selector's own
+account first, then `CHROME_PROFILES` order. One Chrome session per account runs sequentially under the one
+`fetch_session_lock`. An entry whose objects span accounts is recorded in `ctx.plans` and fetched in each
+of those sessions — only its own objects in each: the first session prints today's `🔹 PROCESSING:` header
+and `> [Account] k of its N file(s) live in another account — fetched in the '<x>' session.`, a later one
+`🔸 CONTINUING: …` (deliberately not a web-progress marker), a non-last one ends `⏸️ n file(s) left for the
+'<x>' session.`, and the last gives the entry's verdict. An override that contradicts an object's verified
+account prints `⚠️ override '<o>' for <id> differs from the verified account '<v>' (n file(s)) — the
+override wins.`. With no valid override and nothing learned that differs from the prefix, the result is
+today's single session, byte for byte (pinned).
+
+The motivating case: 31 archived X-Files episodes (`tv-` ids) live in the MOVIES account, so
+id-prefix routing could never fetch them (IMP-C26); the user's `fetch_account_overrides` entries route them
+there today, and once mapped, their learned `home_account` does the same without an override.
+
+### 8.2 Selenium + Chrome attach-mode setup (`init_driver`, `mainfetch.py:87`)
 
 Rather than letting Selenium spawn Chrome with `--user-data-dir`
 (Chrome refuses to load some Google sessions when launched by Selenium
@@ -2166,13 +2403,22 @@ in headful mode), `init_driver`:
    "--profile-directory=Default", "--remote-debugging-port=9222",
    "--disable-gpu", "--window-size=1920,1080", "--no-first-run",
    "--no-default-browser-check", "--disable-session-crashed-bubble",
-   "--disable-quic", "about:blank"])`
+   "--hide-crash-restore-bubble", "--disable-quic", "about:blank"])`
    - `--disable-quic` (IMP-C29) keeps downloads on TCP. Google serves a
      Photos download over HTTP/3 (QUIC) when Chrome allows it, and a QUIC
      download fails for good after a stall of about 8 s; over TCP it
      survives a 60 s stall. The switch only applies when this call
      starts the browser: a Chrome that is already running keeps the
      options it was started with.
+   - No "Restore pages?" bubble (IMP-C25, 2026-10-08): Chrome 154 ignores
+     `--disable-session-crashed-bubble` and leaves `profile.exit_type
+     "Crashed"` in the profile's `Default\Preferences` even after a
+     graceful close. So `--hide-crash-restore-bubble` is passed too, and
+     `mark_profile_clean_exit(<profile>)` runs just before the launch and
+     again once a Chrome a run closed or terminated is gone: it sets
+     `exit_type "Normal"` + `exited_cleanly true` (only while no Chrome
+     runs on that profile; atomic; every other key kept; never raises).
+     The crawler (`tools/gp_inventory.py launch_chrome`) does the same.
 2. `time.sleep(3)` — give Chrome time to bind port 9222.
 3. Build a Selenium `Options` with
    `add_experimental_option("debuggerAddress", "127.0.0.1:9222")`.
@@ -2184,36 +2430,50 @@ in headful mode), `init_driver`:
    focus. chromedriver attaches to whichever target it finds first; on
    Chrome 154 that is the Gemini side panel. If no Photos tab can be
    had, `init_driver` returns `None`.
+7. **Bounded page loads (IMP-C25 Step 14 c).** `bound_page_loads(driver)` (`:73`) sets a 60 s page-load
+   timeout (`FETCH_PAGE_LOAD_S`) before the first navigation — Selenium's 300 s default once hung a live
+   probe for ~5 min. The direct download lowers it to 15 s for its own navigation; check sessions use 60 s.
+8. **A failed attach ends the Chrome it launched (Step 14 c).** If chromedriver-manager, the attach, or the
+   Photos tab fails — or Ctrl+C arrives meanwhile — `_end_launched_chrome` ends the Chrome this call
+   started, so it never stays behind on port 9222 and the profile. A `chrome.exe` that handed over to a
+   Chrome already running exits at once; that Chrome is never touched (attach mode).
+9. The `Popen` handle and the profile folder ride on the driver (`driver._mv_chrome_proc`,
+   `_mv_user_data_dir`) for the fetch journal and the close (§8.5).
 
 This means **all cookies, saved logins, and Google Photos session state
 live in `C:\Media\Utils\ChromeProfile*`** and persist across runs. The
 user must log in once manually in each profile; thereafter the script
 inherits that login.
 
-### 8.3 Search-by-UID flow (`trigger_download`, lines 150-216)
+### 8.3 Today's legacy attempt = stage S4 (`trigger_download`, `mainfetch.py:516`)
 
-For each file to download, fire-and-forget triggers:
+`trigger_download(driver, query, index)` is the pre-IMP-C25 search-and-click attempt, kept as the
+**last resort** (stage S4) and pinned by a source digest (`tests/test_fetch_search_wait.py`; a change is a
+reviewed re-pin). It runs only for objects the exact-item stages (§8.4) did not settle, and for every
+object when `EXACT_LOCATOR_ENABLED = False`. Fire-and-forget:
 
-1. `driver.get("https://photos.google.com")`, wait for `<body>`.
-2. Send keystrokes via ActionChains:
-   - `"/"` — Google Photos' "open search" shortcut.
-   - `<query>` — the search term, typically
-     `<filename> [<short_id>].mkv`. Falls back to `entry["search_term"]`
-     or `entry["filename"]` if precision search fails (attempt 2).
-   - `ENTER` — execute search.
-3. Wait 3 seconds for results.
-4. Click the Nth thumbnail (`index` argument). Locator strategy:
-   - Primary: `driver.find_elements(By.CSS_SELECTOR, "a[href*='./photo/']")`
-     filtered to visible elements wider than 50 px.
-   - Fallback: XPath `//div[contains(@style, 'background-image')]` with
-     same visibility/size filter.
-   - Click via `driver.execute_script("arguments[0].click();", el)` to
-     dodge interception by overlays.
-5. Sleep 2 s for the photo player to open.
-6. Send `Shift+D` — Google Photos' built-in "download original" shortcut.
-   This is what actually puts a `.crdownload` into the Downloads folder.
-7. Sleep 1 s, then `Escape` to close the player so the next trigger can
-   navigate back to search cleanly.
+1. `use_photos_tab(driver)` (IMP-C29 — a focused `photos.google.com` page, never the Gemini side panel),
+   `driver.get("https://photos.google.com")`, wait for `<body>`, `check_session_alive`.
+2. Keystrokes via ActionChains: `"/"` (open search), `<query>`, `ENTER`. What is typed comes from the queue
+   item built by `build_fetch_queue` (`:2447`):
+   - **Attempt 1** (`specific_query`, index 0): for a whole file the plain library `filename` — WITHOUT
+     the ` [<short_id>]` tag the uploaded name carries (RESEARCH F25: this query found zero results for 4
+     of 11 sampled objects); for a chunk / FLAC holder its exact chunk / holder name (which IS the uploaded
+     name — exactly one result in every sample).
+   - **Attempt 2** (`fallback_query`): the entry's `search_term` (else its `filename`), clicking tile index
+     = the chunk index (0 for a whole file) — the blind positional click.
+3. `_await_search_results(driver)` (`:449`, IMP-C35) replaces the old fixed 3 s sleep: a bounded poll
+   (`SEARCH_RESULTS_WAIT_S = 10`, every 0.5 s) until the `/search/` page shows settled results, says
+   "No results", or has shown only the **"Most relevant to your search"** strip for 4 looks in a row (a
+   miss). If the page never reached `/search/` or still shows the home timeline, it returns a problem line
+   (`❌ … — this is not a 'Not found'.`) and nothing is clicked.
+4. Click the Nth thumbnail. The primary selector `a[href*='./photo/']` matches nothing on search pages
+   (RESEARCH F14), so in practice the XPath fallback `//div[contains(@style, 'background-image')]` does the
+   clicking. Both lists pass `_drop_timeline` (`:500`), which removes home-timeline thumbnails AND the
+   tiles of the "Most relevant to your search" strip (live finding 2026-10-05: its first tile — another
+   show — was the wrong item the legacy index-0 click had picked). Click via
+   `driver.execute_script("arguments[0].click();", el)`.
+5. Sleep 2 s, send `Shift+D` (download original), sleep 1 s, `Escape`.
 
 The function returns `True` if the trigger was sent (it does NOT wait
 for the download to complete).
@@ -2223,85 +2483,220 @@ when the first pass returns `False` (0 thumbnails / index out of range) **or**
 raises a Selenium fault, printing one `⏳ Retry 2/2 after 5s` line. The second
 pass's result is final, so the `True`/`False` return contract is unchanged.
 
-### 8.4 Parallel-trigger + harvester (`fetch_single_entry`, lines 233-372)
+A backstop of 3 consecutive zero-result attempts on one driver (IMP-C6) raises `PhotosThrottledError` (a
+`SessionExpiredError`, so every handler still stops the batch): each attempt passed `check_session_alive` on a
+Google Photos page, so the profile IS signed in — the search answers nothing (IMP-C25 thfix, 2026-10-28; until then
+it was reported as "logged out"). The fetch then prints `⏸️ Google Photos is throttled in '<account>' (3 searches in
+a row found nothing although the profile is signed in) — the fetch stops here; …` (§8.8). The source digest was
+re-pinned for this change.
 
-The clever bit. For a single entry (possibly split into N chunks), the
-function:
+### 8.4 The exact-item locator — stages S0a–S3u (candidate C + 10 cherry-picks)
 
-1. Builds a queue of pending downloads (each has
-   `specific_query`, `fallback_query`, `fallback_index`, expected `hash`
-   and `dest` folder).
-2. Skips chunks/files already present in the entry's `restore/` folder.
-3. Runs up to **2 attempts**:
-   - **Attempt 1**: precision search — query is the chunk filename
-     (`xxx.chunk.001.mkv`), index 0.
-   - **Attempt 2**: fallback — query is the broader `search_term`, index
-     is the chunk index `i` (so different chunks click different
-     thumbnails in the search-result grid).
-4. Within each attempt, the function **fires all triggers first**
-   (with 2 s pauses between them) so Chrome ends up with multiple
-   parallel downloads going. Then it enters the **harvester loop**.
+`fetch_single_entry` (`:4952`) → `_fetch_items` (`:4886`) runs, per entry and per account session:
+`_prepare_downloads` (§8.5) → **`_run_locator_phase`** (`:3819`, only when `EXACT_LOCATOR_ENABLED`) →
+today's two attempts (§8.3) for whatever is still pending → IMP-C34's one retry of a lost download →
+failed-list booking (`_record_unfetched`, then `_record_wrong_items`) → the identification block /
+`--manual` round (§8.6) → `_finish_downloads`.
 
-#### The harvester loop (lines 304-366)
+The engine is **Step 12 candidate C, "hybrid arbitration"**, chosen by the user at 🚦 G12 (2026-10-12,
+DECISIONS §1f; judge `.candidates/c25-step-12/DECISION.md`: the only candidate with zero wrong downloads
+under both an RPC outage and an item-page format change), plus the judge's 10 cherry-picks
+(`.candidates/c25-step-12/C/PICKS_STATUS.md`).
 
-```
-start = now()
-base_timeout = 300 seconds
-processed = set()
-while True:
-    active = files ending in .crdownload in ~/Downloads
-    if time - start > base_timeout:
-        if any .crdownload active:
-            print "extending..." and continue (sleep 5)
-        else:
-            break (timeout)
-    if all queue items status == "done": break
+**`locate_object(driver, locator, ctx, approaches="best", exclude=(), stages=None)`** (`:3479`) is
+READ-ONLY: it navigates the session's Photos tab, types searches and asks allowlisted RPCs; it never
+downloads, clicks a tile, presses Shift+D or writes anything. The waterfall (P-8, `_LOCATE_STAGES`
+`:2602`), with the object's verified `approach.best` moved first:
 
-    for each completed .mkv / .mp4 file in ~/Downloads (skipping .crdownload):
-        if size == 0: skip
-        sleep 0.5     # stability
-        hash = SHA256(file)
-        match queue item by hash == queue[*].hash AND status == "pending"
-        if matched:
-            move file -> matched.dest/matched.filename (overwrite if exists)
-            mark matched.status = "done"
-        elif hash matches an already-done item:
-            delete duplicate
-    if no new found this iteration: sleep 5
-```
+| Stage | approach | How candidates are found |
+|---|---|---|
+| S0a | `photo_id` | the learned `photo_id` of this account, then its `alternates` — RPC item info (`VrseUb` + `fDcn4b`), else the item page |
+| S0b | `hash` | content-hash lookup `swbisb` with the object's SHA-1 (one batch of ≤ 50 per entry). RPC only |
+| S1 | `taken_second` | the items taken in the object's second (learned `taken_ms`, else its DateUTC): `lcxiM` at that timestamp, else the web day search (the whole day is read before filtering to the second) |
+| S2 | `exact_name` | the exact uploaded name (whole file: `<name> [<short_id>]<ext>`; chunk / holder: its exact name) — `EzkLib`, else the search box |
+| S3 | `title_sid` | title + short_id; then the **bare short id** when that pinned nothing (live 2026-10-07: an anime episode was found only that way) |
+| S3u | `user_query` | the user's `search_override` from the failed list (OD-5) |
+| (S4 preview) | `legacy` | for a content-keyed object nothing pinned: the two queries today's attempts would type, listed and verified (OD-5) |
 
-Key properties:
-- **Hash-based routing**: downloads land in `~/Downloads` with whatever
-  filename Google Photos chose (often the original name, sometimes with
-  a `(1)` suffix on duplicates). Routing relies entirely on the SHA256
-  matching the expected hash from the library — not on filename
-  matching. This makes the system robust to renames, mixed case, etc.
-- **Self-extending timeout**: the 5-minute timer is suspended as long as
-  at least one `.crdownload` exists. So a 60 GB movie download won't
-  fail just because the timer expired — only true stalls (no progress
-  AND no active download) trigger a real timeout.
-- **Two-phase search**: precision attempt first, broader fallback
-  second. The fallback uses `fallback_index = i` so that chunk N of a
-  movie hits the Nth tile in the search results.
+- **Verification, never position.** A candidate counts only when its record PROVES it (P-5): its dedupKey
+  equals the object's content key (proof `dedupkey`), or — for an object without one — its file name is
+  the exact uploaded name (proof `filename`; P-6 normalized counts, flagged `name_normalized`). Never a tile
+  index; a chunk set is resolved per chunk by dedupKey or exact `.chunk.NNN` name. The "Most relevant to
+  your search" strip is never treated as a result (`gpweb.SEARCH_STATE_JS` / `TIMELINE_LINKS_JS`). More than
+  `LOCATE_MAX_CANDIDATES = 20` names-only candidates = `ambiguous`, never a guess (no cap for a content-keyed
+  RPC listing: every record carries its dedupKey — cherry-pick 9).
+- **Per-stage fallback.** Each stage asks RPC first and, on `gprpc.RpcUnavailable` (incl. `RpcShapeError` /
+  `RpcServerError`), runs the SAME stage on the web pages (`_stage_listing` `:3074`). One record cache per
+  run (`ctx.locator`) feeds both paths: a season or a chunk set lists and opens each item at most once.
+- **Drift detector** (`_arbitrate` `:3295`). Once per run the first RPC-located object is cross-checked
+  against its item page's record (dedupKey, taken / upload time, tz offset). A disagreement prints
+  `⚠️ Google Photos' internal answers disagree with the item page (…) — RPC is off for the rest of this
+  run; the web pages decide.` and that object is located again from the pages.
+- **Stale photo_ids** are recorded only when RPC AND the item page both call the item gone.
+- **OD-5 skip.** When every candidate today's attempts could click is proven another item, the object
+  ends `failed` with reason `s4-skipped` (today's blind attempts could only download wrong multi-GB files).
+- **The throttle guard** (`_zero_check` `mainfetch.py:3438`, IMP-C25 thfix 2026-10-28 — the R3 dry runs of
+  2026-10-27: Google Photos' search answered NOTHING for tens of minutes per account, in waves, while the items
+  were there, and every object read "not found"). When nothing pinned an object and a LISTING stage (S1, S2, S3,
+  S3u, the S4 preview) answered nothing, that zero stands only while the search demonstrably works on the
+  transport it came by (`ui` when any zero came by the web pages or RPC is not usable now, else `rpc` = `EzkLib`):
+  - a fresh search on that transport listed an item, or a canary passed, within `CANARY_REUSE_S = 10` s →
+    `zero_check: "recent"` (no extra search);
+  - else a **canary**: one uncached search for an item known to be in that account (`_pick_canary`): an item a
+    TEXT query pinned earlier in the run (its query), else the account's crawl inventory (the latest complete
+    enumeration; not archived / partial / errored; MediaVault-tagged chunk names first — an exact chunk name finds
+    exactly one item), else — only if the inventory gives none — a library object with a CONFIRMED record there
+    (its uploaded name; `ctx.library`, which the guard never reads on its own). Never the object itself (its photo
+    ids, the candidates it saw, its name, its content key). The canary lists its item → `"canary"`. It does not →
+    that item is never used again in the run and ONE more canary (another item) decides (a single deleted or
+    unsearchable item never decides alone while the account has another); both fail, or the only one fails →
+    **`PhotosThrottledError`** (`page="search"`, why "a search for an item known to be there found nothing"):
+    nothing is recorded for the object and the caller stops;
+  - no item to test with at all → `"unverified"`: the zero is recorded as before, marked; check_photos and the
+    fetch never book it on the failed list.
+  S0a (photo_id) and S0b (hash) look-ups and found objects never ask for a canary (in R3 the photo-id look-ups
+  kept working throughout). Pacing is unchanged: after a recovery the throttle returned after ~30 searches even at the
+  web pages' ~6 searches/min, so no evidence supports a minimum spacing.
+- Result contract (Step 13 reuses it): `{found, photo_id, record, proof, name_normalized, stage, approach,
+  via, outcome, n, rule, alternates, query, per_approach, per_approach_via, per_approach_pick, stale,
+  s4_skip, zero_check, candidates_seen, candidates, pages_opened, searches, rpc_calls, elapsed}`, where
+  `per_approach[<approach>]` is exactly `{outcome, n}` (cherry-pick 1) — each entry is a valid failed-list
+  `tried` row; `zero_check` is None, `recent`, `canary` or `unverified` (the guard above).
 
-### 8.5 Routing into restore folder
+**Triggering a located object** (`_fetch_window`, at most `DIRECT_DOWNLOAD_CONCURRENCY = 3` at once):
+1. **Direct download (P-20)** — `_direct_trigger` (`:3665`): mint a FRESH original-download link
+   (`gprpc.download_url`: item info `[7]`, else `pLFTfd` with that one key), `_rearm_downloads`, open it in
+   the automation Chrome (15 s page-load bound). Confirmed when a download shows in the watched folder within
+   `TRIGGER_CONFIRM_S = 20` s — never one of the window's other downloads (cherry-pick 4). A link that
+   answers with a web page is left at once (cherry-pick 5). Lines: `⬇️ <file>: direct download`,
+   `↪️ <file>: no download link was minted — Shift+D next.`, `… the direct download did not start — its
+   link answered with a web page — Shift+D next.`. The link is never printed, stored, logged or journaled.
+2. **Shift+D** — `_shift_d_trigger` (`:3787`): the item's own page (reused when already open — cherry-pick
+   7), and `_shows_item` checks before every keystroke that the page's ADDRESS names the item and its record
+   is there (an item page also embeds its neighbours' records); else the click path opens the item from its
+   search results by the tile whose link names the photo_id.
+3. A located object none of whose requests fetched it is located ONCE more without that item
+   (`exclude`, `_another_copy` — cherry-pick 6) before today's attempts.
+4. A content-verified link that served other bytes switches direct downloads off for the run
+   (`⚠️ The direct download link served other bytes than a content-verified item (a transcode?) — direct
+   downloads are off for the rest of this run; Shift+D fetches the originals.`). If Shift+D also brings other
+   bytes, the object ends `inconsistent` (cherry-pick 3; IMP-C27).
 
-For every successful match, the file is moved to:
+SHA-256 after the download stays the final authority (the harvester). Each account session ends with
+`> 🔎 Exact item ('<account>'): L of N object(s) located · D direct download(s) · S Shift+D · RPC calls: N
+(errors E)` (`_locator_session_line` `:4148`).
 
-```
-<entry["folder_path"]> / restore / <expected_filename>
-```
+**Kill switch (P-14).** `EXACT_LOCATOR_ENABLED = False` reproduces today's fetch selection exactly (no
+stage runs); learning, the lost-download retry, the search wait and the download hygiene stay on.
 
-`restore/` is `mkdir`ed at the top of `build_download_queue` / `fetch_single_entry`.
-The `expected_filename` is exactly what `cmd_restore` later expects to
-find — either the original filename or the per-chunk
-`xxx.chunk.001.mkv` name. This is what gives the restore step
-deterministic input regardless of how Google Photos named the
-downloaded blob.
+**`python mainfetch.py locate <id> [episodes <r>] [--fetchExtras] [--probe-direct]`** (`cmd_locate`
+`:5695`) — the same engine as a READ-ONLY diagnostic: per object `FOUND · <stage> <approach> · proof … · via
+rpc|ui · <s> · pages · searches · RPC`, its photo id and item address (on the terminal only), `tried: …`.
+It takes the fetch lock without waiting (a running fetch → refused), closes the Chrome it opened, and ends
+`✅ Located F of N object(s). Nothing was downloaded or written.`. `--probe-direct` also mints each found
+item's link and reports only whether a cookie-less HEAD request answers with media
+(`direct link without the browser's cookies: yes (<type>)` / no) — the link is never shown.
 
-### 8.6 Entry resolution and batch mode
+### 8.5 Where downloads land — download hygiene (P-12, Step 11)
 
-- `resolve_targets(manual_id, ep_range)` (375-410): if the ID is a
+**Destination-direct.** `_prepare_downloads` (`:1097`) runs before the entry's first request:
+
+- `<dest>` = `_fetch_restore_folder(entry, temp_dir, entry_id)` (`:655`) — `<folder_path>\restore`, or
+  `<tempdir>\<safe id>\restore` with `tempdir` (the same `<safe-id>` `cmd_push` / `cmd_restore` use).
+- Chrome is pointed at `<dest>\.mv_incoming\` (a marker file `.mediavault_incoming` inside) through CDP
+  `Browser.setDownloadBehavior {behavior: allow, downloadPath, eventsEnabled: true}` (fallback
+  `Page.setDownloadBehavior`), re-applied on every Photos tab (`use_photos_tab` → `_rearm_downloads`).
+- A path too long for Chrome (folder + longest name + `.crdownload` > 240) → `<drive>:\MV_incoming\<first 8 hex
+  of SHA-1(dest)>\`, same volume.
+- **Disk pre-flight**: the destination volume must hold the entry's remaining bytes + 2 GB, else
+  `❌ Not enough free space on <vol> for this entry: … Nothing was downloaded — free some space, then
+  re-run.` and the entry is refused before any request; otherwise one `> 💽 Disk space on <vol>: …` line.
+- Modes (`ctx.target["mode"]`): `incoming` (normal — the harvester watches only the incoming folder;
+  `~/Downloads` is neither read nor written), `fallback` (Chrome refused the redirect → `~/Downloads` for the
+  rest of the run, one warning line; only files that appeared during this run, belong to the entry's
+  expected-name family and failed verification are deleted there), `legacy` (a driver without CDP — test
+  stand-ins only, never a real Chrome — keeps the pre-IMP-C25 flow byte for byte).
+
+**The harvester** `harvest_downloads(queue, ctx, timeout=300, stop=None)` (`:4284`): every completed file
+in the watched folder is SHA-256-verified (hashed once per run — IMP-B10; its SHA-1 from the same pass); a
+match is `os.replace`d into `<dest>\<expected filename>` (`✅ MOVED: <file>` — the P-13 web marker), a copy
+of an item already fetched is deleted (`Duplicate. Deleting.`), anything else is deleted at once and listed
+(name + size). The 300 s base timeout self-extends while a `.crdownload` is active. A match teaches the
+learned sidecar (`_learn_from_download`: proof `sha256`, source `fetch`, the bytes' dedupKey; the photo_id
+only when the requested item's record holds exactly those bytes). IMP-C34: a lost download (requested, the
+round timed out with nothing downloading, never arrived) is requested once more (`=== RETRY … ===`); a
+second loss → `❌ Download lost twice: <file> — …` and a failed row with reason `download-lost`.
+
+**End of an entry.** `_finish_downloads` (`:1157`): whatever is still in the incoming folder (a broken
+transfer's partial, a surplus download) is deleted and listed, the folder is removed; a file Chrome still
+holds goes to `pending_delete` and is deleted after Chrome closes, else at the next start-up. Nothing
+outside a marked incoming folder is ever deleted (except the fallback rule above).
+
+**The fetch journal** `~/.mediavault/fetch_journal/<run_id>.json` (`FetchJournal` `:747`; atomic temp +
+fsync + `os.replace`; a separate file — NOT the rollback journal `.mediavault_txn.json`): pid, state
+(`running` / `clean` / `pending` / `recovered`), sessions `{account, chrome_pid, user_data_dir, launched,
+closed}`, entries `{manual_id, label, account, dest, mode, incoming, names, cleaned, objects}`, the
+`~/Downloads` snapshot (fallback only), `pending_delete`. Object fields are whitelisted (label, sha256,
+state, method, photo_id) — never a URL.
+
+**After an interruption.** `_end_run(ctx, interrupted)` (`:2104`, in a `finally` around the session loop):
+Ctrl+C or an error terminates the Chrome this run LAUNCHED (`🛑 Chrome terminated (pid N) — its downloads
+stopped.`), deletes this run's leftovers and leaves the journal `clean` or `pending`. The next run's
+`_startup_cleanup(ctx)` (`:1546`, inside the fetch lock, before its first Chrome) finishes every unfinished
+journal that is not a live fetch: it terminates a recorded Chrome only if that pid still runs AND its
+command line names the session's profile folder (`_chrome_still_ours`; PowerShell `Get-CimInstance
+Win32_Process` with `-ErrorAction Stop`, `taskkill /PID n /T /F`), never a Chrome the run only attached to;
+deletes the leftovers of the incoming folders it names; marks it `recovered`; and prints `> 🧹 Cleaned N
+leftover file(s) from an interrupted fetch (X.X GB)`.
+
+**`fetch_cleanup [--apply]`** (`fetch_cleanup_plan` `:1640`, `fetch_cleanup_apply` `:1728`) — for leftovers
+from before this feature: files directly in `~/Downloads` whose name belongs to a library object's
+expected-name family (its exact uploaded name, Chrome's ` (n)` variants, their `.crdownload` partials), every
+file in a marked incoming folder, and unfinished journals. The dry run lists name / path, size and reason and
+writes nothing (no lock, no journal); `--apply` takes the fetch lock without waiting, re-checks each file
+(still there, same size, still where the rule allows) right before deleting it, removes emptied marked
+folders and marks journals recovered. Folders without the marker are listed "Not touched".
+
+**Chrome lifecycle (user requirements 2026-10-04 / 2026-10-08).** `_close_session(driver, ctx, last)`
+(`:2035`) ends every account session except an interrupted one: it first waits until no download of the
+session is still growing (`DOWNLOAD_STALL_S = 300`; a transfer is never cancelled), then
+- a Chrome the run **launched**: CDP `Browser.close`; still running 10 s later → terminated, only when its
+  command line names the profile (under heavy load the open `Popen` handle is the identity proof when the
+  process table cannot answer — Step 14 c). Line `🧹 Chrome ('<account>') closed — the next fetch starts a
+  fresh one.`;
+- a Chrome the run only **attached** to: after the last account only the tabs this run opened are closed
+  (`🧹 Closed N tab(s) this fetch opened — the Chrome it attached to ('<account>', already running before)
+  stays open.`); between two accounts its windows are closed (the next account needs port 9222).
+- **No "Restore pages?" bubble.** Every launch passes `--hide-crash-restore-bubble` (Chrome 154 ignores
+  `--disable-session-crashed-bubble`), and `mark_profile_clean_exit(user_data_dir)` (`:1400`) sets
+  `profile.exit_type "Normal"` + `exited_cleanly true` in `Default\Preferences` before EVERY launch and
+  after EVERY close once that Chrome is gone — only while no Chrome runs on that profile, atomically, every
+  other key kept, never raising. The crawler and `warm_profiles` follow the same rules.
+
+### 8.6 What nothing fetched — identification block, `--manual`, resume
+
+- **Identification block** (`identification_lines` `:4653`; `_help_unfetched` `:4864`, incoming / fallback
+  modes only): `=== NOT FETCHED (N file(s)) — what to look for in Google Photos ===`, then per object
+  `🧭 <file> · <id> (<label>)` and its account, exact uploaded name, local taken time ("the time Google
+  Photos shows"), content key, size, what was tried, its failed-list status and the next commands
+  (`python main.py fetch <id> … --manual`; for a failed-list row `python main.py resolve_photos --id <id>`).
+  No photo id, URL or web marker.
+- **`--manual`** (CLI only; the web UI never passes it): `=== MANUAL (N file(s)) — find each one in this
+  Chrome window and download it ===`; per object the Photos tab is opened at its best start
+  (`open_best_start` `:4748`: its located page, its manual match, the first candidate no record disproves,
+  the day search, the exact-name search) and the incoming folder is watched for up to `MANUAL_WAIT_S` =
+  30 min. Only a SHA-256 match is kept (`> ✋ … fetched by hand …`); a wrong item is deleted and the wait
+  goes on. Learned with proof `sha256`, source `manual` — never `confirmed` until a check.
+- **Resume.** A re-run skips files already in `restore\`; `_resume_hints` (`:3991`) adds as S0a candidates
+  the photo_ids the learned sidecar and earlier runs' journals hold (still verified before any request):
+  `> ↩️ <file>: N item(s) an earlier run found or learned are tried first.`
+
+### 8.7 Entry resolution, batch mode, removed stubs
+
+- **Removed stubs (IMP-A8).** `wait_for_download`, `automation_download_file` and `build_download_queue`
+  were deleted in IMP-C25 Step 10 (pinned gone by a test); the queue builder is `build_fetch_queue`
+  (`:2447`), shared by fetch, `locate` and `check`.
+- `resolve_targets(manual_id, ep_range)` (`:5027`): if the ID is a
   season_map, returns the list of leaf children (filtered by
   `ep_range` if provided), else returns a 1-element list with the leaf
   entry itself. The episode-range parsing now reads each child's number
@@ -2313,23 +2708,17 @@ downloaded blob.
   When a NON-EMPTY season is reduced to 0 by the range, `resolve_targets`
   prints a `⚠️` naming the parsed range + a sample child id and returns
   `[]` (the caller fetches nothing — no error).
-- `cmd_fetch_route(manual_id, ep_range)` (455-494): picks Chrome
-  profile, calls `init_driver`, iterates targets calling
-  `fetch_single_entry`. Wraps in try/except/finally so KeyboardInterrupt
-  closes the driver cleanly.
-
-### 8.7 Unused / kept-for-compat stubs
-
-- `wait_for_download(filename_snippet, timeout=300)` at line 219 — empty,
-  returns None.
-- `automation_download_file(driver, ...)` at line 224 — empty, returns
-  False.
-- `build_download_queue(entries)` at line 413 — implemented but
-  effectively superseded by the inline queue building inside
-  `fetch_single_entry`. Not called from `cmd_fetch_route`.
-
-These are leftover scaffolding from earlier iterations; safe to delete
-in a future cleanup.
+- `cmd_fetch_route(manual_id, ep_range=None, fetch_extras=False, temp_dir=None, manual=False)` (`:5435`):
+  prints the entry-level `[Account]` line, resolves targets (+ extras with `--fetchExtras`), builds the
+  account groups (§8.1), then under `fetch_session_lock(blocking=True)` per group: `profile_preflight` (a
+  missing profile folder stops the batch with `❌ The Chrome profile for '<a>' does not exist: …`), the
+  port-9222 guard before a second session, `_startup_cleanup` + a new `FetchJournal` before the FIRST
+  session, `init_driver`, then `fetch_single_entry` per target / extra. A `SessionExpiredError` stops the
+  batch with the sign-in remediation — its `PhotosThrottledError` with the throttle line instead (IMP-C25 thfix,
+  §8.8); Ctrl+C prints `🛑 Stopped by user.`. Each session's `finally` prints
+  the locator line and runs `_close_session` (not after an interruption); the outer `finally` runs
+  `_end_run`. Ends with the lost-download line (if any), the "Left in Downloads" list (fallback mode only)
+  and `✅ Batch Processing Complete.`.
 
 ### 8.8 Session-alive detector + keep-alive tooling (IMP-C17 / IMP-C6)
 
@@ -2339,30 +2728,61 @@ in a future cleanup.
 
 ```python
 class SessionExpiredError(Exception): ...
+class PhotosThrottledError(SessionExpiredError): ...   # IMP-C25 thfix — .why (the line's phrase), .page
 
-def check_session_alive(driver) -> bool:
-    """Return True if the session looks alive (or the check is uncertain,
-    e.g. a Selenium fault); raise SessionExpiredError on a confident logout
-    (current URL host is accounts.google.com or is not photos.google.com
-    after a navigation attempt)."""
+def check_session_alive(driver, profile_key=None) -> bool:
+    """Side-effect-free: inspect driver.current_url (the CALLER navigated already).
+    True on photos.google.com (and note on the driver that this session has shown
+    signed-in Google Photos) or when current_url cannot be read (a Selenium fault);
+    SessionExpiredError on a sign-in page (accounts.google.com) or on Google Photos'
+    page for signed-out visitors before the session showed signed-in Photos;
+    PhotosThrottledError on every other page."""
 ```
 
-The detector is **shared** by two callers:
+The detector is **shared** by these callers:
 
 - **Live fetch path (`cmd_fetch_route` / `trigger_download`)** — called before
   each trigger to fast-fail with a clear `SessionExpiredError` rather than
   silently burning minutes waiting for downloads that will never arrive (IMP-C6).
-  A backstop of **3 consecutive zero-result trigger rounds** also raises
-  `SessionExpiredError` so a subtler mid-session expiry is caught too.
+  A backstop of **3 consecutive zero-result trigger rounds** raises
+  `PhotosThrottledError` (IMP-C25 thfix; until then a `SessionExpiredError` read as "logged out" — §8.3).
+- **The exact-item stages and RPC** — the locator's navigations, and `gprpc._photos_url` (`gprpc.py:233`) before
+  EVERY RPC request (IMP-C25 thfix: on Google Photos it notes the session as signed in even when an RPC-only
+  session navigates nowhere).
 - **Warm-up runner (`tools/warm_profiles.py`)** — calls `check_session_alive`
   after navigating to Google Photos to determine the `OK` / `LOGGED_OUT` /
-  `LAUNCH_FAIL` status for each profile.
+  `THROTTLED` / `LAUNCH_FAIL` status for each profile. `THROTTLED` (IMP-C25 thfix) prints
+  `⏸️ Profile '<key>': Google showed another page than Google Photos (throttled?) — not a sign-out; the next
+  warm-up looks again.`, sends no toast and does not fail the run (exit 0, `✅ No profile is signed out.`).
 
-`check_session_alive` returns `True` on alive or uncertain (Selenium fault,
-unexpected page structure) and raises `SessionExpiredError` only when it is
-confident the session is gone — specifically when the browser URL host is
-`accounts.google.com` (redirected to login) or is not `photos.google.com`
-after a navigation attempt to `https://photos.google.com`.
+`check_session_alive` (`mainfetch.py:250`) classifies the tab's address (`_page_kind` `:224`: its host and path
+only) and raises `SessionExpiredError` only when the session is confidently signed out: the host is
+`accounts.google.com` (a sign-in or verify page), or the page is Google Photos' landing page for signed-out visitors
+(`google.com/…/photos/about` — a signed-out profile lands there at once, RESEARCH F26) while this browser session
+has not shown signed-in Google Photos yet (`driver._mv_photos_seen`, set on every photos.google.com check).
+**IMP-C25 thfix (2026-10-28):** every other page raises `PhotosThrottledError` — a `SessionExpiredError` on
+purpose, so every handler still stops the session or the batch, but none of them prints "logged out":
+
+- that same signed-out page once the session WAS signed in — in the R3 dry runs of 2026-10-27 Google
+  server-redirected a signed-in session there in the middle of a search throttle (the movies profile's history,
+  13:31:59Z, its only non-Photos page among 5,537 visits; the profile worked again afterwards). That was the false
+  "logged out";
+- Google's "unusual traffic" page (`google.com/sorry/…`) and any other page (an empty tab included).
+
+The canary (`page="search"`, §8.4) and the fetch's zero streak (`page="streak"`, §8.3) raise it too. Each handler
+prints ONE throttle line built from `throttled_head` (`:284` — `Google Photos is throttled in '<account>'
+(<why>)`) and `throttled_hint` (`:290` — only for the signed-out page: `If Chrome on this profile still shows
+Google Photos' signed-out page after the pause, sign in (--user-data-dir=…).`), advises a re-run in
+`THROTTLE_RETRY_MIN = 30` minutes (advice only — nothing waits or retries by itself; R3's zero windows ended after
+4–55 min) and records nothing for the object at hand (`<head>` = the `throttled_head` text):
+
+| Caller | The line | Then |
+|---|---|---|
+| fetch (`cmd_fetch_route`) | `⏸️ <head> — the fetch stops here; files already fetched are kept and skipped. Re-run the same fetch in about 30 minutes.` | the batch stops (as a sign-out does) |
+| `mainfetch.py locate` | `⏸️ <head> — the locate stops here; re-run it in about 30 minutes.` | the batch stops |
+| check_photos child (`_check_session`) | `⏸️ <head> — nothing was recorded for the object it was checking; re-run the same command in about 30 minutes: it continues where it stopped.` | stop reason `throttled` (resumable, §8.10) |
+| resolve_photos (`_rp_walk`) | `⏸️ <head> — its objects stop here (no verdict for the one at hand: it comes back next time; the answers given so far are kept). Re-run resolve_photos in about 30 minutes.` | the next account goes on (as after a sign-out); a search term just typed stays the object's search term |
+| crawler (`tools/gp_inventory.py`) | `STOPPED: <head> — not a sign-out; progress is kept, re-run in about 30 minutes.` | the run ends `throttled`, exit 4 (§9.3) |
 
 > **IMP-X5 reuse seam**: the planned account-health canary command will import
 > `check_session_alive` directly. The ban-sentinel logic is out of scope for
@@ -2373,13 +2793,229 @@ after a navigation attempt to `https://photos.google.com`.
 `mvcommon.py` exposes a `fetch_session_lock` context manager backed by a lock
 file at `~/.mediavault/locks/fetch_session.lock`.
 
-- **`cmd_fetch_route`** acquires it in blocking mode for the entire batch so
-  only one fetch session owns Chrome's CDP port 9222 at a time.
+- **`cmd_fetch_route`** acquires it in blocking mode for the entire batch (every account session) so
+  only one session owns Chrome's CDP port 9222 and the profiles at a time.
 - **The warm-up runner** tries it in **non-blocking** mode before launching
   Chrome; if the lock is held (a fetch is running) it skips that profile's
   warm-up and logs accordingly.
+- **IMP-C25:** `mainfetch.py locate`, the `check_photos` child, `resolve_photos`, `fetch_cleanup --apply` and
+  the crawler (`tools/gp_inventory.py`) take it **without waiting** and refuse while it is held. The check
+  child and the crawler keep it alive with a heartbeat (lock mtime refreshed at most every 60 s after
+  checking the lock still holds their line; a takeover → they yield). The auto-confirm probes it the same way
+  before spawning its child.
 - `LockHeldError` is raised by `mvcommon` when a non-blocking acquire fails;
   callers catch it and decide whether to skip or abort.
+- Known limit (unchanged, Step 7 note): a plain fetch does not heartbeat, so a fetch running > 1 h can be
+  reclaimed as stale (`stale_after=3600`) by another lock taker.
+
+### 8.9 Read-only Google Photos RPC (`gprpc.py`, IMP-C25 Step 2b; OD-9 ruling)
+
+MediaVault reads Google Photos' own internal web calls (the "batchexecute" RPCs the web app itself uses)
+to find items quickly and prove identity without a download. **It never changes anything in a Google
+account, and it never stores or prints a download link (P-20).**
+
+- **One client, one allowlist.** Every RPC goes through `gprpc.call(driver, rpcid, request_data)`
+  (`gprpc.py:341`); no other module builds a request. `ALLOWED_RPCIDS` (`gprpc.py:61`) is the read-only
+  allowlist, checked before the driver is touched AND again at the one send site; anything else raises
+  `RpcRefused` (deliberately NOT an `RpcUnavailable`, so no fallback handler can swallow it). The literal is
+  pinned (`tests/test_c25_regression_pins.py` registry → `test_gprpc`); a new rpcid is a reviewed change, and
+  `tests/test_locator.py` checks the fake's request log after every test.
+
+  | rpcid | Read-only use | Helper |
+  |---|---|---|
+  | `lcxiM` | timeline page by taken time (S1; the crawler's full enumeration) | `timeline_at` |
+  | `EzkLib` | the web UI's search box (S2/S3/S3u); the recently-uploaded listing | `search`, `recent_uploads` |
+  | `swbisb` | content-hash lookup: which items hold exactly these bytes (S0b, ≤ 50 keys) | `hash_lookup` |
+  | `VrseUb` | item info (record; original-download link at `[7]` when present) | `item_info`, `download_url` |
+  | `fDcn4b` | item info ext: file name, size (own library only) | `item_info` |
+  | `EWgK9e` | batch info: names, size, times, quality (≤ 50 ids) | `batch_info` |
+  | `pLFTfd` | a fresh download link for ONE media key (P-20 fallback) | `download_url` |
+
+  **Never called** (PLAN P13, named so the tests can refuse them): trash/restore, locked folder,
+  albums/sharing, geo edits, set timestamps, set description, zip download jobs. Nothing in IMP-C25 needs a
+  mutating call.
+- **Page context — cookies never leave the browser.** Each request is a `fetch()` run inside the signed-in
+  `photos.google.com` tab of the automation Chrome (`execute_async_script`, `credentials: 'include'`). The
+  page tokens (`WIZ_global_data`) are read per request into local variables and sent to `photos.google.com`
+  only; the endpoint path must be a plain path, so the XSRF token can go nowhere else. No credential is read
+  out of the browser, stored or logged; gprpc prints nothing and writes no file. The signed-in email
+  (`signed_in_account`) is for a terminal-only identity check, never logged.
+- **Pacing and failure handling.** ≥ 0.5 s between two requests + up to 0.25 s jitter; 3 retries with
+  1 / 2 / 4 s backoff (+ jitter) on HTTP 429 / 5xx / no answer envelope / a failed page request; a circuit
+  breaker turns RPC off for the rest of that browser session after 5 consecutive failed attempts (state lives
+  on the driver, so another account's session keeps RPC). Each session prints `RPC calls: N (errors E)`.
+- **Evidence, not authority.** Typed parsers (`gpweb.PARSERS`) fail closed (`RpcShapeError`); answers are
+  still verified (dedupKey / name), the drift detector cross-checks them against the item page once per run,
+  and SHA-256 after a download stays the final gate. `gprpc.STATUS_NOT_FOUND = 5` ("no such item") is
+  UNVERIFIED; a stored photo_id is called stale only when the item page agrees.
+- **Download links (P-20).** `download_url(driver, photo_id)` returns a `DownloadUrl` (`gprpc.py:122`) whose
+  `str` / `repr` / `format` are redacted and which `json.dumps` refuses; `reveal()` is used only for
+  `driver.get`. Links expire within about an hour and act as a bearer credential while valid, so only the
+  permanent `photo_id` is stored; a fresh link is minted at every fetch.
+- **Quality flags (Step 14 b, one read-only live probe).** The compact `swbisb` record does not carry
+  partial-upload / archived, so `check_photos` reads them from the item's full timeline record (≤ 1 extra
+  `lcxiM` call per pinned object); original-quality stays unknown (no position could be established) and is
+  never claimed.
+
+### 8.10 Google Photos identity commands (`main.py`) — map, check, confirm, resolve
+
+**Inventory crawler** (`tools/gp_inventory.py`, §9.3) → **`map_photos`** (backfill the archived library) →
+user resolutions → `--apply`; then **`check_photos`** (verify any scope, download-free), the
+**auto-confirm** after the next push (§5), and **`resolve_photos`** (manual confirm / match).
+
+**`map_photos`** (`cmd_map_photos` `main.py:12830`) — offline: reads only the crawler's files through
+`tools.gp_inventory.inventory_state` (no Chrome). Per uploaded object (`mvcommon.iter_uploaded_objects`:
+whole, chunk, holder, extras; four categories):
+1. freshness gate — an account's inventory backs a verdict only with a complete enumeration started ≤ 24 h
+   ago (`MAP_INVENTORY_MAX_AGE_H`); otherwise `stale-inventory` and the re-crawl command;
+2. match — a known content key (trusted block or capture) decides first (proof `dedupkey`); else the exact
+   uploaded name in the default account, then the P-6 normalized name, then another account
+   (`wrong-account`), then the `[short_id]`-tag `probable`; same-named items holding other bytes → `conflict`;
+3. duplicates and re-split sets (newest complete upload, else `ambiguous`), IMP-C27 detectors
+   (split_info lost, untagged old name, partial / not-original upload);
+4. **not in any account — Step 9b (user ruling 2026-10-03, "why do you need the phone for this?")**: no
+   phone needed; by its capture push time against the routed account's crawl start: pushed after the crawl
+   began or within `MAP_RECENT_DAYS = 7` days before it → `not-backed-up-yet` (no failed row); earlier, or no
+   push time → `possible-loss` (a LOUD block). Phones are read only with `--devices` (opt-in), which refines
+   an old object to awaiting-backup / missing-after-backup / missing-everywhere.
+   **Except `not-listed`** (IMP-C25 thfix, 2026-10-28 — in R3 a chunk confirmed by its dedupKey on 2026-10-16
+   read `possible-loss` because the next crawl did not list its item): after the freshness gates, an object whose
+   library block holds a CONFIRMED record (a photo_id with a verified proof) in an account whose inventory is fresh
+   and whose latest complete enumeration does not list that photo_id (`_mp_unlisted` `main.py:11684`) is NOT a
+   loss — archived or in the trash, perhaps. No failed-list reason, no `resolutions_todo.csv` row, out of the LOUD
+   block, nothing recorded by `--apply`; its own short block in summary.txt (`Not listed by the crawl — NOT a loss:
+   N object(s) whose confirmed record names an item its account's latest crawl does not list (archived, in the
+   trash?) — nothing is recorded for them; check one with: python main.py check_photos <id>`, then one
+   `    not-listed           <id> · <label> — in '<account>' per its confirmed record (proof <proof>)` line each)
+   and in mapping.csv its status `not-listed` with the note `in '<account>' per its confirmed record, but the crawl
+   does not list it — maybe archived or in the trash; check it with: python main.py check_photos <id>`.
+   **And `uploaded-after-crawl`** (IMP-C25 mpfix, 2026-10-28 — Aavesham chunk 1/2, pushed in the evening, reached
+   Google Photos after the next morning's crawl began; a check confirmed it minutes later and the next dry run called
+   it `not-listed`): when that confirmed record's item reached Google Photos at or after its account's crawl began
+   (`_mp_after_crawl` `main.py:11704`, to the second), the crawl could not list it yet. The item's own `upload_ms`
+   decides whenever the record has one (every confirmed record does: `mvcommon.apply_learned` confirms none without
+   it); without it, the capture's push time; never `verified_at` (it proves the item was there when verified, not
+   when it arrived). Handled like `not-listed` — no failed-list reason, no `resolutions_todo.csv` row, out of the LOUD
+   block, nothing recorded by `--apply`, `_mp_recency` leaves it — with its own block in summary.txt (`Uploaded after
+   the crawl began — NOT a loss: N object(s) whose confirmed record names an item that reached Google Photos after its
+   account's latest crawl began — the next crawl lists them; nothing is recorded for them`, then one
+   `    uploaded-after-crawl <id> · <label> — in '<account>' per its confirmed record (uploaded <t>, the crawl began
+   <t>)` line each — `pushed <t>` when the push time decided) and in mapping.csv the note `in '<account>' per its
+   confirmed record — uploaded after this crawl began (uploaded <t>, the crawl began <t>); the next crawl lists it`.
+   Its texts never say archived or trash.
+
+Dry run by default: only its run directory (`~/.mediavault/gphotos/map/<UTC ts>/` or `--out`). `--apply`
+appends learned records (source `map`, no approach verdict) for mapped / mapped-normalized / wrong-account
+rows and runs the apply engine; `--resolutions <csv>` imports the user's filled `resolutions_todo.csv` /
+`failed_objects.csv` (url → manual record + hint, datetime → hint, search → `search_override`); `--repair
+split-info|names` and `--accept-probable` are explicit opt-ins.
+
+**The dry run's apply preview** (IMP-C25 mpfix, 2026-10-28 — after the R3 apply, a `--repair split-info` dry run
+previewed `2,207 object(s) would change (0 newly confirmed)`; the apply then recorded 6 new facts — the 6 chunks of
+the 3 entries it repaired, newly confirmed) gives the apply's answer (`_mp_preview` `main.py:12772`): the engine's
+dry run over the learned sidecar plus ONLY the run's records not on record yet — `_mp_new_records`, the rule
+`--apply` (and check_photos' apply) appends by: same facts, whatever their time, so a re-dated duplicate changes
+nothing — and the `--repair names` facts, taken as the apply takes them (`_mp_run_records`), also when the run itself
+records nothing (the apply folds the whole sidecar). `--repair split-info`: the apply writes the PROVEN split_info
+first and maps the repaired entries' chunks in the same run; the preview patches a copy of those entries the same
+way (`_mp_patch_split_info`) and maps them again with the run's inventory index (`_mp_repair_preview`), printing
+them apart — `  + N chunk(s) of M repaired entr(y/ies) map after the repair — --apply writes their split_info first,
+then records them (not in the count above)` (N = the chunks whose verdict records something; the result's
+`preview.repair` = {entries, chunks}) — and leaves every record about the repaired objects (their whole files, which
+the repair removes, and their chunks) out of the engine's count: neither number exceeds what the apply changes.
+
+**`check_photos <scope>`** (`cmd_check_photos` `main.py:14263`; engine `mainfetch.cmd_check` `mainfetch.py:6548`) —
+verifies uploaded objects in Google Photos **without downloading**. main resolves and prints the scope
+(item / alias, season, `series:<season id|episode id|show folder>`, id prefix, `account:<a>`, `pending`,
+`hinted`, `all`), writes `run.json` in `~/.mediavault/gphotos/check/<UTC ts>/`, and spawns
+`python mainfetch.py check --run <dir>` (streamed; Ctrl+C waits for the child to close Chrome). The child,
+under the fetch lock (no wait) + heartbeat, runs one Chrome session per account, `locate_object` per object
+(swbisb / EWgK9e batches of ≤ 50 warm its cache; a mapped cloud dedupKey is never a content proof — legacy
+objects stay proof `filename`), looks in the other accounts only for an object its own account did not find
+that is not a push of the last `MAP_RECENT_DAYS`, paces (3 s after a web-page object, 0.5 s after an RPC
+one, `--pace`), stops after 5 uncheckable objects in a row, honours `--limit` / `--max-minutes`, and appends
+`results.jsonl` (fsync per line). main turns results into verdicts (`confirmed · inconsistent · ambiguous ·
+not-backed-up-yet · possible-loss`, with `--devices` also `awaiting-backup / missing-after-backup /
+missing-everywhere`, `error`, `unchecked`), `report.txt` (per account × category × approach), `outliers.csv`
+(`approaches-disagree, single-approach, legacy-only, ambiguous-everywhere, account-mismatch, duplicates,
+partial-upload, not-original-quality, taken-time-differs, stale-photo-id`) and one summary line
+`🔎 check_photos <scope>: N object(s) — …`. Dry run writes only its run dir; `--apply` = check, then record
+(learned records source `check`, or `confirm` for `pending`; stale records; failed rows; the apply engine;
+`failed_objects.csv`; `applied.json`); `--apply-run <dir|latest>` applies a reviewed run without Chrome
+(`latest` = the newest complete run of the same scope). Re-running the same scope resumes its newest
+unfinished run; `--recheck` starts afresh. `check_photos pending --list` is offline (no Chrome, no child).
+`--min-age-h H` (IMP-C25 follow-up, 2026-10-27) leaves out of the run — after the scope and `--account` — every
+object whose capture push time is less than H hours old (no push time counts as old): never looked up, no verdict
+row, no failed row, no learned record, one line `N object(s) pushed less than H h ago skipped — checked at a later
+push`; all of them young → `Nothing to check.`, no run directory. `run.json` records it and it is part of the resume
+key (a plain run and a `--min-age-h` run never continue each other); `--apply-run` / `--list` refuse it.
+
+**A throttled check (IMP-C25 thfix, 2026-10-28).** Every look-up runs through `locate_object`'s throttle guard
+(§8.4) and the session detector (§8.8). A `PhotosThrottledError` ends the child's session (`_check_session`
+`mainfetch.py:6444`) with `   ⏸️ Google Photos is throttled in '<account>' (<why>) — nothing was recorded for the
+object it was checking; re-run the same command in about 30 minutes: it continues where it stopped.`: stop reason
+`throttled`, no further account, status `stopped` (exit 1, like a sign-out). The object at hand gets NO
+`results.jsonl` line — it stays unchecked, so a re-run (which resumes the run) looks it up again — and report.txt
+keeps `State: stopped (throttled) — …` plus `  Google Photos was throttled: its search answered nothing even for an
+item known to be there, or Google showed another page than Google Photos (never a sign-out, never a 'not found') —
+nothing was recorded for the object it stopped at; wait about 30 minutes, then re-run the same command: it continues
+where it stopped.` A `--apply` run still applies the objects checked before the stop (as after any stop but Ctrl+C).
+Each results line carries `zero_check` (§8.4). A not-in-Google-Photos verdict (`possible-loss`,
+`not-backed-up-yet`) resting on a look whose zero was `unverified` — no item could show the search was answering —
+is marked `unverified` (`_cp_rows` `main.py:13656`): its note says `unverified: its search answered nothing and no
+item known to be in the account could show that the search was answering — not booked`, `_cp_settle` gives it no
+failed-list reason, and report.txt adds `Unverified: N object(s) of the above — …`. Runs started before this change
+carry no `zero_check`: their zero answers may be throttle zeros — start such a scope afresh with `--recheck`, and do
+not `--apply-run` them.
+
+**Auto-confirm** — see §5 (`AUTO_CONFIRM_MIN_AGE_H = 24`, measured: 41 % of uploads were in Google Photos
+12 h after their push, 84 % after 24 h, 99 % after 48 h; config `auto_confirm_after_push`). Its check is
+`check_photos pending --apply --min-age-h 24 --max-minutes 15`: only the pushes at least 24 h old are looked up.
+
+**`resolve_photos [failed|<csv>] [--account a] [--id <manual_id>]`** (`cmd_resolve_photos` `main.py:14834`)
+— interactive, terminal only (no TTY → `❌ resolve_photos is interactive: run it in a terminal — …`, exit
+1, nothing launched). Walks the newest failed row per object (answered / confirmed ones left out), one Chrome
+per account under the fetch lock, shows the identification block, opens the best start, and asks
+`[p]aste photo URL | [s]earch term | [n]ot uploaded | s[k]ip | [q]uit`. A pasted item verified download-free
+(dedupkey / filename) → learned record source `check`; a proven content mismatch is refused; otherwise
+"accept as a manual match (a later fetch verifies it by SHA-256)? [y/N]" → proof / source `manual` (never
+confirms alone; the fetch's stages never download it — `fetch <id> --manual` does). A search term →
+`search_override` + an S3u try at once. Every answer is logged at once to `resolved.jsonl`. At the end:
+the engine's dry-run summary and `Apply these N changes to the library? [y/N]`; lost downloads get
+`Re-fetch the N lost download(s) now? …`. Also reachable from the check report's ambiguous line.
+IMP-C25 thfix: a throttle (§8.8) stops that account's objects with its `⏸️` line and the next account goes on —
+the object at hand gets no answer in `resolved.jsonl` (it comes back next time; a search term just typed stays its
+search term); a search term whose zero answer could not be verified says so: `🔍 your term found no verified item
+(user_query not-found(0); unverified: no item known to be in '<account>' could show that its search was answering) —
+kept as its search term: every fetch tries it (S3u)`.
+
+**Device cross-check (opt-in, Step 8).** `device_inventory()` (`main.py:10800`) lists each configured
+phone's `/sdcard/Media/` read-only (`adb devices`, `shell find`, `shell stat` — every argv passes the exact
+allowlist `_dev_argv_readonly`); `classify_device_objects()` (`:10959`) gives each object `on_device / freed /
+absent / unchecked` (`unchecked` when a phone was not listed — never "missing"). A check-only extra movies
+phone (`DEVICE_CHECK_EXTRA_SERIALS`, listed as `movies#2`) is scanned too; push routing (`DEVICE_ALIASES`)
+is unchanged.
+
+**Live results (R2 / R3 / R4, redacted counts):**
+- **R2, the orchestrator's share (2026-10-20/21, all passed; every Chrome closed, no `~/Downloads`, `.mv_incoming`
+  or `.crdownload` leftovers):** `fetch_cleanup` found 0 · `locate` pinned 6 of 6 objects (whole episodes by exact
+  name, a 2-chunk set, an X-Files episode that lives in the movies account, an anime episode by title + short id) ·
+  `check_photos` on one season confirmed 10 of 10 · a direct download landed in `.mv_incoming` and was moved, the
+  only library change being the object's `gphotos` block · a chunk-set fetch killed after its first verified chunk:
+  the re-run printed `🧹 Cleaned 1 leftover file(s)` and skipped the verified chunk · the X-Files episode's
+  `home_account` was learned as movies · `fetch_restore` → `check` PASS → `replace` on one episode. The user's share
+  (the web console's progress ring, `--manual`, a new archival plus the next push's auto-confirm, `resolve_photos`)
+  is recorded in `docs/feature-fetch-datetime/PROGRESS.md` when run.
+- **R3, the real library (2026-10-28):** re-crawl movies 1,019 · tv 1,122 · anime 158 items · `map_photos all
+  --apply`: 2,207 objects updated, 1,982 newly confirmed, 0 conflicts · `check_photos account:<a>` by photo_id:
+  anime 158 of 158, movies 971, tv 1,080 confirmed (all applied) · `--repair split-info` rebuilt 3 lost split
+  records · failed list 16 (IMP-C27: 13 episodes in no account, 2 legacy last chunks, 1 upload under an untagged
+  name). The first check dry runs — made before the map apply, so every object had to be searched — met Google
+  Photos' search throttle after ~25–30 objects; the throttle guard above (a canary re-search, stop `throttled`,
+  never a "not found" or "logged out") came from that run, and the later photo_id-first runs needed searches only for
+  the ~20 objects without one.
+- **R4:** the R3 photo_id-first check of every movies/tv/anime object counts as the full-library sweep (user ruling
+  2026-10-28); `others` waits for its Chrome profile (IMP-D18).
 
 ---
 
@@ -2407,9 +3043,37 @@ Three files added under `tools/`:
 
 | File | Purpose |
 |------|---------|
-| `tools/warm_profiles.py` | Daily keep-alive runner. Launches Chrome for each profile (or a single `--profile <key>`), calls `check_session_alive`, logs `OK` / `LOGGED_OUT` / `LAUNCH_FAIL` to `~/.mediavault/logs/warm_profiles.log`, fires a Windows desktop toast on failure, and exits non-zero if any profile is degraded. |
+| `tools/warm_profiles.py` | Daily keep-alive runner. Launches Chrome for each profile (or a single `--profile <key>`), calls `check_session_alive`, logs `OK` / `LOGGED_OUT` / `THROTTLED` / `LAUNCH_FAIL` to `~/.mediavault/logs/warm_profiles.log`, fires a Windows desktop toast on failure, and exits non-zero if any profile is logged out or failed to launch (`THROTTLED` — IMP-C25 thfix: Google showed another page than Google Photos or its sign-in page — prints one `⏸️` line, no toast, exit 0; §8.8). Since IMP-C25 Step 14 c it closes the Chrome it launched (`mainfetch._close_session(..., last=True)`; an attached Chrome only loses the warm-up's own tabs) and refuses to warm the next profile while port 9222 is still held (`❌ Profile '<key>' not warmed: …`), so it can no longer attach to the previous profile's Chrome and check the wrong account. It runs no `profile_preflight` (known gap: it could create an empty `ChromeProfile_Others`). |
 | `tools/notify_toast.py` | Dependency-free Windows toast helper. Calls the WinRT `ToastNotification` API via `ctypes` / `winrt` if available; falls back to a `print` so non-Windows or headless environments don't crash. `send_toast(title, body)` is the only public function. |
 | `tools/mediavault_warm_profiles.xml` | Windows Task Scheduler definition. Runs `warm_profiles.py` daily at ~03:00 as the current interactive user, only when the machine has been idle for 5 minutes, without requiring elevated privileges. Register with `schtasks /create /xml "tools\mediavault_warm_profiles.xml" /tn "MediaVault Warm Profiles"`; remove with `schtasks /delete /tn "MediaVault Warm Profiles" /f`. |
+
+### 9.3 `tools/gp_inventory.py` — Google Photos inventory crawler (IMP-C25 Steps 2 / 7)
+
+Read-only list of everything one Google account holds, the input of `map_photos`.
+
+```
+python tools/gp_inventory.py <movies|tv|anime|others> --port <port>   # launch that profile (not 9222)
+python tools/gp_inventory.py <account> --attach <port>                # or attach to an open Chrome
+python tools/gp_inventory.py all --status                              # offline counts: no Chrome, writes nothing
+  [--mode rpc|dom] [--phase enumerate|details|all] [--max N] [--out <dir>]
+```
+
+- **`--mode rpc` (default, minutes):** incremental runs first page the recently-uploaded listing (`EzkLib`),
+  then EVERY run does the full `lcxiM` timeline pass (library + archive — the deletion-detection pass), then
+  `EWgK9e` batches (≤ 50 ids) for new or errored ids. Any `RpcUnavailable` → one WARNING line → the dom crawl
+  does the rest. **`--mode dom`** = the original browser crawl (hours; opens every item page).
+- Files in `D:\MediaVault_gp_inventory\` (`mvcommon.GP_INVENTORY_DIR`): `<account>.tiles.jsonl`,
+  `<account>.items.jsonl` (one line per item, fsync'd), `<account>.runs.jsonl` (start / one seen line per id /
+  an `enumerated` line once the whole account was listed — the completeness proof / end), `<account>.log`.
+  Resumable by construction; append helpers repair a torn last line.
+- `inventory_state(account, out_dir=None)` is the offline reader (`--status`, `map_photos`, `check_photos`):
+  latest good line per id wins; `possibly_deleted` = ids absent from the latest complete enumeration.
+- Lock: `crawl_lock()` = the fetch session lock without waiting + a progress-driven heartbeat (ONE crawl at a
+  time, across accounts — run them one after another). Profiles: `--port` runs `profile_preflight` first; every
+  session does a landing check. Exit codes 0 done / interrupted · 1 usage or missing profile · 2 signed out ·
+  3 lock held or taken over · 4 throttled (IMP-C25 thfix: Google showed another page than Google Photos —
+  `STOPPED: Google Photos is throttled in '<account>' (<why>) — not a sign-out; progress is kept, re-run in about
+  30 minutes.`; the runs file ends `throttled`; §8.8). Output stays cp1252-encodable.
 
 ### 9.2 `archive/legacy/index_file.py` (legacy, 123 lines)
 
@@ -2504,25 +3168,33 @@ Hash stays in JSON for the day the user wants to restore.
 
 ### Stage 4 — FETCH (`python main.py fetch mov-en-2024-inception`)
 
-1. `main.py:1599` -> `cmd_dispatch_fetch(mid, None)` -> spawns
-   `python mainfetch.py fetch mov-en-2024-inception`.
-2. `mainfetch.py:cmd_fetch_route` picks `default` profile (since ID
-   starts with `mov`).
-3. `init_driver("default")` launches Chrome at
-   `C:\Media\Utils\ChromeProfile` on port 9222 and attaches Selenium.
-4. `resolve_targets` returns `[entry]` (no children).
-5. `fetch_single_entry(driver, entry)` builds queue of 2 chunks (since
-   `split_info.total_chunks == 2`).
-6. **Attempt 1** — for each chunk, `trigger_download(driver,
-   chunk_filename, 0)`: open photos.google.com, press `/`, type the
-   filename, press Enter, click first result, press Shift+D, press Esc.
-7. Harvester loop watches `~/Downloads`. As each downloaded file
-   finishes (`.crdownload` disappears), SHA256-hash it and look for a
-   match in the pending queue. On match: move to
-   `<folder>/restore/<expected_name>`, mark done.
-8. If any chunks still pending after Attempt 1, **Attempt 2**: same
-   loop but `query = entry["search_term"]` and `index = chunk_index`.
-9. Quit driver, return.
+1. `main.py:18425` -> `cmd_dispatch_fetch(mid, None)` -> spawns
+   `python mainfetch.py fetch mov-en-2024-inception` (UTF-8, unbuffered; output streamed).
+2. `mainfetch.cmd_fetch_route` routes every object (§8.1): `fetch_account_overrides` > learned
+   `home_account` > id prefix → `movies` here; one account group.
+3. Under the fetch lock: `_startup_cleanup` finishes any interrupted earlier fetch (`🧹 Cleaned …`), a new
+   fetch journal is opened, `profile_preflight("movies")`, then `init_driver("movies")` launches Chrome on
+   `C:\Media\Utils\ChromeProfile` (port 9222, `--disable-quic`, `--hide-crash-restore-bubble`; the profile
+   is marked cleanly exited first) and attaches Selenium to a `photos.google.com` tab.
+4. `resolve_targets` returns `[entry]`; `fetch_single_entry` prints `🔹 PROCESSING: …` and
+   `> Detected Split File (2 chunks)` and builds the queue of the 2 chunks not yet in `restore\`.
+5. `_prepare_downloads`: disk pre-flight, `<folder>\restore\.mv_incoming\` created and set as Chrome's
+   download folder (CDP).
+6. `=== EXACT ITEM (2 files) ===` — `locate_object` per chunk: a chunk with a learned `photo_id` is
+   verified by one item-info call (S0a, zero searches); otherwise S0b hash lookup (content key known) /
+   S1 the shared taken second / S2 the exact chunk name — each candidate proven by dedupKey or exact name.
+7. Each located chunk: a freshly minted original-download link opened in Chrome (`⬇️ …: direct download`),
+   else Shift+D on its verified item page. The file lands in `restore\.mv_incoming\`.
+8. Harvester: SHA-256 each completed file in the incoming folder; a match is renamed to
+   `<folder>\restore\<chunk name>` (`✅ MOVED: …`), anything else deleted; a match teaches the learned
+   sidecar.
+9. Anything still pending gets today's attempts (S4, §8.3) unless OD-5 skips it; what nothing fetched gets
+   its identification block (or the `--manual` round) and a failed-list row.
+10. `_finish_downloads` empties and removes `.mv_incoming`; `✅ ENTRY COMPLETE.`; the session line
+    `🔎 Exact item ('movies'): …`; `_close_session` waits for running downloads, then closes the Chrome it
+    launched; `_end_run` marks the journal clean.
+11. Back in `main.py`: `merge_learned_gphotos()` folds the learned records into the library
+    (`> Google Photos identity: …`). Nothing was written to `~/Downloads`.
 
 ### Stage 5 — RESTORE (`python main.py restore mov-en-2024-inception`)
 
@@ -2556,11 +3228,17 @@ Hash stays in JSON for the day the user wants to restore.
 | **MediaInfo** | `pymediainfo.MediaInfo.parse(filepath)`, walking `.tracks` | `main.py:get_tech_specs` (139) |
 | **mkvmerge** | `subprocess.run([MKVMERGE_PATH, ...])` | `main.py:split_video_file` (256), `main.py:merge_video_files` (275) |
 | **ADB / Pixel phone** | `subprocess.run(["adb", "shell", ...])` and `subprocess.run(["adb", "push", "-p", ...])` | `main.py:cmd_push` (576, 675) |
-| **Chrome (DevTools)** | `subprocess.Popen([chrome.exe, "--remote-debugging-port=9222", ...])` then Selenium `add_experimental_option("debuggerAddress", "127.0.0.1:9222")` | `mainfetch.py:init_driver` (105) |
-| **Google Photos (web UI)** | `driver.get("https://photos.google.com")` + simulated keyboard via `ActionChains` (`/`, query, Enter, Shift+D, Esc) | `mainfetch.py:trigger_download` (150) |
-| **Downloads folder watcher** | `os.listdir(SYSTEM_DOWNLOADS_FOLDER)` polling every 5 s | `mainfetch.py:fetch_single_entry` (310-366) |
-| **HTTP** (poster/fanart) | `requests.get(url, headers={"User-Agent": ...}, stream=True)` | `main.py:cmd_set_poster` (402), `cmd_set_fanart` (430) |
-| **Subprocess to fetcher** | `subprocess.run(["python", MAINFETCH_SCRIPT, "fetch", id, ...])` | `main.py:cmd_dispatch_fetch` (1350) |
+| **Chrome (DevTools)** | `subprocess.Popen([chrome.exe, "--remote-debugging-port=9222", "--disable-quic", "--hide-crash-restore-bubble", ...])` then Selenium `add_experimental_option("debuggerAddress", "127.0.0.1:9222")`; CDP `Browser.setDownloadBehavior` / `Page.setDownloadBehavior` (download folder), `Browser.close`, `Target.*` (tab selection) | `mainfetch.py:init_driver` (87), `_point_downloads` (1022), `_close_session` (2035) |
+| **Chrome profile files** | `Default\Preferences` `exit_type` / `exited_cleanly` rewritten atomically (no "Restore pages?") | `mainfetch.py:mark_profile_clean_exit` (1400) |
+| **Google Photos (web UI)** | `driver.get(...)` + `ActionChains` (`/`, query, Enter, Shift+D, Esc); item pages read through `gpweb.page_record` | `mainfetch.py:trigger_download` (516), the locator's page path |
+| **Google Photos (internal RPC, read-only)** | `fetch()` POSTs to `batchexecute` from the signed-in page (`execute_async_script`), allowlisted rpcids only | `gprpc.call` (341) — §8.9 |
+| **Download folder watcher** | `os.listdir` of the entry's `restore\.mv_incoming\` (fallback mode: `~/Downloads`), polling | `mainfetch.py:harvest_downloads` (4284) |
+| **Windows process table** | PowerShell `Get-CimInstance Win32_Process` (`-ErrorAction Stop`), `Get-NetTCPConnection -LocalPort 9222`, `taskkill /PID n /T /F` — only for a Chrome this tool launched | `mainfetch.py:_ProcessTable` (1184) |
+| **ADB (read-only listing / mvmeta)** | `adb devices`, `shell find`, `shell stat` (allowlisted); `mvmeta_upgrade`: `pull`, and with `--apply` `push <sidecar>.tmp` + `shell mv` | `main.py:device_inventory` (10800), `_mu_argv_ok` |
+| **HTTP** (poster/fanart) | `requests.get(url, headers={"User-Agent": ...}, stream=True)` | `main.py:cmd_set_poster`, `cmd_set_fanart` |
+| **HTTP HEAD** (`locate --probe-direct` only) | a cookie-less HEAD to a minted link; prints yes/no + content type | `mainfetch.py:_head_without_cookies` (5784) |
+| **Subprocess to fetcher** | `subprocess.Popen(["python", MAINFETCH_SCRIPT, "fetch", id, ...], env=_mainfetch_child_env())` | `main.py:cmd_dispatch_fetch` (10397) |
+| **Subprocess to the check engine** | `[sys.executable, <abs mainfetch.py>, "check", "--run", <dir>]` via `_cp_spawn`; the auto-confirm child `[sys.executable, <abs main.py>, "check_photos", "pending", "--apply", "--min-age-h", "24", "--max-minutes", "15"]` | `main.py:_cp_spawn` (13568), `auto_confirm_argv` (14939) |
 
 ---
 
@@ -2619,13 +3297,28 @@ Hash stays in JSON for the day the user wants to restore.
   second one to arrive will be deleted as a "duplicate". This is a
   theoretical bug but practically impossible (SHA256 over multi-GB
   chunks).
-- **Filename collisions in `~/Downloads`**: a `.crdownload` arriving for
-  a name already on disk gets ` (1)`, ` (2)`, ... suffixes by Chrome.
-  Since routing is hash-based, this doesn't matter; the harvester picks
-  up whatever new file appears.
+- **Filename collisions**: a `.crdownload` arriving for a name already on disk gets ` (1)`, ` (2)`, ...
+  suffixes by Chrome. Since routing is hash-based, this doesn't matter; the harvester picks up whatever new
+  file appears in the watched folder (`.mv_incoming`, or `~/Downloads` in the fallback mode).
+- **Wrong or partial downloads (IMP-C25 P-12)**: deleted at once inside `.mv_incoming` and listed; an
+  interrupted fetch is cleaned up by the next fetch's start-up (`🧹 Cleaned N leftover file(s) from an
+  interrupted fetch (X.X GB)`); files Chrome still locks are retried after Chrome closes and at the next
+  start; `fetch_cleanup` handles leftovers from before this feature. A lost download is requested once more
+  (IMP-C34); lost twice → the failed list (`download-lost`).
 - **Lost session state**: if Selenium's debug-port attach fails (e.g.,
-  9222 already in use by another Chrome), `init_driver` returns None
-  and the fetch route exits cleanly.
+  9222 already in use by another Chrome), `init_driver` ends the Chrome it just launched and returns None,
+  and the fetch route exits cleanly. A signed-out profile raises `SessionExpiredError` → one remediation line
+  naming the profile folder; a missing profile folder is refused before any launch (`profile_preflight`).
+- **A throttled Google Photos (IMP-C25 thfix)**: a search that answers nothing even for an item known to be in the
+  account, or a page that is neither Google Photos nor its sign-in page, raises `PhotosThrottledError` → one `⏸️`
+  line per command advising a re-run in about 30 minutes; never a "logged out", never a "not found", nothing
+  recorded for the object at hand (§8.4, §8.8).
+- **RPC trouble**: every locator stage falls back to the web pages on `RpcUnavailable`; 5 consecutive
+  failures turn RPC off for the session; a silent RPC/page disagreement turns it off for the run (drift
+  detector). Never a reason to download an unverified item.
+- **Library written by another process during an identity apply**: the apply engine's fingerprint re-check
+  reloads and re-patches (3 tries), then aborts with one line; the learned sidecar keeps every record, so a
+  re-run is idempotent.
 
 ---
 
@@ -2790,6 +3483,25 @@ rollback/storage work is tracked in `improvements/improvements_tierR.md`.
 > the `RollbackHardFail` contract are unchanged. See
 > `docs/feature-auto-rollback/ROLLBACK_MECHANISM.md` §6/§8/§10.
 
+> **IMP-C25 is rollback-neutral (OD-3 ruling "yes correct").** Nothing in the exact-item fetch,
+> map / check / resolve, `mvmeta_upgrade` or the auto-confirm changes the journal format/durability, the
+> PONR locations or `mark_point_of_no_return()` placement, D-6/D-7 scoping, the `cmd_*` wrapping,
+> `recover_journal()` semantics, the season resume-range messaging or the `RollbackHardFail` contract.
+> - The identity capture runs **post-commit** (after `journal.commit()`), is never journalled and never
+>   raises (wrapped, so a capture problem can never roll back a committed prep / push); the OD-3
+>   journal-op instrumentation test (`tests/test_gp_capture.py`) proves every journal record is identical
+>   with the capture layer on and off.
+> - The auto-confirm hook runs at the CLI-dispatcher level **after** a push-family function returned
+>   successfully — outside every journal scope; an exception never reaches it (`tests/test_auto_confirm.py`
+>   instruments a real `prep_push_rep` with a PONR: journal ops identical, no `.mediavault_txn*` file on disk
+>   when the hook starts).
+> - The apply engine (`gphotos_apply`) and `--repair split-info` write the library through their own
+>   fingerprint-guarded load → patch → save, with **no** rollback journal; `cmd_restore` /
+>   `restore_one_extra` / `bless_or_verify_merged_hash` are not modified (`verify_restore` only gained
+>   `tempdir`).
+> - The fetch journal `~/.mediavault/fetch_journal/<run_id>.json` is a separate file for download cleanup —
+>   it is NOT `.mediavault_txn.json` and not part of this mechanism.
+
 ---
 
 ## 13. Testing Approach
@@ -2812,7 +3524,38 @@ separate **50-test smoke suite** (`pytest tests/smoke -q`). Test files under
 | `test_trigger_download_retry.py` | C2 Selenium one-retry |
 | `test_mvcommon.py` | Pure helpers + library round-trip |
 | `test_alias_consumers.py` | IMP-C12/C13 alias regression — every fixed `multi_ep_alias` consumer (#1-#8) + non-alias controls, on the `sandbox_alias` fixture |
-| `test_entry_schema_guard.py` | IMP-H3 — round-trips one entry of every `ENTRY_TYPE_KEYS` type through `save`/`load`, and asserts the whole-library read commands tolerate non-physical entries (the registry-driven guard) |
+| `test_entry_schema_guard.py` | IMP-H3 — round-trips one entry of every `ENTRY_TYPE_KEYS` type through `save`/`load`, and asserts the whole-library read commands tolerate non-physical entries (the registry-driven guard); IMP-C25 section (d): the literal pinned, the canonical `_gphotos_block`, a four-prefix library with a block on every uploaded object round-trips byte for byte, and every whole-library reader gives identical output with and without blocks |
+
+**IMP-C25 test files** (as of 2026-10-20: full suite **3278 passed**, smoke **102 passed in ~12 s**; disarm
+62/62 in `.candidates/c25-step15/DISARM.md`). All run against the fake Google Photos world
+(`tests/gphotos_fake.py`, conftest fixture `fake_photos`: four accounts — movies in UK English, the others US
+— a Selenium-compatible driver that real `ActionChains` / `WebDriverWait` work against, item pages with
+embedded records, downloads, signed-out modes, a search throttle — `throttle(account, after=N, rpc="zero"|"error")`:
+after N searches every search answers nothing, as in the R3 dry runs — and Google's "unusual traffic" page (session
+`"sorry"`; IMP-C25 thfix), and a `batchexecute` emulator with failure injection and a request log) — never live
+Google, adb or network:
+
+| File | Covers |
+|---|---|
+| `test_gpweb.py` / `test_gprpc.py` / `test_rpc_quality_flags.py` | parsers; the RPC client (allowlist, pacing, retries, breaker, redacted links, no token in any traceback); the live quality-flag layouts |
+| `test_gphotos_primitives.py` / `test_gphotos_apply.py` | mvcommon identity primitives (pin rule, iterators, learned / failed / hints stores); the apply engine (fingerprint guard, conflicts, orphans, CSV safety) |
+| `test_gp_capture.py` / `test_gp_inventory.py` / `test_gp_inventory_own_tab.py` | capture v2 + mvmeta v2 + the OD-3 journal-op instrumentation; the crawler (rpc / dom, lock + heartbeat, run log, golden crawl) |
+| `test_device_inventory.py` / `test_map_photos.py` | the read-only device check (exact argv allowlist); the mapper (freshness gate, Step 9b recency, re-split sets, repairs, resolutions, the `not-listed` and `uploaded-after-crawl` verdicts, the dry-run preview = what `--apply` changes) |
+| `test_fetch_routing.py` / `test_fetch_account_routing.py` / `test_anime_fetch_routing.py` | per-object routing, mixed batches, frozen pre-change transcripts |
+| `test_fetch_harvester.py` / `test_fetch_hygiene.py` / `test_fetch_search_wait.py` / `test_fetch_photos_tab.py` / `test_fetch_child_stream.py` | the harvester (frozen oracles with the kill switch on and off), `.mv_incoming`, journal + cleanup + `fetch_cleanup`, the search wait + `trigger_download` digest, the Photos tab, live child output |
+| `test_locator.py` | the exact-item stages S0a–S4 and both triggers (every PLAN Step 12 scenario + the 10 cherry-picks) and the throttle guard (canary, reuse window, `unverified`); the read-only allowlist checked after every test |
+| `test_check_photos.py` / `test_auto_confirm.py` / `test_mvmeta_upgrade.py` | check engine, verdicts, outliers, apply, resume, a throttled stop and `unverified` verdicts; the push hook (six dispatcher branches, journal-op instrumentation); sidecar upgrade with a directory-backed fake adb |
+| `test_fetch_manual.py` / `test_resolve_photos.py` / `test_chrome_robustness.py` / `test_chrome_restore_bubble.py` / `test_warm_profiles.py` | `--manual`, resume hints, resolve walker; Chrome close under load, failed attach, page-load bound, warm-up close, "Restore pages?" |
+| `test_c25_regression_pins.py` | a registry of every existing C25 pin (a deleted / renamed pin fails) + the missing ones (spawned fetch argv, P-13 marker literals, `calculate_file_hash` contract, mvmeta v1 byte form) |
+
+Hermetic autouse guards in `tests/conftest.py`: `_hermetic_gphotos_state` (redirects `~/.mediavault/gphotos`,
+the inventory dir, the fetch journal dir, `~/Downloads`, the short incoming root, and an inert process
+table), `_hermetic_chrome_profiles`, `_hermetic_check_child` (no test can spawn the real check child),
+`_hermetic_auto_confirm` (the hook is an inert recorder; opt-in `real_auto_confirm`). Smoke Group 5
+(`TestC25*` in `tests/smoke/test_smoke_all_commands.py`) drives capture, `pending --list`, the post-fetch
+merge, `check_photos` / `map_photos` in-process on the fake world, an incoming-mode fetch, `mvmeta_upgrade`
+on the mock device, the `resolve_photos` TTY refusal, `fetch_cleanup`, the six push-family dispatcher runs,
+an alias sweep and all four prefixes. Details: `docs/testing-strategy.md`.
 
 The **smoke suite** (`tests/smoke/`, IMP-H3) is a fast (~8-10s) full-command
 gate: `TestEachCommand` drives every user-facing command + its major options
@@ -2830,8 +3573,9 @@ genuinely-splittable ~60 MB MKV reusing production `main.resolve_ffmpeg()`), the
 dual-binding patch hazard, and Windows gotchas are documented in
 [`docs/testing-strategy.md`](docs/testing-strategy.md). There is still no CI
 config — the suite runs locally via `pytest -q` (and `pytest tests/smoke -q`).
-Code paths outside the listed areas (Selenium fetch against real Google Photos,
-MediaInfo parsing) remain "tested by use"; the legacy snapshots under `archive/`
+Code paths outside the listed areas (Selenium against real Google Photos — the download triggers, the CDP
+download redirect and the Chrome close are verified live at 🚦 R2 (passed 2026-10-20/21 — §8.10 Live results) — and MediaInfo
+parsing) remain "tested by use"; the legacy snapshots under `archive/`
 serve as informal regression baselines.
 
 Implicit safety checks that act as runtime tests:
@@ -2847,9 +3591,11 @@ Implicit safety checks that act as runtime tests:
 
 ## 14. Configuration
 
-All configuration is **hardcoded Python constants at the top of each
-file**. There are no env vars, `.env`, `config.json`, `settings.py`, or
-CLI flags for paths. To re-target the system, you edit the source.
+Most configuration is **hardcoded Python constants at the top of each
+file**; paths are not CLI flags. To re-target the system, you edit the source. The exceptions are the
+gitignored `mvconfig.json` (web host/port, API keys, and the two IMP-C25/C26 keys below) and the
+environment variables MediaVault sets for its own children (`PYTHONIOENCODING=utf-8`,
+`PYTHONUNBUFFERED=1`; `MEDIAVAULT_WEB_JOB` marks a web job so the auto-confirm only prints its reminder).
 
 > **As of IMP-A1**, the shared library/path constants (`LIBRARY_MOVIES`,
 > `LIBRARY_SERIES`, `LIBRARY_ANIME`, `LIBRARY_OTHERS`, `LOCAL_ROOT`,
@@ -2858,6 +3604,13 @@ CLI flags for paths. To re-target the system, you edit the source.
 > `VIDEO_EXTENSIONS`) are now defined once in `mvcommon.py` and imported by both
 > entry points. The "Defined in" column below reflects the historical
 > per-file locations; edit `mvcommon.py` to re-target any shared constant.
+
+> **`mvconfig.json` keys read by IMP-C25 / IMP-C26** (gitignored; `mvconfig.example.json` documents them;
+> read at call time through `mvcommon._load_config()`; absent keys keep today's behavior):
+> - `"fetch_account_overrides": {"<exact id or id prefix>": "<movies|tv|anime|others>"}` — the top routing
+>   layer (§8.1); the longest matching key wins; an invalid entry gives one stderr warning and is ignored.
+> - `"auto_confirm_after_push": true|false` — absent / `null` / `true` = on; `false` = off (silent); any
+>   other value = off + one stderr warning.
 
 ### Active configuration constants
 
@@ -2879,18 +3632,35 @@ CLI flags for paths. To re-target the system, you edit the source.
 | `VIDEO_EXTENSIONS` | both | `('.mkv', '.mp4', '.avi', '.mov')` |
 | `PARTIAL_SUFFIX` | `main.py` | `.partial` — chunks upload to `<final>.partial` then `adb shell mv` to final (atomic remote rename); auto-rollback seam |
 | `MVMETA_SUFFIX` | `main.py` | `.mvmeta.json` — remote disaster-recovery sidecar name (`<base> [<short_id>].mvmeta.json`) written on full push success |
-| `CHROME_PROFILES["default"]` | `mainfetch.py:38` | `C:\Media\Utils\ChromeProfile` |
-| `CHROME_PROFILES["tv"]` | `mainfetch.py:39` | `C:\Media\Utils\ChromeProfile_TV` |
-| `CHROME_PROFILES["others"]` | `mainfetch.py:36` | `C:\Media\Utils\ChromeProfile_Others` (IMP-D18 Others/sports account) |
-| `ID_PREFIX_PROFILE` / `DEFAULT_PROFILE` | `mainfetch.py:40-41` | `[("ani","anime"),("tv","tv"),("mov","movies"),("oth","others")]` / `"movies"` — ordered id-prefix→Chrome-profile map consumed by `profile_for_id()`; `oth-` ids route to the Others profile (IMP-D18) |
-| `CHROME_PROFILE_NAME` | `mainfetch.py:41` | `Default` (sub-profile inside the user-data-dir) |
-| `SYSTEM_DOWNLOADS_FOLDER` | `mainfetch.py:42` | `~/Downloads` |
-| `CHROME_PATH` | `mainfetch.py:112` | `C:\Program Files\Google\Chrome\Application\chrome.exe` (falls back to `(x86)`) |
-| Debug port | `mainfetch.py:120` | `9222` |
+| `CHROME_PROFILES` | `mainfetch.py:41` | `movies` → `C:\Media\Utils\ChromeProfile`, `tv` → `…\ChromeProfile_TV`, `anime` → `…\ChromeProfile_Anime`, `others` → `…\ChromeProfile_Others` (IMP-D18; a user prerequisite) |
+| `ID_PREFIX_PROFILE` / `DEFAULT_PROFILE` | `mainfetch.py:49-50` | `[("ani","anime"),("tv","tv"),("mov","movies"),("oth","others")]` / `"movies"` — ordered id-prefix→Chrome-profile map; the last routing layer (§8.1) |
+| `CHROME_PROFILE_NAME` | `mainfetch.py:51` | `Default` (sub-profile inside the user-data-dir) |
+| `SYSTEM_DOWNLOADS_FOLDER` | `mainfetch.py:52` | `~/Downloads` — read only in the fallback mode and by `fetch_cleanup` |
+| `EXACT_LOCATOR_ENABLED` | `mainfetch.py:59` | `True` — P-14 kill switch for the exact-item stages |
+| `FETCH_PAGE_LOAD_S` / `DIRECT_PAGE_LOAD_S` / `CHECK_PAGE_LOAD_S` | `mainfetch.py:70` / `:2588` / `:5844` | 60 s / 15 s / 60 s page-load bounds |
+| `CHROME_PATH` | `mainfetch.py:100` | `C:\Program Files\Google\Chrome\Application\chrome.exe` (falls back to `(x86)`) |
+| Debug port | `mainfetch.py:108` | `9222` (the crawler's `--port` must be another one) |
+| `THROTTLE_RETRY_MIN` | `mainfetch.py:210` | 30 — the minutes every throttle line advises waiting before a re-run (advice only: nothing waits or retries by itself; IMP-C25 thfix, §8.8) |
+| `SEARCH_RESULTS_WAIT_S` / `SEARCH_POLL_S` / `SEARCH_SUGGESTIONS_ONLY_LOOKS` | `mainfetch.py:436-443` | 10 s / 0.5 s / 4 (IMP-C35 + the "Most relevant" strip) |
+| `INCOMING_DIR_NAME` / `INCOMING_MARKER` / `SHORT_INCOMING_ROOT` / `INCOMING_PATH_LIMIT` / `DISK_HEADROOM_BYTES` | `mainfetch.py:681-685` | `.mv_incoming` / `.mediavault_incoming` / `MV_incoming` / 240 / 2 GB |
+| `FETCH_JOURNAL_DIR` | `mainfetch.py:689` | `~/.mediavault/fetch_journal` |
+| `DOWNLOAD_STALL_S` | `mainfetch.py:1264` | 300 s — a partial not grown for this long is no longer running (the close waits for the rest) |
+| `TRIGGER_CONFIRM_S` / `DIRECT_DOWNLOAD_CONCURRENCY` / `LOCATE_MAX_CANDIDATES` | `mainfetch.py:2574-2577` | 20 s / 3 / 20 |
+| `CANARY_REUSE_S` / `CANARY_TRIES` | `mainfetch.py:2595-2597` | 10 s / 2 — the throttle guard (IMP-C25 thfix, §8.4): a search on the transport that listed an item, or a passed canary, this recently needs no canary; a canary that finds nothing is confirmed by one more (another item) before the run stops |
+| `MANUAL_WAIT_S` | `mainfetch.py:4644` | 1800 s (30 min per object with `--manual`) |
+| `CHECK_UI_PACE_S` / `CHECK_RPC_PACE_S` / `CHECK_ERROR_BREAKER` | `mainfetch.py:5840-5843` | 3 s / 0.5 s / 5 |
+| `ALLOWED_RPCIDS` | `gprpc.py:61` | `lcxiM, EzkLib, swbisb, VrseUb, fDcn4b, EWgK9e, pLFTfd` (read-only allowlist, pinned) |
+| `RPC_MIN_INTERVAL_S` / `RPC_JITTER_S` / `RPC_RETRIES` / `RPC_BACKOFF_S` / `CIRCUIT_BREAKER_FAILURES` / `MAX_BATCH_KEYS` | `gprpc.py:63-68` | 0.5 s / 0.25 s / 3 / (1, 2, 4) s / 5 / 50 |
+| `GPHOTOS_STATE_DIR` / `GP_INVENTORY_DIR` | `mvcommon.py:57-58` | `~/.mediavault/gphotos` / `D:\MediaVault_gp_inventory` |
+| `GPHOTOS_APPLY_ATTEMPTS` | `main.py:9977` | 3 — fingerprint changes before the apply engine aborts |
+| `MAP_INVENTORY_MAX_AGE_H` / `MAP_RECENT_DAYS` | `main.py:11068` / `:11073` | 24 h / 7 days (not-backed-up-yet vs possible-loss) |
+| `AUTO_CONFIRM_MIN_AGE_H` / `AUTO_CONFIRM_MAX_MINUTES` | `main.py:14931-14932` | 24 h (the auto-confirm's `--min-age-h`: only pushes this old are looked up) / 15 min |
+| `DEVICE_CHECK_EXTRA_SERIALS` | `main.py:98` | the extra movies phone, scanned by the device check only (`movies#2`); push routing is unchanged |
+| `MVMETA_SCHEMA_VERSION` / `MVMETA_UPGRADE_APPLY_ENABLED` | `main.py:5767` / `:15144` | 2 / `True` |
 | Language priority (sort) | `main.py:1035` | `en=1, ta=2, hi=3, default=99` |
 | Hash block size | `main.py:101`, `mainfetch.py:85`, `archive/legacy/index_file.py:22` | 65536 (64 KB) |
 | Balanced-split buffer | `main.py:231, 245` | `+10 MB` |
-| Fetch base timeout | `mainfetch.py:306` | 300 s (self-extends while .crdownload active) |
+| Fetch base timeout | `mainfetch.py:4284` (`harvest_downloads(timeout=300)`) | 300 s (self-extends while a `.crdownload` is active) |
 | `DUMMY_MAX_BYTES` | `main.py:34` | `200_000` (200 KB) — sniff threshold in `cmd_prep`, `cmd_check`, and `cmd_repair_dummies` |
 | `FFMPEG_PATH` | `main.py:33` | `C:\Users\harin\AppData\Roaming\Emby-Server\system\ffmpeg.exe` (falls back to `shutil.which`) |
 | `DUMMY_RECIPE_BY_EXT` | `main.py:41` | Per-container ffmpeg recipe for the ~10 KB dummy (audio codec / source / duration); four entries: `.mkv`, `.avi`, `.mp4`, `.mov` |
@@ -2904,9 +3674,11 @@ CLI flags for paths. To re-target the system, you edit the source.
 - The Pixel phone is connected via USB, debugging is authorised, and
   the Photos app is configured to back up `/sdcard/Media`.
 - MKVToolNix is installed at the default location.
-- The Downloads folder contains no other large `.mkv`/`.mp4` files that
-  could be confused with active fetches (the hash check protects
-  against collisions but the file is still hashed once).
+- All four Chrome profiles exist and are signed in (`ChromeProfile_Others` is created by the user — until
+  then `oth-` live steps are blocked by the profile pre-flight).
+- `~/Downloads` is no longer part of a normal fetch (downloads land in `restore\.mv_incoming\`); it matters
+  only in the fallback mode (Chrome refused the CDP redirect) and for `fetch_cleanup`.
+- An inventory crawl of an account must be fresh (≤ 24 h) for `map_photos` to give verdicts for it.
 
 ---
 
@@ -2927,9 +3699,14 @@ CLI flags for paths. To re-target the system, you edit the source.
   `uid`, `<short_id>.sha256`, optionally `_parts/`, `checksums/`,
   `restore/`, `poster.jpg`, `fanart.jpg`, plus the original (or its
   dummy).
-- **Two-stage matching for restore**: precision-by-filename then
-  fallback-by-fuzzy-search-term, with positional indexing for
-  multi-chunk fallback.
+- **Identity before bytes (IMP-C25)**: the fetch proves WHICH Google Photos item is the object (photo_id,
+  content key = dedupKey, taken second, exact name) before requesting a download; today's precision /
+  positional search is only the last resort (S4).
+- **Dry run by default, `--apply` to write**: `map_photos`, `check_photos`, `mvmeta_upgrade`,
+  `fetch_cleanup` (and the existing `enrich_metadata` / migrations) write nothing but their own run report
+  unless told to.
+- **Append-only sidecars + one writer**: learned facts go to append-only JSONL files first; one engine
+  folds them into the library idempotently.
 - **Hash-first routing**: when in doubt about a file's identity (in
   Downloads, in restore/), SHA256 it and look it up. Filenames are
   treated as hints, not identity.
@@ -2961,14 +3738,21 @@ CLI flags for paths. To re-target the system, you edit the source.
   `main.py` and used by `set_poster`/`set_fanart`. Add it.
 - ~~**`pymediainfo` dead import in `mainfetch.py`**~~: **FIXED** —
   `from pymediainfo import MediaInfo` removed from `mainfetch.py`.
-- **`build_download_queue` in `mainfetch.py:413` is unreachable** —
-  defined but never called. Either wire it up (replacing the inline
-  duplicate in `fetch_single_entry`) or delete.
-- **`fallback_query` is the same as `specific_query` for non-chunked
-  files** (`mainfetch.py:269-279`) — both default to
-  `entry["search_term"]` or `entry["filename"]`. The second attempt is
-  effectively the same search, just with `fallback_index = 0`. A real
-  fallback (e.g., dropping the bracketed UID) would be more useful.
+- ~~**`build_download_queue` in `mainfetch.py:413` is unreachable**~~: **FIXED** (IMP-A8, absorbed by
+  IMP-C25 Step 10) — deleted together with `wait_for_download` / `automation_download_file`; the queue is
+  `build_fetch_queue`.
+- ~~**`fallback_query` is the same as `specific_query` for non-chunked files**~~: **SUPERSEDED** (IMP-C5,
+  absorbed by IMP-C25) — the legacy attempts are unchanged on purpose (they are stage S4, digest-pinned), but
+  they now run only after the exact-item stages S0a–S3u, which search by the exact uploaded name, title +
+  short id, the bare short id and the user's own term, each candidate verified.
+- ~~**The harvester re-hashes the same file every attempt**~~: **FIXED** (IMP-B10, absorbed by IMP-C25 Step
+  10) — a file is hashed once per run (path + size + `mtime_ns`).
+- **Known IMP-C25 limits (not bugs, tracked):** `gprpc.STATUS_NOT_FOUND = 5` is unverified (a photo_id is
+  called stale only when the item page agrees); original-quality cannot be read from the RPC records yet
+  (never claimed); fetch journals under `~/.mediavault/fetch_journal/` are never pruned; `warm_profiles` runs
+  no profile pre-flight; the shared close line says "this fetch" also inside `resolve_photos`; a fetch holds
+  the lock without a heartbeat, so one running > 1 h can be reclaimed as stale; the live download triggers
+  and the CDP redirect are verified only live, at 🚦 R2 (passed 2026-10-20/21; §8.10 Live results).
 - **`get_tech_specs` swallows all parse exceptions** to a single
   `{"error": "Could not parse file"}`, which then gets stored into
   `entry["tech_spec"]` as a 1-key dict. Downstream code (e.g.,
@@ -3050,7 +3834,8 @@ CLI flags for paths. To re-target the system, you edit the source.
   IMP-A1 — both entry points import the strict `mvcommon.load_library`
   (`sys.exit(1)` on corruption); the silent-zero-entries behavior is gone.
 - **`cmd_dispatch_fetch` invokes `"python"` literally**
-  (`main.py:2719`) instead of `sys.executable`. On a machine where
+  (`main.py:10399`) instead of `sys.executable` (still true; the IMP-C25 `check_photos` and auto-confirm
+  children do use `sys.executable`). On a machine where
   `PATH` resolves `python` to a different interpreter than the one
   running `main.py`, the spawned `mainfetch.py` will fail to import
   `selenium`.
@@ -3065,9 +3850,10 @@ CLI flags for paths. To re-target the system, you edit the source.
   values).
 - Inline emoji `print` statements make it hard to capture clean logs
   for debugging long-running batch operations.
-- `build_download_queue` in `mainfetch.py:413` is unreachable scaffolding.
-- `wait_for_download` and `automation_download_file` in
-  `mainfetch.py:219, 224` are no-op stubs kept "for compatibility".
+- ~~`build_download_queue` / `wait_for_download` / `automation_download_file` dead stubs~~ **DONE**
+  (IMP-A8, deleted in IMP-C25 Step 10).
+- `main.py` (18,294 lines) and `mainfetch.py` (6,313 lines) keep growing as single files; the IMP-C25
+  sections are banner-delimited (grep "GOOGLE PHOTOS IDENTITY" / "IMP-C25 STEP").
 
 ### Security / privacy concerns
 
@@ -3078,6 +3864,11 @@ CLI flags for paths. To re-target the system, you edit the source.
   `127.0.0.1:9222` — anything local on the machine can issue commands
   to the browser session while it's running. Acceptable for a
   single-user PC; risky on a shared machine.
+- **IMP-C25 private data.** Photo ids, dedupKeys, inventory and mapping reports identify the user's cloud
+  items: they live only in `~/.mediavault/gphotos/` and `D:\MediaVault_gp_inventory\`, never in the repo
+  (P-15; the tests use synthetic `AF1QipFAKE…` ids). Minted download links are bearer credentials while valid
+  (~1 h): memory only, redacted wrapper, never printed / logged / journaled (P-20). RPC page tokens never
+  leave the browser's own request. Every Google Photos call is read-only (§8.9).
 
 ### Scalability
 
@@ -3090,7 +3881,12 @@ CLI flags for paths. To re-target the system, you edit the source.
   parallel, but entries themselves processed sequentially via
   `for entry in targets`). For a 20-episode season this is intentional
   (Google Photos rate-limits parallel sessions), but it's a hard
-  ceiling on throughput.
+  ceiling on throughput. Since IMP-C25 a batch whose objects live in several accounts runs one Chrome
+  session per account, one after another; direct downloads run at most 3 at once per entry.
+- A full-library `check_photos` sweep is paced (≥ 0.5 s per RPC call, 3 s after a web-page object) and
+  resumable (`--max-minutes`, re-run to continue) — hours, spread over sessions, by design (account safety).
+- Once the learned sidecar is non-empty, every `main.py fetch` re-reduces it and loads the library for the
+  post-fetch merge (seconds at full-library scale).
 
 ---
 
@@ -3116,9 +3912,11 @@ work would slot in cleanly:
    (PR #2: `device <id_or_name>` + `DEVICE_ALIASES` on all four push
    commands). True *parallel* multi-device orchestration (the user runs
    4 Pixel 1 XLs) remains open — see IMP-E7 and the end-goal roadmap.
-7. **Better fallback search**: today's "fallback_query" is essentially
-   the same query as the precision search. A real fallback would strip
-   the UID/extension and try the bare title.
+7. ~~**Better fallback search**~~ — **DONE** (IMP-C5, absorbed by IMP-C25): the exact-item waterfall
+   (§8.4) runs before today's two attempts.
+7a. **Resumable direct transfer** (suggested after IMP-C25; tracked as IMP-C44): if `locate --probe-direct`
+   shows the minted original-download link answers without browser cookies, the byte transfer could move from
+   Chrome to Python with HTTP Range resume (links stay memory-only, P-20).
 8. **Progress tracking for long batches**: write a `progress.json`
    per-batch so a Ctrl-C in `cmd_prep_push_rep_season` can resume from
    the last completed episode rather than re-evaluating every child.
@@ -3130,7 +3928,8 @@ work would slot in cleanly:
     remove the Chrome dependency entirely and let the fetcher run
     headless on a server. Trade-off: Photos API doesn't return raw
     "original quality" video without a separate Picker workflow as of
-    the latest documentation.
+    the latest documentation. (IMP-C25 instead uses the web app's own read-only internal calls from the
+    signed-in page — §8.9 — and still downloads through the automation Chrome.)
 11. **Opus 4.8 "dynamic workflows" for the agent pipeline**: a session
     can plan a task then spin up hundreds of verified parallel subagents.
     It could replace the sequential orchestrator + multi-candidate
@@ -3151,16 +3950,25 @@ work would slot in cleanly:
 | How to pin a push to a specific phone | `main.py:resolve_device()` + `cmd_push(... device_id=...)`; alias dict at `main.py:DEVICE_ALIASES` |
 | How dummies are formatted | `main.py:778-780` |
 | How the merged-file hash is updated | `main.py:923-929` |
-| Which Chrome profile is chosen | `mainfetch.py:cmd_fetch_route` (459-464) |
-| How Photos search is performed | `mainfetch.py:trigger_download` (150-216) |
-| How downloaded files are routed | `mainfetch.py:fetch_single_entry` harvester loop (310-366) |
+| Which Chrome profile / account an object is fetched in | `mainfetch.py:_object_account` (5290), `_account_groups` (5345); overrides `_account_overrides` (5232) |
+| How the exact item is found | `mainfetch.py:locate_object` (3479), the stages (3107-3238), `_run_locator_phase` (3819) |
+| How a located item is downloaded | `mainfetch.py:_direct_trigger` (3665), `_shift_d_trigger` (3787) |
+| Today's legacy search (S4) | `mainfetch.py:trigger_download` (516) — digest-pinned |
+| Where downloads land / cleanup | `mainfetch.py:_prepare_downloads` (1097), `_finish_downloads` (1157), `_startup_cleanup` (1546), `fetch_cleanup_plan` (1640) |
+| How downloaded files are routed | `mainfetch.py:harvest_downloads` (4284) |
+| How Chrome is closed | `mainfetch.py:_close_session` (2035), `_end_run` (2104), `mark_profile_clean_exit` (1400) |
+| Which Google Photos RPCs may be called | `gprpc.py:ALLOWED_RPCIDS` (61), `call` (341) |
+| Who writes the `gphotos` block | `main.py:gphotos_apply` (10240) — the only writer; post-fetch `merge_learned_gphotos` (10347) |
+| Identity primitives (pin, iterators, stores) | `mvcommon.py` "GOOGLE PHOTOS IDENTITY" section (from ~950) |
+| Capture at prep / push | `gpcapture.py`; hooks `main.py:1609`, `:5613`, `:6333`, `:6972`, `:6988` |
+| map / check / resolve / mvmeta_upgrade / auto-confirm | `main.py:cmd_map_photos` (12830), `cmd_check_photos` (14263), `cmd_resolve_photos` (14834), `cmd_mvmeta_upgrade` (15720), `after_push_command` (15091) |
 | What ID prefix goes to which library file | `main.py:save_library` (75-84), `tools/migrate_lib.py:38-45` |
 | Auto-parent / season-map creation | `main.py:cmd_prep` (333-364) |
 | Episode-number auto-detection from filenames | `main.py:cmd_prep_season` (489-507) |
 | Episode-range filter (group ops) | `main.py:cmd_push_group` (731-732), `cmd_restore_group` (997-998), `cmd_prep_push_rep_season` (1303); `mainfetch.py:resolve_targets` (391-392). Note: `cmd_push_group` lacks the `x\d+$` pattern — see §16. |
-| Chrome profile per category | `mainfetch.py:cmd_fetch_route` (457-462). Movies → `default`; series & anime → `tv`. |
-| Half-episode (`.5`) regex support | `main.py:336, 491, 738, 1004, 1310`; `mainfetch.py:393` |
-| Adding a new subcommand | Append to the `if/elif` chain in `main.py:1397-1622` |
+| Chrome profile per category | `mainfetch.py:ID_PREFIX_PROFILE` (49): `mov` → movies, `tv` → tv, `ani` → anime, `oth` → others |
+| Half-episode (`.5`) regex support | `main.py:336, 491, 738, 1004, 1310` (point-in-time refs); `mvcommon.episode_num_from_id` |
+| Adding a new subcommand | Append to the `if/elif` chain of the dispatcher (`main.py:17646` onward) |
 
 ---
 
@@ -3275,7 +4083,40 @@ it):
 
 ---
 
-*Last updated 2026-06-12 (fable-review session, branch `feature_fable_review`):
+*Last updated 2026-11-03 (IMP-C25 follow-up "mpfix", from the R3 map runs of 2026-10-28): map_photos' dry-run apply
+preview counts what `--apply` changes (records already on record are not new; a run that records nothing previews
+the sidecar too; the `--repair split-info` chunks on their own line) and the `uploaded-after-crawl` verdict (§8.10
+step 4 and the preview paragraph; §13). The `main.py` refs this change shifted (+1 at the map constants … +118 after
+the map section) were re-pointed and re-verified across the document: §5, §6.5, §8.10, §10 Stage 4, §11, §14, §18.*
+
+*Earlier — 2026-10-28 (IMP-C25 follow-up "thfix", from the R3 dry runs of 2026-10-27): the throttle guard — a
+Google Photos search that answers nothing is a "not found" only while a canary shows the search works (§8.4,
+`zero_check`), `PhotosThrottledError` and the page classifier that no longer reads Google's throttle bounce as
+"logged out" (§8.3, §8.7, §8.8 with the per-command lines), check_photos' stop reason `throttled` and `unverified`
+verdicts, resolve_photos' throttle line (§8.10), the warm-up's `THROTTLED` (§9.1b), the crawler's exit 4 (§9.3),
+`THROTTLE_RETRY_MIN` / `CANARY_REUSE_S` / `CANARY_TRIES` (§14); map_photos' `not-listed` verdict (§8.10 step 4). The
+refs this change shifted (`mainfetch.py` +83 … +321 after `SessionExpiredError`, `gprpc.py` +1 / +4, `main.py`
++2 … +82 from the map section on) were re-verified across the document, including the §11 and §18 tables.*
+
+*Earlier — 2026-10-27 (IMP-C25 follow-up "auto-confirm checks only objects old enough", the user's finding —
+`docs/feature-fetch-datetime/DECISIONS.md` §1g): `check_photos --min-age-h H` (§5 table, §8.10) and the auto-confirm
+child `check_photos pending --apply --min-age-h 24 --max-minutes 15` with its due-only header line (§5 note, §8.10,
+§11, §14). The `main.py` refs this change shifted (+24 … +40 after the check section) were re-verified in §5, §6.5,
+§8.10, §10 Stage 4, §11, §14 and §18.*
+
+*Earlier — 2026-10-20 (IMP-C25 Step 16, branch `feature/imp_c25_fetch_exact_gp_item`): exact Google
+Photos item fetch — §1 overview, §3 layout (gpweb / gprpc / gpcapture / gp_inventory, the `~/.mediavault`
+state tree), §5 new commands (`map_photos`, `check_photos`, `resolve_photos`, `mvmeta_upgrade`,
+`fetch_cleanup`, `verify_restore tempdir`, `--manual`, the auto-confirm hook, `mainfetch.py locate/check`),
+§6.3 the `gphotos` block, §6.5 capture v2 + mvmeta v2 + `mvmeta_upgrade`, §7.5 capture, §8 rewritten (four
+profiles + per-object routing, the S4 drift fix, the locator, download hygiene + Chrome lifecycle, manual /
+resume, the read-only RPC section §8.9, the identity commands §8.10), §9.1b / §9.3, §10 Stage 4, §11, §12,
+§12a rollback-neutral addendum, §13 C25 tests, §14 constants + mvconfig keys, §16 / §17 C5 / A8 / B10 struck,
+§18. Line refs in the touched sections verified against the code at de5620b; `main.py:NNN` refs elsewhere
+(e.g. the §12a PONR table, the 2026-05-25 audit list, the §14 historical "Defined in" column) are
+point-in-time. Live R2 / R3 results: pending.*
+
+*Earlier — 2026-06-12 (fable-review session, branch `feature_fable_review`):
 refreshed line counts (`main.py` 3081 / `mainfetch.py` 491 / `mvcommon.py` 168),
 repo layout (docs/ + tests/ + .candidates/ real contents, migrate_rehash_flag),
 §7.8 PR #19 regex, §12a anchors re-verified, §13 rewritten for the 13-file test

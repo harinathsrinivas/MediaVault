@@ -9,6 +9,8 @@ import time
 import stat
 import hashlib
 import difflib
+import copy
+import csv
 import tempfile
 import webbrowser
 import requests
@@ -41,9 +43,13 @@ from mvcommon import (
 # them (or mvcommon.MVTOKENS_PATH) is honoured here — see the binding-hazard note
 # in mvcommon's RUNTIME CONFIG section.
 import mvcommon
-# [IMP-C25] interim identity capture (<folder>/<short_id>.gpcapture.json) — best-effort,
-# called only after cmd_prep / cmd_push succeed; never raises, never journalled.
+# [IMP-C25] identity capture (<folder>/<short_id>.gpcapture.json) — best-effort, called
+# only after cmd_prep / cmd_push succeed, after the extras scan saved and after an extra
+# uploaded; never raises, never journalled.
 import gpcapture
+# [IMP-C25] the shared Google Photos parsers (dedupKey helpers) for the apply engine — stdlib-only and
+# already loaded by mvcommon, so this adds no import cost and no cycle.
+import gpweb
 
 REMOTE_ROOT = "/sdcard/Media"  # Your Pixel Root
 FFMPEG_PATH = r"C:\Users\harin\AppData\Roaming\Emby-Server\system\ffmpeg.exe"
@@ -85,6 +91,11 @@ MAINFETCH_SCRIPT = "mainfetch.py"  # Name of the automation script
 # Human-friendly aliases for the user's ADB devices. Maps alias -> serial.
 # Edit this dict when the physical phones change.
 DEVICE_ALIASES = {"movies": "FA69H0300200", "series": "FA75V0303405", "others": "<NEW_PIXEL_SERIAL>"}  # TODO(user): real Others Pixel serial — prerequisite
+# [IMP-C25] Extra phones the READ-ONLY device cross-check also lists, keyed by the DEVICE_ALIASES alias they
+# serve (user ruling 2026-10-01, docs/feature-fetch-datetime/DECISIONS.md §1d: HT74D0202839 is an extra movies
+# phone). Device-check only: pushes keep DEVICE_ALIASES' one serial per alias (resolve_device never reads this).
+# device_check_aliases() merges both for device_inventory(). Edit it when the physical phones change.
+DEVICE_CHECK_EXTRA_SERIALS = {"movies": ["HT74D0202839"]}
 
 # Remote push reliability conventions (rclone "chunker"-style).
 # AUTO-ROLLBACK SEAM: each chunk is uploaded to "<final>.partial" then atomically
@@ -157,6 +168,57 @@ CATEGORY_ROOTS = {
 # split_info vocabulary a main-content leaf uses. Authoritative in-code spec:
 # the EXTRAS DATA LAYER section below (grep "EXTRAS DATA LAYER").
 #
+# (IMP-C25) An optional `gphotos` block — the Google Photos identity of ONE
+# uploaded object — nests on EACH object a push uploads (PLAN P-1): the
+# unsplit leaf itself, each `split_info.chunks[i]`, each FLAC holder
+# `split_info.carried_out_tracks[i]`, an unsplit extras item, and each
+# `split_info.chunks[i]` of a split extras item. Never on a split entry itself
+# (P-3: its chunks + holders were uploaded, not the whole file); a season_map
+# holds blocks only inside its extras; a multi_ep_alias holds none. Like
+# `extras` it adds NO entry type, is in NO `required` set, changes no
+# `physical` flag, round-trips through save_library/load_library untouched,
+# and the whole-library read commands ignore it. Shape v1 (only known facts,
+# never null; times are UTC "...Z" strings, or epoch ms in taken_ms/upload_ms):
+#   gphotos = {v: 1, sha256, sha1, dedup_key, size_bytes, width, height,
+#     duration_s, date_utc, uploaded_name,
+#     pushed: {at, device_id, device_tz, device_tz_offset_min},
+#     accounts: {<movies|tv|anime|others>: {photo_id, taken_ms, tz_offset_ms,
+#       upload_ms, dedup_key, gp_filename, width, height, verified_at,
+#       verified_by, source, approach: {best, ok, failed, at, via},
+#       alternates, original_quality, partial_upload, confirmed}},
+#     home_account, search_override: {query, at}}
+# - PIN (P-2): a block is trusted only while its `sha256` equals the owning
+#   object's CURRENT hash (leaf `hash` / chunk `hash` / holder `holder_hash` /
+#   extras item `hash`); an untrusted block (it describes other bytes, e.g. an
+#   extras item re-mastered after its push) is ignored by readers and replaced
+#   by the apply engine, the block's ONLY writer (P-10). A re-split replaces
+#   split_info wholesale, so the old chunks' blocks go with it.
+# - `sha1`/`dedup_key` = the content key Google Photos dedups on (dedup_key =
+#   unpadded urlsafe base64 of the SHA-1); `date_utc` = the file's Matroska
+#   DateUTC (the taken time Google Photos shows); `uploaded_name` = the exact
+#   pushed name; `pushed` = the push's device, device timezone and time.
+# - accounts[<account>] = the copy in that Google account: its permanent
+#   `photo_id` + item facts; `verified_by` dedupkey|sha256|filename|manual and
+#   `source` map|check|fetch|confirm|manual; `approach` = which fetch
+#   approaches pinpointed it (`ok`, `best` = the first in waterfall order) or
+#   `failed`, from photo_id|hash|taken_second|exact_name|title_sid|user_query|
+#   legacy (`via` rpc|ui); `alternates` = photo ids of other items with the
+#   same name (re-split duplicates); `original_quality` / `partial_upload` =
+#   that copy's quality flags (a non-original or partial copy fails a
+#   restore's SHA-256 check); `confirmed` = seen there with upload_ms AND a
+#   verified identity (never from the push-time capture alone, P-11).
+# - `home_account` = the learned account fetch routes to (P-4: mvconfig
+#   fetch_account_overrides > home_account > id prefix); `search_override` =
+#   the user's own search term for this object, from the failed list (OD-5).
+# - Never a download URL (P-20: URLs expire and act as credentials).
+# Authoritative in-code spec: mvcommon's "GOOGLE PHOTOS IDENTITY" section
+# (new_gphotos_block / block_trusted / iter_uploaded_objects); decisions:
+# docs/feature-fetch-datetime/DECISIONS.md.
+# - `map_photos --repair split-info` (IMP-C25 Step 9 / IMP-C27 (a)) can write
+#   a `split_info` back onto a leaf (or extras item) that lost it: {is_split,
+#   total_chunks, chunks: [{filename, hash}]} — WITHOUT method / val, which
+#   are unknown after the loss (every reader takes them with .get()).
+#
 # `required` = keys that distinguish the type and are always present; it is the
 # minimal set, not the exhaustive set (leaves also carry hash/metadata/etc.).
 # `physical` = "this entry owns a physical file on disk" (has folder_path AND
@@ -167,7 +229,9 @@ CATEGORY_ROOTS = {
 # This constant is documentation + a test seam (tests/test_entry_schema_guard.py
 # enforces it). It is intentionally NOT wired into the cmd_* code paths — the
 # guard test is the enforcement. When you add or change an entry type, update
-# THIS registry AND the guard test's non-physical set.
+# THIS registry AND the guard test's non-physical set; when you change a nested
+# block's shape, update its canonical fixture there too (_extras_block /
+# _gphotos_block).
 ENTRY_TYPE_KEYS = {
     "leaf":           {"required": {"folder_path", "filename", "status"}, "physical": True},
     "season_map":     {"required": {"folder_path", "children"},           "physical": False},
@@ -5532,6 +5596,23 @@ def _extras_scan_merge_and_save(library, mid, extras):
         return
     merge_extras_into_title(library, title_id, scanned)
     save_library(library)
+    # [IMP-C25] After the save — best-effort, never journalled (extras have no journal)
+    # and never raising (cmd_prep calls this AFTER its journal committed): record the
+    # identity facts of every item this scan registered or refreshed, the SHA-1 from
+    # the scan's own hash pass. An item the merge did not take (a dummy-sized new file,
+    # a cloud-bearing item kept as stored over its dummy) is skipped — its scanned
+    # bytes are not the ones the library records.
+    try:
+        groups = library[title_id].get("extras", {}).get("groups", {})
+        for group_rel, gdata in scanned.items():
+            stored = {_extras_rel_posix(it.get("sub_rel", "")): it
+                      for it in groups.get(group_rel, {}).get("items", [])}
+            for item in gdata.get("items", []):
+                kept = stored.get(_extras_rel_posix(item["sub_rel"]))
+                if kept is not None and kept.get("hash") and kept.get("hash") == item.get("hash"):
+                    gpcapture.capture_after_extras_scan(title_folder, title_id, group_rel, kept)
+    except Exception:
+        pass
     total = sum(len(g["items"]) for g in scanned.values())
     groups_str = ", ".join(
         f"{k} ({len(v['items'])} item{'s' if len(v['items']) != 1 else ''})"
@@ -5681,10 +5762,12 @@ def cmd_check(manual_id):
     _check_title_extras(library, manual_id)
 
 
-MVMETA_SCHEMA_VERSION = 1
+# v2 (IMP-C25, OD-4 ruling): every v1 key unchanged + optional per-chunk identity keys
+# (gpcapture.MVMETA_KEYS) — see write_remote_mvmeta.
+MVMETA_SCHEMA_VERSION = 2
 
 
-def write_remote_mvmeta(adb_base, remote_target_dir, manual_id, entry):
+def write_remote_mvmeta(adb_base, remote_target_dir, manual_id, entry, identity=None):
     """Write a disaster-recovery `.mvmeta.json` sidecar next to the chunks on the phone.
 
     Mirrors the library entry (split_info + key metadata) so the local library can
@@ -5697,6 +5780,13 @@ def write_remote_mvmeta(adb_base, remote_target_dir, manual_id, entry):
     matching the chunk naming convention). Written for non-split single-file uploads
     too -- in that case `chunks` is a 1-element list referencing the renamed remote
     `<name> [<short_id>]<ext>` name.
+
+    v2 (IMP-C25, OD-4 ruling): every v1 key is unchanged; each `chunks` item may
+    also carry `sha1` + `dedup_key` (Google Photos' content key for those exact
+    bytes), `date_utc` (their Matroska DateUTC, the time Google Photos shows) and
+    `uploaded_name` (the exact name pushed) — only the ones known. `identity` maps
+    a chunk's SHA-256 to those facts (gpcapture.mvmeta_identity); without it the
+    v1 content is written under version 2.
     """
     try:
         short_id = entry.get("short_id", "")
@@ -5722,6 +5812,13 @@ def write_remote_mvmeta(adb_base, remote_target_dir, manual_id, entry):
             total_chunks = 1
             remote_name = f"{base_filename} [{short_id}]{ext}"
             chunks = [{"filename": remote_name, "hash": entry.get("hash")}]
+
+        # [IMP-C25] v2: the known identity facts of each chunk's bytes (OD-4).
+        if isinstance(identity, dict):
+            for chunk in chunks:
+                facts = identity.get(chunk["hash"]) if isinstance(chunk.get("hash"), str) else None
+                if isinstance(facts, dict):
+                    chunk.update((k, facts[k]) for k in gpcapture.MVMETA_KEYS if facts.get(k))
 
         mvmeta = {
             "version": MVMETA_SCHEMA_VERSION,
@@ -5759,6 +5856,26 @@ def write_remote_mvmeta(adb_base, remote_target_dir, manual_id, entry):
     except Exception as e:
         print(f"⚠️ mvmeta sidecar write failed (chunks are safe): {e}")
         return False
+
+
+def _device_facts(adb_base):
+    """[IMP-C25] The pushing device's timezone for the identity capture (PLAN Step
+    5b): ONE best-effort, read-only query `getprop persist.sys.timezone; date +%z`
+    (15 s timeout) through the push's own `adb_base`, so a pinned `-s <serial>`
+    reaches it too. Returns {device_tz, device_tz_offset_min} with only the facts
+    it could read (gpcapture.device_facts_from_output); ANY problem — no device, a
+    timeout, a runner without stdout — gives {}. Called only after a push committed
+    (cmd_push after journal.commit(); push_title_extras after an extra uploaded);
+    never journalled, never raises."""
+    try:
+        result = subprocess.run(adb_base + ["shell", "getprop persist.sys.timezone; date +%z"],
+                                capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=15)
+        if getattr(result, "returncode", None) != 0:
+            return {}
+        return gpcapture.device_facts_from_output(getattr(result, "stdout", None))
+    except Exception:
+        return {}
 
 
 def _verify_chunk_hash(adb_base, remote_path, safe_path, expected_sha256):
@@ -5930,7 +6047,8 @@ def _print_resume_strangers(indent, notes):
 # RollbackJournal, mark_point_of_no_return(), or the main O-1/O-2 split.
 
 
-def push_one_extra(library, title_id, group_rel, item, extras_method, extras_val, device_id=None):
+def push_one_extra(library, title_id, group_rel, item, extras_method, extras_val, device_id=None,
+                   device_facts=None):
     """Upload ONE extra item to the device, mirroring cmd_push's per-file upload
     protocol but standalone and stripped to the essentials.
 
@@ -5946,7 +6064,10 @@ def push_one_extra(library, title_id, group_rel, item, extras_method, extras_val
     hashes into the item's `split_info` (BEFORE upload, so a resume has them)
     -> per-chunk `<final>.partial` upload + atomic `mv`, wrapped in
     mvcommon.retry -> delete the local chunk -> best-effort `write_remote_mvmeta`
-    sidecar -> flip the item `uploaded=True`, `status="onboarded"`, and save.
+    sidecar -> flip the item `uploaded=True`, `status="onboarded"`, and save ->
+    [IMP-C25] best-effort identity capture at <extra folder>/<short_id>.gpcapture.json
+    (`device_facts`: an optional zero-arg callable returning the device's timezone
+    facts — push_title_extras passes its once-per-title memo of _device_facts).
 
     O-1 resumable per file: NO point-of-no-return. The per-item chunk dir lives
     at <extra folder>/<SPLIT_DIR_NAME>/<short_id> — nested under SPLIT_DIR_NAME so
@@ -6116,6 +6237,18 @@ def push_one_extra(library, title_id, group_rel, item, extras_method, extras_val
         files_to_upload = [local_file_path]
         item.pop("split_info", None)
 
+    # [IMP-C25] Read-only snapshot of what is about to be uploaded (chunks are deleted
+    # locally as they upload); written to the item's capture file only after success.
+    # parts_dir (not the bare _parts name) marks the chunks: this pusher names by is_split.
+    try:
+        _capture_objs = gpcapture.snapshot_push_objects(
+            files_to_upload, parts_dir, short_id,
+            {c.get("filename"): c.get("hash") for c in (item.get("split_info") or {}).get("chunks", [])
+             if isinstance(c, dict)},
+            item.get("hash"), [], item.get("tech_spec"))
+    except Exception:
+        _capture_objs = []
+
     # UPLOAD LOOP — the duplicated .partial+rename+retry idiom (deliberate, lean).
     all_success = True
     for f in files_to_upload:
@@ -6183,12 +6316,25 @@ def push_one_extra(library, title_id, group_rel, item, extras_method, extras_val
     # folder_path so the mvmeta records where the extra restores to.
     meta_entry = dict(item)
     meta_entry["folder_path"] = extra_folder
+    try:
+        _mvmeta_identity = gpcapture.mvmeta_identity(extra_folder, short_id, _capture_objs)
+    except Exception:
+        _mvmeta_identity = None
     write_remote_mvmeta(adb_base, remote_target_dir,
-                        f"{title_id}::{group_rel}/{item.get('sub_rel')}", meta_entry)
+                        f"{title_id}::{group_rel}/{item.get('sub_rel')}", meta_entry,
+                        identity=_mvmeta_identity)
 
     item["uploaded"] = True
     item["status"] = "onboarded"
     save_library(library)
+    # [IMP-C25] After the success save — best-effort, never journalled (extras have no
+    # journal): the item's identity capture, with the device's timezone facts.
+    try:
+        gpcapture.capture_after_push(extra_folder, gpcapture.extras_label(title_id, group_rel, item.get("sub_rel")),
+                                     short_id, _capture_objs, device_id=device_id, remote_dir=remote_target_dir,
+                                     device_facts=device_facts() if device_facts else None)
+    except Exception:
+        pass
     return True
 
 
@@ -6230,9 +6376,21 @@ def push_title_extras(library, title_id, extras_size, device_id=None, split_meth
     print(f"   > Extras split: {e_method} {e_val}" if (e_method and e_val)
           else "   > Extras: whole-file (no split)")
 
+    # [IMP-C25] The device's timezone facts for the extras captures: ONE best-effort,
+    # read-only query per title (same adb_base as the uploads), made lazily once the
+    # first extra has uploaded — a run where nothing uploads never asks the device.
+    adb_base = ["adb", "-s", device_id] if device_id else ["adb"]
+    facts_memo = []
+
+    def _device_facts_once():
+        if not facts_memo:
+            facts_memo.append(_device_facts(adb_base))
+        return facts_memo[0]
+
     ok = True
     for group_rel, item in pending:
-        if not push_one_extra(library, title_id, group_rel, item, e_method, e_val, device_id=device_id):
+        if not push_one_extra(library, title_id, group_rel, item, e_method, e_val, device_id=device_id,
+                              device_facts=_device_facts_once):
             ok = False
     print(f"=== ✅ EXTRAS UPLOAD COMPLETE for {title_id} ===" if ok
           else f"=== ⚠️  EXTRAS UPLOAD INCOMPLETE for {title_id} (re-run to resume) ===")
@@ -6655,7 +6813,8 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
     try:
         _capture_objs = gpcapture.snapshot_push_objects(
             files_to_upload_paths, parts_dir, short_id, _chunk_hashes, entry.get("hash"),
-            library.get(manual_id, {}).get("split_info", {}).get("carried_out_tracks", []))
+            library.get(manual_id, {}).get("split_info", {}).get("carried_out_tracks", []),
+            entry.get("tech_spec"))
     except Exception:
         _capture_objs = []
 
@@ -6793,7 +6952,13 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
                 print("   > ℹ️  This push uploaded the file whole: the entry's unfinished split record is dropped.")
             # Best-effort remote disaster-recovery sidecar. A sidecar miss must
             # NOT fail a fully-successful chunk upload, so its return is ignored.
-            write_remote_mvmeta(adb_base, remote_target_dir, manual_id, library[manual_id])
+            # [IMP-C25] Its v2 identity facts are a read-only lookup (never journalled).
+            try:
+                _mvmeta_identity = gpcapture.mvmeta_identity(local_folder, short_id, _capture_objs)
+            except Exception:
+                _mvmeta_identity = None
+            write_remote_mvmeta(adb_base, remote_target_dir, manual_id, library[manual_id],
+                                identity=_mvmeta_identity)
             library[manual_id]["uploaded"] = True
             library[manual_id]["status"] = "onboarded"
             save_library(library)
@@ -6801,10 +6966,12 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             journal.commit()
             # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
             _warn_if_entry_inconsistent(library[manual_id], manual_id)
-            # [IMP-C25] Post-commit, best-effort, NOT journalled identity capture.
+            # [IMP-C25] Post-commit, best-effort, NOT journalled identity capture (the
+            # device's timezone comes from one read-only adb query, made only now).
             try:
                 gpcapture.capture_after_push(local_folder, manual_id, short_id, _capture_objs,
-                                             device_id=device_id, remote_dir=remote_target_dir)
+                                             device_id=device_id, remote_dir=remote_target_dir,
+                                             device_facts=_device_facts(adb_base))
             except Exception:
                 pass
             print("✅ SUCCESS.\n")
@@ -6815,11 +6982,12 @@ def cmd_push(manual_id, split_method=None, split_val=None, chunk_range=None, dev
             journal.commit()
             # Warn-only post-condition (IMP-D4). Post-commit; does NOT affect rollback/PONR.
             _warn_if_entry_inconsistent(library[manual_id], manual_id)
-            # [IMP-C25] Post-commit, best-effort, NOT journalled identity capture.
+            # [IMP-C25] Post-commit, best-effort, NOT journalled identity capture (the
+            # device's timezone comes from one read-only adb query, made only now).
             try:
                 gpcapture.capture_after_push(local_folder, manual_id, short_id, _capture_objs,
                                              device_id=device_id, remote_dir=remote_target_dir,
-                                             chunk_range=chunk_range)
+                                             chunk_range=chunk_range, device_facts=_device_facts(adb_base))
             except Exception:
                 pass
             print(f"✅ Partial Upload Complete (Chunks {chunk_range}).\n")
@@ -8062,7 +8230,7 @@ def _verify_title_extras_restore(library, manual_id):
                 print(f"   ❌ {label} FAILURE: Hash mismatch.")
 
 
-def cmd_verify_restore(manual_id):
+def cmd_verify_restore(manual_id, temp_dir=None):
     print(f"--- VERIFYING RESTORE (DRY RUN): {manual_id} ---")
     library = load_library()
     if manual_id not in library: print("❌ ID not found."); return
@@ -8071,8 +8239,13 @@ def cmd_verify_restore(manual_id):
         print(f"ℹ️  {manual_id} is part of the combined file registered as {real_id} — operating on that.")
         manual_id = real_id
 
-    # Auto-detect restore folder
-    restore_folder = os.path.join(entry['folder_path'], RESTORE_DIR_NAME)
+    # Auto-detect restore folder ([IMP-C25 Step 11 h] — or temp_dir/<safe id>/restore when a temp
+    # volume is given: the SAME _parts_base rule cmd_restore and the fetch use)
+    restore_base, restore_err = _parts_base(entry['folder_path'], temp_dir, manual_id)
+    if restore_err:
+        print(f"❌ {restore_err}")
+        return
+    restore_folder = os.path.join(restore_base, RESTORE_DIR_NAME)
 
     if not os.path.exists(restore_folder):
         print(f"❌ Error: Restore folder missing at:\n   {restore_folder}")
@@ -9769,7 +9942,459 @@ def cmd_prep_push_rep_season_enrich(base_id, folder_path, split_method=None, spl
     return True
 
 
-def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False, temp_dir=None):
+# ==========================================
+#   GOOGLE PHOTOS IDENTITY — THE APPLY ENGINE (IMP-C25)
+# ==========================================
+# THE only writer of `gphotos` blocks (docs/feature-fetch-datetime/PLAN.md Step 6; P-10, OD-2 ruling).
+# Every producer — the fetch (mainfetch stays library-read-only), map_photos, check_photos, the
+# auto-confirm, resolve_photos — only APPENDS what it learned to the per-account learned sidecar
+# (mvcommon.append_learned: the durable record that survives a lost library update, IMP-C24). This engine
+# folds those records, plus each named object's capture facts (mvcommon.read_capture — the file's own
+# facts at prep/push, P-11), into the library. An object is named by a record's manual_id (the owning
+# library id — the TITLE id for extras; an alias resolves one hop to its primary) AND its current SHA-256
+# (the P-2 pin). Per object:
+#   * a TRUSTED block is updated; an absent or untrusted one (other bytes: re-mastered, re-split) is
+#     replaced by a block pinned to the current hash; a block written by NEWER code (v > 1) is never
+#     touched (conflict `block-version`);
+#   * capture facts (sha1 / dedup_key, size_bytes, width / height, duration_s, date_utc, uploaded_name,
+#     pushed) build a new block, and refresh a trusted one (they describe these very bytes) — except a
+#     content key contradicting the block's own (conflict `capture-content-mismatch`: nothing folded);
+#   * account records: mvcommon.apply_learned per account — P-5 proof ladder, alternates, approach
+#     verdicts, dead photo ids, search_override; `confirmed` only from a verified map / check / fetch /
+#     confirm record, never from a capture and never from a manual match alone. Its conflicts are
+#     reported, never applied;
+#   * home_account (P-4's learned layer) = mvcommon.home_account(...) whenever an account holds a verified
+#     (or user-vouched) copy; otherwise the key is absent and routing falls back to the id prefix —
+#     exactly what home_account() answers then. mvconfig overrides stay the caller's top layer;
+#   * nothing but the `gphotos` key of the object's own node ever changes.
+# A capture alone never creates a block: only objects some record names are touched. Records whose object
+# no longer exists (re-split, re-mastered, re-prepped, unknown id) are ORPHANS — reported, never applied.
+# Library I/O: a fresh load_library() per attempt; --apply saves ONCE, guarded by the OD-2 fingerprint
+# (size, mtime_ns, SHA-256 of every library file, taken before the load and re-checked right before the
+# save: changed -> reload + re-patch, which is idempotent; after GPHOTOS_APPLY_ATTEMPTS changes -> abort).
+# No lock and no rollback journal (P-10); switch to mvcommon.save_library_atomic when IMP-C24 lands.
+
+GPHOTOS_APPLY_ATTEMPTS = 3  # OD-2 ruling: the library changed under the engine this many times -> abort
+_GP_BUSY = "library changed by another process — re-run when idle"
+# The block-level facts a capture contributes (P-1 keys; read_capture's other facts — role, index,
+# local_name, mtime_utc, approach_hint, remote_dir — are not block keys).
+_GP_CAPTURE_KEYS = ("sha1", "dedup_key", "size_bytes", "width", "height", "duration_s", "date_utc",
+                    "uploaded_name", "pushed")
+_GP_SHA1_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+_GP_ABSENT = object()  # a node that has no `gphotos` key at all
+
+
+def _gp_is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _gp_line(exc):
+    """An exception as one line of text (a message may carry newlines)."""
+    return " ".join(f"{type(exc).__name__}: {exc}".split())
+
+
+def _library_fingerprint():
+    """The OD-2 change detector: (size, mtime_ns, SHA-256) of every library file load_library reads — read
+    through mvcommon's OWN LIBRARY_* bindings at call time (the binding hazard; main does not even import
+    LIBRARY_OTHERS) — with None for a file that does not exist. Equal fingerprints = nobody wrote."""
+    prints = []
+    for path in (mvcommon.LIBRARY_MOVIES, mvcommon.LIBRARY_SERIES, mvcommon.LIBRARY_ANIME,
+                 mvcommon.LIBRARY_OTHERS):
+        try:
+            with open(path, "rb") as fh:
+                st = os.fstat(fh.fileno())
+                data = fh.read()
+        except FileNotFoundError:
+            prints.append(None)
+            continue
+        prints.append((st.st_size, st.st_mtime_ns, hashlib.sha256(data).hexdigest()))
+    return tuple(prints)
+
+
+def _gp_content_key(block):
+    """A block's content key — its canonical dedupKey, from dedup_key, else from sha1 — or None."""
+    key = gpweb.normalize_dedup_key(block.get("dedup_key"))
+    sha1 = block.get("sha1")
+    if key is None and isinstance(sha1, str) and _GP_SHA1_RE.match(sha1):
+        key = gpweb.dedup_key(sha1.lower())
+    return key
+
+
+def _gp_confirmed(block):
+    """True when a block holds a confirmed account record (the rule mvcommon's cloud_state uses)."""
+    accounts = block.get("accounts") if isinstance(block, dict) else None
+    return isinstance(accounts, dict) and any(isinstance(r, dict) and r.get("confirmed") is True
+                                              for r in accounts.values())
+
+
+def _gp_fold_capture(block, sha256, facts):
+    """Fold one object's capture facts into its block (P-11: the file's own facts, never proof of cloud
+    presence). block None -> a new block built from them; a trusted block takes the capture's values (they
+    describe these very bytes; `pushed` is the latest push) unless the capture's content key contradicts
+    the block's. -> (block, conflict code or None); on a conflict the block comes back unchanged."""
+    try:
+        cap = mvcommon.new_gphotos_block(sha256, **{k: facts.get(k) for k in _GP_CAPTURE_KEYS})
+    except ValueError:
+        return block, "capture-invalid"
+    if block is None:
+        return cap, None
+    held = _gp_content_key(block)
+    if held and cap.get("dedup_key") and held != cap["dedup_key"]:
+        return block, "capture-content-mismatch"
+    merged = dict(block)
+    merged.update((k, cap[k]) for k in _GP_CAPTURE_KEYS if k in cap)
+    return mvcommon._ordered(merged, mvcommon._BLOCK_KEYS), None  # the writer's own P-1 key order
+
+
+def _gp_with_home(block, manual_id, prefix_map, default):
+    """Set P-4's learned home_account — mvcommon.home_account() computed WITHOUT the stored field, so it
+    always follows the evidence — when an account holds a verified or user-vouched copy (verified_by set);
+    otherwise remove the key: routing then falls back to the id prefix, which is what home_account() answers
+    for such a block anyway. The result stays a pure function of the account records (re-applying the
+    sidecar reproduces it). Keeps the P-1 key order."""
+    rest = {k: v for k, v in block.items() if k != "home_account"}
+    accounts = rest.get("accounts")
+    learned = isinstance(accounts, dict) and any(
+        account in mvcommon.GP_ACCOUNTS and isinstance(r, dict) and r.get("verified_by") in mvcommon.GP_PROOF_LADDER
+        for account, r in accounts.items())
+    if learned:
+        rest["home_account"] = mvcommon.home_account(rest, manual_id, prefix_map, default)
+    return mvcommon._ordered(rest, mvcommon._BLOCK_KEYS)
+
+
+def _gp_fold_object(obj, raw, reds, capture, prefix_map, default, name=None):
+    """Fold one object's reduced records ({account: reduced}), — capture=True — its capture facts and — name — the
+    uploaded name a `map_photos --repair names` proved (it wins over the capture's) into its block. raw = the
+    node's current `gphotos` value (_GP_ABSENT when there is none).
+    -> (the new block, or None to leave the node untouched; action create | replace | update;
+        [(account or None for block level, conflict code)])."""
+    sha256 = obj["sha256"]
+    if isinstance(raw, dict) and _gp_is_int(raw.get("v")) and raw["v"] > mvcommon.GPHOTOS_BLOCK_VERSION:
+        return None, None, [(None, "block-version")]  # written by newer code: never overwritten
+    trusted = mvcommon.block_trusted(raw, sha256)
+    action = "update" if trusted else ("create" if raw is _GP_ABSENT else "replace")
+    block = copy.deepcopy(raw) if trusted else None  # untrusted (P-2): ignored, and replaced below
+    problems = []
+    if capture and isinstance(obj.get("capture"), dict):
+        block, problem = _gp_fold_capture(block, sha256, obj["capture"])
+        if problem:
+            problems.append((None, problem))
+    if block is None:
+        block = mvcommon.new_gphotos_block(sha256)
+    if name:
+        block = mvcommon._ordered({**block, "uploaded_name": name}, mvcommon._BLOCK_KEYS)
+    for account in mvcommon.GP_ACCOUNTS:
+        if account in reds:
+            folded, _changed, problem = mvcommon.apply_learned(block, reds[account], account)
+            if problem:
+                problems.append((account, problem))
+            else:
+                block = folded
+    block = _gp_with_home(block, obj["manual_id"], prefix_map, default)
+    if trusted:
+        return (None if block == raw else block), action, problems
+    # A new block that learned nothing beyond its pin carries no fact: not worth a library write.
+    return (block if set(block) - {"v", "sha256"} else None), action, problems
+
+
+def _gp_flat(value, prefix=""):
+    """{dotted path: leaf value} of nested dicts (lists are leaves); {} for a non-dict top level."""
+    if not isinstance(value, dict):
+        return {prefix: value} if prefix else {}
+    out = {}
+    for key, val in value.items():
+        out.update(_gp_flat(val, f"{prefix}.{key}" if prefix else str(key)))
+    return out
+
+
+def _gp_diff(old, new):
+    """{dotted path: [old value, new value]} for every leaf that differs (None = absent): the new block's
+    paths in order, then the removed ones. A non-dict `old` (no block, a garbage value) diffs as empty."""
+    before, after = _gp_flat(old), _gp_flat(new)
+    paths = list(after) + [p for p in before if p not in after]
+    return {p: [before.get(p), after.get(p)] for p in paths if before.get(p) != after.get(p)}
+
+
+def _gp_resolve(library, manual_id):
+    """(real id, entry) for a record's manual_id — a multi_ep_alias resolves ONE hop to its primary
+    (_resolve_alias) — or (manual_id, None) when there is no such entry or the alias dangles."""
+    if not isinstance(library.get(manual_id), dict):
+        return manual_id, None
+    try:
+        real, entry = _resolve_alias(library, manual_id)
+    except (KeyError, TypeError):  # a malformed alias entry
+        return manual_id, None
+    if not isinstance(entry, dict) or entry.get("type") == "multi_ep_alias":
+        return manual_id, None
+    return real, entry
+
+
+def _gp_plan(library, reduced, named, capture, prefix_map, default, names=()):
+    """One pass over a freshly loaded library: which nodes get which block, and the per-pass report fields.
+    reduced = mvcommon.reduce_learned(...) {(account, sha256): reduced}; named = {(account, sha256): [every
+    manual_id the records gave]} (reduce keeps only the last one; aliases and duplicates need them all); names =
+    [{manual_id, sha256, uploaded_name}] — validated `--repair names` facts (gphotos_apply).
+    -> ([(node, new block)], {objects, changed, unchanged, confirmed, conflicts, orphans})."""
+    claims, owners = {}, {}
+    for key, red in reduced.items():
+        account, sha256 = key
+        owners[key] = []
+        for manual_id in named.get(key) or [red["manual_id"]]:
+            real, entry = _gp_resolve(library, manual_id)
+            if entry is None:
+                continue
+            if real not in owners[key]:
+                owners[key].append(real)
+            claims.setdefault(real, {}).setdefault(sha256, {})[account] = red
+    renames, rename_owner = {}, {}
+    for spec in names:
+        real, entry = _gp_resolve(library, spec["manual_id"])
+        rename_owner[(spec["manual_id"], spec["sha256"])] = real if entry is not None else None
+        if entry is not None:
+            claims.setdefault(real, {}).setdefault(spec["sha256"], {})
+            renames[(real, spec["sha256"])] = spec["uploaded_name"]
+    patches, changed, conflicts, matched, renamed = [], [], [], set(), set()
+    objects = confirmed = 0
+    for real in sorted(claims):
+        wanted = claims[real]
+        for obj in mvcommon.iter_entry_objects(real, library[real]):
+            reds = wanted.get(obj["sha256"])
+            if reds is None:
+                continue
+            name = renames.get((real, obj["sha256"]))
+            objects += 1
+            matched.update((account, obj["sha256"]) for account in reds)
+            if name:
+                renamed.add((real, obj["sha256"]))
+            node = mvcommon.slot_owner(library, obj["slot"])
+            raw = node.get("gphotos", _GP_ABSENT)
+            block, action, problems = _gp_fold_object(obj, raw, reds, capture, prefix_map, default, name)
+            where = {"manual_id": real, "label": obj["label"], "kind": obj["kind"], "sha256": obj["sha256"]}
+            conflicts.extend(dict(where, account=account, code=code) for account, code in problems)
+            if block is None:
+                continue
+            patches.append((node, block))
+            confirmed += int(_gp_confirmed(block) and not (action == "update" and _gp_confirmed(raw)))
+            changed.append(dict(where, action=action, fields=_gp_diff(raw, block)))
+    orphans = [{"account": account, "manual_id": reduced[(account, sha256)]["manual_id"],
+                "sha256": sha256, "label": reduced[(account, sha256)].get("label"),
+                "reason": "no-object" if owners[(account, sha256)] else "no-entry"}
+               for account, sha256 in reduced if (account, sha256) not in matched]
+    orphans += [{"account": None, "manual_id": manual_id, "sha256": sha256, "label": None,  # a names fact, no account
+                 "reason": "no-object" if real is not None else "no-entry"}
+                for (manual_id, sha256), real in rename_owner.items() if (real, sha256) not in renamed]
+    orphans.sort(key=lambda o: (o["manual_id"], o["account"] or "", o["sha256"]))
+    return patches, {"objects": objects, "changed": changed, "unchanged": objects - len(changed),
+                     "confirmed": confirmed, "conflicts": conflicts, "orphans": orphans}
+
+
+def _gp_csv_edits(path):
+    """How many rows of failed_objects.csv carry a user decision — valid or not: mvcommon.read_failed_csv's
+    notion of an edit — or None when it cannot be read as a failed-objects CSV."""
+    try:
+        rows, errors = mvcommon.read_failed_csv(path)
+    except (OSError, ValueError):
+        return None
+    return len(rows) + len(errors)
+
+
+def _gp_refresh_failed_csv(library, report):
+    """PLAN Step 6 "after every apply: export_failed_csv()": regenerate failed_objects.csv (P-18) from the
+    applied library so objects confirmed now drop off — when a failed list (or its CSV) exists. A CSV that
+    holds the user's edits (decision rows) — or that no longer reads as one — is left as is and reported as
+    failed_csv {path, kept: True, edited_rows}: regenerating empties the editable columns, and the post-fetch
+    merge must never wipe edits waiting to be imported (the importer regenerates it once it consumed them).
+    A write failure (e.g. the CSV is open in Excel) prints one warning line; the apply's result stands."""
+    csv_path = mvcommon.failed_csv_path()
+    if not (os.path.exists(mvcommon.failed_path()) or os.path.exists(csv_path)):
+        return
+    if os.path.exists(csv_path):
+        edits = _gp_csv_edits(csv_path)
+        if edits != 0:
+            report["failed_csv"] = {"path": csv_path, "kept": True, "edited_rows": edits}
+            return
+    try:
+        report["failed_csv"] = mvcommon.export_failed_csv(library)
+    except Exception as e:
+        report["warning"] = (f"⚠️  failed_objects.csv not refreshed ({_gp_line(e)}) — close it if it is "
+                             f"open (e.g. in Excel); the next apply refreshes it.")
+        print(report["warning"])
+
+
+def _gp_valid_names(names):
+    """The valid `names` facts for gphotos_apply -> ([{manual_id, sha256, uploaded_name}], invalid count). A fact
+    names an object (manual_id + its current 64-hex SHA-256) and a non-empty file name without a path separator."""
+    valid, invalid = [], 0
+    for spec in names or ():
+        manual_id = spec.get("manual_id") if isinstance(spec, dict) else None
+        sha256 = spec.get("sha256") if isinstance(spec, dict) else None
+        name = spec.get("uploaded_name") if isinstance(spec, dict) else None
+        if (isinstance(manual_id, str) and manual_id and mvcommon._is_sha256(sha256) and isinstance(name, str)
+                and name.strip() and not any(c in name for c in "/\\\r\n\0")):
+            valid.append({"manual_id": manual_id, "sha256": sha256, "uploaded_name": name})
+        else:
+            invalid += 1
+    return valid, invalid
+
+
+def gphotos_apply(records, capture=True, dry_run=True, names=None):
+    """THE apply engine (PLAN Step 6): fold learned records (+ capture facts) into the library's `gphotos`
+    blocks — the only code that writes them. See the section comment above for the per-object rules.
+
+    records   iterable of learned records — complete P-10 lines (v, at, account, ...) exactly as
+              mvcommon.read_learned() returns them or a run's results.jsonl holds them; invalid ones are
+              counted and skipped. They are reduced TOGETHER (mvcommon.reduce_learned), so pass the whole
+              sidecar plus any not-yet-appended run records for the complete picture (merge_learned_gphotos
+              passes the sidecar). manual_id = the owning library id (the TITLE id for extras); an alias id
+              resolves to its primary.
+    capture   also fold each named object's capture facts (P-11).
+    dry_run   True (the default): compute the report and write NOTHING — no library, no sidecar, no CSV.
+              False: save the library ONCE when something changed (fingerprint-guarded, OD-2), then
+              regenerate failed_objects.csv (see _gp_refresh_failed_csv).
+    names     (PLAN Step 9, `map_photos --repair names`) [{manual_id, sha256, uploaded_name}]: the name an object
+              was REALLY uploaded under (proven by the inventory) — stored as the block's `uploaded_name`, over the
+              capture's; the object is named like a record names it (an alias resolves; the sha256 is the pin).
+              Recomputed by the mapper from the inventory on every run, so not kept in a sidecar. Invalid facts
+              count as `invalid`; facts whose object is gone are orphans with account None.
+
+    With no valid record and no valid name the library is not even loaded. Never raises (a KeyboardInterrupt still
+    interrupts): a failure prints ONE warning line and returns status "error". Prints nothing else —
+    callers print their own summary from the report (and tell the user when failed_csv says `kept`).
+
+    Returns the report:
+      status      nothing-to-apply | dry-run | up-to-date | saved | aborted | error
+      dry_run     as given
+      records     valid records given · invalid: records skipped as not valid learned records (+ invalid names)
+      objects     library objects the records name that exist (manual_id + current SHA-256)
+      changed     [{manual_id, label, kind, sha256, action: create | replace | update,
+                    fields: {dotted path: [old, new]}}] — the objects whose block changes (dry run: would
+                    change; aborted / error: were NOT changed), in library order; None = absent; a
+                    replaced block is diffed against the old one
+      unchanged   named objects left as they are (up to date, nothing learned, or a block-version conflict)
+      confirmed   changed objects that gain their first confirmed account record
+      conflicts   [{manual_id, label, kind, sha256, account (None: block level), code}] — never applied;
+                  codes: block-version, capture-invalid, capture-content-mismatch, and apply_learned's
+                  (content-key-mismatch, dedup-key-mismatch, malformed-block, ...)
+      orphans     [{account, manual_id, sha256, label, reason: no-entry | no-object}] — record groups whose
+                  object no longer exists; never applied
+      saved       True when the library was written
+      attempts    load -> patch -> re-check attempts made (the OD-2 guard)
+      failed_csv  export_failed_csv's result, or {path, kept: True, edited_rows} when an edited CSV was
+                  left alone, or None
+      warning     the warning line printed, or None
+    """
+    report = {"status": None, "dry_run": bool(dry_run), "records": 0, "invalid": 0, "objects": 0,
+              "changed": [], "unchanged": 0, "confirmed": 0, "conflicts": [], "orphans": [],
+              "saved": False, "attempts": 0, "failed_csv": None, "warning": None}
+    saving = False
+    try:
+        valid = []
+        for record in records or ():
+            try:
+                valid.append(mvcommon._normalize_learned(record, fill=False))  # reduce_learned's validator
+            except ValueError:
+                report["invalid"] += 1
+        report["records"] = len(valid)
+        renames, bad_names = _gp_valid_names(names)
+        report["invalid"] += bad_names
+        if not valid and not renames:
+            report["status"] = "nothing-to-apply"  # nothing to fold: the library is not even read
+            return report
+        reduced = mvcommon.reduce_learned(valid)
+        named = {}
+        for record in valid:
+            ids = named.setdefault((record["account"], record["sha256"]), [])
+            if record["manual_id"] not in ids:
+                ids.append(record["manual_id"])
+        import mainfetch  # P-4's routing constants — their single source; importing it has no side effects
+        prefix_map, default = mainfetch.ID_PREFIX_PROFILE, mainfetch.DEFAULT_PROFILE
+        for attempt in range(1, GPHOTOS_APPLY_ATTEMPTS + 1):
+            report["attempts"] = attempt
+            before = None if dry_run else _library_fingerprint()
+            library = load_library()  # fresh, immediately before patching
+            patches, found = _gp_plan(library, reduced, named, capture, prefix_map, default, renames)
+            report.update(found)
+            if dry_run:
+                report["status"] = "dry-run"
+                return report
+            if patches:
+                if _library_fingerprint() != before:
+                    continue  # another process wrote the library after our load: reload + re-patch
+                for node, block in patches:
+                    node["gphotos"] = block
+                saving = True
+                save_library(library)
+                saving = False
+                report["saved"] = True
+            report["status"] = "saved" if patches else "up-to-date"
+            _gp_refresh_failed_csv(library, report)
+            return report
+        report.update(status="aborted", warning=f"⚠️  Google Photos identity not applied: {_GP_BUSY}.")
+        print(report["warning"])
+        return report
+    except (Exception, SystemExit) as e:  # SystemExit: load_library refuses a corrupt library file
+        what = "the library could not be loaded" if isinstance(e, SystemExit) else _gp_line(e)
+        tail = ("the library save was interrupted — re-run to finish it" if saving
+                else "the library was not changed")
+        report.update(status="error", warning=f"⚠️  Google Photos identity not applied ({what}) — {tail}.")
+        try:
+            print(report["warning"])
+        except Exception:
+            pass
+        return report
+
+
+def merge_learned_gphotos():
+    """The post-fetch merge (PLAN Step 6): fold EVERY learned record — the sidecars the fetch appends to — into
+    the library through the apply engine (capture facts included) and print one summary line when an object
+    changed or a conflict stays unapplied (plus one note when the library changed but an edited
+    failed_objects.csv was left alone). Idempotent: records already folded change nothing. With no learned
+    record it reads and writes nothing and prints nothing. Never raises. Returns the engine's report, or
+    None when nothing was applied."""
+    try:
+        records = mvcommon.read_learned()
+    except Exception as e:  # an unreadable sidecar must never look like an empty one
+        try:
+            print(f"⚠️  Google Photos identity not merged (learned records unreadable: {_gp_line(e)}).")
+        except Exception:
+            pass
+        return None
+    if not records:
+        return None
+    report = gphotos_apply(records, capture=True, dry_run=False)
+    try:
+        parts = []
+        if report["changed"]:
+            parts.append(f"{len(report['changed'])} object(s) updated in the library")
+        if report["confirmed"]:
+            parts.append(f"{report['confirmed']} newly confirmed in Google Photos")
+        if report["conflicts"]:
+            parts.append(f"{len(report['conflicts'])} conflict(s) not applied")
+        if parts and report["status"] in ("saved", "up-to-date"):
+            print("   > Google Photos identity: " + ", ".join(parts) + ".")
+        kept = report["failed_csv"]
+        if report["saved"] and isinstance(kept, dict) and kept.get("kept"):
+            if kept["edited_rows"] is None:
+                print("   > failed_objects.csv no longer reads as the failed list — left as is.")
+            else:
+                print(f"   > failed_objects.csv holds {kept['edited_rows']} edited row(s) — left as is "
+                      f"(it is regenerated once they are imported).")
+    except Exception:
+        pass
+    return report
+
+
+def _mainfetch_child_env():
+    """[IMP-C36] The environment of every mainfetch child process (cmd_dispatch_fetch;
+    IMP-C25 Steps 13 / 13b spawn their check_photos children with it too): the
+    parent's own, plus UTF-8 stdio — a PIPEd child defaults to cp1252 on Windows and
+    would crash printing mainfetch's emoji — and UNBUFFERED output: a PIPEd child's
+    print() is block-buffered, so its progress reached the terminal and the web UI
+    only in bursts."""
+    return {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
+
+
+def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False, temp_dir=None, manual=False):
     # This keeps main.py clean but still lets you run "main.py fetch"
     cmd = ["python", MAINFETCH_SCRIPT, "fetch", manual_id]
 
@@ -9790,10 +10415,16 @@ def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False, temp_d
     # media volume (mirrors push's tempdir redirect).
     if temp_dir:
         cmd += ["tempdir", temp_dir]
+    # [IMP-C25 Step 10 f] --manual (IMP-C25 Step 14's manual mode) is forwarded only
+    # when given, so without it the argv stays byte-for-byte today's. The web UI
+    # never passes it.
+    if manual:
+        cmd.append("--manual")
 
     try:
-        # Force the child's stdio to UTF-8 — a PIPEd child defaults to cp1252 on Windows and would crash printing mainfetch's emoji.
-        child_env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        # Force the child's stdio to UTF-8 (a PIPEd child defaults to cp1252 on Windows and would crash printing
+        # mainfetch's emoji) and unbuffered ([IMP-C36] so its progress streams live, not in bursts).
+        child_env = _mainfetch_child_env()
         # Stream the child's combined stdout/stderr line-by-line through the
         # CURRENT sys.stdout. A blocking run would inherit the OS-level fd and
         # bypass any in-process redirect_stdout (used by the web worker to tee
@@ -9820,13 +10451,19 @@ def cmd_dispatch_fetch(manual_id, episode_range=None, fetch_extras=False, temp_d
     except Exception as e:
         print(f"❌ Error running fetch script: {e}")
 
+    # [IMP-C25] The child has exited: fold what it learned — the learned sidecar mainfetch appends to
+    # (P-10) — into the library through the apply engine (PLAN Step 6). The argv and the streaming above
+    # are unchanged; with nothing learned this reads and writes nothing and prints nothing; it never
+    # raises. A Ctrl+C during the fetch skips it (the records wait in the sidecar for the next merge).
+    merge_learned_gphotos()
 
-def cmd_fetch_restore(manual_id, episode_range=None, fetch_extras=False, temp_dir=None):
+
+def cmd_fetch_restore(manual_id, episode_range=None, fetch_extras=False, temp_dir=None, manual=False):
     # [NEW] Automated Fetch -> Restore Pipeline
     print(f"=== 🔄 AUTO-PILOT: FETCH -> RESTORE for {manual_id} ===")
 
-    # 1. FETCH
-    cmd_dispatch_fetch(manual_id, episode_range, fetch_extras=fetch_extras, temp_dir=temp_dir)
+    # 1. FETCH ([IMP-C25] manual = --manual, forwarded only when given)
+    cmd_dispatch_fetch(manual_id, episode_range, fetch_extras=fetch_extras, temp_dir=temp_dir, manual=manual)
     # IMP-D19 Step 5: fetch extras when fetch_extras (forwarded above to mainfetch)
 
     # 2. DETECT & RESTORE
@@ -9870,6 +10507,34 @@ def cmd_fetch_restore(manual_id, episode_range=None, fetch_extras=False, temp_di
         print("\n✅✅✅ FETCH & RESTORE COMPLETE.")
 
 
+def cmd_fetch_cleanup(apply=False):
+    """[IMP-C25 Step 11 g] `fetch_cleanup [--apply]` — the one-time cleanup of fetch leftovers, never automatic
+    (docs/feature-fetch-datetime/PLAN.md P-12): files in ~/Downloads named like a library object's upload (fetches
+    from before IMP-C25 left them there), files in MediaVault's download folders (.mv_incoming) and unfinished
+    fetch journals. The rules live with the fetch (mainfetch.fetch_cleanup_plan / fetch_cleanup_apply).
+
+    Dry run (default): lists name/path, size and reason of every file and writes nothing (no lock, no journal,
+    no folder). --apply: refused while a fetch holds the fetch lock; under the lock it lists again — leaving out
+    the folders of a fetch that still runs — and deletes exactly that list, each file re-checked right before.
+    Returns the plan (dry run), the apply result, or None when refused. Reads the library; never writes it."""
+    import mainfetch  # the fetch's own delete rules (P-12); importing it has no side effects
+    library = load_library()
+    if not apply:
+        plan = mainfetch.fetch_cleanup_plan(library)
+        mainfetch.print_fetch_cleanup(plan)
+        return plan
+    try:
+        with mvcommon.fetch_session_lock(blocking=False):
+            plan = mainfetch.fetch_cleanup_plan(library, check_live=True)
+            mainfetch.print_fetch_cleanup(plan, apply=True)
+            result = mainfetch.fetch_cleanup_apply(plan)
+            mainfetch.print_fetch_cleanup_result(result)
+            return result
+    except mvcommon.LockHeldError:
+        print("❌ A fetch is running (the fetch lock is held) — run fetch_cleanup --apply when it has finished.")
+        return None
+
+
 def cmd_add_extras(title_id, folders, extras_size=None, device_id=None, no_replace=False):
     """Attach extras to an existing / archived / local-only title entry.
 
@@ -9911,6 +10576,5285 @@ def cmd_add_extras(title_id, folders, extras_size=None, device_id=None, no_repla
     # mutated `library` in place, so replace_title_extras sees the uploaded items.
     if not no_replace:
         replace_title_extras(library, real_title_id)
+
+
+# ==========================================
+#   GOOGLE PHOTOS IDENTITY — READ-ONLY DEVICE CROSS-CHECK (IMP-C25)
+# ==========================================
+# docs/feature-fetch-datetime/PLAN.md Step 8: no "missing from the cloud" verdict (Step 9's mapper, Step 13's
+# check) before looking at the phones themselves. An object Google Photos does not hold may still sit on a
+# Pixel waiting for its backup (on_device); may have been backed up and then removed from the phone — Google
+# Photos' "Free up space" deletes the media but not the `.mvmeta.json` sidecar write_remote_mvmeta pushed next
+# to it (JSON is not media: never backed up, never freed), so a lone sidecar marks an object that reached that
+# phone and is gone from it (freed — possibly LOST when the cloud lacks it too); or may be on no phone at all
+# (absent). Two functions; their docstrings define the return shapes Steps 9, 13 and 13c consume:
+#   * device_inventory(aliases): every file under the Media root of each configured phone (default:
+#     device_check_aliases() — DEVICE_ALIASES plus the check-only DEVICE_CHECK_EXTRA_SERIALS) — ONE `adb devices`,
+#     then per attached phone ONE `find '/sdcard/Media/' -type f` (the trailing slash makes find follow the
+#     /sdcard symlink; `/storage/emulated/0/Media/` is the fallback root) and `stat -c '%s %Y %n'` in batches
+#     whose device command stays within DEVICE_STAT_BATCH_BYTES;
+#   * classify_device_objects(library, inventory): each uploaded object (mvcommon.iter_uploaded_objects —
+#     whole files, chunks, FLAC holders, extras items and chunks; all four categories) by its exact uploaded
+#     name, with size agreement where a size is known.
+# READ-ONLY by construction, pinned by tests: every adb argv must pass _dev_argv_readonly — an allowlist of
+# exact shapes (`devices`; `shell find` / `shell stat` over the Media roots, every path ONE single-quoted
+# word) — before it runs. Nothing else is ever issued: no push, pull, rm, mv, touch, mkdir, am or pm, and no
+# shell operator outside quotes. Field lessons from the real Pixels: device output ends its lines with CRLF;
+# `adb shell` reads the caller's stdin (in a loop it swallows it), so every call gets stdin=DEVNULL; names
+# carry spaces, apostrophes and unicode, so paths reach the device shell single-quoted ('\'' for a quote —
+# cmd_push's escaping) and output is decoded as UTF-8. An unplugged, offline or unauthorized phone, a missing
+# adb binary, a timeout: reported per device, never raised. Nothing is printed and the library is only read.
+
+DEVICE_LIST_ROOTS = (REMOTE_ROOT + "/", "/storage/emulated/0/Media/")  # find roots, in order (field lesson)
+DEVICE_STAT_FORMAT = "%s %Y %n"   # size in bytes, mtime in epoch seconds, the path exactly as given
+DEVICE_STAT_BATCH_BYTES = 3500    # UTF-8 bytes of ONE stat command: under legacy adb's 4 KiB packet limit
+DEVICE_ADB_TIMEOUT_S = 30         # `adb devices` (it may have to start the adb server first)
+DEVICE_FIND_TIMEOUT_S = 120
+DEVICE_STAT_TIMEOUT_S = 60
+_DEV_PLACEHOLDER_RE = re.compile(r"<[^<>]*>")      # a DEVICE_ALIASES '<NEW_PIXEL_SERIAL>'-style placeholder
+_DEV_SERIAL_RE = re.compile(r"[A-Za-z0-9._:-]+")   # a USB, tcp (host:port) or mDNS adb serial
+_DEV_QUOTED_RE = re.compile(r"'(?:[^']|'\\'')*'")  # ONE single-quoted device-shell word ('\'' = a quote)
+_DEV_STAT_RE = re.compile(r"(\d+) (-?\d+) (/.*)")  # one `stat -c '%s %Y %n'` output line
+
+
+class _DeviceCommandRefused(RuntimeError):
+    """An adb argv outside the device cross-check's read-only allowlist — a bug; it is never run."""
+
+
+def _dev_quote(path):
+    """`path` as ONE single-quoted word for the device shell ('\\'' stands for a quote — cmd_push's escaping)."""
+    return "'" + path.replace("'", "'\\''") + "'"
+
+
+def _dev_unquote(word):
+    """The literal text of a _DEV_QUOTED_RE word."""
+    return word[1:-1].replace("'\\''", "'")
+
+
+def _dev_statable(path):
+    """True for a path a stat batch may carry: one line of text, strictly under a listing root."""
+    return (isinstance(path, str) and not any(c in path for c in "\r\n\0")
+            and any(path.startswith(root) and len(path) > len(root) for root in DEVICE_LIST_ROOTS))
+
+
+def _dev_argv_readonly(argv):
+    """THE read-only allowlist of the device cross-check: True only for these exact adb argv shapes —
+         adb [-s <serial>] devices
+         adb -s <serial> shell find '<root>' -type f             <root> in DEVICE_LIST_ROOTS
+         adb -s <serial> shell stat -c '%s %Y %n' '<path>' ...   every <path> strictly under a root
+    A shell command always names its phone (never "whichever one is attached"). adb joins the words after
+    `shell` with spaces and hands them to the device shell, so each path must be ONE single-quoted word (a
+    quote only as '\\'') — then the command holds no operator (; | & > < ` $( ...) outside quotes. Everything
+    else is refused: push, pull, install, rm, mv, cp, touch, mkdir, am, pm, `find -delete` / `-exec`, an
+    unquoted or out-of-root path, a malformed serial."""
+    if not (isinstance(argv, (list, tuple)) and argv and all(isinstance(a, str) for a in argv)):
+        return False
+    if argv[0] != "adb":
+        return False
+    rest = list(argv[1:])
+    pinned = rest[:1] == ["-s"]
+    if pinned:
+        if len(rest) < 2 or not _DEV_SERIAL_RE.fullmatch(rest[1]):
+            return False
+        rest = rest[2:]
+    if rest == ["devices"]:
+        return True
+    if not pinned or rest[:1] != ["shell"]:
+        return False
+    cmd = rest[1:]
+    if len(cmd) == 4 and cmd[0] == "find" and cmd[2:] == ["-type", "f"]:
+        return cmd[1] in [_dev_quote(root) for root in DEVICE_LIST_ROOTS]
+    if len(cmd) > 3 and cmd[:3] == ["stat", "-c", _dev_quote(DEVICE_STAT_FORMAT)]:
+        return all(_DEV_QUOTED_RE.fullmatch(word) and _dev_statable(_dev_unquote(word)) for word in cmd[3:])
+    return False
+
+
+def _dev_text(data):
+    """Captured adb output as text: bytes decoded as UTF-8 (an undecodable byte becomes U+FFFD); '' for none."""
+    if isinstance(data, bytes):
+        return data.decode("utf-8", errors="replace")
+    return data if isinstance(data, str) else ""
+
+
+def _dev_lines(text):
+    """The non-empty lines of device output without their line-ending CRs (real Pixels end lines with CRLF).
+    Split on '\\n' only: str.splitlines() would also split on unicode separators a file name may hold."""
+    return [line.rstrip("\r") for line in text.split("\n") if line.rstrip("\r")]
+
+
+def _dev_first_line(text):
+    """The first non-blank line of `text`, stripped and cut to 200 characters (an error message), or None."""
+    for line in _dev_lines(text):
+        if line.strip():
+            return line.strip()[:200]
+    return None
+
+
+def _dev_run(argv, timeout):
+    """Run ONE allowlisted adb command -> (returncode, stdout text, stderr text). The allowlist check comes
+    first: an argv off it raises _DeviceCommandRefused and never runs. stdin is DEVNULL (adb shell reads the
+    caller's stdin — inside a loop it would swallow it); output is captured as bytes and decoded by _dev_text.
+    OSError (no adb binary) and subprocess.TimeoutExpired propagate."""
+    if not _dev_argv_readonly(argv):
+        raise _DeviceCommandRefused(repr(argv)[:200])
+    result = subprocess.run(list(argv), stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout)
+    return (getattr(result, "returncode", None), _dev_text(getattr(result, "stdout", None)),
+            _dev_text(getattr(result, "stderr", None)))
+
+
+def _dev_attached(text):
+    """`adb devices` output -> {serial: state} in listing order (device, offline, unauthorized, authorizing,
+    no permissions ...). The header line and the daemon's '* ...' lines carry no tab and are skipped."""
+    attached = {}
+    for line in _dev_lines(text):
+        serial, tab, state = line.partition("\t")
+        if tab and serial.strip():
+            attached[serial.strip()] = state.strip()
+    return attached
+
+
+def _dev_batches(paths):
+    """`paths` in order, packed into stat batches whose device command — `stat -c '%s %Y %n' '<p1>' '<p2>' ...`
+    exactly as adb joins it — stays within DEVICE_STAT_BATCH_BYTES of UTF-8. A single path longer than that
+    gets a batch of its own."""
+    head = len(f"stat -c {_dev_quote(DEVICE_STAT_FORMAT)}".encode("utf-8"))
+    batch, size = [], head
+    for path in paths:
+        cost = 1 + len(_dev_quote(path).encode("utf-8"))
+        if batch and size + cost > DEVICE_STAT_BATCH_BYTES:
+            yield batch
+            batch, size = [], head
+        batch.append(path)
+        size += cost
+    if batch:
+        yield batch
+
+
+def _dev_list(record):
+    """List ONE attached phone into its device_inventory record: `find '<root>' -type f` over the first
+    DEVICE_LIST_ROOTS root that lists any file, then size + mtime by batched stat (a failed batch only leaves
+    its files' size/mtime unknown). When no root lists a file, the phone counts as empty only if EVERY root
+    listed cleanly (exit 0): an error on any root makes it `error` — a locked or failing phone must never
+    read as an empty one. Never raises."""
+    base = ["adb", "-s", record["serial"], "shell"]
+    try:
+        problems, paths = [], []
+        for root in DEVICE_LIST_ROOTS:
+            code, out, err = _dev_run(base + ["find", _dev_quote(root), "-type", "f"], DEVICE_FIND_TIMEOUT_S)
+            listed = {re.sub(r"/{2,}", "/", line) for line in _dev_lines(out)}
+            paths = sorted(p for p in listed if p.startswith(root) and len(p) > len(root))
+            problem = None if code == 0 else (_dev_first_line(err) or f"find exited with status {code}")
+            if paths:
+                record.update(status="ok" if problem is None else "partial", detail=problem, root=root)
+                break
+            if problem:
+                problems.append(f"{root}: {problem}")
+        else:
+            if problems:
+                record.update(status="error", detail="; ".join(problems))
+            else:
+                record.update(status="ok", root=DEVICE_LIST_ROOTS[0])  # every root listed, cleanly and empty
+            return
+        stats = {}
+        for batch in _dev_batches([p for p in paths if _dev_statable(p)]):
+            try:
+                code, out, err = _dev_run(base + ["stat", "-c", _dev_quote(DEVICE_STAT_FORMAT)]
+                                          + [_dev_quote(p) for p in batch], DEVICE_STAT_TIMEOUT_S)
+            except (OSError, subprocess.SubprocessError):
+                continue  # this batch keeps unknown sizes; the listing itself stands
+            wanted = set(batch)
+            for line in _dev_lines(out):
+                m = _DEV_STAT_RE.fullmatch(line)
+                if m and m.group(3) in wanted:
+                    stats[m.group(3)] = (int(m.group(1)), int(m.group(2)))
+        record["files"] = [{"path": p, "name": p.rsplit("/", 1)[1], "size": stats.get(p, (None, None))[0],
+                            "mtime": stats.get(p, (None, None))[1]} for p in paths]
+        record["stat_errors"] = sum(1 for p in paths if p not in stats)
+    except _DeviceCommandRefused as e:
+        record.update(status="error", detail=f"refused a non-read-only adb command (a bug): {e}", files=[])
+    except Exception as e:
+        record.update(status="error", detail=_gp_line(e), files=[])
+
+
+def device_check_aliases():
+    """{alias: serial} of every phone the device cross-check lists, both tables read at call time:
+    DEVICE_ALIASES in order, then each DEVICE_CHECK_EXTRA_SERIALS serial as '<alias>#2', '<alias>#3', ... (the
+    alias it serves; the next free number when a key is taken). A serial that is already named — by
+    DEVICE_ALIASES or an earlier extra — is listed once; a bare string is taken as a one-serial list and a
+    non-string serial is ignored. The check-only extras never reach resolve_device (DECISIONS.md §1d)."""
+    merged = dict(DEVICE_ALIASES)
+    named = {serial.strip() for serial in merged.values() if isinstance(serial, str)}
+    for alias, serials in DEVICE_CHECK_EXTRA_SERIALS.items():
+        number = 1
+        for serial in [serials] if isinstance(serials, str) else serials:
+            if not isinstance(serial, str) or serial.strip() in named:
+                continue
+            number += 1
+            while f"{alias}#{number}" in merged:
+                number += 1
+            merged[f"{alias}#{number}"] = serial
+            named.add(serial.strip())
+    return merged
+
+
+def device_inventory(aliases=None):
+    """The read-only file inventory of the configured phones (PLAN Step 8 — see the section comment above).
+
+    aliases   {alias: serial}; default device_check_aliases() — DEVICE_ALIASES plus the check-only
+              DEVICE_CHECK_EXTRA_SERIALS (both read at call time). An alias may name a raw serial. A
+              serial that is empty or a '<...>' placeholder (DEVICE_ALIASES' '<NEW_PIXEL_SERIAL>') is skipped:
+              no adb command ever names it.
+
+    Issues ONE `adb devices` (none when every alias is skipped), then, per attached phone, the find + stat
+    commands of the section comment — only argvs _dev_argv_readonly allows. Never raises for anything a phone
+    or adb does (a KeyboardInterrupt still interrupts), prints nothing and writes nothing, anywhere.
+
+    Returns:
+      complete      True only when at least one alias names a real serial and EVERY alias that is not a
+                    placeholder was listed in full (status ok — an invalid serial counts as not listed). Only
+                    then may "on no phone" be read as absent: a phone that was not listed could hold the object
+                    (classify_device_objects answers `unchecked` instead).
+      devices       {alias: record}, in `aliases` order; a record:
+        alias, serial   as configured
+        status          ok             listed in full
+                        partial        listed, but find reported an error (a folder it could not read): its
+                                       files are real evidence, its silence is not
+                        skipped        a placeholder serial — reported as "skipped (placeholder)"
+                        not-connected  `adb devices` does not list it (unplugged, attached to another PC ...)
+                        offline        adb lists it offline (replug the cable / restart adb)
+                        unauthorized   adb lists it unauthorized or authorizing (allow USB debugging on it)
+                        unavailable    any other adb state (recovery, bootloader, sideload, no permissions ...)
+                        adb-missing    the adb binary could not be started
+                        error          anything else — a timeout, `adb devices` failing, find failing on every
+                                       root, an invalid serial; `detail` says what
+        detail          None when ok; otherwise the reason (adb's own first error line when there is one)
+        root            the DEVICE_LIST_ROOTS root the files were listed from (normally '/sdcard/Media/'), else
+                        None
+        files           [{path, name, size, mtime}] sorted by path — path exactly as the phone listed it
+                        (under `root`, so it works in any later read-only adb command), name its last part,
+                        size in bytes and mtime in epoch seconds from stat (None when stat gave nothing). adb
+                        push keeps the PC file's mtime (RESEARCH F3), so a `.mvmeta.json` sidecar's mtime is
+                        its push time
+        stat_errors     how many of `files` got no size / mtime
+      unconfigured  [{serial, state}] — phones `adb devices` lists that `aliases` does not name (e.g. a Pixel
+                    missing from DEVICE_ALIASES and DEVICE_CHECK_EXTRA_SERIALS): reported, never inventoried
+    """
+    aliases = device_check_aliases() if aliases is None else aliases
+    devices, real = {}, []
+    for alias, serial in aliases.items():
+        record = {"alias": alias, "serial": serial, "status": None, "detail": None, "root": None, "files": [],
+                  "stat_errors": 0}
+        devices[alias] = record
+        text = serial.strip() if isinstance(serial, str) else ""
+        if not text or _DEV_PLACEHOLDER_RE.fullmatch(text):
+            record.update(status="skipped", detail="placeholder")
+        elif not _DEV_SERIAL_RE.fullmatch(serial):
+            record.update(status="error", detail=f"not a valid adb serial: {serial!r}")
+        else:
+            real.append(record)
+    result = {"complete": False, "devices": devices, "unconfigured": []}
+    if not real:
+        return result
+    try:
+        code, out, err = _dev_run(["adb", "devices"], DEVICE_ADB_TIMEOUT_S)
+    except OSError as e:  # FileNotFoundError: no adb binary on PATH
+        for record in real:
+            record.update(status="adb-missing", detail=f"adb could not be started ({_gp_line(e)})")
+        return result
+    except Exception as e:  # a timeout, or anything else adb did
+        for record in real:
+            record.update(status="error", detail=f"adb devices failed ({_gp_line(e)})")
+        return result
+    if code != 0:
+        why = _dev_first_line(err) or _dev_first_line(out) or f"exit status {code}"
+        for record in real:
+            record.update(status="error", detail=f"adb devices failed ({why})")
+        return result
+    attached = _dev_attached(out)
+    named = {record["serial"] for record in devices.values()}
+    result["unconfigured"] = [{"serial": serial, "state": state} for serial, state in attached.items()
+                              if serial not in named]
+    for record in real:
+        state = attached.get(record["serial"])
+        if state == "device":
+            _dev_list(record)
+        elif state is None:
+            record.update(status="not-connected", detail="adb devices does not list it — connect the phone")
+        elif state == "offline":
+            record.update(status="offline", detail="adb lists it offline — replug the cable or restart adb")
+        elif state in ("unauthorized", "authorizing"):
+            record.update(status="unauthorized", detail=f"adb lists it {state} — allow USB debugging on the phone")
+        else:
+            record.update(status="unavailable", detail=f"adb state: {state}")
+    # every configured phone that is not a placeholder — an invalid serial too — must have been listed in full
+    result["complete"] = all(record["status"] in ("ok", "skipped") for record in devices.values())
+    return result
+
+
+DEVICE_STATES = ("on_device", "freed", "absent", "unchecked")  # classify_device_objects' verdicts, in order
+
+
+def _dev_index(inventory):
+    """Every listed file of a device_inventory result as a location {alias, serial, path, size, mtime}, indexed
+    three ways: (by exact name, by PLAN P-6 normalized name, by the name a `.partial` upload leftover of an
+    interrupted push would have become)."""
+    exact, normalized, partial = {}, {}, {}
+    devices = inventory.get("devices") if isinstance(inventory, dict) else None
+    for alias, device in (devices or {}).items():
+        if not isinstance(device, dict):
+            continue
+        for f in device.get("files") or ():
+            name = f.get("name") if isinstance(f, dict) else None
+            if not (isinstance(name, str) and name):
+                continue
+            where = {"alias": alias, "serial": device.get("serial"), "path": f.get("path"), "size": f.get("size"),
+                     "mtime": f.get("mtime")}
+            exact.setdefault(name, []).append(where)
+            normalized.setdefault(gpweb.normalize_name(name), []).append(where)
+            if name.endswith(PARTIAL_SUFFIX) and len(name) > len(PARTIAL_SUFFIX):
+                partial.setdefault(name[:-len(PARTIAL_SUFFIX)], []).append(where)
+    return exact, normalized, partial
+
+
+def _dev_matches(index, name):
+    """The locations of the file `name`: its exact matches, else (PLAN P-6) its normalized ones — each copied
+    with name_match exact | normalized. [] for no name."""
+    exact, normalized, _partial = index
+    if not (isinstance(name, str) and name):
+        return []
+    if name in exact:
+        return [dict(where, name_match="exact") for where in exact[name]]
+    return [dict(where, name_match="normalized") for where in normalized.get(gpweb.normalize_name(name), ())]
+
+
+def _dev_sidecar_name(uploaded_name, short_id):
+    """The `.mvmeta.json` write_remote_mvmeta pushed next to an object: '<base> [<short_id>].mvmeta.json', where
+    '<base> [<short_id>]' is the uploaded name up to its LAST ' [<short_id>]' tag — the tag cmd_push /
+    push_one_extra add to a whole file and split_video_file / _carry_out_flac_track put before '.chunk.NNN.mkv'
+    / '.holder.mkv' (so a split entry's chunks and holder share one sidecar). None when the name carries no tag
+    of that short id (e.g. an old upload under an untagged name)."""
+    if not (isinstance(uploaded_name, str) and isinstance(short_id, str) and short_id):
+        return None
+    tag = f" [{short_id}]"
+    at = uploaded_name.rfind(tag)
+    return None if at < 0 else uploaded_name[:at + len(tag)] + MVMETA_SUFFIX
+
+
+def _dev_expected_size(library, obj):
+    """(bytes, source) the object's upload must have: the trusted block's size_bytes, else the capture's (both
+    describe exactly these bytes), else the tech_spec.size_bytes of the object's OWN node — its slot owner (prep
+    and the extras scan stat the very file they hash). Only a whole file (the leaf) and a whole extras item (the
+    item) have one: a chunk's or holder's own record carries none, and its entry's tech_spec sizes the whole
+    file, never a chunk. (None, None) when unknown."""
+    for source, facts in (("block", obj.get("block")), ("capture", obj.get("capture"))):
+        size = facts.get("size_bytes") if isinstance(facts, dict) else None
+        if _gp_is_int(size) and size > 0:
+            return size, source
+    owner = mvcommon.slot_owner(library, obj.get("slot"))
+    tech = owner.get("tech_spec") if isinstance(owner, dict) else None
+    size = tech.get("size_bytes") if isinstance(tech, dict) else None
+    return (size, "tech_spec") if _gp_is_int(size) and size > 0 else (None, None)
+
+
+def classify_device_objects(library, inventory, objects=None):
+    """Classify each uploaded object by what the phones hold (PLAN Step 8 — see the section comment above).
+
+    library    the library dict (load_library()); only read
+    inventory  a device_inventory() result
+    objects    the objects to classify — mvcommon.iter_uploaded_objects / iter_entry_objects dicts of THIS
+               library (their slot resolves the owner) — default: every uploaded object of the library
+
+    An object is looked up by its exact uploaded name (PLAN P-6: else its normalized name, flagged) anywhere
+    under the Media root of every listed phone. Verdict, the first that applies:
+      on_device  a file with its uploaded name whose size agrees — or cannot be compared (unknown on either
+                 side): the object is still on a phone, awaiting (or already past) its backup
+      freed      no such file, but the `.mvmeta.json` sidecar pushed with it is there: it reached that phone and
+                 its media is gone from it ("Free up space" after a backup, or a manual delete). If the cloud
+                 lacks it too it is possibly LOST (Step 9: missing-after-backup). Positive evidence, so it stands
+                 even when another phone was not listed (only a second push to that phone could change it)
+      absent     nothing on any phone — and every configured phone was listed in full (inventory complete)
+      unchecked  nothing found, but "absent" cannot be claimed: a configured phone was not listed in full
+                 (unplugged, offline, unauthorized, partial ...) or none is configured, or the object has no
+                 uploaded name. A consumer must not call it missing (Step 9, Step 13)
+    A same-named file whose size DISAGREES holds other bytes (e.g. a superseded re-split chunk): it never makes
+    the object on_device and stays listed in `copies` with size_match False. Limits: a split set pushed only by
+    chunk ranges has no sidecar (write_remote_mvmeta runs after a full push), so its freed chunks read absent /
+    unchecked; an object uploaded under a name without its ' [<short_id>]' tag has no sidecar to find.
+
+    Returns:
+      complete            the inventory's `complete`
+      incomplete_devices  {alias: status} of the configured phones not listed in full (placeholders excluded)
+      counts              {state: n} over DEVICE_STATES
+      objects             one record per object, in `objects` order:
+        manual_id, category, kind, index, label, sha256, uploaded_name, slot   the object's identity
+                          (iter_uploaded_objects' fields; (manual_id, label) or slot names it uniquely)
+        state             on_device | freed | absent | unchecked
+        expected_size     bytes its upload must have, or None; size_source: block | capture | tech_spec | None
+        copies            [{alias, serial, path, size, mtime, name_match: exact | normalized,
+                            size_match: True | False | None}] — every file carrying its uploaded name
+        sidecars          [{alias, serial, path, size, mtime, name_match}] — its `.mvmeta.json` wherever found
+                          (its mtime is the push time)
+        partials          [{alias, serial, path, size, mtime}] — '<uploaded name>.partial' leftovers of an
+                          interrupted push (never a copy)
+    No adb, no output, no library write (building the default object list reads the capture files)."""
+    index = _dev_index(inventory)
+    complete = bool(isinstance(inventory, dict) and inventory.get("complete") is True)
+    devices = inventory.get("devices") if isinstance(inventory, dict) else None
+    incomplete = {alias: device.get("status") for alias, device in (devices or {}).items()
+                  if isinstance(device, dict) and device.get("status") not in ("ok", "skipped")}
+    counts = dict.fromkeys(DEVICE_STATES, 0)
+    rows = []
+    for obj in (mvcommon.iter_uploaded_objects(library) if objects is None else objects):
+        name = obj.get("uploaded_name")
+        expected, source = _dev_expected_size(library, obj)
+        copies = [dict(where, size_match=(None if where["size"] is None or expected is None
+                                          else where["size"] == expected))
+                  for where in _dev_matches(index, name)]
+        sidecars = _dev_matches(index, _dev_sidecar_name(name, obj.get("short_id")))
+        partials = [dict(where) for where in index[2].get(name, ())] if isinstance(name, str) else []
+        if any(copy_["size_match"] is not False for copy_ in copies):
+            state = "on_device"
+        elif sidecars:
+            state = "freed"
+        elif complete and isinstance(name, str) and name:
+            state = "absent"
+        else:
+            state = "unchecked"
+        counts[state] += 1
+        rows.append({"manual_id": obj.get("manual_id"), "category": obj.get("category"), "kind": obj.get("kind"),
+                     "index": obj.get("index"), "label": obj.get("label"), "sha256": obj.get("sha256"),
+                     "uploaded_name": name, "slot": obj.get("slot"), "state": state, "expected_size": expected,
+                     "size_source": source, "copies": copies, "sidecars": sidecars, "partials": partials})
+    return {"complete": complete, "incomplete_devices": incomplete, "counts": counts, "objects": rows}
+
+
+# ==========================================
+#   GOOGLE PHOTOS IDENTITY — THE MAPPER: map_photos (IMP-C25)
+# ==========================================
+# docs/feature-fetch-datetime/PLAN.md Step 9: backfill the ARCHIVED library's Google Photos identity by mapping every
+# uploaded object (mvcommon.iter_uploaded_objects: whole files, chunks, FLAC holders, extras; all four categories)
+# to the crawled inventory — read through the crawler's own offline reader, tools/gp_inventory.inventory_state —
+# then report, let the user resolve what cannot be proven, and apply. READ-ONLY until --apply: a dry run (the
+# default) writes only its own run directory (<GPHOTOS_STATE_DIR>/map/<ts>, or --out) — never the library, the
+# learned sidecars, the hints or the failed list.
+#
+# Per object:
+#   1. freshness gate — a verdict needs every inventory it rests on to be FRESH: crawled, with a complete
+#      enumeration at most MAP_INVENTORY_MAX_AGE_H old; an "in no account" verdict also needs every crawled account
+#      fresh and fully detailed, and the account the object is routed to crawled. Otherwise the row is
+#      `stale-inventory` (no verdict) and the re-crawl command is printed. A push newer than an enumeration does not
+#      stale the account (Step 9b): only that push's objects wait for the next crawl (see 5).
+#   2. match (PLAN P-6) — the exact uploaded name in the object's DEFAULT account (its id prefix), then the
+#      normalized name; else the name in ANOTHER account (wrong-account); an object whose content key (SHA-1 =
+#      dedupKey: trusted block or capture) is known is found by that key; then the `[short_id]`-tag `probable`.
+#   3. cross-check — a known content key must equal the item's dedupKey, else `conflict` (never applied).
+#   4. duplicates — same bytes: one item, the rest alternates; a re-split set: the chunks' items grouped by taken
+#      second, the newest COMPLETE set chosen when no newer set exists; anything else `ambiguous`.
+#   5. IMP-C27 detectors — split_info lost (--repair split-info), uploaded under the old untagged name (--repair
+#      names), a partial / non-original upload, and an object in NO account. That verdict is library <-> Google
+#      Photos only (Step 9b, DECISIONS §1e — no phone needed): by its capture push time against the crawl start of
+#      the account it is routed to, `not-backed-up-yet` (pushed after the crawl began, or in the MAP_RECENT_DAYS
+#      before it: not a problem yet) or `possible-loss` (pushed earlier, or push time unknown — no capture) — unless
+#      [IMP-C25 thfix] its library block holds a CONFIRMED record in a freshly crawled account whose latest
+#      enumeration does not list that photo_id: `not-listed` (archived? in the trash? — no loss; nothing recorded), or —
+#      [IMP-C25 mpfix] that item reached Google Photos at or after the crawl began — `uploaded-after-crawl` (not crawled
+#      yet: no loss either; nothing recorded). A push newer than the crawl can only be proven by its bytes (dedupKey); a
+#      name match is no evidence for it. Only with --devices does the read-only device check (Step 8) refine an OLD
+#      object — awaiting-backup / missing-after-backup / missing-everywhere — and annotate a recent one; a phone that
+#      was not listed only annotates (it never blocks or downgrades a verdict).
+# Outputs, --resolutions, --apply, --devices and --devices-only: see cmd_map_photos. Nothing here prints a P-13
+# web-progress marker; no photo id, dedupKey or URL is printed (they live in the run directory's files only — P-15).
+
+MAP_INVENTORY_MAX_AGE_H = 24  # PLAN Step 9 (1): an enumeration older than this cannot back a verdict
+# Step 9b: an object in no account that was pushed after its account's crawl began, or within this many days before
+# it, is `not-backed-up-yet`; earlier, or with no push time, it is `possible-loss`. A phone backs up when it can —
+# live 2026-10-03: 66 captured chunks reached Google Photos 2.8–49.6 h after their push completed, while 4 chunks
+# pushed 5.9 days before the crawl had not yet — so the window is a week, not the observed two days.
+MAP_RECENT_DAYS = 7
+MAP_REPAIRS = ("split-info", "names")
+MAP_USAGE = ("map_photos [all|<id>|<prefix>] [--account movies|tv|anime|others] [--devices] [--devices-only] "
+             "[--resolutions <csv>] [--repair split-info|names] [--accept-probable] [--apply] [--out <dir>]")
+_MP_FLAGS = {"--devices": "devices", "--devices-only": "devices_only", "--accept-probable": "accept_probable",
+             "--apply": "apply"}
+_MP_VALUED = ("--account", "--resolutions", "--repair", "--out")
+_MP_RECRAWL = "python tools/gp_inventory.py {account} --port <port>"
+# The P-1 item facts an inventory record carries (the crawler's record format, dom and rpc).
+_MP_ITEM_KEYS = ("photo_id", "filename", "taken_ms", "tz_offset_ms", "upload_ms", "dedup_key", "width", "height",
+                 "size_bytes", "original_quality", "partial_upload", "archived")
+_MP_TAG_RE = re.compile(r"\[([0-9a-f]{6})\]")                # a MediaVault short_id tag (generate_short_id: 6 hex)
+_MP_HOLDER_RE = re.compile(r"\.holder\.mkv$", re.IGNORECASE)
+_MP_CHUNK_KINDS = ("chunk", "extra_chunk")
+
+
+def parse_map_photos_args(tokens):
+    """The `map_photos` CLI tokens (after the verb) -> cmd_map_photos keyword arguments (MAP_USAGE). Raises
+    ValueError naming the problem: an unknown option, a missing or invalid value, a second scope, or
+    --devices-only combined with an option it does not take."""
+    opts = {"scope": "all", "account": None, "devices": False, "devices_only": False, "resolutions": None,
+            "repairs": (), "accept_probable": False, "apply": False, "out": None}
+    tokens, scope, repairs, i = list(tokens), None, [], 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token in _MP_VALUED:
+            if i + 1 >= len(tokens) or not tokens[i + 1].strip() or tokens[i + 1].startswith("--"):
+                raise ValueError(f"{token} needs a value")
+            value = tokens[i + 1].strip()
+            i += 2
+            if token == "--account":
+                if value not in mvcommon.GP_ACCOUNTS:
+                    raise ValueError(f"--account must be one of {', '.join(mvcommon.GP_ACCOUNTS)} (got {value!r})")
+                opts["account"] = value
+            elif token == "--repair":
+                for part in (p.strip() for p in value.split(",")):
+                    if part not in MAP_REPAIRS:
+                        raise ValueError(f"--repair takes {' / '.join(MAP_REPAIRS)} (got {part!r})")
+                    if part not in repairs:
+                        repairs.append(part)
+            else:
+                opts["resolutions" if token == "--resolutions" else "out"] = value
+        elif token in _MP_FLAGS:
+            opts[_MP_FLAGS[token]] = True
+            i += 1
+        elif token.startswith("--"):
+            raise ValueError(f"unknown option {token}")
+        else:
+            if scope is not None:
+                raise ValueError(f"one scope only (got {scope!r} and {token!r})")
+            scope = token.strip()
+            i += 1
+    opts["scope"] = scope or "all"
+    opts["repairs"] = tuple(repairs)
+    if opts["devices_only"] and (opts["apply"] or opts["resolutions"] or repairs or opts["accept_probable"]
+                                 or opts["devices"]):
+        raise ValueError("--devices-only takes only a scope, --account and --out")
+    return opts
+
+
+def _mp_when(value):
+    """An ISO-8601 time — the crawler's '+00:00' form or a capture's 'Z' form — as an aware UTC datetime, or None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        when = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    return (when if when.tzinfo else when.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
+
+
+def _mp_iso(when):
+    return when.strftime("%Y-%m-%dT%H:%M:%SZ") if when is not None else None
+
+
+def _mp_inventory_states():
+    """{account: tools/gp_inventory.inventory_state(account)} for every Google account, read from
+    mvcommon.GP_INVENTORY_DIR at call time — the crawler's own offline reader (no Chrome, no lock, nothing
+    written), never a private copy of its format."""
+    from tools import gp_inventory  # lazy: the crawler module imports Selenium
+    return {account: gp_inventory.inventory_state(account, mvcommon.GP_INVENTORY_DIR)
+            for account in mvcommon.GP_ACCOUNTS}
+
+
+def _mp_override(manual_id, overrides):
+    """The mvconfig fetch_account_overrides account for an id — mainfetch.profile_for_id's rule: the longest
+    matching key (an exact id beats any prefix of it) — or None."""
+    best = max((key for key in overrides if manual_id.startswith(key)), key=len, default=None)
+    return overrides[best] if best is not None else None
+
+
+def _mp_route(obj, overrides, prefix_map, default):
+    """An object's account layers (PLAN P-4): its default (id prefix), the mvconfig override, the learned home
+    (the trusted block's home_account) and the routing account they give (override > home > default)."""
+    base = mvcommon.home_account(None, obj["manual_id"], prefix_map, default)
+    home = (obj.get("block") or {}).get("home_account")
+    home = home if home in mvcommon.GP_ACCOUNTS else None
+    override = _mp_override(obj["manual_id"], overrides)
+    return {"default": base, "override": override, "home": home, "routing": override or home or base}
+
+
+def _mp_freshness(states, objects, routes, now):
+    """PLAN Step 9 (1): {account: freshness} — fresh when the account was crawled and has a complete enumeration
+    (inventory_state's latest_complete: its start is the as-of time) at most MAP_INVENTORY_MAX_AGE_H old. Also
+    reported: the newest capture push of the in-scope objects ROUTED to the account (Step 9b: a push newer than the
+    enumeration no longer stales the account — _mp_recency makes only that push's objects wait), `gaps` — known ids
+    without a good record (errored, or listed and never detailed) — which blocks every "in no account" verdict, and
+    the re-crawl command."""
+    newest = {}
+    for obj in objects:
+        pushed = (obj.get("capture") or {}).get("pushed") or {}
+        when = _mp_when(pushed.get("at"))
+        account = routes[(obj["manual_id"], obj["label"])]["routing"]
+        if when is not None and (account not in newest or when > newest[account]):
+            newest[account] = when
+    out = {}
+    for account, state in states.items():
+        crawled = bool(state["known_ids"] or state["runs"])
+        latest = state["latest_complete"]
+        as_of = _mp_when(latest["started_at"]) if latest else None
+        age_h = (now - as_of).total_seconds() / 3600.0 if as_of is not None else None
+        push = newest.get(account)
+        if not crawled:
+            reason = "not crawled yet"
+        elif as_of is None:
+            reason = "no complete enumeration yet"
+        elif age_h > MAP_INVENTORY_MAX_AGE_H:
+            reason = f"the enumeration is {age_h:.1f} h old (limit {MAP_INVENTORY_MAX_AGE_H} h)"
+        else:
+            reason = None
+        gone = set(state["possibly_deleted"])
+        gaps = sum(1 for pid in state["known_ids"] if pid not in state["detailed"] and pid not in gone)
+        out[account] = {"account": account, "crawled": crawled, "fresh": reason is None, "reason": reason,
+                        "as_of": _mp_iso(as_of), "age_h": age_h, "newest_push": _mp_iso(push),
+                        "items": len(state["items"]), "gaps": gaps, "possibly_deleted": len(gone),
+                        "recrawl": _MP_RECRAWL.format(account=account)}
+    return out
+
+
+def _mp_item(account, rec):
+    """An inventory record as a mapper item: the account + the P-1 item facts it carries (None when unknown)."""
+    item = {"account": account}
+    item.update((key, rec.get(key)) for key in _MP_ITEM_KEYS)
+    item["dedup_key"] = gpweb.normalize_dedup_key(item["dedup_key"])
+    return item
+
+
+def _mp_tag_key(name):
+    """(kind, chunk number) of a file name for the `[short_id]`-tag index: ('chunk', NNN) for '….chunk.NNN.mkv',
+    ('holder', None) for '….holder.mkv', else ('whole', None)."""
+    number = gpweb.chunk_index(name)
+    if number is not None:
+        return "chunk", number
+    return ("holder", None) if _MP_HOLDER_RE.search(name or "") else ("whole", None)
+
+
+def _mp_index(states):
+    """Per account, the live inventory items indexed for the ladder: by exact file name, by P-6 normalized name, and
+    by MediaVault `[short_id]` tag ((tag, kind, chunk number) -> [items], the OD-14 probable match), and by dedupKey
+    (the SHA-1 of the uploaded bytes — PLAN Step 9 (3): content proof); chunk and FLAC-holder items also by the
+    normalized name they were cut from (`stems`: the IMP-C27 (a) split_info-lost detector). Items absent from
+    the latest complete enumeration (possibly deleted) never match — they are kept by normalized name under
+    `deleted` (reported: an item that was there and is gone). A record without a file name or with a crawl error is
+    left out: its id counts in the freshness `gaps`, which withhold every "in no account" verdict. [IMP-C25 thfix]
+    `listed`: the ids the latest COMPLETE enumeration listed (None without one) — what a confirmed record is checked
+    against (_mp_unlisted)."""
+    index = {}
+    for account, state in states.items():
+        gone = set(state["possibly_deleted"])
+        exact, normalized, tags, dedup, deleted, stems = {}, {}, {}, {}, {}, {}
+        for pid in sorted(state["items"]):
+            rec = state["items"][pid]
+            item = _mp_item(account, rec)
+            name = item["filename"] if isinstance(item["filename"], str) and item["filename"].strip() else None
+            if not name:
+                continue
+            key = gpweb.normalize_name(name)
+            if pid in gone:
+                deleted.setdefault(key, []).append(item)
+            elif not rec.get("error"):
+                exact.setdefault(name, []).append(item)
+                normalized.setdefault(key, []).append(item)
+                kind, number = _mp_tag_key(name)
+                for tag in dict.fromkeys(_MP_TAG_RE.findall(name)):
+                    tags.setdefault((tag, kind, number), []).append(item)
+                if item["dedup_key"]:
+                    dedup.setdefault(item["dedup_key"], []).append(item)
+                if kind != "whole":                    # a chunk or a holder: indexed by the name it was cut from
+                    cut = name.lower().rfind(".chunk." if kind == "chunk" else ".holder.")
+                    stems.setdefault((kind, gpweb.normalize_name(name[:cut])), []).append(item)
+        latest = state.get("latest_complete")
+        index[account] = {"exact": exact, "normalized": normalized, "tags": tags, "dedup": dedup, "deleted": deleted,
+                          "stems": stems, "listed": frozenset(latest["ids"]) if latest else None}
+    return index
+
+
+def _mp_content_key(obj):
+    """The object's content key — the dedupKey of its own bytes — from its trusted block, else its capture, or None."""
+    block = obj.get("block")
+    key = _gp_content_key(block) if isinstance(block, dict) else None
+    return key or gpweb.normalize_dedup_key((obj.get("capture") or {}).get("dedup_key"))
+
+
+def _mp_expected_local(obj):
+    """The taken time Google Photos will show for an object, from its capture — the file's DateUTC in the pushing
+    phone's timezone: 'YYYY-MM-DD HH:MM:SS GMT+08:00' (UTC when the offset is unknown) — or None (no capture)."""
+    capture = obj.get("capture") or {}
+    when = _mp_when(capture.get("date_utc"))
+    if when is None:
+        return None
+    offset = (capture.get("pushed") or {}).get("device_tz_offset_min")
+    if not isinstance(offset, int) or isinstance(offset, bool):
+        return when.strftime("%Y-%m-%d %H:%M:%S UTC")
+    local = when + timedelta(minutes=offset)
+    sign = "-" if offset < 0 else "+"
+    return local.strftime("%Y-%m-%d %H:%M:%S") + f" GMT{sign}{abs(offset) // 60:02d}:{abs(offset) % 60:02d}"
+
+
+def _mp_pushed_at(obj):
+    """Step 9b: when THESE bytes were pushed — the capture's push time ('…Z'; stamped when that push completed) —
+    or None: no capture recorded a push of them (a pre-capture push). The only push-time evidence the library
+    side has: the remote .mvmeta.json lives on the phone alone (write_remote_mvmeta deletes its local temp), and the
+    capture's other times (its prep record, another push of the same entry) date other bytes or other steps."""
+    return _mp_iso(_mp_when(((obj.get("capture") or {}).get("pushed") or {}).get("at")))
+
+
+def _mp_row(obj, route):
+    """The mapping.jsonl row of one object, before its verdict (status None)."""
+    return {"manual_id": obj["manual_id"], "label": obj["label"], "kind": obj["kind"], "category": obj["category"],
+            "sha256": obj["sha256"], "uploaded_name": obj["uploaded_name"], "cloud_state": obj["cloud_state"],
+            "default_account": route["default"], "override": route["override"], "learned_home": route["home"],
+            "routing": route["routing"], "account": route["default"], "status": None, "issue": None,
+            "name_match": None, "proof": None, "item": None, "alternates": [], "copies": [], "candidates": [],
+            "deleted": [], "override_check": None, "duplicate": None, "set": None, "device": None,
+            "partial_set": False, "content_key": _mp_content_key(obj), "expected_taken_local": _mp_expected_local(obj),
+            "pushed_at": _mp_pushed_at(obj), "recent": None, "library_position": None,
+            "reason": None, "user_decision": None, "note": None, "repair": None}
+
+
+def _mp_names(index_account, name):
+    """(items, name_match) for a name in one account's index: the exact matches, else the P-6 normalized ones."""
+    if not (isinstance(name, str) and name):
+        return [], None
+    hits = index_account["exact"].get(name)
+    if hits:
+        return list(hits), "exact"
+    hits = index_account["normalized"].get(gpweb.normalize_name(name))
+    return (list(hits), "normalized") if hits else ([], None)
+
+
+def _mp_key(obj):
+    return obj["manual_id"], obj["label"]
+
+
+def _mp_groups(objects):
+    """The objects as matching groups, in object order: the chunks of ONE split — a leaf's, or one extras item's —
+    are decided together (PLAN Step 9 (4): all chunks of a split share one taken second); every other object is a
+    group of its own."""
+    groups, splits = [], {}
+    for obj in objects:
+        if obj["kind"] in _MP_CHUNK_KINDS:
+            key = (obj["manual_id"], obj["kind"], obj.get("group_rel"), obj.get("sub_rel"))
+            if key not in splits:
+                splits[key] = []
+                groups.append(splits[key])
+            splits[key].append(obj)
+        else:
+            groups.append([obj])
+    return groups
+
+
+def _mp_decision(kind, name_match, item=None, candidates=(), proof=None, alternates=(), duplicate=None,
+                 chunk_set=None, note=None):
+    """One account's answer for one object: mapped (item + proof), ambiguous / conflict (candidates)."""
+    return {"kind": kind, "name_match": name_match, "item": item, "candidates": list(candidates), "proof": proof,
+            "alternates": list(alternates), "duplicate": duplicate, "set": chunk_set, "note": note}
+
+
+def _mp_pick(items):
+    """The one item to record among items holding the SAME bytes: a complete, original-quality, unarchived copy
+    first, then the earliest upload, then the photo id (deterministic) — the others become its alternates."""
+    return sorted(items, key=lambda i: (i.get("partial_upload") is True, i.get("original_quality") is False,
+                                        i.get("archived") is True,
+                                        i["upload_ms"] if isinstance(i.get("upload_ms"), int) else float("inf"),
+                                        i["photo_id"]))[0]
+
+
+def _mp_by_content(obj, idx, content_key):
+    """PLAN Step 9 (3): the decision for an object whose content key is known — the items holding its bytes
+    (dedupKey) prove it (proof dedupkey; name_match exact / normalized, or `content` under another name); without
+    one, same-named items hold OTHER bytes: conflict (never applied). None when neither exists."""
+    named, how = _mp_names(idx, obj["uploaded_name"])
+    hits = idx["dedup"].get(content_key, [])
+    if hits:
+        item = _mp_pick(hits)
+        others = [i["photo_id"] for i in hits if i["photo_id"] != item["photo_id"]]
+        match = gpweb.names_match(item["filename"], obj["uploaded_name"] or "") or "content"
+        decision = _mp_decision("mapped", match, item=item, proof="dedupkey", alternates=others,
+                                duplicate="same-bytes" if others else None)
+        foreign = [i for i in named if i["dedup_key"] != content_key]
+        if foreign:
+            decision["note"] = (f"{len(foreign)} other item(s) carry this name with other bytes (a superseded "
+                                f"upload?) — not recorded")
+        return decision
+    if named:
+        return _mp_decision("conflict", how, candidates=named,
+                            note=f"{len(named)} item(s) carry this name, none holds the object's bytes (dedupKey)")
+    return None
+
+
+def _mp_bytes(items):
+    """`items` grouped by the bytes they hold (dedupKey; an item without one stands alone) -> [[items]], first
+    appearance order."""
+    groups = {}
+    for item in items:
+        groups.setdefault(item["dedup_key"] or ("photo", item["photo_id"]), []).append(item)
+    return list(groups.values())
+
+
+def _mp_second(item):
+    """The taken second of an item (all chunks of one split share it — RESEARCH F4), or None."""
+    taken = item.get("taken_ms")
+    return taken // 1000 if isinstance(taken, int) and not isinstance(taken, bool) else None
+
+
+def _mp_one_of(members, how, alternates=(), duplicate=None, chunk_set=None, note=None):
+    """mapped: the picked item of one group of same-bytes items; the rest of the group + `alternates` (photo ids)."""
+    item = _mp_pick(members)
+    others = [i["photo_id"] for i in members if i["photo_id"] != item["photo_id"]] + list(alternates)
+    return _mp_decision("mapped", how, item=item, proof="filename", alternates=others,
+                        duplicate=duplicate or ("same-bytes" if len(members) > 1 else None), chunk_set=chunk_set,
+                        note=note)
+
+
+def _mp_by_name(items, how):
+    """PLAN Step 9 (4), one object alone: one group of same bytes -> mapped (one item, the rest alternates); several
+    groups of different bytes -> ambiguous."""
+    groups = _mp_bytes(items)
+    if len(groups) == 1:
+        return _mp_one_of(groups[0], how)
+    return _mp_decision("ambiguous", how, candidates=items,
+                        note=f"{len(groups)} items with this name hold different bytes")
+
+
+def _mp_chunk_set(loose, pins, size):
+    """PLAN Step 9 (4), the name-matched chunks of ONE split in one account (`loose`: [(obj, items, name_match)], no
+    content key) -> {key: decision}. All chunks of a split share its taken second (RESEARCH F4), so the candidates are
+    grouped by second (one second = one upload of the split):
+      * `pins` — the seconds of this split's content-PROVEN chunks: one pin decides the set (another second's items
+        are other bytes: conflict); several pins: ambiguous;
+      * no chunk name with different-bytes duplicates: each chunk maps to its own item (seconds that differ are
+        only noted — never seen in the real library: 250 of 250 such sets sit on one second);
+      * one second: each chunk by its own items (same bytes collapse; different bytes: ambiguous);
+      * several seconds (the split was uploaded more than once): the newest COMPLETE set — every chunk of the split
+        exactly once — when no newer upload exists; its chunks map, the other uploads' items become alternates. A
+        newer incomplete upload (perhaps still backing up), or no complete one, leaves every chunk ambiguous."""
+    per = {}
+    for obj, items, _how in loose:
+        by_second = {}
+        for members in _mp_bytes(items):
+            by_second.setdefault(_mp_second(_mp_pick(members)), []).append(members)
+        per[_mp_key(obj)] = by_second
+    seconds = set(pins) | {s for by_second in per.values() for s in by_second}
+    out = {}
+    if pins:
+        for obj, items, how in loose:
+            here = per[_mp_key(obj)].get(next(iter(pins))) if len(pins) == 1 else None
+            if here and len(here) == 1:
+                out[_mp_key(obj)] = _mp_one_of(here[0], how, note="the split's upload is pinned by a chunk proven "
+                                                                  "by its bytes")
+            elif len(pins) == 1 and not here:
+                out[_mp_key(obj)] = _mp_decision("conflict", how, candidates=items,
+                                                 note="only another upload of this split (another taken second) "
+                                                      "carries this name — not the object's bytes")
+            else:
+                out[_mp_key(obj)] = _mp_decision("ambiguous", how, candidates=items,
+                                                 note="this split's chunks cannot be told apart")
+        return out
+    if all(sum(len(groups) for groups in per[_mp_key(o)].values()) == 1 for o, _i, _h in loose):
+        note = (f"this split's chunks carry {len(seconds)} different taken seconds (mixed uploads?)"
+                if len(seconds) > 1 else None)
+        return {_mp_key(obj): _mp_one_of(next(iter(per[_mp_key(obj)].values()))[0], how, note=note)
+                for obj, _items, how in loose}
+    if len(seconds) <= 1:
+        return {_mp_key(obj): _mp_by_name(items, how) for obj, items, how in loose}
+    ordered = sorted(seconds, key=lambda s: float("-inf") if s is None else s)
+    complete = [s for s in ordered if len(loose) == size and all(len(per[_mp_key(o)].get(s, [])) == 1
+                                                                  for o, _i, _h in loose)]
+    if complete and complete[-1] == ordered[-1]:
+        chosen = complete[-1]
+        info = {"taken_s": chosen, "uploads": len(seconds), "chunks": size}
+        for obj, items, how in loose:
+            members = per[_mp_key(obj)][chosen][0]
+            elsewhere = [i["photo_id"] for s, groups in per[_mp_key(obj)].items() if s != chosen
+                         for g in groups for i in g]
+            out[_mp_key(obj)] = _mp_one_of(members, how, alternates=elsewhere, duplicate="re-split",
+                                           chunk_set=info)
+        return out
+    note = (f"a newer upload of this split is incomplete ({len(seconds)} uploads; maybe still backing up)"
+            if complete else f"this split was uploaded {len(seconds)} times and no upload is complete")
+    return {_mp_key(obj): _mp_decision("ambiguous", how, candidates=items, note=note) for obj, items, how in loose}
+
+
+def _mp_decide(group, idx, keys):
+    """ONE account's decision for each object of a matching group -> {(manual_id, label): decision or None}. An
+    object with a known content key (keys) is decided by its bytes (_mp_by_content); any other by the items carrying
+    its exact uploaded name, else its P-6 normalized name — alone (_mp_by_name), or, for a split's chunks, as one
+    set (_mp_chunk_set). None: no item."""
+    out, loose = {}, []
+    for obj in group:
+        key = _mp_key(obj)
+        if keys.get(key):
+            out[key] = _mp_by_content(obj, idx, keys[key])
+            continue
+        items, how = _mp_names(idx, obj["uploaded_name"])
+        out[key] = None
+        if items:
+            loose.append((obj, items, how))
+    if not loose:
+        return out
+    if group[0]["kind"] in _MP_CHUNK_KINDS:
+        pins = {_mp_second(out[_mp_key(o)]["item"]) for o in group
+                if keys.get(_mp_key(o)) and out[_mp_key(o)] and out[_mp_key(o)]["kind"] == "mapped"}
+        out.update(_mp_chunk_set(loose, pins, len(group)))
+    else:
+        for obj, items, how in loose:
+            out[_mp_key(obj)] = _mp_by_name(items, how)
+    return out
+
+
+def _mp_take(row, decision, account):
+    """Copy one account's decision into the row: mapped -> mapped / mapped-normalized; ambiguous; conflict."""
+    if decision["kind"] == "mapped":
+        status = "mapped" if decision["name_match"] != "normalized" else "mapped-normalized"
+    else:
+        status = decision["kind"]
+    row.update(status=status, account=account, name_match=decision["name_match"], proof=decision["proof"],
+               item=dict(decision["item"]) if decision["item"] else None,
+               candidates=[dict(c) for c in decision["candidates"]], alternates=list(decision["alternates"]),
+               duplicate=decision["duplicate"], set=decision["set"])
+    if decision["note"]:
+        _mp_note(row, decision["note"])
+
+
+def _mp_note(row, text):
+    row["note"] = text if not row["note"] else f"{row['note']}; {text}"
+
+
+def _mp_stale(row, account, reason):
+    row.update(status="stale-inventory", account=row["default_account"])
+    _mp_note(row, f"{account}: {reason}")
+
+
+def _mp_preferred(row, accounts):
+    """`accounts` with the row's override first, then its learned home, then GP_ACCOUNTS order."""
+    order = [a for a in (row["override"], row["learned_home"]) if a] + list(mvcommon.GP_ACCOUNTS)
+    return sorted(accounts, key=lambda a: order.index(a) if a in order else len(order))
+
+
+def _mp_settle(row, obj, decisions, fresh, index, library):
+    """The verdict of one object from every crawled account's decision (PLAN Step 9 (1)-(3)): its default account
+    first (its normalized name there beats an exact name elsewhere — P-6 ladder order), then another account
+    (wrong-account), then the `[short_id]`-tag probable; an object with a known content key is decided by its bytes
+    wherever they are. An answer that rests on a stale inventory is refused (stale-inventory)."""
+    key, home = _mp_key(obj), row["default_account"]
+    if not fresh[home]["fresh"]:
+        return _mp_stale(row, home, fresh[home]["reason"])
+    if row["content_key"]:
+        if _mp_settle_by_content(row, key, decisions, fresh):
+            return
+        return _mp_nowhere(row, obj, fresh, index, library)
+    own = decisions[home][key]
+    if own is not None:
+        _mp_take(row, own, home)
+        if row["item"] is not None:
+            _mp_copies(row, key, decisions, fresh)
+        return
+    elsewhere = {a: d[key] for a, d in decisions.items() if a != home and d[key] is not None}
+    if elsewhere:
+        stale = [a for a in _mp_preferred(row, elsewhere) if not fresh[a]["fresh"]]
+        if stale:
+            return _mp_stale(row, stale[0], f"the name is in this account, whose inventory is not fresh "
+                                            f"({fresh[stale[0]]['reason']})")
+        accounts = _mp_preferred(row, elsewhere)
+        mapped = [a for a in accounts if elsewhere[a]["kind"] == "mapped"]
+        keys = {elsewhere[a]["item"]["dedup_key"] for a in mapped}
+        if len(accounts) == 1 or (len(mapped) == len(accounts) and len(keys) == 1 and None not in keys):
+            _mp_take(row, elsewhere[accounts[0]], accounts[0])
+            if row["item"] is not None:
+                row["status"] = "wrong-account"
+                row["copies"] = [dict(elsewhere[a]["item"]) for a in accounts[1:]]
+            return
+        row.update(status="ambiguous", candidates=[dict(c) for a in accounts for c in (
+            [elsewhere[a]["item"]] if elsewhere[a]["item"] else elsewhere[a]["candidates"])])
+        return _mp_note(row, f"the name is in {len(accounts)} other accounts ({', '.join(accounts)}) with "
+                             f"different bytes")
+    return _mp_nowhere(row, obj, fresh, index, library)
+
+
+def _mp_settle_by_content(row, key, decisions, fresh):
+    """The verdict of a content-keyed object (PLAN Step 9 (3)) -> True when decided. Its bytes in the default account,
+    else in another account (wrong-account; the same bytes in further accounts are recorded copies) — content proof
+    outranks any same-named item; else a same-named item with other bytes -> conflict. False: found nowhere."""
+    home = row["default_account"]
+    order = [home] + _mp_preferred(row, [a for a in decisions if a != home])
+    proven = [a for a in order if decisions[a][key] is not None and decisions[a][key]["kind"] == "mapped"]
+    if proven:
+        if not fresh[proven[0]]["fresh"]:
+            _mp_stale(row, proven[0], f"its bytes are in this account, whose inventory is not fresh "
+                                      f"({fresh[proven[0]]['reason']})")
+            return True
+        _mp_take(row, decisions[proven[0]][key], proven[0])
+        if proven[0] != home:
+            row["status"] = "wrong-account"
+        row["copies"] = [dict(decisions[a][key]["item"]) for a in proven[1:] if fresh[a]["fresh"]]
+        conflict = decisions[home][key]
+        if proven[0] != home and conflict is not None:
+            _mp_note(row, f"{home}: {conflict['note']}")
+        if row["name_match"] == "content":
+            _mp_note(row, f"its bytes were uploaded under another name ({row['item']['filename']}) — "
+                          f"--repair names records it")
+        return True
+    conflicts = [a for a in order if decisions[a][key] is not None]
+    if conflicts:
+        if not fresh[conflicts[0]]["fresh"]:
+            _mp_stale(row, conflicts[0], f"the name is in this account, whose inventory is not fresh "
+                                         f"({fresh[conflicts[0]]['reason']})")
+            return True
+        _mp_take(row, decisions[conflicts[0]][key], conflicts[0])
+        return True
+    return False
+
+
+def _mp_nowhere(row, obj, fresh, index, library):
+    """An object found in no account by name or bytes: withheld while any crawled inventory is not fresh or not fully
+    detailed, or the account it is routed to was never crawled (it could be there); else, in order, [IMP-C25 thfix]
+    `not-listed` when its confirmed record names an item a fresh crawl does not list (_mp_unlisted) — [IMP-C25 mpfix]
+    `uploaded-after-crawl` when that item reached Google Photos at or after the crawl began (_mp_after_crawl) —, the
+    `[short_id]`-tag probable (never for a content-keyed object: those items hold other bytes), the IMP-C27 (a)
+    split_info lost and (b) old untagged name of a whole file; else not-found (_mp_recency gives its verdict), with
+    any possibly-deleted same-named item as evidence."""
+    blocked = [a for a in mvcommon.GP_ACCOUNTS if fresh[a]["crawled"] and not fresh[a]["fresh"]]
+    gaps = [a for a in mvcommon.GP_ACCOUNTS if fresh[a]["crawled"] and fresh[a]["gaps"]]
+    if blocked or gaps:
+        a = (blocked or gaps)[0]
+        why = fresh[a]["reason"] or f"{fresh[a]['gaps']:,} known id(s) without details — re-run the crawl"
+        return _mp_stale(row, a, f"not in any account, but that cannot be told while this inventory is not "
+                                 f"complete ({why})")
+    if not fresh[row["routing"]]["crawled"]:
+        return _mp_stale(row, row["routing"], "not in any crawled account, and the account it is routed to was "
+                                              "never crawled")
+    unlisted = _mp_unlisted(row, obj, fresh, index)
+    if unlisted is not None:   # [IMP-C25 thfix] its CONFIRMED record says where it is: no loss, whatever the crawl lists
+        account, record = unlisted
+        item = {"account": account, "photo_id": record["photo_id"], "filename": record.get("gp_filename")}
+        item.update((k, record.get(k)) for k in ("taken_ms", "tz_offset_ms", "upload_ms", "dedup_key", "width",
+                                                 "height", "original_quality", "partial_upload"))
+        row.update(status="not-listed", account=account, proof=record.get("verified_by"), item=item)
+        late = _mp_after_crawl(row, fresh[account])
+        if late is not None:   # [IMP-C25 mpfix] it reached Google Photos after the crawl began: not crawled yet
+            row["status"] = "uploaded-after-crawl"
+            return _mp_note(row, f"in '{account}' per its confirmed record — uploaded after this crawl began ({late}); "
+                                 f"the next crawl lists it")
+        return _mp_note(row, f"in '{account}' per its confirmed record, but the crawl does not list it — maybe "
+                             f"archived or in the trash; check it with: python main.py check_photos {row['manual_id']}")
+    if not row["uploaded_name"]:
+        row.update(status="inconsistent", issue="no-uploaded-name")
+        return _mp_note(row, "the library holds no name it was uploaded under (no short_id)")
+    probable = None if row["content_key"] else _mp_probable(obj, row, index)
+    if probable:
+        account, items = probable
+        row.update(status="probable", account=account, name_match="tag", candidates=[dict(i) for i in items])
+        return
+    accounts = [row["default_account"]] + [a for a in mvcommon.GP_ACCOUNTS if a != row["default_account"]]
+    if obj["kind"] in ("whole", "extra_whole"):
+        stem = gpweb.normalize_name(os.path.splitext(row["uploaded_name"])[0])
+        for account in accounts:
+            chunks = index[account]["stems"].get(("chunk", stem))
+            if chunks:
+                holders = index[account]["stems"].get(("holder", stem), [])
+                row.update(status="inconsistent", issue="split-info-lost", account=account, name_match="chunks",
+                           candidates=[dict(i) for i in chunks + holders])
+                row["repair"] = _mp_split_plan(row, obj, chunks, holders, library)
+                return _mp_note(row, "the library says one whole file, Google Photos holds its chunks "
+                                     "(split_info lost)")
+        if not row["content_key"]:
+            untagged = _mp_untagged_name(obj)
+            for account in accounts:
+                items, how = _mp_names(index[account], untagged)
+                if items:
+                    groups = _mp_bytes(items)
+                    if len(groups) > 1:
+                        row.update(status="ambiguous", account=account, name_match="untagged",
+                                   candidates=[dict(i) for i in items])
+                        return _mp_note(row, f"{len(groups)} items carry its old untagged name with different bytes")
+                    item = _mp_pick(groups[0])
+                    row.update(status="inconsistent", issue="untagged-name", account=account, name_match="untagged",
+                               proof="filename", item=dict(item),
+                               alternates=[i["photo_id"] for i in groups[0] if i["photo_id"] != item["photo_id"]],
+                               repair={"kind": "names", "uploaded_name": item["filename"]})
+                    return _mp_note(row, f"uploaded under its old untagged name ({item['filename']}) — "
+                                         f"--repair names records it")
+    row["status"] = "not-found"
+    gone = [dict(i) for a in mvcommon.GP_ACCOUNTS
+            for i in index[a]["deleted"].get(gpweb.normalize_name(row["uploaded_name"] or ""), [])]
+    if gone:
+        row["deleted"] = gone
+        _mp_note(row, "an item with this name was in Google Photos before and is absent from the latest "
+                      "enumeration (deleted?)")
+
+
+def _mp_unlisted(row, obj, fresh, index):
+    """[IMP-C25 thfix — the R3 case of 2026-10-27: a chunk confirmed by its dedupKey on 2026-10-16 that the next crawl
+    did not list (archived?) read `possible-loss`] (account, record) when the object's TRUSTED block holds a CONFIRMED
+    record (a photo_id with a verified proof — mvcommon.apply_learned sets `confirmed` only then) in an account whose
+    inventory is FRESH and whose latest complete enumeration does NOT list that photo_id; the account it is routed to
+    first, then GP_ACCOUNTS order. None otherwise."""
+    accounts = (obj.get("block") or {}).get("accounts")
+    if not isinstance(accounts, dict):
+        return None
+    for account in dict.fromkeys([row["routing"]] + list(mvcommon.GP_ACCOUNTS)):
+        record = accounts.get(account)
+        listed = (index.get(account) or {}).get("listed")
+        if (isinstance(record, dict) and record.get("confirmed") is True
+                and record.get("verified_by") in mvcommon._VERIFIED_PROOFS
+                and isinstance(record.get("photo_id"), str) and gpweb.MEDIA_KEY_RE.match(record["photo_id"])
+                and (fresh.get(account) or {}).get("fresh") and listed is not None and record["photo_id"] not in listed):
+            return account, record
+    return None
+
+
+def _mp_after_crawl(row, info):
+    """[IMP-C25 mpfix — the R3 case of 2026-10-28: a chunk pushed the evening before, confirmed by a check minutes after
+    the next morning's crawl began, read `not-listed`] The evidence that the item of a row's confirmed record reached
+    Google Photos at or after its account's crawl began (to the second: the crawl start is kept to the second) — so the
+    crawl could not list it yet — as 'uploaded <time>, the crawl began <time>', else None. info = that account's
+    freshness. The item's own upload time (`upload_ms`, which every confirmed record carries: mvcommon.apply_learned
+    confirms none without it) decides whenever it is known: an item uploaded before the crawl began stays not-listed,
+    even when the same bytes were pushed again after it. Without it, the capture's push time (`pushed_at`) at or after
+    the crawl start (a push reaches Google Photos only after it was made). Never `verified_at`: it says the item was
+    there when verified, not when it arrived."""
+    as_of = _mp_when(info.get("as_of"))
+    if as_of is None:
+        return None
+    upload = (row["item"] or {}).get("upload_ms")
+    if isinstance(upload, int) and not isinstance(upload, bool):
+        try:
+            when = datetime.fromtimestamp(upload // 1000, timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            when = None
+        if when is not None:
+            return f"uploaded {_mp_iso(when)}, the crawl began {_mp_iso(as_of)}" if when >= as_of else None
+    pushed = _mp_when(row["pushed_at"])
+    if pushed is not None and pushed >= as_of:
+        return f"pushed {_mp_iso(pushed)}, the crawl began {_mp_iso(as_of)}"
+    return None
+
+
+def _mp_untagged_name(obj):
+    """The name a whole object had BEFORE pushes tagged it with ' [<short_id>]' (IMP-C27 (b)): the file's own name —
+    a leaf's `filename`, an extras item's last sub_rel part (push_one_extra uploads that)."""
+    if obj["kind"] == "extra_whole" and obj.get("sub_rel"):
+        return os.path.basename(obj["sub_rel"].replace("/", os.sep)) or obj.get("filename")
+    return obj.get("filename")
+
+
+def _mp_object_folder(library, obj):
+    """The local folder an object's push ran from — where cmd_push / push_one_extra keep `checksums/` — or None: a
+    leaf's folder_path; an extras item's directory (<title folder>/<group_rel>/<dirname of sub_rel>)."""
+    entry = library.get(obj["manual_id"]) if isinstance(library, dict) else None
+    folder = entry.get("folder_path") if isinstance(entry, dict) else None
+    if not (isinstance(folder, str) and folder):
+        return None
+    if obj["kind"] in ("extra_whole", "extra_chunk"):
+        sub_rel = (obj.get("sub_rel") or "").replace("/", os.sep)
+        return os.path.join(folder, (obj.get("group_rel") or "").replace("/", os.sep), os.path.dirname(sub_rel))
+    return folder
+
+
+def _mp_checksum(folder, chunk_name):
+    """The SHA-256 cmd_push recorded for a chunk in <folder>/checksums/<chunk>.sha256 ('<hex64> *<name>'), or None
+    when the sidecar is missing, unreadable, or names another file."""
+    try:
+        with open(os.path.join(folder, CHECKSUM_DIR_NAME, f"{chunk_name}.sha256"), encoding="utf-8") as fh:
+            text = fh.read().strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    m = re.fullmatch(r"([0-9a-fA-F]{64})\s+\*?(.+)", text)
+    return m.group(1).lower() if m and m.group(2) == chunk_name else None
+
+
+def _mp_split_plan(row, obj, chunks, holders, library):
+    """--repair split-info (PLAN Step 9 (5a)) for a whole object whose chunks are in Google Photos: the split_info
+    to write back, PROVEN or not. Provable only when the chunks were uploaded ONCE (one taken second, every chunk
+    1..N exactly once, each under the name the push gave it), no FLAC holder was carried out (its track facts are
+    gone), and every chunk's SHA-256 is in the local checksums/<chunk>.sha256 sidecar cmd_push wrote. Anything less
+    stays a user decision. -> {kind, provable, why, account, slot, sha256, split_info, photo_ids}."""
+    plan = {"kind": "split-info", "provable": False, "why": None, "manual_id": obj["manual_id"], "label": obj["label"],
+            "account": row["account"], "slot": list(obj["slot"]), "sha256": obj["sha256"], "split_info": None,
+            "photo_ids": [i["photo_id"] for i in chunks]}
+    seconds = {_mp_second(i) for i in chunks}
+    numbers = sorted(gpweb.chunk_index(i["filename"]) for i in chunks)
+    prefix = os.path.splitext(row["uploaded_name"])[0] + ".chunk."
+    folder = _mp_object_folder(library, obj)
+    if len(seconds) > 1 or len(_mp_bytes(chunks)) != len(chunks):
+        plan["why"] = (f"its chunks were uploaded more than once ({len(seconds)} taken seconds)" if len(seconds) > 1
+                       else "its chunks were uploaded more than once (the same chunk twice)")
+    elif numbers != list(range(1, len(chunks) + 1)):
+        plan["why"] = f"the chunks in Google Photos are not 1..{len(chunks)} exactly once ({numbers})"
+    elif holders:
+        plan["why"] = "a FLAC holder was carried out — its track facts are not in the library any more"
+    elif not all(i["filename"].startswith(prefix) for i in chunks):
+        plan["why"] = "the chunk names in Google Photos differ from the names the push gave them"
+    elif not obj["sha256"] or folder is None:
+        plan["why"] = "the library entry has no hash or no folder"
+    else:
+        ordered = sorted(chunks, key=lambda i: gpweb.chunk_index(i["filename"]))
+        hashes = [_mp_checksum(folder, i["filename"]) for i in ordered]
+        missing = [gpweb.chunk_index(i["filename"]) for i, h in zip(ordered, hashes) if h is None]
+        if missing:
+            plan["why"] = f"no local checksum sidecar for chunk(s) {missing} (checksums/<chunk>.sha256)"
+        else:
+            plan.update(provable=True, split_info={
+                "is_split": True, "total_chunks": len(ordered),
+                "chunks": [{"filename": i["filename"], "hash": h} for i, h in zip(ordered, hashes)]})
+    return plan
+
+
+def _mp_patch_split_info(library, plans):
+    """Write each plan's split_info into its whole-file node of `library` (in memory) — only while the node still IS
+    that whole file (the same hash, not split) -> (repaired [{manual_id, label, chunks}], skipped [{manual_id, label,
+    why}]). [IMP-C25 mpfix] The one patch step of --repair split-info: _mp_write_split_info patches a fresh load with
+    it, a dry run's preview a copy (_mp_repair_preview)."""
+    repaired, skipped = [], []
+    for plan in plans:
+        node = mvcommon.slot_owner(library, plan["slot"])
+        split = node.get("split_info") if isinstance(node, dict) else None
+        where = {"manual_id": plan["manual_id"], "label": plan["label"]}
+        if node is None or node.get("hash") != plan["sha256"]:
+            skipped.append(dict(where, why="the object changed since it was mapped — re-run map_photos"))
+        elif isinstance(split, dict) and split.get("is_split"):
+            skipped.append(dict(where, why="it is split already"))
+        else:
+            node["split_info"] = copy.deepcopy(plan["split_info"])
+            repaired.append(dict(where, chunks=plan["split_info"]["total_chunks"]))
+    return repaired, skipped
+
+
+def _mp_write_split_info(plans):
+    """--repair split-info --apply (PLAN Step 9 (5a)): write each PROVABLE plan's split_info into its whole-file node
+    — guarded exactly like the apply engine (OD-2: a fresh load, the library fingerprint re-checked right before the
+    ONE save, reload + re-patch up to GPHOTOS_APPLY_ATTEMPTS times) and only while the node still IS that whole file
+    (the same hash, not split: _mp_patch_split_info). Nothing else of the node changes (its `re_hashed` and `hash`
+    stay: the first restore blesses or verifies the merge — bless_or_verify_merged_hash). No rollback journal (the
+    gphotos-engine rule). Never raises (one warning line). -> {status: nothing-to-apply | saved | up-to-date | aborted
+    | error, repaired, skipped: [{manual_id, label, why}], attempts, warning}."""
+    report = {"status": None, "repaired": [], "skipped": [], "attempts": 0, "warning": None}
+    plans = [p for p in plans if p.get("provable") and p.get("split_info")]
+    if not plans:
+        report["status"] = "nothing-to-apply"
+        return report
+    saving = False
+    try:
+        for attempt in range(1, GPHOTOS_APPLY_ATTEMPTS + 1):
+            report["attempts"] = attempt
+            before = _library_fingerprint()
+            library = load_library()
+            repaired, skipped = _mp_patch_split_info(library, plans)
+            if repaired and _library_fingerprint() != before:
+                continue  # another process wrote the library after our load: reload + re-patch
+            if repaired:
+                saving = True
+                save_library(library)
+                saving = False
+            report.update(status="saved" if repaired else "up-to-date", repaired=repaired, skipped=skipped)
+            return report
+        report.update(status="aborted", warning=f"⚠️  split_info not repaired: {_GP_BUSY}.")
+        print(report["warning"])
+        return report
+    except (Exception, SystemExit) as e:
+        what = "the library could not be loaded" if isinstance(e, SystemExit) else _gp_line(e)
+        tail = "the library save was interrupted — re-run to finish it" if saving else "the library was not changed"
+        report.update(status="error", warning=f"⚠️  split_info not repaired ({what}) — {tail}.")
+        try:
+            print(report["warning"])
+        except Exception:
+            pass
+        return report
+
+
+def _mp_copies(row, key, decisions, fresh):
+    """Extra copies (PLAN P-4): the same bytes (same dedupKey) under the object's name in another FRESH account —
+    recorded on apply; a same-named item with other bytes, or one in a stale inventory, is only noted."""
+    for account in _mp_preferred(row, [a for a in decisions if a != row["account"]]):
+        other = decisions[account][key]
+        if other is None:
+            continue
+        item = other["item"]
+        if (other["kind"] == "mapped" and fresh[account]["fresh"] and item["dedup_key"]
+                and item["dedup_key"] == row["item"]["dedup_key"]):
+            row["copies"].append(dict(item))
+        elif not fresh[account]["fresh"]:
+            _mp_note(row, f"a same-named item is also in {account} (inventory not fresh — not recorded)")
+        else:
+            _mp_note(row, f"a same-named item with other bytes is also in {account} (not recorded)")
+
+
+def _mp_probable(obj, row, index):
+    """OD-14: (account, items) of the items carrying the object's `[short_id]` tag — same kind, same chunk number —
+    under ANOTHER name: the default account first, then the others. None without a short_id or a hit."""
+    sid = obj.get("short_id")
+    if not sid:
+        return None
+    kind, number = _mp_tag_key(row["uploaded_name"] or "")
+    wanted = {"whole": "whole", "extra_whole": "whole", "holder": "holder"}.get(obj["kind"], "chunk")
+    if wanted != kind:
+        number = None
+    for account in [row["default_account"]] + [a for a in mvcommon.GP_ACCOUNTS if a != row["default_account"]]:
+        hits = index[account]["tags"].get((sid, wanted, number))
+        if hits:
+            return account, list(hits)
+    return None
+
+
+def _mp_override_check(row):
+    """How the mvconfig override relates to where the item is: covers | differs | none (a wrong-account object no
+    override routes) | None (nothing to check)."""
+    if row["item"] is None:
+        return None
+    if row["override"]:
+        return "covers" if row["override"] == row["account"] else "differs"
+    return "none" if row["status"] == "wrong-account" else None
+
+
+def _mp_quality(row):
+    """IMP-C27 (e): an item flagged partial_upload, or not original quality, by the rpc inventory holds other bytes
+    than the upload — a restore would fail its SHA-256 check. Its row becomes `inconsistent` (never applied)."""
+    item = row["item"] or {}
+    issue = ("partial-upload" if item.get("partial_upload") is True
+             else "not-original-quality" if item.get("original_quality") is False else None)
+    if issue is None:
+        return
+    if row["status"] in ("mapped", "mapped-normalized", "wrong-account"):
+        row.update(status="inconsistent", issue=issue)
+    _mp_note(row, f"Google Photos holds a {issue.replace('-', ' ')} copy — a restore would fail its SHA-256 check")
+
+
+def _mp_not_yet(row, note):
+    """Step 9b: the row becomes `not-backed-up-yet` in the account it is routed to — what the inventory shows cannot
+    be this push; any item the ladder took for it stays as a candidate (context only), nothing is recorded for it."""
+    pool = ([row["item"]] if row["item"] else []) + row["candidates"]
+    row.update(status="not-backed-up-yet", account=row["routing"], issue=None, proof=None, item=None, alternates=[],
+               copies=[], duplicate=None, set=None, repair=None, candidates=[dict(c) for c in pool])
+    _mp_note(row, note)
+
+
+def _mp_evidence_as_of(row, fresh):
+    """The latest crawl start among the fresh inventories a row's answer came from — its item's account, else its
+    candidates' accounts, else its own — or None."""
+    accounts = {row["item"]["account"]} if row["item"] else {c["account"] for c in row["candidates"]}
+    times = [_mp_when(fresh[a]["as_of"]) for a in accounts or {row["account"]} if a in fresh and fresh[a]["fresh"]]
+    return max(times) if times else None
+
+
+def _mp_recency(rows, fresh):
+    """Step 9b (DECISIONS §1e) — what it means that Google Photos does not show an object, library <-> Google only.
+    `recent`: its capture push time (`pushed_at`) is no older than MAP_RECENT_DAYS before the crawl start of the
+    account it is routed to — where its backup lands (None while either time is unknown). Then:
+      * not found -> not-backed-up-yet when recent (a phone backs up when it can; pushes after the crawl began
+        included), else possible-loss — pushed earlier, or push time unknown (no capture: a pre-capture push);
+      * pushed after the crawl that gave any other answer began (a name match, a conflict, a probable ...): that
+        inventory cannot hold this push, so only its own bytes (a dedupKey match) prove it -> not-backed-up-yet;
+      * a recent conflict (another upload holds its name) -> not-backed-up-yet: the new upload may not be listed.
+    A waiting or a lost row names the account it is routed to."""
+    for row in rows:
+        when = _mp_when(row["pushed_at"])
+        info = fresh.get(row["routing"]) or {}
+        as_of = _mp_when(info.get("as_of")) if info.get("fresh") else None
+        if when is not None and as_of is not None:
+            row["recent"] = when >= as_of - timedelta(days=MAP_RECENT_DAYS)
+        status = row["status"]
+        if status == "not-found":
+            row.update(status="not-backed-up-yet" if row["recent"] else "possible-loss", account=row["routing"])
+            continue
+        if (status in ("stale-inventory", "not-listed", "uploaded-after-crawl") or when is None
+                or row["proof"] == "dedupkey"):
+            continue          # [IMP-C25 thfix / mpfix] its confirmed record — no push time can make it "not yet"
+        evidence = _mp_evidence_as_of(row, fresh)
+        if evidence is not None and when > evidence:
+            _mp_not_yet(row, f"pushed {_mp_iso(when)}, after the crawl that shows its name began ({_mp_iso(evidence)}) "
+                             f"— what Google Photos shows under its name predates this push")
+        elif status == "conflict" and row["recent"]:
+            _mp_not_yet(row, "another upload holds its name in Google Photos (other bytes) — this push is not in the "
+                             "inventory yet")
+
+
+def _mp_match(objects, routes, index, fresh, library):
+    """The verdict of every object (PLAN Step 9 (1)-(5), Step 9b) -> rows in object order. Offline: an object in no
+    account becomes not-backed-up-yet or possible-loss (_mp_recency); only --devices adds what the phones hold
+    (_mp_device_check)."""
+    rows, by_key = [], {}
+    for obj in objects:
+        by_key[_mp_key(obj)] = _mp_row(obj, routes[_mp_key(obj)])
+        rows.append(by_key[_mp_key(obj)])
+    crawled = [a for a in mvcommon.GP_ACCOUNTS if fresh[a]["crawled"]]
+    for group in _mp_groups(objects):
+        keys = {_mp_key(obj): by_key[_mp_key(obj)]["content_key"] for obj in group}
+        decisions = {a: _mp_decide(group, index[a], keys) for a in crawled}
+        for a in mvcommon.GP_ACCOUNTS:
+            decisions.setdefault(a, dict.fromkeys(map(_mp_key, group)))
+        for obj in group:
+            _mp_settle(by_key[_mp_key(obj)], obj, decisions, fresh, index, library)
+    claims = {}
+    for row in rows:                          # one old untagged name, several library objects: none can claim it
+        if row["issue"] == "untagged-name":
+            claims.setdefault((row["account"], row["item"]["photo_id"]), []).append(row)
+    for claimants in claims.values():
+        if len(claimants) > 1:
+            for row in claimants:
+                row.update(status="ambiguous", issue=None, proof=None, candidates=[row["item"]], item=None,
+                           alternates=[], repair=None)
+                _mp_note(row, f"{len(claimants)} library objects share this old untagged name")
+    _mp_recency(rows, fresh)
+    for row in rows:
+        _mp_quality(row)
+        row["override_check"] = _mp_override_check(row)
+    return rows
+
+
+# Step 9b: the statuses of an object Google Photos does not show (in report order), and — --devices only — Step 8's
+# verdict for an OLD one (possible-loss); `unchecked` (a configured phone not listed) keeps the verdict: a note only.
+_MP_NOT_IN_GP = ("not-backed-up-yet", "possible-loss", "awaiting-backup", "missing-after-backup",
+                 "missing-everywhere")
+_MP_DEVICE_STATUS = {"on_device": "awaiting-backup", "freed": "missing-after-backup", "absent": "missing-everywhere"}
+
+
+def _mp_family(obj):
+    """The objects one restore needs together — a split's chunks + its FLAC holders (a leaf's, or one extras item's)
+    — share a family key; a whole file has none."""
+    if obj["kind"] in ("whole", "extra_whole"):
+        return None
+    return obj["manual_id"], obj["kind"].startswith("extra"), obj.get("group_rel"), obj.get("sub_rel")
+
+
+def _mp_device_check(library, objects, rows, cache=None):
+    """--devices only (Step 9b: no verdict needs a phone). The READ-ONLY device check of Step 8 (device_inventory()
+    over device_check_aliases()) for every object found in no account. An OLD one (possible-loss) gets the phones'
+    richer verdict: still on a phone -> awaiting-backup (its backup is overdue); only its .mvmeta.json sidecar left ->
+    missing-after-backup (possible cloud loss); on no phone of a complete check -> missing-everywhere. A recent one
+    (not-backed-up-yet) keeps its verdict — the phones' answer is its annotation. A configured phone that was not
+    listed (`unchecked`) only adds a note: it never blocks or downgrades a verdict. -> the check's summary, or None
+    when no object needed it (then no adb command runs). `cache` (a dict) keeps the phones' listing for a second
+    pass of the same run."""
+    todo = [r for r in rows if r["status"] in ("not-backed-up-yet", "possible-loss")]
+    if not todo:
+        return None
+    objs = {_mp_key(o): o for o in objects}
+    if cache is not None and "inventory" in cache:
+        inventory = cache["inventory"]
+    else:
+        inventory = device_inventory()
+        if cache is not None:
+            cache["inventory"] = inventory
+    result = classify_device_objects(library, inventory, objects=[objs[(r["manual_id"], r["label"])] for r in todo])
+    devices = inventory.get("devices") or {}
+    away = ", ".join(f"{alias} ({(devices.get(alias) or {}).get('serial')}) {status}"
+                     for alias, status in result["incomplete_devices"].items())
+    for row, verdict in zip(todo, result["objects"]):
+        state = verdict["state"]
+        if row["status"] == "possible-loss" and state in _MP_DEVICE_STATUS:
+            row["status"] = _MP_DEVICE_STATUS[state]
+        row["device"] = {"state": state, "expected_size": verdict["expected_size"],
+                         "copies": [{k: c.get(k) for k in ("alias", "serial", "path", "size", "size_match")}
+                                    for c in verdict["copies"]],
+                         "sidecars": [{k: s.get(k) for k in ("alias", "serial", "path", "mtime")}
+                                      for s in verdict["sidecars"]],
+                         "partials": [{k: p.get(k) for k in ("alias", "serial", "path", "size")}
+                                      for p in verdict["partials"]]}
+        if state == "unchecked" and away:
+            _mp_note(row, f"device check incomplete — not listed: {away} (the verdict stands)")
+    return {"complete": result["complete"], "incomplete": result["incomplete_devices"], "counts": result["counts"],
+            "devices": devices, "unconfigured": inventory.get("unconfigured") or []}
+
+
+def _mp_partial_sets(objects, rows):
+    """IMP-C27 (c): an object Google Photos does not show, of a split (its chunks + FLAC holders) of which Google
+    Photos DOES show another member, is flagged partial_set."""
+    by_key, families = {(r["manual_id"], r["label"]): r for r in rows}, {}
+    for obj in objects:
+        if _mp_family(obj) is not None:
+            families.setdefault(_mp_family(obj), []).append(by_key[_mp_key(obj)])
+    for members in families.values():
+        if any(m["status"] in _MP_NOT_IN_GP for m in members) and any(
+                m["status"] not in _MP_NOT_IN_GP and m["status"] != "stale-inventory" for m in members):
+            for m in members:
+                if m["status"] in _MP_NOT_IN_GP:
+                    m["partial_set"] = True
+
+
+MAP_UNMATCHED = ("superseded-split", "duplicate", "cross-account-copy", "mediavault-unknown", "non-mediavault",
+                 "possibly-deleted", "errored")   # unmatched_<account>.csv categories, in report order
+
+
+def _mp_unmatched(states, fresh, rows, objects):
+    """PLAN Step 9 (6): every inventory item of a FRESH account that no object's verdict uses — categorized for the
+    report, NEVER touched (stale cloud copies are never deleted) -> {account: [{category, item, owner, note}]}.
+    Categories: superseded-split (a chunk with a library object's chunk name or `[short_id]` tag — another upload of
+    it as a split), duplicate (another whole item with a library object's name or tag in its own account),
+    cross-account-copy (the name of an object that lives in another account), mediavault-unknown (a
+    `[short_id]`-tagged name no library object claims — a removed entry?), non-mediavault (any other upload),
+    possibly-deleted (absent from the latest complete enumeration), errored (a record the crawler could not
+    complete). Only meaningful for the WHOLE library: the caller runs it for `map_photos all` without --account."""
+    used = {}
+    for row in rows:
+        mine = used.setdefault(row["account"], set())
+        if row["item"]:
+            mine.add(row["item"]["photo_id"])
+        mine.update(row["alternates"])
+        for item in row["copies"] + row["candidates"] + row["deleted"]:
+            used.setdefault(item["account"], set()).add(item["photo_id"])
+    by_name = {gpweb.normalize_name(r["uploaded_name"]): r for r in rows if r["uploaded_name"]}
+    by_tag = {}
+    for obj in objects:
+        if obj.get("short_id"):
+            by_tag.setdefault(obj["short_id"], obj)
+    rows_by_key = {(r["manual_id"], r["label"]): r for r in rows}
+    out = {}
+    for account, state in states.items():
+        if not fresh[account]["fresh"]:
+            continue
+        gone, found = set(state["possibly_deleted"]), []
+        for pid in sorted(state["items"]):
+            if pid in used.get(account, ()):
+                continue
+            rec = state["items"][pid]
+            item = _mp_item(account, rec)
+            name = item["filename"] if isinstance(item["filename"], str) else ""
+            owner, note = by_name.get(gpweb.normalize_name(name)) if name else None, None
+            tag_owner = next((by_tag[t] for t in _MP_TAG_RE.findall(name) if t in by_tag), None)
+            if pid in gone:
+                category = "possibly-deleted"
+            elif rec.get("error") or not name.strip():
+                category = "errored"
+            elif owner is not None and owner["account"] != account:
+                category, note = "cross-account-copy", f"the object lives in {owner['account']}"
+            elif owner is not None:
+                category = "superseded-split" if gpweb.chunk_index(name) is not None else "duplicate"
+            elif tag_owner is not None:
+                owner = rows_by_key.get(_mp_key(tag_owner))
+                category = "superseded-split" if gpweb.chunk_index(name) is not None else "duplicate"
+                note = "carries the object's [short_id] tag under another name"
+            elif _MP_TAG_RE.search(name):
+                category = "mediavault-unknown"
+            else:
+                category = "non-mediavault"
+            found.append({"category": category, "item": item,
+                          "owner": f"{owner['manual_id']} · {owner['label']}" if owner else None, "note": note})
+        found.sort(key=lambda u: (MAP_UNMATCHED.index(u["category"]), u["item"]["filename"] or "",
+                                  u["item"]["photo_id"]))
+        out[account] = found
+    return out
+
+
+_MP_REASONS = {"probable": "probable", "ambiguous": "ambiguous", "conflict": "wrong-item",
+               "inconsistent": "inconsistent", "possible-loss": "not-found",
+               "missing-after-backup": "missing-after-backup",
+               "missing-everywhere": "missing-everywhere"}   # status -> P-18 failed-list reason (unresolved rows only)
+_MP_LOST = ("possible-loss", "missing-after-backup", "missing-everywhere")   # the rows a partial set's reason names
+
+
+def _mp_reasons(rows):
+    """Set every row's P-18 failed-list `reason` — None for a resolved row (mapped, wrong-account), one waiting for its
+    backup (not-backed-up-yet: Step 9b keeps it off resolutions_todo.csv and the failed list; awaiting-backup), or one
+    without a verdict (stale-inventory); a lost member of a partially uploaded split: partial-set."""
+    for row in rows:
+        reason = _MP_REASONS.get(row["status"])
+        if row["status"] in _MP_LOST and row["partial_set"]:
+            reason = "partial-set"
+        row["reason"] = reason
+
+
+def _mp_status_text(row):
+    return (row["status"] + (f": {row['issue']}" if row["issue"] else "")
+            + (" (partial set)" if row["partial_set"] else ""))
+
+
+def _mp_failed_record(row, run):
+    """The P-18 failed-list record of an unresolved row — validated by mvcommon (append_failed's own normalizer)."""
+    outcome = {"ambiguous": "ambiguous", "conflict": "wrong-item"}.get(
+        row["status"], "exactly-one" if row["issue"] in ("partial-upload", "not-original-quality") else "not-found")
+    pool = row["candidates"] or ([row["item"]] if row["item"] else [])
+    candidates = list(dict.fromkeys(c["photo_id"] for c in pool
+                                    if isinstance(c.get("photo_id"), str) and gpweb.MEDIA_KEY_RE.match(c["photo_id"])))
+    return mvcommon._normalize_failed({
+        "run": run, "account": row["account"], "category": row["category"], "manual_id": row["manual_id"],
+        "label": row["label"], "sha256": row["sha256"], "uploaded_name": row["uploaded_name"],
+        "expected_taken_local": row["expected_taken_local"],
+        "tried": [{"approach": "exact_name", "outcome": outcome, "n": len(pool)}],
+        "candidates": candidates or None, "reason": row["reason"]})
+
+
+def _mp_todo(rows, run):
+    """[(failed record, resolutions_todo.csv row)] of every unresolved row the user has not decided yet (a `skip`
+    stays) — the CSV row built by mvcommon's own failed_objects.csv row builder (the same 18 columns, P-18), its
+    status column the mapper's precise verdict."""
+    out = []
+    for row in rows:
+        if row["reason"] is None or row["user_decision"] not in (None, "skip"):
+            continue
+        record = _mp_failed_record(row, run)
+        csv_row = mvcommon._failed_row(record, row)
+        csv_row["status"] = _mp_status_text(row)
+        out.append((record, csv_row))
+    return out
+
+
+def _mp_prior_decisions(objects):
+    """{(manual_id, label): what} for the objects the user already resolved by hand — a manual photo_id or a search
+    term in the trusted block, or a hint on record (hints.jsonl): they wait for `check_photos hinted` / the next
+    fetch, not for a second decision. An unreadable hints file reads as none (the report says so)."""
+    out, problem = {}, None
+    for obj in objects:
+        block = obj.get("block") or {}
+        accounts = block.get("accounts") if isinstance(block.get("accounts"), dict) else {}
+        if any(isinstance(r, dict) and r.get("verified_by") == "manual" and r.get("photo_id")
+               for r in accounts.values()):
+            out[_mp_key(obj)] = "url (recorded)"
+        elif isinstance(block.get("search_override"), dict):
+            out[_mp_key(obj)] = "search (recorded)"
+    try:
+        hints = mvcommon.read_hints()
+    except OSError as e:
+        hints, problem = [], f"⚠️  hints.jsonl could not be read ({_gp_line(e)}) — earlier decisions not shown"
+    pins = {(o["manual_id"], o["sha256"]): _mp_key(o) for o in objects}
+    for hint in hints:
+        key = pins.get((hint["manual_id"], hint["sha256"]))
+        if key is not None and key not in out:
+            out[key] = f"{hint['kind']} (recorded)"
+    return out, problem
+
+
+def _mp_resolutions(path, library, objects):
+    """--resolutions (PLAN Step 9 (8)): the user's decisions in a resolutions_todo.csv or failed_objects.csv (read by
+    mvcommon.read_failed_csv — Excel-tolerant) for the objects in scope. Each row names its object by manual_id (an
+    alias resolves) and its sha256 (the P-2 pin; else the `object` label):
+      url          -> a learned record {photo_id, proof manual, source manual} (P-5: never confirms by itself) + a hint
+      datetime     -> a hint {taken_ms, gmt_offset_min, taken_local}
+      search       -> a learned record {search_override, source manual} (stage S3u; still verified at fetch/check)
+      not_uploaded -> listed in the IMP-C27 report (the user's word that it never reached Google Photos)
+      skip         -> stays on the failed list
+    Every record is validated by mvcommon (the writers' own normalizers); nothing is written here. ->
+    {path, decisions {key: decision}, learned, hints, counts {decision: n}, out_of_scope, errors [{line, manual_id,
+    error}], fatal (the file could not be read at all)}."""
+    out = {"path": path, "decisions": {}, "learned": [], "hints": [], "out_of_scope": 0, "errors": [], "fatal": None,
+           "counts": dict.fromkeys(mvcommon.GP_DECISIONS, 0)}
+    try:
+        edits, errors = mvcommon.read_failed_csv(path)
+    except (OSError, ValueError) as e:
+        out["fatal"] = _gp_line(e)
+        return out
+    out["errors"].extend(errors)
+    in_scope = {_mp_key(o) for o in objects}
+    for edit in edits:
+        real, entry = _gp_resolve(library, edit["manual_id"])
+        objs = list(mvcommon.iter_entry_objects(real, entry)) if entry is not None else []
+        if edit.get("sha256"):
+            obj = next((o for o in objs if o["sha256"] == edit["sha256"]), None)
+        else:
+            obj = next((o for o in objs if o["label"] == edit.get("object")), None)
+        problem = ("no such library id" if entry is None else
+                   "its object is no longer in the library (re-split or re-mastered?) — make a new list"
+                   if obj is None else "the library holds no SHA-256 for it" if not obj["sha256"] else None)
+        if problem is None and _mp_key(obj) not in in_scope:
+            out["out_of_scope"] += 1
+            continue
+        learned, hints = [], []
+        if problem is None:
+            base = {"account": edit["account"], "manual_id": real, "label": obj["label"], "sha256": obj["sha256"]}
+            try:
+                if edit["decision"] == "url":
+                    learned.append(mvcommon._normalize_learned(
+                        dict(base, photo_id=edit["photo_id"], proof="manual", source="manual"), edit["account"]))
+                    hints.append(mvcommon._normalize_hint(dict(base, kind="url", photo_id=edit["photo_id"])))
+                elif edit["decision"] == "datetime":
+                    hints.append(mvcommon._normalize_hint(dict(
+                        base, kind="datetime", taken_ms=edit["taken_ms"], gmt_offset_min=edit["gmt_offset_min"],
+                        taken_local=edit["taken_local"])))
+                elif edit["decision"] == "search":
+                    learned.append(mvcommon._normalize_learned(
+                        dict(base, source="manual", search_override=edit["search_term"]), edit["account"]))
+            except ValueError as e:
+                problem = str(e)
+        if problem is not None:
+            out["errors"].append({"line": edit["line"], "manual_id": edit["manual_id"], "error": problem})
+            continue
+        out["learned"].extend(learned)
+        out["hints"].extend(hints)
+        out["counts"][edit["decision"]] += 1
+        out["decisions"][_mp_key(obj)] = edit["decision"]
+    out["errors"].sort(key=lambda e: e["line"])
+    return out
+
+
+def _mp_repair_text(row):
+    repair = row["repair"] or {}
+    if repair.get("kind") == "split-info":
+        return ("--repair split-info (proven)" if repair["provable"]
+                else f"not provable — {repair['why']} (your decision)")
+    if repair.get("kind") == "names":
+        return f"--repair names records '{repair['uploaded_name']}'"
+    return ""
+
+
+def _mp_write_todo(run_dir, csv_rows):
+    """resolutions_todo.csv into the run directory -> (path, note or None). An existing one that holds the user's
+    edits (an --out directory re-used) is never overwritten: this run's list goes to resolutions_todo.new.csv."""
+    path = os.path.join(run_dir, "resolutions_todo.csv")
+    if os.path.exists(path) and _gp_csv_edits(path) != 0:
+        kept = path
+        path = os.path.join(run_dir, "resolutions_todo.new.csv")
+        note = f"⚠️  {kept} holds your edits — kept; this run's list is {os.path.basename(path)}"
+    else:
+        note = None
+    mvcommon.write_failed_csv(path, csv_rows)
+    return path, note
+
+
+def _mp_utc(ms):
+    """Epoch milliseconds -> 'YYYY-MM-DD HH:MM:SS UTC', or '' when unknown."""
+    if not isinstance(ms, int) or isinstance(ms, bool):
+        return ""
+    try:
+        return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    except (OverflowError, OSError, ValueError):
+        return ""
+
+
+def _mp_write_csv(path, header, rows):
+    """An Excel-friendly CSV (UTF-8 with BOM, CRLF) — the failed list's convention (P-18)."""
+    with open(path, "w", encoding="utf-8-sig", newline="") as fh:
+        writer = csv.writer(fh, lineterminator="\r\n")
+        writer.writerow(header)
+        writer.writerows([["" if v is None else v for v in row] for row in rows])
+
+
+def _mp_run_dir(out, now):
+    """The run directory: --out as given, else <GPHOTOS_STATE_DIR>/map/<UTC timestamp> (read at call time)."""
+    return out if out else os.path.join(mvcommon.GPHOTOS_STATE_DIR, "map", now.strftime("%Y%m%dT%H%M%SZ"))
+
+
+def _mp_write_text(path, text):
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+
+
+def _mp_write_jsonl(path, records):
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        for record in records:
+            fh.write(json.dumps(record, ensure_ascii=False, sort_keys=False) + "\n")
+
+
+MAP_STATES = ("mapped", "mapped-normalized", "wrong-account", "not-listed", "uploaded-after-crawl", "probable",
+              "ambiguous", "conflict", "inconsistent", "not-backed-up-yet", "possible-loss", "awaiting-backup",
+              "missing-after-backup", "missing-everywhere",
+              "stale-inventory")   # every row's final status, in report order
+# [IMP-C25 thfix] not-listed: its CONFIRMED record names an item its account's fresh crawl does not list (archived? in
+# the trash?) — no loss: no failed reason, no resolutions_todo.csv row, no learned record, not in the LOUD block.
+# [IMP-C25 mpfix] uploaded-after-crawl: that item reached Google Photos at or after the crawl began (not crawled yet) —
+# no loss either, handled like not-listed.
+_MP_LOSS = ("possible-loss", "missing-after-backup", "missing-everywhere", "awaiting-backup")   # the LOUD block
+_MP_LOSS_TEXT = {
+    "possible-loss": f"in no account, pushed over {MAP_RECENT_DAYS} days before its account's crawl began or with no "
+                     f"push time (no capture) — possible LOSS",
+    "missing-after-backup": "in no account and freed from a phone — only its .mvmeta.json sidecar is left "
+                            "(possible cloud LOSS)",
+    "missing-everywhere": "in no account and on no phone (possible LOSS)",
+    "awaiting-backup": f"in no account but still on a phone although pushed over {MAP_RECENT_DAYS} days before the "
+                       f"crawl — its backup is overdue (do NOT free it yet)",
+}
+_MP_INCONSISTENCY = ("inconsistent", "conflict") + _MP_LOSS     # the rows of inconsistencies.csv (IMP-C27)
+
+
+def _mp_counts_line(counter):
+    return " · ".join(f"{state} {n:,}" for state, n in counter.items() if n)
+
+
+def _mp_push_text(row):
+    """Step 9b: a row's push-time evidence for the report — the capture's push time, else 'push time unknown' with
+    the entry's place in its library file (newly added entries come last; a hint only, never a verdict)."""
+    when = _mp_when(row["pushed_at"])
+    if when is not None:
+        return f"pushed {when.strftime('%Y-%m-%d %H:%M')} UTC (capture)"
+    return "push time unknown (no capture)" + (f" · entry {row['library_position']}" if row["library_position"] else "")
+
+
+def _mp_device_hint(row):
+    """What the phones hold for a row Google Photos does not show (--devices), or None without a device check."""
+    device = row.get("device")
+    if not device:
+        return None
+    if device["state"] == "on_device":
+        return "on " + ", ".join(sorted({f"{c['alias']} ({c['serial']})" for c in device["copies"]
+                                         if c.get("size_match") is not False}))
+    if device["state"] == "freed":
+        return "sidecar only on " + ", ".join(sorted({f"{s['alias']} ({s['serial']})" for s in device["sidecars"]}))
+    if device["state"] == "absent":
+        return "on no phone"
+    return "device check incomplete"
+
+
+def _mp_nowhere_line(row):
+    """One report line for a row Google Photos does not show: verdict, object, push evidence, phones (--devices)."""
+    hint = _mp_device_hint(row)
+    return (f"    {row['status']:<20} {row['manual_id']} · {row['label']}"
+            f"{' [partial set]' if row['partial_set'] else ''} — {_mp_push_text(row)}" + (f" · {hint}" if hint else ""))
+
+
+def _mp_device_lines(devices):
+    lines = [f"Device check (read-only; DEVICE_ALIASES + DEVICE_CHECK_EXTRA_SERIALS): "
+             f"{'complete' if devices['complete'] else 'INCOMPLETE — nothing is called missing-everywhere'}"]
+    for alias, d in devices["devices"].items():
+        what = (f"{len(d.get('files') or []):,} file(s)" if d.get("status") in ("ok", "partial") else
+                d.get("detail") or "")
+        lines.append(f"  {alias:<9} {str(d.get('serial')):<18} {d.get('status')} — {what}".rstrip(" —"))
+    for phone in devices["unconfigured"]:
+        lines.append(f"  ⚠️  attached but not configured: {phone['serial']} ({phone['state']}) — add it to "
+                     f"DEVICE_ALIASES or DEVICE_CHECK_EXTRA_SERIALS to include it")
+    return lines
+
+
+def _mp_engine_line(report, verb):
+    """One line for an apply-engine report (dry run: what WOULD change)."""
+    if report.get("status") in ("error", "aborted"):
+        return f"  ❌ library: {report.get('warning')}"
+    return (f"  library ({report['status']}): {len(report['changed']):,} object(s) {verb} ({report['confirmed']:,} "
+            f"newly confirmed) · conflict(s) not applied {len(report['conflicts']):,} · orphan(s) "
+            f"{len(report['orphans']):,}")
+
+
+def _mp_apply_lines(ctx):
+    """The report's --apply / preview section -> lines."""
+    lines, rows = [], ctx["rows"]
+    plans = [r for r in rows if (r["repair"] or {}).get("kind") == "split-info"]
+    if plans and "split-info" in ctx["repairs"] and not ctx["apply"]:
+        lines.append("split_info repairs (--repair split-info, dry run):")
+        lines.extend(f"  {r['manual_id']} · {r['label']} — " + (
+            f"proven: {r['repair']['split_info']['total_chunks']} chunk(s) would be written"
+            if r["repair"]["provable"] else f"not provable — {r['repair']['why']}") for r in plans)
+    applied = ctx["applied"]
+    if applied is not None:
+        split = applied["split_info"]
+        if split is not None:
+            lines.append(f"split_info repairs: {split['status']} — repaired {len(split['repaired']):,}"
+                         + "".join(f"; skipped {s['manual_id']} · {s['label']}: {s['why']}" for s in split["skipped"])
+                         + (f" — {split['warning']}" if split["warning"] else ""))
+        if applied["error"]:
+            lines.append(applied["error"])
+            return lines
+        lines.append(f"Recorded: learned records {applied['learned'][0]:,} new ({applied['learned'][1]:,} already on "
+                     f"record) · hints {applied['hints'][0]:,} new ({applied['hints'][1]:,}) · failed list "
+                     f"{applied['failed'][0]:,} new ({applied['failed'][1]:,})")
+        lines.append(_mp_engine_line(applied["engine"], "updated"))
+        lines.extend(f"    conflict: {c['manual_id']} · {c['label']} · {c['account'] or 'block'} — {c['code']}"
+                     for c in applied["engine"].get("conflicts") or [])
+        csv_state = applied["failed_csv"]
+        if csv_state is None:
+            pass
+        elif "warning" in csv_state:
+            lines.append(csv_state["warning"])
+        elif csv_state.get("kept") and csv_state["edited_rows"] is None:
+            lines.append("  failed_objects.csv: kept — it no longer reads as the failed list (left as is)")
+        elif csv_state.get("kept"):
+            lines.append(f"  failed_objects.csv: kept — it holds {csv_state['edited_rows']} edited row(s); import them "
+                         f"with --resolutions")
+        else:
+            lines.append(f"  failed_objects.csv: regenerated — {csv_state['rows']:,} row(s)")
+        return lines
+    preview = ctx["preview"]
+    if preview is not None:
+        lines.append("Apply preview (dry run — nothing written):")
+        lines.append(preview["warning"] if preview.get("status") == "error" and "changed" not in preview
+                     else _mp_engine_line(preview, "would change"))
+        repair = preview.get("repair")
+        if repair is not None:          # [IMP-C25 mpfix] --apply writes the split_info first, then maps the chunks
+            lines.append(f"  + {repair['chunks']:,} chunk(s) of {repair['entries']:,} repaired entr(y/ies) map after "
+                         f"the repair — --apply writes their split_info first, then records them (not in the count "
+                         f"above)")
+        flags = ([f"--account {ctx['account']}"] if ctx["account"] else []) + [f"--repair {r}" for r in ctx["repairs"]]
+        flags += ["--accept-probable"] if ctx["accept_probable"] else []
+        flags += ["--devices"] if ctx["use_devices"] else []
+        resolution = ctx["resolution"]        # previewed above: the apply must import the same decisions
+        flags += [f'--resolutions "{resolution["path"]}"'] if resolution and not resolution["fatal"] else []
+        lines.append(f"Next: python main.py map_photos {ctx['scope']} {' '.join(flags + ['--apply'])}")
+    return lines
+
+
+def _mp_report(ctx):
+    """The run's text report (printed and saved as summary.txt) -> lines. ctx: _mp_compute's pass + apply,
+    repairs, accept_probable, applied, preview, files, notes, run_dir."""
+    rows, fresh, account = ctx["rows"], ctx["fresh"], ctx["account"]
+    lines = [f"=== MAP PHOTOS ({'APPLY' if ctx['apply'] else 'dry-run'}) — scope: {ctx['scope']}"
+             f"{' · account ' + account if account else ''} — {len(rows):,} object(s) ===",
+             f"Inventory ({mvcommon.GP_INVENTORY_DIR}):"]
+    for info in fresh.values():
+        if info["fresh"]:
+            lines.append(f"  {info['account']:<7} fresh — complete enumeration as of {info['as_of']} "
+                         f"({info['age_h']:.1f} h ago), {info['items']:,} items")
+        else:
+            lines.append(f"  {info['account']:<7} STALE — {info['reason']} — re-crawl: {info['recrawl']}")
+    statuses = {state: sum(1 for r in rows if r["status"] == state) for state in MAP_STATES}
+    lines.append(f"Verdicts: {_mp_counts_line(statuses) or 'none'}")
+    groups = {}
+    for row in rows:
+        groups.setdefault(f"{row['category']}/{row['account']}", {}).setdefault(row["status"], 0)
+        groups[f"{row['category']}/{row['account']}"][row["status"]] += 1
+    lines.append("Per category/account:")
+    for key in sorted(groups):
+        lines.append(f"  {key}: {sum(groups[key].values()):,} — {_mp_counts_line(groups[key])}")
+    wrong = [r for r in rows if r["status"] == "wrong-account"]
+    if wrong:
+        checks = {c: sum(1 for r in wrong if r["override_check"] == c) for c in ("covers", "none", "differs")}
+        learned = sum(1 for r in wrong if r["learned_home"] == r["account"])
+        lines.append(f"Wrong account (IMP-C26): {len(wrong):,} object(s) live in another account than their id "
+                     f"prefix — mvconfig override covers {checks['covers']:,} · none {checks['none']:,} · "
+                     f"override points elsewhere {checks['differs']:,} · learned home already {learned:,}")
+    away = [r for r in rows if r["override_check"] == "differs"]
+    if away:
+        lines.append(f"⚠️  mvconfig fetch_account_overrides routes {len(away):,} object(s) away from the account "
+                     f"that holds them:")
+        lines.extend(f"     {r['manual_id']} · {r['label']} — override {r['override']}, item in {r['account']}"
+                     for r in away)
+    same = sum(1 for r in rows if r["duplicate"] == "same-bytes" and r["item"])
+    resplit = [r for r in rows if r["duplicate"] == "re-split" and r["item"]]
+    if same or resplit:
+        lines.append(f"Duplicates resolved: same bytes {same:,} · re-split uploads {len(resplit):,} chunk(s) in "
+                     f"{len({r['manual_id'] for r in resplit}):,} entr(y/ies) (the newest complete upload; the "
+                     f"others recorded as alternates)")
+    if statuses["probable"]:
+        lines.append(f"Probable (OD-14 — only the [short_id] tag matches): {statuses['probable']:,} — accept them "
+                     f"with --accept-probable, or decide row by row in resolutions_todo.csv")
+    if statuses["ambiguous"] or statuses["conflict"]:
+        lines.append(f"Needs your decision: ambiguous {statuses['ambiguous']:,} · conflict (the name holds other "
+                     f"bytes) {statuses['conflict']:,}")
+    issues = {}
+    for row in rows:
+        if row["status"] == "inconsistent":
+            issues[row["issue"]] = issues.get(row["issue"], 0) + 1
+    if issues:
+        provable = sum(1 for r in rows if (r["repair"] or {}).get("kind") == "split-info"
+                       and r["repair"]["provable"])
+        lines.append(f"Inconsistent (IMP-C27): {_mp_counts_line(issues)}"
+                     + (f" — split_info repairable from local checksums: {provable:,} (--repair split-info)"
+                        if issues.get("split-info-lost") else ""))
+    if ctx["devices"] is not None:
+        lines.extend(_mp_device_lines(ctx["devices"]))
+    loud = [r for r in rows if r["status"] in _MP_LOSS]
+    if loud:
+        partial = [r for r in loud if r["partial_set"]]
+        lines.append(f"⚠️⚠️⚠️  NOT IN GOOGLE PHOTOS — POSSIBLE LOSS (IMP-C27): {len(loud):,} object(s) — the local "
+                     f"copy of an archived entry is a dummy  ⚠️⚠️⚠️")
+        for state in _MP_LOSS:
+            n = sum(1 for r in loud if r["status"] == state)
+            if n:
+                lines.append(f"  {state}: {n:,} — {_MP_LOSS_TEXT[state]}")
+        if partial:
+            lines.append(f"  partial chunk sets: {len(partial):,} object(s) in "
+                         f"{len({r['manual_id'] for r in partial}):,} entr(y/ies) — the rest of the set IS in Google "
+                         f"Photos")
+        if ctx["devices"] is None:
+            lines.append("  (no phone was checked — add --devices to see which of these are still on a phone or were "
+                         "freed from one)")
+        lines.extend(_mp_nowhere_line(row) for row in loud)
+    recent = [r for r in rows if r["status"] == "not-backed-up-yet"]
+    if recent:
+        lines.append(f"Not backed up yet (recent — not a problem yet): {len(recent):,} object(s) pushed after their "
+                     f"account's crawl began or in the {MAP_RECENT_DAYS} days before it — a later crawl should list "
+                     f"them")
+        lines.extend(_mp_nowhere_line(row) for row in recent)
+    unlisted = [r for r in rows if r["status"] == "not-listed"]
+    if unlisted:   # [IMP-C25 thfix] confirmed before, not listed now: NOT a loss — nothing is recorded for them
+        lines.append(f"Not listed by the crawl — NOT a loss: {len(unlisted):,} object(s) whose confirmed record names "
+                     f"an item its account's latest crawl does not list (archived, in the trash?) — nothing is "
+                     f"recorded for them; check one with: python main.py check_photos <id>")
+        lines.extend(f"    not-listed           {r['manual_id']} · {r['label']} — in '{r['account']}' per its "
+                     f"confirmed record (proof {r['proof']})" for r in unlisted)
+    late = [r for r in rows if r["status"] == "uploaded-after-crawl"]
+    if late:   # [IMP-C25 mpfix] it reached Google Photos after the crawl began: not crawled yet — never archive / trash
+        lines.append(f"Uploaded after the crawl began — NOT a loss: {len(late):,} object(s) whose confirmed record "
+                     f"names an item that reached Google Photos after its account's latest crawl began — the next "
+                     f"crawl lists them; nothing is recorded for them")
+        lines.extend(f"    uploaded-after-crawl {r['manual_id']} · {r['label']} — in '{r['account']}' per its "
+                     f"confirmed record ({_mp_after_crawl(r, fresh[r['account']])})" for r in late)
+    told = [r for r in rows if r["user_decision"] == "not_uploaded"]
+    if told:
+        lines.append(f"⚠️⚠️⚠️  YOU SAY NOT UPLOADED (IMP-C27): {len(told):,} object(s) — an archived entry keeps only "
+                     f"a dummy locally  ⚠️⚠️⚠️")
+        lines.extend(f"    {r['manual_id']} · {r['label']} (mapper verdict: {r['status']})" for r in told)
+    resolution = ctx["resolution"]
+    if resolution is not None and resolution["fatal"]:
+        lines.append(f"❌ --resolutions {resolution['path']}: {resolution['fatal']} — nothing imported")
+    elif resolution is not None:
+        extra = ((f" · out of this run's scope {resolution['out_of_scope']:,}" if resolution["out_of_scope"] else "")
+                 + (f" · invalid {len(resolution['errors']):,}" if resolution["errors"] else ""))
+        lines.append(f"Resolutions ({resolution['path']}): {sum(resolution['counts'].values()):,} decision(s) — "
+                     f"{_mp_counts_line(resolution['counts']) or 'none'}{extra}")
+        lines.extend(f"  ❌ line {e['line']} · {e['manual_id'] or '?'} — {e['error']}" for e in resolution["errors"])
+        if not ctx["apply"]:
+            lines.append("  dry run — nothing recorded: add --apply to record them (url / datetime: "
+                         "`check_photos hinted` verifies them before anything is confirmed)")
+    if ctx["unmatched"] is None:
+        lines.append("Unmatched inventory items: reported by `map_photos all` (without --account) only")
+    else:
+        parts = []
+        for acc, found in ctx["unmatched"].items():
+            kinds = {c: sum(1 for u in found if u["category"] == c) for c in MAP_UNMATCHED}
+            parts.append(f"{acc} {len(found):,}" + (f" ({_mp_counts_line(kinds)})" if found else ""))
+        lines.append("Unmatched inventory items (report only — never touched): "
+                     + (" · ".join(parts) or "no fresh account"))
+    if ctx["todo"]:
+        reasons = {reason: sum(1 for record, _csv_row in ctx["todo"] if record["reason"] == reason)
+                   for reason in mvcommon.GP_FAILED_REASONS}
+        lines.append(f"To resolve: {len(ctx['todo']):,} row(s) in resolutions_todo.csv ({_mp_counts_line(reasons)}) "
+                     f"— fill its decision column (url | datetime | search | not_uploaded | skip), then: "
+                     f"python main.py map_photos {ctx['scope']} --resolutions <that csv>")
+    lines.extend(_mp_apply_lines(ctx))
+    lines.extend(ctx["notes"])
+    lines.append(f"Outputs: {ctx['run_dir']} — {', '.join(ctx['files'])}")
+    return lines
+
+
+def _mp_record(row, item, proof, account, alternates=()):
+    """The P-10 learned record (source map) that an --apply appends for one row and one item — validated by
+    mvcommon's own normalizer (append_learned's). No approach verdict: matching a name in the inventory is not a
+    Google Photos search, so it must not become the fetch's `approach.best`."""
+    flags = {k: item.get(k) for k in ("original_quality", "partial_upload") if isinstance(item.get(k), bool)}
+    return mvcommon._normalize_learned({
+        "account": account, "manual_id": row["manual_id"], "label": row["label"], "sha256": row["sha256"],
+        "photo_id": item["photo_id"], "taken_ms": item.get("taken_ms"), "tz_offset_ms": item.get("tz_offset_ms"),
+        "upload_ms": item.get("upload_ms"), "dedup_key": item.get("dedup_key"), "gp_filename": item.get("filename"),
+        "width": item.get("width"), "height": item.get("height"), "proof": proof, "source": "map",
+        "alternates": list(alternates) or None, **flags}, account)
+
+
+def _mp_learned(rows, repairs, accept_probable):
+    """PLAN Step 9 (9): the learned records an --apply appends — for mapped / mapped-normalized / wrong-account
+    rows (with their recorded same-bytes copies in other accounts), the old-untagged-name rows when --repair names
+    is given, and — with --accept-probable — a probable row whose candidates are ONE item's bytes in one account
+    (proof manual: it never confirms by itself, P-5). Rows without a verdict (stale-inventory) or without a SHA-256
+    never record anything."""
+    out = []
+    for row in rows:
+        if not row["sha256"]:
+            continue
+        item, proof, alternates = row["item"], row["proof"], row["alternates"]
+        take = row["status"] in ("mapped", "mapped-normalized", "wrong-account")
+        if row["issue"] == "untagged-name" and "names" in repairs:
+            take = True
+        if row["status"] == "probable" and accept_probable:
+            groups = _mp_bytes(row["candidates"])
+            if len(groups) == 1 and len({c["account"] for c in row["candidates"]}) == 1:
+                item, proof, take = _mp_pick(groups[0]), "manual", True
+                alternates = [c["photo_id"] for c in groups[0] if c["photo_id"] != item["photo_id"]]
+        if not take or item is None:
+            continue
+        out.append(_mp_record(row, item, proof, row["account"] if row["status"] != "probable" else item["account"],
+                              alternates))
+        out.extend(_mp_record(row, copy_, proof, copy_["account"]) for copy_ in row["copies"])
+    return out
+
+
+def _mp_names_facts(rows):
+    """--repair names: [{manual_id, sha256, uploaded_name}] — the name each object was REALLY uploaded under, when
+    the inventory proves another than the library's: an old untagged name (IMP-C27 (b)), or the bytes found under
+    another name (content proof)."""
+    facts = []
+    for row in rows:
+        if not row["sha256"]:
+            continue
+        if row["issue"] == "untagged-name":
+            facts.append({"manual_id": row["manual_id"], "sha256": row["sha256"],
+                          "uploaded_name": row["repair"]["uploaded_name"]})
+        elif row["name_match"] == "content" and row["item"] and row["status"] in ("mapped", "wrong-account"):
+            facts.append({"manual_id": row["manual_id"], "sha256": row["sha256"],
+                          "uploaded_name": row["item"]["filename"]})
+    return facts
+
+
+def _mp_fingerprint(record, drop=("v", "at")):
+    return json.dumps({k: v for k, v in record.items() if k not in drop}, sort_keys=True, ensure_ascii=False)
+
+
+def _mp_new_records(records, existing):
+    """[IMP-C25 mpfix] The records not on record yet — same facts, whatever their time (_mp_fingerprint: every key but
+    v / at): those neither in `existing` nor earlier in `records`, in order. The one rule --apply appends by
+    (_mp_append_new) and a dry run's preview counts by (_mp_preview)."""
+    seen, new = {_mp_fingerprint(r) for r in existing}, []
+    for record in records:
+        key = _mp_fingerprint(record)
+        if key not in seen:
+            seen.add(key)
+            new.append(record)
+    return new
+
+
+def _mp_append_new(records, existing, append):
+    """Append the records not on record yet (_mp_new_records) -> (appended, already recorded)."""
+    records = list(records)
+    new = _mp_new_records(records, existing)
+    for record in new:
+        append(record)
+    return len(new), len(records) - len(new)
+
+
+def _mp_append_failed(records):
+    """Append the failed-list rows whose object's newest row on the list says something else -> (appended, already
+    listed): a re-run that learned nothing new adds nothing (P-18's list is append-only)."""
+    newest = {}
+    for rec in mvcommon.read_failed():
+        newest[(rec["manual_id"], rec.get("sha256") or "label:" + rec.get("label", ""))] = rec
+    added = known = 0
+    for record in records:
+        key = (record["manual_id"], record.get("sha256") or "label:" + record.get("label", ""))
+        held = newest.get(key)
+        if held is not None and _mp_fingerprint(held, ("at", "run")) == _mp_fingerprint(record, ("at", "run")):
+            known += 1
+            continue
+        mvcommon.append_failed(record)
+        newest[key] = record
+        added += 1
+    return added, known
+
+
+def _mp_refresh_failed_csv(resolution):
+    """P-18 after an --apply: regenerate failed_objects.csv from the failed list — unless it holds the user's edits
+    that this run did NOT consume (it imported exactly that file with no invalid or out-of-scope row: then the edits
+    are recorded and the regenerated list replaces them). -> export_failed_csv's result, {path, kept, edited_rows},
+    {warning}, or None (no failed list)."""
+    csv_path = mvcommon.failed_csv_path()
+    if not (os.path.exists(mvcommon.failed_path()) or os.path.exists(csv_path)):
+        return None
+    consumed = False
+    if resolution is not None and not resolution["fatal"] and os.path.exists(csv_path):
+        try:
+            consumed = (os.path.samefile(resolution["path"], csv_path) and not resolution["errors"]
+                        and not resolution["out_of_scope"])
+        except OSError:
+            consumed = False
+    if os.path.exists(csv_path) and not consumed:
+        edits = _gp_csv_edits(csv_path)
+        if edits != 0:
+            return {"path": csv_path, "kept": True, "edited_rows": edits}
+    try:
+        return mvcommon.export_failed_csv(load_library())
+    except (Exception, SystemExit) as e:
+        return {"warning": f"⚠️  failed_objects.csv not refreshed ({_gp_line(e)}) — close it if it is open (e.g. in "
+                           f"Excel); the next apply refreshes it."}
+
+
+def _mp_run_records(ctx, repairs, accept_probable):
+    """[IMP-C25 mpfix] What an --apply of this pass records -> (learned records, hints, names facts): the rows' learned
+    records (_mp_learned) + the user's resolution records and hints when the file was read, and the --repair names
+    facts. --apply (_mp_apply) and its dry-run preview (_mp_preview) take them from here: the same answer."""
+    records, hints = _mp_learned(ctx["rows"], repairs, accept_probable), []
+    if ctx["resolution"] and not ctx["resolution"]["fatal"]:
+        records += ctx["resolution"]["learned"]
+        hints = ctx["resolution"]["hints"]
+    names = _mp_names_facts(ctx["rows"]) if "names" in repairs else []
+    return records, hints, names
+
+
+def _mp_proven_plans(rows):
+    """The PROVEN --repair split-info plans of a pass's rows — what --apply writes first (_mp_write_split_info) and a
+    dry run's preview simulates (_mp_repair_preview)."""
+    return [r["repair"] for r in rows if (r["repair"] or {}).get("kind") == "split-info" and r["repair"]["provable"]]
+
+
+def _mp_repair_preview(ctx, plans, repairs, accept_probable):
+    """[IMP-C25 mpfix] --repair split-info in a dry run: what the repair adds to --apply. The apply writes the PROVEN
+    split_info first and then maps again, so a repaired entry's chunks map in that same run; a dry run cannot write, so
+    the same patch (_mp_patch_split_info) goes into a copy of the repaired entries and those entries are mapped again
+    with this pass's inventory index and freshness (_mp_match, the apply's matcher: nothing is read again, no phone).
+    -> {entries: the entries repaired, chunks: their chunks whose verdict records something (_mp_learned takes it) — a
+    node the repair creates, so each one changes —, objects: the (manual_id, sha256) of what the repair removes (the
+    whole files: their records are orphans after it) or creates (their chunks) — the engine's preview leaves their
+    records to this count}."""
+    library = dict(ctx["library"])                      # only the repaired entries are copied: nothing is written
+    for manual_id in {plan["manual_id"] for plan in plans}:
+        library[manual_id] = copy.deepcopy(library[manual_id])
+    repaired = {(r["manual_id"], r["label"]) for r in _mp_patch_split_info(library, plans)[0]}
+    plans = [p for p in plans if (p["manual_id"], p["label"]) in repaired]
+    chunks = {(p["manual_id"], c["hash"]) for p in plans for c in p["split_info"]["chunks"]}
+    ids = sorted({p["manual_id"] for p in plans})
+    objects, routes = _mp_objects(library, ids, ctx["account"])
+    rows = _mp_match(objects, routes, ctx["index"], ctx["fresh"], library)
+    mapped = [r for r in rows if (r["manual_id"], r["sha256"]) in chunks and _mp_learned([r], repairs, accept_probable)]
+    return {"entries": len(ids), "chunks": len(mapped),
+            "objects": chunks | {(p["manual_id"], p["sha256"]) for p in plans}}
+
+
+def _mp_preview(ctx, repairs, accept_probable):
+    """A dry run's preview of --apply — [IMP-C25 mpfix] the answer the apply gives: the apply engine's dry-run report
+    over the learned sidecar plus ONLY this pass's records not on record yet (_mp_new_records: a fact already on
+    record, re-dated by this run, changes nothing) and its names facts, taken as the apply takes them (_mp_run_records)
+    — also when this pass itself records nothing (the apply folds the whole sidecar). --repair split-info: the apply
+    writes the proven split_info first and maps the repaired entries' chunks in the same run — counted apart as
+    `repair` {entries, chunks} (_mp_repair_preview), every record about the repaired objects left out of the engine's
+    count: neither count is larger than what the apply changes. Nothing is written. None when the engine has nothing
+    to apply and no repair is pending."""
+    records, _hints, names = _mp_run_records(ctx, repairs, accept_probable)
+    plans = _mp_proven_plans(ctx["rows"]) if "split-info" in repairs else []
+    try:
+        existing = mvcommon.read_learned()
+    except OSError as e:
+        return {"status": "error",
+                "warning": f"⚠️  no apply preview: the learned sidecar is unreadable ({_gp_line(e)})"}
+    learned = existing + _mp_new_records(records, existing)
+    repair = _mp_repair_preview(ctx, plans, repairs, accept_probable) if plans else None
+    if repair is not None:              # what the repair removes or creates changes only after it: counted apart
+        gone = repair.pop("objects")
+        learned = [r for r in learned if (_gp_resolve(ctx["library"], r["manual_id"])[0], r["sha256"]) not in gone]
+    report = gphotos_apply(learned, capture=True, dry_run=True, names=names)
+    if repair is None and report["status"] == "nothing-to-apply":
+        return None
+    if repair is not None:
+        report["repair"] = repair
+    return report
+
+
+def _mp_apply(ctx, repairs, accept_probable, recompute):
+    """PLAN Step 9 (9) --apply -> (summary, ctx). In order: the PROVEN split_info repairs (--repair split-info), then
+    — when any was written — a fresh mapping pass, so the repaired entries' chunks map in this same run; the learned
+    records (source map) and the user's resolution records appended to the learned sidecars (append_learned — the
+    durable record that survives an IMP-C24 lost update), the hints, the failed-list rows for what stays unresolved
+    (each only when not on record yet); then the apply engine over the whole sidecar (+ the --repair names facts),
+    and failed_objects.csv per P-18. A write failure stops before the engine (one line; re-run --apply)."""
+    summary = {"split_info": None, "learned": (0, 0), "hints": (0, 0), "failed": (0, 0), "engine": None,
+               "failed_csv": None, "error": None}
+    if "split-info" in repairs:
+        summary["split_info"] = _mp_write_split_info(_mp_proven_plans(ctx["rows"]))
+        if summary["split_info"]["repaired"]:
+            ctx = recompute()
+    records, hints, names = _mp_run_records(ctx, repairs, accept_probable)
+    try:
+        summary["learned"] = _mp_append_new(records, mvcommon.read_learned(),
+                                            lambda r: mvcommon.append_learned(r["account"], r))
+        summary["hints"] = _mp_append_new(hints, mvcommon.read_hints(), mvcommon.append_hint)
+        summary["failed"] = _mp_append_failed([record for record, _csv_row in ctx["todo"]])
+        learned = mvcommon.read_learned()
+    except (OSError, ValueError) as e:
+        summary["error"] = (f"❌ map_photos --apply stopped: {_gp_line(e)} — the library was not changed; re-run "
+                            f"--apply (records already appended are not appended twice)")
+        return summary, ctx
+    summary["engine"] = gphotos_apply(learned, capture=True, dry_run=False, names=names)
+    summary["failed_csv"] = _mp_refresh_failed_csv(ctx["resolution"])
+    return summary, ctx
+
+
+def cmd_map_photos(scope="all", account=None, devices_only=False, resolutions=None, repairs=(),
+                   accept_probable=False, apply=False, out=None, devices=False):
+    """`map_photos` (PLAN Step 9, Step 9b): map the uploaded library objects to the Google Photos inventory — the
+    per-object rules are in the section comment above. A DRY RUN by default; no verdict needs a phone.
+
+    scope             all (the whole library) | a library id | an id prefix (a season id selects its episodes; an
+                      alias id maps its primary)
+    account           only the objects ROUTED to that account (mvconfig override > learned home > id prefix)
+    devices           also run Step 8's read-only device check for the objects in no account: an OLD one
+                      (possible-loss) gets awaiting-backup / missing-after-backup / missing-everywhere, a recent one an
+                      annotation; a phone not listed only annotates. Without it no adb command runs at all
+    devices_only      only Step 8's read-only device report (devices.csv): no inventory, nothing recorded
+    resolutions       a filled resolutions_todo.csv / failed_objects.csv: url -> a manual-proof learned record + a
+                      hint, datetime -> a hint (both verified later by `check_photos hinted`), search -> the
+                      object's search_override, not_uploaded -> the LOUD list, skip -> stays unresolved
+    repairs           "split-info": write back a PROVEN lost split_info · "names": record the name an object was
+                      really uploaded under (through the apply engine) — both only with apply
+    accept_probable   also record single-item `[short_id]`-tag matches (proof manual: they never confirm)
+    apply             record: learned sidecars (append_learned), hints, failed list, then the apply engine (the
+                      only writer of `gphotos` blocks) over the whole sidecar; failed_objects.csv per P-18. Nothing
+                      is appended twice. Refused (nothing recorded) when the resolutions file cannot be read.
+    out               the run directory (default <GPHOTOS_STATE_DIR>/map/<UTC timestamp>), created first
+
+    Row status (mapping.jsonl): mapped · mapped-normalized · wrong-account (these three are applied) · not-listed
+    ([IMP-C25 thfix] its confirmed record names an item its account's fresh crawl does not list: no loss — nothing is
+    recorded, it is on no list) · uploaded-after-crawl ([IMP-C25 mpfix] the same, but that item reached Google Photos
+    at or after the crawl began: not crawled yet) · probable ·
+    ambiguous · conflict · inconsistent (issue: split-info-lost | untagged-name | partial-upload |
+    not-original-quality | no-uploaded-name) · not-backed-up-yet (recent: not on the todo or failed list) ·
+    possible-loss · with devices also awaiting-backup · missing-after-backup · missing-everywhere ·
+    stale-inventory (no verdict). Run directory: summary.txt (the printed report),
+    mapping.jsonl, mapping.csv (its sheet for a reader: one row per object, the names side by side, no photo id),
+    inconsistencies.csv, resolutions_todo.csv (the failed_objects.csv columns), unmatched_<account>.csv (`all`
+    without account only); devices.csv for devices_only. A report file that cannot be written (open in Excel) ends
+    the run with one line and status error — after an apply, what was recorded stays on record.
+
+    -> {status: ok | error, run_dir, rows, fresh, devices, unmatched, todo (the failed-list records of the
+    unresolved rows), applied (the --apply summary: split_info, learned / hints / failed (new, already on record),
+    engine (gphotos_apply's report), failed_csv, error), preview (a dry run's engine report: what --apply would change,
+    counted like the apply counts — [IMP-C25 mpfix] with --repair split-info also `repair` {entries, chunks}: the
+    chunks that map after the repair, apart)}."""
+    now = mvcommon._now_utc()
+    library = load_library()
+    if scope in (None, "", "all"):
+        scope, ids = "all", None
+    else:
+        ids = sorted(mid for mid in library if isinstance(mid, str) and (mid == scope or mid.startswith(scope)))
+        if not ids:
+            print(f"❌ map_photos: no library id is or starts with {scope!r}.")
+            return {"status": "error", "run_dir": None, "rows": [], "fresh": {}}
+    run_dir = _mp_run_dir(out, now)
+    try:                              # before anything is recorded: a bad --out must not surface after an --apply
+        os.makedirs(run_dir, exist_ok=True)
+    except OSError as e:
+        print(f"❌ map_photos: cannot create the output directory {run_dir} ({_gp_line(e)}).")
+        return {"status": "error", "run_dir": None, "rows": [], "fresh": {}}
+    if devices_only:
+        return _mp_devices_only(library, scope, ids, account, run_dir)
+    cache = {}
+    ctx = _mp_compute(library, scope, ids, account, resolutions, now, cache, devices)
+    applied = preview = None
+    unread = bool(apply and ctx["resolution"] and ctx["resolution"]["fatal"])
+    if unread:                        # a mistyped --resolutions path must not turn into a half-intended apply
+        ctx["notes"].append("❌ --apply was NOT run: the --resolutions file could not be read — nothing was "
+                            "recorded; fix the path and re-run")
+    elif apply:
+        applied, ctx = _mp_apply(ctx, repairs, accept_probable,
+                                 lambda: _mp_compute(load_library(), scope, ids, account, resolutions, now, cache,
+                                                     devices))
+    else:
+        preview = _mp_preview(ctx, repairs, accept_probable)
+    ctx.update(apply=apply and not unread, repairs=tuple(repairs), accept_probable=accept_probable, applied=applied,
+               preview=preview)
+    try:
+        result = _mp_finish(ctx, run_dir)
+    except OSError as e:              # e.g. a report of a re-used --out is open in Excel: one line, never a traceback
+        print(f"❌ map_photos: the reports could not be written to {run_dir} ({_gp_line(e)}) — close the file if it "
+              f"is open (e.g. in Excel) or use another --out, and re-run"
+              + (" (what --apply recorded stays on record; a re-run records nothing twice)." if applied is not None
+                 else "."))
+        return {"status": "error", "run_dir": run_dir, "rows": ctx["rows"], "fresh": ctx["fresh"]}
+    if unread or (applied is not None and applied["error"]):
+        result["status"] = "error"
+    return result
+
+
+def _mp_objects(library, ids, account):
+    """The uploaded objects in scope (ids None: the whole library) whose ROUTING account is `account` (any when None)
+    -> (objects, {(manual_id, label): route})."""
+    import mainfetch  # P-4's routing constants and the validated mvconfig overrides — their single source
+    overrides = mainfetch._account_overrides()
+    prefix_map, default = mainfetch.ID_PREFIX_PROFILE, mainfetch.DEFAULT_PROFILE
+    objects, routes = [], {}
+    for obj in mvcommon.iter_uploaded_objects(library, ids):
+        route = _mp_route(obj, overrides, prefix_map, default)
+        if account is None or route["routing"] == account:
+            objects.append(obj)
+            routes[(obj["manual_id"], obj["label"])] = route
+    return objects, routes
+
+
+def _mp_library_positions(library):
+    """Step 9b's hint for an object with no push time: {manual_id: 'k/n in <library file>'} — the entry's place in
+    the library file save_library writes it to (newly added entries come last). Never a verdict."""
+    files = {"movies": mvcommon.LIBRARY_MOVIES, "tv": mvcommon.LIBRARY_SERIES, "anime": mvcommon.LIBRARY_ANIME,
+             "others": mvcommon.LIBRARY_OTHERS}            # save_library's routing; any other prefix -> movies
+    order = {}
+    for mid in library:
+        if isinstance(mid, str):
+            order.setdefault(mvcommon.category_for_id(mid) or "movies", []).append(mid)
+    return {mid: f"{k}/{len(ids)} in {os.path.basename(files[category])}"
+            for category, ids in order.items() for k, mid in enumerate(ids, 1)}
+
+
+def _mp_compute(library, scope, ids, account, resolutions, now, cache, devices=False):
+    """One complete, offline mapping pass over a loaded library -> ctx: scope, account, library, objects, rows
+    (verdicts, reasons, user decisions), fresh, index (the inventory index — a dry run's repair preview maps again
+    with it), devices (the device check's summary: devices=True only — the one step that may run adb, read-only),
+    use_devices, unmatched, resolution, todo, notes, run."""
+    objects, routes = _mp_objects(library, ids, account)
+    states = _mp_inventory_states()
+    fresh = _mp_freshness(states, objects, routes, now)
+    index = _mp_index(states)
+    rows = _mp_match(objects, routes, index, fresh, library)
+    positions = _mp_library_positions(library)
+    for row in rows:
+        row["library_position"] = positions.get(row["manual_id"])
+    summary = _mp_device_check(library, objects, rows, cache) if devices else None
+    _mp_partial_sets(objects, rows)
+    unmatched = _mp_unmatched(states, fresh, rows, objects) if scope == "all" and account is None else None
+    _mp_reasons(rows)
+    decided, hint_problem = _mp_prior_decisions(objects)
+    resolution = _mp_resolutions(resolutions, library, objects) if resolutions else None
+    for row in rows:
+        key = (row["manual_id"], row["label"])
+        row["user_decision"] = (resolution["decisions"].get(key) if resolution else None) or decided.get(key)
+    run = "map-" + now.strftime("%Y%m%dT%H%M%SZ")
+    return {"scope": scope, "account": account, "library": library, "objects": objects, "rows": rows,
+            "fresh": fresh, "index": index, "devices": summary, "use_devices": devices, "unmatched": unmatched,
+            "resolution": resolution, "todo": _mp_todo(rows, run), "notes": [hint_problem], "run": run}
+
+
+def _mp_devices_only(library, scope, ids, account, run_dir):
+    """`map_photos --devices-only` (PLAN Step 9 (10), §M2): ONLY the read-only device check of Step 8 for the objects
+    in scope — which are still on a phone (awaiting backup, or not freed yet) and which were freed (only the
+    `.mvmeta.json` sidecar is left) — printed, plus devices.csv in the run directory. No inventory, no Google
+    Photos, no library / sidecar / failed-list write."""
+    objects, _routes = _mp_objects(library, ids, account)
+    inventory = device_inventory()
+    result = classify_device_objects(library, inventory, objects=objects)
+    devices = {"complete": result["complete"], "incomplete": result["incomplete_devices"], "counts": result["counts"],
+               "devices": inventory.get("devices") or {}, "unconfigured": inventory.get("unconfigured") or []}
+    phones = lambda places: "; ".join(f"{p['alias']} ({p['serial']}) {p['path']}" for p in places)
+    _mp_write_csv(os.path.join(run_dir, "devices.csv"),
+                  ("manual_id", "object", "uploaded_name", "state", "copies", "size_match", "sidecars", "partials"),
+                  [(o["manual_id"], o["label"], o["uploaded_name"], o["state"], phones(o["copies"]),
+                    ", ".join(str(c["size_match"]) for c in o["copies"]), phones(o["sidecars"]), phones(o["partials"]))
+                   for o in result["objects"]])
+    lines = [f"=== MAP PHOTOS — device check only (read-only) — scope: {scope}"
+             f"{' · account ' + account if account else ''} — {len(objects):,} object(s) ==="]
+    lines.extend(_mp_device_lines(devices))
+    lines.append(f"Verdicts: {_mp_counts_line(result['counts']) or 'none'}")
+    on_phone = [o for o in result["objects"] if o["state"] == "on_device"]
+    if on_phone:
+        lines.append(f"On a phone ({len(on_phone):,}) — awaiting its backup, or backed up and not freed yet:")
+        lines.extend(f"    {o['manual_id']} · {o['label']} — on "
+                     + ", ".join(sorted({f"{c['alias']} ({c['serial']})" for c in o["copies"]
+                                         if c["size_match"] is not False}))
+                     for o in on_phone)
+    if result["counts"]["freed"]:
+        lines.append(f"Freed from a phone ({result['counts']['freed']:,}) — only the .mvmeta.json sidecar is left; "
+                     f"Google Photos must hold them (map_photos tells whether it does) — listed in devices.csv")
+    if result["counts"]["unchecked"]:
+        lines.append(f"Unchecked ({result['counts']['unchecked']:,}) — a configured phone was not listed: "
+                     + ", ".join(f"{a} ({(devices['devices'].get(a) or {}).get('serial')}) {s}"
+                                 for a, s in result["incomplete_devices"].items()))
+    lines.append(f"Outputs: {run_dir} — summary.txt, devices.csv")
+    _mp_write_text(os.path.join(run_dir, "summary.txt"), "\n".join(lines) + "\n")
+    print("\n".join(lines))
+    return {"status": "ok", "run_dir": run_dir, "devices": devices, "objects": result["objects"]}
+
+
+# mapping.csv — every object's verdict as a sheet for the 🚦 R1 reader: the wrong-account list (status, account,
+# override_check), the near-matches (uploaded_name next to gp_filename) and the duplicates are filters on it. The
+# items' photo ids and dedupKeys stay in mapping.jsonl.
+_MP_CSV_COLUMNS = ("account", "category", "manual_id", "object", "uploaded_name", "status", "issue", "name_match",
+                   "proof", "gp_filename", "taken_utc", "upload_utc", "duplicate", "alternates", "copies",
+                   "default_account", "override", "override_check", "learned_home", "pushed_utc",
+                   "library_position", "device", "partial_set", "user_decision", "note")
+
+
+def _mp_csv_row(row):
+    """One mapping.csv row (_MP_CSV_COLUMNS): gp_filename / taken_utc / upload_utc describe the item the object maps
+    to, `alternates` counts its other items (duplicates), `copies` names the other accounts holding the same bytes,
+    pushed_utc is the capture's push time (Step 9b's evidence; blank: unknown)."""
+    item = row["item"] or {}
+    pushed = _mp_when(row["pushed_at"])
+    return (row["account"], row["category"], row["manual_id"], row["label"], row["uploaded_name"], row["status"],
+            row["issue"], row["name_match"], row["proof"], item.get("filename"), _mp_utc(item.get("taken_ms")),
+            _mp_utc(item.get("upload_ms")), row["duplicate"], len(row["alternates"]) or None,
+            ", ".join(c["account"] for c in row["copies"]) or None, row["default_account"], row["override"],
+            row["override_check"], row["learned_home"],
+            pushed.strftime("%Y-%m-%d %H:%M:%S UTC") if pushed else None, row["library_position"],
+            (row["device"] or {}).get("state"), "yes" if row["partial_set"] else None, row["user_decision"],
+            row["note"])
+
+
+def _mp_finish(ctx, run_dir):
+    """Write the run directory (mapping.jsonl, mapping.csv, inconsistencies.csv, resolutions_todo.csv,
+    unmatched_<account>.csv, summary.txt), print the report -> the command's result. Raises OSError when a file
+    cannot be written (cmd_map_photos turns it into one line)."""
+    rows, todo, unmatched = ctx["rows"], ctx["todo"], ctx["unmatched"]
+    files, notes = ["summary.txt", "mapping.jsonl", "mapping.csv", "inconsistencies.csv"], list(ctx["notes"])
+    _mp_write_jsonl(os.path.join(run_dir, "mapping.jsonl"), rows)
+    _mp_write_csv(os.path.join(run_dir, "mapping.csv"), _MP_CSV_COLUMNS, [_mp_csv_row(r) for r in rows])
+    _mp_write_csv(os.path.join(run_dir, "inconsistencies.csv"),
+                  ("account", "category", "manual_id", "object", "uploaded_name", "status", "issue", "partial_set",
+                   "device", "repair", "note"),
+                  [(r["account"], r["category"], r["manual_id"], r["label"], r["uploaded_name"], r["status"],
+                    r["issue"] or ("user says not uploaded" if r["user_decision"] == "not_uploaded" else None),
+                    "yes" if r["partial_set"] else "", (r["device"] or {}).get("state"), _mp_repair_text(r),
+                    r["note"]) for r in rows
+                   if r["status"] in _MP_INCONSISTENCY or r["user_decision"] == "not_uploaded"])
+    todo_path, note = _mp_write_todo(run_dir, [csv_row for _record, csv_row in todo])
+    files.append(os.path.basename(todo_path))
+    notes.append(note)
+    for acc, found in (unmatched or {}).items():
+        files.append(f"unmatched_{acc}.csv")
+        _mp_write_csv(os.path.join(run_dir, f"unmatched_{acc}.csv"),
+                      ("category", "photo_id", "filename", "taken_utc", "upload_utc", "owner", "note"),
+                      [(u["category"], u["item"]["photo_id"], u["item"]["filename"], _mp_utc(u["item"]["taken_ms"]),
+                        _mp_utc(u["item"]["upload_ms"]), u["owner"], u["note"]) for u in found])
+    lines = _mp_report(dict(ctx, files=files, notes=[n for n in notes if n], run_dir=run_dir))
+    _mp_write_text(os.path.join(run_dir, "summary.txt"), "\n".join(lines) + "\n")
+    print("\n".join(lines))
+    return {"status": "ok", "run_dir": run_dir, "rows": rows, "fresh": ctx["fresh"], "devices": ctx["devices"],
+            "unmatched": unmatched, "todo": [record for record, _csv_row in todo], "applied": ctx["applied"],
+            "preview": ctx["preview"]}
+
+
+# ==========================================
+#   GOOGLE PHOTOS IDENTITY — THE CHECK: check_photos (IMP-C25 Step 13)
+# ==========================================
+# docs/feature-fetch-datetime/PLAN.md Step 13 (P-5, P-8, P-9, P-10, P-11, P-18; OD-5, OD-7, OD-9; the Step 9b rule):
+# verify uploaded objects in Google Photos WITHOUT downloading anything — an item, a season, a series, an id prefix, an
+# account, the pending (pushed, not yet confirmed) objects, the hinted ones (the user's manual resolutions) or the whole
+# library — and, with --apply, record what was proven: the learned sidecar (P-10), the failed list (P-18) and the apply
+# engine (the only writer of `gphotos` blocks). The work is split in two processes:
+#   * main (this section) — the CLI, the scope, the run directory <GPHOTOS_STATE_DIR>/check/<UTC ts>/, the report, the
+#     outlier list, Step 9b, and every write: it is the only side that appends to the sidecars or touches the library;
+#   * the child `python mainfetch.py check --run <run dir> …` (mainfetch.cmd_check) — the browser: one Chrome session
+#     per account under the fetch lock, mainfetch.locate_object per object (the fetch's own exact-item engine, read-only
+#     — no download is ever triggered), every result appended to the run's results.jsonl as it is known.
+# A dry run (the default) writes only its run directory. --apply runs the check, then applies the run; --apply-run applies
+# a REVIEWED run (`latest` = the newest completed run of the scope) without opening Chrome. Re-running the same scope
+# continues its newest unfinished run (resumable; --recheck starts afresh). Nothing here prints a P-13 web marker.
+
+CHECK_APPROACHES = ("best", "all")                  # best: stop at the first stage that pins the object · all: every one
+CHECK_USAGE =("check_photos <id | season id | series:<season id|show folder> | id prefix | account:<a> | pending | "
+               "hinted | all> [--approaches best|all] [--account movies|tv|anime|others] [--recheck] "
+               "[--apply | --apply-run <run dir|latest>] [--limit N] [--pace S] [--max-minutes M] [--min-age-h H] "
+               "[--devices] [--list]")
+_CP_FLAGS = {"--recheck": "recheck", "--apply": "apply", "--devices": "devices", "--list": "list_only"}
+_CP_VALUED = ("--approaches", "--account", "--apply-run", "--limit", "--pace", "--max-minutes", "--min-age-h")
+
+
+def _cp_number(option, text, kind, minimum, strict):
+    """A numeric option value: kind(text) (int or float), finite, > minimum (strict) or >= minimum. ValueError naming the
+    option otherwise."""
+    try:
+        value = kind(text)
+    except ValueError:
+        raise ValueError(f"{option} needs a number (got {text!r})") from None
+    if not math.isfinite(value) or (value <= minimum if strict else value < minimum):
+        raise ValueError(f"{option} must be {'above' if strict else 'at least'} {minimum:g} (got {text})")
+    return value
+
+
+def parse_check_photos_args(tokens):
+    """The `check_photos` CLI tokens (after the verb) -> cmd_check_photos keyword arguments (CHECK_USAGE). Raises
+    ValueError naming the problem: no scope or a second one, an unknown option, a missing or invalid value (--min-age-h:
+    a positive number of hours), --apply with --apply-run, an option --apply-run cannot use (it never searches: no
+    --limit / --pace / --max-minutes / --min-age-h / --recheck), or --list outside `pending` (it takes only --account)."""
+    opts = {"scope": None, "approaches": None, "account": None, "recheck": False, "apply": False, "apply_run": None,
+            "limit": None, "pace": None, "max_minutes": None, "min_age_h": None, "devices": False, "list_only": False}
+    tokens, i = list(tokens), 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token in _CP_VALUED:
+            if i + 1 >= len(tokens) or not tokens[i + 1].strip() or tokens[i + 1].startswith("--"):
+                raise ValueError(f"{token} needs a value")
+            value = tokens[i + 1].strip()
+            i += 2
+            if token == "--approaches":
+                if value not in CHECK_APPROACHES:
+                    raise ValueError(f"--approaches must be one of {', '.join(CHECK_APPROACHES)} (got {value!r})")
+                opts["approaches"] = value
+            elif token == "--account":
+                if value not in mvcommon.GP_ACCOUNTS:
+                    raise ValueError(f"--account must be one of {', '.join(mvcommon.GP_ACCOUNTS)} (got {value!r})")
+                opts["account"] = value
+            elif token == "--apply-run":
+                opts["apply_run"] = value
+            elif token == "--limit":
+                opts["limit"] = _cp_number(token, value, int, 1, strict=False)
+            elif token == "--pace":
+                opts["pace"] = _cp_number(token, value, float, 0, strict=False)
+            elif token == "--max-minutes":
+                opts["max_minutes"] = _cp_number(token, value, float, 0, strict=True)
+            else:
+                opts["min_age_h"] = _cp_number(token, value, float, 0, strict=True)
+        elif token in _CP_FLAGS:
+            opts[_CP_FLAGS[token]] = True
+            i += 1
+        elif token.startswith("--"):
+            raise ValueError(f"unknown option {token}")
+        else:
+            if opts["scope"] is not None:
+                raise ValueError(f"one scope only (got {opts['scope']!r} and {token!r})")
+            opts["scope"] = token.strip()
+            i += 1
+    scope = opts["scope"]
+    if not scope:
+        raise ValueError("a scope is required: an id, a season id, series:<season id|show folder>, an id prefix, "
+                         "account:<a>, pending, hinted or all")
+    if scope.startswith("series:") and not scope[len("series:"):].strip():
+        raise ValueError("series: needs a season id or a show folder (series:<season id|show folder>)")
+    if scope.startswith("account:"):
+        if scope[len("account:"):].strip() not in mvcommon.GP_ACCOUNTS:
+            raise ValueError(f"account: must name one of {', '.join(mvcommon.GP_ACCOUNTS)} (got {scope!r})")
+        opts["scope"] = "account:" + scope[len("account:"):].strip()     # one spelling: the run's key
+    if opts["apply"] and opts["apply_run"] is not None:
+        raise ValueError("--apply and --apply-run exclude each other")
+    if opts["apply_run"] is not None and (opts["recheck"] or any(opts[k] is not None
+                                                                  for k in ("limit", "pace", "max_minutes",
+                                                                            "min_age_h"))):
+        raise ValueError("--apply-run applies a finished run without searching: it takes no --limit, --pace, "
+                         "--max-minutes, --min-age-h or --recheck")
+    if opts["list_only"]:
+        if scope != "pending":
+            raise ValueError("--list works with the pending scope only (check_photos pending --list)")
+        if any(opts[k] for k in ("recheck", "apply", "devices")) or any(
+                opts[k] is not None for k in ("approaches", "apply_run", "limit", "pace", "max_minutes", "min_age_h")):
+            raise ValueError("pending --list is offline: it takes only --account")
+    return opts
+
+
+def _cp_routes(objects):
+    """{(manual_id, label): route} — each object's account layers (PLAN P-4, map_photos' _mp_route): default (id prefix),
+    override (mvconfig fetch_account_overrides), home (the trusted block's learned home_account) and routing (override >
+    home > default) — read through mainfetch, the routing constants' single source."""
+    import mainfetch  # P-4's routing constants and the validated mvconfig overrides; importing it has no side effects
+    overrides = mainfetch._account_overrides()
+    prefix_map, default = mainfetch.ID_PREFIX_PROFILE, mainfetch.DEFAULT_PROFILE
+    return {(o["manual_id"], o["label"]): _mp_route(o, overrides, prefix_map, default) for o in objects}
+
+
+def _cp_age(hours):
+    """'14 h' / '3.2 days' for an age in hours (None: '')."""
+    if hours is None:
+        return ""
+    return f"{hours:.0f} h" if hours < 48 else f"{hours / 24:.1f} days"
+
+
+def _cp_pending_list(account=None):
+    """`check_photos pending --list` (PLAN Step 13, P-11) — OFFLINE: the objects a capture records as pushed that no
+    trusted block confirms yet (mvcommon.unverified_objects), oldest push first, each with its push time, age and the
+    account it is routed to. No Chrome, no lock, nothing written. -> {status: ok, objects, routes}."""
+    now = mvcommon._now_utc()
+    objects = mvcommon.unverified_objects(load_library(), now)
+    routes = _cp_routes(objects)
+    if account:
+        objects = [o for o in objects if routes[(o["manual_id"], o["label"])]["routing"] == account]
+    objects.sort(key=lambda o: (o["age_hours"] is None, -(o["age_hours"] or 0.0), o["manual_id"], o["label"]))
+    where = f" in '{account}'" if account else ""
+    lines = [f"=== CHECK PHOTOS — pending{where}: pushed, not yet confirmed in Google Photos (offline: nothing is "
+             f"opened or written) ==="]
+    if not objects:
+        lines.append(f"  Nothing pending{where}.")
+    else:
+        lines.append(f"  {len(objects):,} object(s) in {len({o['manual_id'] for o in objects}):,} entr(y/ies) await "
+                     f"confirmation:")
+        for o in objects:
+            when = _mp_when(o["pushed_at"])
+            pushed = (f"pushed {when.strftime('%Y-%m-%d %H:%M')} UTC ({_cp_age(o['age_hours'])} ago)" if when
+                      else "push time unknown")
+            lines.append(f"    {o['manual_id']} · {o['label']} — {o['uploaded_name'] or '(no uploaded name)'} · "
+                         f"{pushed} · account {routes[(o['manual_id'], o['label'])]['routing']}")
+        lines.append("  Confirm them in Google Photos (once their phone has backed them up) with: "
+                     "python main.py check_photos pending --apply")
+    print("\n".join(lines))
+    return {"status": "ok", "objects": objects, "routes": routes}
+
+
+# ------------------------------------------------------------------ the scope (PLAN Step 13: scope = …)
+_CP_YEAR_RE = re.compile(r"-(?:19|20)\d{2}(?=-)")   # the year token of an id: 'tv-en-2013-…'
+
+
+def _cp_show_key(season_id):
+    """A season's SHOW identity from its id: the id without its season tag (-sNN) and its year token
+    ('tv-en-2013-peakyblinders-s01' -> 'tv-en-peakyblinders'). MediaVault ids carry each SEASON's own year (IMP-U7: the
+    seasons of one show differ in the year), so the seasons of one show share everything else."""
+    return _CP_YEAR_RE.sub("", _SEASON_ID_RE.sub("", season_id), count=1)
+
+
+def _cp_norm(path):
+    """A folder as Windows compares it: absolute, normalized, case-folded."""
+    return os.path.normcase(os.path.normpath(os.path.abspath(path)))
+
+
+def _cp_under(folder, root):
+    """True when the (normalized) `folder` is `root` or lies beneath it."""
+    return folder == root or folder.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def _cp_seasons(library):
+    """{season id: normalized folder} of every season_map that has a folder."""
+    return {sid: _cp_norm(e["folder_path"]) for sid, e in library.items()
+            if isinstance(sid, str) and isinstance(e, dict) and e.get("type") == "season_map"
+            and isinstance(e.get("folder_path"), str) and e["folder_path"].strip()}
+
+
+def _cp_same_show(library, season_ids):
+    """True when the seasons belong to ONE show: one show key (_cp_show_key), or every one carries the same
+    metadata.tmdb_id (the show id enrich stamps on every season of a show)."""
+    if len({_cp_show_key(s) for s in season_ids}) <= 1:
+        return True
+    ids = {str((library[s].get("metadata") or {}).get("tmdb_id") or "") for s in season_ids}
+    return "" not in ids and len(ids) == 1
+
+
+def _cp_category_roots():
+    """The normalized category folders (CATEGORY_ROOTS under LOCAL_ROOT — Movies, Series, Anime and every Others root,
+    a list) — never a show folder."""
+    return {_cp_norm(os.path.join(LOCAL_ROOT, sub)) for subs in CATEGORY_ROOTS.values() for sub in subs}
+
+
+def _cp_series(library, target):
+    """`series:<season id | episode id | show folder>` (PLAN Step 13) -> (show folder as stored, [season ids], notes).
+
+    The show folder of a season: its PARENT when the season folder's name is season-shaped ('Season 02', 'S02',
+    'Show.S02.1080p' — _season_folder_looks_season_shaped) or when two or more season_maps sit directly in that parent;
+    else the season folder itself (a flat show). The parent is refused — the season's own folder is used, with a note —
+    when it is a category root or holds the seasons of more than one show (a category or language folder: 'Classic'
+    holding Friends and The Wire; the shows are told apart by _cp_same_show). Every season_map whose folder lies under the
+    show folder belongs to the series, its seasons' ids may carry different years (IMP-U7). A folder given directly is
+    taken as the show folder (a note warns when it holds more than one show). ValueError when the target names no
+    season."""
+    seasons, notes = _cp_seasons(library), []
+    if target in library:
+        real, entry = _gp_resolve(library, target)
+        if entry is None:
+            raise ValueError(f"{target} is an alias whose primary entry is missing")
+        season_id = real if entry.get("type") == "season_map" else entry.get("parent_id")
+        if season_id not in seasons:
+            raise ValueError(f"{target} belongs to no season — series: takes a season id, an episode id or a show folder")
+        stored = os.path.normpath(library[season_id]["folder_path"])
+        folder, parent = seasons[season_id], _cp_norm(os.path.dirname(stored))
+        show, shown = folder, stored
+        siblings = [s for s, f in seasons.items() if os.path.dirname(f) == parent]
+        if _season_folder_looks_season_shaped(os.path.basename(stored)) or len(siblings) >= 2:
+            members = [s for s, f in seasons.items() if _cp_under(f, parent)]
+            if parent in _cp_category_roots():
+                notes.append("its parent folder is a category folder — only the season's own folder is used")
+            elif not _cp_same_show(library, members):
+                notes.append(f"its parent folder holds the seasons of more than one show — only the season's own folder "
+                             f"is used (give the show folder itself as series:<folder> to widen it)")
+            else:
+                show, shown = parent, os.path.dirname(stored)
+    else:
+        raw = target.strip().strip('"')
+        if not os.path.isabs(raw):
+            raise ValueError(f"{target!r} is neither a library id nor an absolute show folder")
+        show, shown = _cp_norm(raw), os.path.normpath(raw)
+    members = sorted((s for s, f in seasons.items() if _cp_under(f, show)),
+                     key=lambda s: (_season_number_of(s) or 0, s))
+    if not members:
+        raise ValueError(f"no season of the library lies under {shown}")
+    if target not in library and not _cp_same_show(library, members):
+        notes.append("⚠️  this folder holds the seasons of more than one show — every one of them is checked")
+    return shown, members, notes
+
+
+def _cp_hinted(library):
+    """The `hinted` scope (PLAN Step 9 (8)): every object a hint names (hints.jsonl — map_photos --resolutions; the
+    newest hint per object wins), as iter_entry_objects dicts plus `hint` {kind, account, photo_id | taken_ms +
+    gmt_offset_min}. -> (objects, hints whose object no longer exists). ValueError when hints.jsonl is unreadable."""
+    try:
+        hints = mvcommon.read_hints()
+    except OSError as e:
+        raise ValueError(f"hints.jsonl could not be read ({_gp_line(e)})") from None
+    latest = {}
+    for hint in hints:                     # append order: a later hint about the same object replaces the earlier one
+        latest[(hint["manual_id"], hint["sha256"])] = hint
+    objects, gone = [], 0
+    for (manual_id, sha256), hint in sorted(latest.items()):
+        real, entry = _gp_resolve(library, manual_id)
+        obj = next((o for o in mvcommon.iter_entry_objects(real, entry) if o["sha256"] == sha256), None) \
+            if entry is not None else None
+        if obj is None:
+            gone += 1
+            continue
+        objects.append(dict(obj, hint={k: hint[k] for k in ("kind", "account", "photo_id", "taken_ms",
+                                                            "gmt_offset_min") if k in hint}))
+    return objects, gone
+
+
+def _cp_route_reason(route):
+    """Why an object is checked in its account first: override (mvconfig) · learned (its block's home_account) · prefix."""
+    if route["override"]:
+        return "override"
+    return "learned" if route["home"] and route["home"] != route["default"] else "prefix"
+
+
+def _cp_young(pushed_at, now, min_age_h):
+    """--min-age-h: True when an object was pushed less than `min_age_h` hours before `now` — by its capture's push time
+    (a record's `pushed_at`: the evidence Step 9b judges recency by), in mvcommon.unverified_objects' arithmetic, so
+    exactly `min_age_h` old is NOT young (maybe_auto_confirm's boundary). No push time -> False: an unknown push counts
+    as old and is checked (Step 13's verdict rule)."""
+    pushed = _mp_when(pushed_at)
+    return pushed is not None and (now - pushed).total_seconds() / 3600.0 < min_age_h
+
+
+def _cp_resolve(library, scope, account, now, min_age_h=None):
+    """The objects of one `check_photos` scope (PLAN Step 13), each with the account it is checked in first -> dict:
+      kind       item | season | series | prefix | account | pending | hinted | all
+      canonical  the scope as a run records it (series: its show folder, normalized — two seasons of one show are ONE
+                 series scope; everything else as typed)
+      objects    [{manual_id, label, sha256, kind, category, uploaded_name, account (routing: mvconfig override >
+                 learned home > id prefix; a hint's own account for `hinted`), route (override | learned | prefix |
+                 hint), home (the learned home, else the prefix account — what an "account mismatch" is measured
+                 against), pushed_at (the capture's push time: Step 9b's evidence — the child looks for an object in
+                 the other accounts only when it was NOT a push of the last MAP_RECENT_DAYS at the moment its own
+                 account was checked), hint (hinted only)}] — alias-safe (an alias id resolves to its primary, a
+                 whole-library pass skips aliases), objects without a SHA-256 left out (no pin, nothing to verify)
+      show, seasons   (series) the show folder and its season ids · notes: lines printed with the resolution
+      unpinned   objects left out for want of a SHA-256 · gone: hints whose object no longer exists
+      young      `min_age_h` (--min-age-h) given: the objects of the scope (and --account) pushed less than that many
+                 hours before `now` (_cp_young) — left out of `objects`, so they are never looked up and get no verdict
+                 row, no failed row and no learned record; one note line counts them
+    ValueError when the scope names nothing in the library."""
+    notes, show, seasons, gone = [], None, [], 0
+    canonical = scope
+    if scope == "all":
+        kind, objects = "all", list(mvcommon.iter_uploaded_objects(library))
+    elif scope == "pending":
+        kind, objects = "pending", mvcommon.unverified_objects(library, now)
+    elif scope == "hinted":
+        kind, (objects, gone) = "hinted", _cp_hinted(library)
+    elif scope.startswith("account:"):
+        kind, objects = "account", list(mvcommon.iter_uploaded_objects(library))
+    elif scope.startswith("series:"):
+        kind = "series"
+        show, seasons, notes = _cp_series(library, scope[len("series:"):].strip())
+        canonical = "series:" + _cp_norm(show)
+        ids = []
+        for sid in seasons:
+            ids += [sid] + [c for c in library[sid].get("children") or [] if isinstance(c, str)]
+        objects = list(mvcommon.iter_uploaded_objects(library, ids))
+    elif scope in library:
+        entry = library[scope]
+        if isinstance(entry, dict) and entry.get("type") == "season_map":
+            kind, ids = "season", [scope] + [c for c in entry.get("children") or [] if isinstance(c, str)]
+        else:
+            kind, ids = "item", [scope]
+        objects = list(mvcommon.iter_uploaded_objects(library, ids))
+    else:
+        ids = sorted(mid for mid in library if isinstance(mid, str) and mid.startswith(scope))
+        if not ids:
+            raise ValueError(f"no library id is or starts with {scope!r} (a scope is an id, a season id, "
+                             f"series:<…>, an id prefix, account:<a>, pending, hinted or all)")
+        kind, objects = "prefix", list(mvcommon.iter_uploaded_objects(library, ids))
+    routes = _cp_routes(objects)
+    out, unpinned = [], 0
+    for obj in objects:
+        if not mvcommon._is_sha256(obj["sha256"]):
+            unpinned += 1
+            continue
+        route = routes[(obj["manual_id"], obj["label"])]
+        record = {"manual_id": obj["manual_id"], "label": obj["label"], "sha256": obj["sha256"], "kind": obj["kind"],
+                  "category": obj["category"], "uploaded_name": obj["uploaded_name"], "account": route["routing"],
+                  "route": _cp_route_reason(route), "home": route["home"] or route["default"],
+                  "pushed_at": _mp_pushed_at(obj)}
+        if obj.get("hint"):
+            record.update(account=obj["hint"]["account"], route="hint", hint=obj["hint"])
+        out.append(record)
+    if kind == "account":
+        out = [o for o in out if o["account"] == scope[len("account:"):]]
+    if account:
+        out = [o for o in out if o["account"] == account]
+    young = 0
+    if min_age_h is not None:
+        kept = [o for o in out if not _cp_young(o["pushed_at"], now, min_age_h)]
+        young, out = len(out) - len(kept), kept
+    if unpinned:
+        notes.append(f"{unpinned:,} object(s) left out: the library holds no SHA-256 for them (nothing to pin a check to)")
+    if gone:
+        notes.append(f"{gone:,} hint(s) name an object no longer in the library (re-split or re-mastered?) — skipped")
+    if young:
+        notes.append(f"{young:,} object(s) pushed less than {min_age_h:g} h ago skipped — checked at a later push")
+    return {"kind": kind, "canonical": canonical, "objects": out, "show": show, "seasons": seasons, "notes": notes,
+            "unpinned": unpinned, "gone": gone, "young": young}
+
+
+def _cp_scope_lines(resolved, library):
+    """What a scope resolved to — ALWAYS printed before anything runs (PLAN Step 13: the seasons of a series and the
+    object count; IMP-U7: a show's season ids carry different years)."""
+    objects, lines = resolved["objects"], []
+    if resolved["kind"] == "series":
+        names = ", ".join(f"{s} ({os.path.basename(os.path.normpath(library[s]['folder_path']))})"
+                          for s in resolved["seasons"])
+        lines.append(f"  Series: {resolved['show']} — {len(resolved['seasons'])} season(s): {names}")
+    by_account = {}
+    for o in objects:
+        by_account[o["account"]] = by_account.get(o["account"], 0) + 1
+    accounts = " · ".join(f"{a} {by_account[a]:,}" for a in mvcommon.GP_ACCOUNTS if a in by_account)
+    lines.append(f"  {len(objects):,} object(s) in {len({o['manual_id'] for o in objects}):,} entr(y/ies)"
+                 + (f" — checked first in: {accounts}" if accounts else ""))
+    lines.extend(f"  {note}" for note in resolved["notes"])
+    return lines
+
+
+# ------------------------------------------------------------------ the run directory (resumable) and the child
+CHECK_RUN_VERSION = 1
+_CP_CHILD = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mainfetch.py")   # the browser half (absolute)
+# How a run ended (progress.json `reason`, written by mainfetch.cmd_check) -> this command's status: a clean stop the user
+# asked for is `partial` (re-run to continue); anything else that ended a run early is `stopped`.
+_CP_PARTIAL_REASONS = ("limit", "max-minutes")
+# The statuses main.py's dispatcher exits 1 on (ok and partial exit 0).
+CHECK_FAILED_STATUSES = ("error", "refused", "stopped", "interrupted")
+
+
+def _cp_root():
+    """<GPHOTOS_STATE_DIR>/check — every run's directory lives here (read at call time: tests redirect it)."""
+    return os.path.join(mvcommon.GPHOTOS_STATE_DIR, "check")
+
+
+def _cp_read_json(path):
+    """A JSON object file -> dict, or None when it is missing, unreadable or not an object."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def _cp_write_json(path, doc):
+    """Write a run file atomically (mainfetch's writer: temp file, fsync, os.replace)."""
+    import mainfetch  # the one atomic JSON writer of the check's files; importing it has no side effects
+    mainfetch._write_json_atomic(path, doc)
+
+
+def _cp_read_results(run_dir):
+    """The run's results.jsonl lines (mainfetch.cmd_check appends them, fsynced), in append order — a torn line (a
+    killed child) is skipped."""
+    def as_dict(raw):
+        if not isinstance(raw, dict):
+            raise ValueError("not a result line")
+        return raw
+    try:
+        return mvcommon._read_jsonl(os.path.join(run_dir, "results.jsonl"), as_dict, None)
+    except OSError:
+        return []
+
+
+def _cp_runs():
+    """[(run_dir, run.json, progress.json or None)] of every check run, newest first (a run directory is named by its
+    UTC start; a second run in the same second gets '-2', which sorts after it)."""
+    root = _cp_root()
+    try:
+        names = sorted(os.listdir(root), reverse=True)
+    except OSError:
+        return []
+    runs = []
+    for name in names:
+        run_dir = os.path.join(root, name)
+        doc = _cp_read_json(os.path.join(run_dir, "run.json"))
+        if doc is not None and doc.get("v") == CHECK_RUN_VERSION and isinstance(doc.get("objects"), list):
+            runs.append((run_dir, doc, _cp_read_json(os.path.join(run_dir, "progress.json"))))
+    return runs
+
+
+def _cp_matches(doc, scope, account, approaches):
+    """A run of this scope? Its recorded scope and --account must be the given ones; approaches only when given."""
+    return (doc.get("scope") == scope and doc.get("account") == account
+            and (approaches is None or doc.get("approaches") == approaches))
+
+
+def _cp_unfinished(scope, account, approaches, min_age_h=None):
+    """(run_dir, run.json, progress.json) of the NEWEST run of this scope + --account + approaches + --min-age-h when
+    that run is not complete — the one a re-run continues — else None (a complete newest run means: start afresh). A run
+    made with another --min-age-h, or without one, is another run: its objects were chosen by another age (the
+    auto-confirm's `pending --min-age-h` never continues a plain `pending` run holding young objects)."""
+    for run_dir, doc, progress in _cp_runs():
+        if _cp_matches(doc, scope, account, approaches) and doc.get("min_age_h") == min_age_h:
+            return (run_dir, doc, progress) if (progress or {}).get("state") != "complete" else None
+    return None
+
+
+def _cp_new_run(resolved, scope_text, account, approaches, now, min_age_h=None):
+    """Create a run directory <GPHOTOS_STATE_DIR>/check/<UTC yyyymmddThhmmssZ>[-n] and its run.json -> (run_dir, doc).
+    run.json (written once, never changed): v, run, created_at, scope (canonical), scope_text (as typed), kind, account
+    (--account or None), approaches, min_age_h (--min-age-h, only when given: the younger objects were left out),
+    source (`confirm` for pending — P-11's post-backup confirmation — else `check`), show + seasons (series),
+    recent_days (MAP_RECENT_DAYS: Step 9b's window, which the child measures against the time an object's own account
+    was checked before it looks for it elsewhere), objects (the resolved objects, _cp_resolve's shape)."""
+    stamp = now.strftime("%Y%m%dT%H%M%SZ")
+    root = _cp_root()
+    os.makedirs(root, exist_ok=True)
+    name, n = stamp, 1
+    while True:
+        try:
+            os.mkdir(os.path.join(root, name))
+            break
+        except FileExistsError:
+            n += 1
+            name = f"{stamp}-{n}"
+    run_dir = os.path.join(root, name)
+    doc = {"v": CHECK_RUN_VERSION, "run": f"check-{name}", "created_at": _mp_iso(now), "scope": resolved["canonical"],
+           "scope_text": scope_text, "kind": resolved["kind"], "account": account, "approaches": approaches,
+           **({"min_age_h": min_age_h} if min_age_h is not None else {}),
+           "source": "confirm" if resolved["kind"] == "pending" else "check", "show": resolved["show"],
+           "seasons": resolved["seasons"], "recent_days": MAP_RECENT_DAYS, "objects": resolved["objects"]}
+    _cp_write_json(os.path.join(run_dir, "run.json"), doc)
+    return run_dir, doc
+
+
+def _cp_child_argv(run_dir, limit=None, max_minutes=None, pace=None):
+    """The check child's command line — [python, <abs mainfetch.py>, check, --run, <run dir>, …] (PLAN Step 13:
+    sys.executable and the absolute script path; --limit / --max-minutes / --pace only when given)."""
+    argv = [sys.executable, _CP_CHILD, "check", "--run", run_dir]
+    for option, value in (("--limit", limit), ("--max-minutes", max_minutes), ("--pace", pace)):
+        if value is not None:
+            argv += [option, f"{value:g}" if isinstance(value, float) else str(value)]
+    return argv
+
+
+def _cp_spawn(argv):
+    """Run the check child with cmd_dispatch_fetch's streaming idiom — every line re-printed through the CURRENT
+    sys.stdout as it comes (UTF-8 and unbuffered: _mainfetch_child_env) — -> (exit code, interrupted).
+
+    Ctrl+C reaches the child as well (one console): it stops after its current object and closes the Chrome it launched.
+    So this side keeps reading and waits for it to end; only a third Ctrl+C stops the waiting (exit code None) — the
+    child then finishes on its own, and the fetch journal it keeps lets the next fetch or check close a Chrome it could
+    not. Raises OSError when the child cannot be started. (tests/conftest.py replaces this for every test.)"""
+    stops = 0
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+                            encoding="utf-8", errors="replace", env=_mainfetch_child_env())
+    while True:
+        try:
+            for line in proc.stdout:
+                print(line, end="", flush=True)
+            return proc.wait(), stops > 0
+        except KeyboardInterrupt:
+            stops += 1
+            if stops >= 3:
+                print("\n🛑 No longer waiting — the check closes its Chrome on its own.", flush=True)
+                return None, True
+            print("\n🛑 Stopping — waiting for the check to close its Chrome (press Ctrl+C twice more to stop "
+                  "waiting)…", flush=True)
+
+
+def _cp_status(code, interrupted, progress):
+    """This command's status from the child's exit code and its progress.json: refused (3: the fetch lock is held —
+    nothing ran) · error (1: the child could not read its run, or it failed — its lines say why) · interrupted
+    (Ctrl+C) · ok (complete) · partial (a
+    --limit / --max-minutes stop: re-run to continue) · stopped (signed out, throttled — IMP-C25 thfix —, Chrome
+    failed, the error breaker, the lock lost …: re-run to continue once fixed)."""
+    if code == 3:
+        return "refused"
+    if code == 1:
+        return "error"
+    state, reason = (progress or {}).get("state"), (progress or {}).get("reason")
+    if interrupted or code is None or reason == "interrupted":
+        return "interrupted"
+    if state == "complete":
+        return "ok"
+    return "partial" if reason in _CP_PARTIAL_REASONS else "stopped"
+
+
+# ------------------------------------------------------------------ verdicts, the report, the outlier list
+# Every object's verdict, from its results.jsonl lines (in report order). confirmed = pinned to exactly one verified
+# item (its own account, or another: an account mismatch); inconsistent = pinned, but Google Photos holds a partial or
+# non-original copy (IMP-C27 (e): a restore would fail its SHA-256 check); then what was NOT pinned — ambiguous (its
+# candidates cannot be told apart: in its own account, or in another one its own account did not hold it in),
+# Step 9b's not-backed-up-yet / possible-loss for an object no stage pinned in any account it was looked for in (a push
+# of the last MAP_RECENT_DAYS / anything older or of unknown push time; with --devices the phones refine an old one:
+# awaiting-backup / missing-after-backup / missing-everywhere) — whether its stages found nothing or only other items
+# (wrong-item: the failed list keeps that reason, as the fetch books it) —, error (it could not be checked: in its own
+# account, or in another one it had to be looked for in), unchecked (the run has not reached it — or not finished
+# looking for it in the other accounts — yet). Only a final verdict ever reaches the failed list.
+CHECK_STATES = ("confirmed", "inconsistent", "ambiguous", "not-backed-up-yet", "possible-loss", "awaiting-backup",
+                "missing-after-backup", "missing-everywhere", "error", "unchecked")
+# The OD-7 outlier classes (outliers.csv — for the user's manual review), in report order.
+CHECK_OUTLIERS = ("approaches-disagree", "single-approach", "legacy-only", "ambiguous-everywhere", "account-mismatch",
+                  "duplicates", "partial-upload", "not-original-quality", "taken-time-differs", "stale-photo-id")
+_CP_OUTLIER_COLUMNS = ("account", "category", "manual_id", "object", "uploaded_name", "outlier", "detail", "photo_id",
+                       "photo_url", "other_photo_ids", "approaches_ok", "approaches_failed", "taken_utc", "date_utc",
+                       "routed_account", "home_account")
+_CP_REASONS = {"inconsistent": "inconsistent", "ambiguous": "ambiguous", "possible-loss": "not-found",
+               "missing-after-backup": "missing-after-backup",
+               "missing-everywhere": "missing-everywhere"}    # status -> P-18 failed-list reason (the rest: no row)
+_CP_LOSS_TEXT = {   # map_photos' LOUD-block wording, measured against the check instead of an inventory crawl
+    "possible-loss": f"in no account, pushed over {MAP_RECENT_DAYS} days before it was checked or with no push time "
+                     f"(no capture) — possible LOSS",
+    "missing-after-backup": _MP_LOSS_TEXT["missing-after-backup"],
+    "missing-everywhere": _MP_LOSS_TEXT["missing-everywhere"],
+    "awaiting-backup": f"in no account but still on a phone although pushed over {MAP_RECENT_DAYS} days before it was "
+                       f"checked — its backup is overdue (do NOT free it yet)",
+}
+
+
+def _cp_key(d):
+    return d.get("manual_id"), d.get("label"), d.get("sha256")
+
+
+def _cp_recent(pushed_at, checked_at):
+    """Step 9b for a live check: True when the push is no older than MAP_RECENT_DAYS at the moment its account was
+    checked (the check IS that account's look); None when either time is unknown."""
+    pushed, checked = _mp_when(pushed_at), _mp_when(checked_at)
+    if pushed is None or checked is None:
+        return None
+    return pushed >= checked - timedelta(days=MAP_RECENT_DAYS)
+
+
+def _cp_rows(doc, lines, library, complete):
+    """Every run object's verdict row (CHECK_STATES) from its results.jsonl lines, in the run's order: status, account
+    (where it was pinned, else the account it was checked in first), found (the line that pinned it exactly-one),
+    routed_line, cross ({account: line}), decisive (found, else routed_line — the look the approach statistics count),
+    quality (the pinned item's), mismatch (pinned outside its home account), recent (Step 9b), error (why it could not
+    be checked), and the map's row keys its helpers read (pushed_at, library_position, partial_set, device, note,
+    reason).
+
+    An object its own account did not pin (not-found / wrong-item) that was a push of the last MAP_RECENT_DAYS when that
+    account was checked is not-backed-up-yet; an older one was looked for in the other accounts (the child's rule) and
+    is called in no account (possible-loss) only once those looks are done: one that failed makes it `error` (nothing
+    can be said), while the run is not `complete` an account still to look in leaves it `unchecked`, and an account
+    whose look was ambiguous (its name IS there) makes it `ambiguous` there."""
+    checks, quality = {}, {}
+    for line in lines:
+        if line.get("kind") == "check":
+            checks.setdefault(_cp_key(line), []).append(line)
+        elif line.get("kind") == "quality":
+            quality[(line.get("account"), line.get("photo_id"))] = line
+    positions = _mp_library_positions(library)
+    rows = []
+    for obj in doc["objects"]:
+        mine = checks.get(_cp_key(obj), [])
+        routed = next((l for l in reversed(mine) if l.get("pass") == "routed"), None)
+        cross = {}
+        for line in mine:
+            if line.get("pass") == "cross":
+                cross[line.get("account")] = line
+        found = next((l for l in [routed] + list(cross.values())
+                      if l is not None and l.get("found") and l.get("outcome") == "exactly-one"), None)
+        qline = quality.get((found["account"], found.get("photo_id"))) if found else None
+        q = {k: qline[k] for k in ("original_quality", "partial_upload", "archived")
+             if qline and isinstance(qline.get(k), bool)}
+        recent = error = None
+        decisive = found or routed
+        unseen = [a for a in mvcommon.GP_ACCOUNTS if a != obj["account"] and a not in cross]
+        if routed is None:
+            status = "unchecked"
+        elif found is not None:
+            status = ("inconsistent" if q.get("partial_upload") is True or q.get("original_quality") is False
+                      else "confirmed")
+        elif routed["outcome"] == "error":
+            status, error = "error", routed.get("error") or "error"
+        elif routed["outcome"] == "ambiguous":
+            status = "ambiguous"
+        else:
+            recent = _cp_recent(obj.get("pushed_at"), routed.get("at"))
+            failed = next(((a, l) for a, l in cross.items() if l.get("outcome") == "error"), None)
+            there = next((l for l in cross.values() if l.get("outcome") == "ambiguous"), None)
+            if recent:
+                status = "not-backed-up-yet"
+            elif failed is not None:
+                status, error = "error", f"{failed[1].get('error') or 'error'} in '{failed[0]}'"
+            elif unseen and not complete:
+                status = "unchecked"
+            elif there is not None:
+                status, decisive = "ambiguous", there
+            else:
+                status = "possible-loss"
+        # [IMP-C25 thfix] a "not in Google Photos" verdict resting on a look whose search answered nothing while no item
+        # known to be in that account could show the search was answering (mainfetch._zero_check): unverified
+        looks = [l for l in [routed] + list(cross.values())
+                 if l is not None and l.get("outcome") in ("not-found", "wrong-item")]
+        unverified = status in ("possible-loss", "not-backed-up-yet") and any(
+            l.get("zero_check") == "unverified" for l in looks)
+        row = {"manual_id": obj["manual_id"], "label": obj["label"], "sha256": obj["sha256"], "kind": obj["kind"],
+               "category": obj["category"], "uploaded_name": obj["uploaded_name"], "routed": obj["account"],
+               "home": obj.get("home") or obj["account"], "route": obj.get("route"), "pushed_at": obj.get("pushed_at"),
+               "hint": bool(obj.get("hint")), "status": status,
+               "account": (found or decisive or {}).get("account") or obj["account"], "found": found,
+               "routed_line": routed, "cross": cross, "decisive": decisive, "quality": q,
+               "mismatch": bool(found is not None and found["account"] != (obj.get("home") or obj["account"])),
+               "recent": recent, "error": error, "library_position": positions.get(obj["manual_id"]),
+               "partial_set": False, "device": None, "note": None, "reason": None, "unverified": unverified}
+        if unverified:
+            _mp_note(row, "unverified: its search answered nothing and no item known to be in the account could show "
+                          "that the search was answering — not booked")
+        if status == "possible-loss":
+            same_name = (routed.get("content_key") and
+                         ((routed.get("per_approach") or {}).get("exact_name") or {}).get("outcome") == "wrong-item")
+            if same_name:
+                _mp_note(row, "the search for its exact name finds only other bytes (another upload or version?)")
+            if unseen:                 # a complete run looked in every account it could: these have no Chrome profile
+                _mp_note(row, f"not looked for in: {', '.join(unseen)} (no Chrome profile)")
+        elif status == "unchecked" and routed is not None:
+            _mp_note(row, f"not in '{obj['account']}' — the run stopped before it was looked for in: {', '.join(unseen)}")
+        rows.append(row)
+    return rows
+
+
+def _cp_library_objects(library, rows):
+    """The iter_entry_objects dicts of the rows' objects ({(manual_id, label): object}) — what map's helpers
+    (_mp_device_check, _mp_partial_sets) take; an object no longer in the library is absent."""
+    out = {}
+    for manual_id in dict.fromkeys(r["manual_id"] for r in rows):
+        real, entry = _gp_resolve(library, manual_id)
+        for obj in mvcommon.iter_entry_objects(real, entry) if entry is not None else ():
+            out.setdefault((obj["manual_id"], obj["label"]), obj)
+    return out
+
+
+def _cp_settle(library, rows, devices):
+    """The verdicts' last steps (Step 9b, as map_photos takes them): --devices — the read-only phone check refines an OLD
+    object Google Photos does not show (possible-loss -> awaiting-backup / missing-after-backup / missing-everywhere)
+    and annotates a recent one (map's _mp_device_check); partial chunk sets — a split (or extras item) of which Google
+    Photos shows some members but not the others (IMP-C27 (c)); the P-18 failed-list reason of every row. -> the device
+    check's summary (devices only), or None."""
+    objects = _cp_library_objects(library, rows)
+    known = [r for r in rows if (r["manual_id"], r["label"]) in objects]
+    summary = _mp_device_check(library, [objects[(r["manual_id"], r["label"])] for r in known], known) \
+        if devices else None
+    families = {}
+    for row in known:
+        family = _mp_family(objects[(row["manual_id"], row["label"])])
+        if family is not None:
+            families.setdefault(family, []).append(row)
+    for members in families.values():
+        if any(m["status"] in _MP_NOT_IN_GP for m in members) and any(
+                m["status"] in ("confirmed", "inconsistent") for m in members):
+            for m in members:
+                m["partial_set"] = m["status"] in _MP_NOT_IN_GP
+    for row in rows:
+        reason = _CP_REASONS.get(row["status"])
+        if reason == "not-found" and (row["routed_line"] or {}).get("outcome") == "wrong-item":
+            reason = "wrong-item"          # its stages proved every candidate another item (the fetch's reason chain)
+        if row["status"] in _MP_LOST and row["partial_set"]:
+            reason = "partial-set"
+        if row.get("unverified"):
+            reason = None                  # [IMP-C25 thfix] nothing could show its search was answering: never booked
+        row["reason"] = reason
+    return summary
+
+
+def _cp_taken_differs(row):
+    """(Google Photos' taken time, the file's DateUTC) when they differ (to the second) for a pinned object, else None."""
+    record = (row["found"] or {}).get("record") or {}
+    date_utc = (row["found"] or {}).get("date_utc")
+    taken = record.get("taken_ms")
+    when = _mp_when(date_utc)
+    if when is None or not (isinstance(taken, int) and not isinstance(taken, bool)):
+        return None
+    if taken // 1000 == int(when.timestamp()):
+        return None
+    return _mp_utc(taken), when.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _cp_outliers(rows, approaches):
+    """PLAN Step 13 / OD-7: the objects for the user's manual review -> [(row, class, detail)] in CHECK_OUTLIERS order
+    per object: approaches that disagree (different photo_ids) · only one approach works (--approaches all) · found only
+    by today's legacy queries (S4) · ambiguous everywhere · account mismatch · duplicates (other items with its bytes, or
+    several uploads under its name) · partial or non-original-quality uploads · cloud taken time != the file's DateUTC ·
+    a stored photo_id that is gone."""
+    out = []
+    for row in rows:
+        line = row["decisive"]
+        if line is None:
+            continue
+        per = line.get("per_approach") or {}
+        picks = {a: p for a, p in (line.get("per_approach_pick") or {}).items() if p}
+        ok = [a for a, v in per.items() if v["outcome"] == "exactly-one"]
+        failed = [a for a, v in per.items() if v["outcome"] not in ("exactly-one", "error")]
+        if len(set(picks.values())) > 1:
+            out.append((row, "approaches-disagree", "; ".join(f"{a}: {p}" for a, p in picks.items())))
+        if row["found"] and approaches == "all" and len(ok) == 1 and failed:
+            out.append((row, "single-approach", f"only {ok[0]} pins it — {', '.join(failed)} do not"))
+        if row["found"] and row["found"].get("approach") == "legacy":
+            out.append((row, "legacy-only", "only today's legacy queries list it (S4) — no exact-item stage pins it"))
+        evaluated = [v["outcome"] for v in per.values() if v["outcome"] != "error"]
+        if row["status"] == "ambiguous" and evaluated and all(o == "ambiguous" for o in evaluated):
+            out.append((row, "ambiguous-everywhere", f"every approach saw candidates it could not tell apart "
+                                                     f"({', '.join(per)})"))
+        if row["mismatch"]:
+            via = " (an mvconfig override routes it there)" if row["route"] == "override" and \
+                row["account"] == row["routed"] else ""
+            out.append((row, "account-mismatch", f"found in '{row['account']}', its home account is "
+                                                 f"'{row['home']}'{via}"))
+        if line.get("alternates"):
+            what = ("several uploads under its name hold different bytes (a re-split set uploaded twice?) — the newest "
+                    "is listed" if line.get("rule") == "newest-set" else "other items hold the same bytes")
+            out.append((row, "duplicates", f"{len(line['alternates'])} other item(s): {what}"))
+        if row["quality"].get("partial_upload") is True:
+            out.append((row, "partial-upload", "Google Photos holds a partial upload — a restore would fail its SHA-256"))
+        if row["quality"].get("original_quality") is False:
+            out.append((row, "not-original-quality", "Google Photos holds a storage-saver copy, not the original — a "
+                                                     "restore would fail its SHA-256"))
+        differs = _cp_taken_differs(row) if row["found"] else None
+        if differs:
+            out.append((row, "taken-time-differs", f"Google Photos dates it {differs[0]}, the file's DateUTC is "
+                                                   f"{differs[1]}"))
+        stale = list(dict.fromkeys(p for l in [row["routed_line"]] + list(row["cross"].values()) if l
+                                   for p in l.get("stale") or []))
+        if stale:
+            out.append((row, "stale-photo-id", f"{len(stale)} stored photo_id(s) gone — Google Photos and the item page "
+                                               f"agree: {', '.join(stale)}"))
+    return out
+
+
+def _cp_outlier_row(row, kind, detail):
+    """One outliers.csv row (_CP_OUTLIER_COLUMNS) — the item's ADDRESS (photos.google.com/photo/<id>, never a download
+    link) for the review."""
+    line = row["decisive"] or {}
+    per = line.get("per_approach") or {}
+    pid = line.get("photo_id") if line.get("found") else None
+    record = line.get("record") or {}
+    return (row["account"], row["category"], row["manual_id"], row["label"], row["uploaded_name"], kind, detail, pid,
+            f"https://photos.google.com/photo/{pid}" if pid else None, " ".join(line.get("alternates") or []) or None,
+            " ".join(a for a, v in per.items() if v["outcome"] == "exactly-one") or None,
+            " ".join(f"{a}={v['outcome']}({v['n']})" for a, v in per.items() if v["outcome"] != "exactly-one") or None,
+            _mp_utc(record.get("taken_ms")) or None, line.get("date_utc"), row["routed"], row["home"])
+
+
+def _cp_counts(rows, key):
+    counter = {}
+    for row in rows:
+        counter[key(row)] = counter.get(key(row), 0) + 1
+    return counter
+
+
+def _cp_line(rows, status_counts=None):
+    """'confirmed 30 · not-backed-up-yet 2 …' in CHECK_STATES order."""
+    counts = status_counts or _cp_counts(rows, lambda r: r["status"])
+    return " · ".join(f"{s} {counts[s]:,}" for s in CHECK_STATES if counts.get(s))
+
+
+def _cp_check_command(doc):
+    """The check_photos command that continues a run (its resume key: scope, --account, --approaches, --min-age-h)."""
+    return (f"python main.py check_photos {doc.get('scope_text') or doc.get('scope')}"
+            + (f" --account {doc['account']}" if doc.get("account") else "")
+            + (" --approaches all" if doc.get("approaches") == "all" else "")
+            + (f" --min-age-h {doc['min_age_h']:g}" if isinstance(doc.get("min_age_h"), (int, float)) else ""))
+
+
+def _cp_summary_line(doc, rows, status, applied=None, apply_run=False):
+    """The run's ONE closing line (PLAN Step 13b's auto-confirm prints it as its summary): scope, objects, verdicts,
+    state, what an apply recorded. Never a P-13 web marker."""
+    tail = {"ok": "", "partial": " — partial: re-run the same command to continue",
+            "stopped": " — stopped: re-run the same command to continue",
+            "interrupted": " — interrupted: re-run the same command to continue"}.get(status, "")
+    if apply_run and tail:
+        tail = f" — the run is unfinished: continue it with {_cp_check_command(doc)}"
+    applied_text = ""
+    if applied is not None and applied.get("engine"):
+        engine = applied["engine"]
+        applied_text = (f" · applied: {len(engine.get('changed') or []):,} object(s) updated, "
+                        f"{engine.get('confirmed', 0):,} newly confirmed"
+                        if engine.get("status") in ("saved", "up-to-date", "nothing-to-apply")
+                        else f" · NOT applied ({engine.get('status')})")
+    return (f"🔎 check_photos {doc.get('scope_text') or doc.get('scope')}: {len(rows):,} object(s) — "
+            f"{_cp_line(rows) or 'nothing'}{tail}{applied_text}")
+
+
+def _cp_report_lines(ctx):
+    """The run's text report (printed, and saved as report.txt): state, verdicts, per account × category and per account
+    × category × approach (the deciding look of each object), account mismatches, the LOUD not-in-Google-Photos block
+    and the recent ones (Step 9b), the IMP-C27 inconsistencies, stale photo_ids, errors, the outliers, the failed list,
+    the apply section, the next command and the outputs."""
+    doc, rows, run_dir = ctx["doc"], ctx["rows"], ctx["run_dir"]
+    progress = ctx["progress"] or {}
+    lines = [f"=== CHECK PHOTOS ({'APPLY' if ctx['apply'] else 'dry-run'}) — scope: "
+             f"{doc.get('scope_text') or doc.get('scope')}{' · account ' + doc['account'] if doc.get('account') else ''}"
+             f" · approaches {doc.get('approaches')} — {len(rows):,} object(s) — run {os.path.basename(run_dir)} ==="]
+    checked = sum(1 for r in rows if r["status"] != "unchecked")
+    if progress.get("state") == "complete":
+        lines.append(f"State: complete — {checked:,} of {len(rows):,} object(s) checked")
+    else:
+        how = (f"continue the check with: {_cp_check_command(doc)}" if ctx.get("apply_run")
+               else "re-run the same command to continue (--recheck starts afresh)")
+        lines.append(f"State: {ctx['status']} ({progress.get('reason') or 'not finished'}) — {checked:,} of "
+                     f"{len(rows):,} object(s) checked; {how}")
+        if progress.get("reason") == "throttled":   # [IMP-C25 thfix] the child's line, kept in report.txt
+            import mainfetch  # THROTTLE_RETRY_MIN — the advice's one source; importing it has no side effects
+            nxt = (f"continue the check with: {_cp_check_command(doc)}" if ctx.get("apply_run")
+                   else "re-run the same command: it continues where it stopped")
+            lines.append(f"  Google Photos was throttled: its search answered nothing even for an item known to be "
+                         f"there, or Google showed another page than Google Photos (never a sign-out, never a 'not "
+                         f"found') — nothing was recorded for the object it stopped at; wait about "
+                         f"{mainfetch.THROTTLE_RETRY_MIN} minutes, then {nxt}.")
+    lines.append(f"Verdicts: {_cp_line(rows) or 'none yet'}")
+    groups = {}
+    for row in rows:
+        groups.setdefault(f"{row['account']}/{row['category']}", []).append(row)
+    lines.append("Per account/category:")
+    lines.extend(f"  {key}: {len(members):,} — {_cp_line(members)}" for key, members in sorted(groups.items()))
+    lines.append("Per account/category/approach (the look that decided each object):")
+    for key, members in sorted(groups.items()):
+        per = {}
+        for row in members:
+            for approach, verdict in ((row["decisive"] or {}).get("per_approach") or {}).items():
+                per.setdefault(approach, {}).setdefault(verdict["outcome"], 0)
+                per[approach][verdict["outcome"]] += 1
+        for approach in [a for a in mvcommon.GP_APPROACHES if a in per]:
+            counts = " · ".join(f"{o} {n:,}" for o, n in per[approach].items())
+            lines.append(f"  {key} · {approach}: {counts}")
+    mismatch = [r for r in rows if r["mismatch"]]
+    if mismatch:
+        lines.append(f"Account mismatch: {len(mismatch):,} object(s) found in another account than their home "
+                     f"(listed in outliers.csv; --apply records where they are — fetch then goes there):")
+        lines.extend(f"    {r['manual_id']} · {r['label']} — in '{r['account']}', home '{r['home']}'" for r in mismatch)
+    loud = [r for r in rows if r["status"] in _MP_LOSS]
+    if loud:
+        lines.append(f"⚠️⚠️⚠️  NOT IN GOOGLE PHOTOS — POSSIBLE LOSS (IMP-C27): {len(loud):,} object(s) — the local copy "
+                     f"of an archived entry is a dummy  ⚠️⚠️⚠️")
+        for state in _MP_LOSS:
+            n = sum(1 for r in loud if r["status"] == state)
+            if n:
+                lines.append(f"  {state}: {n:,} — {_CP_LOSS_TEXT[state]}")
+        if ctx["devices"] is None:
+            lines.append("  (no phone was checked — add --devices to see which of these are still on a phone or were "
+                         "freed from one)")
+        for row in loud:
+            lines.append(_mp_nowhere_line(row) + (f" · {row['note']}" if row["note"] else ""))
+    recent = [r for r in rows if r["status"] == "not-backed-up-yet"]
+    if recent:
+        lines.append(f"Not backed up yet (pushed in the last {MAP_RECENT_DAYS} days — not a problem yet): "
+                     f"{len(recent):,} object(s)")
+        lines.extend(_mp_nowhere_line(row) for row in recent)
+    unverified = [r for r in rows if r.get("unverified")]
+    if unverified:   # [IMP-C25 thfix] mainfetch._zero_check found no item to test the search with
+        lines.append(f"Unverified: {len(unverified):,} object(s) of the above — their searches answered nothing and no "
+                     f"item known to be in the account (none found by a search yet, no crawl inventory, no confirmed "
+                     f"record) could show that the search was answering: nothing is booked for them (no failed-list row); "
+                     f"a later run that has such an item checks them again")
+    if ctx["devices"] is not None:
+        lines.extend(_mp_device_lines(ctx["devices"]))
+    bad = [r for r in rows if r["status"] == "inconsistent"]
+    if bad:
+        lines.append(f"Inconsistent (IMP-C27): {len(bad):,} object(s) — Google Photos holds a partial or "
+                     f"non-original copy; a restore would fail its SHA-256 check (never confirmed):")
+        lines.extend(f"    {r['manual_id']} · {r['label']} — in '{r['account']}'" for r in bad)
+    ambiguous = [r for r in rows if r["status"] == "ambiguous"]
+    if ambiguous:
+        lines.append(f"Ambiguous: {len(ambiguous):,} object(s) — candidates that cannot be told apart (an apply puts "
+                     f"them on the failed list: pick the right item with python main.py resolve_photos failed)")
+    errors = [r for r in rows if r["status"] == "error"]
+    if errors:
+        why = _cp_counts(errors, lambda r: r["error"] or "error")
+        retry = ("check them again by id: python main.py check_photos <id>" if progress.get("state") == "complete" else
+                 f"continue the check with: {_cp_check_command(doc)} — it retries them" if ctx.get("apply_run") else
+                 "re-running the same command continues this run and retries them")
+        lines.append(f"Not checked: {len(errors):,} object(s) — {' · '.join(f'{k} {n}' for k, n in sorted(why.items()))}"
+                     f" ({retry})")
+        lines.extend(f"    {r['manual_id']} · {r['label']} — {r['error']}" for r in errors)
+    outliers = ctx["outliers"]
+    if outliers:
+        kinds = _cp_counts(outliers, lambda o: o[1])
+        lines.append(f"Outliers (OD-7 — for your review): {len(outliers):,} row(s) in outliers.csv — "
+                     + " · ".join(f"{k} {kinds[k]:,}" for k in CHECK_OUTLIERS if kinds.get(k)))
+    failed = [r for r in rows if r["reason"]]
+    if failed:
+        reasons = _cp_counts(failed, lambda r: r["reason"])
+        applied = ctx["applied"]
+        where = ("would go to the failed list with --apply / --apply-run" if applied is None else
+                 "NOT recorded: the apply stopped" if applied.get("error") else "on the failed list")
+        lines.append(f"Failed list (P-18): {len(failed):,} object(s) {where} — "
+                     + " · ".join(f"{k} {n:,}" for k, n in sorted(reasons.items())))
+    lines.extend(_cp_apply_lines(ctx))
+    lines.append(f"Outputs: {run_dir} — {', '.join(ctx['files'])}")
+    return lines
+
+
+def _cp_apply_lines(ctx):
+    """The report's apply section — what --apply / --apply-run recorded — or the next command of a dry run."""
+    applied, doc, run_dir = ctx["applied"], ctx["doc"], ctx["run_dir"]
+    if applied is None:
+        if ctx["status"] == "ok":
+            account = f" --account {doc['account']}" if doc.get("account") else ""
+            return [f'Next: review this report and outliers.csv, then: python main.py check_photos '
+                    f'{doc.get("scope_text") or doc.get("scope")}{account} --apply-run "{run_dir}"']
+        return []
+    out = []
+    if applied.get("error"):
+        return [applied["error"]]
+    out.append(f"Recorded: learned records {applied['learned'][0]:,} new ({applied['learned'][1]:,} already on record) · "
+               f"failed list {applied['failed'][0]:,} new ({applied['failed'][1]:,} already listed)")
+    out.append(_mp_engine_line(applied["engine"], "updated"))
+    out.extend(f"    conflict: {c['manual_id']} · {c['label']} · {c['account'] or 'block'} — {c['code']}"
+               for c in applied["engine"].get("conflicts") or [])
+    csv_state = applied.get("failed_csv")
+    if not isinstance(csv_state, dict):
+        pass
+    elif "warning" in csv_state:
+        out.append(csv_state["warning"])
+    elif csv_state.get("kept") and csv_state.get("edited_rows") is None:
+        out.append("  failed_objects.csv: kept — it no longer reads as the failed list (left as is)")
+    elif csv_state.get("kept"):
+        out.append(f"  failed_objects.csv: kept — it holds {csv_state['edited_rows']} edited row(s); import them with "
+                   f"python main.py map_photos <scope> --resolutions \"{csv_state['path']}\"")
+    else:
+        out.append(f"  failed_objects.csv: regenerated — {csv_state['rows']:,} row(s)")
+    return out
+
+
+def _cp_finish(ctx):
+    """Write report.txt and outliers.csv (UTF-8 with BOM, CRLF — Excel-friendly) into the run directory, print the report
+    and the run's one summary line. Raises OSError when a file cannot be written (cmd_check_photos turns it into one
+    line)."""
+    run_dir = ctx["run_dir"]
+    ctx["outliers"] = _cp_outliers(ctx["rows"], ctx["doc"].get("approaches"))
+    ctx["files"] = ["report.txt", "results.jsonl", "outliers.csv", "run.json", "progress.json"] + (
+        ["applied.json"] if ctx["applied"] is not None else [])
+    _mp_write_csv(os.path.join(run_dir, "outliers.csv"), _CP_OUTLIER_COLUMNS,
+                  [_cp_outlier_row(row, kind, detail) for row, kind, detail in ctx["outliers"]])
+    lines = _cp_report_lines(ctx)
+    _mp_write_text(os.path.join(run_dir, "report.txt"), "\n".join(lines) + "\n")
+    print("\n".join(lines))
+    print(_cp_summary_line(ctx["doc"], ctx["rows"], ctx["status"], ctx["applied"], ctx.get("apply_run", False)))
+
+
+# ------------------------------------------------------------------ the apply (--apply · --apply-run)
+_CP_STAGE_OF = {approach: stage for stage, approach in mvcommon.GP_STAGES.items()}   # approach -> learned approach.tried
+
+
+def _cp_records(doc, rows):
+    """The P-10 learned records an apply appends (PLAN Step 13) — validated by mvcommon's own normalizer:
+      * a CONFIRMED object (pinned exactly-one, quality not known bad): its item in the account it was pinned in —
+        photo_id, the item's facts, proof (dedupkey | filename: P-5 — a mapped cloud key never made a content proof),
+        source `confirm` for the pending scope (P-11's post-backup confirmation) else `check`, the pinning stage's
+        verdict, same-bytes alternates, the quality flags read — with the time of the check (verified_at); plus one
+        verdict-only record per OTHER stage evaluated there (approach.ok / approach.failed — PLAN Step 13: `all`
+        records them all). No verdict for a stage that errored (no verdict) or that answered exactly-one with ANOTHER
+        item (the approaches-disagree outlier: the user reviews it; the store gets no contradicting `ok`);
+      * every photo_id a look found gone (RPC and its own page agree) — a stale record in that account (it supersedes
+        what named it: the copy is no longer confirmed).
+    An inconsistent, ambiguous, not-found or unchecked object adds no learned record (no block is created for an
+    unconfirmed object — its row goes to the failed list)."""
+    source = doc.get("source") if doc.get("source") in ("check", "confirm") else "check"
+    records = []
+    for row in rows:
+        base = {"manual_id": row["manual_id"], "label": row["label"], "sha256": row["sha256"], "source": source}
+        found = row["found"]
+        if found is not None and row["status"] == "confirmed":
+            item = found.get("record") or {}
+            q = row["quality"]
+            records.append(mvcommon._normalize_learned(dict(
+                base, account=found["account"], at=found["at"], photo_id=found["photo_id"],
+                taken_ms=item.get("taken_ms"), tz_offset_ms=item.get("tz_offset_ms"), upload_ms=item.get("upload_ms"),
+                dedup_key=item.get("dedup_key"), gp_filename=item.get("filename"), width=item.get("width"),
+                height=item.get("height"), proof=found["proof"],
+                approach={"tried": found["stage"], "outcome": "exactly-one", "n": found["n"], "via": found["via"]},
+                alternates=list(found.get("alternates") or []) or None,
+                original_quality=q.get("original_quality"), partial_upload=q.get("partial_upload")), found["account"]))
+            via, picks = found.get("per_approach_via") or {}, found.get("per_approach_pick") or {}
+            same = {None, found["photo_id"], *(found.get("alternates") or [])}     # the item, or a same-bytes copy
+            for approach, verdict in (found.get("per_approach") or {}).items():
+                if (approach == found["approach"] or verdict["outcome"] == "error" or approach not in _CP_STAGE_OF
+                        or (verdict["outcome"] == "exactly-one" and picks.get(approach) not in same)):
+                    continue
+                records.append(mvcommon._normalize_learned(dict(
+                    base, account=found["account"], at=found["at"],
+                    approach={"tried": _CP_STAGE_OF[approach], "outcome": verdict["outcome"], "n": verdict["n"],
+                              "via": via.get(approach)}), found["account"]))
+        for line in [row["routed_line"]] + list(row["cross"].values()):
+            for photo_id in (line or {}).get("stale") or []:
+                records.append(mvcommon._normalize_learned(dict(
+                    base, account=line["account"], at=line["at"], photo_id=photo_id, stale=True,
+                    approach={"tried": "s0_photo_id", "outcome": "not-found", "n": 0, "via": "rpc"}), line["account"]))
+    return records
+
+
+def _cp_failed_records(doc, rows):
+    """The P-18 failed-list rows of an apply: every object with a reason (_cp_settle) — run, the account it was checked
+    in (pinned in, for an inconsistent one), category, object, uploaded name, expected_taken_local, tried (every stage's
+    verdict of its deciding look — exactly the {approach, outcome, n} entries locate_object gives), the candidates seen
+    (the pinned item first for an inconsistent one; as many as the locator verifies in one stage) and the reason.
+    Validated by mvcommon's own normalizer."""
+    import mainfetch  # LOCATE_MAX_CANDIDATES — the locator's own cap; importing it has no side effects
+    out = []
+    for row in rows:
+        if not row["reason"]:
+            continue
+        line = row["decisive"] or {}
+        tried = [{"approach": a, "outcome": v["outcome"], "n": v["n"]} for a, v in (line.get("per_approach") or {}).items()]
+        pool = ([row["found"]["photo_id"]] if row["status"] == "inconsistent" and row["found"] else []) + list(
+            line.get("candidates") or [])
+        candidates = [p for p in dict.fromkeys(pool) if isinstance(p, str) and gpweb.MEDIA_KEY_RE.match(p)]
+        out.append(mvcommon._normalize_failed({
+            "run": doc.get("run"), "account": row["account"], "category": row["category"], "manual_id": row["manual_id"],
+            "label": row["label"], "sha256": row["sha256"], "uploaded_name": row["uploaded_name"],
+            "expected_taken_local": line.get("expected_taken_local"), "tried": tried or None,
+            "candidates": candidates[:mainfetch.LOCATE_MAX_CANDIDATES] or None, "reason": row["reason"]}))
+    return out
+
+
+def _cp_apply(run_dir, doc, rows):
+    """Record what a run proved (PLAN Step 13 --apply / --apply-run): the learned records (_cp_records) appended to the
+    per-account sidecars and the failed rows (_cp_failed_records) to the failed list — each only when not on record yet
+    (map_photos' _mp_append_new / _mp_append_failed: re-applying a run appends nothing twice) — then the apply engine (the
+    only writer of `gphotos` blocks) over the WHOLE sidecar, which re-checks every pin (a run older than a re-split cannot
+    corrupt a node: its records are orphans), and failed_objects.csv per P-18. applied.json in the run directory keeps the
+    counts. -> {learned: (new, known), failed: (new, known), engine, failed_csv, error}."""
+    summary = {"learned": (0, 0), "failed": (0, 0), "engine": None, "failed_csv": None, "error": None}
+    try:
+        records, failed = _cp_records(doc, rows), _cp_failed_records(doc, rows)
+        summary["learned"] = _mp_append_new(records, mvcommon.read_learned(),
+                                            lambda r: mvcommon.append_learned(r["account"], r))
+        summary["failed"] = _mp_append_failed(failed)
+        learned = mvcommon.read_learned()
+    except (OSError, ValueError) as e:
+        summary["error"] = (f"❌ check_photos: the apply stopped: {_gp_line(e)} — the library was not changed; re-run the "
+                            f"apply (records already appended are not appended twice)")
+        print(summary["error"])
+        return summary
+    summary["engine"] = gphotos_apply(learned, capture=True, dry_run=False)
+    summary["failed_csv"] = _mp_refresh_failed_csv(None)
+    engine = summary["engine"]
+    try:
+        _cp_write_json(os.path.join(run_dir, "applied.json"), {
+            "v": 1, "at": _mp_iso(mvcommon._now_utc()), "learned": {"new": summary["learned"][0],
+                                                                    "known": summary["learned"][1]},
+            "failed": {"new": summary["failed"][0], "known": summary["failed"][1]},
+            "engine": {"status": engine.get("status"), "changed": len(engine.get("changed") or []),
+                       "confirmed": engine.get("confirmed", 0), "conflicts": len(engine.get("conflicts") or []),
+                       "orphans": len(engine.get("orphans") or [])}})
+    except (OSError, TypeError, ValueError) as e:
+        print(f"   ⚠️  applied.json not written ({_gp_line(e)}) — the apply itself stands.")
+    return summary
+
+
+def _cp_canonical(library, scope, now):
+    """A scope as runs record it (_cp_resolve's canonical: series -> its show folder), or the scope as given when it no
+    longer resolves (its run can still be applied)."""
+    try:
+        return _cp_resolve(library, scope, None, now)["canonical"]
+    except ValueError:
+        return scope
+
+
+def _cp_apply_run(scope, account, approaches, which, devices):
+    """`check_photos <scope> --apply-run <run dir | latest>` (PLAN Step 13): apply a REVIEWED run's results without
+    searching again — no Chrome, no lock (the apply engine guards the library itself, OD-2). The run's recorded scope
+    (and --account; --approaches when given) must equal the given one, else the apply is refused; `latest` = the newest
+    COMPLETED run of that scope. An explicit run directory may be an unfinished run: what it settled is applied, the
+    objects it has not finished stay unchecked (no record, no failed row). The report and outliers.csv are written again
+    with the apply's section. -> the command's result (status ok | error)."""
+    now = mvcommon._now_utc()
+    library = load_library()
+    canonical = _cp_canonical(library, scope, now)
+    where = f" · account {account}" if account else ""
+    print(f"=== CHECK PHOTOS (APPLY-RUN {which}) — scope: {scope}{where} — no search, no Chrome ===")
+    if which == "latest":
+        runs = [(d, doc, prog) for d, doc, prog in _cp_runs() if _cp_matches(doc, canonical, account, approaches)]
+        found = next(((d, doc, prog) for d, doc, prog in runs if (prog or {}).get("state") == "complete"), None)
+        if found is None:
+            newest = (f" — its newest run {runs[0][0]} is unfinished: continue it with "
+                      f"{_cp_check_command(runs[0][1])}, or apply it by naming that directory" if runs else
+                      f" — run `python main.py check_photos {scope}{' --account ' + account if account else ''}` first")
+            print(f"❌ check_photos: no completed run of scope {scope!r}{where}{newest}.")
+            return {"status": "error", "run_dir": None}
+        run_dir, doc, progress = found
+    else:
+        run_dir = os.path.abspath(which)
+        doc = _cp_read_json(os.path.join(run_dir, "run.json"))
+        if doc is None or doc.get("v") != CHECK_RUN_VERSION or not isinstance(doc.get("objects"), list):
+            print(f"❌ check_photos: {run_dir} is not a check_photos run directory (no readable run.json).")
+            return {"status": "error", "run_dir": None}
+        if not _cp_matches(doc, canonical, account, approaches):
+            print(f"❌ check_photos: refused — that run checked scope {doc.get('scope_text') or doc.get('scope')!r}"
+                  f"{' · account ' + doc['account'] if doc.get('account') else ''} · approaches "
+                  f"{doc.get('approaches')}, not {scope!r}{where}{' · approaches ' + approaches if approaches else ''}. "
+                  f"Apply it with its own scope.")
+            return {"status": "error", "run_dir": run_dir}
+        progress = _cp_read_json(os.path.join(run_dir, "progress.json"))
+        if (progress or {}).get("state") != "complete":
+            print(f"  ⚠️  That run is unfinished ({(progress or {}).get('reason') or 'not finished'}) — what it settled is "
+                  f"applied; the objects it has not finished stay unchecked.")
+    print(f"  Run: {run_dir}")
+    complete = (progress or {}).get("state") == "complete"
+    rows = _cp_rows(doc, _cp_read_results(run_dir), library, complete)
+    summary = _cp_settle(library, rows, devices)
+    applied = _cp_apply(run_dir, doc, rows)
+    ctx = {"doc": doc, "rows": rows, "run_dir": run_dir, "progress": progress, "status": "ok" if complete else "partial",
+           "apply": True, "apply_run": True, "devices": summary, "applied": applied}
+    try:
+        _cp_finish(ctx)
+    except OSError as e:
+        print(f"❌ check_photos: the report could not be written to {run_dir} ({_gp_line(e)}) — what the apply recorded "
+              f"stays on record.")
+    failed = applied["error"] or (applied["engine"] or {}).get("status") in ("error", "aborted")
+    return {"status": "error" if failed else "ok", "run_dir": run_dir, "rows": rows, "applied": applied,
+            "outliers": ctx.get("outliers")}
+
+
+def _cp_after_child(run_dir, doc, library, status, progress, apply, devices):
+    """main's half after the child has run: the verdicts (_cp_rows + _cp_settle), the apply when asked — after any run
+    but one the user interrupted (Ctrl+C: nothing is applied; re-running resumes and then applies) — the report and the
+    outlier list. -> the command's result."""
+    rows = _cp_rows(doc, _cp_read_results(run_dir), library, (progress or {}).get("state") == "complete")
+    summary = _cp_settle(library, rows, devices)
+    applied = None
+    if apply and status == "interrupted":
+        print("  ⏸️ Interrupted — nothing was applied; re-run the same command to continue (it applies at its end).")
+    elif apply:
+        applied = _cp_apply(run_dir, doc, rows)
+        if applied["error"] or (applied["engine"] or {}).get("status") in ("error", "aborted"):
+            status = "error"
+    ctx = {"doc": doc, "rows": rows, "run_dir": run_dir, "progress": progress, "status": status, "apply": apply,
+           "devices": summary, "applied": applied}
+    try:
+        _cp_finish(ctx)
+    except OSError as e:
+        print(f"❌ check_photos: the report could not be written to {run_dir} ({_gp_line(e)}) — close outliers.csv if "
+              f"it is open (e.g. in Excel); the results are kept in results.jsonl.")
+        return {"status": "error", "run_dir": run_dir, "rows": rows}
+    return {"status": status, "run_dir": run_dir, "rows": rows, "outliers": ctx["outliers"], "devices": summary,
+            "applied": applied, "progress": progress}
+
+
+def cmd_check_photos(scope, approaches=None, account=None, recheck=False, apply=False, apply_run=None, limit=None,
+                     pace=None, max_minutes=None, devices=False, list_only=False, min_age_h=None):
+    """`check_photos` (PLAN Step 13) — download-free verification of uploaded objects in Google Photos (see the section
+    comment above). A DRY RUN by default: it writes only its run directory.
+
+    scope        an item id (an alias resolves) · a season_map id · series:<season id | episode id | show folder> · an
+                 id prefix · account:<a> · pending (pushed, not yet confirmed) · hinted (the user's resolutions) · all —
+                 always printed before anything runs
+    approaches   best (default: stop at the first stage that pins the object) | all (every stage — approach.ok /
+                 approach.failed, the OD-7 sweep)
+    account      only the objects checked first in that account (their routing)
+    recheck      start a new run instead of continuing the newest unfinished run of the same scope / account /
+                 approaches (a complete run is never continued)
+    apply        run the check, then record what it proved (unless it was interrupted): learned records (source check,
+                 `confirm` for pending), stale photo_ids, the failed list (P-18 — only an apply writes it), the apply
+                 engine (the only writer of `gphotos` blocks; it re-checks every pin), failed_objects.csv, applied.json
+    apply_run    a run directory or `latest` (the newest COMPLETED run of the scope): apply that reviewed run without
+                 searching again — its recorded scope must be this one, else refused (no Chrome, no lock)
+    limit · max_minutes · pace   bound an invocation (objects checked in their own account · minutes) / the seconds
+                 between two objects — a bounded run is partial: the same command continues it
+    min_age_h    look up only the objects pushed at least that many hours ago (their capture's push time; no push
+                 time counts as old): the younger ones get one line and nothing else — no verdict row, no failed row,
+                 no learned record (the auto-confirm passes AUTO_CONFIRM_MIN_AGE_H: never the push that just ran).
+                 Part of the resume key: a run continues only a run made with the same --min-age-h (or none)
+    devices      Step 9b's phone opt-in: the read-only device check refines an OLD object found in no account
+    list_only    `pending --list`: the pending objects, offline (no Chrome, nothing written)
+
+    -> {status, run_dir, rows (the verdict rows, CHECK_STATES), outliers, devices, applied (the apply's summary or
+    None), progress}. status: ok (a complete run) · partial (--limit / --max-minutes: re-run to continue) · stopped
+    (signed out, throttled, Chrome, the error breaker, the lock taken over …: re-run to continue once fixed) · interrupted
+    (Ctrl+C: nothing applied) · refused (the fetch lock is held: nothing ran) · error (a bad scope, the child could
+    not run, a report or the apply failed). main.py's dispatcher exits 1 on CHECK_FAILED_STATUSES. --apply-run ->
+    {status ok | error, run_dir, rows, applied, outliers}; --list -> {status ok, objects, routes}."""
+    if list_only:
+        return _cp_pending_list(account)
+    if apply_run is not None:
+        return _cp_apply_run(scope, account, approaches, apply_run, devices)
+    now = mvcommon._now_utc()
+    library = load_library()
+    approaches = approaches or "best"
+    print(f"=== CHECK PHOTOS ({'APPLY' if apply else 'dry-run'}) — scope: {scope}"
+          f"{' · account ' + account if account else ''} · approaches {approaches} — download-free ===")
+    try:
+        resolved = _cp_resolve(library, scope, account, now, min_age_h)
+    except ValueError as e:
+        print(f"❌ check_photos: {e}")
+        return {"status": "error", "run_dir": None}
+    for line in _cp_scope_lines(resolved, library):
+        print(line)
+    if not resolved["objects"]:
+        print("  Nothing to check.")
+        return {"status": "ok", "run_dir": None}
+    found = None if recheck else _cp_unfinished(resolved["canonical"], account, approaches, min_age_h)
+    if found is not None:
+        run_dir, doc, _progress = found
+        done = {(r.get("manual_id"), r.get("label"), r.get("sha256")) for r in _cp_read_results(run_dir)
+                if r.get("kind") == "check" and r.get("pass") == "routed" and r.get("outcome") != "error"}
+        ran = {(o["manual_id"], o["label"], o["sha256"]) for o in doc["objects"]}
+        now_keys = {(o["manual_id"], o["label"], o["sha256"]) for o in resolved["objects"]}
+        print(f"  ↻ Continuing the unfinished run {os.path.basename(run_dir)} (begun {doc.get('created_at')}): "
+              f"{len(done & ran):,} of {len(ran):,} object(s) checked already — --recheck starts afresh")
+        if now_keys - ran:
+            print(f"  {len(now_keys - ran):,} object(s) of the scope joined since that run began — the next run checks "
+                  f"them (or now: --recheck)")
+    else:
+        run_dir, doc = _cp_new_run(resolved, scope, account, approaches, now, min_age_h)
+        print(f"  Run: {run_dir}")
+    try:
+        code, interrupted = _cp_spawn(_cp_child_argv(run_dir, limit, max_minutes, pace))
+    except OSError as e:
+        print(f"❌ check_photos: the check could not be started ({_gp_line(e)}).")
+        return {"status": "error", "run_dir": run_dir}
+    progress = _cp_read_json(os.path.join(run_dir, "progress.json"))
+    status = _cp_status(code, interrupted, progress)
+    if status == "refused":
+        print("❌ check_photos: a fetch, a crawl or the profile warm-up holds the fetch session lock — nothing was "
+              "checked; re-run when it has finished.")
+        return {"status": status, "run_dir": run_dir, "progress": progress}
+    if status == "error":
+        print(f"❌ check_photos: the check could not run (exit code {code}) — see the lines above.")
+        return {"status": status, "run_dir": run_dir, "progress": progress}
+    return _cp_after_child(run_dir, doc, library, status, progress, apply, devices)
+
+
+# ==========================================
+#   GOOGLE PHOTOS IDENTITY — resolve_photos: THE USER RESOLVES THE FAILED LIST (IMP-C25 Step 14)
+# ==========================================
+# docs/feature-fetch-datetime/PLAN.md Step 14 (OD-14 ruling: CLI only, interactive) + follow-up b. Per unresolved object
+# of the failed list (P-18), grouped by account — one Chrome session per account under the fetch lock — its
+# identification block (mainfetch.identification_lines), the session's Photos tab at its best start
+# (mainfetch.open_best_start) and the question  [p]aste photo URL | [s]earch term | [n]ot uploaded | s[k]ip | [q]uit:
+#   paste         the item is read and checked download-free (mainfetch.verify_item — the stages' own P-5 check): its
+#                 dedupKey is the object's content key (proof dedupkey) or, without one, its name is the exact uploaded
+#                 name (proof filename) -> a learned record, source `check` (the apply may confirm it). A mismatch that
+#                 proves nothing (another name, a record that does not say) -> "accept as a manual match (a later fetch
+#                 verifies it by SHA-256)?" -> proof and source `manual` (never confirmed by itself;
+#                 `fetch <id> --manual` opens it and keeps its download only when the SHA-256 matches). PROVEN other
+#                 bytes (another content key) -> refused: a restore could never use them;
+#   search        the term becomes the object's search_override (source manual, P-10) and stage S3u alone tries it at
+#                 once, verified like any stage — a verified find adds a `check` record;
+#   not uploaded  the IMP-C27 list: the user's word that it never reached Google Photos;
+#   skip / quit   nothing recorded — the object comes back next time.
+# Every answer is written at once — to the learned sidecar (P-10) and the answer log resolved.jsonl (a resumed session
+# skips what was answered) — so a quit or a crash keeps it. Only at the end, Chrome closed and the lock released, does
+# the library change: the apply engine's dry-run summary over the WHOLE sidecar, then "Apply these N changes to the
+# library? [y/N]". download-lost objects (their item WAS found; the transfer broke twice — Step 10) are not identified
+# again: listed with their fetch commands and offered a re-fetch at the end. Ctrl+C stops at once; nothing is applied.
+
+RESOLVE_USAGE = "resolve_photos [failed|<csv>] [--account movies|tv|anime|others] [--id <manual_id>]"
+RESOLVE_PROMPT = "   [p]aste photo URL | [s]earch term | [n]ot uploaded | s[k]ip | [q]uit: "
+RESOLVE_FAILED_STATUSES = ("refused", "error", "interrupted")   # main's dispatcher exits 1 on these
+
+
+def parse_resolve_photos_args(tokens):
+    """`resolve_photos [failed|<csv>] [--account a] [--id <manual_id>]` -> {source, account, manual_id}: source "failed"
+    (the default: the failed list) or the path of a failed_objects.csv / resolutions_todo.csv to walk instead; --id an
+    id (an alias resolves), a season id or any id prefix. Raises ValueError naming the problem."""
+    opts = {"source": None, "account": None, "manual_id": None}
+    rest, i = list(tokens), 0
+    while i < len(rest):
+        token = rest[i]
+        if token in ("--account", "--id"):
+            value = rest[i + 1].strip() if i + 1 < len(rest) else ""
+            if not value or value.startswith("--"):
+                raise ValueError(f"{token} needs a value")
+            if token == "--account" and value.lower() not in mvcommon.GP_ACCOUNTS:
+                raise ValueError(f"--account must be one of {', '.join(mvcommon.GP_ACCOUNTS)}")
+            opts["account" if token == "--account" else "manual_id"] = value.lower() if token == "--account" else value
+            i += 2
+            continue
+        if token.startswith("--"):
+            raise ValueError(f"unknown option {token}")
+        if opts["source"] is not None:
+            raise ValueError("one source only: failed, or the path of a failed_objects.csv / resolutions_todo.csv")
+        opts["source"] = token
+        i += 1
+    opts["source"] = opts["source"] or "failed"
+    return opts
+
+
+def _rp_stdin_is_tty():
+    """The keyboard is a terminal (the OD-14 ruling: resolve_photos is interactive — never a pipe or the web UI)."""
+    try:
+        return sys.stdin.isatty()
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def _rp_ask(prompt):
+    """One answer from the keyboard, stripped — None at the end of the input (Ctrl+Z / Ctrl+D: quit, or no)."""
+    try:
+        return input(prompt).strip()
+    except EOFError:
+        print()
+        return None
+
+
+def _rp_key(obj):
+    return obj["manual_id"], obj["label"], obj["sha256"]
+
+
+def _rp_id_matches(library, wanted, manual_id):
+    """--id: the id itself, the primary an alias names, or an id prefix (a season id selects its episodes)."""
+    if wanted is None:
+        return True
+    real, _entry = _gp_resolve(library, wanted)
+    return manual_id in (wanted, real) or manual_id.startswith(wanted)
+
+
+def _rp_csv_rows(library, path, records):
+    """`resolve_photos <csv>`: every object row of the CSV (mvcommon.read_failed_csv_rows), matched to its library
+    object by manual_id (an alias resolves) and sha256 (else its `object` label) -> ([(record, object)], problems). The
+    record is the object's newest failed-list row (for what was tried and seen), else one made from the CSV row; the
+    CSV's account wins (the user may have changed it). An object gone from the library is a problem line."""
+    rows, errors = mvcommon.read_failed_csv_rows(path)
+    problems = [f"line {e['line']} · {e['manual_id'] or '?'} — {e['error']}" for e in errors]
+    newest = {}
+    for rec in records:
+        newest[(rec["manual_id"], rec.get("sha256") or "label:" + rec.get("label", ""))] = rec
+    out = []
+    for row in rows:
+        real, entry = _gp_resolve(library, row["manual_id"])
+        objs = list(mvcommon.iter_entry_objects(real, entry)) if entry is not None else []
+        obj = next((o for o in objs if (o["sha256"] == row["sha256"] if row.get("sha256")
+                                        else o["label"] == row.get("object"))), None)
+        if obj is None or not obj["sha256"]:
+            problems.append(f"line {row['line']} · {row['manual_id']} — not in the library any more (re-split, "
+                            f"re-mastered or removed?)")
+            continue
+        held = newest.get((obj["manual_id"], obj["sha256"])) or newest.get((obj["manual_id"], "label:" + obj["label"]))
+        rec = dict(held) if held else {"manual_id": obj["manual_id"], "label": obj["label"], "sha256": obj["sha256"],
+                                       "reason": row.get("status") or "listed",
+                                       "uploaded_name": row.get("uploaded_name"),
+                                       "expected_taken_local": row.get("expected_taken_local")}
+        rec["account"] = row["account"]
+        out.append((rec, obj))
+    return out, problems
+
+
+def _rp_rows(library, source, account, manual_id):
+    """The objects to resolve -> {rows: [(record, object)] to walk, lost: the download-lost ones, answered: how many
+    the answer log already settled, confirmed: how many are confirmed by now, problems: lines}. source "failed" = the
+    failed list against the library (mvcommon.failed_objects: newest row per object, confirmed and vanished objects
+    left out), else a CSV path. An object counts as answered when the answer log holds an answer for it (same
+    account, object and bytes) given at or after its newest failed row. Raises OSError / ValueError for a CSV that
+    cannot be read."""
+    records = mvcommon.read_failed()
+    out = {"rows": [], "lost": [], "answered": 0, "confirmed": 0, "problems": []}
+    if source == "failed":
+        listed = mvcommon.failed_objects(library, records)["rows"]
+    else:
+        listed, out["problems"] = _rp_csv_rows(library, source, records)
+    answers = {}
+    for answer in mvcommon.read_resolved():
+        answers[(answer["account"], answer["manual_id"], answer["sha256"])] = answer["at"]
+    seen = set()
+    for rec, obj in listed:
+        if (account and rec["account"] != account) or not _rp_id_matches(library, manual_id, obj["manual_id"]):
+            continue
+        key = (rec["account"],) + _rp_key(obj)
+        if key in seen:
+            continue
+        seen.add(key)
+        if obj["cloud_state"] == "confirmed":
+            out["confirmed"] += 1
+            continue
+        when = answers.get((rec["account"], obj["manual_id"], obj["sha256"]))
+        if when is not None and mvcommon._at_ts(when) >= mvcommon._at_ts(rec.get("at")):
+            out["answered"] += 1
+            continue
+        out["lost" if rec.get("reason") == "download-lost" else "rows"].append((rec, obj))
+    return out
+
+
+def _rp_size(obj, library):
+    """The object's exact size: its trusted block's or capture's, else a whole file's tech_spec size — or None."""
+    for facts in (obj.get("block"), obj.get("capture")):
+        if isinstance(facts, dict) and _gp_is_int(facts.get("size_bytes")) and facts["size_bytes"] > 0:
+            return facts["size_bytes"]
+    entry = library.get(obj["manual_id"]) if obj["kind"] == "whole" else None
+    size = ((entry or {}).get("tech_spec") or {}).get("size_bytes")
+    return size if _gp_is_int(size) and size > 0 else None
+
+
+def _rp_fetch_command(obj):
+    """The fetch that re-fetches one object: its owner, with --fetchExtras for an extra."""
+    extra = " --fetchExtras" if obj["kind"] in ("extra_whole", "extra_chunk") else ""
+    return f"python main.py fetch {obj['manual_id']}{extra}"
+
+
+def _rp_learned(obj, item, photo_id, proof, source, approach=None):
+    """The P-10 learned record of one answer naming an item (validated when appended)."""
+    item = item or {}
+    return {"manual_id": obj["manual_id"], "label": obj["label"], "sha256": obj["sha256"], "photo_id": photo_id,
+            "taken_ms": item.get("taken_ms"), "tz_offset_ms": item.get("tz_offset_ms"),
+            "upload_ms": item.get("upload_ms"), "dedup_key": item.get("dedup_key"),
+            "gp_filename": item.get("filename") or None, "width": item.get("width"), "height": item.get("height"),
+            "proof": proof, "source": source, "approach": approach}
+
+
+def _rp_record(state, rec, obj, answer, learned=()):
+    """Write one answer at once: its learned records (the object's account sidecar, P-10) and its line in the answer
+    log. True when written; a write that fails prints one line and records nothing more (the question is asked
+    again)."""
+    try:
+        for record in learned:
+            mvcommon.append_learned(rec["account"], record)
+        mvcommon.append_resolved(dict(answer, account=rec["account"], manual_id=obj["manual_id"], label=obj["label"],
+                                      sha256=obj["sha256"]))
+    except (OSError, ValueError) as e:
+        print(f"      ⚠️ not recorded ({_gp_line(e)}) — answer again, or skip it")
+        return False
+    state["answered"].add(_rp_key(obj))
+    return True
+
+
+def _rp_paste(driver, ctx, rec, obj, loc, text, state):
+    """The paste answer: the item named by `text` (a photo link, a bare photo id, or — empty — the item the browser
+    shows now), checked by mainfetch.verify_item -> True (recorded), False (back to the question), None (quit)."""
+    import mainfetch
+    if text:
+        photo_id = gpweb.photo_id_from_url(text) or (text if gpweb.MEDIA_KEY_RE.fullmatch(text) else None)
+    else:
+        try:
+            photo_id = gpweb.photo_id_from_url(driver.current_url)
+        except Exception:
+            photo_id = None
+    if not photo_id:
+        print("      not a Google Photos photo link (…/photo/<id>) — open the item and press Enter, or paste its link")
+        return False
+    res = mainfetch.verify_item(driver, loc, photo_id, ctx)
+    item = res["record"] or {}
+    if res["verdict"] == "match":
+        how = " (normalized name)" if res["name_normalized"] else ""
+        if not _rp_record(state, rec, obj, {"answer": "url", "photo_id": photo_id, "proof": res["proof"]},
+                          [_rp_learned(obj, item, photo_id, res["proof"], "check")]):
+            return False
+        print(f"      ✔ verified — proof {res['proof']}{how}; recorded: a fetch now goes straight to it")
+        return True
+    if res["verdict"] == "gone":
+        print(f"      ✘ the '{rec['account']}' account holds no such item — is it in another account?")
+        return False
+    if res["content_mismatch"]:
+        print(f"      ✘ this item holds OTHER bytes than the object (its dedupKey {item.get('dedup_key')} is not the "
+              f"object's content key) — not recorded: a restore could never use it")
+        return False
+    why = (f"its name is '{item['filename']}', the object was uploaded as '{loc.get('uploaded_name')}'"
+           if item.get("filename") else "its record does not show whether it holds these bytes")
+    print(f"      ? not verified — {why}")
+    answer = _rp_ask("      accept as a manual match (a later fetch verifies it by SHA-256)? [y/N]: ")
+    if answer is None:
+        return None
+    if answer.lower() not in ("y", "yes"):
+        print("      not recorded")
+        return False
+    if not _rp_record(state, rec, obj, {"answer": "url", "photo_id": photo_id, "proof": "manual"},
+                      [_rp_learned(obj, item, photo_id, "manual", "manual")]):
+        return False
+    print(f"      ✋ recorded as a manual match — `{_rp_fetch_command(obj)} --manual` opens it and keeps its download "
+          f"only when the SHA-256 matches")
+    return True
+
+
+def _rp_search(driver, ctx, rec, obj, loc, term, state):
+    """The search answer: `term` becomes the object's search_override (source manual) at once, then stage S3u alone
+    tries it (mainfetch.locate_object(stages=("user_query",)) — verified like any stage); a verified find adds a
+    `check` record. -> True (recorded) / False (not written)."""
+    import gprpc
+    import mainfetch
+    try:
+        mvcommon.append_learned(rec["account"], {"manual_id": obj["manual_id"], "label": obj["label"],
+                                                 "sha256": obj["sha256"], "source": "manual", "search_override": term})
+    except (OSError, ValueError) as e:
+        print(f"      ⚠️ not recorded ({_gp_line(e)}) — answer again, or skip it")
+        return False
+    res = None
+    try:
+        res = mainfetch.locate_object(driver, dict(loc, search_override=term, queries=dict(loc.get("queries") or {},
+                                                                                           s3u=[term])),
+                                      ctx, stages=("user_query",))
+    except (mainfetch.SessionExpiredError, gprpc.RpcRefused):
+        raise
+    except Exception as e:  # the term is kept either way: a fetch tries it (S3u)
+        print(f"      ⚠️ the search could not run ({type(e).__name__})")
+    found = bool(res and res["found"])
+    learned, answer = [], {"answer": "search", "search_term": term, "found": found}
+    if found:
+        approach = {"tried": "s3u_user_query", "outcome": "exactly-one", "n": res["n"], "via": res["via"]}
+        learned.append(_rp_learned(obj, res["record"], res["photo_id"], res["proof"], "check", approach))
+        answer.update(photo_id=res["photo_id"], proof=res["proof"])
+    if not _rp_record(state, rec, obj, answer, learned):
+        return False
+    if found:
+        print(f"      ✔ your term found it — proof {res['proof']}; recorded (and kept as its search term)")
+    else:
+        tried = mainfetch._tried_text(res) if res else "the search did not run"
+        unverified = (f"; unverified: no item known to be in '{rec['account']}' could show that its search was "
+                      f"answering" if res and res.get("zero_check") == "unverified" else "")   # [IMP-C25 thfix]
+        print(f"      🔍 your term found no verified item ({tried}{unverified}) — kept as its search term: every fetch "
+              f"tries it (S3u)")
+    return True
+
+
+def _rp_object(driver, ctx, rec, obj, loc, library, n, total, state):
+    """One object: its identification block, the browser at its best start, the question until it is answered.
+    -> "next" or "quit"."""
+    import mainfetch
+    key = mainfetch._content_key(loc)
+    print(f"\n   🧭 [{n}/{total}] {obj['manual_id']} · {obj['label']} — {rec.get('reason')}"
+          + (f" ({rec['at']})" if rec.get("at") else ""))
+    facts = {"account": rec["account"], "uploaded_name": loc.get("uploaded_name") or obj.get("uploaded_name"),
+             "expected_local": rec.get("expected_taken_local") or mainfetch._expected_local(loc), "dedup_key": key,
+             "sha1": mainfetch._sha1_of(loc, key), "size_bytes": _rp_size(obj, library),
+             "tried": rec.get("tried") or "not recorded", "candidates": rec.get("candidates")}
+    for line in mainfetch.identification_lines(facts):
+        print(f"      {line}")
+    try:
+        what, _pid, _record = mainfetch.open_best_start(driver, loc, ctx, None, rec.get("candidates") or ())
+    except mainfetch.SessionExpiredError:
+        raise
+    except Exception as e:  # a page that cannot be opened: the user can still look by hand
+        what = f"nothing — the page could not be opened ({type(e).__name__}); look for it yourself"
+    print(f"      opened        {what}")
+    while True:
+        state["heartbeat"].beat()
+        answer = _rp_ask(RESOLVE_PROMPT)
+        if answer is None:
+            return "quit"
+        choice = answer.lower()
+        if choice in ("q", "quit"):
+            return "quit"
+        if choice in ("k", "skip"):
+            print("      skipped — it stays on the failed list")
+            return "next"
+        if choice in ("n", "not uploaded", "not_uploaded"):
+            if _rp_record(state, rec, obj, {"answer": "not_uploaded"}):
+                print("      recorded: not uploaded — listed in the IMP-C27 report at the end")
+                return "next"
+            continue
+        if choice in ("s", "search"):
+            term = _rp_ask("      search term: ")
+            if term is None:
+                return "quit"
+            if term and _rp_search(driver, ctx, rec, obj, loc, term, state):
+                return "next"
+            continue
+        if choice in ("p", "paste") or gpweb.photo_id_from_url(answer):
+            text = answer if choice not in ("p", "paste") else _rp_ask(
+                "      photo URL (Enter = the item the browser shows now): ")
+            if text is None:
+                return "quit"
+            done = _rp_paste(driver, ctx, rec, obj, loc, text, state)
+            if done is None:
+                return "quit"
+            if done:
+                return "next"
+            continue
+        print("      ? answer p, s, n, k or q")
+
+
+def _rp_walk(library, rows, state):
+    """Walk `rows` account by account (GP_ACCOUNTS order), one Chrome session each, under the fetch lock taken WITHOUT
+    waiting: the fetch's start-up cleanup and a fetch journal first (crash cleanup, P-12), the shared close
+    (_close_session) after each and _end_run at the end. -> "done" | "quit" | "locked" | "lock-lost" | "port" |
+    "interrupted" | "error"."""
+    import mainfetch
+    from tools import gp_inventory  # LockLost — the crawler's heartbeat (mainfetch._check_lock)
+    ctx = mainfetch.FetchContext(run_id=f"resolve-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{os.getpid()}")
+    ctx.library = library   # [IMP-C25 thfix] the throttle guard's last canary source
+    by_account = {}
+    for rec, obj in rows:
+        by_account.setdefault(rec["account"], []).append((rec, obj))
+    accounts = [a for a in mvcommon.GP_ACCOUNTS if a in by_account]
+    outcome, interrupted, n, total = "done", False, 0, len(rows)
+    try:
+        with mainfetch._check_lock() as heartbeat:
+            state["heartbeat"] = heartbeat
+            sessions = 0
+            try:
+                for account in accounts:
+                    problem = mainfetch.profile_preflight(account)
+                    if problem:
+                        print(f"\n⏭️  {len(by_account[account])} object(s) of '{account}' skipped: {problem}")
+                        n += len(by_account[account])
+                        continue
+                    if sessions and not mainfetch._debug_port_free():
+                        print(f"\n❌ Cannot switch to profile '{account}': Chrome's debug port 9222 is still in use "
+                              f"(the previous account's Chrome did not close) — close it, then re-run resolve_photos.")
+                        outcome = "port"
+                        break
+                    if not sessions:
+                        mainfetch._startup_cleanup(ctx)   # [Step 11] an interrupted earlier fetch first (P-12 rule 3)
+                        ctx.journal = mainfetch.FetchJournal(ctx.run_id)
+                    print(f"\n=== '{account}' — {len(by_account[account])} object(s) ===")
+                    driver = mainfetch.init_driver(account)
+                    if not driver:
+                        print(f"⏭️  '{account}': Chrome could not be started — its objects are left for next time.")
+                        n += len(by_account[account])
+                        continue
+                    sessions += 1
+                    ctx.start_session(account)
+                    mainfetch._note_session(ctx, driver, account)
+                    last = account == accounts[-1]
+                    try:
+                        objects = [obj for _rec, obj in by_account[account]]
+                        located = mainfetch.object_locators(library, ctx, objects)
+                        for rec, obj in by_account[account]:
+                            n += 1
+                            entry = located.get(_rp_key(obj))
+                            if entry is None:
+                                print(f"\n   ⏭️ {obj['manual_id']} · {obj['label']}: not in the library as listed")
+                                continue
+                            if _rp_object(driver, ctx, rec, obj, entry[1], library, n, total, state) == "quit":
+                                outcome = "quit"
+                                break
+                    except mainfetch.SessionExpiredError as e:
+                        # [IMP-C25 thfix] a throttle is never "logged out": like a sign-out, this account's objects
+                        # stop here (the next account's follow); its object at hand got no answer and is asked again
+                        if isinstance(e, mainfetch.PhotosThrottledError):
+                            print(f"⏸️ {mainfetch.throttled_head(account, e)} — its objects stop here (no verdict for "
+                                  f"the one at hand: it comes back next time; the answers given so far are kept). "
+                                  f"Re-run resolve_photos in about {mainfetch.THROTTLE_RETRY_MIN} minutes."
+                                  f"{mainfetch.throttled_hint(account, e)}")
+                        else:
+                            print(f"❌ Profile '{account}' is logged out. Open Chrome with --user-data-dir="
+                                  f"{mainfetch.CHROME_PROFILES[account]}, sign in to photos.google.com, then re-run "
+                                  f"resolve_photos (answers given so far are kept).")
+                    except KeyboardInterrupt:
+                        interrupted = True   # _end_run terminates the Chrome at once, as a fetch's Ctrl+C does
+                        raise
+                    finally:
+                        if not interrupted:
+                            try:
+                                mainfetch._close_session(driver, ctx, last=last or outcome != "done")
+                            except Exception as e:
+                                print(f"   > ⚠️ Closing Chrome failed ({type(e).__name__}: {e}).")
+                        try:
+                            driver.quit()
+                        except Exception:
+                            pass
+                    if outcome != "done":
+                        break
+            except KeyboardInterrupt:
+                interrupted, outcome = True, "interrupted"
+            except gp_inventory.LockLost as e:
+                outcome = "lock-lost"
+                print(f"\n❌ {e} — stopping; the answers given so far are kept.")
+            except Exception as e:  # a browser fault, a bug: stop the walk, never lose an answer already written
+                interrupted, outcome = True, "error"
+                print(f"\n❌ resolve_photos stopped: {_gp_line(e)} — the answers given so far are kept.")
+            finally:
+                mainfetch._end_run(ctx, interrupted)
+    except mvcommon.LockHeldError:
+        print("❌ resolve_photos: a fetch, a check, a crawl or the profile warm-up holds the fetch session lock — it "
+              "needs the same Chrome profiles and port; re-run when it has finished.")
+        return "locked"
+    return outcome
+
+
+def _rp_not_uploaded_lines(library):
+    """The IMP-C27 list: every object whose newest answer is "not uploaded" and that is still in the library, not
+    confirmed."""
+    newest = {}
+    for answer in mvcommon.read_resolved():
+        newest[(answer["account"], answer["manual_id"], answer["sha256"])] = answer
+    told = []
+    for (account, manual_id, sha256), answer in newest.items():
+        if answer["answer"] != "not_uploaded":
+            continue
+        real, entry = _gp_resolve(library, manual_id)
+        obj = next((o for o in mvcommon.iter_entry_objects(real, entry) if o["sha256"] == sha256), None)
+        if obj is not None and obj["cloud_state"] != "confirmed":
+            told.append(f"    {real} · {obj['label']} — in '{account}' (answered {answer['at']})")
+    if not told:
+        return []
+    return [f"\n⚠️⚠️⚠️  YOU SAY NOT UPLOADED (IMP-C27): {len(told):,} object(s) — an archived entry keeps only a dummy "
+            f"locally  ⚠️⚠️⚠️"] + told
+
+
+def _rp_apply(state):
+    """The end: the apply engine's dry run over the WHOLE learned sidecar — its summary, this session's objects marked
+    — then "Apply these N changes to the library? [y/N]" (anything but y: no). -> the engine's report when applied,
+    else None."""
+    try:
+        records = mvcommon.read_learned()
+    except (OSError, ValueError) as e:
+        print(f"⚠️  The learned sidecar could not be read ({_gp_line(e)}) — nothing applied.")
+        return None
+    preview = gphotos_apply(records, capture=True, dry_run=True)
+    if preview["status"] == "error":
+        return None   # the engine printed its one warning line
+    changed = preview["changed"]
+    if not changed:
+        print("\nLibrary: nothing to apply — the learned sidecar holds nothing new for it.")
+        return None
+    print(f"\nApply preview (dry run — nothing written yet): {len(changed):,} object(s) would change")
+    for change in changed:
+        mark = "  ← answered now" if (change["manual_id"], change["label"], change["sha256"]) in state["answered"] \
+            else ""
+        print(f"    {change['manual_id']} · {change['label']} — {change['action']}{mark}")
+    print(_mp_engine_line(preview, "would change"))
+    answer = _rp_ask(f"Apply these {len(changed):,} changes to the library? [y/N]: ")
+    if not answer or answer.lower() not in ("y", "yes"):
+        print("Not applied — the library is untouched. The answers stay in the learned sidecar: the next fetch's "
+              "merge, check_photos --apply or resolve_photos folds them.")
+        return None
+    report = gphotos_apply(records, capture=True, dry_run=False)
+    print(_mp_engine_line(report, "updated"))
+    return report
+
+
+def cmd_resolve_photos(source="failed", account=None, manual_id=None):
+    """`resolve_photos [failed|<csv>] [--account a] [--id <manual_id>]` (PLAN Step 14 — see the section comment): the
+    user resolves the failed list (or a failed_objects.csv / resolutions_todo.csv) by hand, one object at a time, in
+    the account's Chrome. Refused when the keyboard is not a terminal (OD-14: CLI only). Every answer is recorded at
+    once (learned sidecar + resolved.jsonl); the library changes only after the final "Apply these N changes to the
+    library? [y/N]". -> {status: ok | refused | error | interrupted, answered (objects answered now), applied (the
+    engine's report or None), walk (how the walk ended)}."""
+    result = {"status": "ok", "answered": 0, "applied": None, "walk": None}
+    if not _rp_stdin_is_tty():
+        print("❌ resolve_photos is interactive: run it in a terminal — its questions cannot be answered from a pipe or "
+              "the web UI.")
+        return dict(result, status="refused")
+    library = load_library()
+    if source != "failed" and not os.path.isfile(source):
+        print(f"❌ resolve_photos: no such file: {source}")
+        return dict(result, status="error")
+    try:
+        found = _rp_rows(library, source, account, manual_id)
+    except (OSError, ValueError) as e:
+        print(f"❌ resolve_photos: {source} could not be read ({_gp_line(e)}).")
+        return dict(result, status="error")
+    where = " · ".join(p for p in (f"account {account}" if account else "",
+                                   f"id {manual_id}" if manual_id else "") if p)
+    print(f"=== RESOLVE PHOTOS — {'the failed list' if source == 'failed' else source}{' · ' + where if where else ''} "
+          f"— {len(found['rows']):,} object(s) to resolve ===")
+    extra = [f"{found['answered']:,} answered before" if found["answered"] else "",
+             f"{found['confirmed']:,} confirmed by now" if found["confirmed"] else ""]
+    if any(extra):
+        print("  (" + " · ".join(e for e in extra if e) + " — left out)")
+    for line in found["problems"]:
+        print(f"  ⚠️ {line}")
+    if found["lost"]:
+        print(f"Lost downloads: {len(found['lost']):,} object(s) — their item WAS found, the transfer broke twice; not "
+              f"asked again here — re-fetch them:")
+        for _rec, obj in found["lost"]:
+            print(f"    {_rp_fetch_command(obj)}   ({obj['label']})")
+    state = {"answered": set(), "heartbeat": None}
+    if found["rows"]:
+        print("Answer each with [p]aste photo URL | [s]earch term | [n]ot uploaded | s[k]ip | [q]uit — every answer is "
+              "recorded at once; the library changes only if you say so at the end.")
+        result["walk"] = _rp_walk(library, found["rows"], state)
+        if result["walk"] == "locked":
+            return dict(result, status="refused")
+        result["answered"] = len(state["answered"])
+        if result["walk"] == "interrupted":
+            print("\n🛑 Stopped by user — the answers given so far are kept (learned sidecar + resolved.jsonl); "
+                  "nothing was applied to the library.")
+            return dict(result, status="interrupted")
+        if result["walk"] == "error":
+            return dict(result, status="error")   # nothing applied: a stopped walk is re-run, not applied blind
+    elif not found["lost"]:
+        print("Nothing to resolve.")
+    for line in _rp_not_uploaded_lines(load_library()):
+        print(line)
+    if result["walk"] != "lock-lost":
+        result["applied"] = _rp_apply(state)   # answers declined earlier are offered again (they wait in the sidecar)
+    if found["lost"]:
+        answer = _rp_ask(f"Re-fetch the {len(found['lost']):,} lost download(s) now? (a fetch also folds the learned "
+                         f"sidecar into the library when it ends) [y/N]: ")
+        if answer and answer.lower() in ("y", "yes"):
+            owners = dict.fromkeys((obj["manual_id"], obj["kind"] in ("extra_whole", "extra_chunk"))
+                                   for _rec, obj in found["lost"])
+            for owner, extra in owners:
+                cmd_dispatch_fetch(owner, fetch_extras=extra)
+    return result
+
+
+# ==========================================
+#   GOOGLE PHOTOS IDENTITY — AUTO-CONFIRM AFTER A PUSH (IMP-C25 Step 13b)
+# ==========================================
+# docs/feature-fetch-datetime/PLAN.md P-19 / Step 13b — the OD-6 ruling: "when doing other push, can check all
+# unverified one in google photos and note down". A push only reaches the phone; Google Photos backs its objects up
+# hours or days later, so a new archival stays `unverified` (P-11: its capture records the push, no confirmed block).
+# At the end of the NEXT push-family command that succeeded, main.py's CLI dispatcher confirms the ones pushed at least
+# AUTO_CONFIRM_MIN_AGE_H ago: `python main.py check_photos pending --apply --min-age-h 24 --max-minutes 15` runs as a
+# child process, its output streamed (Chrome opens for the accounts it needs; confirmed -> the node through the apply
+# engine, not found -> the failed list; a younger object — the push that just ran included — is not looked up: a later
+# push confirms it; the child's last line is the check's summary line). Turned off by mvconfig.json
+# "auto_confirm_after_push": false.
+#
+# Rollback change-gate (CLAUDE.md; docs/feature-auto-rollback/ROLLBACK_MECHANISM.md §10): nothing here runs inside a
+# cmd_* function. The dispatcher calls after_push_command only once the command's function has RETURNED, so every
+# RollbackJournal it opened was committed or rolled back and every point of no return lies behind; an exception
+# (RollbackHardFail, SystemExit, …) never reaches it. Nothing here touches RollbackJournal, a journal file, a PONR or
+# the season resume messaging, and the check it starts never does either. It prints only after the push command's own
+# last line and never raises, so the command's output contract and exit code stay exactly as they were.
+
+# AUTO_CONFIRM_MIN_AGE_H — how long ago a pending object must have been pushed before the auto-confirm looks it up. A
+# push opens Chrome only when at least one pending object is that old, and the check it starts looks up only those
+# (`--min-age-h`): the younger ones — the push that just ran included — are skipped and confirmed at a later push (the
+# user's finding of 2026-10-27, DECISIONS.md §1g: a check of EVERY pending object had looked up the chunks pushed
+# minutes earlier, each through every stage, for nothing). The PLAN proposed 12 h and asked for a
+# measurement: on the R1b mapping of 2026-10-03 (69 captured objects in 14 pushes) Google Photos held 41 % of them 12 h
+# after their push, 84 % after 24 h, 88 % after 36 h and 99 % after 48 h (median 14 h, slowest 49.6 h). 24 h — "next
+# day", the OD-6 ruling's own words — confirms most objects at the first try without making every confirmation wait two
+# days; the slow tail is simply checked again at a later push, which is harmless (an object pushed in the last
+# MAP_RECENT_DAYS that is not found yet is `not-backed-up-yet`: no failed row — Step 13).
+AUTO_CONFIRM_MIN_AGE_H = 24
+AUTO_CONFIRM_MAX_MINUTES = 15            # the child's --max-minutes: a push is never held up longer (a partial run resumes)
+AUTO_CONFIRM_REMINDER = ("🔎 {n} pushed object(s) await Google Photos confirmation — run: main.py check_photos pending "
+                         "--apply")
+AUTO_CONFIRM_WEB_JOB_ENV = "MEDIAVAULT_WEB_JOB"   # set (and not "0") in a web job's environment: never open Chrome there
+_AC_SCRIPT = os.path.abspath(__file__)   # this main.py, absolute — the child's script
+
+
+def auto_confirm_argv():
+    """The auto-confirm child's command line: [sys.executable, <abs main.py>, "check_photos", "pending", "--apply",
+    "--min-age-h", "24", "--max-minutes", "15"] — PLAN Step 13b's, plus `--min-age-h AUTO_CONFIRM_MIN_AGE_H` (IMP-C25
+    acfix, 2026-10-27): the check looks up only the objects pushed at least that long ago, never the push that just
+    ran."""
+    return [sys.executable, _AC_SCRIPT, "check_photos", "pending", "--apply",
+            "--min-age-h", str(AUTO_CONFIRM_MIN_AGE_H), "--max-minutes", str(AUTO_CONFIRM_MAX_MINUTES)]
+
+
+def _auto_confirm_on():
+    """mvconfig.json "auto_confirm_after_push" (PLAN P-19): absent, null or true -> on; false -> off. Any other value is
+    read as off — a present non-boolean is an attempt to set the switch, and the safe reading never opens Chrome — with
+    one warning on stderr, like mainfetch's fetch_account_overrides warnings. Read at call time (mvcommon's RUNTIME
+    CONFIG binding-hazard rule)."""
+    value = mvcommon._load_config().get("auto_confirm_after_push")
+    if value is None or value is True:
+        return True
+    if value is not False:
+        print(f"⚠️  mvconfig.json: auto_confirm_after_push must be true or false, got {value!r} — read as false (no "
+              f"auto-confirm after a push).", file=sys.stderr)
+    return False
+
+
+def _auto_confirm_warning(why):
+    """The ONE warning line of an auto-confirm that did not finish (P-19: any error -> one warning line)."""
+    return (f"⚠️  Auto-confirm did not finish ({why}) — the push itself is done; confirm later with: main.py "
+            f"check_photos pending --apply")
+
+
+def _auto_confirm_why(exc):
+    """What stopped the auto-confirm, in one line: Ctrl+C -> 'interrupted', anything else its type and message."""
+    return "interrupted" if isinstance(exc, KeyboardInterrupt) else _gp_line(exc)
+
+
+def maybe_auto_confirm(library=None):
+    """PLAN P-19 — after a push-family command SUCCEEDED (after_push_command decided it), confirm in Google Photos the
+    pushed objects that have had time to be backed up. In this order:
+      * the config switch is off (_auto_confirm_on) -> nothing at all: no line, the library is not even read;
+      * nothing is pending (mvcommon.unverified_objects: a capture records the push, no confirmed block) -> nothing;
+      * a web job (AUTO_CONFIRM_WEB_JOB_ENV set) · no pending object pushed AUTO_CONFIRM_MIN_AGE_H ago or earlier (an
+        unknown push time counts as old — Step 13's verdict rule) · no Chrome profile for ANY account the old objects
+        route to (P-4: override > learned home > id prefix; one missing of several: the check reports those objects and
+        confirms the rest) · the fetch lock held (probed exactly as the check takes it: without waiting, a stale lock
+        reclaimable) -> the ONE reminder line AUTO_CONFIRM_REMINDER, N = every pending object, and no Chrome;
+      * else one line saying what runs — N = the due objects only, then ", M newer skipped" for the younger ones (when
+        there are any) —, then `check_photos pending --apply --min-age-h 24 --max-minutes 15` (auto_confirm_argv) as a
+        child process through _cp_spawn — the check's own streaming idiom: every line re-printed as it comes, Ctrl+C
+        waits for the child to close its Chrome. The check looks up only the due objects (--min-age-h), never the push
+        that just ran. Exit 0 (ok / partial) -> the child's last line is the check's summary; a non-zero exit or an
+        interruption -> ONE warning line.
+    Any error -> ONE warning line. It never raises — SystemExit (a corrupt library) and Ctrl+C included — so the push
+    command's exit code never changes. `library`: the caller's freshly loaded library, else it is loaded here.
+    -> what happened: disabled | nothing | web | young | no-profile | locked | ran | failed | error."""
+    try:
+        if not _auto_confirm_on():
+            return "disabled"
+        if library is None:
+            library = load_library()
+        pending = mvcommon.unverified_objects(library, mvcommon._now_utc())
+        if not pending:
+            return "nothing"
+        reminder = AUTO_CONFIRM_REMINDER.format(n=len(pending))
+        if os.environ.get(AUTO_CONFIRM_WEB_JOB_ENV, "").strip() not in ("", "0"):
+            print(reminder)
+            return "web"
+        due = [o for o in pending if o["age_hours"] is None or o["age_hours"] >= AUTO_CONFIRM_MIN_AGE_H]
+        if not due:
+            print(reminder)
+            return "young"
+        import mainfetch  # profile_preflight (OD-10); importing it has no side effects
+        accounts = {route["routing"] for route in _cp_routes(due).values()}
+        if all(mainfetch.profile_preflight(account) for account in accounts):
+            print(reminder)
+            return "no-profile"
+        try:
+            with mvcommon.fetch_session_lock(blocking=False):
+                pass   # free (or stale): released at once — the check takes it itself
+        except mvcommon.LockHeldError:
+            print(reminder)
+            return "locked"
+        newer = len(pending) - len(due)
+        print(f"🔎 {len(due)} pushed object(s) await Google Photos confirmation — confirming them now"
+              f"{f', {newer} newer skipped' if newer else ''} (check_photos pending --apply --min-age-h "
+              f"{AUTO_CONFIRM_MIN_AGE_H}, at most {AUTO_CONFIRM_MAX_MINUTES} min; to turn this off: "
+              f"\"auto_confirm_after_push\": false in mvconfig.json)", flush=True)
+        code, interrupted = _cp_spawn(auto_confirm_argv())
+        if interrupted or code != 0:
+            print(_auto_confirm_warning("interrupted" if interrupted else f"check_photos exited with code {code}"))
+            return "failed"
+        return "ran"
+    except BaseException as e:   # never raise: SystemExit (load_library on a corrupt file) and Ctrl+C included
+        print(_auto_confirm_warning(_auto_confirm_why(e)))
+        return "error"
+
+
+# "Succeeded" for the three push-family commands whose function returns None on success AND on its handled failures
+# (cmd_push_group, cmd_prep_push_rep — which even turns a post-PONR RollbackHardFail into a bare return — and
+# cmd_prep_push_rep_season; tests/test_auto_confirm.py documents all six return contracts): None alone cannot tell them
+# apart (webui/server.py's _NONE_IS_SUCCESS reached the same conclusion), so their success is read from the end state the
+# run left in the library — the signal the IMP-D22 enrich autopilots already use for their own archive leg.
+
+def _push_group_run_target_ids(library, group_id, episode_range):
+    """The ordered, de-aliased ids a `push_group <group_id> [episodes <range>]` run targeted — cmd_push_group's own
+    derivation (keep in sync; it does not expose the list): a season_map's children (_season_run_target_ids, the same
+    steps), else every other id starting with `group_id`, sorted; then the episode range; then de-aliased. [] when
+    nothing matches, or for an invalid range (cmd_push_group then printed "❌ Invalid episode range format" and pushed
+    nothing)."""
+    entry = library.get(group_id)
+    if isinstance(entry, dict) and entry.get("type") == "season_map":
+        return _season_run_target_ids(library, group_id, episode_range)
+    target_ids = sorted(k for k in library if k.startswith(group_id) and k != group_id)
+    if episode_range:
+        try:
+            start, end = map(float, episode_range.split('-'))
+        except ValueError:
+            return []
+        filtered_ids = []
+        for mid in target_ids:
+            ep_num = episode_num_from_id(mid, group_id)
+            if ep_num is not None and start <= ep_num <= end:
+                filtered_ids.append(mid)
+        target_ids = filtered_ids
+    seen, dealiased = set(), []
+    for mid in target_ids:
+        real_id, _ = _resolve_alias(library, mid)
+        if real_id not in seen:
+            seen.add(real_id)
+            dealiased.append(real_id)
+    return dealiased
+
+
+def _push_command_completed(library, command, target, episode_range):
+    """Did THIS run of a None-returning push-family command reach its end state? Read from the library it saved:
+      prep_push_rep         its entry is archived — the id as given: cmd_prep refuses an alias id, so a run on one
+                            archives nothing (its primary's state says nothing about this run)
+      prep_push_rep_season  every target of the run (_season_run_target_ids: the season, or its episode range) is
+                            archived
+      push_group            every target of the run (_push_group_run_target_ids) is uploaded (cmd_push_group's own
+                            "already uploaded" test)
+    Any other command: False — a None it never returns is no success."""
+    if command == "prep_push_rep":
+        entry = library.get(target)
+        return isinstance(entry, dict) and entry.get("status") == "archived"
+    if command == "prep_push_rep_season":
+        ids = _season_run_target_ids(library, target, episode_range)
+        return bool(ids) and all(library.get(mid, {}).get("status") == "archived" for mid in ids)
+    if command == "push_group":
+        ids = _push_group_run_target_ids(library, target, episode_range)
+        return bool(ids) and all(library.get(mid, {}).get("uploaded") == True for mid in ids)  # noqa: E712
+    return False
+
+
+def after_push_command(command, result, target=None, episode_range=None):
+    """THE auto-confirm hook (PLAN P-19 / Step 13b). main.py's CLI dispatcher calls it right after a push-family command's
+    function RETURNED, with that function's return value (`result`) and what the run worked on (`target` — its id,
+    season id or group id — and `episode_range`). An exception — RollbackHardFail, SystemExit, KeyboardInterrupt, any —
+    never reaches it: the dispatcher does not catch one, exactly as before this hook existed.
+
+    Succeeded = returned normally and not False (PLAN Step 13b) — and, for a None result, the run reached the command's
+    end state (_push_command_completed): three of the six return None on their handled failures too. Succeeded ->
+    maybe_auto_confirm() with the library just read; not succeeded -> nothing at all (no line, no Chrome). The switch is
+    read first, so a disabled auto-confirm reads nothing. Never raises (one warning line).
+    -> maybe_auto_confirm's outcome, "disabled", "error", or None when the command did not succeed."""
+    if result is False:
+        return None
+    try:
+        if not _auto_confirm_on():
+            return "disabled"
+        library = load_library()
+        if result is None and not _push_command_completed(library, command, target, episode_range):
+            return None
+    except BaseException as e:   # never raise: SystemExit (load_library on a corrupt file) and Ctrl+C included
+        print(_auto_confirm_warning(_auto_confirm_why(e)))
+        return "error"
+    return maybe_auto_confirm(library)
+
+
+# ==========================================
+#   GOOGLE PHOTOS IDENTITY — mvmeta_upgrade: v2 PHONE SIDECARS FOR THE EXISTING LIBRARY (IMP-C25 Step 13c)
+# ==========================================
+# docs/feature-fetch-datetime/PLAN.md Step 13c — the OD-4 ruling ("ok fine - you can change all existing library also")
+# and G0 question 2, answered 2026-09-28: "Yes, with --apply only" (DECISIONS.md §1). Every push leaves a
+# `<base> [<short_id>].mvmeta.json` next to what it uploaded (write_remote_mvmeta — for a whole file too, as a one-chunk
+# list). Since Step 5 a NEW push writes it as v2: per chunk the content key Google Photos dedups on (sha1 + dedup_key),
+# the DateUTC it shows (date_utc) and the exact pushed name (uploaded_name). The EXISTING library's sidecars are v1;
+# `mvmeta_upgrade` brings them to v2 with what is PROVEN about each chunk's own bytes, plus `gphotos_account` — the
+# Google account a confirmed copy lives in (_mu_facts names the sources; the content key never comes from a filename or
+# manual proof: a legacy object's cloud key belongs to the cloud copy, and IMP-E5 will trust a sidecar's key before
+# freeing a phone). A sidecar is rewritten only when it is exactly its owner's (manual_id, short_id and the CURRENT
+# chunk SHA-256s — the P-2 pin), in MediaVault's own bytes and a known version, and no value it already holds disagrees
+# with a proven one; the missing keys are appended and nothing else changes — the new bytes minus the added keys are
+# the original bytes, checked before anything is written.
+# A DRY RUN by default: the phones are listed (Step 8's read-only device_inventory) and each sidecar that could gain a
+# key is pulled into a temporary folder that is removed again — nothing is written anywhere. --apply rewrites one
+# sidecar at a time: the original is kept locally first (<GPHOTOS_STATE_DIR>/mvmeta/<UTC ts>/), the v2 file is pushed
+# as `<name>.tmp` carrying the original's mtime (adb push keeps it — RESEARCH F3 — and a sidecar's mtime is its push
+# time in the device check's evidence), renamed over the original on the phone (`mv`: atomic), then pulled back and
+# compared byte for byte; the first failure stops the run, and a re-run continues (an upgraded sidecar is up to date).
+# Phones: `device <alias|serial>` names one; without it every phone the device check lists is read, and --apply
+# rewrites only the push phones' sidecars (DEVICE_ALIASES) — a check-only phone (DEVICE_CHECK_EXTRA_SERIALS,
+# DECISIONS.md §1d) only when it is named. Its adb commands pass ITS OWN allowlist (_mu_argv_ok: `pull` of a sidecar;
+# with --apply `push` to `<sidecar>.tmp` and `shell mv` of that .tmp over the sidecar — never a media file, never any
+# other file, always `-s <serial>`); the device check's read-only _dev_argv_readonly is NOT widened. The library is
+# only read; no rollback journal is involved. Nothing printed carries a P-13 web-progress marker.
+
+MVMETA_UPGRADE_APPLY_ENABLED = True   # G0 question 2 (the OD-4 clarification), answered 2026-09-28: "Yes, with --apply only"
+MVMETA_UPGRADE_DISABLED = "device rewrites disabled (OD-4 clarification)"   # --apply's line while the switch is off
+MVMETA_UPGRADE_VERSION = 2            # the version an upgraded sidecar carries: today's push writer's (pinned by a test)
+MVMETA_UPGRADE_KEYS = gpcapture.MVMETA_KEYS + ("gphotos_account",)          # the per-chunk keys it adds, in this order
+MVMETA_UPGRADE_USAGE = "mvmeta_upgrade [all|<id>|<prefix>] [device <alias|serial>] [--apply]"
+MVMETA_TMP_SUFFIX = ".tmp"            # a rewritten sidecar is pushed as `<sidecar>.tmp`, then renamed over the sidecar
+MVMETA_ADB_TIMEOUT_S = 60             # one pull / push / mv of a sidecar (a few KB)
+_MU_CONTENT_PROOFS = ("dedupkey", "sha256")   # PLAN P-5: the proofs that make a record's dedup_key THESE bytes' key
+
+
+def _mu_owners(objects):
+    """The sidecars the uploaded `objects` (mvcommon.iter_uploaded_objects dicts) were pushed with -> [owner] in object
+    order. An owner is write_remote_mvmeta's unit — one library entry (its whole file, or its chunks) or one extras item
+    (whole, or its chunks):
+      key        (manual_id, group_rel, sub_rel) — group_rel / sub_rel None for an entry's own objects
+      manual_id  the library id (the TITLE id for an extras item); category its id prefix's
+      extra      True for an extras item
+      label      the manual_id its sidecar carries: the entry's id, or '<title id>::<group_rel>/<sub_rel>'
+                 (push_one_extra's label, gpcapture.extras_label)
+      short_id   the short id of its sidecar's name and content
+      objects    its whole file, or its chunks in order — FLAC holders are left out: no sidecar lists them
+      hashes     their CURRENT SHA-256s in that order: exactly what its sidecar's `chunks` must list (P-2)"""
+    owners = {}
+    for obj in objects:
+        if obj.get("kind") == "holder":
+            continue
+        key = (obj["manual_id"], obj.get("group_rel"), obj.get("sub_rel"))
+        owner = owners.get(key)
+        if owner is None:
+            extra = obj.get("group_rel") is not None
+            owner = owners[key] = {
+                "key": key, "manual_id": obj["manual_id"], "category": obj.get("category"), "extra": extra,
+                "label": gpcapture.extras_label(*key) if extra else obj["manual_id"],
+                "short_id": obj.get("short_id"), "objects": []}
+        owner["objects"].append(obj)
+    for owner in owners.values():
+        owner["hashes"] = [obj.get("sha256") for obj in owner["objects"]]
+    return list(owners.values())
+
+
+def _mu_taken_utc(taken_ms):
+    """Google Photos' taken time (epoch milliseconds) as a DateUTC string 'YYYY-MM-DDTHH:MM:SSZ' — to the second,
+    floored, the way check_photos compares the two — or None."""
+    if not _gp_is_int(taken_ms):
+        return None
+    try:
+        text = (datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=taken_ms // 1000)).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, ValueError):
+        return None
+    return text if mvcommon._DATE_UTC_RE.match(text) else None
+
+
+def _mu_facts(obj):
+    """The v2 facts PROVEN for ONE uploaded object's bytes (PLAN Step 13c) -> (facts {key: value}, None), or ({}, why).
+    `obj` is an mvcommon.iter_entry_objects dict: `capture` = its capture facts and `block` = its TRUSTED gphotos block
+    (an untrusted one is None there — P-2), both pinned to its CURRENT SHA-256.
+      sha1, dedup_key   the capture's (hashed at prep / push), the trusted block's own content key (only a capture or a
+                        download's SHA-256 match writes one), or the dedup_key of an account record verified BY CONTENT
+                        (verified_by dedupkey | sha256) — never a record verified by `filename` or `manual` (PLAN P-5:
+                        that key is the cloud copy's, not proven to be these bytes)
+      date_utc          the file's own DateUTC — the capture's, or the trusted block's (only a capture writes it) — else
+                        the taken time of the CONFIRMED record of gphotos_account (Google Photos shows the DateUTC — F20)
+      uploaded_name     the trusted block's (a capture's, or a proven `map_photos --repair names`), else the capture's —
+                        never derived from a file name
+      gphotos_account   the account holding the confirmed copy: the block's home_account when its record there is
+                        confirmed, else the only confirmed account; none when several are and the home is not one
+    Only known facts are returned. Content keys or DateUTCs that disagree -> ({}, why): nothing of the object is used."""
+    capture = obj.get("capture") if isinstance(obj.get("capture"), dict) else {}
+    block = obj.get("block") if isinstance(obj.get("block"), dict) else {}
+    held = block.get("accounts") if isinstance(block.get("accounts"), dict) else {}
+    records = {a: r for a, r in held.items() if a in mvcommon.GP_ACCOUNTS and isinstance(r, dict)}
+    keys = {gpweb.normalize_dedup_key(capture.get("dedup_key")), gpweb.normalize_dedup_key(block.get("dedup_key"))}
+    if isinstance(block.get("sha1"), str) and _GP_SHA1_RE.match(block["sha1"]):
+        keys.add(gpweb.dedup_key(block["sha1"].lower()))
+    keys.update(gpweb.normalize_dedup_key(r.get("dedup_key")) for r in records.values()
+                if r.get("verified_by") in _MU_CONTENT_PROOFS)
+    keys.discard(None)
+    if len(keys) > 1:
+        return {}, "its proven content keys disagree"
+    dates = {d for d in (capture.get("date_utc"), block.get("date_utc"))
+             if isinstance(d, str) and mvcommon._DATE_UTC_RE.match(d)}
+    if len(dates) > 1:
+        return {}, "its recorded DateUTCs disagree"
+    confirmed = [a for a in mvcommon.GP_ACCOUNTS if records.get(a, {}).get("confirmed") is True]
+    home = block.get("home_account")
+    account = home if home in confirmed else (confirmed[0] if len(confirmed) == 1 else None)
+    facts = {}
+    if keys:
+        key = keys.pop()
+        facts.update(sha1=gpweb.dedup_key_to_sha1_hex(key), dedup_key=key)
+    date = dates.pop() if dates else (_mu_taken_utc(records[account].get("taken_ms")) if account else None)
+    if date:
+        facts["date_utc"] = date
+    name = block.get("uploaded_name") if mvcommon._text(block.get("uploaded_name")) else capture.get("uploaded_name")
+    if mvcommon._text(name):
+        facts["uploaded_name"] = name
+    if account:
+        facts["gphotos_account"] = account
+    return facts, None
+
+
+def _mu_encode(doc, newline):
+    """A sidecar's bytes exactly as write_remote_mvmeta writes them: json.dump(indent=2) — ASCII, anything else as a
+    \\u escape — with `newline` ending its lines ("\\r\\n" for a sidecar written in text mode on Windows)."""
+    return json.dumps(doc, indent=2).replace("\n", newline).encode("utf-8")
+
+
+def _mu_decode(raw):
+    """A pulled sidecar's bytes -> (doc, newline, None) when they are EXACTLY what write_remote_mvmeta writes — the
+    _mu_encode of their own content, the only form a rewrite can keep byte for byte — else (None, None, why)."""
+    try:
+        text = raw.decode("utf-8")
+        doc = json.loads(text)
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return None, None, "it is not a JSON file"
+    newline = "\r\n" if "\r\n" in text else "\n"
+    if _mu_encode(doc, newline) != raw:
+        return None, None, "its bytes are not in the exact form MediaVault writes (edited by hand?)"
+    return doc, newline, None
+
+
+def _mu_same(key, held, value):
+    """True when a sidecar's present `key` holds the proven `value` (a SHA-1 in either case, a dedupKey in any base64
+    spelling)."""
+    if key == "sha1":
+        return isinstance(held, str) and held.lower() == value
+    if key == "dedup_key":
+        return gpweb.normalize_dedup_key(held) == value
+    return held == value
+
+
+def _mu_upgrade(doc, owner, facts):
+    """ONE sidecar's v2 form (PLAN Step 13c) — PURE -> (new doc, {key: chunks it is added to}, None), or (None, None,
+    why) when the sidecar must be left as it is. `owner` (_mu_owners) gives the label, short_id and CURRENT SHA-256s
+    its sidecar must carry; `facts` = {sha256: _mu_facts(...)[0]} of its objects. The sidecar must be the owner's
+    (manual_id == label, short_id) in a version this code knows (1 … MVMETA_UPGRADE_VERSION), listing EXACTLY the
+    owner's SHA-256s in order (P-2: other bytes -> nothing applies to it), and a key it already holds must hold the
+    proven value. Each missing proven key is APPENDED to its chunk (MVMETA_UPGRADE_KEYS order); a sidecar below
+    MVMETA_UPGRADE_VERSION that gains a key is raised to it. Nothing else changes; the input is never modified."""
+    if not isinstance(doc, dict):
+        return None, None, "it is not a JSON object"
+    version = doc.get("version")
+    if not (_gp_is_int(version) and 1 <= version <= MVMETA_UPGRADE_VERSION):
+        return None, None, f"its version {version!r} is not one this code knows (1–{MVMETA_UPGRADE_VERSION})"
+    if doc.get("manual_id") != owner["label"] or doc.get("short_id") != owner["short_id"]:
+        return None, None, (f"it names {doc.get('manual_id')!r} / short id {doc.get('short_id')!r}, not this "
+                            f"{'extras item' if owner['extra'] else 'entry'}")
+    chunks = doc.get("chunks")
+    if not (isinstance(chunks, list) and all(isinstance(c, dict) for c in chunks)):
+        return None, None, "its chunk list is malformed"
+    if [c.get("hash") for c in chunks] != owner["hashes"]:
+        return None, None, "it lists other bytes than the library holds now (re-split or re-mastered since its push)"
+    new, adds = copy.deepcopy(doc), {}
+    for n, chunk in enumerate(new["chunks"], 1):
+        proven = facts.get(chunk["hash"]) or {}
+        for key in MVMETA_UPGRADE_KEYS:
+            value = proven.get(key)
+            if value is None:
+                continue
+            if key not in chunk:
+                chunk[key] = value
+                adds[key] = adds.get(key, 0) + 1
+            elif not _mu_same(key, chunk[key], value):
+                return None, None, f"its {key} of chunk {n}/{len(chunks)} differs from the proven one"
+    if adds and version < MVMETA_UPGRADE_VERSION:
+        new["version"] = MVMETA_UPGRADE_VERSION
+    return new, adds, None
+
+
+def _mu_only_added(old, new, raw, newline):
+    """THE byte-identity check (PLAN Step 13c: "every v1 key byte-identical inside v2"): True only when `new` differs
+    from the sidecar `old` by nothing but MVMETA_UPGRADE_KEYS appended at the END of chunks and its version, AND `new`
+    with those keys removed and the version restored encodes to the original bytes `raw` exactly."""
+    if not (isinstance(new, dict) and list(new) == list(old) and isinstance(new.get("chunks"), list)
+            and len(new["chunks"]) == len(old["chunks"])):
+        return False
+    restored = dict(new, version=old["version"], chunks=[])
+    for c_new, c_old in zip(new["chunks"], old["chunks"]):
+        keys = list(c_new)
+        if keys[:len(c_old)] != list(c_old) or not set(keys[len(c_old):]) <= set(MVMETA_UPGRADE_KEYS):
+            return False
+        restored["chunks"].append({k: c_new[k] for k in c_old})
+    return _mu_encode(restored, newline) == raw
+
+
+class _MvmetaCommandRefused(RuntimeError):
+    """An adb argv outside mvmeta_upgrade's allowlist — a bug; it is never run."""
+
+
+def _mu_sidecar_path(path):
+    """True for a phone path mvmeta_upgrade may address: a `.mvmeta.json` strictly under a Media root
+    (DEVICE_LIST_ROOTS), on one line, without a `..` step."""
+    return _dev_statable(path) and path.endswith(MVMETA_SUFFIX) and "/../" not in path
+
+
+def _mu_local(path):
+    """True for a local file argument: an absolute path on one line (adb never reads it as an option)."""
+    return (isinstance(path, str) and os.path.isabs(path) and not path.startswith("-")
+            and not any(c in path for c in "\r\n\0"))
+
+
+def _mu_argv_ok(argv, write):
+    """mvmeta_upgrade's OWN adb allowlist (PLAN Step 13c — the device check's read-only _dev_argv_readonly stays as it
+    is): True only for these exact shapes, each naming its phone:
+         adb -s <serial> pull <sidecar> <local file>                    reading (a dry run too)
+         adb -s <serial> push <local file> <sidecar>.tmp                write=True only
+         adb -s <serial> shell mv '<sidecar>.tmp' '<sidecar>'           write=True only
+    <sidecar> is a `.mvmeta.json` strictly under a Media root (_mu_sidecar_path), <local file> an absolute local path.
+    pull / push hand adb the paths as plain arguments (no device shell); `shell mv` gets each path as ONE single-quoted
+    word ('\\'' for a quote — cmd_push's escaping), so no operator can run, and it may only rename a sidecar's own .tmp
+    over it. Everything else is refused: a media file, any other phone path, rm, a push straight onto the sidecar, a
+    phone not named, a malformed serial — and every write when `write` (the run's --apply) is False."""
+    if not (isinstance(argv, (list, tuple)) and all(isinstance(a, str) for a in argv)):
+        return False
+    argv = list(argv)
+    if len(argv) < 6 or argv[:2] != ["adb", "-s"] or not _DEV_SERIAL_RE.fullmatch(argv[2]):
+        return False
+    verb, rest = argv[3], argv[4:]
+    if verb == "pull":
+        return len(rest) == 2 and _mu_sidecar_path(rest[0]) and _mu_local(rest[1])
+    if not write:
+        return False
+    if verb == "push":
+        return (len(rest) == 2 and _mu_local(rest[0]) and rest[1].endswith(MVMETA_TMP_SUFFIX)
+                and _mu_sidecar_path(rest[1][:-len(MVMETA_TMP_SUFFIX)]))
+    if verb == "shell" and len(rest) == 3 and rest[0] == "mv":
+        if not all(_DEV_QUOTED_RE.fullmatch(word) for word in rest[1:]):
+            return False
+        source, target = _dev_unquote(rest[1]), _dev_unquote(rest[2])
+        return source == target + MVMETA_TMP_SUFFIX and _mu_sidecar_path(target)
+    return False
+
+
+def _mu_run(argv, write):
+    """Run ONE adb command of mvmeta_upgrade -> (returncode, stdout text, stderr text). Its allowlist comes first
+    (_mu_argv_ok; `write` is the run's --apply, so a dry run cannot write even if a caller asked it to): an argv off it
+    raises _MvmetaCommandRefused and never runs. stdin is DEVNULL, the output captured (decoded by _dev_text) and the
+    time bounded (MVMETA_ADB_TIMEOUT_S). OSError (no adb binary) and subprocess.TimeoutExpired propagate."""
+    if not _mu_argv_ok(argv, write):
+        raise _MvmetaCommandRefused(repr(argv)[:200])
+    result = subprocess.run(list(argv), stdin=subprocess.DEVNULL, capture_output=True, timeout=MVMETA_ADB_TIMEOUT_S)
+    return (getattr(result, "returncode", None), _dev_text(getattr(result, "stdout", None)),
+            _dev_text(getattr(result, "stderr", None)))
+
+
+def _mu_adb_problem(code, out, err):
+    """A failed adb command in one line: adb's own first error line, else its exit status."""
+    return _dev_first_line(err) or _dev_first_line(out) or f"exit status {code}"
+
+
+def _mu_pull(serial, path, local):
+    """Pull ONE sidecar from the phone into the NEW local file `local` -> (its bytes, None), or (None, why). Never
+    raises for anything adb or the phone does (a refused argv included); Ctrl+C still interrupts."""
+    try:
+        code, out, err = _mu_run(["adb", "-s", serial, "pull", path, local], write=False)
+        if code != 0:
+            return None, f"adb pull failed ({_mu_adb_problem(code, out, err)})"
+        with open(local, "rb") as fh:
+            return fh.read(), None
+    except Exception as e:     # _MvmetaCommandRefused, OSError (no adb, no file), subprocess.TimeoutExpired
+        return None, f"adb pull failed ({_gp_line(e)})"
+
+
+def _mu_mtime(serial, path):
+    """A phone file's mtime (epoch seconds), read with the device check's own read-only `stat` (_dev_run — its
+    allowlist, unchanged) -> int, or None when it cannot be read."""
+    try:
+        code, out, _err = _dev_run(["adb", "-s", serial, "shell", "stat", "-c", _dev_quote(DEVICE_STAT_FORMAT),
+                                    _dev_quote(path)], DEVICE_STAT_TIMEOUT_S)
+    except Exception:
+        return None
+    for line in _dev_lines(out) if code == 0 else ():
+        m = _DEV_STAT_RE.fullmatch(line)
+        if m and m.group(3) == path:
+            return int(m.group(2))
+    return None
+
+
+def _mu_new_run_dir(now):
+    """Create this --apply's run directory: <GPHOTOS_STATE_DIR>/mvmeta/<UTC timestamp> (read at call time), with a
+    -2, -3 … suffix when a run of the same second left one — never another run's folder. Raises OSError."""
+    base = os.path.join(mvcommon.GPHOTOS_STATE_DIR, "mvmeta", now.strftime("%Y%m%dT%H%M%SZ"))
+    for n in range(1, 1000):
+        path = base if n == 1 else f"{base}-{n}"
+        if not os.path.exists(path):
+            os.makedirs(path)      # exist_ok=False: a folder that appeared meanwhile is never shared
+            return path
+    raise OSError(f"no free run directory next to {base}")
+
+
+def _mu_keep_original(row, ctx):
+    """Keep a sidecar's ORIGINAL bytes in the run directory before its phone is touched (--apply): originals/NNNN
+    .mvmeta.json (the exact bytes) and one backup.jsonl line naming the phone file it came from — both flushed to
+    disk. -> the kept file's path. Raises OSError (then nothing is written to the phone)."""
+    if ctx["run_dir"] is None:
+        ctx["run_dir"] = _mu_new_run_dir(ctx["now"])
+    folder = os.path.join(ctx["run_dir"], "originals")
+    os.makedirs(folder, exist_ok=True)
+    ctx["kept"] += 1
+    name = f"{ctx['kept']:04d}{MVMETA_SUFFIX}"
+    kept = os.path.join(folder, name)
+    with open(kept, "xb") as fh:
+        fh.write(row["raw"])
+        fh.flush()
+        os.fsync(fh.fileno())
+    line = {"file": f"originals/{name}", "alias": row["alias"], "serial": row["serial"], "path": row["path"],
+            "mtime": row["mtime"], "manual_id": row["label"], "sha256": hashlib.sha256(row["raw"]).hexdigest()}
+    with open(os.path.join(ctx["run_dir"], "backup.jsonl"), "a", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(line, ensure_ascii=False) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    return kept
+
+
+def _mu_write(row, ctx):
+    """--apply for ONE planned sidecar (its original `raw` and v2 `new` bytes, its listed `mtime`) -> True when the phone
+    now holds exactly `new` (row: upgraded — `warning` set when its mtime changed), False on any failure (row: failed,
+    `why` saying what the phone holds now). In this order, each step only after the one before succeeded:
+      1. keep the original locally (_mu_keep_original) — no local copy, no phone write;
+      2. a local file with the v2 bytes and the ORIGINAL's mtime, pushed to `<sidecar>.tmp` (adb push keeps a file's
+         mtime — RESEARCH F3);
+      3. `mv` that .tmp over the sidecar on the phone — one atomic rename, the sidecar is never half written;
+      4. pull the sidecar back: its bytes must be exactly `new`;
+      5. its mtime (a read-only stat) must still be the original's: the push time the device check reads.
+    `ctx`: apply (the run's --apply — the allowlist's `write`), work (the temporary folder), run_dir (None until the
+    first write), now, kept and n (counters). Ctrl+C still interrupts."""
+    serial, path = row["serial"], row["path"]
+    tmp, name = path + MVMETA_TMP_SUFFIX, path.rsplit("/", 1)[-1]
+
+    def failed(why):
+        row.update(status="failed", why=why)
+        return False
+
+    if not ctx["apply"]:                   # a dry run writes nothing — not even the local copy
+        return failed("a dry run writes nothing")
+    try:
+        row["kept"] = _mu_keep_original(row, ctx)
+    except OSError as e:
+        return failed(f"its original could not be kept locally ({_gp_line(e)}) — nothing was written to the phone")
+    ctx["n"] += 1
+    local = os.path.join(ctx["work"], f"{ctx['n']}.v2{MVMETA_SUFFIX}")
+    try:
+        with open(local, "wb") as fh:
+            fh.write(row["new"])
+        os.utime(local, (row["mtime"], row["mtime"]))
+        code, out, err = _mu_run(["adb", "-s", serial, "push", local, tmp], write=ctx["apply"])
+        problem = None if code == 0 else _mu_adb_problem(code, out, err)
+    except Exception as e:
+        problem = _gp_line(e)
+    if problem:
+        return failed(f"the push of {name}{MVMETA_TMP_SUFFIX} failed ({problem}) — the sidecar is unchanged")
+    try:
+        code, out, err = _mu_run(["adb", "-s", serial, "shell", "mv", _dev_quote(tmp), _dev_quote(path)],
+                                 write=ctx["apply"])
+        problem = None if code == 0 else _mu_adb_problem(code, out, err)
+    except Exception as e:
+        problem = _gp_line(e)
+    if problem:
+        return failed(f"the rename on the phone failed ({problem}) — the sidecar is unchanged; {name}"
+                      f"{MVMETA_TMP_SUFFIX} is left next to it (the next --apply replaces it)")
+    ctx["n"] += 1
+    back, why = _mu_pull(serial, path, os.path.join(ctx["work"], f"{ctx['n']}.back{MVMETA_SUFFIX}"))
+    if back != row["new"]:
+        return failed(f"it was rewritten but does not read back as written ({why or 'other bytes'}) — restore the "
+                      f"original: adb -s {serial} push \"{row['kept']}\" \"{path}\"")
+    mtime = _mu_mtime(serial, path)
+    if mtime != row["mtime"]:
+        row["warning"] = (f"its mtime — the push time the device check reads — is now {mtime}, was {row['mtime']}"
+                          if mtime is not None else "its mtime could not be read back")
+    row["status"] = "upgraded"
+    return True
+
+
+_MU_LIST_MAX = 20     # uploaded items without a sidecar: their ids are listed up to this many (else a count per category)
+# Row statuses in report order, and their words. upgrade = a dry run's "would upgrade" (an --apply rewrites it next).
+_MU_STATUS_TEXT = {"upgrade": "would upgrade", "upgraded": "upgraded", "check-only": "not rewritten (check-only phone)",
+                   "failed": "FAILED", "not-reached": "not reached (stopped)", "skipped": "left as they are",
+                   "up-to-date": "up to date", "nothing-proven": "nothing proven yet"}
+
+
+def parse_mvmeta_upgrade_args(tokens):
+    """The `mvmeta_upgrade` CLI tokens (after the verb) -> cmd_mvmeta_upgrade keyword arguments (MVMETA_UPGRADE_USAGE).
+    Raises ValueError naming the problem: an unknown option, `device` without a value or given twice, a second scope."""
+    opts, scope, tokens, i = {"scope": "all", "device": None, "apply": False}, None, list(tokens), 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "--apply":
+            opts["apply"] = True
+            i += 1
+        elif token == "device":
+            value = tokens[i + 1].strip() if i + 1 < len(tokens) else ""
+            if not value or value.startswith("--"):
+                raise ValueError("device needs a phone: an alias (e.g. series) or a serial")
+            if opts["device"] is not None:
+                raise ValueError(f"one device only (got {opts['device']!r} and {value!r})")
+            opts["device"] = value
+            i += 2
+        elif token.startswith("--"):
+            raise ValueError(f"unknown option {token}")
+        else:
+            if scope is not None:
+                raise ValueError(f"one scope only (got {scope!r} and {token!r})")
+            scope = token.strip()
+            i += 1
+    opts["scope"] = scope or "all"
+    return opts
+
+
+def _mu_phones(device):
+    """(phones {alias: serial} to list, the serials --apply may rewrite). `device` names one phone — an alias of
+    device_check_aliases(), one of its serials, or any other serial (adb's own name for a phone); None = every phone
+    the device check lists (DEVICE_ALIASES + the check-only DEVICE_CHECK_EXTRA_SERIALS). --apply rewrites a NAMED
+    phone, and without a name only the push phones (DEVICE_ALIASES): a check-only phone serves the device check, not
+    pushes (DECISIONS.md §1d), so its sidecars are rewritten only when the user names it."""
+    known = device_check_aliases()
+    if device is None:
+        return known, {serial for serial in DEVICE_ALIASES.values() if isinstance(serial, str)}
+    if device in known:
+        return {device: known[device]}, {known[device]}
+    for alias, serial in known.items():
+        if serial == device:
+            return {alias: serial}, {serial}
+    return {device: device}, {device}
+
+
+def _mu_locate(library, inventory, owners):
+    """Where each owner's sidecar is — Step 8's classify_device_objects looks every object's `.mvmeta.json` up by its
+    exact (else PLAN P-6 normalized) name on every listed phone -> (locations [{alias, serial, path, size, mtime,
+    name_match, owners: [owner]}] in the phones' order, then by path; [owners whose sidecar is on no listed phone])."""
+    objects = [obj for owner in owners for obj in owner["objects"]]
+    claimed_by = [owner for owner in owners for _obj in owner["objects"]]
+    found, seen = {}, set()
+    for owner, row in zip(claimed_by, classify_device_objects(library, inventory, objects=objects)["objects"]):
+        for where in row["sidecars"]:
+            location = found.setdefault((where["serial"], where["path"]), {**where, "owners": []})
+            if all(other is not owner for other in location["owners"]):
+                location["owners"].append(owner)
+            seen.add(owner["key"])
+    order = {alias: n for n, alias in enumerate(inventory.get("devices") or {})}
+    locations = sorted(found.values(), key=lambda loc: (order.get(loc["alias"], len(order)), loc["path"]))
+    return locations, [owner for owner in owners if owner["key"] not in seen]
+
+
+def _mu_row(location, ctx, status=None):
+    """A sidecar's row (what one run did with it): its phone (alias, serial, path, mtime as listed), its owner (label —
+    several labels when several items claim the file name — and manual_id), status, why (when skipped / failed), adds
+    {key: chunks} and chunks, the version before and after, writable (may --apply rewrite this phone), raw / new (an
+    upgrade's original and v2 bytes), warning, kept (--apply: the local copy of its original)."""
+    owners = location["owners"]
+    return {"alias": location["alias"], "serial": location["serial"], "path": location["path"],
+            "mtime": location.get("mtime"), "label": ", ".join(o["label"] for o in owners),
+            "manual_id": owners[0]["manual_id"] if len(owners) == 1 else None, "status": status, "why": None,
+            "adds": {}, "chunks": 0, "version": None, "new_version": None,
+            "writable": location["serial"] in ctx["writable"], "raw": None, "new": None, "warning": None, "kept": None}
+
+
+def _mu_plan(location, ctx):
+    """Plan ONE sidecar found on a phone — a dry run and --apply alike -> its row (_mu_row). Decided without a pull: a
+    file name two items claim, an owner without a SHA-256 for every object, facts that disagree -> skipped; nothing
+    proven for any of its objects -> nothing-proven; its mtime (the push time) unknown -> skipped. Otherwise the sidecar
+    is pulled into the temporary folder and planned (_mu_decode, _mu_upgrade, _mu_only_added): up-to-date, upgrade
+    (with its original `raw` and v2 `new` bytes) or skipped (why)."""
+    owners = location["owners"]
+    row = _mu_row(location, ctx)
+
+    def skipped(why):
+        row.update(status="skipped", why=why)
+        return row
+
+    if len(owners) != 1:
+        return skipped(f"{len(owners)} library items claim this file name")
+    (owner,) = owners
+    row["chunks"] = len(owner["hashes"])
+    if not all(mvcommon._is_sha256(h) for h in owner["hashes"]):
+        return skipped("the library holds no SHA-256 for every object it lists")
+    facts = {}
+    for obj in owner["objects"]:
+        proven, why = _mu_facts(obj)
+        if why:
+            return skipped(f"{obj['label']}: {why}")
+        facts[obj["sha256"]] = proven
+    if not any(facts.values()):
+        row["status"] = "nothing-proven"
+        return row
+    if not _gp_is_int(row["mtime"]):
+        return skipped("its mtime (the push time) could not be read on the phone — re-run to try again")
+    ctx["n"] += 1
+    raw, why = _mu_pull(row["serial"], row["path"], os.path.join(ctx["work"], f"{ctx['n']}.pull{MVMETA_SUFFIX}"))
+    if raw is None:
+        return skipped(why)
+    doc, newline, why = _mu_decode(raw)
+    if doc is None:
+        return skipped(why)
+    new, adds, why = _mu_upgrade(doc, owner, facts)
+    if why:
+        return skipped(why)
+    row["version"] = row["new_version"] = doc["version"]
+    if not adds:
+        row["status"] = "up-to-date"
+        return row
+    if not _mu_only_added(doc, new, raw, newline):
+        return skipped("the byte-identity check failed — a bug, nothing is written; please report it")
+    row.update(status="upgrade", raw=raw, new=_mu_encode(new, newline), adds=adds, new_version=new["version"])
+    return row
+
+
+def _mu_adds_text(row):
+    """'v1 → v2: + sha1 2/3 · date_utc 3/3 · …' — the keys a sidecar gains, with how many of its chunks get each."""
+    keys = " · ".join(f"{key} {row['adds'][key]}/{row['chunks']}" for key in MVMETA_UPGRADE_KEYS if key in row["adds"])
+    version = (f"v{row['version']} → v{row['new_version']}" if row["new_version"] != row["version"]
+               else f"v{row['version']}")
+    return f"{version}: + {keys}"
+
+
+def _mu_row_lines(row, indent="  "):
+    """A row's two report lines: what it is (and what changes, or why not), then its phone path."""
+    what = _mu_adds_text(row) if row["adds"] and row["status"] != "skipped" else (row["why"] or "")
+    return [f"{indent}{row['label']} — {row['alias']} {row['serial']} — {what}".rstrip(" —"),
+            f"{indent}    {row['path']}"]
+
+
+def _mu_phone_lines(inventory, writable, named):
+    """The listed phones, one line each: its status, how many files, and whether --apply may rewrite it."""
+    lines = ["Phones (listed read-only by the device check):"]
+    for alias, d in (inventory.get("devices") or {}).items():
+        status = d.get("status")
+        if status in ("ok", "partial"):
+            what = f"{len(d.get('files') or []):,} file(s)" + (f" ({d['detail']})" if d.get("detail") else "")
+            if d.get("serial") not in writable:
+                what += f" · check-only phone: --apply rewrites it only when named — device {alias}"
+        else:
+            what = (d.get("detail") or "") + ("" if status == "skipped" else " — skipped")
+        lines.append(f"  {alias:<9} {str(d.get('serial')):<18} {status} — {what}")
+    if not named:
+        for phone in inventory.get("unconfigured") or []:
+            lines.append(f"  ⚠️  attached but not configured: {phone['serial']} ({phone['state']}) — to include it: "
+                         f"device {phone['serial']}")
+    return lines
+
+
+def _mu_missing_lines(missing, inventory):
+    """The uploaded items whose sidecar is on no listed phone — listed only (PLAN Step 13c: creating a missing sidecar
+    is out of scope): a count per category, the ids when there are at most _MU_LIST_MAX."""
+    if not missing:
+        return []
+    per = {}
+    for owner in missing:
+        per[owner["category"] or "other"] = per.get(owner["category"] or "other", 0) + 1
+    lines = [f"No sidecar on the listed phones: {len(missing):,} uploaded item(s) ("
+             + " · ".join(f"{category} {n:,}" for category, n in sorted(per.items()))
+             + ") — listed only: creating a missing sidecar is out of scope"]
+    away = [f"{alias} ({d.get('serial')}) {d.get('status')}" for alias, d in (inventory.get("devices") or {}).items()
+            if d.get("status") not in ("ok", "skipped")]
+    if away:
+        lines.append("    a phone was not listed in full, so their sidecars may be there: " + ", ".join(away))
+    if len(missing) <= _MU_LIST_MAX:
+        lines.extend(f"    {owner['label']}" for owner in missing)
+    else:
+        lines.append(f"    (more than {_MU_LIST_MAX} — run with one id or season id to list them)")
+    return lines
+
+
+def _mu_leftover_lines(inventory, rows):
+    """`<sidecar>.tmp` files an interrupted --apply left on the listed phones (the ones this run did not replace)."""
+    replaced = {(r["serial"], r["path"] + MVMETA_TMP_SUFFIX) for r in rows if r["status"] in ("upgraded", "failed")}
+    left = [(alias, d.get("serial"), f.get("path")) for alias, d in (inventory.get("devices") or {}).items()
+            for f in d.get("files") or () if str(f.get("name")).endswith(MVMETA_SUFFIX + MVMETA_TMP_SUFFIX)
+            and (d.get("serial"), f.get("path")) not in replaced]
+    if not left:
+        return []
+    return ([f"⚠️  {len(left):,} leftover <sidecar>{MVMETA_TMP_SUFFIX} file(s) of an interrupted --apply — harmless "
+             f"(not media); the next --apply of their item replaces them:"]
+            + [f"    {alias} {serial} {path}" for alias, serial, path in left])
+
+
+def cmd_mvmeta_upgrade(scope="all", device=None, apply=False):
+    """`mvmeta_upgrade` (PLAN Step 13c; the OD-4 ruling) — bring the phones' `.mvmeta.json` sidecars of the existing
+    library to v2 with the facts PROVEN for each chunk's own bytes; the rules are in the section comment above. A DRY
+    RUN unless `apply`: it pulls into a temporary folder and writes nothing anywhere.
+      scope   all (the whole library) | a library id | an id prefix (a season id selects its episodes; an alias id
+              upgrades its primary's sidecar; an entry's extras items come with it)
+      device  one phone: an alias of device_check_aliases(), one of its serials, any serial; None = every phone the
+              device check lists — --apply then rewrites only the push phones' sidecars (DEVICE_ALIASES)
+      apply   rewrite, one sidecar at a time (_mu_write: its original kept locally first); the first failure stops
+    -> {status: ok | error (an unknown scope; a write failed) | interrupted (Ctrl+C) | disabled (--apply while
+        MVMETA_UPGRADE_APPLY_ENABLED is off), apply, scope, rows (one per sidecar found), missing (uploaded items whose
+        sidecar is on no listed phone), devices (the listing), run_dir (--apply: the originals' folder, once a write
+        began), counts {row status: n}}."""
+    done = {"status": "ok", "apply": apply, "scope": scope, "rows": [], "missing": [], "devices": {}, "run_dir": None,
+            "counts": {}}
+    if apply and not MVMETA_UPGRADE_APPLY_ENABLED:
+        print(f"⚠️  mvmeta_upgrade --apply: {MVMETA_UPGRADE_DISABLED} — nothing was read or written; without --apply "
+              f"the dry run still lists what it would add.")
+        return dict(done, status="disabled")
+    library = load_library()
+    if scope in (None, "", "all"):
+        scope, ids = "all", None
+    else:
+        ids = sorted(mid for mid in library if isinstance(mid, str) and (mid == scope or mid.startswith(scope)))
+        if not ids:
+            print(f"❌ mvmeta_upgrade: no library id is or starts with {scope!r}.")
+            return dict(done, status="error")
+    done["scope"] = scope
+    transcript = []
+
+    def say(line):
+        print(line, flush=True)
+        transcript.append(line)
+
+    owners = _mu_owners(mvcommon.iter_uploaded_objects(library, ids))
+    mode = "--apply: rewriting the phones' sidecars" if apply else "dry run: nothing is written"
+    say(f"=== MVMETA UPGRADE — {mode} — scope: {scope}{' · device ' + device if device else ''} — "
+        f"{len(owners):,} uploaded item(s) ===")
+    if not owners:
+        say("Nothing in this scope was uploaded — there is no sidecar to look for.")
+        return done
+    phones, writable = _mu_phones(device)
+    inventory = device_inventory(phones)
+    locations, missing = _mu_locate(library, inventory, owners)
+    done.update(missing=missing, devices=inventory.get("devices") or {})
+    for line in _mu_phone_lines(inventory, writable, device is not None):
+        say(line)
+    ctx = {"apply": apply, "work": tempfile.mkdtemp(prefix="mv_mvmeta_"), "run_dir": None,
+           "now": mvcommon._now_utc(), "kept": 0, "n": 0, "writable": writable}
+    rows, writing, stop = done["rows"], None, None
+    try:
+        for location in locations:
+            if stop:
+                rows.append(_mu_row(location, ctx, status="not-reached"))
+                continue
+            row = _mu_plan(location, ctx)
+            rows.append(row)
+            if not apply or row["status"] != "upgrade":
+                continue
+            if not row["writable"]:
+                row["status"] = "check-only"
+                continue
+            writing = row
+            ok = _mu_write(row, ctx)
+            writing = None
+            if ok:
+                say(f"   ✅ upgraded {row['label']} — {row['alias']} — {_mu_adds_text(row)}")
+                if row["warning"]:
+                    say(f"      ⚠️  {row['warning']}")
+            else:
+                say(f"   ❌ FAILED {row['label']} — {row['alias']} {row['serial']} — {row['why']}")
+                stop = "error"
+            say(f"         {row['path']}")
+    except KeyboardInterrupt:
+        stop = "interrupted"
+        if writing is not None:
+            writing.update(status="failed", why="interrupted while it was being rewritten — it holds its original or "
+                                                "the new v2 (at most a leftover .tmp): re-run to see which")
+            say(f"⚠️  Interrupted (Ctrl+C) while rewriting {writing['label']} on {writing['alias']} — it holds its "
+                f"original or the new v2 (at most a leftover .tmp): re-run to see which.")
+            say(f"         {writing['path']}")
+        else:
+            say("⚠️  Interrupted (Ctrl+C) — no sidecar was being written.")
+        listed = {(r["serial"], r["path"]) for r in rows}
+        rows.extend(_mu_row(loc, ctx, status="not-reached") for loc in locations
+                    if (loc["serial"], loc["path"]) not in listed)
+    finally:
+        shutil.rmtree(ctx["work"], ignore_errors=True)
+    done.update(run_dir=ctx["run_dir"], status=stop or "ok")
+    done["counts"] = {status: sum(1 for r in rows if r["status"] == status) for status in _MU_STATUS_TEXT
+                      if any(r["status"] == status for r in rows)}
+    upgrades = [r for r in rows if r["status"] == "upgrade"]
+    if upgrades:
+        say(f"Would upgrade ({len(upgrades):,}) — the keys --apply adds (how many of the sidecar's chunks get each):")
+        for row in upgrades:
+            first, second = _mu_row_lines(row)
+            say(first + ("" if row["writable"] else f"   (check-only phone: --apply needs it named — device "
+                                                    f"{row['alias']})"))
+            say(second)
+    for status, title in (("check-only", "Not rewritten — on a check-only phone (name it to rewrite it: device "
+                                         "<alias>)"),
+                          ("skipped", "Left as they are — nothing is changed in them"),
+                          ("not-reached", "Not reached — the run stopped first")):
+        chosen = [r for r in rows if r["status"] == status]
+        if chosen:
+            say(f"{title} ({len(chosen):,}):")
+            for row in chosen:
+                for line in _mu_row_lines(row):
+                    say(line)
+    summary = " · ".join(f"{_MU_STATUS_TEXT[status]} {n:,}" for status, n in done["counts"].items())
+    say(f"Summary: {summary or 'no sidecar of this scope on the listed phones'}"
+        + (" — nothing proven yet = no capture and not confirmed in Google Photos: map_photos / check_photos --apply "
+           "first" if done["counts"].get("nothing-proven") else ""))
+    for line in _mu_missing_lines(missing, inventory) + _mu_leftover_lines(inventory, rows):
+        say(line)
+    if ctx["run_dir"]:
+        say(f"Originals kept in {ctx['run_dir']} — backup.jsonl names each one's phone file; to put one back: "
+            f"adb -s <serial> push \"<file>\" \"<phone path>\"")
+    if stop == "error":
+        say("❌ Stopped at the first failure (above) — once it is fixed, re-run the same command: the upgraded "
+            "sidecars are up to date and skipped.")
+    elif stop == "interrupted":
+        say("⚠️  Re-run the same command to finish: whatever was upgraded is up to date and skipped.")
+    else:
+        writable_rows = [r for r in upgrades if r["writable"]]
+        if writable_rows and not apply:
+            say(f"Next: python main.py mvmeta_upgrade {scope}{' device ' + device if device else ''} --apply — "
+                f"rewrites the {len(writable_rows):,} sidecar(s) marked above"
+                + (" (not those on a check-only phone)" if len(writable_rows) < len(upgrades) else ""))
+        for alias in sorted({r["alias"] for r in rows if r["status"] in ("upgrade", "check-only") and not r["writable"]}):
+            say(f"Next (check-only phone): python main.py mvmeta_upgrade {scope} device {alias} --apply")
+    if ctx["run_dir"]:
+        try:
+            with open(os.path.join(ctx["run_dir"], "report.txt"), "w", encoding="utf-8", newline="\n") as fh:
+                fh.write("\n".join(transcript) + "\n")
+        except OSError as e:
+            print(f"⚠️  report.txt not written to {ctx['run_dir']} ({_gp_line(e)}) — the run itself is complete.")
+    return done
 
 
 # ==========================================
@@ -11707,7 +17651,7 @@ if __name__ == "__main__":
         print("  prep_push_rep_season [id] [folder] [optional: SIZE..] [OPT: episodes] [device <id_or_name>] [rehash] [tempdir <path>]")
         print("  prep_push_rep_enrich [id] [filepath] [SIZE_GB/SIZE_MB/COUNT val] [device <id_or_name>] [rehash] [tempdir <path>] [-tmdbid <id>] [--yes|--no-rename] [--nfo] [--no-web]  — archive then TMDB-enrich; no id -> auto-resolve exactly like enrich_metadata")
         print("  prep_push_rep_season_enrich [id] [folder] [SIZE_GB/SIZE_MB/COUNT val] [episodes <range>] [device <id_or_name>] [rehash] [tempdir <path>] [-tmdbid <id>] [--yes|--no-rename] [--nfo] [--no-web]  — season autopilot, then show-centric enrich")
-        print("  fetch_restore [id] [OPT: episodes 1-3] [tempdir <path>] [--fetchExtras]")  # [NEW]
+        print("  fetch_restore [id] [OPT: episodes 1-3] [tempdir <path>] [--fetchExtras] [--manual]")  # [NEW]
         print("  set_search [id] [term]")
         print("  set_poster [id] [url]")
         print("  set_fanart [id] [url]")
@@ -11725,16 +17669,24 @@ if __name__ == "__main__":
         print("  replace_group [id]")
         print("  repair_dummies [optional: id_prefix]")
         print("  verify_library [--fix-dummies]")
-        print("  verify_restore [id]")
+        print("  verify_restore [id] [tempdir <path>]")
         print("  restore [id] [tempdir <path>]")
         print("  restore_group [id] [tempdir <path>]")
         print("  sort")
-        print("  fetch [id] [tempdir <path>]")
+        print("  fetch [id] [tempdir <path>] [--manual]")
+        print("  fetch_cleanup [--apply]  — list (dry run) / delete fetch leftovers: ~/Downloads files named like a library upload, MediaVault download folders (.mv_incoming), unfinished fetch journals")
         print("  recover [id|folder]  (or: recover --scan)")
         print("  rename_folder [id|folder] \"<NewName {tmdb-12345}>\"  — rename a show/season folder + rewrite every descendant folder_path (crash-safe, no rehash)")
         print("  migrate_provider_tokens [id_or_prefix] [--apply] [--library movies|series|anime|others]  — migrate every folder still on an OLD token format ([tmdbid-…], [tmdb-…], [tmdbid=…], wrong casing) to canonical {tmdb-…}, ancestor-aware (dry-run by default; --apply writes a JSON report under migration_reports/)")
         print("  normalize_season_folders [id_or_prefix] [--apply]  — two-phase structural rename: Phase A gives the show folder its TMDB token, Phase B renames each season folder to '<Show Name> Season NN (air year)' with NO id on the season (dry-run by default; --apply writes a JSON report under migration_reports/)")
         print("  add_extras <title_id> \"<folders>\" [--extras-size <v|none>] [device <id>] [no-replace]  — attach extras (Specials/Trailers/BTS) to an existing title")
+        print(f"  {MAP_USAGE}  — map the uploaded objects to the Google Photos inventory (dry-run by default; --apply writes)")
+        print(f"  {CHECK_USAGE}  — verify objects in Google Photos without downloading (dry-run by default; --apply / "
+              f"--apply-run record; pending --list is offline)")
+        print(f"  {RESOLVE_USAGE}  — resolve the failed list by hand in Chrome (interactive, a terminal only): paste a "
+              f"photo URL, give a search term or mark it not uploaded; the library changes only when you say so")
+        print(f"  {MVMETA_UPGRADE_USAGE}  — upgrade the phones' .mvmeta.json sidecars to v2 with the proven identity "
+              f"facts (dry-run by default; --apply rewrites them, keeping each original locally)")
         print("  web [--port N] [--host H] [--no-browser] [--demo]  — Launch the local web operations console (Disk Reclaim view); --demo = SAFE build, all actions simulated")
         print("  token create [--label \"X\"] [--ttl 1h|8h|12h|1d|3d|7d|30d|never]  — Mint a web access token (default --ttl 7d)")
         print("  token list                                          — List minted web access tokens")
@@ -11824,8 +17776,10 @@ if __name__ == "__main__":
 
         filepath = " ".join(filepath_parts)
         _er_ppr = parse_extras_tokens(_et_ppr)
-        cmd_prep_push_rep(mid, filepath, method, val, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
-                          extras=_er_ppr["folders"] or None, extras_size=_er_ppr["extras_size"])
+        _ac_result = cmd_prep_push_rep(mid, filepath, method, val, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
+                                       extras=_er_ppr["folders"] or None, extras_size=_er_ppr["extras_size"])
+        # [IMP-C25 Step 13b] the auto-confirm (PLAN P-19) — only once the command RETURNED; an exception never gets here
+        after_push_command("prep_push_rep", _ac_result, mid)
 
     elif cmd == "prep_push_rep_season":
         if len(sys.argv) < 4:
@@ -11887,8 +17841,10 @@ if __name__ == "__main__":
 
         folder_path = " ".join(folder_parts)
         _er_pprs = parse_extras_tokens(_et_pprs)
-        cmd_prep_push_rep_season(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
-                                 extras=_er_pprs["folders"] or None, extras_size=_er_pprs["extras_size"])
+        _ac_result = cmd_prep_push_rep_season(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
+                                              extras=_er_pprs["folders"] or None, extras_size=_er_pprs["extras_size"])
+        # [IMP-C25 Step 13b] the auto-confirm (PLAN P-19) — only once the command RETURNED; an exception never gets here
+        after_push_command("prep_push_rep_season", _ac_result, group_id, ep_range)
 
     elif cmd == "prep_push_rep_enrich":
         # IMP-D22 — same token walk as `prep_push_rep` above (SIZE_*/COUNT, device,
@@ -11981,10 +17937,12 @@ if __name__ == "__main__":
 
         filepath = " ".join(filepath_parts)
         _er_ppre = parse_extras_tokens(_et_ppre)
-        cmd_prep_push_rep_enrich(mid, filepath, method, val, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
-                                 extras=_er_ppre["folders"] or None, extras_size=_er_ppre["extras_size"],
-                                 tmdb_id=cli_tmdb_id, tvdb_id=cli_tvdb_id,
-                                 write_nfo=write_nfo_flag, no_web=no_web_flag, rename_choice=rename_choice)
+        _ac_result = cmd_prep_push_rep_enrich(mid, filepath, method, val, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
+                                              extras=_er_ppre["folders"] or None, extras_size=_er_ppre["extras_size"],
+                                              tmdb_id=cli_tmdb_id, tvdb_id=cli_tvdb_id,
+                                              write_nfo=write_nfo_flag, no_web=no_web_flag, rename_choice=rename_choice)
+        # [IMP-C25 Step 13b] the auto-confirm (PLAN P-19) — only once the command RETURNED; an exception never gets here
+        after_push_command("prep_push_rep_enrich", _ac_result, mid)
 
     elif cmd == "prep_push_rep_season_enrich":
         # IMP-D22 — same token walk as `prep_push_rep_season` above (SIZE_*/COUNT,
@@ -12082,10 +18040,12 @@ if __name__ == "__main__":
 
         folder_path = " ".join(folder_parts)
         _er_pprse = parse_extras_tokens(_et_pprse)
-        cmd_prep_push_rep_season_enrich(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
-                                        extras=_er_pprse["folders"] or None, extras_size=_er_pprse["extras_size"],
-                                        tmdb_id=cli_tmdb_id, tvdb_id=cli_tvdb_id,
-                                        write_nfo=write_nfo_flag, no_web=no_web_flag, rename_choice=rename_choice)
+        _ac_result = cmd_prep_push_rep_season_enrich(group_id, folder_path, method, val, ep_range, device_id=resolve_device(device_arg), eager_rehash=eager, temp_dir=tdir,
+                                                     extras=_er_pprse["folders"] or None, extras_size=_er_pprse["extras_size"],
+                                                     tmdb_id=cli_tmdb_id, tvdb_id=cli_tvdb_id,
+                                                     write_nfo=write_nfo_flag, no_web=no_web_flag, rename_choice=rename_choice)
+        # [IMP-C25 Step 13b] the auto-confirm (PLAN P-19) — only once the command RETURNED; an exception never gets here
+        after_push_command("prep_push_rep_season_enrich", _ac_result, group_id, ep_range)
 
     elif cmd == "set_search":
         if len(sys.argv) >= 4:
@@ -12193,7 +18153,16 @@ if __name__ == "__main__":
         cmd_verify_library(fix_dummies=fix)
 
     elif cmd == "verify_restore":
-        cmd_verify_restore(sys.argv[2])
+        # [IMP-C25 Step 11 h] verify_restore [id] [tempdir <path>] — tempdir parsed like restore's
+        args = sys.argv[2:]
+        tdir = None
+        i = 0
+        while i < len(args):
+            if args[i] == "tempdir" and i + 1 < len(args):
+                tdir = args[i + 1]; i += 2
+            else:
+                i += 1
+        cmd_verify_restore(args[0], temp_dir=tdir) if args else print("❌ Usage: verify_restore [id] [tempdir <path>]")
 
     elif cmd == "restore":
         args = sys.argv[2:]
@@ -12291,12 +18260,14 @@ if __name__ == "__main__":
             _lib_probe = load_library()
             if mid in _lib_probe and _resolve_alias(_lib_probe, mid)[1].get("status") == "archived":
                 print(f"ℹ️  {mid} main is archived — pushing extras only (main untouched).")
-                _push_title_extras_or_warn(_lib_probe, _extras_title_id(_lib_probe, mid), _extras_folders,
-                                            _extras_size_val, _dev_push, method, val)
+                _ac_result = _push_title_extras_or_warn(_lib_probe, _extras_title_id(_lib_probe, mid), _extras_folders,
+                                                        _extras_size_val, _dev_push, method, val)
                 _skip_main = True
         if not _skip_main:
-            cmd_push(mid, method, val, c_range, device_id=_dev_push, eager_rehash=eager, temp_dir=tdir,
-                     extras=_extras_folders, extras_size=_extras_size_val)
+            _ac_result = cmd_push(mid, method, val, c_range, device_id=_dev_push, eager_rehash=eager, temp_dir=tdir,
+                                  extras=_extras_folders, extras_size=_extras_size_val)
+        # [IMP-C25 Step 13b] the auto-confirm (PLAN P-19) — only once the command RETURNED; an exception never gets here
+        after_push_command("push", _ac_result, mid)
 
     elif cmd == "push_group":
         _pgg_all = sys.argv[2:]
@@ -12319,8 +18290,10 @@ if __name__ == "__main__":
                 _pgg_i += 1
         group_id, method, val, ep_range, dev, eager, tdir = parse_push_group_args(_other_pgg)
         _er_pgg = parse_extras_tokens(_et_pgg)
-        cmd_push_group(group_id, method, val, ep_range, device_id=resolve_device(dev), eager_rehash=eager, temp_dir=tdir,
-                       extras=_er_pgg["folders"] or None, extras_size=_er_pgg["extras_size"])
+        _ac_result = cmd_push_group(group_id, method, val, ep_range, device_id=resolve_device(dev), eager_rehash=eager, temp_dir=tdir,
+                                    extras=_er_pgg["folders"] or None, extras_size=_er_pgg["extras_size"])
+        # [IMP-C25 Step 13b] the auto-confirm (PLAN P-19) — only once the command RETURNED; an exception never gets here
+        after_push_command("push_group", _ac_result, group_id, ep_range)
 
     elif cmd == "sort":
         cmd_sort()
@@ -12400,9 +18373,58 @@ if __name__ == "__main__":
         cmd_add_extras(_ae_title_id, _ae_folders, extras_size=_er_ae["extras_size"],
                        device_id=resolve_device(_ae_dev), no_replace=_ae_no_replace)
 
+    elif cmd == "map_photos":
+        # map_photos [all|<id>|<prefix>] [--account a] [--devices-only] [--resolutions <csv>]
+        #            [--repair split-info|names] [--accept-probable] [--apply] [--out <dir>]  — DRY-RUN by default
+        try:
+            _mp_opts = parse_map_photos_args(sys.argv[2:])
+        except ValueError as _mp_err:
+            print(f"❌ map_photos: {_mp_err}")
+            print(f"   Usage: {MAP_USAGE}")
+            sys.exit(1)
+        if cmd_map_photos(**_mp_opts).get("status") == "error":
+            sys.exit(1)
+
+    elif cmd == "check_photos":
+        # [IMP-C25 Step 13] check_photos <scope> [--approaches best|all] [--account a] [--recheck]
+        #   [--apply | --apply-run <run dir|latest>] [--limit N] [--pace S] [--max-minutes M] [--min-age-h H]
+        #   [--devices] [--list] — download-free; a DRY RUN unless --apply / --apply-run
+        try:
+            _cp_opts = parse_check_photos_args(sys.argv[2:])
+        except ValueError as _cp_err:
+            print(f"❌ check_photos: {_cp_err}")
+            print(f"   Usage: {CHECK_USAGE}")
+            sys.exit(1)
+        if cmd_check_photos(**_cp_opts).get("status") in CHECK_FAILED_STATUSES:
+            sys.exit(1)
+
+    elif cmd == "resolve_photos":
+        # [IMP-C25 Step 14] resolve_photos [failed|<csv>] [--account a] [--id <manual_id>] — interactive, CLI only
+        # (OD-14): every answer recorded at once; the library changes only after the final "Apply …? [y/N]"
+        try:
+            _rp_opts = parse_resolve_photos_args(sys.argv[2:])
+        except ValueError as _rp_err:
+            print(f"❌ resolve_photos: {_rp_err}")
+            print(f"   Usage: {RESOLVE_USAGE}")
+            sys.exit(1)
+        if cmd_resolve_photos(**_rp_opts).get("status") in RESOLVE_FAILED_STATUSES:
+            sys.exit(1)
+
+    elif cmd == "mvmeta_upgrade":
+        # [IMP-C25 Step 13c] mvmeta_upgrade [all|<id>|<prefix>] [device <alias|serial>] [--apply] — a DRY RUN unless
+        # --apply (OD-4; G0 q2: "Yes, with --apply only"): the phones' .mvmeta.json sidecars -> v2 with proven facts
+        try:
+            _mu_opts = parse_mvmeta_upgrade_args(sys.argv[2:])
+        except ValueError as _mu_err:
+            print(f"❌ mvmeta_upgrade: {_mu_err}")
+            print(f"   Usage: {MVMETA_UPGRADE_USAGE}")
+            sys.exit(1)
+        if cmd_mvmeta_upgrade(**_mu_opts).get("status") in ("error", "interrupted"):
+            sys.exit(1)
+
     elif cmd == "fetch":
         if len(sys.argv) < 3:
-            print("❌ Usage: fetch [id] [OPT: episodes 1-3] [tempdir <path>] [--fetchExtras]")
+            print("❌ Usage: fetch [id] [OPT: episodes 1-3] [tempdir <path>] [--fetchExtras] [--manual]")
             sys.exit(1)
 
         mid = sys.argv[2]
@@ -12419,12 +18441,13 @@ if __name__ == "__main__":
                 ftdir = _fetch_tokens[_ft_i + 1]
             _ft_i += 1
 
-        cmd_dispatch_fetch(mid, epr, fetch_extras=_fetch_extras, temp_dir=ftdir)
+        cmd_dispatch_fetch(mid, epr, fetch_extras=_fetch_extras, temp_dir=ftdir,
+                           manual="--manual" in _fetch_tokens)  # [IMP-C25] forwarded only when given
 
     elif cmd == "fetch_restore":
-        # [NEW] Usage: fetch_restore [id] [OPT: episodes 1-3] [tempdir <path>] [--fetchExtras]
+        # [NEW] Usage: fetch_restore [id] [OPT: episodes 1-3] [tempdir <path>] [--fetchExtras] [--manual]
         if len(sys.argv) < 3:
-            print("❌ Usage: fetch_restore [id] [OPT: episodes 1-3] [tempdir <path>] [--fetchExtras]")
+            print("❌ Usage: fetch_restore [id] [OPT: episodes 1-3] [tempdir <path>] [--fetchExtras] [--manual]")
             sys.exit(1)
 
         mid = sys.argv[2]
@@ -12441,7 +18464,16 @@ if __name__ == "__main__":
                 frdir = _fr_tokens[_fr_i + 1]
             _fr_i += 1
 
-        cmd_fetch_restore(mid, epr, fetch_extras=_fetch_extras, temp_dir=frdir)
+        cmd_fetch_restore(mid, epr, fetch_extras=_fetch_extras, temp_dir=frdir,
+                          manual="--manual" in _fr_tokens)  # [IMP-C25] forwarded only when given
+
+    elif cmd == "fetch_cleanup":
+        # [IMP-C25 Step 11 g] fetch_cleanup [--apply] — a dry run unless --apply is given
+        _fc_args = sys.argv[2:]
+        if any(_a != "--apply" for _a in _fc_args):
+            print("❌ Usage: fetch_cleanup [--apply]")
+            sys.exit(1)
+        cmd_fetch_cleanup(apply="--apply" in _fc_args)
 
     elif cmd == "token":
         # Web access token management (IMP-E15): create / list / revoke.

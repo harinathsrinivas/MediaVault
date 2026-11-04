@@ -109,7 +109,8 @@
 - Effort estimate: small
 - Risk: low — second-attempt query construction only; first attempt and hash-routing unchanged.
 - If skipped: titles whose precision search misses (punctuation/fuzzy-tokenizer quirks) are simply unfetchable without a manual `set_search` — for a daemon-triggered fetch that means a "fetch failed" tile and a trip to the PC, the exact thing the end goal abolishes.
-- Status: pending
+- Shipped by IMP-C25 (not as a stripped query): fetch now locates an object before it downloads, through the evidence-ordered waterfall — the stored `photo_id`, the SHA-1 hash lookup, the taken second, then S2 the exact uploaded name, S3 the title + short_id (category-aware), and S3u the user's own search term from the failed list — with every candidate verified first. Today's two attempts stay the S4 last resort (`mainfetch.EXACT_LOCATOR_ENABLED` is the kill switch).
+- Status: done (absorbed by IMP-C25, `feature/imp_c25_fetch_exact_gp_item`, PR pending)
 
 ---
 
@@ -149,6 +150,7 @@
 - Effort estimate: small
 - Risk: low-medium — adds a guard to an emergency command; `--force` preserves the old behavior for the cases the command exists for (post-Photos-cleanup, multi-session pushes where the phone copy is already gone — expect `--force` to be needed often; message must say so).
 - If skipped: one wrong-id paste away from `replace` destroying the only local copy of a file whose upload never happened. The dummy swap makes the loss invisible until a fetch months later returns nothing.
+- Synergy (IMP-C25, done): `python main.py check_photos <id>` now verifies download-free whether an entry's objects are in Google Photos (a dedupKey proof for content-keyed objects, the exact uploaded name for legacy ones) — a cloud-side check for exactly the case where the phone copy is already gone and this entry expects `--force` to be needed often.
 - Status: pending
 
 ---
@@ -465,7 +467,51 @@
 - Risk: the change itself is low-risk if scoped correctly (additive primitive + mechanical per-site migration), but it sits **adjacent to the change-gated auto-rollback mechanism** (`RollbackJournal.rollback()`/`recover_journal()` call `save_library()` internally, and the fix changes what happens at the exact moment `cmd_prep`/`cmd_push`/`cmd_replace`/`cmd_restore` persist on their happy path) — per `CLAUDE.md` this MUST be surfaced to the user as an explicit decision before implementation, not silently modified.
 - If skipped: the exact incident (or worse — a movie/anime entry clobbered by an unrelated series-entry save) can recur at any time two mutating commands overlap, including today's normal usage pattern of running `main.py web` alongside a CLI command.
 - Cross-references: IMP-D23 is what the user was manually working around (avoiding an expensive prep re-hash) when they triggered this incident via a risky parallel `push_group`+`replace` workaround — fixing D23 removes the *motive* for that specific workaround but does not fix the underlying race, which can still occur for other legitimate reasons (e.g. `web` alongside a CLI command, running right now in production). IMP-B1 ("cache library handle across cmd_* calls", `improvements_tierB.md`, pending) proposes the OPPOSITE direction — holding one library handle across an entire season batch — and would make this race's blast radius larger, not smaller, if implemented without C24's lock in place first; B1's own entry already flags it as risk "high" and change-gate-adjacent for this reason.
+- IMP-C25 interplay (2026-11-03): C25 added one more library writer, its apply engine (`main.gphotos_apply`, the only writer of `gphotos` blocks), and it takes no lock either. Per the C25 OD-2 ruling it overwrites the library directly, guarded by a fingerprint of every library file (size, mtime_ns, SHA-256) taken before the load and re-checked just before the save; on a change it reloads and re-patches, up to `GPHOTOS_APPLY_ATTEMPTS = 3` times, then aborts. Its real-library applies (🚦 R3) ran with no other MediaVault command running. When C24 lands, switch that engine to C24's `save_library_atomic` (C25 PLAN P-10). C24's planned `library_lock` mirrors `fetch_session_lock`, and IMP-C39 records two gaps in that primitive that the new lock should not copy: a dead holder is judged only by the lock file's age, and the release deletes whatever lock file is there, even a newer holder's.
 - Status: pending
+
+---
+
+## IMP-C25: Fetch the EXACT Google Photos item — content key + taken-second locator + remembered photo_id + per-object account; map/check/confirm the archived library
+
+- Category: other
+- Priority: high
+- Files: `gpweb.py` (new), `gpcapture.py`, `mvcommon.py`, `main.py`, `mainfetch.py`, `tools/gp_inventory.py`, tests, docs. Plan: `docs/feature-fetch-datetime/PLAN.md`; research: `docs/feature-fetch-datetime/RESEARCH.md`.
+- Current behavior: fetch types filename/`search_term` queries, clicks a tile by position, downloads it and routes by SHA-256; wrong downloads are left in `~/Downloads` (RESEARCH F10). Text search is not an identity (F16/F18/F25), a release batch shares one second (F13), the primary tile selector is dead on search pages (F14), fetch routes by id prefix although 31 archived X-Files episodes live in the MOVIES account, and `tempdir` does not keep downloads off C:.
+- Proposed change: SHA-1 content key (= dedupKey) and DateUTC captured at prep/push (interim capture, PR #60); per-object versioned `gphotos` identity block with per-account learned record, approach term and confirmed-in-cloud marker; inventory crawl (read-only RPC, DOM fallback) → mapping (normalized names, dedupKey cross-checks, re-split sets, wrong-account, device cross-check) → user resolutions → `--apply`; `check_photos` (download-free verification by item/season/series/account/pending/all, RPC hash lookup, outlier list); auto-confirm of unverified pushes at the end of the next push; evidence-ordered waterfall (photo_id → SHA-1 hash lookup → taken second → exact name → title+short_id → user search term) with today's flow as the unchanged last resort; per-object account routing; failed list + `resolve_photos` manual confirm/match; downloads directly into the restore folder (or tempdir location) through a disposable `.mv_incoming` dir + fetch journal + interruption cleanup + `fetch_cleanup` for old `~/Downloads` leftovers; `--manual`; resumable fetch_restore; `mvmeta_upgrade` for the existing phone-side sidecars.
+- Rationale: identity by content, proven before any bytes move; every archived object becomes directly addressable.
+- Goal: every archived object fetchable by direct photo_id in its real account; new archivals confirmed after backup; zero regression when data is absent.
+- Effort estimate: large
+- Risk: medium — rewrites fetch selection behind a kill switch with today's flow as last resort; capture is post-commit (rollback-neutral, OD-3); `gphotos` is an optional nested block (ENTRY_TYPE_KEYS doc + guard); library writes through one apply engine with a fingerprint re-check (IMP-C24 note); internal RPCs are read-only and allowlisted.
+- If skipped: fetch keeps guessing by text and tile order; 31 wrong-account episodes stay unfetchable; possible cloud-loss cases stay invisible until a restore fails.
+- Cross-references: absorbs C5, A8, B10; partial B4; fixes C26; tooling for C27; synergies E5, G2/S7, X1/X5, C7, D9; interplay C24.
+- What shipped (`feature/imp_c25_fetch_exact_gp_item`; record: `docs/feature-fetch-datetime/PROGRESS.md`, rulings: `DECISIONS.md`):
+  - Steps 0–16, incl. 9b, 13b and 13c:
+    - the identity layer: the `gphotos` block (P-1) and its pin rule; capture v2 at prep/push plus v2 `.mvmeta.json` sidecars; the shared parsers (`gpweb.py`) and the allowlisted read-only RPC client (`gprpc.py`); the apply engine, the only writer of `gphotos` blocks; the productized inventory crawler (`tools/gp_inventory.py`: RPC-first, incremental, locked); the device cross-check.
+    - the commands: `map_photos` (mapping, resolutions, `--repair split-info|names`); `check_photos` (download-free verification, sweep, `--apply`); the auto-confirm after the next push; `mvmeta_upgrade`; `resolve_photos`; `fetch_cleanup`; `mainfetch.py locate`.
+    - the fetch: per-object account routing (mvconfig override > `home_account` > id prefix); the locator engine (Step 12, candidate C hybrid, picked at 🚦 G12) with a direct download by `photo_id`; download hygiene (straight into `restore\.mv_incoming\`, a fetch journal, interruption cleanup, Chrome closed at the end); `--manual`; a resumable fetch_restore.
+    - verification and docs: smoke 82 → 102, regression pins, disarm probes; README, ARCHITECTURE, OPERATIONS_QA, testing strategy.
+    - Step H shipped IMP-C26 as PR #61 (squash `494fbec`).
+  - Follow-ups fixed inside C25:
+    - restore-bubble: Chrome never shows "Restore pages?" (`537ff7e`).
+    - acfix: the auto-confirm checks only objects pushed at least 24 h ago (`cd0ef94`).
+    - thfix: a throttled Google Photos search is never a "not found" or a "logged out"; map's `not-listed` (merge `c6d9990`).
+    - mpfix: map_photos' dry-run preview counts what `--apply` changes, and an item uploaded after the crawl began is not `not-listed` — in progress at the time of writing; merged before the PR.
+  - Absorbed: IMP-C5, IMP-A8 and IMP-B10 (done); IMP-C34, IMP-C35 and IMP-C36 (Step 10 items g, h, i — done); IMP-B4 partially.
+- Real-library results (redacted counts):
+  - 🚦 R1 (2026-10-03, the R1b map dry run, PLAN §M3): mapped 2,020 · wrong-account 31 (the override covers all 31) · inconsistent 4 · not-backed-up-yet 23 · possible-loss 15 · others 35 stale. The R1 ruling became Step 9b: verdicts need no phone.
+  - 🚦 R2 (2026-10-20/21, the orchestrator's share, all passed):
+    - M4 locate 6/6 objects, 0 RPC errors · M5 a season check, 10/10 confirmed · M6 a direct download of the exact item (only that entry's `gphotos` block changed).
+    - M7 a chunk set killed after chunk 2: the re-run cleaned 1 leftover and fetched only chunk 1 · M8 an X-Files episode routed to movies, `home_account` learned · M9 fetch_restore → check → replace · M18 fetch_cleanup found 0 leftovers.
+    - Every Chrome closed; nothing left in `~/Downloads`. The user's share (M9 web, M10, M11, M14, M15) is still open.
+  - 🚦 R3 (2026-10-27/28):
+    - Backups first; re-crawl movies 1,019 · tv 1,122 · anime 158 ids. The first check dry runs were invalid (a search throttle) → thfix.
+    - `map_photos all --apply`: 2,207 objects updated, 1,982 newly confirmed, 0 conflicts.
+    - `check_photos account:<a> --approaches best --recheck` (photo_id first), then `--apply-run`: anime 158 of 158, movies 971 (the 31 X-Files episodes included), tv 1,080 confirmed; 0 conflicts.
+    - `map_photos all --repair split-info --apply`: 3 entries rebuilt, their 6 chunks confirmed. Failed list: 16 rows (IMP-C27).
+  - 🚦 R4 (ruling 2026-10-28 "Count R3's sweep as R4"): the R3 photo_id-first check of all 2,242 movies/tv/anime objects is the full-library sweep. Every object is confirmed except the 16 failed-list rows (IMP-C27) and 18 not backed up yet. Others (35 objects) stay unchecked until its Chrome profile exists (R0 / IMP-D18).
+- Follow-ups registered at Step 17 (register only — the user's scope rule of 2026-10-28): IMP-C39 (fetch session lock), IMP-C40 (chromedriver low-memory start), IMP-C41 (crawler login check), IMP-C42 (the warm-up's failure handling), IMP-C43 (fetch-session papercuts), IMP-C44 (resumable direct transfer).
+- Status: done (feature/imp_c25_fetch_exact_gp_item, PR pending)
 
 ---
 
@@ -479,9 +525,29 @@
 - Effort estimate: small (hotfix) · Risk: low — no overrides configured ⇒ byte-identical behavior.
 - If skipped: those 31 episodes cannot be restored.
 - Fix applied (`fix/imp_c26_fetch_account_routing`): `mainfetch._account_overrides()` reads `fetch_account_overrides` through `mvcommon._load_config()` (validated once per config object — an unknown account or a blank key prints one warning and is ignored); `profile_for_id` takes the longest matching key (exact id beats prefix), else today's `ID_PREFIX_PROFILE` loop; `cmd_fetch_route` groups a batch by account (extras by their title id) — the selector's account first, then `CHROME_PROFILES` order — and runs one `init_driver` per group under ONE `fetch_session_lock`, closing the previous account's Chrome windows and requiring debug port 9222 to be free before each switch (a busy port stops the batch loudly instead of attaching to the wrong account). No valid overrides ⇒ a single group, byte-identical transcript (frozen oracle captured from the pre-fix code). Tests: `tests/test_fetch_account_routing.py` (31) + smoke `test_fetch_route_mixed_account_batch`; a new autouse `_hermetic_mvconfig` fixture keeps every test off the machine's real `mvconfig.json`. User steps: README fetch note, `docs/OPERATIONS_QA.md` §6b.
-- Status: done (hotfix PR; learned routing follows in IMP-C25)
+- Status: done (hotfix PR #61, squash-merged to `main` as `494fbec`; the learned per-object routing — `gphotos.home_account` beneath the override, P-4 — shipped with IMP-C25)
 
 ---
+
+## IMP-C27: Library ↔ Google Photos inconsistencies on archived items — possible cloud loss
+
+- Category: bug
+- Priority: high (Band 0 🚦 — per-case user decisions; the local copy of an `archived` item is a dummy)
+- Files: data (library ↔ cloud); tooling in IMP-C25 (`map_photos`, `check_photos`, device cross-check)
+- Current behavior (verified 2026-09-25 13:30 after the incremental re-crawl, a day-search of each release day, and a read-only per-id search of both Pixels): (a) library says whole file but the cloud holds chunks (The Wire S02E12, Dark S01E10, BSG S01E11 — split_info lost; the Pixel still holds the Dark/BSG `.mvmeta.json` sidecars, which mirror split_info and can seed the `--repair split-info`); (b) uploaded under an old untagged name (Fanaa); (c) last chunk missing from the cloud and from both Pixels (A Tale of Two Sisters #10, The Wailing #9); (d) **13 Friends episodes in no account**: S04E16–19 (pushed 2026-09-03 to FA75V0303405 — only their `.mvmeta.json` sidecars remain on the Pixel = pushed, then freed, never backed up), S05E15/16/18/19/20 and S06E21–24 (absent from both Pixels); the day search of each release day (Jan 19/20/22, 2025) lists every other episode of those seasons but not these; and **Daredevil: Born Again S02E01–07** (added 2026-09-24; in no account and on neither Pixel). All are `archived` (local copy = dummy). Resolved by the re-crawl/retries: Death Note 09, Gentleman, Daredevil S01E07–11 (backed up), Friends S06E01.
+- Proposed change: IMP-C25's mapper/check detect, report loudly and offer dry-run repairs for (a)/(b); (c)/(d) become an explicit user decision list after the incremental re-crawl + device cross-check.
+- Effort estimate: small per case (decisions) · Risk: none from detection (read-only); repairs are dry-run-first.
+- If skipped: a restore of these items fails only when the user needs them — possibly after the phone copy is gone.
+- Outcome of IMP-C25's 🚦 R3 / R4 (2026-10-28; redacted counts in `docs/feature-fetch-datetime/PROGRESS.md`, operations log):
+  - Resolved:
+    - (a) split_info lost (The Wire S02E12, Dark S01E10, BSG S01E11): rebuilt by `map_photos all --repair split-info --apply` — 3 entries, their 6 chunks now confirmed in Google Photos.
+    - (d) Daredevil: Born Again S02E01–07: backed up after the first mapping, now confirmed (the Step 13 live check of 2026-10-13 found the season 8/8; not on the R3 failed list).
+  - Open — 16 rows in `~/.mediavault/gphotos/failed_objects.csv`:
+    - 13 Friends episodes (the (d) list above): no `photo_id` and found in no account — possible loss.
+    - 2 legacy last chunks, the (c) list — A Tale of Two Sisters chunk 10/10, The Wailing chunk 9/9: missing from the cloud, so each title is a partial set that cannot be restored.
+    - (b) Fanaa: in Google Photos under its old untagged name (map verdict `inconsistent` / `untagged-name`). Resolve it with `python main.py resolve_photos failed --account movies` (PLAN §M15: paste the item's URL), or record that name with `python main.py map_photos all --repair names` (dry run, then `--apply`).
+  - Done when every row is resolved or explicitly accepted by the user. The walker is `resolve_photos failed` (§M15: paste the item's URL, give a search term, or mark it `not uploaded`). Accepting means, for example, re-archiving the title from another copy, or writing it off.
+- Status: in_progress (the 16-row open list above; the detection + repair tooling shipped with IMP-C25)
 
 ## IMP-C28: `cmd_push` treats any path containing `_parts` as a chunk — a whole file from a `Spare_parts (2015)` folder is uploaded untagged, then its local master is deleted
 
@@ -628,10 +694,12 @@
   - For about 1–2 s after Enter the URL is already `/search/` while the timeline is still displayed (measured live). Result latency varied from about 2 s to about 7 s.
   - If the results page has not replaced the timeline when the fixed 3 s wait ends, `trigger_download` can click a timeline item and download the wrong file. Hash routing leaves that file in Downloads, so nothing is corrupted.
   - Proposed: poll for the results (or `No results`) instead of a fixed 3 s, and never click a `./photo/` link on a `/search/` page.
+  - Since settled: the user ruled "Inside C25" on 2026-10-03 (`docs/feature-fetch-datetime/DECISIONS.md` §1e). Registered as **IMP-C35**, built in IMP-C25 Step 10 (item h).
 - Open decision — retry a broken transfer (not built):
   - A transfer that breaks is reported now, but it is not retried. For a whole file only `ATTEMPT 2` finds the item, so one network break ends the entry INCOMPLETE and the user re-runs.
   - With downloads on TCP the known cause of broken transfers is gone, so this matters less than it did.
   - Proposed: re-trigger once a triggered download that never arrived. It needs a decision because a Photos download cannot resume, so every retry is a full re-download.
+  - Since settled: the user ruled "Inside C25" on 2026-10-03 (same section). Registered as **IMP-C34**, built in IMP-C25 Step 10 (item g).
 - Merge note for IMP-C25: that branch adds `profile_preflight` next to these helpers in `mainfetch.py`; keep both. Its `gp_inventory._session` still opens its own tab only with `--attach`, so apply this rule there too and repoint `tests/test_gp_inventory_own_tab.py` at `_session`. Any new Chrome launcher that downloads through fetch must carry `--disable-quic` as `init_driver` does; the crawler's own launcher does not download and does not need it.
 - Status: done (`fix/imp_c29_fetch_attach_photos_tab`)
 
@@ -758,6 +826,7 @@
     - `tv-en-2003-thewire-s02e12` was pushed in full on 2026-02-09 and lost its record to an older re-prep over a legacy text dummy.
     - No bytes are lost: the IMP-C25 Google Photos inventory (`D:\MediaVault_gp_inventory\tv.items.jsonl`) lists both chunks of all three in the TV account.
     - `fetch_restore` cannot restore them until their `split_info` is rebuilt from the `checksums/<chunk>.sha256` sidecars, as the legacy reconcile did for 27 entries (`docs/feature-legacy-reconcile/REPORT.md`). Not done here: this task writes nothing to the real library, and no command does it yet (unregistered).
+    - Since repaired (2026-10-28): IMP-C25's `map_photos all --repair split-info --apply` rebuilt all three records (the chunks Google Photos holds, proven by these `checksums/` sidecars), and the 6 chunks are confirmed in Google Photos (IMP-C27 (a)).
 - Merge note for IMP-C25: that branch edits `cmd_push` and `push_one_extra` near both resume branches, so expect textual conflicts there. Keep `_resume_plan` at both sites, and keep the pre-upload check before the capture snapshot: it hashes the resumed files, which also gives the capture their sha1. Its resume fixtures (`_seed_parts` in `tests/test_device_inventory.py` and `tests/test_gphotos_primitives.py`, checked at `d9458bf`) already record real chunk and holder hashes, so they need no change.
 - Effort estimate: small-medium · Risk: low-medium. A resume now reads each resumed chunk once more to hash it before uploading. Every recorded, intact resume behaves as before. No `ENTRY_TYPE_KEYS` involvement.
 - If skipped: a push in a shared season folder can be marked onboarded on another episode's chunks, and any unrecorded leftover turns the next push into an archive that cannot be restored.
@@ -794,7 +863,7 @@
   - Unchanged: the journal format, what prep and push record, PONR placement, `recover_journal`, the O-1 resume message, the season resume-range messaging and `RollbackHardFail`.
   - One consequence of the unchanged D-6 scoping is visible. The push journal records `split_info` only when the run itself created it. A re-run that has to split afresh (the leftovers are gone) now finds a record already there, because prep kept it. If that run fails before any upload, rollback removes its own `_parts/` and `checksums/` and leaves the record in place. A plain `push <id> <split>` re-run always behaved this way; the autopilot path used to pop the record, because its re-prep had cleared it first. The next push splits again, or uploads the file whole and drops the record. Pinned.
 - The `_enrich` autopilots: checked, no mismatch is possible. They run the plain autopilot first and enrich only once the entry is `archived` (`main.py:9570`, `main.py:9717`), so no folder is renamed between the interrupted run and the re-run. The record stores chunk file names, not paths, so it still matches the cloud after the rename that follows the archive. Pinned end to end for the movie and the season command, including a restore from the renamed folder.
-- Found here, not changed (unregistered; needs a decision):
+- Found here, not changed (needs a decision; the first is since registered as **IMP-C37**):
   - **The season resume line leaves out `tempdir` and `rehash`.** `_season_resume_cmd` (`main.py:9183-9215`) rebuilds the command from the split, `episodes`, `device`, `--extras` and `--extras-size`. After a season run that used `tempdir`, the printed line pushes without the redirect, so it does not look in `<tempdir>\<id>\_parts`: it splits the interrupted episode again in the season folder and uploads it from the start, and the old chunks stay in the tempdir. Adding `tempdir <dir>` to the printed line by hand resumes properly. Without `rehash`, the remaining episodes are split with a deferred canonical hash instead of an eager one. This is the change-gated season resume-range messaging, so it is not touched here.
   - A re-prep still re-hashes the whole file (IMP-D23), so `push <id>` remains the cheaper resume.
 - Tests: `tests/test_prep_keeps_split_record.py` has 26 hermetic tests (`sandbox`, `mock_device`, `make_video`, `stub_tech_specs`, `fake_dummy`). 13 of them fail on `main`.
@@ -812,3 +881,184 @@
 - Effort estimate: small · Risk: low. Only a re-prep of a still-local entry that records a split changes, and a whole-file first archive of one. A first prep, an entry that was never split and every uploaded entry behave as before. No `ENTRY_TYPE_KEYS` involvement.
 - If skipped: after an interrupted split push, re-running the autopilot or the season's printed resume command is refused, and the leftovers have to be deleted and the title split and uploaded again from the start.
 - Status: done (`fix/imp_c33_prep_keeps_split_info`)
+
+---
+
+## IMP-C34: fetch does not retry a lost download — a Google Photos download cannot resume, so one broken transfer leaves the entry INCOMPLETE
+
+- Category: robustness (the open decision IMP-C29 left: retry a broken transfer)
+- Priority: high (Band 1 — a robustness gap with no data loss: the entry ends INCOMPLETE and the user re-runs the fetch)
+- Files: `mainfetch.py` — `fetch_single_entry`'s download harvester and `_lost_download_note`. Found by IMP-C29 ("Open decision — retry a broken transfer"). The user ruled "Inside C25" on 2026-10-03 (`docs/feature-fetch-datetime/DECISIONS.md` §1e), so it is built as IMP-C25 Step 10 item g (`docs/feature-fetch-datetime/PLAN.md`).
+- Current behavior:
+  - Google Photos downloads cannot resume. A transfer that breaks shows `Failed - Network error` at 0 B in `chrome://downloads`.
+  - Since IMP-C29, fetch names the loss: a timeout adds `_lost_download_note`'s line for the triggered files that never arrived. It does not re-trigger them, so one break leaves the entry INCOMPLETE.
+- Proposed change (IMP-C25 Step 10 item g): re-trigger a lost download ONCE per object per run (whole files, chunks, holders, extras), never while a download for that object is still active. The retry is printed and counted. A second loss puts the object on the failed list.
+- Effort estimate: small (inside IMP-C25 Step 10) · Risk: low — at most one more trigger per lost object, and hash routing still decides what is kept. Every retry is a full re-download, because a Photos download cannot resume.
+- If skipped: one broken transfer ends the entry INCOMPLETE, and the user re-runs the fetch (files already fetched are skipped).
+- Shipped (IMP-C25 Step 10 item g, `dd410ed`; Step 10 commit `0690546`): `mainfetch._fire` / `_note_losses` / `_retry_lost_downloads` request a lost download once more per object per run, never while that object's download is still active; a round in which a wrong item arrived counts no loss; a second loss puts the object on the failed list with the new reason `download-lost`.
+- Status: done (IMP-C25 Step 10 item g, `feature/imp_c25_fetch_exact_gp_item`, PR pending)
+
+---
+
+## IMP-C35: fetch can click the home timeline instead of a search result — a slow search lets `trigger_download` download the wrong file
+
+- Category: bug (IMP-C29's residual risk)
+- Priority: high (Band 1 — no data loss, but the attempt is wasted on a wrong download)
+- Files: `mainfetch.py` — `trigger_download` (its fixed 3 s wait and its first thumbnail selector, `a[href*='./photo/']`). Found by IMP-C29 ("Residual risk / follow-up"). The user ruled "Inside C25" on 2026-10-03 (`docs/feature-fetch-datetime/DECISIONS.md` §1e): IMP-C25 Step 10 item h, and Step 12 for items whose photo_id is known.
+- Current behavior:
+  - `trigger_download` reads the thumbnails after a fixed 3 s sleep.
+  - For about 1–2 s after Enter the home timeline is still shown, and it matches the first selector, so a slow search can click a timeline item. IMP-C29 measured result latency from about 2 s to about 7 s. Its page check does not catch this, because the URL already reads `/search/`.
+  - Hash routing prevents damage: it leaves the wrong file in Downloads. But the attempt is wasted and a wrong file is downloaded.
+- Proposed change (IMP-C25 Step 10 item h): a bounded poll for a `/search/` results page, instead of the fixed 3 s sleep, before reading thumbnails; never click a `./photo/` link that is not inside the search results. An item whose photo_id is known is opened by its URL, never by clicking (Step 12).
+- Effort estimate: small (inside IMP-C25 Step 10) · Risk: low-medium — it changes which element gets clicked (the reason it needed a ruling), so the `trigger_download` digest pin is re-pinned on purpose.
+- If skipped: whenever the results page is slower than the fixed wait, fetch can download a wrong file and lose that attempt.
+- Shipped (IMP-C25 Step 10 item h, `e673b10` + `77984d3`; Step 10 commit `0690546`): `mainfetch._await_search_results` polls (bounded, `SEARCH_RESULTS_WAIT_S`) for a `/search/` page whose results have settled, and `_drop_timeline` keeps every home-timeline thumbnail out of the click; the `trigger_download` digest was re-pinned on purpose. `8dacbad` (2026-10-07) also keeps Google Photos' "Most relevant to your search" strip out of the click. Items with a known `photo_id` are opened by their URL (Step 12).
+- Status: done (IMP-C25 Step 10 item h, `feature/imp_c25_fetch_exact_gp_item`, PR pending)
+
+---
+
+## IMP-C36: `python main.py fetch` shows mainfetch's output only in bursts — the child's stdout is block-buffered through the pipe
+
+- Category: bug (operability)
+- Priority: low (Band 1 — output timing only: nothing appears for minutes, then everything at once)
+- Files: `main.py` — `cmd_dispatch_fetch` (the child environment of its `subprocess.Popen`). The user ruled "Inside C25" on 2026-10-03 (`docs/feature-fetch-datetime/DECISIONS.md` §1e): IMP-C25 Step 10 item i.
+- Current behavior: `cmd_dispatch_fetch` runs `mainfetch.py` as a child process and re-prints each line of its piped output as it arrives. The child's stdout is block-buffered through the pipe, so nothing appears for minutes and then everything at once.
+- Proposed change (IMP-C25 Step 10 item i): set `PYTHONUNBUFFERED=1` in the child environment in `cmd_dispatch_fetch`. The step covers every other mainfetch child spawn too.
+- Effort estimate: small · Risk: low — one environment variable for the child; its argv is unchanged.
+- If skipped: during a long fetch, `python main.py fetch` stays silent for minutes, then prints everything at once.
+- Shipped (IMP-C25 Step 10 item i, `e333c3d`; Step 10 commit `0690546`): `main._mainfetch_child_env()` gives the mainfetch child `PYTHONUNBUFFERED=1` (and `PYTHONIOENCODING=utf-8`), so fetch progress streams as it happens.
+- Status: done (IMP-C25 Step 10 item i, `feature/imp_c25_fetch_exact_gp_item`, PR pending)
+
+---
+
+## IMP-C37: the season autopilot's printed resume line omits `tempdir` and `rehash` — after an interrupted `tempdir` season run it re-splits the interrupted episode in the season folder
+
+- Category: bug (change-gated messaging)
+- Priority: medium (Band 1 🚦 — any change needs the user's explicit ruling; observed in a hermetic run only, and a workaround is documented)
+- Files: `main.py` — `_season_resume_cmd`, nested in `cmd_prep_push_rep_season`. It builds the printed `Resume the rest of the season: prep_push_rep_season …` line from the split, `episodes`, `device`, `--extras` and `--extras-size`, not from the run's `tempdir` or `rehash`. Found during IMP-C33 (its "Found here, not changed" note).
+- Current behavior:
+  - After a `tempdir` season run is interrupted, the printed resume command has no `tempdir`. It re-splits the interrupted episode in the season folder (it needs the free space there) and uploads it from the start, and the old chunks stay in the tempdir.
+  - Without `rehash`, the remaining episodes are split with a deferred canonical hash instead of an eager one (IMP-C33).
+  - Observed in a hermetic run only, during IMP-C33. Workaround: add `tempdir <dir>` to the printed line by hand (`docs/OPERATIONS_QA.md` §5).
+- Rollback change-gate: the line is the season resume-range messaging, which `CLAUDE.md` ("Auto-rollback is load-bearing") and `docs/feature-auto-rollback/ROLLBACK_MECHANISM.md` §10 gate. Any change needs the user's explicit ruling first.
+- Proposed change (for that ruling): print `tempdir <dir>` and `rehash` in the resume line when the run used them, as it already does for `--extras` and `--extras-size`.
+- Effort estimate: small · Risk: low to build; 🚦 gated.
+- If skipped: a `tempdir` season run resumed with the printed line, as printed, splits and uploads the interrupted episode again from the start and leaves the old chunks in the tempdir.
+- Status: pending (🚦 change-gated — needs the user's ruling)
+
+---
+
+## IMP-C38: two pre-existing tests are not hermetic — one runs a real `adb shell mkdir`, the other opens the real `C:\Media\library_movies.json`
+
+- Category: code quality (test isolation)
+- Priority: low (Band 1 — cheap test hygiene, beside IMP-A11; no production code is involved)
+- Files: `tests/test_rehash.py` — `test_disk_preflight_stops_before_parts_dir_created`; `tests/test_session_detector.py` — `test_cmd_fetch_route_prints_remediation_on_logout`. Found during IMP-C33, whose full-suite run deselected the second one.
+- Current behavior:
+  - `test_disk_preflight_stops_before_parts_dir_created` runs a real `adb shell mkdir`. `cmd_push` creates the remote folder over ADB before its disk pre-flight, and the test patches only `_free_space_ok`, with no device fixture. Read from the code, not run: without a reachable device that `mkdir` fails and `cmd_push` returns False at `❌ Error: ADB Connection Failed`, so the test also passes without reaching the pre-flight it pins.
+  - `test_cmd_fetch_route_prints_remediation_on_logout` opens the real `C:\Media\library_movies.json`. It stubs `resolve_targets` but not `resolve_target_ids`, whose `load_library()` reads the real library.
+- Proposed change: run the first under `mock_device` and assert that it stopped at the disk pre-flight; give the second `sandbox` (or stub `resolve_target_ids` too). Tests only.
+- Effort estimate: small · Risk: none to production code.
+- If skipped: each full-suite run sends a real `adb shell mkdir -p` to a connected phone and reads the real library, and on a machine with no device the first test proves nothing about the pre-flight.
+- Status: pending
+
+---
+
+## IMP-C39: the fetch session lock trusts only its file's age — a dead holder blocks the non-blocking commands for up to 1 h, a fetch never refreshes it, and its release deletes any holder's lock
+
+- Category: robustness (the single-flight lock of the automation Chrome)
+- Priority: medium (Band 1 — no data loss; seen live once, at IMP-C25's 🚦 R3)
+- Files: `mvcommon.py` — `fetch_session_lock` (the lock file holds `"<pid> <time>"`; `stale_after=3600`, `timeout=30`). Its callers: `mainfetch.cmd_fetch_route` (blocking) and, non-blocking, `tools/gp_inventory.crawl_lock`, `mainfetch._check_lock` (check_photos' child, resolve_photos), `mainfetch.cmd_locate`, `main.maybe_auto_confirm`, `main.cmd_fetch_cleanup` (`--apply`) and `tools/warm_profiles.warm_all`. The progress heartbeat is `tools/gp_inventory.Heartbeat`. Found during IMP-C25: the R3 prep, and Step 7's "pre-existing limits, not changed" note.
+- Current behavior:
+  - The lock file records the holder's pid, but nothing checks whether that process still runs. A held lock counts as stale only once its mtime is older than `stale_after` (1 h).
+  - A command killed while it holds the lock (a crash, a closed terminal, a killed process) leaves the file behind. For up to 1 h every non-blocking command then refuses: the crawler (`REFUSED: the fetch session lock is held …`, exit 3), `check_photos` (the auto-confirm after a push prints only its reminder), `locate`, `resolve_photos`, `fetch_cleanup --apply` and the warm-up. A fetch (`blocking=True`) waits 30 s and reclaims it. At IMP-C25's 🚦 R3 such a lock was removed by hand.
+  - A fetch never refreshes the lock: only the crawler, `check_photos` and `resolve_photos` heartbeat. So a fetch that runs longer than 1 h looks stale. From the code (not observed): a command started then — the scheduled warm-up, a crawl, the auto-confirm after a push — reclaims the lock and launches its own automation Chrome on debug port 9222 while the fetch's Chrome holds that port.
+  - The release removes the lock file unconditionally: a command that yielded to a takeover deletes the new holder's lock on its way out.
+- Proposed change: on a collision, a holder pid that no longer runs makes the lock reclaimable at once ("cannot tell" counts as running — never reclaim a live fetch); a fetch refreshes the lock while it works, like the crawler's progress heartbeat; the release removes the file only while it still holds this holder's own line. A live holder still makes `blocking=False` refuse.
+- Cross-references: IMP-C17 introduced the lock. IMP-C24's planned `library_lock` mirrors this primitive (`docs/feature-library-concurrency/PLAN.md`) and should not copy the first and the last gap.
+- Effort estimate: small · Risk: low-medium — every Chrome-driving command takes this lock.
+- If skipped: after any killed run, crawls, checks (the auto-confirm included), `locate` and `resolve_photos` refuse for up to an hour unless someone deletes the file by hand; a fetch longer than an hour can be pre-empted mid-run.
+- Status: pending
+
+---
+
+## IMP-C40: chromedriver can fail to start under low memory (exit 0xC0000142) — the check or fetch session stops instead of retrying once
+
+- Category: robustness
+- Priority: low (Band 1 — resumable: re-running the command continues; seen live once)
+- Files: `mainfetch.py` — `init_driver` (its `Selenium Connection Error` path) and its callers: `_check_session` (`run.stop = "chrome"`), `cmd_fetch_route` (`if not driver: return`), `_locate_sessions`, main's `_rp_walk` (resolve_photos), `tools/warm_profiles._warm_one` (`LAUNCH_FAIL`); `tools/gp_inventory.connect` starts chromedriver the same way. Found during IMP-C25 (thfix's evidence F-b, `.candidates/c25-thfix/STATUS.md`).
+- Current behavior:
+  - During IMP-C25's 🚦 R3 dry runs, on a machine under heavy memory load, one check run died while launching the TV Chrome. chromedriver exited at start with 0xC0000142 (STATUS_DLL_INIT_FAILED: Windows could not initialise one of its DLLs, typically when memory or desktop heap runs out).
+  - `init_driver` prints `❌ Selenium Connection Error: …`, ends the Chrome it launched and returns None. Nothing retries: a check run stops with `chrome` (re-running it continues), a fetch returns at once, and the warm-up reports `LAUNCH_FAIL` and raises its toast.
+- Proposed change: when chromedriver fails at start (in particular with exit status 0xC0000142 = 3221225794), retry its start once after a short pause, and name the likely cause in the line ("low memory? close other programs, then re-run"). The attach and Photos-tab logic stay as they are.
+- Effort estimate: small · Risk: low — at most one more chromedriver start; the launched Chrome is already ended on every failure path (`_end_launched_chrome`).
+- If skipped: a long unattended check, sweep or fetch on a loaded machine can stop at an account switch and wait for someone to re-run it.
+- Status: pending
+
+---
+
+## IMP-C41: the dom crawl's login check matches "photos.google.com" anywhere in the URL — a sign-in page that names Google Photos in its `continue=` passes
+
+- Category: bug (robustness)
+- Priority: low (Band 1 — the dom crawl is the fallback mode; not seen live)
+- Files: `tools/gp_inventory.py` — `ensure_logged_in`, called by `enumerate_tiles` and `crawl_item`. Found in IMP-C25's thfix self-review (pre-existing; left untouched).
+- Current behavior:
+  - `ensure_logged_in` tests `"photos.google.com" not in driver.current_url`, a substring test on the whole URL. A Google sign-in URL whose `continue=` parameter names photos.google.com contains that text, so the check passes while the profile is signed out.
+  - Every other session check reads only the host: `mainfetch._page_kind`, used by `check_session_alive` and by gprpc on every RPC request.
+  - What limits it today: only the dom crawl calls it (the default rpc crawl checks every request through gprpc), and `_mark_enumerated` never marks an empty listing complete while ids are known. Such a crawl does not stop as signed out (exit 2): its enumeration finds nothing (a warning, not marked complete), and with `--phase details` every item page is booked as an `incomplete` item error.
+- Proposed change: decide by host — `mainfetch.check_session_alive` or `mainfetch._page_kind(url) == "photos"` instead of the substring test — plus a test with a sign-in URL whose `continue=` names photos.google.com.
+- Effort estimate: small · Risk: low — one predicate in the dom crawl.
+- If skipped: a dom-mode crawl of a signed-out profile ends without the sign-out message and its fix, so the reason the inventory did not grow stays hidden.
+- Status: pending
+
+---
+
+## IMP-C42: the profile warm-up's failure handling — it runs no profile pre-flight (warming `others` creates an empty `ChromeProfile_Others` that then reads as "logged out"), and one page-load timeout ends the whole run
+
+- Category: bug (operability)
+- Priority: low (Band 1 — no data loss; false alarms, a defeated pre-flight, profiles left unwarmed)
+- Files: `tools/warm_profiles.py` — `warm_all` (every `mainfetch.CHROME_PROFILES` key by default) and `_warm_one` → `mainfetch.init_driver`; `mainfetch.profile_preflight` (IMP-C25, OD-10). The scheduled task is `tools/mediavault_warm_profiles.xml`. Found during IMP-C25 Step 14 (its "observations, not changed") and in a side session's Step 14.g sweep (`.candidates/c25-step14g-pins/README.md` in the main folder, untracked).
+- Current behavior:
+  - Every other Chrome-driving command (fetch, check_photos, resolve_photos, locate, the crawler) runs `profile_preflight` first and refuses a missing profile folder with a "create it, then sign in" line. The warm-up does not.
+  - `CHROME_PROFILES` includes `others`, whose profile `C:\Media\Utils\ChromeProfile_Others` does not exist yet (IMP-C25 🚦 R0 / IMP-D18). Warming it makes Chrome create an EMPTY profile there, which lands signed out: `LOGGED_OUT` and the "account needs attention" toast. From then on the folder exists, so every later pre-flight passes it and the command launches a signed-out profile.
+  - `_warm_one` catches only `PhotosThrottledError` and `SessionExpiredError`. Since IMP-C25 Step 14 every session's page loads are bounded (60 s), so a slow `driver.get` raises Selenium's timeout instead of hanging. Nothing in `warm_all` or `main` catches it: the run ends with a traceback, the remaining profiles are not warmed, and neither the status log line nor the toast is written.
+  - The toast also says "<profiles> logged out — re-login required" for a `LAUNCH_FAIL` profile.
+- Proposed change: run `mainfetch.profile_preflight(key)` before each launch, and report a missing profile as its own status (one line, no launch, no toast — a prerequisite, not a sign-out). Count any other error of one profile as that profile's failure — logged, and the next profile still warmed. Let the toast name each profile's real status.
+- Effort estimate: small · Risk: low — the warm-up only skips what it cannot warm.
+- If skipped: each warm-up run launches an empty Others profile and raises a false "logged out" alarm, and the pre-flight's clear "create it" message never shows for that profile again. One slow page ends the whole warm-up without a log line.
+- Status: pending
+
+---
+
+## IMP-C43: fetch-session papercuts — fetch journals are never pruned, the shared Chrome close says "this fetch" in every command, and `resolve_photos` exits 0 when its walk stops on a busy port or a lost lock
+
+- Category: code quality (housekeeping)
+- Priority: low (Band 1 — three papercuts in IMP-C25's session plumbing)
+- Files: `mainfetch.py` — `FetchJournal` / `read_fetch_journals` (`~/.mediavault/fetch_journal/<run_id>.json`), `_startup_cleanup`, `fetch_cleanup_plan`, `_resume_hints`; `_close_session` (its result lines). `main.py` — `cmd_resolve_photos` / `_rp_walk`, `RESOLVE_FAILED_STATUSES`. Found during IMP-C25 Step 14 (its "observations, not changed") and in a side session's Step 14.g sweep (`.candidates/c25-step14g-pins/README.md` in the main folder, untracked).
+- Current behavior:
+  - Every fetch, `check_photos` run and `resolve_photos` run writes a journal file, and no code ever deletes one — not even a `clean` journal (the run finished with nothing left behind). Every run reads them all: the start-up cleanup, `fetch_cleanup`'s plan, and `_resume_hints` (once per run and account). The files are small, but the folder only grows.
+  - `_close_session` is shared by fetch, `locate`, `check_photos`, `resolve_photos` and the warm-up, and its lines say "this fetch" in all of them (e.g. `🧹 Closed N tab(s) this fetch opened …`, `⚠️ The Chrome this fetch started (…) did not close …`).
+  - `_rp_walk` stops the walk when debug port 9222 is still busy before the next account (`port`), or when another command took the fetch lock over (`lock-lost`). `cmd_resolve_photos` still returns status `ok`, so `python main.py resolve_photos` exits 0 although objects were left unasked; only `refused`, `error` and `interrupted` exit 1. The printed line says why it stopped. After `port` the apply is still offered; after `lock-lost` it is not.
+- Proposed change: prune journals that are `clean` or `recovered` and older than a few days (never a `running` or `pending` one); let `_close_session` name the command it closes for; give a walk that ends on `port` or `lock-lost` its own non-ok status, so the command exits 1.
+- Effort estimate: small · Risk: low — housekeeping, wording and one exit code; the cleanup rules for unfinished journals stay as they are.
+- If skipped: the journal folder grows by one file per run and every run reads it all; the close lines keep naming a fetch in a check, a resolve or a warm-up; a script cannot tell a `resolve_photos` walk that stopped half-way from a finished one.
+- Status: pending
+
+---
+
+## IMP-C44: resumable direct transfer — fetch a multi-GB object in Python with HTTP Range resume instead of Chrome's download manager (a spike that starts with a read-only probe)
+
+- Category: robustness / performance (the fetch's byte transfer)
+- Priority: medium (Band 4 — a fetch-engine spike, beside IMP-G2 → IMP-S7)
+- Files: `mainfetch.py` — the direct download (`_direct_trigger`, `gprpc.download_url`; IMP-C25 P-20), `mainfetch.py locate --probe-direct` (`_probe_direct`, `_head_without_cookies`), the harvester. Source: IMP-C25 PLAN, "Suggested next tasks after IMP-C25" #10 ("Register as a new IMP after C25").
+- Current behavior:
+  - Since IMP-C25, a fetch mints a fresh original-download URL for each object and hands it to the automation Chrome, which saves the file into `restore\.mv_incoming\`. The URL is never stored: it expires and works as a bearer credential while valid (P-20).
+  - A Google Photos download in Chrome cannot resume. A broken transfer restarts from zero (IMP-C34 retries it once; a second loss lands on the failed list), so a multi-GB chunk interrupted near its end is downloaded again in full.
+  - Whether the minted URL also answers without the browser's cookies is unknown. `python mainfetch.py locate <id> --probe-direct` reports exactly that (a cookie-less HEAD request; it prints yes/no and the content type and downloads nothing), but no result has been recorded: IMP-C25's 🚦 R2 §M6 did not run it.
+- Proposed change:
+  1. Run the probe on one object per account (read-only).
+  2. Only if the URL answers without cookies: move the byte transfer into Python with HTTP `Range` resume (exact progress, resume after a crash, no browser-download housekeeping). The URL stays in memory only (P-20), SHA-256 stays the gate, and Chrome's download stays the fallback.
+  3. Otherwise record the no-go here.
+- Effort estimate: small (the probe) → medium (the transfer) · Risk: medium — a new path for the restore's bytes; the SHA-256 gate and the P-20 rules (never store or print a URL) must hold.
+- Cross-references: IMP-C34 (retry a lost download), IMP-G2 / IMP-S7 (the fetch engine), IMP-S6 (watch-while-fetching).
+- If skipped: every interrupted multi-GB transfer restarts from zero.
+- Status: pending

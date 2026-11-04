@@ -1,0 +1,202 @@
+STATE: COMPLETE
+
+# IMP-C25 follow-up to Step 13b — auto-confirm checks only objects old enough (acfix) — resumable status
+
+- Finding (user, real run 2026-10-26; DECISIONS.md §1g last bullet, 1f00913): after a `prep_push_rep_enrich` of a
+  9-chunk movie the auto-confirm ran `check_photos pending --apply --max-minutes 15`, which looked up all 36 pending
+  objects — the 9 chunks pushed minutes earlier included (each through hash, taken_second, exact_name, title_sid,
+  legacy -> `not-backed-up-yet`). Cause: `maybe_auto_confirm` gates on the OLDEST pending object's age, then spawns a
+  check of EVERY pending object (main.py comment "the check then covers every pending object, young ones included").
+- Fix: `check_photos … --min-age-h <hours>` (objects whose capture push time is younger are not looked up) and the
+  auto-confirm child passes `--min-age-h AUTO_CONFIRM_MIN_AGE_H`; its lines count only the due objects.
+- Worktree `C:\Users\harin\PycharmProjects\MediaVault-acfix` · branch `tmp/c25_acfix` · base 1f00913 (Steps 0–16).
+  The main folder is never touched (the user archives from it). No live runs.
+- Python: `C:\Users\harin\PycharmProjects\MediaVault\.venv\Scripts\python.exe -m pytest …`, run from the worktree.
+  Gates SEQUENTIAL. Baseline (dispatch): full 3278 · smoke 102.
+
+## Resume rule
+Read this file, then `git log --oneline -10` (WIP commits `wip(imp-c25): acfix.<x> — …`) and `git status`. An
+uncommitted diff belongs to the first unticked sub-task: keep it when coherent and its targeted tests pass, else
+`git checkout -- <its files>` (record that here). Commit THIS file (force-added: `.candidates/` is gitignored) with
+every WIP commit; tick a sub-task only after its tests pass, with its SHA. Pathspec commits only; never -A, amend,
+rebase or stash. Never edit PROGRESS.md / PRIORITY.md (the orchestrator does).
+
+## Sub-tasks (one WIP commit each)
+- [x] acfix.0 this status file: the plan + the design decisions below (no code) — 18f3a33
+- [x] acfix.a main: `check_photos … --min-age-h <hours>` — parser (positive number; refused with --apply-run / --list),
+      CHECK_USAGE, `_cp_resolve(…, min_age_h)` filter (`_cp_young`) + the one skip line, run.json `min_age_h` + the
+      resume key (`_cp_unfinished`, `_cp_check_command`), `cmd_check_photos(min_age_h=…)`, the dispatcher comment —
+      tests/test_check_photos.py 183 passed (158 + 25: the command line ×2 + bad values ×9 (no value ×2, 0, −3, a word,
+      nan, inf, with --apply-run, with --list), the dispatcher's exit 1 + usage line ×4, the core case (30 h + no push
+      time looked up and confirmed; 2 h + 23.9 h never looked up — no RPC / page trace, no row, no learned record, no
+      failed row, no block, still pending), without the option (all four, run.json unchanged), only young (no child,
+      no Chrome, nothing written), the resume key (a plain and a min-age run never continue each other; "continue it
+      with" names --min-age-h), the boundary ×5 (24 h looked up, 24.01, 23.99 skipped, no push time looked up, a future
+      push skipped), every scope after --account (+ the `:g` note, + unchanged without it)). Neighbours
+      (test_auto_confirm, test_c25_regression_pins, test_map_photos, test_resolve_photos) 406 passed; smoke 102
+      passed — 805cf2c
+- [x] acfix.b main: `auto_confirm_argv()` + `--min-age-h`, maybe_auto_confirm's line (due only, ", N newer
+      skipped"), the comments (section comment, AUTO_CONFIRM_MIN_AGE_H — "covers every pending object" is gone —,
+      auto_confirm_argv / maybe_auto_confirm docstrings); tests/test_auto_confirm.py 164 passed (162 + 2; the argv pin
+      re-pinned with a literal argv and a literal line, `_header(n, newer)`, CHILD_ARGV_TAIL, the "covers every pending
+      one" test renamed `…only_the_old_ones_are_counted` (1 counted, 2 newer), the real-archive journal test's line now
+      `_header(1, newer=2)` (its new push's 2 chunks — the finding itself), the child's argv parses with min_age_h 24;
+      NEW: no younger object -> no "newer" part, and the chain end to end (the auto-confirm's argv through the real
+      dispatcher into the real cmd_check_photos: only the 30 h + no-push-time objects are handed to the browser child,
+      never the 6 min / 23.9 h ones)); tests/test_c25_regression_pins.py 42 passed (39 + 3: the re-pin recorded in the
+      registry docstring, the 3 new pins registered). Neighbours (+ test_check_photos, test_prep_push_rep_enrich_cli,
+      test_prep_keeps_split_record, test_cli_parsers, test_fetch_child_stream) 553 passed; smoke 102 passed — 75c932c
+- [x] acfix.c docs: README (command table `[--min-age-h H]`; "New pushes are confirmed automatically" — the new
+      line, only ≥ 24 h pushes looked up, reminder N = every waiting push), ARCHITECTURE (§5 table row + note, §8.10
+      check_photos `--min-age-h` paragraph + the auto-confirm's check, §11 the child argv, §14 constants; a new "Last
+      updated" entry), OPERATIONS_QA (§6d: the auto-confirm Q&A rewritten, NEW Q&A "Does the auto-confirm look up the
+      files I just pushed?" (the user's question, verified against main.py), `--min-age-h 24` in "confirm by hand";
+      Last updated bumped), mvconfig.example.json's `_comment_auto_confirm_after_push` (the argv; JSON re-parsed OK),
+      the stale argv in a test_check_photos.py comment. Every `main.py:NNNN` ref this change shifted (+24 … +40) was
+      recomputed from anchors at 1f00913 vs now and checked line by line (16/16 OK): §5 17446 / 18062 / 14074 /
+      14634 / 15520 / 14891 / 14773 / 18225 / 18247 / 17609, §6.5 15520, §8.10 14074 / 14634, §10 18225, §11 13404 /
+      14739, §14 14731-14732 / 14944, §18 14074 / 14634 / 15520 / 14891 / 17446; OPERATIONS_QA 14731 / 14739. Left
+      as history on purpose: PLAN.md / DECISIONS.md §1 (the original Step 13b ruling — §1g records the change),
+      PROGRESS.md (the orchestrator's), ARCHITECTURE's dated "18294 lines as of 2026-10-20". No test reads these docs;
+      test_check_photos 183 passed — 5004c8c
+- [x] acfix.d0 a probe gap found while designing the disarm probes (before running them): "the reminder keeps counting
+      every pending object" was pinned for the web / young / no-profile branches but not the fetch-lock one (its tests
+      hold only old objects, so a reminder counting the due ones would survive) — NEW test_auto_confirm.py::
+      test_a_held_lock_reminder_still_counts_every_pending_object (an old + a young object, lock held -> reminder(2));
+      test_auto_confirm 165 passed — 3647d30
+- [x] acfix.d-disarm (recorded in e92f3a6, probed code 3647d30) 26/26 caught (scratchpad `disarm_acfix.py`, results
+      `acfix_disarm_results.jsonl`): one
+      uninterrupted run on a fresh `git archive 3647d30` copy; the worktree only read (clean before and after); the
+      probed files byte-equal to the worktree first; every probe an exact one-occurrence edit, its catchers run without
+      -x, every edited file restored and compared byte for byte (26/26 restored). Unmutated copy: test_check_photos +
+      test_auto_confirm + test_c25_regression_pins 390 passed (38.6 s); the restored copy again 390 passed (33.8 s).
+      The coordinator's five named parts -> A1 (the argv), M1 (the age filter), M10 (the resume key), A3 (the due-only
+      line), M1/M13 (nothing recorded for a skipped object — the exclusion from run.json `objects` is that guard).
+      | id | mutation | caught by (failed) |
+      | M1 | `_cp_resolve` ignores --min-age-h | 7 — the core test, only-young, the resume key, every-scope, e2e … |
+      | M2 | no push time = young | 4 — core, boundary[no-push-time], e2e … |
+      | M3 | exactly H h = young (<=) | 1 — boundary[exactly-24h] |
+      | M4 | a future push = old | 1 — boundary[pushed-in-the-future] |
+      | M5 | age in minutes, not hours | 6 — core, only-young … |
+      | M6 | --min-age-h 0 accepted | 5 — bad command line ×4 + the dispatcher's exit 1 |
+      | M7 | --min-age-h parsed, dropped | 10 — the command line ×2, dispatcher, e2e … |
+      | M8 | --apply-run takes --min-age-h | 1 — bad command line[--apply-run] |
+      | M9 | --list takes --min-age-h | 1 — bad command line[--list] |
+      | M10 | resume key ignores min_age_h | 1 — test_min_age_h_is_part_of_the_resume_key |
+      | M11 | run.json without min_age_h | 3 — core, resume key, e2e |
+      | M12 | "continue it with" lacks it | 1 — resume key |
+      | M13 | cmd_check_photos drops it | 4 — core, only-young, resume key, e2e |
+      | M14 | no skip line | 4 — core, only-young, every-scope, e2e |
+      | M15 | young counted before --account | 1 — every-scope |
+      | M16 | all young still starts a run | 2 — test_an_empty_scope_starts_nothing, only-young |
+      | A1 | argv without --min-age-h (pre-fix) | 11 — the argv pin, the parse test, the dispatcher argv ×8, e2e |
+      | A2 | argv with another age (12) | 11 — the same |
+      | A3 | the line counts every pending | 4 — the argv pin's literal line, only-the-old-counted, journal, e2e |
+      | A4 | the line never names newer | 4 — the same |
+      | A5 | ", 0 newer skipped" | 22 — no-younger literal + every `_header(n)` line |
+      | A6 | the line's command lacks --min-age-h | 26 — every header assertion |
+      | A7 | held-lock reminder counts due | 1 — test_a_held_lock_reminder_still_counts_every_pending_object (d0) |
+      | A8 | no-profile reminder counts due | 1 — test_only_the_old_objects_accounts_count_for_the_profiles |
+      | A9 | auto-confirm: no push time = young | 3 — unknown push time, no-younger line, e2e |
+      | R1 | the e2e pin renamed away | 1 — test_c25_regression_pins (the registry) |
+- [x] acfix.d1 a second test gap found while mapping the probes: the core test's `read_failed() == []` proved nothing
+      — its young items were complete in Google Photos, so even unfiltered they would only be confirmed, never booked.
+      Now e03 (2 h) is a partial upload (a fresh push still uploading): unfiltered it would be `inconsistent` -> a
+      failed-list row, so "no failed row" is really tested. test_check_photos -k min_age_h 10 passed — e92f3a6
+- [x] acfix.d gates, on e92f3a6 (= the final code: the final commit changes only this file):
+      · disarm 26/26 caught (above — run on 3647d30; e92f3a6 differs only in the core test's setup and this file)
+      · precision pass (scratchpad `precision_acfix.py`, a fresh `git archive e92f3a6` copy, 5 tests appended to the
+        COPY only): "nothing for a skipped object", one claim per test — no lookup (no RPC / page trace), no verdict
+        row, no learned record, no block, no failed row (a young partial upload would be `inconsistent`) — all 5 pass
+        unmutated; under M1 (filter off) and under M13 (cmd_check_photos drops --min-age-h) each of the 5 is red; both
+        restored byte for byte; the copy == the worktree again and its real catchers 390 passed
+      · full suite 3309 passed, 1 warning (the pre-existing starlette/httpx deprecation), 477 s = 3278 + 31 new
+        (test_check_photos +25, test_auto_confirm +3, test_c25_regression_pins +3); THEN smoke 102 passed, 1 warning,
+        20 s — one after the other, in the worktree, pytest's default basetemp, no xdist
+      · secrets: `git diff --cached` scanned before acfix.d1 and before this commit (scratchpad `secrets_scan.py`: 9
+        credential patterns + risky file names), and the whole range 1f00913..e92f3a6 retroactively (9 files, 608 added
+        lines) — 0 hits every time
+      · self-review below · STATE: COMPLETE · the final commit `fix(imp-c25): auto-confirm checks only objects pushed
+        at least AUTO_CONFIRM_MIN_AGE_H ago` (this commit — its SHA is in the final report and `git log -1`)
+
+## Self-review (the whole diff 1f00913..HEAD, read in full)
+- (a) Acceptance bullets, one by one: `--min-age-h <hours>` — younger objects (capture `pushed.at` of their own bytes,
+  the record's `pushed_at`, Step 9b's source) never looked up ✓; ONE line `N object(s) pushed less than 24 h ago skipped
+  — checked at a later push` ✓; no verdict row, no failed row, no learned record ✓ (precision 5/5); no push time ->
+  checked ✓; without the option unchanged ✓ (no filter, run.json byte-for-byte today's, an old run.json without the key
+  still resumes under the same key); a bad value -> exit 1 + the usage line ✓. `auto_confirm_argv()` exactly the
+  dispatch's list ✓, pins re-pinned and said so ✓. The line counts only the due objects ✓, `, N newer skipped` ✓, the
+  reminder counts every pending object ✓ (web / young / no-profile / lock all pinned), the comment fixed ✓. Docs ✓.
+- (b) Downstream consumers: mainfetch.cmd_check reads only run.json's `objects` / `approaches` / `recent_days`
+  (mainfetch.py:5650-5653) — the extra `min_age_h` key is ignored; `_cp_runs` accepts it; `--apply-run` keeps its
+  lookup; the web console never calls check_photos; the R2/R3 live pack is affected — see C2 below.
+- (c) Change-gates: rollback untouched (no RollbackJournal / journal file / PONR / resume-range change; the hook still
+  runs only after a push-family command RETURNED successfully — after_push_command unchanged; the journal-op
+  instrumentation test still passes with the new line); ENTRY_TYPE_KEYS untouched (run.json is no library entry; the
+  guard test passes in the full suite); smoke 102 green.
+
+## Consequences surfaced for the orchestrator (not decided here)
+- C1 An unfinished `check_photos pending` run made WITHOUT --min-age-h (e.g. by the pre-fix auto-confirm of
+  2026-10-26, if it stopped at its 15 minutes) is no longer continued by the auto-confirm (another resume key); a
+  manual `python main.py check_photos pending --apply` continues it, `--recheck` starts afresh. A harmless leftover.
+- C2 R2's M14 ("auto-confirm a day later", the user's run): its expected first line is now `🔎 N pushed object(s) await
+  Google Photos confirmation — confirming them now[, M newer skipped] (check_photos pending --apply --min-age-h 24, at
+  most 15 min; …)` with N = the pushes ≥ 24 h old, and the check prints the skip line — update M14's instructions.
+- C3 PROGRESS.md, PRIORITY.md, the tier file and DECISIONS.md were not edited (the orchestrator's); PLAN.md /
+  DECISIONS.md §1 keep the original Step 13b argv as history (§1g records the change).
+
+## Design decisions (binding — recorded first so a resumed session stays consistent)
+1. **The filter.** `_cp_resolve(library, scope, account, now, min_age_h=None)` drops — after the scope and `--account`
+   filters — every object whose push time is less than `min_age_h` hours before `now`. The push time is the record's
+   `pushed_at` = `_mp_pushed_at(obj)`: the capture's `pushed.at` of the object's OWN bytes, the value Step 9b's
+   `_cp_recent` judges recency by. Age = (now − push).total_seconds() / 3600 — `mvcommon.unverified_objects`'
+   arithmetic — so exactly H h old is checked, as in maybe_auto_confirm (`age_hours >= AUTO_CONFIRM_MIN_AGE_H`); no
+   overflow for a huge H. No push time -> kept (checked: Step 13's verdict rule). A future push time (clock change) ->
+   young, as in maybe_auto_confirm. Works for every scope (legacy objects have no push time: unaffected).
+2. **Nothing for a skipped object.** It never enters run.json's `objects`: the child looks up only those, verdict rows
+   come only from them, learned records and failed rows only from the rows -> no verdict row, no failed row, no learned
+   record. One note under the scope lines, only when N > 0: `N object(s) pushed less than H h ago skipped — checked at
+   a later push`. All skipped -> `Nothing to check.`, no run directory (nothing written at all).
+3. **Part of the resume key.** run.json records `min_age_h` (only when given: a run without it keeps today's run.json)
+   and `_cp_unfinished` continues only a run made with the SAME `--min-age-h` (or none). Otherwise the auto-confirm
+   (`pending --min-age-h 24`) would continue an unfinished `check_photos pending` run made without it — whose objects
+   include young ones — and look them up; and a manual `pending` run would continue an auto-confirm run and leave the
+   young ones out. `_cp_check_command` ("continue it with …") adds `--min-age-h H`. `--apply-run` stays age-agnostic
+   (an explicit run dir, or `latest` of the scope + account — unchanged).
+4. **The parser.** `--min-age-h` is valued like `--max-minutes`: `_cp_number(…, float, 0, strict=True)` (finite, > 0)
+   -> bad input is a ValueError -> the dispatcher's existing `❌ check_photos: …` + `   Usage: {CHECK_USAGE}` + exit 1.
+   Refused with `--apply-run` (it never searches — named in that message) and with `--list` (offline: only
+   `--account`). Without the option nothing changes (opts gains `min_age_h: None`).
+5. **The auto-confirm.** `auto_confirm_argv()` = `[sys.executable, <abs main.py>, "check_photos", "pending", "--apply",
+   "--min-age-h", str(AUTO_CONFIRM_MIN_AGE_H), "--max-minutes", "15"]` (the argv pin intentionally changed). Its line
+   counts only the due objects and adds `, N newer skipped` when N > 0; the parenthetical names what runs (`check_photos
+   pending --apply --min-age-h 24`). The reminder and warning lines are unchanged (reminder N = every pending object).
+   The gates (switch, web, young, profiles, lock), the hook's success decision and every rollback path: untouched.
+6. **Boundary race (accepted).** The parent's `now` precedes the child's by its start-up (~1–2 s) and the child reads
+   the push time to the whole second (`_mp_pushed_at`), so an object within ~2 s of the 24 h mark may be counted
+   "newer" by the parent yet looked up by the child — never the reverse (the child's age is always ≥ the parent's).
+
+## Assumptions (surfaced — the dispatch does not fix these)
+- A1 `--min-age-h` works with every scope (the dispatch writes `check_photos … --min-age-h`), not only `pending`.
+- A2 `, N newer skipped` only when N > 0 (no ", 0 newer skipped").
+- A3 The header's parenthetical shows `--min-age-h 24` (it names the command that runs, as before).
+- A4 The reminder / warning lines keep suggesting `check_photos pending --apply` (a manual run checks everything).
+- A5 The skip line is the check's (the child's) scope note; report.txt and the summary line stay rows-only.
+- A6 mvconfig.example.json's `_comment_auto_confirm_after_push` quotes the argv, so it is updated with the docs.
+
+## Log
+- Baseline on a `git archive 1f00913` scratch copy (acfix_gate.py, run in the background while the code was written):
+  full 3265 passed + 13 failed, smoke 101 + 1 failed — all 13 in tests/test_fetch_hygiene.py + the fetch smoke, every
+  one an incoming-folder path assertion: the copy's `--basetemp` under the long scratchpad path pushed the title
+  folder past INCOMING_PATH_LIMIT (240), so the fetch took its short-root fallback (`mv_short_root\MV_incoming\…`) —
+  correct code behaviour, an artefact of the path. The 13 re-run on the same copy with pytest's default basetemp: 13
+  passed. Baseline confirmed = full 3278 · smoke 102 (the dispatch's numbers). Rule kept: every gate runs with the
+  default basetemp. Per module at 1f00913: test_check_photos 158 · test_auto_confirm 162 · test_c25_regression_pins 39.
+- Model / attribution: dispatched to executor-fable (Fable 5.1). After the first tool call the harness switched the
+  commit attribution to Claude Opus 5.5 (a usage-limit fallback — no MODEL-FALLBACK banner came with the dispatch), so
+  acfix.0 (18f3a33) and acfix.a (805cf2c) carry `Co-Authored-By: Claude Opus 5.5`. The coordinator then resumed the
+  work after the limits reset; the attribution flipped to Fable 5.1 and back to Opus 5.5 within minutes. Every commit
+  carries the trailer the harness gives at the moment it is made (the model actually running): 18f3a33 · 805cf2c ·
+  75c932c · 5004c8c · 3647d30 · e92f3a6 and the final commit — Claude Opus 5.5 (the harness's attribution at each of
+  those moments). The work was interrupted twice by usage limits and resumed by the coordinator; nothing was lost
+  (every sub-task committed; the disarm run and the full suite finished on their own while the session waited).

@@ -1,0 +1,330 @@
+STATE: COMPLETE
+
+# IMP-C25 Step 14 — `--manual`, `resolve_photos` (manual confirm + match), robust fetch_restore resume, web behavior
+# (+ follow-ups a–d) — resumable status
+
+- Plan: docs/feature-fetch-datetime/PLAN.md Step 14 + "Follow-ups carried into Step 14" a–d (+ P-5, P-8, P-10, P-12,
+  P-13, P-18, P-20, OD-5, OD-14, D3, Goal 2) · DECISIONS.md §1c–§1f (the user's Chrome rules: close Chrome and its
+  tabs properly; never show "Restore pages?") · contracts from Steps 10 / 11 (root STATUS.md of the main folder),
+  12 + picks (.candidates/c25-step-12/C/*), 13 / 13b / 13c (.candidates/c25-step13*/STATUS.md).
+- Worktree `C:\Users\harin\PycharmProjects\MediaVault-s14` · branch `tmp/c25_step14` · base c6b53c6 (Steps 0–13c done).
+  The main folder is never touched (the user archives from it).
+- Python: `C:\Users\harin\PycharmProjects\MediaVault\.venv\Scripts\python.exe -m pytest …`, run from the worktree.
+  Gates run SEQUENTIALLY. Baseline (orchestrator re-run at c6b53c6): full suite 3062 · smoke 82.
+
+## Resume rule
+Read this file, then `git log --oneline -15` (WIP commits: `wip(imp-c25): step 14.<x> — …`) and `git status`. An
+uncommitted diff belongs to the first unticked sub-task: keep it when coherent and its targeted tests pass, else
+`git checkout -- <its files>` (record that here). Continue at the first unticked sub-task. Commit THIS file
+(force-added: `.candidates/` is gitignored) with every WIP commit; tick a sub-task only after its tests pass, with its
+SHA. Pathspec commits only; never -A, amend, rebase or stash. Never edit PROGRESS.md (the orchestrator does).
+
+## Sub-tasks (one WIP commit each)
+- [x] 14.0 this status file: the sub-task plan + the design decisions below (no code) — 41501c4
+- [x] 14.a follow-up c — Chrome robustness (mainfetch, tools/warm_profiles.py, tools/gp_inventory.py connect):
+      `_ProcessTable.query` with `-ErrorAction Stop` (a WMI failure is "cannot tell", never "gone") · the shared close
+      under load: `_terminate_session_chrome` takes the open Popen handle as the identity proof when the process table
+      cannot tell (or says gone while the handle says running), taskkill /T /F then the handle's kill() — never a pid
+      the table names with another profile or an unreadable command line (Step 11's pins kept) · `init_driver`: a
+      failed attach (chromedriver-manager / the attach / the Photos tab, Ctrl+C included) ends the Chrome it just
+      launched (`_end_launched_chrome`) · a bounded page-load timeout for every session (`bound_page_loads`,
+      FETCH_PAGE_LOAD_S, before the first navigation; the crawler's connect too) · warm_profiles closes the Chrome it
+      launched (`_close_session`, last=True: an attached Chrome only loses this run's tabs) and refuses to attach to a
+      previous profile's Chrome (port guard only when that Chrome may still run) — tests: tests/test_chrome_robustness.py
+      35 passed (the query ×5 incl. a timed-out query; the terminate rule ×5 table answers + taskkill failing → the
+      handle + neither works + attached / unknown never + exited never queried; the Step 12/C load replay through
+      `_close_session`: listener and query both unable to tell → only the run's tab closed, then terminated through the
+      handle, journal `terminated`, profile marked; init_driver: driver-manager / attach failures ×2, the Photos tab,
+      taskkill failing → kill(), an unendable Chrome → one warning, a hand-over never touched, a failed launch, Ctrl+C
+      ×3 (settling / attach / Photos tab), the bound set before the first navigation; bound_page_loads; the crawler's
+      connect; warm-up ×6: closed before the next profile, a close ignored → terminated, logged out still closed, an
+      attached Chrome keeps its windows and blocks the next profiles while the port is held, a port freed in time,
+      stand-ins never probe the real port); neighbours (fetch hygiene, restore bubble, warm profiles, photos tab, check,
+      locator, gp_inventory ×2, harvester, routing ×2, session detector, trigger retry, cli parsers, search wait) 772
+      passed; smoke 82 passed; live read-only: the new query on this process → alive + its command line (1.6 s), on a
+      missing pid → (False, None) (0.8 s) — 1ba0bda
+- [x] 14.b follow-up d — the RPC quality flags: ONE read-only live probe (TV profile, one known item, port 9222 free,
+      no fetch/crawl running, nothing downloaded, Chrome closed, no URL/cookie/email printed) of the raw item records
+      (swbisb / lcxiM / VrseUb / EWgK9e) → fix gpweb's parsers where the probe establishes a position with certainty,
+      else keep "unknown" and say so — tests: tests/test_rpc_quality_flags.py (+ the fake updated only where the probe
+      proved the real layout). Findings: Log 2026-10-14 "14.b live probe". Changes: gpweb `_jspb_field` (dense slot,
+      else the trailing object by FIELD NUMBER str(index+1), else absent) — `_partial_upload` / `_archived` read through
+      it: a field the record does not carry is None (unknown), never False; every dense (Step 2b) layout reads exactly
+      as before · the four parsers' docstrings record the live layouts · mainfetch `_check_quality`: the pinned items
+      whose partial_upload is still unknown after the swbisb ask are read from the timeline at their taken second
+      (lcxiM, second*1000+999, TIMELINE_PAGE_SIZE — one call per distinct second, the item's own full record taken
+      from it) → Step 13's `inconsistent` verdict and its partial-upload outlier can fire live; a failing call leaves
+      them unknown (the one note line) · original_quality stays unknown live (no triple; the code cannot be told) ·
+      tests/gphotos_fake.py: `compact_array`, `batch_info_row(live=True)`, knobs `swbisb_compact` / `ewgk9e_live`
+      (default off: every existing test sees the same fake). Tests: test_rpc_quality_flags 20 passed; disarm (scratch
+      copy) no timeline pass → 4 fail · no field-number read → 3 fail · an absent field read as unset → 6 fail;
+      neighbours (check_photos, schema guard, harvester, hygiene, routing, search wait, gp_inventory, gphotos_apply,
+      primitives, gprpc, gpweb, locator, map_photos, mvmeta_upgrade, chrome robustness, quality flags) 1551 passed;
+      smoke 82 passed — a268b7c
+- [x] 14.c `--manual` + the identification block (mainfetch): at the end of `_fetch_items`, before `_finish_downloads`,
+      every object of the entry part not fetched gets its identification block (account, exact uploaded name, local
+      taken time, content key, size, what was tried, its failed-list status, the CLI next steps); with ctx.manual the
+      same block + the browser at the best start + a per-object watch of ctx.target["dir"] (MANUAL_WAIT_S = 30 min,
+      harvest_downloads(timeout=, stop=)), SHA-256 verification, learned record source `manual` (proof sha256); the
+      `failed` ones are taken too (follow-up a) · usage lines name `--manual` — tests: tests/test_fetch_manual.py.
+      Done: `_help_unfetched` (after `_record_unfetched` / `_record_wrong_items`, before `_finish_downloads`; incoming /
+      fallback only) · `identification_lines(facts)` (public, shared with resolve_photos; never a URL, never a P-13
+      marker; the fetch's block names no photo id) · `open_best_start(driver, loc, ctx, located, candidates)` (public:
+      located page → the record's photo_id → first candidate no record proves wrong → day search → exact-name search
+      → start page; an item page counts only once it shows its record) · `_manual_round` / `_manual_wait` (all the
+      part's unfetched objects pending during a wait, none "requested", statuses restored in a finally) ·
+      `harvest_downloads(queue, ctx, timeout=300, stop=None)` · `_record_failed` keeps item['_failed'] · learn-on-fetch:
+      source manual for item['_manual'], photo_id from the located record, else item['_manual_opened'] — only with the
+      verified bytes' dedupKey · the next commands: `python main.py fetch <id> [--fetchExtras] [tempdir "<p>"]
+      --manual` and (failed-list rows) `python main.py resolve_photos --id <id>` · usage lines: main.py ×4 (no-args
+      fetch_restore + fetch, the two "❌ Usage" lines, the fetch_restore comment) + parse_fetch_args. Tests:
+      test_fetch_manual 17 passed (block exact lines for an s4-skipped object; a located-unfetched one "a re-run fetches
+      it" without resolve_photos; the command flags; a stand-in driver with --manual: no block, no wait; all fetched:
+      nothing; --manual: kept after SHA-256 + learned source manual without photo_id + the wait ends with the download;
+      30-min timeout + journal state back to failed; a wrong download deleted, the wait goes on; the failed ones taken
+      (s4-skipped, RPC off, day search opened); another missing chunk downloaded during a wait kept; each wait ends at
+      its own object; the located page opened + photo_id learned + not confirmed by apply_learned; an opened item with
+      other bytes never learned (inconsistent); the ~/Downloads fallback; a best start that cannot open still waits;
+      Ctrl+C; the usage lines). Disarm (scratch copy) ×7: kept without SHA-256 → 3 fail · photo_id without the
+      dedupKey check → 1 · no status restore → 1 · no legacy gate → 1 · source fetch → 5 · no stop → 1 (after adding
+      the per-object wait test) · other objects not pending → 1. Neighbours 1154 passed; smoke 82 passed — ac74bd1
+- [x] 14.d robust fetch_restore resume (mainfetch): a re-run goes straight to S0 — the session account's learned
+      sidecar (photo_ids proven but not merged yet: an interrupted parent never merged) and the fetch journals (the
+      photo_ids an interrupted run located) add S0a candidates (still verified, P-5) · public helpers for resolve_photos:
+      `locate_object(..., stages=)`, `verify_item`, `open_best_start`, `object_locators` (extracted from
+      `_check_locators`, check unchanged) — tests: tests/test_fetch_manual.py (resume) + tests/test_resolve_photos.py.
+      Done: `_resume_hints(ctx, account)` (once per run + account on ctx.locator.hints: the reduced learned sidecar —
+      identity, alternates, dead — and other runs' journals, newest first, this account's entries only, this run's own
+      skipped) · `_with_resume_hints(loc, ctx)` -> (locator, n added): the sidecar identity becomes photo_id only when
+      the library has none, the rest are S0a alternates after the library's own, dead ids never; nothing added → the
+      SAME locator object · `_locate_item` puts the hinted locator on the item and prints `↩️ <name>: N item(s) an
+      earlier run found or learned are tried first.` · `locate_object(..., stages=None)` through `_waterfall` /
+      `_arbitrate` (the OD-5 preview only with "legacy") · `verify_item(driver, loc, photo_id, ctx)` -> {photo_id,
+      verdict match|wrong|unknown|gone, proof, name_normalized, record, via, content_mismatch} · `object_locators(
+      library, ctx, objs)` (`_check_locators` now delegates — check unchanged) · open_best_start's filter: only a
+      PROVEN content mismatch skips an item (a no-key object's name mismatch does not: a manual match is opened).
+      Tests (in tests/test_fetch_manual.py — resolve_photos' own come with 14.f): run 1 Ctrl+C after S2 located +
+      requested → run 2 S0a from the journal, no EzkLib at all; an unmerged sidecar photo_id first, a journal-named
+      dead id never read; a manual match (proof manual) read by S0a, never requested by the stages, opened first by
+      --manual and learned after the user's SHA-256-verified download; another account's / this run's journal → the
+      same locator; journal ids after the library's own, newest run first; verify_item ×7 (dedupkey match, content
+      mismatch, filename match, name mismatch, no-key other bytes = filename match, gone, RPC off → page); stages=
+      runs only S3u, no preview; object_locators == _check_locators. 31 passed. Disarm (scratch copy) ×6: no hints → 3
+      fail · dead ids kept → 1 (after adding the journal-named dead id) · stages ignored → 1 · name mismatch called a
+      content mismatch → 1 · journal hints from every account → 1 · the name filter back in open_best_start → 1.
+      Neighbours 1591 passed; smoke 82 passed (19 s) — ce56e95
+- [x] 14.e mvcommon: the resolve answer log `resolved.jsonl` (append_resolved / read_resolved: resume + the IMP-C27
+      "not uploaded" list) and `read_failed_csv_rows` (every object row of a failed_objects.csv / resolutions_todo.csv,
+      sharing read_failed_csv's Excel-tolerant decoding, read_failed_csv unchanged) — tests: tests/test_resolve_photos.py.
+      Done: `resolved_path()` (GPHOTOS_STATE_DIR/resolved.jsonl), `GP_RESOLVE_ANSWERS` = url | search | not_uploaded,
+      `_RESOLVED_KEYS` (v, at, account, manual_id, label, sha256, answer, photo_id, proof, search_term, found),
+      `append_resolved` (validated, fsynced at once) / `read_resolved` (torn-line tolerant) — a url answer names
+      photo_id + proof, a search answer its search_term (+ found, + photo_id/proof when the term found it), not_uploaded
+      nothing else · `read_failed_csv_rows(path)` -> (rows {line, account, manual_id + category / object /
+      uploaded_name / status / expected_taken_local / sha256}, errors) · `_failed_csv_cells` = read_failed_csv's
+      reading, now shared (read_failed_csv's behaviour unchanged: its tests green) · `failed_objects(library,
+      records=None)` = export_failed_csv's join (newest record per object, confirmed and orphans left out, sorted),
+      export_failed_csv now writes from it (its tests green). Tests: test_resolve_photos 35 passed (14.e part); disarm
+      (scratch copy) ×3: only edited rows → 8 fail · not_uploaded with an item → 1 · confirmed listed → 2 (incl. the
+      existing export test). Consumers (primitives, map_photos, check_photos, gphotos_apply, schema guard,
+      auto_confirm, mvmeta_upgrade) 930 passed; smoke 82 passed — d7d2c0b
+- [x] 14.f main: `resolve_photos [failed|<csv>] [--account a] [--id <manual_id>]` — the TTY refusal, the rows (newest
+      failed row per object, confirmed / orphaned / answered ones left out), grouped by account, one Chrome session per
+      account under the fetch lock (start-up cleanup + journal + robust close), the identification block, the best
+      start, `[p]aste photo URL | [s]earch term | [n]ot uploaded | s[k]ip | [q]uit`, every answer recorded at once, the
+      final dry-run summary + `Apply these N changes to the library? [y/N]`, the download-lost re-fetch offer, the C27
+      list · check_photos' report points ambiguous objects at resolve_photos (follow-up b) · the CLI branch + usage
+      line — tests: tests/test_resolve_photos.py.
+      Done (main.py, a new section after cmd_check_photos): RESOLVE_USAGE / RESOLVE_PROMPT / RESOLVE_FAILED_STATUSES
+      (refused, error, interrupted -> exit 1) · parse_resolve_photos_args · `_rp_stdin_is_tty()` seam (refused, exit 1,
+      nothing launched) · `_rp_rows` (failed list via mvcommon.failed_objects or a CSV via read_failed_csv_rows; --account;
+      --id = the id, an alias's primary, or any prefix; answered = an answer at/after the newest failed row; download-
+      lost rows apart) · `_rp_walk` (mainfetch._check_lock without waiting + its heartbeat beaten at every question;
+      GP_ACCOUNTS order; profile_preflight; the port guard before a 2nd session; _startup_cleanup + FetchJournal once;
+      init_driver; _note_session; object_locators; shared close / Ctrl+C -> _end_run terminates; signed out -> that
+      account's line, the walk goes on; LockLost / any other fault -> the walk stops, answers kept) · `_rp_object` (the
+      block via identification_lines with the failed row's tried + candidates, open_best_start, the question; a pasted
+      URL is accepted at the question too) · paste -> verify_item: match -> learned (source check, proof dedupkey |
+      filename) + answer url; gone -> named; content mismatch -> refused; else the manual-match question -> proof /
+      source manual · search -> search_override at once + locate_object(stages=("user_query",)) -> found adds a check
+      record (approach s3u_user_query) · not uploaded -> answer only · the IMP-C27 list at the end · `_rp_apply`: the
+      engine's dry run over the whole sidecar, "← answered now" marks, `Apply these N changes to the library? [y/N]` —
+      also offered when nothing is left to walk (declined answers wait in the sidecar) · download-lost: listed with
+      their fetch commands, `Re-fetch … now? (a fetch also folds the learned sidecar …) [y/N]` -> cmd_dispatch_fetch
+      per owner (--fetchExtras for an extra) · dispatcher branch + the no-args usage line · follow-up b: the check
+      report's Ambiguous line now says "pick the right item with python main.py resolve_photos failed". Tests:
+      test_resolve_photos 71 passed (14.e 35 + 14.f 36). Disarm (scratch copy) ×8: no TTY check → 1 fail · proven
+      other bytes offered → 1 · applied without asking → 2 · answered rows walked again → 2 · verified paste as manual
+      → 1 · answer log not written → 9 · download-lost walked → 1 · the old ambiguous line → 1. Neighbours 1141 passed;
+      smoke 82 passed (49.6 s right after the neighbours — re-timed at 14.g) — b1d31d1
+- [x] 14.g gates: disarm probes (isolated scratch copy) · full suite · smoke · self-review · STATE: COMPLETE · the
+      final feat commit `feat(imp-c25): Step 14 — --manual, resolve_photos, robust fetch_restore resume, Chrome robustness`.
+      Disarm, all on ONE fresh scratch copy of b1d31d1 (the unmutated probed files first: 587 passed): 39/39 caught —
+      14.a ×10 (the -ErrorAction Stop query · another profile terminated · the handle not trusted when the table cannot
+      tell · no handle kill after a failed taskkill · a failed attach / a failed Photos tab leaving the launched Chrome ·
+      no page-load bound in init_driver / the crawler's connect · the warm-up not closing its Chrome / attaching to the
+      previous one), 14.b ×3, 14.c ×8 (incl. --manual reading the keyboard), 14.d ×6, 14.e ×3, 14.f ×9 (incl. the lock
+      taken waiting); every file restored byte for byte. Full suite 3219 passed (baseline 3062 + 157 new: chrome
+      robustness 35, quality flags 20, fetch manual 31, resolve photos 71), 0 failed, 5 min 24 s; then smoke 82 passed
+      in 11.7 s. Self-review: the acceptance bullets of PLAN Step 14 and follow-ups a–d one by one; the consumers (Step
+      15 smoke/pins, R2 §M9 / §M10 / §M15, R4, Step 16 wording); the change-gates (rollback untouched — no RollbackJournal
+      / recover_journal / PONR / cmd_restore / txn line in the diff; ENTRY_TYPE_KEYS untouched, guard green; the new
+      library readers are alias/season_map-safe: iter_entry_objects / _gp_resolve; webui/server.py unchanged — it never
+      passes --manual, pinned by test_fetch_routing) — findings in the final report
+
+## Design decisions (binding for the rest of this step — recorded early so a resumed session stays consistent)
+1. Legacy mode keeps today's transcript: the identification block and `--manual` act only when the entry's downloads
+   go through a real Chrome (ctx.target mode incoming | fallback). A driver without Chrome's DevTools protocol (None or
+   a test stand-in — never a real Chrome) keeps today's output byte for byte (Step 11's rule): every frozen oracle of
+   test_fetch_harvester / test_fetch_account_routing stays untouched.
+2. `--manual` (CLI only — the web never passes it) runs at the END of `_fetch_items` (after `_record_unfetched` /
+   `_record_wrong_items`, before `_finish_downloads` empties the folder): every object of the entry part still not
+   fetched — `failed` ones included (follow-up a) — gets, one at a time: its block, the session's Photos tab at its
+   best start (its located item's page · the user's manual match · the first candidate the stages saw · the day search
+   of its expected local date · the search of its exact uploaded name; nothing is clicked or downloaded), and a watch
+   of ctx.target["dir"] (the folder the automation Chrome saves into) for up to MANUAL_WAIT_S = 30 min. The round's
+   queue holds EVERY still-unfetched object of the entry as pending (a download of another one is never deleted as a
+   wrong item) and ends when the current one is fetched (harvest_downloads(..., timeout=, stop=)). No stdin is read.
+   Only a SHA-256 match is kept (the harvester); a wrong item is deleted (incoming mode) and the wait goes on.
+3. A `--manual` download is recorded in the learned sidecar with proof `sha256` (its BYTES matched — the strongest
+   download proof, so the block learns the content key) and source `manual` (the user's hand: the PLAN's "learned
+   manual proof"): `confirmed` is never set by it (P-5: a manual result is confirmed by a later check). Its photo_id is
+   recorded only when the item opened for it holds exactly those bytes (Step 10's rule: item['_trigger']['record']).
+4. A `manual` match (resolve_photos' accepted mismatch) is NEVER downloaded by the fetch's own stages: D3 ("later
+   fetches go direct and still verify before downloading") and Goal 2 ("never downloads an unverified item in the new
+   stages") forbid it. S0a still tries it (verified as always); `--manual` opens it first; the identification block
+   says so. The resolve prompt keeps the PLAN's words — "a later fetch verifies it by SHA-256" = `fetch <id> --manual`.
+5. resolve_photos never offers a manual match for a PROVEN content mismatch (the item's dedupKey differs from the
+   object's content key: its bytes are not the object's — a SHA-256 check would refuse them); it says so instead.
+6. resolve answers: a paste VERIFIED download-free (dedupkey / filename — the very P-5 check check_photos runs) is a
+   learned record with source `check` (so the apply can confirm it and the object leaves the failed list); an accepted
+   manual match: proof `manual`, source `manual` (never confirms by itself); a search term: `search_override` (source
+   `manual`, P-10) tried at once through S3u alone — a verified find adds a `check` record with approach
+   s3u_user_query. "Not uploaded" and every other answer also go to the answer log `resolved.jsonl` (fsynced at once):
+   resume ("answered rows are skipped" — an answer at or after the object's newest failed row) and the IMP-C27 list.
+   Skip and quit record nothing (a skipped row comes back).
+7. resolve's apply = the apply engine over the WHOLE learned sidecar (as check_photos --apply and the post-fetch merge
+   do): first its dry-run summary (per changed object; this session's marked), then `Apply these N changes to the
+   library? [y/N]` (EOF / anything but y = no). Declined: the library is untouched; the answers stay in the sidecar
+   (P-10) — the next fetch's merge, check_photos --apply or resolve_photos folds them (said in the decline line).
+8. download-lost rows (Step 10: the item WAS found, its transfer broke twice) are not re-identified: they are listed
+   before the walk with their fetch commands, and at the end (Chrome closed, lock released) "Re-fetch them now?
+   [y/N]" runs the normal `fetch` (cmd_dispatch_fetch) per id — the question says that a fetch folds the learned
+   sidecar when it ends.
+9. resolve_photos refuses when stdin is not a TTY (exit 1); it takes the fetch lock WITHOUT waiting; one Chrome per
+   account (GP_ACCOUNTS order), the fetch's start-up cleanup first and a fetch journal (crash cleanup), closed through
+   the shared close (last=True for the last account) and `_end_run`.
+10. Resume (fetch): the learned sidecar and the fetch journals only ADD S0a candidates (after the block's own photo_id
+   and alternates; dead ids left out) — S0a verifies each (P-5) before anything is requested; a locator that gains
+   nothing is passed unchanged (the same object), so today's runs are byte-identical. check_photos and locate are not
+   affected (they call locate_object directly). The parent never merges before the child (Step 6/10 pins: no library
+   write after a Ctrl+C; the merge line after the child's output).
+11. The shared close (follow-up c): the Popen handle the run holds is the identity proof when the process table cannot
+   answer — while it is open the pid cannot have been reused, and the run launched that chrome.exe with that profile.
+   A positive answer naming another profile, or an unreadable command line, still means "never" (Step 11's pins).
+   The start-up cleanup (journaled pids, no handle) keeps the command-line rule unchanged.
+12. The quality flags (follow-up d): a fact the record does not carry is UNKNOWN (None), never False; nothing is read
+   from a position the live probe could not establish (the original-quality code: several fields hold 2 for the one
+   original-quality item, none can be told apart without a storage-saver item). check_photos' quality pass takes
+   partial upload / archived from the item's full timeline record when the hash record lacks them — the price is ≤ 1
+   lcxiM call per pinned object live (same-second items share one; gprpc paces ≥ 0.5 s), so a long sweep runs about
+   0.6–1 s per object longer: the one source the probe showed that carries them, and the follow-up's goal ("so the
+   inconsistent verdict and those outlier classes can fire") needs it. Flagged in the report for the orchestrator.
+
+## Assumptions (also listed in the final report)
+- (A1) The harness's commit-attribution notice names the model for each commit's trailer (it said Opus 5.5 at dispatch;
+  the session environment reports claude-fable-5-1; no MODEL-FALLBACK banner) — the quirk Steps 8–13c recorded. It
+  alternates between "Claude Opus 5.5" and "Claude Fable 5.1" during this step; each commit uses the notice current
+  when it is made.
+- (A2) P12's partial-upload / archived markers ([12][0] == 20, [13] true) are kept as given: the probe could confirm only
+  the negative case (one complete, non-archived item: [12] null, [13] false); no partial or archived item was probed.
+- (A3) One item stands for the TV account's record layouts (the dispatch allowed ONE item); the inventory agrees
+  (2374 TV records: original_quality absent for all, partial/archived False for the 1122 rpc-sourced ones).
+- (A4) A `--manual` download teaches the content key (proof sha256, source manual) and a photo_id only from an item
+  this run READ whose dedupKey is the verified bytes' — never from the user's clicks (no stdin); the apply engine does
+  not confirm source manual (a later check_photos does), so the object's failed-list row stays until then.
+- (A5) The automation Chrome saves a download the USER starts in the tab MediaVault opened into the entry's folder (the
+  CDP download behaviour is re-armed on that tab — use_photos_tab); whether a tab the user opens himself does too is
+  unverified live (PLAN P6 / R2 §M10) — the block says to download "in this Chrome window", and the fallback mode
+  watches ~/Downloads.
+- (A6) Two fetch runs never share a run id in real use (one mainfetch process per run: the id holds the second and the
+  pid) — a test with two runs in one second and one process gives each its own id (test_fetch_manual).
+
+## Log
+- 2026-10-14 dispatched; read-in: base contract (executor-opus.md); PLAN (journal, P-1…P-20, OD table, protocol, Steps
+  0–18 incl. 14 + follow-ups a–d, consumer rows, risks, §M4–M18); DECISIONS (§1–§1f); PROGRESS; root STATUS.md Steps
+  10 / 11 / live wrong-item pick (main folder, read only); .candidates/c25-step-12/C/{CANDIDATE,PICKS}_STATUS.md;
+  .candidates/c25-step13{,b,c}/STATUS.md; mainfetch.py (whole file); gprpc.py; gpweb.py; mvcommon.py identity section;
+  main.py (apply engine, merge, dispatch/fetch_restore, map_photos resolutions + appends, check_photos report/apply/
+  scopes/spawn, the dispatcher's fetch branches + usage); webui/server.py actions + progress parser;
+  tools/warm_profiles.py; tools/gp_inventory.py session/connect; tests/conftest.py; tests/gphotos_fake.py;
+  docs/testing-strategy.md; the pins in test_fetch_harvester / test_fetch_hygiene / test_fetch_photos_tab /
+  test_chrome_restore_bubble / test_warm_profiles / test_gphotos_apply / test_check_photos / test_locator /
+  test_fetch_search_wait / test_cli_parsers.
+- 2026-10-14 14.b live probe (ONE read-only session; redacted — structure only, no URL / key / name / email printed or
+  stored). Preconditions: nothing listening on 9222, no fetch lock, no fetch / crawl running (the only python was an
+  idle `main.py web`), no automation Chrome. Item: S02E03, found in the TV inventory by its PUBLISHED dedupKey (P2).
+  A scratch script (outside the repo) wrapped gpweb.PARSERS to see the raw payloads. A first attempt stopped BEFORE any
+  launch (the scratch script's cp1252 console could not print an emoji; lock released, nothing started); the re-run
+  with PYTHONIOENCODING=utf-8: downloads denied for the session (CDP), 6 calls (VrseUb, fDcn4b, swbisb, lcxiM,
+  EWgK9e, EzkLib), 0 errors, nothing clicked but the info button, Chrome closed through the fetch's own close; after:
+  no automation Chrome, no lock, port free, the TV profile exited cleanly. Raw layouts:
+  * full dense record — lcxiM / EzkLib items and VrseUb payload[0]: 16 entries; [0] id, [1] thumbnail (10 entries),
+    [2] taken, [3] dedupKey, [4] tz, [5] upload, [6] null or a 1-entry list, [7] 12 capability-like codes, [8] 2,
+    [9]–[11] null, [12] null, [13] false, [14] an int, [15] the extension object (76647426 → [0] the duration, 1920,
+    1080, …; 163238866; 318563170 → [[2,0,2,0,null,1]]; …) → parsed partial False, archived False, duration known.
+  * swbisb record: [hash, record of 10 entries]: [0]–[5] the P3 fields, [6] null, [7] null (the full record sets
+    [7]: field-masked), [8] 2, [9] a trailing object keyed by FIELD NUMBER — "15" holds the full record's [14],
+    "76647426" the duration → partial / archived not carried → None for every item (why Step 13 never saw them).
+  * EWgK9e: [[null, rows]]; a row has 6 entries [id, info, null, null, null, 2-entry list]; info has 26 entries:
+    [2] '', [3] the name, [6] taken, [7] tz, [8] upload, [9] size (as P12), [10] 100, [18] 2, [23] 1, [25] = the
+    record's [14] → NO [takesUpSpace, spaceTaken, quality] triple → original_quality None.
+  * fDcn4b payload[0]: 33 entries — [2] name, [3] taken, [4] tz, [5] size, [6]/[7] 1920/1080, [11] dedupKey (as the
+    Step 2 text), [14] 2, [29] 2, [30] [2,0,2,0,null,1].
+  * VrseUb payload: 5 entries — [1] a 1189-char URL (role not verified), [2] the codes, [3] an 18-entry list, [4] a
+    trailing object (fields 11, 13 = a URL, 155147258) without field 8 → P14's payload[7] absent →
+    download_original_url None (gprpc.download_url falls back to pLFTfd as built; not changed — R2 verifies downloads).
+  * the item's web info panel: "Original quality", "Backed up", "doesn't take up space"; no "Storage saver".
+  Reading: 2 sits at [8] of every item record, fDcn4b [14] / [29], the [2,0,2,0,null,1] list and EWgK9e [18] — any
+  could be the quality code; one original-quality item cannot tell which → original_quality stays unknown (said in the
+  report; a storage-saver item would settle it). No partial / archived item → P12's markers kept (A2).
+- 2026-10-19 14.g: disarm 39/39 on one scratch copy of b1d31d1; full suite 3219 passed (5 min 24 s); smoke 82 passed
+  (11.7 s); self-review done; STATE: COMPLETE.
+
+## Result (for the orchestrator, Steps 15 / 16 and the R2 pack)
+- Commands: `python main.py fetch <id> [episodes <r>] [tempdir <p>] [--fetchExtras] [--manual]` (and fetch_restore, the
+  same flags; --manual forwarded only when given — the web never passes it) · `python main.py resolve_photos
+  [failed|<csv>] [--account movies|tv|anime|others] [--id <id | alias | prefix>]` (a terminal only: otherwise
+  "❌ resolve_photos is interactive: run it in a terminal — …" and exit 1; exit 1 also for refused / error /
+  interrupted). The question: `   [p]aste photo URL | [s]earch term | [n]ot uploaded | s[k]ip | [q]uit: ` (a photo URL
+  is accepted at it directly); then `      photo URL (Enter = the item the browser shows now): ` · `      search term: `
+  · `      accept as a manual match (a later fetch verifies it by SHA-256)? [y/N]: ` · at the end
+  `Apply these N changes to the library? [y/N]: ` and, for lost downloads, `Re-fetch the N lost download(s) now? (a
+  fetch also folds the learned sidecar into the library when it ends) [y/N]: `.
+- The identification block (mainfetch.identification_lines, unindented lines): account · uploaded as · taken
+  (`… (the time Google Photos shows)`) · content key (`dedupKey … · SHA-1 …`) · size (`… (N bytes)`) · tried
+  (`approach outcome(n) · …`) · failed list (`<reason> — added by this run` | `not listed — its item was found, only its
+  download failed: a re-run fetches it` | `not listed`) · candidates (resolve_photos only); the fetch adds `next` with
+  `python main.py fetch <id> [--fetchExtras] [tempdir "<p>"] --manual` and, for a failed-list row, `python main.py
+  resolve_photos --id <id>`. Header `=== NOT FETCHED (N file(s)) — what to look for in Google Photos ===`, a title line
+  `🧭 <file> · <id> (<label>)`; --manual: `=== MANUAL (N file(s)) — find each one in this Chrome window and download it
+  ===`, `opened <what>`, `waiting up to 30 min for its download`, `> ✋ … fetched by hand …` / `> ⏱️ … no download with
+  its bytes within 30 min.` / `> ✋ Manual: D of N file(s) fetched by hand.`; resume: `> ↩️ <file>: N item(s) an
+  earlier run found or learned are tried first.` None carries a P-13 web marker or a URL.
+- New public helpers: mainfetch.identification_lines · open_best_start · verify_item · object_locators ·
+  locate_object(..., stages=) · harvest_downloads(..., timeout=300, stop=None) · MANUAL_WAIT_S = 1800 · mvcommon.
+  resolved_path / append_resolved / read_resolved / GP_RESOLVE_ANSWERS · read_failed_csv_rows · failed_objects ·
+  main.parse_resolve_photos_args / cmd_resolve_photos / RESOLVE_USAGE / RESOLVE_PROMPT / RESOLVE_FAILED_STATUSES /
+  _rp_stdin_is_tty (the TTY seam) · gpweb._jspb_field · the fake's swbisb_compact / ewgk9e_live knobs (default off).
+- State: ~/.mediavault/gphotos/resolved.jsonl (v, at, account, manual_id, label, sha256, answer url|search|not_uploaded,
+  photo_id, proof, search_term, found). No library field, entry type or rollback behaviour changed.
+- Deviations (each in a design decision above): legacy-mode gating (1); --manual learns proof sha256 + source manual,
+  not proof manual (3); a manual match is never downloaded by the stages — `fetch <id> --manual` (4); a PROVEN content
+  mismatch is refused, not offered as a manual match (5); verified pastes are source check (6); not-uploaded answers live
+  in resolved.jsonl (6); the apply is offered even when nothing is left to walk (7); the warm-up's port guard reports
+  LAUNCH_FAIL; the crawler's connect bounds page loads; the check's quality pass reads lcxiM per distinct taken second
+  (12); open_best_start also opens "the item its library record names".
+- Observations, not changed: warm_profiles runs no profile_preflight (it could create an empty ChromeProfile_Others);
+  live VrseUb carried no payload[7] (download_original_url None → pLFTfd, as built — R2 verifies downloads); the shared
+  close says "this fetch" in resolve_photos too; fetch journals are never pruned (_resume_hints reads them all once per
+  run and account).

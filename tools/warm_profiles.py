@@ -59,32 +59,65 @@ def _append_log(results):
         print(f"   > ⚠️  Could not write warm-up log ({exc}).")
 
 
-def _warm_one(key):
+def _port_may_be_held(driver, ctx):
+    """[IMP-C25 Step 14 c] True when this profile's Chrome may still hold Chrome's debug port 9222 after its close: a
+    real Chrome session (it speaks Chrome's DevTools protocol — a test stand-in holds no port) that the warm-up only
+    attached to, or that it launched and that is still running."""
+    if not hasattr(driver, "execute_cdp_cmd"):
+        return False
+    chrome = ctx.chrome or {}
+    if chrome.get("launched") is not True:
+        return True
+    poll = getattr(chrome.get("proc"), "poll", None)
+    return not callable(poll) or poll() is None
+
+
+def _warm_one(key, session=None):
     """Warm a single profile and return its status string.
 
     "OK"          — session confirmed alive.
     "LOGGED_OUT"  — navigated, but the session is signed out (re-login needed).
+    "THROTTLED"   — [IMP-C25 thfix] Google showed another page than Google Photos or its sign-in page (e.g. its
+                    "unusual traffic" page): no sign-out, nothing to do — the next warm-up looks again.
     "LAUNCH_FAIL" — Chrome/Selenium failed to launch or attach.
 
     The driver is ALWAYS quit in a finally (the quit itself is guarded — it can
     raise if the browser already died).
+
+    [IMP-C25 Step 14 c — DECISIONS §1e] Before that, the Chrome the warm-up LAUNCHED is closed (the fetch's own
+    mainfetch._close_session: CDP Browser.close, terminated only when it does not exit and is provably this run's;
+    its profile marked cleanly exited — no "Restore pages?"). It used to stay open on the debug port 9222, so the
+    next profile attached to it and checked the WRONG account. A Chrome the warm-up only attached to (already running
+    before) keeps running with just the warm-up's own tabs closed: it may hold the user's windows. `session` (a dict,
+    optional) receives "port_may_be_held" (_port_may_be_held) — warm_all checks the port before the next profile then.
     """
     driver = mainfetch.init_driver(key)
     if driver is None:
         return "LAUNCH_FAIL"
 
+    ctx = mainfetch.FetchContext()          # the session's launched Chrome (its Popen handle, pid, profile)
+    ctx.start_session(key)
+    mainfetch._note_session(ctx, driver, key)
     try:
         driver.get(mainfetch.PHOTOS_URL)
         time.sleep(2)
         mainfetch.check_session_alive(driver, key)
         return "OK"
+    except mainfetch.PhotosThrottledError:   # [IMP-C25 thfix] a SessionExpiredError, but never a sign-out
+        return "THROTTLED"
     except mainfetch.SessionExpiredError:
         return "LOGGED_OUT"
     finally:
         try:
+            mainfetch._close_session(driver, ctx, last=True)
+        except Exception as exc:
+            print(f"   > ⚠️  Closing Chrome failed ({type(exc).__name__}: {exc}).")
+        try:
             driver.quit()
         except Exception:
             pass
+        if session is not None:
+            session["port_may_be_held"] = _port_may_be_held(driver, ctx)
 
 
 def warm_all(profile_keys=None):
@@ -102,15 +135,29 @@ def warm_all(profile_keys=None):
     results = {}
     try:
         with fetch_session_lock(blocking=False):
+            session = {}
             for key in profile_keys:
+                # [IMP-C25 Step 14 c] Never attach to the previous profile's Chrome: it would check the wrong account.
+                if session.get("port_may_be_held") and not mainfetch._debug_port_free():
+                    print(f"   > ❌ Profile '{key}' not warmed: Chrome's debug port 9222 is still in use (the previous "
+                          f"profile's Chrome did not close) — close that Chrome, then re-run.")
+                    results[key] = "LAUNCH_FAIL"
+                    continue
                 print(f"   > Warming profile '{key}'...")
-                results[key] = _warm_one(key)
+                session = {}
+                results[key] = _warm_one(key, session)
     except LockHeldError:
         print("⏭️ Live fetch in progress — skipping warm-up.")
         _append_log({"_run": "SKIPPED_LOCK_HELD"})
         return 0
 
     _append_log(results)
+
+    # [IMP-C25 thfix] A throttle is no sign-out: one line, no toast, no failure (the next warm-up looks again).
+    for key, status in results.items():
+        if status == "THROTTLED":
+            print(f"   ⏸️ Profile '{key}': Google showed another page than Google Photos (throttled?) — not a sign-out; "
+                  f"the next warm-up looks again.")
 
     failed = [key for key, status in results.items()
               if status in ("LOGGED_OUT", "LAUNCH_FAIL")]
@@ -124,7 +171,8 @@ def warm_all(profile_keys=None):
         )
         return 1
 
-    print("✅ All profiles healthy.")
+    throttled = any(status == "THROTTLED" for status in results.values())
+    print("✅ No profile is signed out." if throttled else "✅ All profiles healthy.")
     return 0
 
 

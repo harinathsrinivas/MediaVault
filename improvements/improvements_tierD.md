@@ -228,6 +228,7 @@
 - Effort estimate: small
 - Risk: medium-for-a-small-command — the search_term must match the name that was UPLOADED, not the current local name. A local rename AFTER upload means the rebuilt term would point at a nonexistent remote name and silently break fetch for that entry. The command must warn when `uploaded=True` (the remote name is frozen at push time) and only auto-apply for `local_ready` entries.
 - If skipped: stale search terms surface as mysterious fetch misses; today fixed one-at-a-time via `set_search`.
+- Synergy (IMP-C25, done): the risk above can now be checked against the record. Each mapped object stores the name Google Photos shows (`gphotos.accounts[<account>].gp_filename`), and a push captured since IMP-C25 stores its exact pushed name (`gphotos.uploaded_name`). A rebuild can therefore use the name that was really uploaded instead of recomputing it from the current local filename. Fetch now locates by `photo_id` first, so a stale `search_term` matters only to the legacy S4 stage. For one-off fixes, the failed list prints a ready-made `set_search` command per entry, and a per-object term goes to `gphotos.search_override` (stage S3u).
 - Status: pending
 
 ---

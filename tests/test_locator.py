@@ -1256,6 +1256,58 @@ def test_shift_d_ignored_on_a_direct_page_load_falls_to_the_click_path(flow, san
     assert (folder / "restore" / "Demo.S01E01.mkv").read_bytes() == item.data and flow.legacy == []
 
 
+def test_the_viewer_is_closed_once_its_shift_d_download_started(flow, sandbox):
+    # [IMP-C25 follow-up] As the pre-C25 trigger did (Shift+D, then Esc): once the download has started, Esc closes
+    # the item's player — its video does not keep playing while the downloads run — and the download still lands.
+    folder, item, episode = _one_episode(flow, sandbox, vrseub_original_url=False, mint_refused=True)
+
+    mainfetch.cmd_fetch_route(episode)
+
+    acts = flow.drivers["tv"].actions
+    started = next(n for n, a in enumerate(acts) if a["kind"] == "shift_d" and a["downloaded"])
+    assert {"kind": "escape", "from": "item"} in acts[started + 1:]
+    assert not any(a["kind"] == "pause_videos" for a in acts)  # Esc closed it: nothing to pause
+    assert (folder / "restore" / "Demo.S01E01.mkv").read_bytes() == item.data
+
+
+def test_a_viewer_esc_leaves_open_gets_its_videos_paused(flow, sandbox, monkeypatch):
+    # The fallback: when Esc leaves the item's page shown (the keystroke missed, the viewer ignored it), its videos
+    # are paused instead — and the download still lands.
+    folder, item, episode = _one_episode(flow, sandbox, vrseub_original_url=False, mint_refused=True)
+    monkeypatch.setattr(gphotos_fake.FakeDriver, "_escape",
+                        lambda self: self.actions.append({"kind": "escape", "from": "ignored"}))
+
+    mainfetch.cmd_fetch_route(episode)
+
+    acts = flow.drivers["tv"].actions
+    started = next(n for n, a in enumerate(acts) if a["kind"] == "shift_d" and a["downloaded"])
+    assert {"kind": "pause_videos", "page": "item"} in acts[started + 1:]
+    assert (folder / "restore" / "Demo.S01E01.mkv").read_bytes() == item.data
+
+
+def test_the_item_page_the_locate_left_open_is_closed_after_a_direct_download(flow, sandbox):
+    # The user's report (2026-11-12): the direct download never needs the item's page, but the locate leaves the tab
+    # on it (the page its record was read from) — its video played on through the download. Closed once it started.
+    folder, item, episode = _one_episode(flow, sandbox)
+
+    mainfetch.cmd_fetch_route(episode)
+
+    assert [r["via"] for r in flow.world.downloads] == ["direct"]
+    assert {"kind": "escape", "from": "item"} in flow.drivers["tv"].actions
+    assert gpweb.photo_id_from_url(flow.drivers["tv"].url) is None
+    assert (folder / "restore" / "Demo.S01E01.mkv").read_bytes() == item.data
+
+
+def test_close_viewer_sends_nothing_when_the_tab_is_not_on_an_item_page(fake_photos):
+    # No item page shown (a search, the library): no keystroke, no script — nothing to close.
+    driver = fake_photos.driver("tv")
+    driver.get(mainfetch.PHOTOS_URL)
+
+    mainfetch._close_viewer(driver)
+
+    assert not any(a["kind"] in ("escape", "pause_videos") for a in driver.actions)
+
+
 def _episode_folder(sandbox):
     folder = sandbox["local_root"] / "Series" / "Demo" / "Season 04"
     folder.mkdir(parents=True, exist_ok=True)

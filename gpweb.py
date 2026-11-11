@@ -911,6 +911,9 @@ const els=[...document.querySelectorAll('*')].filter(e=>{const s=getComputedStyl
 els.sort((a,b)=>b.scrollHeight-a.scrollHeight);
 const el=els[0]; if(!el){window.scrollBy(0,900);return [window.scrollY, document.body.scrollHeight];}
 el.scrollTop+=Math.max(400, Math.floor(el.clientHeight*0.8)); return [el.scrollTop, el.scrollHeight];"""
+# Pause every video on the page — mainfetch._close_viewer's fallback when Esc left an item's viewer open after its
+# download started (the item's video would otherwise keep playing while the downloads run).
+PAUSE_VIDEOS_JS = "document.querySelectorAll('video').forEach(function (v) { v.pause(); });"
 
 # One look at a search page -> {results, timeline, relevant, empty}. A visible link to an item (TILES_JS's rule) is
 # either a search RESULT — its href runs through the search: ./search/<token>/photo/<id> — or a home-TIMELINE

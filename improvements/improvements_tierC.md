@@ -110,7 +110,7 @@
 - Risk: low — second-attempt query construction only; first attempt and hash-routing unchanged.
 - If skipped: titles whose precision search misses (punctuation/fuzzy-tokenizer quirks) are simply unfetchable without a manual `set_search` — for a daemon-triggered fetch that means a "fetch failed" tile and a trip to the PC, the exact thing the end goal abolishes.
 - Shipped by IMP-C25 (not as a stripped query): fetch now locates an object before it downloads, through the evidence-ordered waterfall — the stored `photo_id`, the SHA-1 hash lookup, the taken second, then S2 the exact uploaded name, S3 the title + short_id (category-aware), and S3u the user's own search term from the failed list — with every candidate verified first. Today's two attempts stay the S4 last resort (`mainfetch.EXACT_LOCATOR_ENABLED` is the kill switch).
-- Status: done (absorbed by IMP-C25, `feature/imp_c25_fetch_exact_gp_item`, PR pending)
+- Status: done (absorbed by IMP-C25, merged to main via PR #67, 2026-11-04)
 
 ---
 
@@ -511,7 +511,19 @@
     - `map_photos all --repair split-info --apply`: 3 entries rebuilt, their 6 chunks confirmed. Failed list: 16 rows (IMP-C27).
   - 🚦 R4 (ruling 2026-10-28 "Count R3's sweep as R4"): the R3 photo_id-first check of all 2,242 movies/tv/anime objects is the full-library sweep. Every object is confirmed except the 16 failed-list rows (IMP-C27) and 18 not backed up yet. Others (35 objects) stay unchecked until its Chrome profile exists (R0 / IMP-D18).
 - Follow-ups registered at Step 17 (register only — the user's scope rule of 2026-10-28): IMP-C39 (fetch session lock), IMP-C40 (chromedriver low-memory start), IMP-C41 (crawler login check), IMP-C42 (the warm-up's failure handling), IMP-C43 (fetch-session papercuts), IMP-C44 (resumable direct transfer).
-- Status: done (feature/imp_c25_fetch_exact_gp_item, PR pending)
+- **Open follow-ups (2026-11-12) — recorded at the merge, not started:**
+  - **Rifle Club + Vaazha** (`mov-ma-2024-rifleclub`, `mov-ma-2024-vaazha`, whole files pushed 2026-10-28 ~18:10 UTC to
+    the movies phone): the auto-confirm of 2026-11-11 found neither in movies, tv or anime (content-hash lookup, then
+    every search stage) while the rest of that night's batch was confirmed — the local copies are dummies. Check the
+    movies phone first (`python main.py check_photos mov-ma-2024-rifleclub --devices`, the same for vaazha, or the Photos
+    app's backup queue); if they are gone, re-archive from another copy. Tracked in IMP-C27.
+  - **2 legacy last chunks** (A Tale of Two Sisters 10/10, The Wailing 9/9) and **13 Friends episodes**: in no account;
+    the user could not find the two chunks by hand either. Fix = re-download + re-archive, the user's call (IMP-C27).
+  - **`others` account (R0):** no Chrome profile yet, so its 35 objects are never checked (IMP-D18 prerequisite).
+  - **PR #68** (fetch closes the item's viewer once its download starts): verified by tests; the user checks it live at
+    the next fetch.
+  - Registered at Step 17, pending: IMP-C39 – IMP-C44.
+- Status: done (merged to main via PR #67 `8343854`, 2026-11-04; follow-up PR #68 `1a2641b`, 2026-11-12 — fetch closes the item's viewer once its download starts; branch archived as `archive/feature/imp_c25_fetch_exact_gp_item`)
 
 ---
 
@@ -546,8 +558,14 @@
     - 13 Friends episodes (the (d) list above): no `photo_id` and found in no account — possible loss.
     - 2 legacy last chunks, the (c) list — A Tale of Two Sisters chunk 10/10, The Wailing chunk 9/9: missing from the cloud, so each title is a partial set that cannot be restored.
     - (b) Fanaa: in Google Photos under its old untagged name (map verdict `inconsistent` / `untagged-name`). Resolve it with `python main.py resolve_photos failed --account movies` (PLAN §M15: paste the item's URL), or record that name with `python main.py map_photos all --repair names` (dry run, then `--apply`).
+  - Update 2026-11-12 — **17 rows**: Fanaa resolved by the user with `resolve_photos` (PLAN §M15). New: **Rifle Club**
+    (`mov-ma-2024-rifleclub`) and **Vaazha** (`mov-ma-2024-vaazha`), whole files pushed 2026-10-28 ~18:10 UTC to the movies
+    phone — the auto-confirm of 2026-11-11 found neither in movies, tv or anime while the rest of that night's batch was
+    confirmed; local copies are dummies. Next: check the movies phone (`python main.py check_photos <id> --devices`, or
+    the Photos app's backup queue); if gone, re-archive from another copy. The user could not find the 2 legacy chunks by
+    hand either (re-download + re-archive is the fix).
   - Done when every row is resolved or explicitly accepted by the user. The walker is `resolve_photos failed` (§M15: paste the item's URL, give a search term, or mark it `not uploaded`). Accepting means, for example, re-archiving the title from another copy, or writing it off.
-- Status: in_progress (the 16-row open list above; the detection + repair tooling shipped with IMP-C25)
+- Status: in_progress (the 17-row open list above, 2026-11-12; the detection + repair tooling shipped with IMP-C25)
 
 ## IMP-C28: `cmd_push` treats any path containing `_parts` as a chunk — a whole file from a `Spare_parts (2015)` folder is uploaded untagged, then its local master is deleted
 
@@ -896,7 +914,7 @@
 - Effort estimate: small (inside IMP-C25 Step 10) · Risk: low — at most one more trigger per lost object, and hash routing still decides what is kept. Every retry is a full re-download, because a Photos download cannot resume.
 - If skipped: one broken transfer ends the entry INCOMPLETE, and the user re-runs the fetch (files already fetched are skipped).
 - Shipped (IMP-C25 Step 10 item g, `dd410ed`; Step 10 commit `0690546`): `mainfetch._fire` / `_note_losses` / `_retry_lost_downloads` request a lost download once more per object per run, never while that object's download is still active; a round in which a wrong item arrived counts no loss; a second loss puts the object on the failed list with the new reason `download-lost`.
-- Status: done (IMP-C25 Step 10 item g, `feature/imp_c25_fetch_exact_gp_item`, PR pending)
+- Status: done (IMP-C25 Step 10 item g, merged to main via PR #67, 2026-11-04)
 
 ---
 
@@ -913,7 +931,7 @@
 - Effort estimate: small (inside IMP-C25 Step 10) · Risk: low-medium — it changes which element gets clicked (the reason it needed a ruling), so the `trigger_download` digest pin is re-pinned on purpose.
 - If skipped: whenever the results page is slower than the fixed wait, fetch can download a wrong file and lose that attempt.
 - Shipped (IMP-C25 Step 10 item h, `e673b10` + `77984d3`; Step 10 commit `0690546`): `mainfetch._await_search_results` polls (bounded, `SEARCH_RESULTS_WAIT_S`) for a `/search/` page whose results have settled, and `_drop_timeline` keeps every home-timeline thumbnail out of the click; the `trigger_download` digest was re-pinned on purpose. `8dacbad` (2026-10-07) also keeps Google Photos' "Most relevant to your search" strip out of the click. Items with a known `photo_id` are opened by their URL (Step 12).
-- Status: done (IMP-C25 Step 10 item h, `feature/imp_c25_fetch_exact_gp_item`, PR pending)
+- Status: done (IMP-C25 Step 10 item h, merged to main via PR #67, 2026-11-04)
 
 ---
 
@@ -927,7 +945,7 @@
 - Effort estimate: small · Risk: low — one environment variable for the child; its argv is unchanged.
 - If skipped: during a long fetch, `python main.py fetch` stays silent for minutes, then prints everything at once.
 - Shipped (IMP-C25 Step 10 item i, `e333c3d`; Step 10 commit `0690546`): `main._mainfetch_child_env()` gives the mainfetch child `PYTHONUNBUFFERED=1` (and `PYTHONIOENCODING=utf-8`), so fetch progress streams as it happens.
-- Status: done (IMP-C25 Step 10 item i, `feature/imp_c25_fetch_exact_gp_item`, PR pending)
+- Status: done (IMP-C25 Step 10 item i, merged to main via PR #67, 2026-11-04)
 
 ---
 

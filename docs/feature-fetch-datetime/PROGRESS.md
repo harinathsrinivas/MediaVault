@@ -16,7 +16,7 @@
   authoritative)
 
 ## At a glance
-- **Progress (2026-11-04): ≈ 97% — 29 of 31 tracked items done; PR #67 open → 🚦 Checkpoint 1 (the user's merge approval) · left: R2's user share (M9 web, M10, M11/M14, M15) and R0's others profile · then 🚦 Checkpoint 2 (archive).** Items = the plan's
+- **Progress (2026-11-12): SHIPPED — 30 of 31 tracked items done (only R0, the `others` profile, open). PR #67 merged 2026-11-04 (`8343854`) + follow-up PR #68 (`1a2641b`); the user's R2 share passed; branch archived as `archive/feature/imp_c25_fetch_exact_gp_item`. Open follow-ups: ▶ NEXT ACTION below.** Items = the plan's
   steps 0, 1, H, 2, 2b, 3–12, 9b, 13, 13b, 13c, 14–18 and the gates G0, RH, R0, R1, R2, R3, R4 (G12 sits in Step 12).
 - **Done:** Steps 0–16 incl. 9b, 13b, 13c, H (#61) and every Step 1 re-sync so far · G0 · RH · R1 (2026-10-03) ·
   G12 (candidate C) · follow-ups: restore bubble 537ff7e · auto-confirm checks only old-enough objects cd0ef94.
@@ -29,13 +29,19 @@
   step is fixed inside C25, everything else is only registered (Step 17). Every status update shows this % line.
 
 ## ▶ NEXT ACTION
-🚦 **Checkpoint 1 — PR #67** (https://github.com/harinathsrinivas/MediaVault/pull/67, head 55df082, full 3479 · smoke 102):
-merging into `main` is the user's call — never `gh pr merge` without their explicit go. Before approving, the user's R2
-share: M9 web (Fetch & Restore progress ring) · M10 `fetch <id> --manual` · M11/M14 a new archival + the next push's
-auto-confirm line · M15 `resolve_photos failed --account movies`. After the merge, 🚦 Checkpoint 2 on approval:
-annotated tag `archive/feature/imp_c25_fetch_exact_gp_item`, push it, delete the branch (local + remote), remove the
-C25 worktrees (acfix, thfix, mpfix, s16, s17, pins, c26 leftover).
-The user archives from this folder — check for a running `main.py` before any merge here.
+**IMP-C25 is shipped and archived** (Checkpoint 1: PR #67 approved and merged by the user 2026-11-04; Checkpoint 2: archive tag on the user's go, 2026-11-12). Nothing runs from this plan any more.
+- **Open follow-ups (2026-11-12) — recorded at the merge, not started:**
+  - **Rifle Club + Vaazha** (`mov-ma-2024-rifleclub`, `mov-ma-2024-vaazha`, whole files pushed 2026-10-28 ~18:10 UTC to
+    the movies phone): the auto-confirm of 2026-11-11 found neither in movies, tv or anime (content-hash lookup, then
+    every search stage) while the rest of that night's batch was confirmed — the local copies are dummies. Check the
+    movies phone first (`python main.py check_photos mov-ma-2024-rifleclub --devices`, the same for vaazha, or the Photos
+    app's backup queue); if they are gone, re-archive from another copy. Tracked in IMP-C27.
+  - **2 legacy last chunks** (A Tale of Two Sisters 10/10, The Wailing 9/9) and **13 Friends episodes**: in no account;
+    the user could not find the two chunks by hand either. Fix = re-download + re-archive, the user's call (IMP-C27).
+  - **`others` account (R0):** no Chrome profile yet, so its 35 objects are never checked (IMP-D18 prerequisite).
+  - **PR #68** (fetch closes the item's viewer once its download starts): verified by tests; the user checks it live at
+    the next fetch.
+  - Registered at Step 17, pending: IMP-C39 – IMP-C44.
 
 ## Resume protocol
 1. Open a session in the main folder `C:\Users\harin\PycharmProjects\MediaVault` (branch
@@ -60,7 +66,7 @@ The user archives from this folder — check for a running `main.py` before any 
 | 0 | plan (0a 16e292c/5fd4843 + 0a′ d29bb03) + journal + IMP registration | done | opus (executor-opus, claude-opus-5-5) | 16e292c · 5fd4843 · d29bb03 · 0b 20a10ae · 0c c2085e3 | full 971 · smoke 81 (baseline re-run 2026-09-28) | 0a = 16e292c (rev-1 draft) + 5fd4843 (rev-1 final pass); 0a′ = d29bb03 (revisions 2–6); root PLAN.md == tracked copy (cmp) · 0b = PROGRESS + DECISIONS · 0c = IMP-C25 + IMP-C27 registered (tier C, PRIORITY Band 0/1, graph TASKS 136 · EDGES 76 · badTasks 0 · badEdges 0); C5/A8/B10 → in_progress (absorbed); B4 note; C26 comes via Step H; both NEXT pointers untouched (OD-16) |
 | G0 | rulings recorded (2026-09-25) + clarifications | partial (P-12 pending before Step 11) | user | 20a10ae | | plan approved 2026-09-28 · OD-1: H confirmed, PR STOPS for user approval (decision card 2026-09-28; supersedes the auto-merge wording) · q2 OD-4 ANSWERED 2026-09-28: "Yes, with --apply only" — mvmeta_upgrade may rewrite phone sidecars with --apply only (dry-run default) · q3 P-12 download design PENDING — ask before Step 11 |
 | 1 | sync with main (after #60 / H / #62+#63 / #64 / #65+#66) | done (5×) | orchestrator (Opus 5.5) | 3029f6f (ac563a0/#60) · 5ec9ef0 (494fbec/#61) · re-sync #3 = this merge commit (e35b624/#62+#63) | full 2068 · smoke 82 (re-sync #3) | #61 merge resolved tierC/PRIORITY/graph/conftest keeping both sides; C25→C26 edge added; graph 137/78/0/0 |
-| H | C26 hotfix PR (worktree MediaVault-c26) | done — PR #61 open, awaiting user approval (Checkpoint 1) | fable (executor-fable) | 2893d98 (branch fix/imp_c26_fetch_account_routing) | full 1003 · smoke 82 · disarm 3/3 | +switch guard (close prev Chrome, port 9222 free) beyond plan text; RH after merge; then Step 1 re-merges main |
+| H | C26 hotfix PR (worktree MediaVault-c26) | done — PR #61 merged | fable (executor-fable) | 2893d98 (branch fix/imp_c26_fetch_account_routing) | full 1003 · smoke 82 · disarm 3/3 | +switch guard (close prev Chrome, port 9222 free) beyond plan text; RH after merge; then Step 1 re-merges main |
 | RH | user fills fetch_account_overrides + tests | pending | user | | | after H merges |
 | 2 | gpweb + RPC parsers + fake Google Photos | done | fable (executor-fable, claude-fable-5-1) | eea6759 | full 1215 · smoke 81 · crawler golden byte-identical · disarm/mutation probes 8/8 | new gpweb.py + tests/gphotos_fake.py + tests/test_gpweb.py; tools/gp_inventory.py delegates; conftest `fake_photos`; VrseUb original_quality not pre-resolved → None (read EWgK9e); dedup_key re-export is a lazy delegate (import-cycle guard for Step 3) |
 | 2b | gprpc read-only RPC client | done | fable (executor-fable, claude-fable-5-1) | 18cbb91 | full 1329 · smoke 81 · test_gprpc 114 · disarm/mutation probes 19/19 | new gprpc.py + tests/test_gprpc.py; consumers catch `RpcUnavailable` (base of RpcShapeError/RpcServerError) for the UI fallback, never RpcRefused; pacing + circuit breaker are per browser session (driver); tests that drive gprpc must patch its clock (`clock` fixture in test_gprpc.py) |
@@ -82,17 +88,23 @@ The user archives from this folder — check for a running `main.py` before any 
 | 13c | mvmeta_upgrade | done | executor-fable (own worktree) | 03bdd64 (WIP 17b801e..6e06df5) | full 3062 · smoke 82 (orchestrator re-run) · disarm 38/38 · live dry run skipped (no phone attached) | --apply enabled (G0 q2); check-only phone only when named; originals backed up; A1/A2 (real sidecar bytes, adb mtime) verify at R3 §M17 |
 | 14 | --manual + resolve_photos + resume | done | executor-fable (fable, no fallback; own worktree) | 5b21c3f (WIP 41501c4..b1d31d1) | full 3219 · smoke 82 (orchestrator re-run) · disarm 39/39 · one read-only live probe (quality flags) | follow-ups a–d done; quality flags from the timeline record (+1 call/object, DECISIONS); A5 (user-opened tab's download dir) for R2 §M10 |
 | 15 | smoke + pins + disarm probes | done | executor-opus (own worktree) | b3e5e96 (WIP f35cc56..fc4be59) | full 3278 · smoke 102 in 12.4 s (orchestrator re-run 13.3 s) · disarm 62/62 (15 guards 55/55 + own tests 7/7) | table .candidates/c25-step15/DISARM.md; real ~/.mediavault + ~/Downloads byte-identical before/after |
-| R2 | live verification pack (user) | in_progress | orchestrator + user | 2535308 | | orchestrator share M4–M9, M18 PASSED 2026-10-20/21; user share M9 web, M10, M11, M14, M15 left |
+| R2 | live verification pack (user) | done | orchestrator + user | 2535308 | | orchestrator share M4–M9, M18 PASSED 2026-10-20/21; user share 2026-11-12: M9 web Fetch & Restore + replace ✅ · M10 `--manual` ✅ · M11/M14 auto-confirm ✅ (19 confirmed, 2 newer skipped) · M15 `resolve_photos` ✅ (Fanaa) |
 | R3 | real-library apply (user) | done | orchestrator (each apply user-approved) | | | 2026-10-28: map apply (1,982 confirmed) · check by photo_id anime 158 / movies 971 / tv 1,080 confirmed, applied · split-info repair 3 · failed list 16 |
 | 16 | docs (architect) | done | architect (opus) | 15a732f (merge 699ad8a) | | R2/R3 result placeholders are filled after R3 |
 | R4 | full-library sweep + outlier/failed lists (user) | done | orchestrator | | | user ruling 2026-10-28: the R3 photo_id-first sweep (2,242 objects, applied) counts as R4; failed list 16 |
 | 17 | IMP bookkeeping + NEXT pointer question | done | executor-opus (own worktree) | 102846c (WIP dc6e597..a4266ee) | smoke 102 (orchestrator re-run 102) | C25 done (PR pending) · C27 in_progress, 16 open · C5/A8/B10/C34-C36 done · C39-C44 registered (pending) · single NEXT → IMP-C24 (OD-16) · 3-file check 154/154 |
-| 18 | final verification + PR | done — PR #67 open | orchestrator (checklist) + git-agent (push/PR) | 1859d84 | full 3479 · smoke 102 (LAST) on 1859d84 | checklist 2026-11-04: main unmoved since #66 (no Step 1 needed) · privacy grep: synthetic photo ids only, the published example key only where documented · 0 of 21 global .env credential values in the push diff · 78 files, plan scope · .gitignore gained .env / *.env / *credentials* / *secret* (1859d84) · PR #67 opened 2026-11-04 (head 55df082) → 🚦 Checkpoint 1 |
+| 18 | final verification + PR | done — PR #67 merged 2026-11-04 (8343854) | orchestrator (checklist) + git-agent (push/PR) | 1859d84 | full 3479 · smoke 102 (LAST) on 1859d84 | checklist 2026-11-04: main unmoved since #66 (no Step 1 needed) · privacy grep: synthetic photo ids only, the published example key only where documented · 0 of 21 global .env credential values in the push diff · 78 files, plan scope · .gitignore gained .env / *.env / *credentials* / *secret* (1859d84) · PR #67 opened 2026-11-04 (head 55df082) → 🚦 Checkpoint 1 |
 
 ## Multi-candidate tracking (Step 12)
 A d8dd71f (UI-first) · B 868cd27 (RPC-first) · C 5e7f0f6 (hybrid) — all COMPLETE and gate-verified by the orchestrator (re-runs A 2493/82 · B 2512/82 · C 2502/82); judge-v2 recommended C; user picked C at 🚦 G12 2026-10-12; tags candidates/imp_c25/step-12/{c-chosen,a-rejected,b-rejected}.
 
 ## Operations log (crawls, dry-runs, applies — redacted counts only)
+- 2026-11-12 after the merge: the user's R2 share passed (M9 web Fetch & Restore + replace; M10 `--manual`; M15
+  `resolve_photos` resolved Fanaa). M14: the auto-confirm after `prep_push_rep_enrich mov-ta-2026-thedarkheaven` (run
+  20261111T151905Z) checked 21 due objects (2 newer skipped): 19 confirmed by hash lookup, 2 possible-loss — Rifle Club and
+  Vaazha (pushed 2026-10-28), found in no account → failed list 17 rows. User report: fetch left the item's video playing
+  during downloads → PR #68 (`1a2641b`, merged on the user's "push directly … merge also"): `_close_viewer` after a
+  started download. Then 🚦 Checkpoint 2 on the user's go: archive tags + branch/worktree cleanup.
 - 2026-10-28 🚦 R3 COMPLETE. tv check run 20261028T081724Z finished (resumed on the user's go): confirmed 1,080 ·
   ambiguous 4 · possible-loss 12 (11 Friends + The Wire S02E12) — RPC errors 0. User cards "Apply tv now" + "Dry run,
   then apply" (split-info). After the user's own archive (Manjummel Boys) finished: backup

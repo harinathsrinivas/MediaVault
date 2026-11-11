@@ -2585,6 +2585,7 @@ TIMELINE_MAX_PAGES = 3           # S1: pages read while they stay inside the tak
 ITEM_WAIT_S = 12.0               # an item page: wait this long for its record (+ info panel) — the crawler's wait
 ITEM_POLL_S = 0.4
 VIEWER_SETTLE_S = 1.5            # an opened item takes Shift+D once its viewer is up (trigger_download waits 2 s)
+VIEWER_CLOSE_S = 1.0             # after Esc, the viewer's close has this long before its videos are paused instead
 DIRECT_PAGE_LOAD_S = 15.0        # the page-load bound for opening a minted link — a navigation that becomes a download
                                  # may never "load" (a live probe hung ~5 min on Selenium's 300 s default)
 SELENIUM_PAGE_LOAD_S = 300.0     # Selenium's / W3C's default page-load timeout, restored when it cannot be read
@@ -3749,6 +3750,22 @@ def _shift_d_here(driver, ctx, others=()):
     return _download_started(ctx, before, others)
 
 
+def _close_viewer(driver):
+    """[IMP-C25 follow-up] Once a download has started, leave the item's viewer as the pre-C25 trigger did (Shift+D,
+    then Esc): Google Photos closes the player and goes back to where the item was opened from (its search results),
+    so its video does not keep playing while the downloads run. A tab still on the item after Esc gets its videos
+    paused. Best effort, never raises: the download is the browser's and runs on regardless."""
+    try:
+        if not gpweb.photo_id_from_url(driver.current_url):
+            return
+        webdriver.ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+        time.sleep(VIEWER_CLOSE_S)
+        if gpweb.photo_id_from_url(driver.current_url):
+            driver.execute_script(gpweb.PAUSE_VIDEOS_JS)
+    except Exception:
+        pass
+
+
 def _open_from_results(driver, photo_id, query):
     """The click path: search `query` and open the item from its results by clicking the tile whose link names
     photo_id — never a position, never a timeline thumbnail (IMP-C35). True when it was opened."""
@@ -4118,6 +4135,7 @@ def _fetch_window(driver, window, queue, ctx):
                       if _family_key(name) not in own]
             if _fire(item, lambda item=item, trigger=trigger, others=others: trigger(driver, item, ctx, others)):
                 _session_stats(ctx)[method] += 1
+                _close_viewer(driver)
         _journal_sync(ctx, queue)
         requested = {id(i) for i in todo if i["triggered"]}
         if not requested:

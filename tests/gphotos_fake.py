@@ -979,6 +979,9 @@ class FakeDriver:
                     for a in self._anchors() if a.is_displayed() and a.size["width"] > 40]
         if script == gpweb.SCROLL_JS:
             return self._scroll()
+        if script == gpweb.PAUSE_VIDEOS_JS:
+            self.actions.append({"kind": "pause_videos", "page": self.page["kind"]})
+            return None
         if script == gpweb.SEARCH_STATE_JS:
             return self._search_state()
         if script == gpweb.TIMELINE_LINKS_JS:
